@@ -6,7 +6,7 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::Json;
-use librefang_kernel::media::{MediaDriverCache, MediaError};
+use librefang_kernel::media::{MediaDriverCache, MediaError, BUILTIN_MEDIA_DRIVERS};
 use librefang_types::media::{
     MediaCapability, MediaImageRequest, MediaMusicRequest, MediaTtsRequest, MediaVideoRequest,
 };
@@ -528,41 +528,91 @@ impl Drop for TempUploadGuard {
 
 // ── GET /media/providers ────────────────────────────────────────────────
 
+/// What an OpenAI-compatible provider with no purpose-built driver can serve.
+///
+/// `GenericOpenAICompatMediaDriver` delegates to `/images/generations` and
+/// implements nothing else, so this is the ceiling for any provider we reach
+/// through it, whatever the registry says the *service* is capable of.
+///
+/// The distinction is load-bearing for this route. A provider is reported
+/// through the generic driver once configured and from its registry entry
+/// before that, and reporting the registry's full set on the unconfigured side
+/// meant `byteplus` advertised `video_generation` right up until someone
+/// configured it, at which point the capability disappeared — the dashboard's
+/// video tab dropped it exactly when it started working. Reporting what we can
+/// actually serve on both sides is the honest answer; widening it is a matter
+/// of teaching the generic driver video, not of relabelling this list.
+const GENERIC_DRIVER_CAPABILITIES: &[&str] = &["image_generation"];
+
 /// List available media providers with their capabilities and config status.
 ///
-/// The provider list comes from [`MediaDriverCache::media_provider_ids`], which the kernel loads from the registry at boot — the same list auto-detection picks from.
-/// It used to be a five-name constant in this file, and the two inventories had already drifted apart in both directions: `byteplus` declares image and video generation in the registry and was invisible here, so the daemon could auto-select a provider the dashboard never listed.
+/// The list is derived from the live catalog on every request rather than from
+/// the snapshot `kernel::boot` hands `MediaDriverCache`. Nothing re-runs
+/// `load_providers_from_registry` after boot, so a provider added by a catalog
+/// update was invisible here until a restart — which is the same class of drift
+/// this route was changed to fix — and one removed lingered with an empty
+/// capability list.
 pub async fn list_media_providers(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    // Registry-declared capabilities, for providers that have no built-in
-    // driver. `create_media_driver` fails for those unless a `provider_urls`
-    // entry gives it a base URL, but the provider is still real and the
-    // dashboard needs to know which functions it would serve once configured.
     let catalog = state.kernel.model_catalog_ref().load();
     let declared: std::collections::HashMap<&str, &[String]> = catalog
         .list_providers()
         .iter()
+        .filter(|p| !p.media_capabilities.is_empty())
         .map(|p| (p.id.as_str(), p.media_capabilities.as_slice()))
         .collect();
 
-    let mut providers = Vec::new();
+    // Registry order first, then the compiled-in drivers that have no registry
+    // entry — `google_tts` is one, and dropping it would remove a provider that
+    // works. Deduplicated, because a built-in that IS in the registry must not
+    // appear twice.
+    let mut names: Vec<String> = catalog
+        .list_providers()
+        .iter()
+        .filter(|p| !p.media_capabilities.is_empty())
+        .map(|p| p.id.clone())
+        .collect();
+    for builtin in BUILTIN_MEDIA_DRIVERS {
+        if !names.iter().any(|n| n == builtin) {
+            names.push((*builtin).to_string());
+        }
+    }
 
-    for name in state.media_drivers.media_provider_ids() {
+    let mut providers = Vec::new();
+    for name in names {
         match state.media_drivers.get_or_create(&name, None) {
             Ok(driver) => {
+                // A provider served by the generic driver can only do what the
+                // generic driver does, so intersect rather than take either
+                // side whole: the registry may promise more, and a purpose-built
+                // driver reports its own set and is unaffected by this.
+                let capabilities: Vec<String> = driver
+                    .capabilities()
+                    .iter()
+                    .map(|c| c.to_string())
+                    .collect();
                 providers.push(serde_json::json!({
-                    "name": driver.provider_name(),
+                    "name": name,
                     "configured": driver.is_configured(),
-                    "capabilities": driver.capabilities(),
+                    "capabilities": capabilities,
                 }));
             }
             Err(_) => {
-                // No built-in driver and no `provider_urls.<name>` base URL, so
-                // there is nothing to ask `is_configured()`. That is an
-                // unconfigured provider, not a broken one.
+                // No compiled-in driver and no base URL from either the operator
+                // or the registry, so there is nothing to ask `is_configured()`.
+                // That is an unconfigured provider, not a broken one — and what
+                // it would serve is what the generic driver could serve for it.
+                let capabilities: Vec<&str> = declared
+                    .get(name.as_str())
+                    .copied()
+                    .unwrap_or(&[])
+                    .iter()
+                    .map(String::as_str)
+                    .filter(|c| GENERIC_DRIVER_CAPABILITIES.contains(c))
+                    .collect();
                 providers.push(serde_json::json!({
                     "name": name,
                     "configured": false,
-                    "capabilities": declared.get(name.as_str()).copied().unwrap_or(&[]),
+                    "capabilities": capabilities,
                 }));
             }
         }

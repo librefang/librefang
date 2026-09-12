@@ -152,6 +152,15 @@ pub trait MediaDriver: Send + Sync {
 
 // ── Driver cache ───────────────────────────────────────────────────────
 
+/// Provider names `create_media_driver` serves with a purpose-built driver.
+///
+/// These have no registry entry to derive them from — `google_tts` is not in
+/// the provider registry at all — so any surface enumerating media providers
+/// has to add them, and had been doing so from its own copy of the list.
+/// One list, exported, so a driver added here cannot go missing from a surface.
+pub const BUILTIN_MEDIA_DRIVERS: &[&str] =
+    &["openai", "gemini", "elevenlabs", "minimax", "google_tts"];
+
 /// Thread-safe, lazy-initializing cache for media drivers.
 ///
 /// Holds an optional `provider_urls` map (from `KernelConfig`) so that
@@ -162,9 +171,15 @@ pub struct MediaDriverCache {
     /// Provider name → custom base URL, sourced from config `[provider_urls]`.
     /// Behind RwLock for hot-reload support (update URLs via `&self`).
     provider_urls: RwLock<HashMap<String, String>>,
-    /// Provider IDs that support media, in preference order.
-    /// Loaded from the registry (providers/*.toml) at boot.
+    /// Provider IDs that support media, in registry order with the built-ins
+    /// appended. Loaded from the registry (providers/*.toml) at boot.
     media_providers: RwLock<Vec<String>>,
+    /// Provider ID → the `base_url` the registry declares for it.
+    ///
+    /// Separate from `provider_urls`, which is the operator's override and
+    /// wins. A provider whose endpoint the registry already states should not
+    /// require a `config.toml` edit before it can be reached at all.
+    registry_base_urls: RwLock<HashMap<String, String>>,
 }
 
 fn read_media_state<'a, T>(lock: &'a RwLock<T>, state: &'static str) -> RwLockReadGuard<'a, T> {
@@ -202,6 +217,7 @@ impl MediaDriverCache {
                 "minimax".into(),
                 "google_tts".into(),
             ]),
+            registry_base_urls: RwLock::new(HashMap::new()),
         }
     }
 
@@ -225,6 +241,7 @@ impl MediaDriverCache {
                 "minimax".into(),
                 "google_tts".into(),
             ]),
+            registry_base_urls: RwLock::new(HashMap::new()),
         }
     }
 
@@ -240,17 +257,26 @@ impl MediaDriverCache {
             .filter(|p| !p.media_capabilities.is_empty())
             .map(|p| p.id.clone())
             .collect();
-        for builtin in ["openai", "gemini", "elevenlabs", "minimax", "google_tts"] {
+        for builtin in BUILTIN_MEDIA_DRIVERS {
             if !media_provs.iter().any(|p| p == builtin) {
-                media_provs.push(builtin.to_string());
+                media_provs.push((*builtin).to_string());
             }
         }
         *write_media_state(&self.media_providers, "media_providers") = media_provs;
+
+        let base_urls: HashMap<String, String> = providers
+            .iter()
+            .filter(|p| !p.base_url.trim().is_empty())
+            .map(|p| (p.id.clone(), p.base_url.trim_end_matches('/').to_string()))
+            .collect();
+        *write_media_state(&self.registry_base_urls, "registry_base_urls") = base_urls;
     }
 
-    /// The media provider IDs this cache knows about, in preference order.
+    /// The media provider IDs this cache knows about.
     ///
-    /// This is the same list [`detect_for_capability`](Self::detect_for_capability) picks from, which is the point of exposing it: a surface that enumerates media providers from its own hardcoded list can disagree with the list auto-detection actually uses, and then the daemon selects a provider the UI never showed.
+    /// This is the same list [`detect_for_capability`](Self::detect_for_capability) picks from, which is the point of exposing it: a surface that enumerates media providers from its own hardcoded list can disagree with the list auto-detection actually uses.
+    ///
+    /// **Not a preference order**, despite what this said before. The registry portion arrives in whatever sequence `std::fs::read_dir` produced (`model_catalog.rs`), so with two configured providers serving one capability, which one `detect_for_capability` returns is filesystem-dependent. Pinning that order is a separate change with its own behavioural decision to make.
     pub fn media_provider_ids(&self) -> Vec<String> {
         read_media_state(&self.media_providers, "media_providers").clone()
     }
@@ -277,6 +303,19 @@ impl MediaDriverCache {
                     } else {
                         None
                     }
+                })
+                .or_else(|| {
+                    // The registry already states where this provider lives.
+                    // Without this a provider it fully describes still needed a
+                    // `provider_urls` line in config.toml before it could be
+                    // reached, and the only symptom was `configured: false`
+                    // with the API key correctly set.
+                    let declared =
+                        read_media_state(&self.registry_base_urls, "registry_base_urls");
+                    declared
+                        .get(provider)
+                        .or_else(|| declared.get(canonical_provider_name(provider)))
+                        .cloned()
                 })
         });
         let url_ref = resolved_url.as_deref();
@@ -500,6 +539,49 @@ mod tests {
         // Different key means a separate cache entry from the config-resolved one
         let driver2 = cache.get_or_create("minimax", None).unwrap();
         assert!(!Arc::ptr_eq(&driver, &driver2));
+    }
+
+    #[test]
+    fn a_provider_the_registry_gives_a_base_url_needs_no_config_toml_entry() {
+        let cache = MediaDriverCache::new();
+        // byteplus is the real case: the registry states its endpoint, it has
+        // no compiled-in driver, and before this the only way to reach it was
+        // a `provider_urls.byteplus` line in config.toml — with no hint that
+        // one was needed. Setting the API key and restarting left it reported
+        // as unconfigured.
+        cache.load_providers_from_registry(&[librefang_types::model_catalog::ProviderInfo {
+            id: "byteplus".into(),
+            base_url: "https://ark.ap-southeast.bytepluses.com/api/v3".into(),
+            media_capabilities: vec!["image_generation".into()],
+            ..Default::default()
+        }]);
+
+        let driver = cache
+            .get_or_create("byteplus", None)
+            .expect("a provider the registry gives a base_url for must be reachable");
+        assert_eq!(driver.provider_name(), "byteplus");
+    }
+
+    #[test]
+    fn an_operator_override_still_beats_the_registry_base_url() {
+        let cache = MediaDriverCache::new_with_urls([(
+            "byteplus".to_string(),
+            "https://proxy.internal/v1".to_string(),
+        )]);
+        cache.load_providers_from_registry(&[librefang_types::model_catalog::ProviderInfo {
+            id: "byteplus".into(),
+            base_url: "https://ark.ap-southeast.bytepluses.com/api/v3".into(),
+            media_capabilities: vec!["image_generation".into()],
+            ..Default::default()
+        }]);
+
+        // Two different URLs must not collapse onto one cache entry, which is
+        // how the override would silently stop applying.
+        let overridden = cache.get_or_create("byteplus", None).unwrap();
+        let explicit = cache
+            .get_or_create("byteplus", Some("https://proxy.internal/v1"))
+            .unwrap();
+        assert!(Arc::ptr_eq(&overridden, &explicit));
     }
 
     #[test]
