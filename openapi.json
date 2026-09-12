@@ -11862,6 +11862,9 @@
           "404": {
             "description": "Candidate not found"
           },
+          "500": {
+            "description": "Invalid skills.promotion configuration"
+          },
           "502": {
             "description": "GitHub request failed"
           }
@@ -12366,6 +12369,9 @@
           "404": {
             "description": "Skill not found"
           },
+          "500": {
+            "description": "Invalid skills.promotion configuration"
+          },
           "502": {
             "description": "GitHub request failed"
           }
@@ -12707,6 +12713,9 @@
           },
           "409": {
             "description": "Manifest still contains private details that require review"
+          },
+          "500": {
+            "description": "Invalid skills.promotion configuration"
           },
           "502": {
             "description": "GitHub request failed"

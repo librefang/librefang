@@ -1,0 +1,3 @@
+Proposing a skill or agent type to the registry now refuses to push to a same-named repository under the fork owner unless GitHub actually reports it as a fork of the configured upstream.
+Previously any repository that merely resolved at that path was reused, so an unrelated repository with the same name silently received the pushed branch and files before the pull request failed for having no shared history.
+An installation that relied on that silent reuse will see the promotion fail instead, with an error naming `skills.promotion.fork_owner` as the setting to point at the namespace where the real fork lives. (#8179) (@DaBlitzStein)

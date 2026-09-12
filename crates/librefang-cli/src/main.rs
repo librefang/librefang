@@ -33,6 +33,11 @@ pub mod progress;
 pub mod table;
 pub(crate) mod templates;
 pub(crate) mod tui;
+
+/// Shared env-mutation test helper: every env-var test in this binary takes
+/// the one lock here (`doctor.rs` and `commands/skill.rs` race otherwise).
+#[cfg(test)]
+pub(crate) mod test_env;
 pub(crate) mod ui;
 
 use clap::Parser;

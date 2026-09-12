@@ -234,15 +234,11 @@ description = "second"
 
     /// Process-wide guard for the env-mutating tests in this module: cargo
     /// runs `#[test]` fns in parallel, and `LIBREFANG_HOME`/`LIBREFANG_AGENTS_DIR`
-    /// are global state. Both tests must lock the same mutex.
+    /// are global state. Every env-var test in this binary must lock the same
+    /// mutex — a private lock here would race the sibling modules' tests
+    /// (#8179 review).
     fn env_lock() -> std::sync::MutexGuard<'static, ()> {
-        use std::sync::{Mutex, OnceLock};
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        // If a previous test panicked while holding the guard, the mutex is
-        // poisoned but the data inside is still sound — recover and proceed.
-        LOCK.get_or_init(|| Mutex::new(()))
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
+        crate::test_env::env_lock()
     }
 
     #[test]

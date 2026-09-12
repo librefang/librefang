@@ -2311,3 +2311,235 @@ async fn config_set_null_removes_a_key_from_an_inline_table() {
         "the sibling key must survive the removal; got:\n{on_disk}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// POST /api/config/set — [skills.promotion] (#8163)
+//
+// The registry promotion flow's GitHub settings. What these guard is the
+// silent-dead-field failure: a new config field parses, `GET /api/config`
+// shows it back, and it still never reaches `registry_pr.rs` because nothing
+// threaded it through. Asserting on `kernel.config_ref()` after the write is
+// what makes the round-trip mean something.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread")]
+async fn config_set_writes_skills_promotion_leaf_and_reaches_the_kernel() {
+    let h = boot_router_with_api_key(API_KEY).await;
+    let (status, body) = send(
+        h.app.clone(),
+        auth_post_json(
+            "/api/config/set",
+            serde_json::json!({
+                "path": "skills.promotion.head_branch_prefix",
+                "value": "promo"
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "skills.promotion.* must be writable: {}",
+        String::from_utf8_lossy(&body)
+    );
+    // `saved_reload_failed` is also a 200, so the status field is what
+    // separates "the kernel took it" from "the file changed and nothing else".
+    // `applied_partial` counts: the hot actions ran, and the restart-required
+    // flag is about unrelated fields that differ between the freshly written
+    // file and the booted config, not about this write.
+    let response: serde_json::Value = serde_json::from_slice(&body).expect("response is JSON");
+    let reload_status = response["status"].as_str().unwrap_or_default();
+    assert!(
+        matches!(reload_status, "applied" | "applied_partial"),
+        "reload did not apply: {response}"
+    );
+
+    let written = std::fs::read_to_string(h.home.join("config.toml")).expect("toml exists");
+    assert!(
+        written.contains("promo"),
+        "write did not land on disk:\n{written}"
+    );
+
+    // The value the promotion handlers actually read.
+    assert_eq!(
+        h.state
+            .kernel
+            .config_ref()
+            .skills
+            .promotion
+            .head_branch_prefix
+            .as_deref(),
+        Some("promo"),
+    );
+}
+
+/// `skills.promotion.api_base_url`, `fork_owner` and `base_branch` are all
+/// post-auth destination fields of the promotion flow: every request it
+/// builds carries the repo-scoped GitHub token as `Authorization: Bearer …`,
+/// so a write to any of the three hands that credential to a destination the
+/// caller chose — `api_base_url` picks the host, `fork_owner` picks the
+/// repository namespace the token's push lands in, `base_branch` picks which
+/// ref inside it. `verify_fork` only proves `fork_owner`'s repository is *a*
+/// fork of the configured upstream, not that whoever set `fork_owner` is
+/// trusted, so an Owner-role attacker who forks the public registry into
+/// their own namespace once and then posts that namespace here gets every
+/// later promotion pushed to it with the operator's token. All three join
+/// `proxy.` / `telemetry.otlp_endpoint` / `audit.anchor_path` on the
+/// edit-on-disk side (#8179 review, finding 2), which for the scrub list
+/// means each leaf is refused and a wholesale section payload containing any
+/// of them is refused too.
+#[tokio::test(flavor = "multi_thread")]
+async fn config_set_rejects_skills_promotion_destination_fields() {
+    let h = boot_router_with_api_key(API_KEY).await;
+    for (key, value) in [
+        (
+            "api_base_url",
+            serde_json::Value::String("https://github.example.invalid/api/v3".to_string()),
+        ),
+        (
+            "fork_owner",
+            serde_json::Value::String("attacker-org".to_string()),
+        ),
+        (
+            "base_branch",
+            serde_json::Value::String("attacker-branch".to_string()),
+        ),
+    ] {
+        let (status, body) = send(
+            h.app.clone(),
+            auth_post_json(
+                "/api/config/set",
+                serde_json::json!({
+                    "path": format!("skills.promotion.{key}"),
+                    "value": value
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::FORBIDDEN,
+            "{key} must be edit-on-disk: {}",
+            String::from_utf8_lossy(&body)
+        );
+
+        // The wholesale-table shape is refused by the payload scan too.
+        let mut table = serde_json::Map::new();
+        table.insert(key.to_string(), value);
+        let (status, body) = send(
+            h.app.clone(),
+            auth_post_json(
+                "/api/config/set",
+                serde_json::json!({
+                    "path": "skills.promotion",
+                    "value": serde_json::Value::Object(table)
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::FORBIDDEN,
+            "payload scan must catch {key}: {}",
+            String::from_utf8_lossy(&body)
+        );
+    }
+}
+
+/// `fork_owner` and `base_branch` are excluded from this payload: they are
+/// destination fields of the same credential-redirect shape as
+/// `api_base_url` and are refused by the scrub the same way (#8179 review,
+/// finding 2) — see `config_set_rejects_skills_promotion_destination_fields`.
+/// The whole-section write path stays exercised here through the fields
+/// that remain writable.
+#[tokio::test(flavor = "multi_thread")]
+async fn config_set_writes_whole_skills_promotion_section() {
+    let h = boot_router_with_api_key(API_KEY).await;
+    let (status, body) = send(
+        h.app.clone(),
+        auth_post_json(
+            "/api/config/set",
+            serde_json::json!({
+                "path": "skills.promotion",
+                "value": {
+                    "head_branch_prefix": "promo",
+                    "commit_author_name": "LibreFang Bot",
+                    "commit_author_email": "bot@example.invalid",
+                    "mode": "direct_push"
+                }
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "whole-section write rejected: {}",
+        String::from_utf8_lossy(&body)
+    );
+    let response: serde_json::Value = serde_json::from_slice(&body).expect("response is JSON");
+    let reload_status = response["status"].as_str().unwrap_or_default();
+    assert!(
+        matches!(reload_status, "applied" | "applied_partial"),
+        "reload did not apply: {response}"
+    );
+    let written = std::fs::read_to_string(h.home.join("config.toml")).expect("toml exists");
+    assert!(
+        written.contains("promo"),
+        "whole-section write did not land on disk:\n{written}"
+    );
+
+    let promotion = h.state.kernel.config_ref().skills.promotion.clone();
+    assert_eq!(promotion.head_branch_prefix.as_deref(), Some("promo"));
+    assert_eq!(
+        promotion.commit_author_name.as_deref(),
+        Some("LibreFang Bot")
+    );
+    assert_eq!(
+        promotion.commit_author_email.as_deref(),
+        Some("bot@example.invalid")
+    );
+    assert_eq!(
+        promotion.mode,
+        librefang_types::config::RegistryPromotionMode::DirectPush
+    );
+
+    // And it reads back.
+    let (status, body) = send(h.app.clone(), auth_get("/api/config")).await;
+    assert_eq!(status, StatusCode::OK);
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("response is JSON");
+    assert_eq!(
+        dig(&json, "skills.promotion.head_branch_prefix").and_then(|v| v.as_str()),
+        Some("promo")
+    );
+}
+
+/// The section deliberately carries no credential — the GitHub token keeps
+/// resolving from `GITHUB_TOKEN` and then the vault, so nothing here is
+/// readable back out of `GET /api/config`.
+/// Pinning the key set means a future token-shaped field cannot be added to it
+/// without this failing and forcing the SCRUB question to be asked.
+#[tokio::test(flavor = "multi_thread")]
+async fn skills_promotion_exposes_no_credential_field() {
+    let h = boot_router_with_api_key(API_KEY).await;
+    let (status, body) = send(h.app.clone(), auth_get("/api/config")).await;
+    assert_eq!(status, StatusCode::OK);
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("response is JSON");
+    let promotion = dig(&json, "skills.promotion")
+        .and_then(|v| v.as_object())
+        .expect("skills.promotion is exposed");
+    let mut keys: Vec<&str> = promotion.keys().map(String::as_str).collect();
+    keys.sort_unstable();
+    assert_eq!(
+        keys,
+        [
+            "api_base_url",
+            "base_branch",
+            "commit_author_email",
+            "commit_author_name",
+            "fork_owner",
+            "head_branch_prefix",
+            "mode",
+        ]
+    );
+}

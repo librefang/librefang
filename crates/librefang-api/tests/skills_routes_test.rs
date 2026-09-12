@@ -850,6 +850,56 @@ async fn skills_propose_without_token_returns_401() {
     );
 }
 
+/// A misconfigured `skills.promotion.api_base_url` is a server-side config
+/// problem, not a malformed request: `RegistryGithubClient::new` validates
+/// it eagerly, before any network call, so this is deterministic without a
+/// live GitHub. It must land as 500 (`SkillError::InvalidConfig`) — not the
+/// `SkillError::InvalidManifest` 400 branch, and not the generic 502
+/// "GitHub request failed" catch-all a reordered `match` would silently
+/// fall through to (#8179 review, finding 7).
+#[tokio::test(flavor = "multi_thread")]
+async fn skills_propose_with_invalid_promotion_config_returns_500() {
+    let test = TestAppState::with_builder(MockKernelBuilder::new().with_config(|cfg| {
+        cfg.skills.promotion.api_base_url = Some("http://ghe.internal/api/v3".to_string());
+    }));
+    let state = test.state.clone();
+    let app = Router::new()
+        .nest("/api", routes::skills::router())
+        .with_state(state.clone());
+    let h = Harness {
+        app,
+        _state: state,
+        test,
+    };
+    install_skill(h.home(), "proposable-skill", &["data"]);
+    h._state.kernel.reload_skills();
+    // Vault rather than the process env — a token here only needs to be
+    // non-empty to clear the 401 branch, and mutating process env is racy
+    // across parallel tests in this binary.
+    h._state
+        .kernel
+        .vault_set("GITHUB_TOKEN", "t0ken")
+        .expect("vault_set GITHUB_TOKEN");
+
+    let (status, body) = json_request(
+        &h,
+        Method::POST,
+        "/api/skills/proposable-skill/propose",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body:?}");
+    assert!(
+        body["error"]
+            .as_str()
+            .or_else(|| body["error"]["message"].as_str())
+            .unwrap_or("")
+            .to_lowercase()
+            .contains("api_base_url"),
+        "500 error should name the misconfigured field: {body:?}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // A marketplace that answers 200 with its webpage (#7387)
 // ---------------------------------------------------------------------------

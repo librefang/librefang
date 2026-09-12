@@ -52,6 +52,11 @@ pub enum SkillError {
     RegistryFrozen(String),
     #[error("Invalid skill manifest: {0}")]
     InvalidManifest(String),
+    /// The operator's `[skills.promotion]` configuration is invalid —
+    /// the request was well-formed, so the HTTP layer maps this to 500
+    /// rather than the 400 a manifest problem deserves (#8179 review).
+    #[error("Invalid skill registry configuration: {0}")]
+    InvalidConfig(String),
     #[error("Skill already installed: {0}")]
     AlreadyInstalled(String),
     #[error("Runtime not available: {0}")]

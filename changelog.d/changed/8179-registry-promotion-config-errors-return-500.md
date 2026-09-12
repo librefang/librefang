@@ -1,0 +1,2 @@
+`POST /api/skills/{name}/propose`, `POST /api/skills/pending/{id}/propose-to-registry` and `POST /api/templates/{name}/promote` now answer 500 instead of 400 when `skills.promotion` itself is misconfigured (an invalid `api_base_url`, `fork_owner`, or `base_branch`).
+The request was well-formed; the daemon's own configuration was not, so a client that branches on 4xx-versus-5xx no longer sees an operator's config mistake reported as if the caller had sent bad input. (#8179) (@DaBlitzStein)
