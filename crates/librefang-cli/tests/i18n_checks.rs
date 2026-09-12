@@ -1131,3 +1131,381 @@ fn test_locales_cover_used_i18n_keys() {
         assert_locale_covers_required_i18n_keys(manifest_dir, &locale, &required_keys);
     }
 }
+
+/// One reason, and the key/locale pairs it covers, for values that are supposed to match English.
+struct IdenticalValueExemption {
+    /// Why the English text is the right text here. Written for whoever reads the failure, not for whoever wrote the entry.
+    reason: &'static str,
+    /// Locales the exemption applies to; empty means all of them.
+    locales: &'static [&'static str],
+    keys: &'static [&'static str],
+}
+
+impl IdenticalValueExemption {
+    fn covers(&self, locale: &str, key: &str) -> bool {
+        (self.locales.is_empty() || self.locales.contains(&locale)) && self.keys.contains(&key)
+    }
+}
+
+/// Locale values that are legitimately byte-identical to English, and why.
+///
+/// Every entry is a deliberate statement that the English text is the correct text for that locale, not a record that translating it is still to do — a key that simply has not been translated yet belongs in the locale file with a translation, not here.
+/// `locales` empty means the exemption holds for every locale; naming locales narrows it, so a locale that does translate the value keeps being checked.
+///
+/// Adding an entry costs a written reason and shows up in review as data rather than as a change to the check, which is the point: #8178 was filed because the exception list is the policy, and a policy that lives inside a regex cannot be reviewed.
+const IDENTICAL_VALUE_EXEMPTIONS: &[IdenticalValueExemption] = &[
+    IdenticalValueExemption {
+        reason: "Product, brand and company names. Spelled the same in every locale by definition, which is what the `brand-` prefix exists to declare.",
+        locales: &[],
+        keys: &[
+            "brand-alibaba-coding-plan",
+            "brand-azure-openai",
+            "brand-byteplus",
+            "brand-claude-code",
+            "brand-deepinfra",
+            "brand-deepseek",
+            "brand-discord",
+            "brand-github-copilot",
+            "brand-huggingface",
+            "brand-kimi-coding",
+            "brand-nvidia-nim",
+            "brand-openai",
+            "brand-openai-codex",
+            "brand-openclaw",
+            "brand-openclaw-openfang",
+            "brand-openfang",
+            "brand-openrouter",
+            "brand-slack-app",
+            "brand-slack-bot",
+            "brand-telegram",
+            "brand-vertex-ai",
+            "brand-zai",
+        ],
+    },
+    IdenticalValueExemption {
+        reason: "Identifiers and acronyms used as literal column headers or field labels. `ID`, `URL`, `PID`, `API`, `MCP` and `Top-p` are not translated in any of the shipped locales, and a column header that differs from the API field it shows is harder to read, not easier.",
+        locales: &[],
+        keys: &[
+            "label-api",
+            "label-header-id",
+            "label-header-url",
+            "label-id",
+            "label-pid",
+            "tui-agents-detail-id",
+            "tui-agents-detail-mcp",
+            "tui-agents-header-id",
+            "tui-agents-param-top-p",
+            "tui-event-daemon-http-status",
+            "tui-extensions-header-id",
+            "tui-memory-header-id",
+            "tui-workflows-header-id",
+        ],
+    },
+    IdenticalValueExemption {
+        reason: "Commands and config snippets the user copies verbatim into a shell or a config file. Translating any word here produces something that does not run.",
+        locales: &[],
+        keys: &[
+            "auth-api-key-config-entry",
+            "auth-hash-config-entry",
+            "auth-pool-add-example",
+            "channel-install-sdk-cmd",
+            "desktop-install-skipped-brew",
+            "mcp-vault-set-hint",
+            "tui-workflows-placeholder-steps",
+        ],
+    },
+    IdenticalValueExemption {
+        reason: "Layouts made of placeables, punctuation and literal marker tokens, with no prose to translate. The `key=value` field names match the config keys or the API fields they report.",
+        locales: &[],
+        keys: &[
+            "auth-pool-header",
+            "auth-pool-key-item",
+            "channel-last-error-entry",
+            "chat-runner-owner-notice",
+            "model-picker-item",
+            "tui-event-promote-http-error",
+            "tui-guide-warn-env",
+            "tui-mod-error-symbol",
+            "tui-triggers-placeholder-agent-id",
+            "tui-triggers-placeholder-max-fires",
+        ],
+    },
+    IdenticalValueExemption {
+        reason: "Names of LibreFang features and of the ClawHub marketplace, carried as-is the way the brand keys are.",
+        locales: &[],
+        keys: &[
+            "tui-dashboard-dreams-title",
+            "tui-skills-tab-clawhub",
+            "ui-brand-title",
+        ],
+    },
+    IdenticalValueExemption {
+        reason: "Trigger-type names as they appear on the wire and in `agent.toml`. An operator matching a screen against a config file needs the same spelling in both.",
+        locales: &[],
+        keys: &[
+            "tui-triggers-type-agentspawned-name",
+            "tui-triggers-type-channelmessage-name",
+            "tui-triggers-type-contentmatch-name",
+            "tui-triggers-type-schedule-name",
+            "tui-triggers-type-webhook-name",
+        ],
+    },
+    IdenticalValueExemption {
+        reason: "Trigger-type names as they appear on the wire and in `agent.toml`. An operator matching a screen against a config file needs the same spelling in both.",
+        locales: &["uk", "zh-CN"],
+        keys: &[
+            "tui-triggers-type-lifecycle-name",
+        ],
+    },
+    IdenticalValueExemption {
+        reason: "Only the punctuation differs from English, and Korean and Ukrainian use the same ASCII colon, parentheses and brackets that English does. zh-CN differs solely because it uses the fullwidth forms.",
+        locales: &["ko", "uk"],
+        keys: &[
+            "agent-spawn-id-label",
+            "automation-workflow-created-id",
+            "channel-prompt-default",
+            "channel-prompt-optional",
+            "channel-prompt-required",
+            "skill-bundle-sha",
+            "tui-channels-group-count",
+            "tui-event-daemon-failure-detail",
+        ],
+    },
+    IdenticalValueExemption {
+        reason: "Binary and decimal unit abbreviations. Korean and Chinese write these in Latin script; only Ukrainian transliterates them into Cyrillic.",
+        locales: &["ko", "zh-CN"],
+        keys: &[
+            "format-bytes-b",
+            "format-bytes-gib",
+            "format-bytes-kib",
+            "format-bytes-mib",
+            "format-size-mb",
+            "status-mb",
+        ],
+    },
+    IdenticalValueExemption {
+        reason: "A language runtime's own name followed by its version. Korean and Ukrainian keep the upstream spelling.",
+        locales: &["ko", "uk"],
+        keys: &[
+            "doctor-check-node-version",
+            "doctor-check-python-version",
+            "doctor-check-rust-version",
+        ],
+    },
+    IdenticalValueExemption {
+        reason: "Example values the user copies into a field that only accepts them as written: `template_id` is the API field name, and agent and workflow names are validated as ASCII slugs.",
+        locales: &["ko", "zh-CN"],
+        keys: &[
+            "mcp-header-template-id",
+            "tui-agents-placeholder-name",
+            "tui-workflows-placeholder-name",
+        ],
+    },
+    IdenticalValueExemption {
+        reason: "`Hand` is a LibreFang product concept. Ukrainian and Chinese keep the English term; Korean transliterates it. This is a terminology decision that has not been made explicitly — it is recorded here rather than settled, so that flipping it is one edit in one place.",
+        locales: &["uk", "zh-CN"],
+        keys: &[
+            "label-hands",
+            "label-header-hand",
+            "tui-hands-header-hand",
+            "tui-hands-title",
+            "tui-tab-hands",
+        ],
+    },
+    IdenticalValueExemption {
+        reason: "`Hand` is a LibreFang product concept. Ukrainian and Chinese keep the English term; Korean transliterates it. This is a terminology decision that has not been made explicitly — it is recorded here rather than settled, so that flipping it is one edit in one place.",
+        locales: &["zh-CN"],
+        keys: &[
+            "label-hand",
+        ],
+    },
+];
+
+/// Every `key = value` pair in a locale file, with multiline continuations folded in.
+///
+/// Separate from [`collect_locale_keys`] because that one deliberately discards values; the untranslated-value check is entirely about them.
+/// Continuation lines are joined with a newline and trimmed the way Fluent renders them, so a value the loader treats as one string compares as one string here.
+fn collect_locale_entries(locale_file: &Path) -> std::collections::BTreeMap<String, String> {
+    let content = fs::read_to_string(locale_file)
+        .unwrap_or_else(|e| panic!("failed to read {}: {e}", locale_file.display()));
+    let mut entries = std::collections::BTreeMap::new();
+    let mut current: Option<String> = None;
+    // A blank line does not end a Fluent message on its own — `doctor-section-*` are written as an empty first line, a blank line, then the indented text — so blank lines are held back and only folded in once an indented line proves the message continued.
+    let mut pending_blanks = 0usize;
+    for line in content.lines() {
+        if line.trim().is_empty() {
+            if current.is_some() {
+                pending_blanks += 1;
+            }
+            continue;
+        }
+        if line.trim_start().starts_with('#') {
+            current = None;
+            pending_blanks = 0;
+            continue;
+        }
+        if line.starts_with(char::is_whitespace) {
+            // A continuation of the previous message, or an attribute / selector line inside it. Either way it belongs to the value already being accumulated.
+            if let Some(key) = &current {
+                let value: &mut String = entries.get_mut(key).expect("current key was inserted");
+                for _ in 0..pending_blanks {
+                    value.push('\n');
+                }
+                value.push('\n');
+                value.push_str(line.trim());
+            }
+            pending_blanks = 0;
+            continue;
+        }
+        current = None;
+        pending_blanks = 0;
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        let key = key.trim();
+        let mut chars = key.chars();
+        if !chars.next().is_some_and(|c| c.is_ascii_alphabetic()) {
+            continue;
+        }
+        if !chars.all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+            continue;
+        }
+        // Only the leading space of `key = value` is Fluent syntax; anything past it is part of the value and several keys use it for column alignment.
+        let value = value.strip_prefix(' ').unwrap_or(value);
+        entries.insert(key.to_string(), value.to_string());
+        current = Some(key.to_string());
+    }
+    entries
+}
+
+/// A locale value byte-identical to English is not a translation (#8178).
+///
+/// The missing-key check next door cannot see this one: the key is present, so coverage is satisfied, and the string renders as fluent English inside an otherwise translated screen.
+/// That reads as a deliberate choice rather than as a bug, so nobody files it — eight `tui-settings-*auxiliary*` keys reached `uk` and `zh-CN` with their English values and stayed green the whole time.
+///
+/// Exemptions are data in [`IDENTICAL_VALUE_EXEMPTIONS`], not a pattern in this function.
+/// The distinction matters more than it looks: a heuristic that decides "this looks like a format string" keeps passing as the strings around it drift, and nothing in a diff shows that it stopped catching anything, whereas an entry added to the table is a line a reviewer reads.
+///
+/// The check is not symmetric with the locale — `en` is the reference and is skipped rather than compared against itself.
+#[test]
+fn test_locale_values_are_not_copies_of_english() {
+    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR is set");
+    let manifest_dir = Path::new(&manifest_dir);
+    let english = collect_locale_entries(&manifest_dir.join("locales/en/main.ftl"));
+
+    let mut untranslated: Vec<String> = Vec::new();
+    for locale in shipped_locales(manifest_dir) {
+        if locale == "en" {
+            continue;
+        }
+        let entries =
+            collect_locale_entries(&manifest_dir.join(format!("locales/{locale}/main.ftl")));
+        for (key, value) in &entries {
+            let Some(english_value) = english.get(key) else {
+                // A key absent from `en` is a different defect and belongs to the dead-key check, which reports it with the context to act on.
+                continue;
+            };
+            if value != english_value {
+                continue;
+            }
+            if IDENTICAL_VALUE_EXEMPTIONS
+                .iter()
+                .any(|exemption| exemption.covers(&locale, key))
+            {
+                continue;
+            }
+            untranslated.push(format!("  {locale}/{key} = {english_value:?}"));
+        }
+    }
+
+    assert!(
+        untranslated.is_empty(),
+        "These locale values are byte-identical to the English text, so the screen shows English \
+         to a user who selected another language (#8178):\n{}\n\nTranslate them. If the English \
+         text really is correct for that locale — a brand name, a shell command, a column header \
+         that matches an API field — add the key to IDENTICAL_VALUE_EXEMPTIONS in this file with \
+         a reason saying which.",
+        untranslated.join("\n")
+    );
+}
+
+/// Guards the exemption table against the two ways it rots into a rubber stamp.
+///
+/// An entry for a key that no longer exists, or for one whose value is no longer identical, is an exemption nobody can see is unused — and the next key to reuse that name inherits it silently.
+/// A reason that says nothing defeats the reason the table is data rather than a regex.
+#[test]
+fn identical_value_exemptions_are_all_still_load_bearing() {
+    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR is set");
+    let manifest_dir = Path::new(&manifest_dir);
+    let english = collect_locale_entries(&manifest_dir.join("locales/en/main.ftl"));
+    let locales: Vec<String> = shipped_locales(manifest_dir)
+        .into_iter()
+        .filter(|l| l != "en")
+        .collect();
+    let entries: std::collections::BTreeMap<String, std::collections::BTreeMap<String, String>> =
+        locales
+            .iter()
+            .map(|locale| {
+                (
+                    locale.clone(),
+                    collect_locale_entries(
+                        &manifest_dir.join(format!("locales/{locale}/main.ftl")),
+                    ),
+                )
+            })
+            .collect();
+
+    let mut stale: Vec<String> = Vec::new();
+    let mut seen: std::collections::BTreeSet<(&str, &str)> = std::collections::BTreeSet::new();
+    for exemption in IDENTICAL_VALUE_EXEMPTIONS {
+        assert!(
+            exemption.reason.split_whitespace().count() >= 8,
+            "exemption reason {:?} is too short to tell a reader why the English text is correct here",
+            exemption.reason
+        );
+        for named in exemption.locales {
+            assert!(
+                locales.iter().any(|l| l == named),
+                "exemption names locale {named:?}, which ships no locales/{named}/main.ftl"
+            );
+        }
+        for key in exemption.keys {
+            assert!(
+                seen.insert((
+                    if exemption.locales.is_empty() {
+                        ""
+                    } else {
+                        exemption.locales[0]
+                    },
+                    key
+                )),
+                "{key} is exempted twice for the same locales; two reasons for one key means one of them is wrong"
+            );
+            let Some(english_value) = english.get(*key) else {
+                stale.push(format!("  {key} — no longer in locales/en/main.ftl"));
+                continue;
+            };
+            let applies: Vec<&String> = locales
+                .iter()
+                .filter(|l| exemption.locales.is_empty() || exemption.locales.contains(&l.as_str()))
+                .collect();
+            for locale in applies {
+                match entries[locale].get(*key) {
+                    None => stale.push(format!("  {locale}/{key} — key absent from that locale")),
+                    Some(value) if value != english_value => stale.push(format!(
+                        "  {locale}/{key} — now translated ({value:?}), so the exemption is dead"
+                    )),
+                    Some(_) => {}
+                }
+            }
+        }
+    }
+
+    assert!(
+        stale.is_empty(),
+        "IDENTICAL_VALUE_EXEMPTIONS has entries that no longer describe anything:\n{}\n\nDrop them. \
+         An exemption that matches nothing is invisible until a future key reuses the name and \
+         inherits it.",
+        stale.join("\n")
+    );
+}
