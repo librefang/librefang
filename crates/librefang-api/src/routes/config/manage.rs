@@ -911,6 +911,7 @@ fn redacted_config_json(
         "ws_messages_per_minute": config.rate_limit.ws_messages_per_minute,
         "ws_terminal_messages_per_minute": config.rate_limit.ws_terminal_messages_per_minute,
         "ws_idle_timeout_secs": config.rate_limit.ws_idle_timeout_secs,
+        "ws_ping_interval_secs": config.rate_limit.ws_ping_interval_secs,
         "ws_debounce_ms": config.rate_limit.ws_debounce_ms,
         "ws_debounce_chars": config.rate_limit.ws_debounce_chars,
         "auth_rate_limit_per_ip": config.rate_limit.auth_rate_limit_per_ip,

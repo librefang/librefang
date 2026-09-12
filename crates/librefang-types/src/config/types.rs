@@ -1018,6 +1018,13 @@ pub struct RateLimitConfig {
     /// WebSocket idle timeout in seconds (close after inactivity). Default: 1800.
     #[serde(default = "default_ws_idle_timeout_secs")]
     pub ws_idle_timeout_secs: u64,
+    /// WebSocket ping interval in seconds. Default: 30. Set to 0 to disable.
+    ///
+    /// The server sends a Ping frame after this much silence from the peer and closes the connection if a further interval passes with still nothing received, so a half-open socket is detected in at most twice this value.
+    /// Without it the only thing that ever discovers a dead peer is a failing write, which means a connection sitting idle between turns — the state a chat socket spends most of its life in — is never probed at all.
+    /// Detection is deliberately not tied to `ws_idle_timeout_secs`: an answered Ping must not count as activity, or an open browser tab would keep the idle timeout from ever firing.
+    #[serde(default = "default_ws_ping_interval_secs")]
+    pub ws_ping_interval_secs: u64,
     /// Text delta debounce interval in milliseconds. Default: 100.
     #[serde(default = "default_ws_debounce_ms")]
     pub ws_debounce_ms: u64,
@@ -1049,6 +1056,11 @@ fn default_ws_terminal_messages_per_minute() -> u32 {
 fn default_ws_idle_timeout_secs() -> u64 {
     1800
 }
+/// 30 s keeps detection (two intervals, 60 s) under the dashboard's 180 s duplicate-resend watchdog, so a dead socket is closed and the client's own recovery runs before that watchdog re-sends the message over HTTP.
+/// It is also under the 60 s `proxy_read_timeout` most reverse proxies default to, so the same frame doubles as the keep-alive those deployments need.
+fn default_ws_ping_interval_secs() -> u64 {
+    30
+}
 fn default_ws_debounce_ms() -> u64 {
     100
 }
@@ -1068,6 +1080,7 @@ impl Default for RateLimitConfig {
             ws_messages_per_minute: default_ws_messages_per_minute(),
             ws_terminal_messages_per_minute: default_ws_terminal_messages_per_minute(),
             ws_idle_timeout_secs: default_ws_idle_timeout_secs(),
+            ws_ping_interval_secs: default_ws_ping_interval_secs(),
             ws_debounce_ms: default_ws_debounce_ms(),
             ws_debounce_chars: default_ws_debounce_chars(),
             auth_rate_limit_per_ip: default_auth_rate_limit_per_ip(),

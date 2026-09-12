@@ -1178,6 +1178,7 @@
         "ws_messages_per_minute": 10,
         "ws_terminal_messages_per_minute": 3600,
         "ws_idle_timeout_secs": 1800,
+        "ws_ping_interval_secs": 30,
         "ws_debounce_ms": 100,
         "ws_debounce_chars": 200,
         "auth_rate_limit_per_ip": 10
@@ -6115,6 +6116,13 @@
           "default": 10,
           "type": "integer",
           "format": "uint32",
+          "minimum": 0.0
+        },
+        "ws_ping_interval_secs": {
+          "description": "WebSocket ping interval in seconds. Default: 30. Set to 0 to disable.\n\nThe server sends a Ping frame after this much silence from the peer and closes the connection if a further interval passes with still nothing received, so a half-open socket is detected in at most twice this value. Without it the only thing that ever discovers a dead peer is a failing write, which means a connection sitting idle between turns — the state a chat socket spends most of its life in — is never probed at all. Detection is deliberately not tied to `ws_idle_timeout_secs`: an answered Ping must not count as activity, or an open browser tab would keep the idle timeout from ever firing.",
+          "default": 30,
+          "type": "integer",
+          "format": "uint64",
           "minimum": 0.0
         },
         "ws_terminal_messages_per_minute": {

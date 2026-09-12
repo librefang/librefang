@@ -1,0 +1,6 @@
+The daemon now pings a WebSocket peer it has heard nothing from, and disconnects one that stops answering (#8276).
+  None of the three endpoints ever sent a Ping, so the only thing that could discover a dead peer was a failing write — and a connection sitting idle between turns, which is where a chat socket spends most of its life, is never written to at all.
+  Ten daemon lifetimes on a production host recorded 55 `client_close` disconnects, one `send_error`, one `receive_error` and not a single `idle_timeout`: the one detection that existed worked, and only ever fired when there was outbound traffic.
+  A half-open socket left by a suspend, a wifi roam or an expired NAT mapping was therefore held until the idle timeout, which deployments routinely set to hours.
+  The terminal socket was the worst affected, because its idle timer is reset by PTY output as well as by client input — so a shell that keeps printing kept a dead peer's child process, tmux window and connection slot alive indefinitely.
+  Detection costs at most two intervals and is tuned with `rate_limit.ws_ping_interval_secs` (default 30 s, `0` disables); an answered Ping deliberately does not count as activity, so `ws_idle_timeout_secs` still fires on a genuinely idle browser tab. (#8278) (@DaBlitzStein)
