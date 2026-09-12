@@ -2883,7 +2883,11 @@
     "open_agent_picker": "打开智能体选择器",
     "session_attach_watching": "正在监听",
     "compacting_session": "正在压缩会话…",
-    "session_summary_compacted": "会话摘要（较早消息已压缩）"
+    "session_summary_compacted": "会话摘要（较早消息已压缩）",
+    "mermaid_diagram": "图表",
+    "mermaid_enlarge": "放大图表",
+    "mermaid_unrenderable": "图表源码（无法渲染）",
+    "mermaid_show_source": "图表源码"
   },
   "goals": {
     "title": "目标",

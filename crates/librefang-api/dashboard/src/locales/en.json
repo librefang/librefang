@@ -2918,7 +2918,11 @@
     "open_agent_picker": "Open agent picker",
     "session_attach_watching": "Watching",
     "compacting_session": "Compacting session…",
-    "session_summary_compacted": "Session summary (older messages compacted)"
+    "session_summary_compacted": "Session summary (older messages compacted)",
+    "mermaid_diagram": "Diagram",
+    "mermaid_enlarge": "Enlarge diagram",
+    "mermaid_unrenderable": "Diagram source (could not be rendered)",
+    "mermaid_show_source": "Diagram source"
   },
   "goals": {
     "title": "Goals",

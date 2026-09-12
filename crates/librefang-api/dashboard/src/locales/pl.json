@@ -2926,7 +2926,11 @@
     "open_agent_picker": "Otwórz wybór agenta",
     "session_attach_watching": "Obserwowanie",
     "compacting_session": "Kompaktowanie sesji…",
-    "session_summary_compacted": "Podsumowanie sesji (starsze wiadomości zostały skompaktowane)"
+    "session_summary_compacted": "Podsumowanie sesji (starsze wiadomości zostały skompaktowane)",
+    "mermaid_diagram": "Diagram",
+    "mermaid_enlarge": "Powiększ diagram",
+    "mermaid_unrenderable": "Źródło diagramu (nie udało się wyrenderować)",
+    "mermaid_show_source": "Źródło diagramu"
   },
   "goals": {
     "title": "Cele",

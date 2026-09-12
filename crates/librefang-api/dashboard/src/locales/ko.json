@@ -2916,7 +2916,11 @@
     "open_agent_picker": "에이전트 선택 도구 열기",
     "session_attach_watching": "관찰 중",
     "compacting_session": "세션 압축 중…",
-    "session_summary_compacted": "세션 요약(이전 메시지가 압축됨)"
+    "session_summary_compacted": "세션 요약(이전 메시지가 압축됨)",
+    "mermaid_diagram": "다이어그램",
+    "mermaid_enlarge": "다이어그램 확대",
+    "mermaid_unrenderable": "다이어그램 소스(렌더링할 수 없음)",
+    "mermaid_show_source": "다이어그램 소스"
   },
   "goals": {
     "title": "목표",

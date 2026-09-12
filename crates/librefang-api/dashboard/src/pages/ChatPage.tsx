@@ -1497,9 +1497,14 @@ const MessageBubble = memo(function MessageBubble({ message, usageFooter, onCopy
             // word would otherwise overflow, so normal text is untouched.
             <p className="whitespace-pre-line [overflow-wrap:anywhere]">{displayContent}</p>
           ) : (
+            // `diagrams` only here: this is the settled turn, where the fence
+            // is complete. The streaming view renders through `Typewriter_v2`
+            // and the thinking panel grows token by token, so a diagram in
+            // either would be re-parsed and re-laid-out on every frame.
             <MarkdownContent
               remarkPlugins={mathPlugins.remarkPlugins}
               rehypePlugins={mathPlugins.rehypePlugins}
+              diagrams
             >
               {displayContent}
             </MarkdownContent>

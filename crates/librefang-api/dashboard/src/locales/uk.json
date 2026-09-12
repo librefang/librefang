@@ -2926,7 +2926,11 @@
     "open_agent_picker": "Відкрити вибір агента",
     "session_attach_watching": "Спостереження",
     "compacting_session": "Сесія стискається…",
-    "session_summary_compacted": "Підсумок сесії (старі повідомлення стиснуто)"
+    "session_summary_compacted": "Підсумок сесії (старі повідомлення стиснуто)",
+    "mermaid_diagram": "Діаграма",
+    "mermaid_enlarge": "Збільшити діаграму",
+    "mermaid_unrenderable": "Джерело діаграми (не вдалося відобразити)",
+    "mermaid_show_source": "Джерело діаграми"
   },
   "goals": {
     "title": "Цілі",
