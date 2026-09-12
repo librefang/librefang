@@ -76,8 +76,25 @@ export function StepLadderInput({
   const offLadder = value.trim() !== "" && !isOnLadder(rungs, numeric);
   const isCustom = customMode || offLadder;
 
+  // What the operator typed, kept as they typed it.
+  //
+  // The field is controlled by `value`, and a call site that stores the parsed
+  // number rather than the text hands back a different string for the same
+  // number: the model settings drawer keeps `temperature: number`, so `-0` —
+  // a legitimate penalty — comes back as `String(-0)`, which is `"0"`. React
+  // then rewrites the DOM and the minus sign vanishes from under the operator
+  // mid-keystroke; the rest of `-0.25` lands on `0.25` and a positive value is
+  // saved with no error shown.
+  //
+  // The draft is only what is displayed. Every keystroke still reaches the
+  // parent, so nothing about what gets stored changes — this only stops the
+  // parent's rounding of the *representation* from editing the input.
+  const [draft, setDraft] = useState<string | null>(null);
+  const shownValue = isCustom && draft !== null ? draft : value;
+
   const pick = (next: string): void => {
     setCustomMode(false);
+    setDraft(null);
     onChange(next);
   };
 
@@ -129,6 +146,7 @@ export function StepLadderInput({
           // nobody chose and arms their Save button.
           onClick={() => {
             setCustomMode(true);
+            setDraft(null);
             if (numeric !== null) onChange(String(numeric));
           }}
         >
@@ -141,11 +159,14 @@ export function StepLadderInput({
           min={min}
           max={max}
           step={step}
-          value={value}
+          value={shownValue}
           aria-label={`${label} — ${customLabel}`}
           aria-invalid={warning ? true : undefined}
           aria-describedby={warning ? `${id}-warning` : undefined}
-          onChange={(e) => onChange(e.target.value)}
+          onChange={(e) => {
+            setDraft(e.target.value);
+            onChange(e.target.value);
+          }}
           placeholder={customPlaceholder}
           className="w-full rounded-lg border border-border-subtle bg-main px-2 py-1 text-xs font-mono outline-none focus:border-brand"
         />
