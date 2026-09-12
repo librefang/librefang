@@ -4873,7 +4873,7 @@ mod tests {
             api_key_lock: Arc::new(tokio::sync::RwLock::new("secret".to_string())),
             master_key: Default::default(),
             active_sessions: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
-            dashboard_auth_enabled: false,
+            dashboard_auth_enabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             user_api_keys: Arc::new(tokio::sync::RwLock::new(Vec::new())),
             require_auth_for_reads: false,
             allow_no_auth: false,
