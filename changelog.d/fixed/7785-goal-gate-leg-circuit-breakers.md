@@ -1,0 +1,7 @@
+A throttled verifier on a `loop_engineering` goal is no longer reported as a missing one, and a rework turn that fails every time no longer burns the whole iteration budget in silence.
+Verifier dispatch failures were all funnelled into a single "unreachable" counter without ever being classified, so a verifier whose provider was merely rate-limiting — a different provider, key or quota bucket than the generator's — ended the run as `Stopped` with `verifier unreachable` on `last_error` after five iterations that each paid for a full generator turn first.
+The operator was sent looking for a deleted agent, and `RateLimited`, the phase the dashboard renders as the retry-later signal, never fired for that leg.
+Rate limits now keep their own shorter streak there, matching what the generator leg has always done.
+The rework turn was the third leg and had no breaker at all: a run of "generator turn fine, verdict FAIL, rework dispatch fails" repeated to the iteration cap and reported the cap as the reason it stopped, with no cause attributed.
+It does not take an exotic failure to reach — the rework prompt goes into a session one turn longer than the opening one that just succeeded, so a context-length limit surfaces there first and then repeats every iteration.
+Each leg counts its own consecutive failures, because a healthy dispatch on one leg is no evidence at all about the other (#7785) (@DaBlitzStein)

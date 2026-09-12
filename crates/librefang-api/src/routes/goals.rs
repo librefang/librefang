@@ -182,7 +182,13 @@ pub async fn get_goal_run(
 /// POST /api/goals/{id}/start — Begin an autonomous long-horizon run that
 /// drives the goal's assigned agent toward completion (#5744).
 ///
-/// Optional body: `{ "max_iterations": <u32> }`.
+/// Optional body: `{ "max_iterations": <u32>, "verify_max_retries": <u32> }` — each `>= 1`, validated like `max_iterations` (400 otherwise).
+///
+/// Whether the run is verified at all is a property of the goal
+/// (`loop_engineering`, `verify_agent_id`, `evaluator_model`), not of the
+/// request, so every caller — dashboard, CLI, script — gets the verification
+/// the operator configured once. Only the per-run retry budget is a body
+/// field.
 pub async fn start_goal_run(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -246,11 +252,69 @@ pub async fn start_goal_run(
         },
     };
 
-    let started = state
-        .kernel
-        .start_goal_run(goal_id, agent_id, max_iterations);
+    // Loop-engineering configuration lives on the goal, not on the request, so
+    // a run started from the dashboard, the CLI or a script all get the same
+    // verification the operator configured once.
+    let loop_engineering = goal["loop_engineering"].as_bool().unwrap_or(false);
+    let stored_verifier = goal["verify_agent_id"]
+        .as_str()
+        .map(str::trim)
+        .unwrap_or("");
+    let verify_agent_id = if !loop_engineering || stored_verifier.is_empty() {
+        None
+    } else {
+        match stored_verifier.parse::<uuid::Uuid>() {
+            Ok(u) => Some(AgentId(u)),
+            Err(_) => {
+                return ApiErrorResponse::bad_request(format!(
+                    "This goal's verify_agent_id ('{stored_verifier}') is not a valid agent UUID — reassign the verifier to repair it"
+                ))
+                .into_json_tuple();
+            }
+        }
+    };
+    let evaluator_model = goal["evaluator_model"]
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    // #7785 review: mirror `max_iterations`'s validation — a body field that
+    // reaches a u32 must not silently truncate (`as` on a bigger number
+    // wraps), a negative or fractional value must not silently parse as
+    // `None` (its `as_u64` failure was indistinguishable from an absent
+    // field), and 0 is rejected rather than clamped, same boundary as
+    // `max_iterations`.
+    let verify_max_retries = match body.as_ref().and_then(|b| b.0.get("verify_max_retries")) {
+        None => None,
+        Some(value) => match value.as_u64().and_then(|n| u32::try_from(n).ok()) {
+            Some(0) | None => {
+                return ApiErrorResponse::bad_request(
+                    "verify_max_retries must be an integer between 1 and 4294967295",
+                )
+                .into_json_tuple();
+            }
+            Some(value) => Some(value),
+        },
+    };
+
+    let started = state.kernel.start_goal_run(
+        goal_id,
+        agent_id,
+        max_iterations,
+        loop_engineering,
+        verify_agent_id,
+        verify_max_retries,
+        evaluator_model,
+    );
     if !started {
-        return ApiErrorResponse::internal("Failed to start goal run").into_json_tuple();
+        // #7785 review: the only way `start_goal_run` refuses is the goal
+        // vanishing between the read above and the runner's own reload —
+        // a delete racing this request. That is "the goal is gone", a 404,
+        // not the 500 an internal-fault response implies.
+        return ApiErrorResponse::not_found(format!(
+            "Goal '{id}' was deleted before its run could start"
+        ))
+        .into_json_tuple();
     }
 
     // Flip the goal to in_progress so the dashboard reflects the active run.
@@ -398,6 +462,46 @@ pub async fn create_goal(
         }
     };
 
+    let loop_engineering = req["loop_engineering"].as_bool().unwrap_or(false);
+    // Same boundary rule as `agent_id`, through the same helper: blank or
+    // null clears (nothing to store on a create), a non-empty value must be
+    // a UUID, and a non-string value is a 400 rather than a silently
+    // dropped field (#7785 review).
+    let verify_agent_id_str = match optional_uuid_field(&req, "verify_agent_id") {
+        Ok(value) => value.flatten(),
+        Err(()) => {
+            return ApiErrorResponse::bad_request("Invalid verify_agent_id").into_json_tuple();
+        }
+    };
+    // The one rule the whole pattern exists for: an agent does not grade its
+    // own work. With both ids equal the verdict prompt goes to the same
+    // persistent session that produced the output one turn earlier, so
+    // `VERDICT: PASS` is the expected reply and the gate passes everything —
+    // while the run API and the dashboard's `loop_engineering` badge both
+    // report a verifier that is not verifying (#7785 re-review).
+    if verify_agent_id_str.is_some() && verify_agent_id_str == agent_id_str {
+        return ApiErrorResponse::bad_request(
+            "verify_agent_id must differ from agent_id: an agent cannot verify its own work",
+        )
+        .into_json_tuple();
+    }
+    // Deliberately NOT validated the way the verifier id is: a model id has no
+    // checkable shape, and whether it resolves depends on the provider config
+    // at call time, not at save time. An unresolvable id degrades — the runner
+    // warns per iteration and falls back to the agent's own marker. See the
+    // field doc on `librefang_types::goal::Goal::evaluator_model`.
+    // A blank one is dropped rather than stored, so a created goal round-trips
+    // the way an updated one does — `update_goal_by_id` treats `""` as the
+    // clear signal and removes the key, and `start_goal_run` filters it on
+    // read. Storing `""` here left `GET /api/goals` handing the dashboard an
+    // `evaluator_model` no route would ever have written through an update
+    // (#7785 re-review).
+    let evaluator_model_str: Option<String> = req
+        .get("evaluator_model")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+
     let now = chrono::Utc::now().to_rfc3339();
     let goal_id = uuid::Uuid::new_v4().to_string();
     let mut entry = serde_json::json!({
@@ -406,6 +510,7 @@ pub async fn create_goal(
         "description": description,
         "status": status,
         "progress": progress,
+        "loop_engineering": loop_engineering,
         "created_at": now,
         "updated_at": now,
     });
@@ -415,6 +520,12 @@ pub async fn create_goal(
     }
     if let Some(ref aid) = agent_id_str {
         entry["agent_id"] = serde_json::Value::String(aid.clone());
+    }
+    if let Some(ref vid) = verify_agent_id_str {
+        entry["verify_agent_id"] = serde_json::Value::String(vid.clone());
+    }
+    if let Some(ref em) = evaluator_model_str {
+        entry["evaluator_model"] = serde_json::Value::String(em.clone());
     }
 
     // Atomic read-modify-write under BEGIN IMMEDIATE (#5138). Parent
@@ -520,6 +631,13 @@ pub async fn update_goal_by_id(
         return ApiErrorResponse::bad_request("A goal cannot be its own parent").into_json_tuple();
     }
 
+    let verifier_update = match optional_uuid_field(&req, "verify_agent_id") {
+        Ok(value) => value,
+        Err(()) => {
+            return ApiErrorResponse::bad_request("Invalid verify_agent_id").into_json_tuple();
+        }
+    };
+
     let agent_update = match optional_uuid_field(&req, "agent_id") {
         Ok(value) => value,
         Err(()) => {
@@ -538,6 +656,7 @@ pub async fn update_goal_by_id(
     const PARENT_MISSING: &str = "__goal_parent_missing__";
     const CIRCULAR: &str = "__goal_circular__";
     const NOT_FOUND: &str = "__goal_not_found__";
+    const SELF_VERIFY: &str = "__goal_self_verify__";
     use librefang_types::error::LibreFangError;
 
     let modify_result: Result<serde_json::Value, LibreFangError> = state
@@ -609,6 +728,37 @@ pub async fn update_goal_by_id(
                             g.as_object_mut().map(|obj| obj.remove("agent_id"));
                         }
                     }
+                    if let Some(loop_engineering) =
+                        req.get("loop_engineering").and_then(|v| v.as_bool())
+                    {
+                        g["loop_engineering"] = serde_json::json!(loop_engineering);
+                    }
+                    if let Some(verifier_update) = verifier_update.as_ref() {
+                        if let Some(vid) = verifier_update {
+                            g["verify_agent_id"] = serde_json::Value::String(vid.clone());
+                        } else {
+                            g.as_object_mut().map(|obj| obj.remove("verify_agent_id"));
+                        }
+                    }
+                    if let Some(evaluator_model) = req.get("evaluator_model") {
+                        if is_clear_signal(evaluator_model) {
+                            g.as_object_mut().map(|obj| obj.remove("evaluator_model"));
+                        } else if let Some(em) = evaluator_model.as_str() {
+                            g["evaluator_model"] = serde_json::Value::String(em.trim().to_string());
+                        }
+                    }
+                    // Same rule as `create_goal`, checked on the EFFECTIVE
+                    // post-update pair rather than on the payload: either id
+                    // can be absent from a partial update, so the pair that
+                    // has to differ is the one this write leaves on the
+                    // document — assigning a verifier that happens to equal
+                    // the goal's existing agent is the same self-grading
+                    // configuration as sending both at once (#7785 re-review).
+                    let effective_verifier = g["verify_agent_id"].as_str();
+                    if effective_verifier.is_some() && effective_verifier == g["agent_id"].as_str()
+                    {
+                        return Err(LibreFangError::InvalidInput(SELF_VERIFY.to_string()));
+                    }
                     g["updated_at"] = serde_json::Value::String(chrono::Utc::now().to_rfc3339());
                     updated = Some(g.clone());
                     break;
@@ -636,10 +786,54 @@ pub async fn update_goal_by_id(
             return ApiErrorResponse::not_found(format!("Parent goal '{}' not found", pid))
                 .into_json_tuple();
         }
+        Err(LibreFangError::InvalidInput(ref msg)) if msg == SELF_VERIFY => {
+            return ApiErrorResponse::bad_request(
+                "verify_agent_id must differ from agent_id: an agent cannot verify its own work",
+            )
+            .into_json_tuple();
+        }
         Err(e) => {
             return ApiErrorResponse::internal_scrub(e).into_json_tuple();
         }
     };
+
+    // Marking a goal terminal is a lifecycle boundary, the same way deleting
+    // it is (`delete_goal`, which has called `stop_goal_run` all along). Until
+    // this call the only thing that noticed an operator's `completed` was the
+    // runner's own top-of-loop read of the goal document — which a configured
+    // verifier now correctly declines to treat as a completion signal, since
+    // it cannot tell that write apart from the `goal_update` tool's. Routing
+    // the operator through the run's actual control channel keeps the two
+    // separable: an out-of-band stop order stops the run, an agent asserting
+    // completion in a document still has to get past the gate.
+    //
+    // The runner skips its own end-of-iteration write once stopped THIS way,
+    // so the status — and the progress — the operator chose survives instead
+    // of being reverted by the iteration already in flight. A plain
+    // `POST /stop` writes nothing and therefore does not bar that write; the
+    // two are separate entry points for exactly that reason (#7785 re-review).
+    // Keyed on what this request asked for, not on the goal's resulting
+    // status: re-saving a description on an already-completed goal is not an
+    // operator stopping anything.
+    let stops_the_run = req
+        .get("status")
+        .and_then(|v| v.as_str())
+        .is_some_and(|s| s == "completed" || s == "cancelled");
+    if stops_the_run {
+        if let Ok(goal_id) = id.parse::<GoalId>() {
+            // Known race, deliberately not locked: a runner that read the flag
+            // before this call and reaches `patch_goal` after the write above
+            // still overwrites the operator's choice. The window is the few
+            // microseconds between those two runner statements, and reordering
+            // the handler does not close it — the write has to land before the
+            // stop (a stop that preceded it would leave the run gone and the
+            // document unwritten if the modify then failed), so the only real
+            // fix is a lock shared between the route and the run loop. Not
+            // worth it for a lost status the operator can re-apply, on a run
+            // that is stopping either way (#7785 review, m1).
+            state.kernel.stop_goal_run_after_goal_write(goal_id);
+        }
+    }
 
     // Issue #3832: return the mutated entity so the dashboard can `setQueryData`
     // without an extra round-trip GET. Aligns with `create_goal`'s response shape.

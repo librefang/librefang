@@ -1,0 +1,7 @@
+Marking a goal completed or cancelled through `PUT /api/goals/{id}` now actually stops its autonomous run, instead of being silently undone by the run itself.
+Deleting a goal has always stopped its run; updating one never did, and nothing else connected an operator's decision to the run's lifecycle — the runner only ever noticed by re-reading the goal document on its next tick.
+That read cannot tell an operator apart from the `goal_update` tool the agent's own prompt tells it to call, so once a verifier was configured the runner correctly stopped treating a bare `status: completed` as a reason to finish, and the operator's path went with it.
+An operator who pressed the dashboard's status button on a verified goal therefore watched it flip straight back to `in_progress`, keep the incoherent `progress: 100` that came with it, and spend the rest of its iteration budget on paid turns nobody had asked for.
+The two writers are now separated by which channel they use rather than by guessing from the stored value: an operator gets the run's real stop control, and an agent asserting completion in a document still has to get past the verifier.
+The run also no longer writes its own status and progress over a goal that the same request has just written, so the choice an operator made mid-iteration survives the iteration already in flight.
+A plain `POST /api/goals/{id}/stop` is unaffected and still lands the interrupted iteration's progress, because it writes nothing to the goal there is anything to protect (#7785) (@DaBlitzStein)

@@ -1,0 +1,5 @@
+A lesson an agent restates while reworking rejected output is now kept once instead of once per rework round.
+Captured `GOAL_LEARNED:` lessons were appended before the verifier ran and again for every reworked reply, and nothing downstream collapsed them — the skill workshop's own de-duplication compares whole candidates, not the entries within one.
+An iteration that recorded a lesson, drew a `FAIL`, and repeated the lesson in its corrected reply therefore stored it twice or more, and those copies crowded genuinely distinct earlier lessons out of the small window replayed into later prompts, out of the stored document, and out of the numbered list a human reads before approving the draft skill.
+A reworked reply already replaces the rejected one everywhere else, so its lessons now replace them too, and the run refuses a lesson whose text it already holds.
+Lessons from an iteration the verifier rejected are still kept, deliberately: unlike `GOAL_DONE` they close nothing and make no claim about the work being graded, and what an attempt that did not land taught is exactly what a human reviewing the draft wants to see (#7785) (@DaBlitzStein)

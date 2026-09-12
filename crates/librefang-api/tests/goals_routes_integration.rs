@@ -1018,6 +1018,195 @@ async fn goal_run_start_rejects_invalid_iteration_limits() {
     assert_eq!(run["running"], false);
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn goal_run_start_rejects_invalid_verify_max_retries() {
+    let h = boot().await;
+    let goal = create_goal(
+        &h,
+        serde_json::json!({
+            "title": "Bounded retries",
+            "agent_id": "11111111-1111-1111-1111-111111111111",
+        }),
+    )
+    .await;
+    let id = goal["id"].as_str().unwrap();
+
+    // 0, a non-number, a negative, a fraction, and an out-of-u32-range value
+    // are all rejected rather than truncated or misread as "absent".
+    for verify_max_retries in [
+        serde_json::json!(0),
+        serde_json::json!("3"),
+        serde_json::json!(-1),
+        serde_json::json!(1.5),
+        serde_json::json!(u64::from(u32::MAX) + 1),
+    ] {
+        let (status, body) = json_request(
+            &h,
+            Method::POST,
+            &format!("/api/goals/{id}/start"),
+            Some(serde_json::json!({"verify_max_retries": verify_max_retries})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "got: {body:?}");
+    }
+
+    let (_, run) = json_request(&h, Method::GET, &format!("/api/goals/{id}/run"), None).await;
+    assert_eq!(
+        run["running"], false,
+        "no run may be started by a rejected body"
+    );
+}
+
+/// #6562: the create form submits blank ids from reset form controls, so a
+/// blank `verify_agent_id` must be "absent", not a 400 — same contract as
+/// `agent_id` / `parent_id`.
+#[tokio::test(flavor = "multi_thread")]
+async fn goals_create_treats_blank_verify_agent_id_as_absent() {
+    let h = boot().await;
+    let (status, body) = json_request(
+        &h,
+        Method::POST,
+        "/api/goals",
+        Some(serde_json::json!({"title": "No verifier", "verify_agent_id": ""})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "got: {body:?}");
+    assert!(
+        body.get("verify_agent_id").is_none(),
+        "blank verify_agent_id must not be persisted: {body:?}"
+    );
+}
+
+/// A verifier id is validated at the boundary like `agent_id`: a non-UUID is
+/// a 400 instead of junk `start_goal_run` has to refuse later, and a
+/// non-string is a 400 instead of a silently dropped field.
+#[tokio::test(flavor = "multi_thread")]
+async fn goals_create_rejects_wrong_typed_verify_agent_id() {
+    let h = boot().await;
+    for payload in [
+        serde_json::json!({"title": "bad", "verify_agent_id": "not-a-uuid"}),
+        serde_json::json!({"title": "bad", "verify_agent_id": 123}),
+    ] {
+        let (status, body) = json_request(&h, Method::POST, "/api/goals", Some(payload)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "got: {body:?}");
+    }
+}
+
+/// Same contract for `verify_agent_id` on update: blank clears the link, a
+/// non-UUID is a 400.
+#[tokio::test(flavor = "multi_thread")]
+async fn goals_update_blank_verify_agent_id_clears_assignment() {
+    let h = boot().await;
+    let verifier = uuid::Uuid::new_v4().to_string();
+    let goal = create_goal(
+        &h,
+        serde_json::json!({"title": "Verified", "verify_agent_id": verifier}),
+    )
+    .await;
+    let id = goal["id"].as_str().unwrap().to_string();
+
+    let (status, body) = json_request(
+        &h,
+        Method::PUT,
+        &format!("/api/goals/{id}"),
+        Some(serde_json::json!({"verify_agent_id": ""})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "got: {body:?}");
+    assert!(
+        body.get("verify_agent_id").is_none(),
+        "blank verify_agent_id must clear the link: {body:?}"
+    );
+
+    let (status, body) = json_request(
+        &h,
+        Method::PUT,
+        &format!("/api/goals/{id}"),
+        Some(serde_json::json!({"verify_agent_id": "not-a-uuid"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "got: {body:?}");
+}
+
+/// #7785 re-review: nothing rejected `verify_agent_id == agent_id`, so the
+/// gate could be configured wide open. With both ids equal the verdict prompt
+/// goes to the same persistent session that produced the output one turn
+/// earlier, so `VERDICT: PASS` is the expected reply — while the run API and
+/// the dashboard's `loop_engineering` badge both report a verifier that is
+/// not verifying.
+#[tokio::test(flavor = "multi_thread")]
+async fn goals_create_rejects_an_agent_verifying_its_own_work() {
+    let h = boot().await;
+    let agent = uuid::Uuid::new_v4().to_string();
+    let (status, body) = json_request(
+        &h,
+        Method::POST,
+        "/api/goals",
+        Some(serde_json::json!({
+            "title": "Self-graded",
+            "agent_id": agent,
+            "verify_agent_id": agent,
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "got: {body:?}");
+}
+
+/// Same rule on update, checked against the EFFECTIVE post-update pair: either
+/// id can be absent from a partial update, so assigning a verifier that
+/// happens to equal the goal's existing agent is the same self-grading
+/// configuration as sending both at once.
+#[tokio::test(flavor = "multi_thread")]
+async fn goals_update_rejects_an_agent_verifying_its_own_work() {
+    let h = boot().await;
+    let agent = uuid::Uuid::new_v4().to_string();
+    let goal = create_goal(
+        &h,
+        serde_json::json!({"title": "Assigned", "agent_id": agent}),
+    )
+    .await;
+    let id = goal["id"].as_str().unwrap().to_string();
+
+    // Only the verifier is sent; `agent_id` comes from the stored document.
+    let (status, body) = json_request(
+        &h,
+        Method::PUT,
+        &format!("/api/goals/{id}"),
+        Some(serde_json::json!({"verify_agent_id": agent})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "got: {body:?}");
+
+    // And the rejected write left nothing behind.
+    let (status, body) = json_request(&h, Method::GET, &format!("/api/goals/{id}"), None).await;
+    assert_eq!(status, StatusCode::OK, "got: {body:?}");
+    assert!(
+        body.get("verify_agent_id").is_none(),
+        "a rejected update must not have persisted the verifier: {body:?}"
+    );
+}
+
+/// #7785 re-review: create stored a blank `evaluator_model` as `""` while
+/// update treats the identical payload as the clear signal and removes the
+/// key, so a created goal round-tripped differently from an updated one and
+/// `GET /api/goals` handed the dashboard a value no update would ever write.
+#[tokio::test(flavor = "multi_thread")]
+async fn goals_create_treats_blank_evaluator_model_as_absent() {
+    let h = boot().await;
+    let (status, body) = json_request(
+        &h,
+        Method::POST,
+        "/api/goals",
+        Some(serde_json::json!({"title": "No evaluator", "evaluator_model": "   "})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "got: {body:?}");
+    assert!(
+        body.get("evaluator_model").is_none(),
+        "blank evaluator_model must not be persisted: {body:?}"
+    );
+}
+
 /// #6562: create / update now reject a non-UUID `agent_id`, but goals written
 /// before that fix still carry junk.
 /// Reporting those as unassigned points the operator at a field that already looks filled in, so the two cases get distinct messages.
@@ -1055,6 +1244,227 @@ async fn goal_run_start_distinguishes_a_corrupt_agent_id_from_an_unassigned_one_
         msg.contains("not-a-uuid") && msg.contains("reassign"),
         "a corrupt stored id must be named and the fix suggested, not reported as unassigned: {body:?}"
     );
+}
+
+/// Refusing the run is only half of the property worth asserting.
+///
+/// The obvious way to make a goal with an unusable `agent_id` "just work" is
+/// to conjure an agent for it, and an agent conjured from a field the caller
+/// never had to fill in correctly is an agent nobody chose, with capabilities
+/// nobody granted, outliving the run that created it. The two assertions above
+/// would still pass under that design, so assert the thing that actually
+/// matters: a rejected run provisions nothing.
+#[tokio::test(flavor = "multi_thread")]
+async fn goal_run_start_with_an_unusable_agent_id_provisions_no_agent() {
+    for stored in ["", "not-a-uuid"] {
+        let h = boot().await;
+        let goal = create_goal(&h, serde_json::json!({"title": "No usable agent"})).await;
+        let id = goal["id"].as_str().unwrap().to_string();
+
+        if !stored.is_empty() {
+            let seeded = h._state.kernel.memory_substrate().structured_modify(
+                librefang_types::goal::goals_storage_agent_id(),
+                librefang_types::goal::GOALS_STORAGE_KEY,
+                |cur| {
+                    let mut goals = match cur {
+                        Some(serde_json::Value::Array(a)) => a,
+                        _ => Vec::new(),
+                    };
+                    for g in goals.iter_mut() {
+                        if g["id"].as_str() == Some(id.as_str()) {
+                            g["agent_id"] = serde_json::Value::String(stored.to_string());
+                        }
+                    }
+                    Ok((serde_json::Value::Array(goals), ()))
+                },
+            );
+            assert!(seeded.is_ok(), "seeding {stored:?} must succeed");
+        }
+
+        let before = h._state.kernel.agent_registry().list_arcs().len();
+        let (status, body) =
+            json_request(&h, Method::POST, &format!("/api/goals/{id}/start"), None).await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "stored={stored:?}: {body:?}"
+        );
+
+        let after = h._state.kernel.agent_registry().list_arcs();
+        assert_eq!(
+            after.len(),
+            before,
+            "a rejected run must not provision an agent (stored={stored:?}); registry now holds: {:?}",
+            after.iter().map(|a| a.name.clone()).collect::<Vec<_>>()
+        );
+        assert!(
+            !after.iter().any(|a| a.name.starts_with("goal-")),
+            "no goal-* agent may be auto-spawned (stored={stored:?})"
+        );
+    }
+}
+
+/// The same property for the verifier. Turning loop engineering on without
+/// naming a verifier is a legitimate configuration — the evaluator and the
+/// captured lessons still apply — and the tempting shortcut is to provision a
+/// verifier so the gate is never missing. A verifier the operator did not
+/// choose is not an independent check, it is an agent the API created on a
+/// caller's say-so, so the run proceeds ungated instead.
+#[tokio::test(flavor = "multi_thread")]
+async fn loop_engineering_without_a_verifier_provisions_no_agent() {
+    let h = boot().await;
+    let agent_id = uuid::Uuid::new_v4().to_string();
+    let goal = create_goal(
+        &h,
+        serde_json::json!({
+            "title": "Verify me",
+            "agent_id": agent_id,
+            "loop_engineering": true,
+        }),
+    )
+    .await;
+    let id = goal["id"].as_str().unwrap();
+    assert_eq!(goal["loop_engineering"].as_bool(), Some(true));
+
+    let before = h._state.kernel.agent_registry().list_arcs().len();
+    let (status, body) =
+        json_request(&h, Method::POST, &format!("/api/goals/{id}/start"), None).await;
+    assert_eq!(status, StatusCode::OK, "{body:?}");
+
+    let after = h._state.kernel.agent_registry().list_arcs();
+    assert_eq!(
+        after.len(),
+        before,
+        "starting a loop-engineered run must not provision a verifier; registry now holds: {:?}",
+        after.iter().map(|a| a.name.clone()).collect::<Vec<_>>()
+    );
+    assert!(
+        !after.iter().any(|a| a.name.starts_with("goal-")),
+        "no goal-* agent may be auto-spawned"
+    );
+
+    let (ss, _) = json_request(&h, Method::POST, &format!("/api/goals/{id}/stop"), None).await;
+    assert_eq!(ss, StatusCode::OK);
+}
+
+/// A verifier id that will never parse means the gate the operator configured
+/// can never run. Silently ignoring it downgrades a gated run to an ungated
+/// one without saying so, so it is a 400 with the id named — the same
+/// treatment `agent_id` gets.
+#[tokio::test(flavor = "multi_thread")]
+async fn goal_run_start_rejects_a_corrupt_verifier_id() {
+    let h = boot().await;
+    let goal = create_goal(
+        &h,
+        serde_json::json!({
+            "title": "Bad verifier",
+            "agent_id": uuid::Uuid::new_v4().to_string(),
+            "loop_engineering": true,
+        }),
+    )
+    .await;
+    let id = goal["id"].as_str().unwrap().to_string();
+
+    let seeded = h._state.kernel.memory_substrate().structured_modify(
+        librefang_types::goal::goals_storage_agent_id(),
+        librefang_types::goal::GOALS_STORAGE_KEY,
+        |cur| {
+            let mut goals = match cur {
+                Some(serde_json::Value::Array(a)) => a,
+                _ => Vec::new(),
+            };
+            for g in goals.iter_mut() {
+                if g["id"].as_str() == Some(id.as_str()) {
+                    g["verify_agent_id"] = serde_json::Value::String("junk-verifier".to_string());
+                }
+            }
+            Ok((serde_json::Value::Array(goals), ()))
+        },
+    );
+    assert!(seeded.is_ok());
+
+    let (status, body) =
+        json_request(&h, Method::POST, &format!("/api/goals/{id}/start"), None).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body:?}");
+    let msg = body["message"].as_str().unwrap_or_default();
+    assert!(
+        msg.contains("junk-verifier") && msg.contains("verify_agent_id"),
+        "the unusable verifier must be named: {body:?}"
+    );
+}
+
+/// Loop-engineering configuration is written on create, editable on update,
+/// and readable back — an operator who ticks the box must find it still
+/// ticked.
+#[tokio::test(flavor = "multi_thread")]
+async fn loop_engineering_fields_round_trip_through_create_and_update() {
+    let h = boot().await;
+    let verifier = uuid::Uuid::new_v4().to_string();
+    let goal = create_goal(
+        &h,
+        serde_json::json!({
+            "title": "Configured",
+            "loop_engineering": true,
+            "verify_agent_id": verifier,
+            "evaluator_model": "haiku",
+        }),
+    )
+    .await;
+    let id = goal["id"].as_str().unwrap().to_string();
+    assert_eq!(goal["loop_engineering"].as_bool(), Some(true));
+    assert_eq!(goal["verify_agent_id"].as_str(), Some(verifier.as_str()));
+    assert_eq!(goal["evaluator_model"].as_str(), Some("haiku"));
+
+    // A goal created without the fields defaults to the plain loop.
+    let plain = create_goal(&h, serde_json::json!({"title": "Plain"})).await;
+    assert_eq!(plain["loop_engineering"].as_bool(), Some(false));
+    assert!(plain.get("verify_agent_id").is_none());
+
+    // Update turns the verifier off without disturbing the rest.
+    let (status, updated) = json_request(
+        &h,
+        Method::PUT,
+        &format!("/api/goals/{id}"),
+        Some(serde_json::json!({ "verify_agent_id": null, "evaluator_model": "sonnet" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{updated:?}");
+    assert!(
+        updated.get("verify_agent_id").is_none(),
+        "null must clear the verifier: {updated:?}"
+    );
+    assert_eq!(updated["evaluator_model"].as_str(), Some("sonnet"));
+    assert_eq!(updated["loop_engineering"].as_bool(), Some(true));
+
+    let (status, listed) = json_request(&h, Method::GET, &format!("/api/goals/{id}"), None).await;
+    assert_eq!(status, StatusCode::OK, "{listed:?}");
+    assert_eq!(listed["evaluator_model"].as_str(), Some("sonnet"));
+}
+
+/// Junk must not reach the store in the first place — the boundary rule
+/// `agent_id` already follows.
+#[tokio::test(flavor = "multi_thread")]
+async fn create_and_update_reject_a_non_uuid_verifier() {
+    let h = boot().await;
+    let (status, body) = json_request(
+        &h,
+        Method::POST,
+        "/api/goals",
+        Some(serde_json::json!({"title": "Bad", "verify_agent_id": "nope"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body:?}");
+
+    let goal = create_goal(&h, serde_json::json!({"title": "Good"})).await;
+    let id = goal["id"].as_str().unwrap();
+    let (status, body) = json_request(
+        &h,
+        Method::PUT,
+        &format!("/api/goals/{id}"),
+        Some(serde_json::json!({"verify_agent_id": "nope"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body:?}");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1115,4 +1525,132 @@ async fn deleting_a_goal_stops_its_active_run() {
     let (status, run) = json_request(&h, Method::GET, &format!("/api/goals/{id}/run"), None).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(run["running"], false);
+}
+
+/// Start a run, then `PUT` the goal to `status`, and assert the run was
+/// stopped through the same interlock `delete_goal` uses.
+///
+/// The second `POST /stop` is the mechanism-precise assertion: `GoalRunner`'s
+/// stop removes the registry entry synchronously during the `PUT`, so a
+/// follow-up stop finds nothing left. Without the wiring the entry is still
+/// there and that call reports `true` — the shape
+/// `goal_run_start_then_stop_with_agent` already relies on.
+async fn assert_terminal_status_stops_the_run(payload: serde_json::Value, status_value: &str) {
+    let h = boot().await;
+    // A syntactically valid agent id; the run never completes a real agent
+    // turn, so no provider is needed.
+    let goal = create_goal(&h, payload).await;
+    let id = goal["id"].as_str().unwrap().to_string();
+
+    let (start_status, body) =
+        json_request(&h, Method::POST, &format!("/api/goals/{id}/start"), None).await;
+    assert_eq!(start_status, StatusCode::OK, "start failed: {body:?}");
+
+    let (put_status, body) = json_request(
+        &h,
+        Method::PUT,
+        &format!("/api/goals/{id}"),
+        Some(serde_json::json!({"status": status_value})),
+    )
+    .await;
+    assert_eq!(put_status, StatusCode::OK, "got: {body:?}");
+
+    let (_, run) = json_request(&h, Method::GET, &format!("/api/goals/{id}/run"), None).await;
+    assert_eq!(
+        run["running"], false,
+        "marking a goal {status_value} must stop its run"
+    );
+    let (_, stop) = json_request(&h, Method::POST, &format!("/api/goals/{id}/stop"), None).await;
+    assert_eq!(
+        stop["stopped"].as_bool(),
+        Some(false),
+        "the run entry must already be gone, not merely reported as not running"
+    );
+
+    // And the operator's choice is what the goal reads back as.
+    let (_, goal) = json_request(&h, Method::GET, &format!("/api/goals/{id}"), None).await;
+    assert_eq!(goal["status"].as_str(), Some(status_value));
+}
+
+/// #7785 re-review: `update_goal_by_id` never called `stop_goal_run`, so an
+/// operator marking a goal done had no connection to the run's lifecycle —
+/// the runner only noticed by re-reading the goal document on its next tick,
+/// a read that cannot tell an operator from the `goal_update` tool.
+#[tokio::test(flavor = "multi_thread")]
+async fn updating_a_goal_to_completed_stops_its_active_run() {
+    assert_terminal_status_stops_the_run(
+        serde_json::json!({
+            "title": "Completed by the operator",
+            "agent_id": "11111111-1111-1111-1111-111111111111",
+        }),
+        "completed",
+    )
+    .await;
+}
+
+/// Cancelling is the same lifecycle boundary and goes through the same call.
+#[tokio::test(flavor = "multi_thread")]
+async fn updating_a_goal_to_cancelled_stops_its_active_run() {
+    assert_terminal_status_stops_the_run(
+        serde_json::json!({
+            "title": "Cancelled by the operator",
+            "agent_id": "11111111-1111-1111-1111-111111111111",
+        }),
+        "cancelled",
+    )
+    .await;
+}
+
+/// The reported case: with a verifier configured the runner deliberately
+/// stops treating a bare `status: completed` as a completion signal, so this
+/// is the path where the operator had no way to end the run at all.
+#[tokio::test(flavor = "multi_thread")]
+async fn updating_a_verified_goal_to_completed_stops_its_active_run() {
+    assert_terminal_status_stops_the_run(
+        serde_json::json!({
+            "title": "Gated on a verifier",
+            "agent_id": "11111111-1111-1111-1111-111111111111",
+            "loop_engineering": true,
+            "verify_agent_id": "22222222-2222-2222-2222-222222222222",
+        }),
+        "completed",
+    )
+    .await;
+}
+
+/// The other half of the contract, and what stops the interlock from being
+/// wired unconditionally: a non-terminal update is an edit, not an operator
+/// ending the run. Without this the three tests above all pass against a
+/// `stop_goal_run` called on every `PUT`.
+#[tokio::test(flavor = "multi_thread")]
+async fn updating_a_goal_without_a_terminal_status_leaves_its_run_alone() {
+    let h = boot().await;
+    let goal = create_goal(
+        &h,
+        serde_json::json!({
+            "title": "Still going",
+            "agent_id": "11111111-1111-1111-1111-111111111111",
+        }),
+    )
+    .await;
+    let id = goal["id"].as_str().unwrap().to_string();
+
+    let (status, body) =
+        json_request(&h, Method::POST, &format!("/api/goals/{id}/start"), None).await;
+    assert_eq!(status, StatusCode::OK, "start failed: {body:?}");
+
+    // A title edit, and a status the operator has not finished with.
+    for payload in [
+        serde_json::json!({"title": "Renamed mid-run"}),
+        serde_json::json!({"status": "in_progress"}),
+    ] {
+        let (put_status, body) =
+            json_request(&h, Method::PUT, &format!("/api/goals/{id}"), Some(payload)).await;
+        assert_eq!(put_status, StatusCode::OK, "got: {body:?}");
+        let (_, run) = json_request(&h, Method::GET, &format!("/api/goals/{id}/run"), None).await;
+        assert_eq!(
+            run["running"], true,
+            "an ordinary edit must not stop the run"
+        );
+    }
 }

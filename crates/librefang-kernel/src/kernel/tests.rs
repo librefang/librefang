@@ -10482,7 +10482,29 @@ fn goal_run_start_reports_unset_self_handle() {
     let goal_id = librefang_types::goal::GoalId::new();
     let agent_id = AgentId::new();
 
-    assert!(!kernel.goal_run_start(goal_id, agent_id, Some(1)));
+    assert!(!kernel.goal_run_start(goal_id, agent_id, Some(1), false, None, None, None));
+    assert!(kernel.goal_run_status(goal_id).is_none());
+}
+
+/// #7785 review: `goal_run_start` used to end with `self.workflows.goal_runner.start(...); true`,
+/// discarding the runner's own refusal — `GoalRunner::start` returns `false`
+/// when the goal is missing from the shared store (the race a deletion wins
+/// against a caller's stale read). The goal here is simply never seeded, the
+/// same "not found when the runner loads it" condition, and self_handle is
+/// set so the run reaches the runner's `start()` rather than bailing out on
+/// the earlier unset-handle check this file already covers above.
+#[test]
+fn goal_run_start_propagates_the_runners_refusal_of_a_missing_goal() {
+    let (kernel, _dir) = minimal_kernel("goal-run-start-missing-goal");
+    let kernel = Arc::new(kernel);
+    LibreFangKernel::set_self_handle(&kernel);
+    let goal_id = librefang_types::goal::GoalId::new();
+    let agent_id = AgentId::new();
+
+    assert!(
+        !kernel.goal_run_start(goal_id, agent_id, Some(1), false, None, None, None),
+        "a goal absent from the store must not be reported as started"
+    );
     assert!(kernel.goal_run_status(goal_id).is_none());
 }
 

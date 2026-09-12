@@ -1,0 +1,5 @@
+A goal can no longer be configured with the same agent as both worker and verifier, which made the verifier gate decorative in a single click.
+The dashboard's verifier picker offered the goal's own assigned agent and neither goal endpoint compared the two ids, so the pair could be saved and looked entirely healthy afterwards.
+With both ids equal the verdict prompt lands in the same persistent session that produced the work one turn earlier, so the agent grades itself with its own output still in context and `VERDICT: PASS` is the expected answer — while the run API reports a configured verifier and the dashboard shows the loop-engineering badge, giving the operator positive confirmation of a check that is not checking.
+Every iteration also left the verification exchange and its own verdict in the worker's history for later iterations to build on.
+Both endpoints now reject the pair, update comparing the ids the write would actually leave on the goal rather than only the ones in the payload, and the picker no longer offers the assigned agent in the first place (#7785) (@DaBlitzStein)
