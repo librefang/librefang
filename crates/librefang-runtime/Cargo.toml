@@ -98,6 +98,11 @@ landlock = { version = "0.4", optional = true }
 seccompiler = { version = "0.5", optional = true }
 
 [dev-dependencies]
+# `test-util` enables `#[tokio::test(start_paused = true)]`, used by the media
+# capability-routing test that proves a hung vision provider cannot hold a turn
+# open. Not in the `full` feature set; same spelling `librefang-kernel` and
+# `librefang-acp` already use.
+tokio = { workspace = true, features = ["test-util"] }
 serial_test = "4"
 proptest = "1"
 metrics-util = { version = "0.20", features = ["debugging"] }

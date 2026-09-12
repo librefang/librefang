@@ -31,11 +31,11 @@ pub(crate) fn safe_truncate_str(s: &str, max_bytes: usize) -> &str {
 use async_trait::async_trait;
 use dashmap::DashMap;
 use librefang_types::media::{
-    MediaCapability, MediaImageRequest, MediaImageResult, MediaMusicRequest, MediaMusicResult,
-    MediaTaskStatus, MediaTtsRequest, MediaTtsResult, MediaVideoRequest, MediaVideoResult,
-    MediaVideoSubmitResult,
+    CapabilityRouting, MediaCapability, MediaImageRequest, MediaImageResult, MediaMusicRequest,
+    MediaMusicResult, MediaTaskStatus, MediaTtsRequest, MediaTtsResult, MediaVideoRequest,
+    MediaVideoResult, MediaVideoSubmitResult,
 };
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
 use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use tracing::warn;
@@ -165,6 +165,25 @@ pub struct MediaDriverCache {
     /// Provider IDs that support media, in preference order.
     /// Loaded from the registry (providers/*.toml) at boot.
     media_providers: RwLock<Vec<String>>,
+    /// Operator-nominated provider per capability, from the kernel-global
+    /// `[capabilities]` block. Consulted *before* `media_providers` in
+    /// [`MediaDriverCache::detect_for_capability`] so "use MiniMax for video,
+    /// ElevenLabs for speech" is a config line rather than a code change.
+    ///
+    /// `BTreeMap` (not `HashMap`) because the resolved routing is logged and
+    /// surfaced to operators, and this repo requires deterministic ordering
+    /// for anything that gets stringified.
+    capability_routing: RwLock<BTreeMap<MediaCapability, String>>,
+    /// Capabilities whose nomination has already been reported as unusable.
+    ///
+    /// [`MediaDriverCache::detect_for_capability`] runs once per media
+    /// request, so warning on every miss turns one stale config line into a
+    /// log entry per `POST /api/media/image` and per `image_generate` tool
+    /// call, for the life of the daemon. The information is actionable exactly
+    /// once; the fallback itself is not an error. Cleared by
+    /// [`MediaDriverCache::set_capability_routing`] so a config reload that
+    /// changes the nomination is allowed to warn again.
+    warned_capability_misses: RwLock<BTreeSet<MediaCapability>>,
 }
 
 fn read_media_state<'a, T>(lock: &'a RwLock<T>, state: &'static str) -> RwLockReadGuard<'a, T> {
@@ -202,6 +221,8 @@ impl MediaDriverCache {
                 "minimax".into(),
                 "google_tts".into(),
             ]),
+            capability_routing: RwLock::new(BTreeMap::new()),
+            warned_capability_misses: RwLock::new(BTreeSet::new()),
         }
     }
 
@@ -225,6 +246,8 @@ impl MediaDriverCache {
                 "minimax".into(),
                 "google_tts".into(),
             ]),
+            capability_routing: RwLock::new(BTreeMap::new()),
+            warned_capability_misses: RwLock::new(BTreeSet::new()),
         }
     }
 
@@ -285,12 +308,71 @@ impl MediaDriverCache {
         Ok(driver)
     }
 
+    /// Install the operator-nominated provider per capability from a
+    /// `[capabilities]` block.
+    ///
+    /// Only the `provider` half is used here — the generation drivers take
+    /// their model from the per-request `model` field, so a `model` in the
+    /// routing block has no driver-selection meaning. Entries with no
+    /// provider are skipped rather than stored as an empty preference.
+    pub fn set_capability_routing(&self, routing: &CapabilityRouting) {
+        let mut table = BTreeMap::new();
+        for cap in CapabilityRouting::ALL {
+            if let Some(provider) = routing.get(cap).and_then(|t| t.provider.as_deref()) {
+                table.insert(cap, provider.to_string());
+            }
+        }
+        *write_media_state(&self.capability_routing, "capability_routing") = table;
+        // A reload that changes the nomination deserves a fresh warning if the
+        // new one is also unusable.
+        write_media_state(&self.warned_capability_misses, "warned_capability_misses").clear();
+    }
+
     /// Auto-detect and return the first configured driver that supports the
     /// given capability.
+    ///
+    /// The operator's `[capabilities]` nomination is tried first; it only
+    /// wins if that provider is actually configured *and* actually advertises
+    /// the capability, so a stale or mistaken nomination degrades to the
+    /// registry preference order instead of failing the call outright.
     pub fn detect_for_capability(
         &self,
         capability: MediaCapability,
     ) -> Result<Arc<dyn MediaDriver>, MediaError> {
+        let nominated = read_media_state(&self.capability_routing, "capability_routing")
+            .get(&capability)
+            .cloned();
+        if let Some(provider) = nominated {
+            match self.get_or_create(&provider, None) {
+                Ok(driver)
+                    if driver.is_configured() && driver.capabilities().contains(&capability) =>
+                {
+                    return Ok(driver);
+                }
+                _ => {
+                    let first_time = write_media_state(
+                        &self.warned_capability_misses,
+                        "warned_capability_misses",
+                    )
+                    .insert(capability);
+                    if first_time {
+                        warn!(
+                            provider = %provider,
+                            capability = %capability,
+                            "[capabilities] nominates a provider that is not configured for this \
+                             capability; falling back to the registry preference order"
+                        );
+                    } else {
+                        tracing::debug!(
+                            provider = %provider,
+                            capability = %capability,
+                            "[capabilities] nomination still unusable; already warned once"
+                        );
+                    }
+                }
+            }
+        }
+
         let providers = read_media_state(&self.media_providers, "media_providers");
         for provider in providers.iter() {
             if let Ok(driver) = self.get_or_create(provider, None) {
@@ -405,6 +487,144 @@ mod tests {
         assert!(!cache.media_providers.is_poisoned());
         *cache.media_providers.write().unwrap() = vec!["custom".into()];
         assert_eq!(cache.media_providers.read().unwrap().as_slice(), ["custom"]);
+    }
+
+    /// Minimal driver used to exercise capability selection without needing
+    /// any provider credentials in the test environment.
+    struct FakeDriver {
+        name: &'static str,
+        caps: Vec<MediaCapability>,
+    }
+
+    #[async_trait]
+    impl MediaDriver for FakeDriver {
+        fn capabilities(&self) -> Vec<MediaCapability> {
+            self.caps.clone()
+        }
+        fn provider_name(&self) -> &str {
+            self.name
+        }
+    }
+
+    fn cache_with_fakes(fakes: &[(&'static str, Vec<MediaCapability>)]) -> MediaDriverCache {
+        let cache = MediaDriverCache::new();
+        for (name, caps) in fakes {
+            cache.cache.insert(
+                format!("{name}|default"),
+                Arc::new(FakeDriver {
+                    name,
+                    caps: caps.clone(),
+                }) as Arc<dyn MediaDriver>,
+            );
+        }
+        *write_media_state(&cache.media_providers, "media_providers") =
+            fakes.iter().map(|(n, _)| n.to_string()).collect();
+        cache
+    }
+
+    #[test]
+    fn detect_for_capability_prefers_the_nominated_provider_over_registry_order() {
+        let cache = cache_with_fakes(&[
+            ("beta", vec![MediaCapability::ImageGeneration]),
+            ("alpha", vec![MediaCapability::ImageGeneration]),
+        ]);
+        assert_eq!(
+            cache
+                .detect_for_capability(MediaCapability::ImageGeneration)
+                .unwrap()
+                .provider_name(),
+            "beta"
+        );
+
+        let routing: CapabilityRouting =
+            toml::from_str("image_generation = \"alpha\"\n").expect("parse routing");
+        cache.set_capability_routing(&routing);
+        assert_eq!(
+            cache
+                .detect_for_capability(MediaCapability::ImageGeneration)
+                .unwrap()
+                .provider_name(),
+            "alpha",
+            "[capabilities] nomination must win over the registry preference order"
+        );
+    }
+
+    #[test]
+    fn detect_for_capability_falls_back_when_the_nomination_lacks_the_capability() {
+        let cache = cache_with_fakes(&[
+            ("beta", vec![MediaCapability::ImageGeneration]),
+            ("alpha", vec![MediaCapability::TextToSpeech]),
+        ]);
+        let routing: CapabilityRouting =
+            toml::from_str("image_generation = \"alpha\"\n").expect("parse routing");
+        cache.set_capability_routing(&routing);
+
+        assert_eq!(
+            cache
+                .detect_for_capability(MediaCapability::ImageGeneration)
+                .unwrap()
+                .provider_name(),
+            "beta",
+            "a mistaken nomination must degrade to the preference order, not fail the call"
+        );
+    }
+
+    /// The fallback is a per-request event; the misconfiguration behind it is
+    /// not. Latching keeps one stale config line from emitting a `WARN` on
+    /// every media call for the life of the daemon, while a reload that
+    /// changes the nomination is still allowed to complain about the new one.
+    #[test]
+    fn an_unusable_nomination_is_warned_about_once_until_the_routing_changes() {
+        let cache = cache_with_fakes(&[
+            ("beta", vec![MediaCapability::ImageGeneration]),
+            ("alpha", vec![MediaCapability::TextToSpeech]),
+        ]);
+        let routing: CapabilityRouting =
+            toml::from_str("image_generation = \"alpha\"\n").expect("parse routing");
+        cache.set_capability_routing(&routing);
+        assert!(
+            read_media_state(&cache.warned_capability_misses, "warned_capability_misses")
+                .is_empty(),
+            "nothing has been detected yet"
+        );
+
+        for _ in 0..5 {
+            let _ = cache.detect_for_capability(MediaCapability::ImageGeneration);
+        }
+        assert_eq!(
+            read_media_state(&cache.warned_capability_misses, "warned_capability_misses")
+                .iter()
+                .copied()
+                .collect::<Vec<_>>(),
+            vec![MediaCapability::ImageGeneration],
+            "five failing lookups must latch exactly one warned capability"
+        );
+
+        // Re-nominating resets the latch: the operator changed something, so
+        // the next verdict on it is news again.
+        cache.set_capability_routing(&routing);
+        assert!(
+            read_media_state(&cache.warned_capability_misses, "warned_capability_misses")
+                .is_empty(),
+            "a routing change must re-arm the warning"
+        );
+    }
+
+    #[test]
+    fn set_capability_routing_ignores_entries_that_name_no_provider() {
+        let cache = cache_with_fakes(&[("beta", vec![MediaCapability::ImageGeneration])]);
+        let routing: CapabilityRouting =
+            toml::from_str("image_generation = { model = \"only-a-model\" }\n")
+                .expect("parse routing");
+        cache.set_capability_routing(&routing);
+        assert!(read_media_state(&cache.capability_routing, "capability_routing").is_empty());
+        assert_eq!(
+            cache
+                .detect_for_capability(MediaCapability::ImageGeneration)
+                .unwrap()
+                .provider_name(),
+            "beta"
+        );
     }
 
     #[test]

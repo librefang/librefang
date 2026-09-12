@@ -276,6 +276,9 @@ fn every_kernel_config_struct_field_is_exposed_via_overlay() {
         "workflow_stale_timeout_minutes",
         "workflow_default_total_timeout_secs",
         "local_probe_interval_secs",
+        // Folded into MediaEngine at boot alongside `media`; not a
+        // standalone ConfigPage section.
+        "capabilities",
     ];
 
     let root = schema_root();

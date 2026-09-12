@@ -151,6 +151,23 @@ async fn save_upload(
 // ── POST /media/image ───────────────────────────────────────────────────
 
 /// Generate one or more images from a text prompt.
+///
+/// The provider is taken from the request body's `provider` when set;
+/// otherwise it is resolved from the `[capabilities] image_generation`
+/// nomination and then the registry preference order.
+#[utoipa::path(
+    post,
+    path = "/api/media/image",
+    tag = "media",
+    request_body = crate::types::JsonObject,
+    responses(
+        (status = 200, description = "Generated images, saved to the uploads directory and returned as URLs", body = crate::types::JsonObject),
+        (status = 400, description = "Invalid request, unsupported capability, or provider content filter", body = crate::types::JsonObject),
+        (status = 422, description = "No provider configured for image generation", body = crate::types::JsonObject),
+        (status = 429, description = "Upstream provider rate limit", body = crate::types::JsonObject),
+        (status = 502, description = "Upstream provider error", body = crate::types::JsonObject),
+    )
+)]
 pub async fn generate_image(
     State(state): State<Arc<AppState>>,
     Json(body): Json<MediaImageRequest>,
@@ -229,6 +246,23 @@ pub async fn generate_image(
 // ── POST /media/speech ──────────────────────────────────────────────────
 
 /// Synthesize speech from text (TTS).
+///
+/// Returns an upload URL rather than inline audio; the bytes are written to
+/// the uploads directory and served by `GET /api/uploads/{id}`.
+#[utoipa::path(
+    post,
+    path = "/api/media/speech",
+    tag = "media",
+    request_body = crate::types::JsonObject,
+    responses(
+        (status = 200, description = "Synthesized audio, saved to the uploads directory and returned as a URL", body = crate::types::JsonObject),
+        (status = 400, description = "Invalid request or unsupported capability", body = crate::types::JsonObject),
+        (status = 422, description = "No provider configured for text-to-speech", body = crate::types::JsonObject),
+        (status = 429, description = "Upstream provider rate limit", body = crate::types::JsonObject),
+        (status = 500, description = "Failed to persist the generated audio", body = crate::types::JsonObject),
+        (status = 502, description = "Upstream provider error", body = crate::types::JsonObject),
+    )
+)]
 pub async fn synthesize_speech(
     State(state): State<Arc<AppState>>,
     Json(body): Json<MediaTtsRequest>,
@@ -280,6 +314,25 @@ pub async fn synthesize_speech(
 // ── POST /media/video ───────────────────────────────────────────────────
 
 /// Submit a video generation task (async — returns a task ID for polling).
+///
+/// Video generation is long-running everywhere it is offered, so this returns
+/// `202 Accepted` with a provider-scoped `task_id`. Poll it with
+/// `GET /api/media/video/{task_id}?provider=…` — the same provider must be
+/// named, because the task id is only meaningful to the provider that issued
+/// it.
+#[utoipa::path(
+    post,
+    path = "/api/media/video",
+    tag = "media",
+    request_body = crate::types::JsonObject,
+    responses(
+        (status = 202, description = "Task accepted; poll `task_id` for the result", body = crate::types::JsonObject),
+        (status = 400, description = "Invalid request or unsupported capability", body = crate::types::JsonObject),
+        (status = 422, description = "No provider configured for video generation", body = crate::types::JsonObject),
+        (status = 429, description = "Upstream provider rate limit", body = crate::types::JsonObject),
+        (status = 502, description = "Upstream provider error", body = crate::types::JsonObject),
+    )
+)]
 pub async fn submit_video(
     State(state): State<Arc<AppState>>,
     Json(body): Json<MediaVideoRequest>,
@@ -318,6 +371,26 @@ pub async fn submit_video(
 ///
 /// Query parameter `provider` is required to route the poll to the correct
 /// driver (the task ID is provider-specific).
+///
+/// While the task is running the response is `{"status": …, "task_id": …}`;
+/// on completion it carries a `result` object with the video URL and
+/// dimensions. A failed task answers `200` with `status: "failed"` and an
+/// `error` field — the HTTP status describes the poll, not the task.
+#[utoipa::path(
+    get,
+    path = "/api/media/video/{task_id}",
+    tag = "media",
+    params(
+        ("task_id" = String, Path, description = "Provider-scoped task id returned by POST /api/media/video"),
+        ("provider" = String, Query, description = "Provider that issued the task id — required, the id is not portable"),
+    ),
+    responses(
+        (status = 200, description = "Task status, or the finished video when complete", body = crate::types::JsonObject),
+        (status = 400, description = "Missing `provider` query parameter", body = crate::types::JsonObject),
+        (status = 404, description = "Unknown task id for this provider", body = crate::types::JsonObject),
+        (status = 502, description = "Upstream provider error", body = crate::types::JsonObject),
+    )
+)]
 pub async fn poll_video_task(
     State(state): State<Arc<AppState>>,
     Path(task_id): Path<String>,
@@ -391,6 +464,23 @@ fn video_task_status_json(
 // ── POST /media/music ───────────────────────────────────────────────────
 
 /// Generate music from a prompt and/or lyrics.
+///
+/// At least one of `prompt` or `lyrics` must be present; `instrumental`
+/// selects a lyric-free rendering.
+#[utoipa::path(
+    post,
+    path = "/api/media/music",
+    tag = "media",
+    request_body = crate::types::JsonObject,
+    responses(
+        (status = 200, description = "Generated audio, saved to the uploads directory and returned as a URL", body = crate::types::JsonObject),
+        (status = 400, description = "Neither prompt nor lyrics supplied, or unsupported capability", body = crate::types::JsonObject),
+        (status = 422, description = "No provider configured for music generation", body = crate::types::JsonObject),
+        (status = 429, description = "Upstream provider rate limit", body = crate::types::JsonObject),
+        (status = 500, description = "Failed to persist the generated audio", body = crate::types::JsonObject),
+        (status = 502, description = "Upstream provider error", body = crate::types::JsonObject),
+    )
+)]
 pub async fn generate_music(
     State(state): State<Arc<AppState>>,
     Json(body): Json<MediaMusicRequest>,
@@ -443,6 +533,26 @@ pub async fn generate_music(
 ///
 /// Accepts raw audio bytes with `Content-Type` set to the audio MIME type
 /// (e.g. `audio/webm`, `audio/wav`). Returns the transcribed text.
+///
+/// The body is the audio itself, not a JSON envelope, and is capped at 10 MB.
+/// The provider is resolved from `[capabilities] speech_to_text`, then
+/// `[media] audio_provider`, then env-var auto-detection.
+#[utoipa::path(
+    post,
+    path = "/api/media/transcribe",
+    tag = "media",
+    request_body(
+        content = String,
+        description = "Raw audio bytes; `Content-Type` must be an `audio/*` type",
+        content_type = "audio/webm",
+    ),
+    responses(
+        (status = 200, description = "Transcript, with the provider and model that produced it", body = crate::types::JsonObject),
+        (status = 400, description = "Empty body or a non-audio Content-Type", body = crate::types::JsonObject),
+        (status = 413, description = "Audio larger than 10 MB", body = crate::types::JsonObject),
+        (status = 500, description = "Transcription failed, or the temp file could not be written", body = crate::types::JsonObject),
+    )
+)]
 pub async fn transcribe_audio(
     State(state): State<Arc<AppState>>,
     headers: axum::http::HeaderMap,
@@ -541,6 +651,18 @@ impl Drop for TempUploadGuard {
 // ── GET /media/providers ────────────────────────────────────────────────
 
 /// List available media providers with their capabilities and config status.
+///
+/// `configured` reports whether the provider's credentials are present, and
+/// `capabilities` is the set of `MediaCapability` values it advertises — the
+/// same values the `[capabilities]` config block routes by.
+#[utoipa::path(
+    get,
+    path = "/api/media/providers",
+    tag = "media",
+    responses(
+        (status = 200, description = "Known media providers with their capabilities and configuration status", body = crate::types::JsonObject),
+    )
+)]
 pub async fn list_media_providers(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let mut providers = Vec::new();
 

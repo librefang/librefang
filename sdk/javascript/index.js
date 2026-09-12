@@ -42,6 +42,7 @@ class LibreFang {
     this.hands = new HandsResource(this);
     this.inbox = new InboxResource(this);
     this.mcp = new McpResource(this);
+    this.media = new MediaResource(this);
     this.memory = new MemoryResource(this);
     this.models = new ModelsResource(this);
     this.network = new NetworkResource(this);
@@ -70,10 +71,14 @@ class LibreFang {
     return path + (path.includes("?") ? "&" : "?") + q;
   }
 
-  async _request(method, path, body, query) {
+  // `contentType` sends `body` as-is (Buffer / Uint8Array / Blob) instead of JSON.
+  async _request(method, path, body, query, contentType) {
     const url = this.baseUrl + this._withQuery(path, query);
-    const opts = { method, headers: this._headers };
-    if (body !== undefined && body !== null) opts.body = JSON.stringify(body);
+    const headers = contentType
+      ? Object.assign({}, this._headers, { "Content-Type": contentType })
+      : this._headers;
+    const opts = { method, headers };
+    if (body !== undefined && body !== null) opts.body = contentType ? body : JSON.stringify(body);
     const res = await fetch(url, opts);
     const text = await res.text();
     if (!res.ok) throw new LibreFangError(`HTTP ${res.status}: ${text}`, res.status, text);
@@ -399,8 +404,8 @@ class AgentsResource {
     return this._c._request("GET", `/api/agents/${id}/traces`);
   }
 
-  async uploadFile(id, data) {
-    return this._c._request("POST", `/api/agents/${id}/upload`, data, undefined);
+  async uploadFile(id, body, contentType) {
+    return this._c._request("POST", `/api/agents/${id}/upload`, body, undefined, contentType || "application/octet-stream");
   }
 
   async serveUpload(file_id) {
@@ -895,6 +900,40 @@ class McpResource {
 
   async listMcpTaintRules() {
     return this._c._request("GET", "/api/mcp/taint-rules");
+  }
+}
+
+// ── Media Resource
+
+class MediaResource {
+  constructor(client) { this._c = client; }
+
+  async generateImage(data) {
+    return this._c._request("POST", "/api/media/image", data, undefined);
+  }
+
+  async generateMusic(data) {
+    return this._c._request("POST", "/api/media/music", data, undefined);
+  }
+
+  async listMediaProviders() {
+    return this._c._request("GET", "/api/media/providers");
+  }
+
+  async synthesizeSpeech(data) {
+    return this._c._request("POST", "/api/media/speech", data, undefined);
+  }
+
+  async transcribeAudio(body, contentType) {
+    return this._c._request("POST", "/api/media/transcribe", body, undefined, contentType || "audio/webm");
+  }
+
+  async submitVideo(data) {
+    return this._c._request("POST", "/api/media/video", data, undefined);
+  }
+
+  async pollVideoTask(task_id, query) {
+    return this._c._request("GET", `/api/media/video/${task_id}`, undefined, query);
   }
 }
 

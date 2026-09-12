@@ -56,7 +56,24 @@ def _is_stream(op: dict) -> bool:
     return op_id.endswith("_stream") or op_id.endswith("stream")
 
 def _has_body(op: dict, method: str) -> bool:
-    return method in ("post", "put", "patch") and bool(op.get("requestBody"))
+    return method in ("post", "put", "patch") and bool(op.get("requestBody")) and not _raw_body_ct(op, method)
+
+def _raw_body_ct(op: dict, method: str) -> str:
+    """The declared content type when the request body is *not* JSON.
+
+    Every SDK's default request path serialises with `json.dumps` and sends
+    `Content-Type: application/json`, so a handler that reads the body as raw
+    bytes and rejects a non-matching content type — `POST /api/media/transcribe`
+    demands `audio/*`, `POST /api/agents/{id}/upload` takes octet-stream —
+    would otherwise get a shipped SDK method that returns 400 unconditionally.
+    Returns "" for a JSON (or bodiless) operation.
+    """
+    if method not in ("post", "put", "patch"):
+        return ""
+    content = (op.get("requestBody") or {}).get("content", {})
+    if not content or "application/json" in content:
+        return ""
+    return sorted(content)[0]
 
 def _py_path(path: str) -> str:
     """'/api/agents/{id}' → f-string body '/api/agents/{id}'"""
@@ -121,6 +138,7 @@ def load_ops() -> dict:
                     "params": _path_params(path),
                     "query_params": _query_params(op),
                     "has_body": _has_body(op, method),
+                    "raw_body_ct": _raw_body_ct(op, method),
                     "is_stream": _is_stream(op),
                 })
     return dict(tag_ops)
@@ -177,14 +195,21 @@ class LibreFang:
         if headers:
             self._headers.update(headers)
 {resource_init}
-    def _request(self, method: str, path: str, body: Any = None, query: Optional[Dict[str, Any]] = None) -> Any:
+    def _request(self, method: str, path: str, body: Any = None, query: Optional[Dict[str, Any]] = None, content_type: Optional[str] = None) -> Any:
+        """Send a request. `content_type` sends `body` as raw bytes instead of JSON."""
         url = self.base_url + path
         if query:
             filtered = {k: v for k, v in query.items() if v is not None}
             if filtered:
                 url += ("&" if "?" in url else "?") + urlencode(filtered, doseq=True)
-        data = json.dumps(body).encode() if body is not None else None
-        req = Request(url, data=data, headers=self._headers, method=method)
+        headers = self._headers
+        if content_type is not None:
+            data = bytes(body) if body is not None else None
+            headers = dict(headers)
+            headers["Content-Type"] = content_type
+        else:
+            data = json.dumps(body).encode() if body is not None else None
+        req = Request(url, data=data, headers=headers, method=method)
         try:
             with urlopen(req, timeout=self.timeout) as resp:
                 ct = resp.headers.get("content-type", "")
@@ -305,7 +330,12 @@ def gen_python(tag_ops: dict) -> str:
             http = op["http"]
             path = op["path"]
 
+            raw_ct = op["raw_body_ct"]
+
             sig_parts = ["self"] + [f"{p}: str" for p in params]
+            if raw_ct:
+                sig_parts.append("body: bytes")
+                sig_parts.append(f'content_type: str = "{raw_ct}"')
             for qp in query_params:
                 sig_parts.append(f"{_py_safe(qp)}: Any = None")
             if has_body:
@@ -315,6 +345,11 @@ def gen_python(tag_ops: dict) -> str:
             path_expr = f'f"{_py_path(path)}"' if params else f'"{path}"'
 
             ret_type = " -> Generator[Dict, None, None]" if is_stream else ""
+
+            if raw_ct:
+                out += f"\n    def {op_id}({sig}):\n"
+                out += f'        return self._c._request("{http}", {path_expr}, body, content_type=content_type)\n'
+                continue
 
             body_arg = "data" if has_body else "None"
             if query_params:
@@ -384,10 +419,14 @@ class LibreFang {
     return path + (path.includes("?") ? "&" : "?") + q;
   }
 
-  async _request(method, path, body, query) {
+  // `contentType` sends `body` as-is (Buffer / Uint8Array / Blob) instead of JSON.
+  async _request(method, path, body, query, contentType) {
     const url = this.baseUrl + this._withQuery(path, query);
-    const opts = { method, headers: this._headers };
-    if (body !== undefined && body !== null) opts.body = JSON.stringify(body);
+    const headers = contentType
+      ? Object.assign({}, this._headers, { "Content-Type": contentType })
+      : this._headers;
+    const opts = { method, headers };
+    if (body !== undefined && body !== null) opts.body = contentType ? body : JSON.stringify(body);
     const res = await fetch(url, opts);
     const text = await res.text();
     if (!res.ok) throw new LibreFangError(`HTTP ${res.status}: ${text}`, res.status, text);
@@ -464,8 +503,13 @@ def gen_js(tag_ops: dict) -> str:
             http = op["http"]
             path = op["path"]
 
+            raw_ct = op["raw_body_ct"]
+
             js_method = _op_camel(op_id)
             js_params = list(params)
+            if raw_ct:
+                js_params.append("body")
+                js_params.append("contentType")
             if has_body:
                 js_params.append("data")
             if query_params:
@@ -473,6 +517,12 @@ def gen_js(tag_ops: dict) -> str:
             sig = ", ".join(js_params)
 
             path_expr = f"`{_js_path(path)}`" if params else f'"{path}"'
+
+            if raw_ct:
+                out += f"\n  async {js_method}({sig}) {{\n"
+                out += f'    return this._c._request("{http}", {path_expr}, body, undefined, contentType || "{raw_ct}");\n'
+                out += "  }\n"
+                continue
             body_arg = "data" if has_body else "undefined"
             query_arg = "query" if query_params else "undefined"
             call = "_stream" if is_stream else "_request"
@@ -568,7 +618,6 @@ func (c *Client) withQuery(path string, query map[string]string) string {
 }
 
 func (c *Client) request(method, path string, body interface{}, query map[string]string) (interface{}, error) {
-\turlStr := c.BaseURL + c.withQuery(path, query)
 \tvar bodyBytes []byte
 \tif body != nil {
 \t\tb, err := json.Marshal(body)
@@ -577,12 +626,26 @@ func (c *Client) request(method, path string, body interface{}, query map[string
 \t\t}
 \t\tbodyBytes = b
 \t}
+\treturn c.do(method, c.withQuery(path, query), bodyBytes, "")
+}
+
+// requestRaw sends body verbatim under contentType, for endpoints that read
+// the request body as bytes and reject application/json.
+func (c *Client) requestRaw(method, path string, body []byte, contentType string) (interface{}, error) {
+\treturn c.do(method, path, body, contentType)
+}
+
+func (c *Client) do(method, path string, bodyBytes []byte, contentType string) (interface{}, error) {
+\turlStr := c.BaseURL + path
 \treq, err := http.NewRequest(method, urlStr, bytes.NewReader(bodyBytes))
 \tif err != nil {
 \t\treturn nil, err
 \t}
 \tfor k, v := range c.Headers {
 \t\treq.Header.Set(k, v)
+\t}
+\tif contentType != "" {
+\t\treq.Header.Set("Content-Type", contentType)
 \t}
 \tresp, err := c.HTTP.Do(req)
 \tif err != nil {
@@ -741,8 +804,13 @@ def gen_go(tag_ops: dict) -> str:
             http = op["http"]
             path = op["path"]
 
+            raw_ct = op["raw_body_ct"]
+
             go_method = _op_pascal(op_id)
             go_params = [f"{p} string" for p in params]
+            if raw_ct:
+                go_params.append("body []byte")
+                go_params.append("contentType string")
             if has_body:
                 go_params.append("data map[string]interface{}")
             if query_params:
@@ -754,6 +822,16 @@ def gen_go(tag_ops: dict) -> str:
             path_expr = f'fmt.Sprintf("{go_path_fmt_str}"{fmt_args})' if params else f'"{path}"'
             body_arg = "data" if has_body else "nil"
             query_arg = "query" if query_params else "nil"
+
+            if raw_ct:
+                out += f"// {go_method} sends a raw {raw_ct} body. An empty contentType defaults to it.\n"
+                out += f"func (r *{cls}) {go_method}({sig_args}) (interface{{}}, error) {{\n"
+                out += "\tif contentType == \"\" {\n"
+                out += f'\t\tcontentType = "{raw_ct}"\n'
+                out += "\t}\n"
+                out += f'\treturn r.client.requestRaw("{http}", {path_expr}, body, contentType)\n'
+                out += "}\n\n"
+                continue
 
             if is_stream:
                 out += f"func (r *{cls}) {go_method}({sig_args}) <-chan map[string]interface{{}} {{\n"
@@ -857,6 +935,31 @@ async fn do_req(
         .collect();
     let req = if filtered.is_empty() { req } else { req.query(&filtered) };
     let req = if let Some(b) = body { req.json(&b) } else { req };
+    send_and_parse(req).await
+}
+
+/// Sends `body` verbatim under `content_type`, for endpoints that read the
+/// request body as bytes and reject `application/json`.
+async fn do_req_raw(
+    client: &Client,
+    base_url: &str,
+    method: reqwest::Method,
+    path_segments: &[&str],
+    body: Vec<u8>,
+    content_type: &str,
+) -> Result<Value> {
+    let url = build_url(client, base_url, path_segments.iter().copied())?;
+    send_and_parse(
+        client
+            .request(method, url)
+            .timeout(DEFAULT_REQUEST_TIMEOUT)
+            .header(reqwest::header::CONTENT_TYPE, content_type)
+            .body(body),
+    )
+    .await
+}
+
+async fn send_and_parse(req: reqwest::RequestBuilder) -> Result<Value> {
     let res = req.send().await?;
     let status = res.status();
     let text = res.text().await?;
@@ -1089,7 +1192,12 @@ def gen_rust(tag_ops: dict) -> str:
             http = op["http"]
             path = op["path"]
 
+            raw_ct = op["raw_body_ct"]
+
             rust_params = [f"{_rust_safe(p)}: &str" for p in params]
+            if raw_ct:
+                rust_params.append("body: Vec<u8>")
+                rust_params.append("content_type: Option<&str>")
             if has_body:
                 rust_params.append("data: Value")
             for qp in query_params:
@@ -1098,6 +1206,14 @@ def gen_rust(tag_ops: dict) -> str:
 
             method_const = f"reqwest::Method::{http}"
             body_arg = "Some(data)" if has_body else "None"
+
+            if raw_ct:
+                path_arg = _rust_path_segments(path, owned=False)
+                out += f"\n    /// Sends a raw `{raw_ct}` body; `content_type` overrides that default.\n"
+                out += f"    pub async fn {op_id}({sig}) -> Result<Value> {{\n"
+                out += f'        do_req_raw(&self.client, &self.base_url, {method_const}, {path_arg}, body, content_type.unwrap_or("{raw_ct}")).await\n'
+                out += "    }\n"
+                continue
 
             if is_stream:
                 path_arg = _rust_path_segments(path, owned=True)

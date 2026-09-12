@@ -442,6 +442,18 @@ pub fn build_reload_plan_with_caps(
         );
     }
 
+    if field_changed(&old.capabilities, &new.capabilities) {
+        // The global `[capabilities]` block is folded into `MediaConfig` and
+        // into `MediaDriverCache`'s preference table at boot, both of which
+        // are captured by value — same restart contract as `[media]` itself.
+        plan.restart_required = true;
+        plan.restart_reasons.push(
+            "capabilities config changed (capability routing is folded into the \
+             boot-captured MediaEngine / media driver cache; restart required)"
+                .to_string(),
+        );
+    }
+
     if field_changed(&old.approval, &new.approval) {
         plan.hot_actions.push(HotAction::UpdateApprovalPolicy);
     }
@@ -1142,6 +1154,7 @@ pub fn classified_reload_fields() -> std::collections::BTreeSet<&'static str> {
         "notification",
         "tts",
         "media",
+        "capabilities",
         "hands",
         "links",
         "privacy",

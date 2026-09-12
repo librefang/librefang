@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { AlertTriangle, ChevronDown, Plus, Trash2, X } from "lucide-react";
-import { generateUid } from "../lib/agentManifest";
+import { CAPABILITY_ROUTING_KEYS, generateUid } from "../lib/agentManifest";
 import type { ManifestExtras, ManifestFormState } from "../lib/agentManifest";
 import { MultiSelectCmdk } from "./ui/MultiSelectCmdk";
 import { StepLadderInput } from "./ui/StepLadderInput";
@@ -576,6 +576,39 @@ export function AgentManifestForm({
             checked={value.capabilities.ofp_discover}
             onChange={(checked) => updateCapabilities({ ofp_discover: checked })}
           />
+        </div>
+
+        {/*
+          Media capability routing. Each field is one modality this agent's own
+          model may not handle; leaving it blank inherits the kernel-global
+          `[capabilities]` block, which is why the placeholder is the word
+          "inherit" rather than an example value — a blank field here is a real
+          setting, not an unfilled one.
+        */}
+        <div className="space-y-2.5 border-t border-border-subtle/60 pt-2.5">
+          <p className="text-[10px] font-bold uppercase tracking-widest text-text-dim">
+            {t("agents.form.capability_routing")}
+          </p>
+          <p className="text-[11px] leading-snug text-text-dim">
+            {t("agents.form.capability_routing_hint")}
+          </p>
+          <div className="grid grid-cols-2 gap-3">
+            {CAPABILITY_ROUTING_KEYS.map((key) => (
+              <Field
+                key={key}
+                label={t(`agents.form.capability_${key}`)}
+                hint={t(`agents.form.capability_${key}_hint`)}
+              >
+                <input
+                  type="text"
+                  value={value.capabilities[key]}
+                  onChange={(e) => updateCapabilities({ [key]: e.target.value })}
+                  placeholder={t("agents.form.capability_inherit_placeholder")}
+                  className={inputClass}
+                />
+              </Field>
+            ))}
+          </div>
         </div>
       </Section>
 

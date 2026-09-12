@@ -45,6 +45,7 @@ type Client struct {
 	Hands *HandsResource
 	Inbox *InboxResource
 	Mcp *McpResource
+	Media *MediaResource
 	Memory *MemoryResource
 	Models *ModelsResource
 	Network *NetworkResource
@@ -82,6 +83,7 @@ func New(baseURL string) *Client {
 		c.Hands = &HandsResource{client: c}
 		c.Inbox = &InboxResource{client: c}
 		c.Mcp = &McpResource{client: c}
+		c.Media = &MediaResource{client: c}
 		c.Memory = &MemoryResource{client: c}
 		c.Models = &ModelsResource{client: c}
 		c.Network = &NetworkResource{client: c}
@@ -121,7 +123,6 @@ func (c *Client) withQuery(path string, query map[string]string) string {
 }
 
 func (c *Client) request(method, path string, body interface{}, query map[string]string) (interface{}, error) {
-	urlStr := c.BaseURL + c.withQuery(path, query)
 	var bodyBytes []byte
 	if body != nil {
 		b, err := json.Marshal(body)
@@ -130,12 +131,26 @@ func (c *Client) request(method, path string, body interface{}, query map[string
 		}
 		bodyBytes = b
 	}
+	return c.do(method, c.withQuery(path, query), bodyBytes, "")
+}
+
+// requestRaw sends body verbatim under contentType, for endpoints that read
+// the request body as bytes and reject application/json.
+func (c *Client) requestRaw(method, path string, body []byte, contentType string) (interface{}, error) {
+	return c.do(method, path, body, contentType)
+}
+
+func (c *Client) do(method, path string, bodyBytes []byte, contentType string) (interface{}, error) {
+	urlStr := c.BaseURL + path
 	req, err := http.NewRequest(method, urlStr, bytes.NewReader(bodyBytes))
 	if err != nil {
 		return nil, err
 	}
 	for k, v := range c.Headers {
 		req.Header.Set(k, v)
+	}
+	if contentType != "" {
+		req.Header.Set("Content-Type", contentType)
 	}
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
@@ -536,8 +551,12 @@ func (r *AgentsResource) GetAgentTraces(id string) (interface{}, error) {
 	return r.client.request("GET", fmt.Sprintf("/api/agents/%s/traces", id), nil, nil)
 }
 
-func (r *AgentsResource) UploadFile(id string, data map[string]interface{}) (interface{}, error) {
-	return r.client.request("POST", fmt.Sprintf("/api/agents/%s/upload", id), data, nil)
+// UploadFile sends a raw application/octet-stream body. An empty contentType defaults to it.
+func (r *AgentsResource) UploadFile(id string, body []byte, contentType string) (interface{}, error) {
+	if contentType == "" {
+		contentType = "application/octet-stream"
+	}
+	return r.client.requestRaw("POST", fmt.Sprintf("/api/agents/%s/upload", id), body, contentType)
 }
 
 func (r *AgentsResource) ServeUpload(file_id string) (interface{}, error) {
@@ -1010,6 +1029,42 @@ func (r *McpResource) PatchMcpServerTaint(name string, data map[string]interface
 
 func (r *McpResource) ListMcpTaintRules() (interface{}, error) {
 	return r.client.request("GET", "/api/mcp/taint-rules", nil, nil)
+}
+
+// ── Media Resource
+
+type MediaResource struct{ client *Client }
+
+func (r *MediaResource) GenerateImage(data map[string]interface{}) (interface{}, error) {
+	return r.client.request("POST", "/api/media/image", data, nil)
+}
+
+func (r *MediaResource) GenerateMusic(data map[string]interface{}) (interface{}, error) {
+	return r.client.request("POST", "/api/media/music", data, nil)
+}
+
+func (r *MediaResource) ListMediaProviders() (interface{}, error) {
+	return r.client.request("GET", "/api/media/providers", nil, nil)
+}
+
+func (r *MediaResource) SynthesizeSpeech(data map[string]interface{}) (interface{}, error) {
+	return r.client.request("POST", "/api/media/speech", data, nil)
+}
+
+// TranscribeAudio sends a raw audio/webm body. An empty contentType defaults to it.
+func (r *MediaResource) TranscribeAudio(body []byte, contentType string) (interface{}, error) {
+	if contentType == "" {
+		contentType = "audio/webm"
+	}
+	return r.client.requestRaw("POST", "/api/media/transcribe", body, contentType)
+}
+
+func (r *MediaResource) SubmitVideo(data map[string]interface{}) (interface{}, error) {
+	return r.client.request("POST", "/api/media/video", data, nil)
+}
+
+func (r *MediaResource) PollVideoTask(task_id string, query map[string]string) (interface{}, error) {
+	return r.client.request("GET", fmt.Sprintf("/api/media/video/%s", task_id), nil, query)
 }
 
 // ── Memory Resource

@@ -3862,6 +3862,21 @@ pub struct KernelConfig {
     /// Media understanding configuration.
     #[serde(default)]
     pub media: crate::media::MediaConfig,
+    /// Kernel-global media capability routing — which provider and model
+    /// services each modality the agent's own model cannot handle.
+    ///
+    /// ```toml
+    /// [capabilities]
+    /// image_understanding = "openai/gpt-4o"
+    /// speech_to_text = { provider = "groq", model = "whisper-large-v3" }
+    /// ```
+    ///
+    /// Every agent inherits this block; `agent.toml`'s own `[capabilities]`
+    /// overrides it key by key. Resolution is agent > global > the historical
+    /// `[media] image_provider` / `audio_provider` selectors > env-var
+    /// auto-detection.
+    #[serde(default)]
+    pub capabilities: crate::media::CapabilityRouting,
     /// Link understanding configuration.
     #[serde(default)]
     pub links: crate::media::LinkConfig,
@@ -6902,6 +6917,7 @@ impl Default for KernelConfig {
             workspaces_dir: None,
             log_dir: None,
             media: crate::media::MediaConfig::default(),
+            capabilities: crate::media::CapabilityRouting::default(),
             links: crate::media::LinkConfig::default(),
             reload: ReloadConfig::default(),
             webhook_triggers: None,

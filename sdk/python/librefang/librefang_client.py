@@ -58,6 +58,7 @@ class LibreFang:
         self.hands = _HandsResource(self)
         self.inbox = _InboxResource(self)
         self.mcp = _McpResource(self)
+        self.media = _MediaResource(self)
         self.memory = _MemoryResource(self)
         self.models = _ModelsResource(self)
         self.network = _NetworkResource(self)
@@ -74,14 +75,21 @@ class LibreFang:
         self.workflows = _WorkflowsResource(self)
 
 
-    def _request(self, method: str, path: str, body: Any = None, query: Optional[Dict[str, Any]] = None) -> Any:
+    def _request(self, method: str, path: str, body: Any = None, query: Optional[Dict[str, Any]] = None, content_type: Optional[str] = None) -> Any:
+        """Send a request. `content_type` sends `body` as raw bytes instead of JSON."""
         url = self.base_url + path
         if query:
             filtered = {k: v for k, v in query.items() if v is not None}
             if filtered:
                 url += ("&" if "?" in url else "?") + urlencode(filtered, doseq=True)
-        data = json.dumps(body).encode() if body is not None else None
-        req = Request(url, data=data, headers=self._headers, method=method)
+        headers = self._headers
+        if content_type is not None:
+            data = bytes(body) if body is not None else None
+            headers = dict(headers)
+            headers["Content-Type"] = content_type
+        else:
+            data = json.dumps(body).encode() if body is not None else None
+        req = Request(url, data=data, headers=headers, method=method)
         try:
             with urlopen(req, timeout=self.timeout) as resp:
                 ct = resp.headers.get("content-type", "")
@@ -383,8 +391,8 @@ class _AgentsResource(_Resource):
     def get_agent_traces(self, id: str):
         return self._c._request("GET", f"/api/agents/{id}/traces")
 
-    def upload_file(self, id: str, **data):
-        return self._c._request("POST", f"/api/agents/{id}/upload", data)
+    def upload_file(self, id: str, body: bytes, content_type: str = "application/octet-stream"):
+        return self._c._request("POST", f"/api/agents/{id}/upload", body, content_type=content_type)
 
     def serve_upload(self, file_id: str):
         return self._c._request("GET", f"/api/uploads/{file_id}")
@@ -761,6 +769,32 @@ class _McpResource(_Resource):
 
     def list_mcp_taint_rules(self):
         return self._c._request("GET", "/api/mcp/taint-rules")
+
+
+# ── Media Resource ─────────────────────────────────────────────
+
+class _MediaResource(_Resource):
+
+    def generate_image(self, **data):
+        return self._c._request("POST", "/api/media/image", data)
+
+    def generate_music(self, **data):
+        return self._c._request("POST", "/api/media/music", data)
+
+    def list_media_providers(self):
+        return self._c._request("GET", "/api/media/providers")
+
+    def synthesize_speech(self, **data):
+        return self._c._request("POST", "/api/media/speech", data)
+
+    def transcribe_audio(self, body: bytes, content_type: str = "audio/webm"):
+        return self._c._request("POST", "/api/media/transcribe", body, content_type=content_type)
+
+    def submit_video(self, **data):
+        return self._c._request("POST", "/api/media/video", data)
+
+    def poll_video_task(self, task_id: str, provider: Any = None):
+        return self._c._request("GET", f"/api/media/video/{task_id}", None, query={"provider": provider})
 
 
 # ── Memory Resource ────────────────────────────────────────────

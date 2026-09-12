@@ -8,6 +8,12 @@
 use super::retry::stream_with_retry;
 use super::*;
 
+/// The note left in session history when a non-timeout provider failure kills a turn.
+///
+/// Deliberately opaque, for the same reason `IMAGE_DESCRIPTION_UNAVAILABLE` is on the media path: the driver error's `Display` carries endpoint URLs, model ids and upstream response bodies, and `build_user_facing_llm_error` appends that raw string verbatim for the `Format` category — which is also where an unrecognised provider error lands by default.
+/// The raw error goes to the `warn!` at the push site and nowhere else.
+const PROVIDER_FAILURE_NOTE: &str = "[System: the model provider failed and the task could not be completed. No response was produced; the provider error is recorded in the daemon log.]";
+
 /// Run the agent execution loop with streaming support.
 ///
 /// Like `run_agent_loop`, but sends `StreamEvent`s to the provided channel
@@ -373,6 +379,17 @@ async fn run_agent_loop_streaming_inner(
             (user_message, user_content_blocks)
         };
 
+    // Mirror the non-streaming capability-routing hop: describe an inbound
+    // image once, before it enters history, when the agent's model cannot see
+    // it. See `agent_loop::media_routing` for the full contract.
+    let guarded_user_content_blocks = super::media_routing::describe_images_for_text_only_model(
+        guarded_user_content_blocks,
+        manifest,
+        kernel.as_ref(),
+        media_engine,
+    )
+    .await;
+
     // Add the user message to session history.
     // When content blocks are provided (e.g. text + image from a channel),
     // use multimodal message format so the LLM receives the image for vision.
@@ -384,6 +401,20 @@ async fn run_agent_loop_streaming_inner(
         &privacy_config,
         combined_prefix.as_deref(),
     );
+
+    // Mirror of the non-streaming loop: persist the inbound message before the
+    // first LLM call. This is the path the dashboard takes, so it is the one
+    // where a daemon restart, or a hang that outlives the surrounding timeout,
+    // between the push and the first interim save silently loses the
+    // operator's message. The provider-failure note added further down covers
+    // only `stream_with_retry` returning `Err` — not a crash, not a restart,
+    // not a cancellation. Same guards as the interim save: fork and incognito
+    // turns stay ephemeral even on mid-turn crashes.
+    if !opts.is_fork && !opts.incognito {
+        if let Err(e) = memory.save_session_async(session).await {
+            warn!("Failed to save inbound message: {e}");
+        }
+    }
 
     let max_history = resolve_max_history(manifest, opts);
     let PreparedMessages {
@@ -900,6 +931,38 @@ async fn run_agent_loop_streaming_inner(
                             warn!(
                                 "Failed to persist timeout note to session: {save_err}. \
                                  The timeout marker will not appear on next session load."
+                            );
+                        }
+                    }
+                } else {
+                    // Non-timeout provider failure: the turn is about to end
+                    // with an error, and unless a visible note is saved the
+                    // session shows NOTHING — the operator's message appears
+                    // to vanish from the chat, and there is no trace of why.
+                    // This is the failure mode observed live: the circuit
+                    // breaker opened after a stream error, the turn ended,
+                    // and neither the chat nor the history explained it.
+                    //
+                    // `Role::Assistant`, matching the timeout note above, with the `[System: …]` text prefix carrying the "this is the daemon speaking" framing.
+                    // A `Role::System` message in the middle of history reaches no hosted model: `anthropic.rs` filters it out of the request, `gemini.rs` and `bedrock.rs` skip it, and `openai.rs` / `ollama.rs` only emit one when the request carries no system prompt — which the agent loop always sets.
+                    // Worse, it survives long enough to break alternation: `session_repair` merges *adjacent* same-role messages, so a system note interposed between two user turns blocks that merge and the driver then strips it, handing the provider the `user, user` pair the merge exists to prevent.
+                    warn!(
+                        event = "provider_failure_note",
+                        agent = %manifest.name,
+                        error = %err_str,
+                        "Provider failed on the streaming path — the session gets an opaque note, and this line is the only place the raw provider error appears"
+                    );
+                    session.push_message(Message::assistant(PROVIDER_FAILURE_NOTE));
+                    repair_session_before_save(
+                        session,
+                        agent_id_str.as_str(),
+                        "streaming_provider_error",
+                    );
+                    if !opts.is_fork && !opts.incognito {
+                        if let Err(save_err) = memory.save_session_async(session).await {
+                            warn!(
+                                "Failed to persist provider-error note to session: {save_err}. \
+                                 The error will not appear on next session load."
                             );
                         }
                     }

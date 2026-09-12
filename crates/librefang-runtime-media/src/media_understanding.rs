@@ -7,7 +7,8 @@
 //! chosen provider surfaces as an `Err` to the caller.
 
 use librefang_types::media::{
-    MediaAttachment, MediaConfig, MediaSource, MediaType, MediaUnderstanding, MAX_AUDIO_BYTES,
+    CapabilityRouting, MediaAttachment, MediaConfig, MediaSource, MediaType, MediaUnderstanding,
+    MAX_AUDIO_BYTES,
 };
 use std::path::Path;
 use std::sync::Arc;
@@ -63,6 +64,36 @@ impl MediaEngine {
             config,
             semaphore: Arc::new(Semaphore::new(max)),
         }
+    }
+
+    /// A view of this engine whose provider/model selections are overridden by
+    /// `routing` — the per-agent `[capabilities]` block layered on top of the
+    /// kernel-global one that was already folded in at boot.
+    ///
+    /// The semaphore is **shared**, not rebuilt: the `max_concurrency` budget
+    /// is a property of the process, and handing every agent its own engine
+    /// with its own budget would multiply the real concurrency by the number
+    /// of agents.
+    ///
+    /// Returns cheaply when `routing` is empty, which is the common case.
+    pub fn with_capability_routing(&self, routing: &CapabilityRouting) -> Self {
+        Self {
+            config: self.config.clone().with_capability_routing(routing),
+            semaphore: Arc::clone(&self.semaphore),
+        }
+    }
+
+    /// Whether `[media] image_description` is on. Callers that want to
+    /// describe an image on behalf of a text-only model must honour the same
+    /// operator switch the channel bridge does.
+    pub fn image_description_enabled(&self) -> bool {
+        self.config.image_description
+    }
+
+    /// Whether `[media] audio_transcription` is on. Same contract as
+    /// [`Self::image_description_enabled`].
+    pub fn audio_transcription_enabled(&self) -> bool {
+        self.config.audio_transcription
     }
 
     /// Describe an image using a vision-capable LLM.

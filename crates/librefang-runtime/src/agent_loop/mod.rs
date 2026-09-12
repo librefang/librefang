@@ -36,6 +36,13 @@ use tracing::{debug, info, instrument, warn};
 
 mod end_turn;
 mod history;
+// The orchestration half of this module is deliberately feature-agnostic so its
+// unit tests run in every configuration, but with `media` off nothing in the
+// crate calls it — the entry point compiles to a pass-through. Silence the
+// resulting dead-code wall there rather than splitting the file along a feature
+// seam that has no behavioural meaning.
+#[cfg_attr(not(feature = "media"), allow(dead_code))]
+mod media_routing;
 mod message;
 pub mod model;
 mod prompt;
@@ -859,6 +866,20 @@ async fn run_agent_loop_inner(
             (user_message, user_content_blocks)
         };
 
+    // Capability routing: an image bound for a model with no vision support is
+    // described by the provider the resolved `[capabilities]` block nominates,
+    // and the description is inserted next to the image. Done here — once, on
+    // the inbound turn, before it enters history — rather than at the redaction
+    // gate inside the loop, which would re-describe on every iteration.
+    // No-op for vision-capable models and for turns without images.
+    let guarded_user_content_blocks = media_routing::describe_images_for_text_only_model(
+        guarded_user_content_blocks,
+        manifest,
+        kernel.as_ref(),
+        media_engine,
+    )
+    .await;
+
     // Add the user message to session history.
     // When content blocks are provided (e.g. text + image from a channel),
     // use multimodal message format so the LLM receives the image for vision.
@@ -870,6 +891,18 @@ async fn run_agent_loop_inner(
         &privacy_config,
         combined_prefix.as_deref(),
     );
+
+    // Persist the inbound message before the first LLM call. The turn can
+    // die long before the first interim save (daemon restart, a provider
+    // that hangs, a circuit breaker that opens) and a session that loses the
+    // operator's message is the worst failure mode of all: the conversation
+    // forgets what was asked, silently. Same guards as the interim save —
+    // fork and incognito turns stay ephemeral even on mid-turn crashes.
+    if !opts.is_fork && !opts.incognito {
+        if let Err(e) = memory.save_session_async(session).await {
+            warn!("Failed to save inbound message: {e}");
+        }
+    }
 
     let max_history = resolve_max_history(manifest, opts);
     let PreparedMessages {
