@@ -520,6 +520,21 @@ fn min_role_for_privileged_get(path: &str) -> Option<UserRole> {
     if path == "/api/vault/keys" {
         return Some(UserRole::Owner);
     }
+    // `GET /api/mcp/servers` and `GET /api/mcp/servers/{name}` return each server's transport verbatim: `command` and `args` for a stdio server, and the full `url` — path, query and userinfo included — for an SSE / HTTP one.
+    // A remote MCP endpoint routinely carries its credential in that query string, so the blanket "GET is read-only" rule was handing every authenticated Viewer a set of live bearer tokens.
+    // That is the disclosure `/api/config/export` and `/api/vault/keys` above are already gated for, one resource further out.
+    //
+    // Redacting the payload instead is not available here: `McpServersPage.tsx` prefills its edit form from this response (`url: transport.url ?? ""`) and submits it back through `PUT /api/mcp/servers/{name}`, so a scrubbed `url` would be written into the config the first time an operator edited any other field on that server.
+    // The sibling `http_compat_header_summary` can omit a header's `value` precisely because `value_env` gives that field somewhere else to come from; a transport `url` has no second source.
+    //
+    // Gated to `Admin` rather than `Owner` because `is_owner_only_write` already holds the config-mutating verbs at Owner while leaving `{name}/reconnect`, `{name}/taint` and the `auth/*` sub-resources at Admin — an Admin who may reconnect a server has to be able to list it first.
+    // Matched as a single trailing segment with no deeper `/`, so those sub-resources keep their own gate instead of inheriting this one.
+    if path == "/api/mcp/servers"
+        || (path.starts_with("/api/mcp/servers/")
+            && !path["/api/mcp/servers/".len()..].contains('/'))
+    {
+        return Some(UserRole::Admin);
+    }
     None
 }
 
@@ -1684,7 +1699,11 @@ pub const PUBLIC_ROUTES_DASHBOARD_READS: &[PublicRoute] = &[
     PublicRoute::single_segment_get("/api/hands/"),
     PublicRoute::exact_get("/api/mcp/catalog"),
     PublicRoute::exact_get("/api/mcp/health"),
-    PublicRoute::exact_get("/api/mcp/servers"),
+    // `/api/mcp/servers` used to sit here, and it is the one entry in this group that hands out credentials rather than catalogue metadata.
+    // `serialize_mcp_transport` returns a stdio server's `command` and `args`, and an SSE / HTTP server's `url` with path, query and userinfo intact — and a remote MCP endpoint's token normally lives in that query string.
+    // In this group that was readable with no bearer token at all whenever `require_auth_for_reads` was unset, which is the default.
+    // #6630 already removed the `env` values and #6612 the static `http_compat` header values from the same payload; the transport `url` is the remaining one, and it cannot be redacted the same way — those two are keyed lists where a submitted bare `NAME` unambiguously means "unchanged", while a scalar `url` scrubbed to its origin is indistinguishable from an operator deliberately setting that origin, so the write-side merge those fixes rely on has nothing to key on.
+    // Gated instead: removed from this group, and `min_role_for_privileged_get` holds the read at Admin.
     PublicRoute::exact_get("/api/models"),
     PublicRoute::exact_get("/api/models/aliases"),
     PublicRoute::exact_get("/api/network/status"),
@@ -3083,17 +3102,31 @@ mod tests {
                 "Owner must be allowed to {method} {path}"
             );
         }
-        // Reads (list / detail) stay at the generic Admin-or-above gate — the
-        // GET short-circuit keeps them reachable for every role, so the gate
-        // does not over-block the dashboard MCP page.
+        // Reads (list / detail) are Admin-or-above, enforced by
+        // `min_role_for_privileged_get` rather than by the blanket GET rule.
+        //
+        // This assertion used to run the other way — every role could GET —
+        // under the reason "so the gate does not over-block the dashboard MCP
+        // page". That reason was about keeping the *mutation* gate from
+        // spilling onto reads, and it did not weigh what the read itself
+        // returns: `serialize_mcp_transport` emits a stdio server's `command`
+        // and `args`, and an SSE / HTTP server's `url` with its query string
+        // intact, which is where a remote MCP endpoint's credential normally
+        // sits.
+        //
+        // The page is a management surface: every write on it is Owner-only
+        // per the loop above, and `reconnect` / `taint` / `auth/*` are Admin.
+        // A Viewer got a page of controls it could not use, and the price was
+        // a set of live bearer tokens. See `test_mcp_server_reads_are_admin_only`.
         let get = axum::http::Method::GET;
         for path in ["/api/mcp/servers", "/api/mcp/servers/my-server"] {
-            for role in [
-                UserRole::Viewer,
-                UserRole::User,
-                UserRole::Admin,
-                UserRole::Owner,
-            ] {
+            for role in [UserRole::Viewer, UserRole::User] {
+                assert!(
+                    !user_role_allows_request(role, &get, path),
+                    "{role:?} must NOT GET {path} — it carries transport credentials"
+                );
+            }
+            for role in [UserRole::Admin, UserRole::Owner] {
                 assert!(
                     user_role_allows_request(role, &get, path),
                     "{role:?} must be allowed to GET {path}"
@@ -3216,6 +3249,57 @@ mod tests {
             &get,
             "/api/config"
         ));
+    }
+
+    /// The MCP list and detail reads return each server's transport verbatim —
+    /// a stdio `command` / `args`, or an SSE / HTTP `url` with its query string,
+    /// which is where a remote MCP endpoint's credential normally sits. Same
+    /// class as `/api/config/export` above, so the same shape of gate.
+    ///
+    /// `Admin` rather than `Owner`: the sub-resources an Admin already drives
+    /// (`reconnect`, `taint`, `auth/*`) are useless without being able to list
+    /// the servers first.
+    #[test]
+    fn test_mcp_server_reads_are_admin_only() {
+        let get = axum::http::Method::GET;
+        for path in ["/api/mcp/servers", "/api/mcp/servers/sequential-thinking"] {
+            assert_eq!(
+                min_role_for_privileged_get(path),
+                Some(UserRole::Admin),
+                "{path} exposes transport credentials and must not sit on the blanket GET rule"
+            );
+            for role in [UserRole::Viewer, UserRole::User] {
+                assert!(
+                    !user_role_allows_request(role, &get, path),
+                    "{role:?} must NOT read MCP transports at {path}"
+                );
+            }
+            for role in [UserRole::Admin, UserRole::Owner] {
+                assert!(
+                    user_role_allows_request(role, &get, path),
+                    "{role:?} manages MCP servers and must be able to read {path}"
+                );
+            }
+        }
+
+        // The sub-resources are matched by their own rules, not swept up by the
+        // prefix above — the single-trailing-segment test is what keeps them out.
+        for path in [
+            "/api/mcp/servers/sequential-thinking/auth/status",
+            "/api/mcp/servers/sequential-thinking/reconnect",
+        ] {
+            assert_eq!(
+                min_role_for_privileged_get(path),
+                None,
+                "{path} must keep its existing gate rather than inherit the read gate"
+            );
+        }
+
+        // Siblings that carry no transport detail stay on the blanket GET rule.
+        for path in ["/api/mcp/catalog", "/api/mcp/health"] {
+            assert_eq!(min_role_for_privileged_get(path), None);
+            assert!(user_role_allows_request(UserRole::Viewer, &get, path));
+        }
     }
 
     // Finding #20: unmatched requests must all collapse to a single bounded
@@ -4856,6 +4940,33 @@ mod tests {
             )),
             "/api/hands/ must not be a prefix entry — it publishes the linked agent session, the HAND.toml prompt, the instance config and the live browser view"
         );
+    }
+
+    /// `/api/mcp/servers` must stay out of the dashboard-reads allowlist: it is
+    /// the one MCP read that returns transport credentials rather than
+    /// catalogue metadata, and membership here publishes it with no bearer
+    /// token whenever `require_auth_for_reads` is unset — the default.
+    ///
+    /// The catalogue and health siblings are unaffected and deliberately
+    /// asserted present, so a blanket removal of the `/api/mcp/*` group would
+    /// fail here rather than quietly costing the pre-login dashboard its data.
+    #[test]
+    fn mcp_servers_absent_from_dashboard_reads() {
+        let listed = |p: &str| {
+            PUBLIC_ROUTES_DASHBOARD_READS
+                .iter()
+                .any(|r| r.path == p && matches!(r.match_kind, PublicMatch::Exact))
+        };
+        assert!(
+            !listed("/api/mcp/servers"),
+            "/api/mcp/servers returns each server's `command` / `args` / `url` — it must not be readable without auth"
+        );
+        for still_public in ["/api/mcp/catalog", "/api/mcp/health"] {
+            assert!(
+                listed(still_public),
+                "{still_public} carries no transport detail and should stay in the pre-login group"
+            );
+        }
     }
 
     /// `/api/cron/` must not be present in the dashboard-reads allowlist —
