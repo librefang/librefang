@@ -1744,7 +1744,7 @@
       ],
       "properties": {
         "agent_pattern": {
-          "description": "Glob pattern matching agent names (e.g. \"social-*\", \"*\").",
+          "description": "Glob pattern matching agent names (e.g. \"social-*\", \"*\").\n\nMatched against the agent's name and, for the benefit of a rule written against a specific registered agent, against its id as well — the notification path identifies agents by id, and a name is only available while the agent is registered.",
           "type": "string"
         },
         "channels": {
