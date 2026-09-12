@@ -88,10 +88,7 @@ pub async fn task_queue_status(
     State(state): State<Arc<AppState>>,
     _lang: Option<axum::Extension<RequestLanguage>>,
 ) -> impl IntoResponse {
-    // Counted in SQL rather than by listing every task: `task_list` has no
-    // `LIMIT` and only terminal rows are ever pruned, so deriving four integers
-    // from it allocated one `serde_json::Value` per row in the table on every
-    // poll — and this is the endpoint the dashboard polls (#8219).
+    // Counted in SQL rather than by listing every task: `task_list` has no `LIMIT` and only terminal rows are ever pruned, so deriving four integers from it allocated one `serde_json::Value` per row in the table on every poll — and this is the endpoint the dashboard polls (#8219).
     match state.kernel.task_status_counts().await {
         Ok(counts) => {
             let mut pending = 0u64;
@@ -107,10 +104,8 @@ pub async fn task_queue_status(
                     "completed" => completed += count,
                     "failed" => failed += count,
                     unknown => {
-                        // Still reported, but once per status rather than once
-                        // per row — the old warning named the offending task id,
-                        // which a `GROUP BY` cannot carry. The count is the more
-                        // useful half: it says how far the drift has spread.
+                        // Still reported, but once per status rather than once per row — the old warning named the offending task id, which a `GROUP BY` cannot carry.
+                        // The count is the more useful half: it says how far the drift has spread.
                         tracing::warn!(
                             status = unknown,
                             count,

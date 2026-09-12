@@ -1885,10 +1885,7 @@ mod tests {
 
     /// #8219: the aggregate must agree with what listing every row would have counted.
     ///
-    /// The endpoint's four integers are the contract, not the query that produces
-    /// them, so this compares the new `GROUP BY` against the old list-and-tally on
-    /// the same store — including a status the summary handler does not recognise,
-    /// which has to survive as its own bucket rather than being folded away.
+    /// The endpoint's four integers are the contract, not the query that produces them, so this compares the new `GROUP BY` against the old list-and-tally on the same store — including a status the summary handler does not recognise, which has to survive as its own bucket rather than being folded away.
     #[tokio::test]
     async fn task_status_counts_agrees_with_listing_every_row() {
         let substrate = MemorySubstrate::open_in_memory(0.1).unwrap();
