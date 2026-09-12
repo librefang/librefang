@@ -816,6 +816,24 @@ pub fn build_reload_plan_with_caps(
         );
         restart_if_changed(field_changed(&old.heartbeat, &new.heartbeat), "heartbeat");
         restart_if_changed(field_changed(&old.plugins, &new.plugins), "plugins");
+        // `tts` minus `enabled` / `output_format`: everything else in the section
+        // reaches the tool through `TtsEngine`, which `boot.rs` builds once from
+        // `config.tts.clone()` with no rebuild path — the same shape as
+        // `MediaEngine` and `BrowserManager` above, and classifying it NOOP made
+        // `POST /api/config/reload` answer "effective on next message" for a
+        // change that does nothing until the daemon restarts.
+        // The two exceptions are read per turn from the config snapshot:
+        // `enabled` at the call sites that decide whether to lend the engine,
+        // `output_format` through `LoopOptions.tts_config` (#8272). They stay in
+        // the NOOP block below — which is also what lets `should_store_config`
+        // accept the swap at all.
+        let tts_except_live_keys_changed = {
+            let mut old_rest = old.tts.clone();
+            old_rest.enabled = new.tts.enabled;
+            old_rest.output_format = new.tts.output_format.clone();
+            field_changed(&old_rest, &new.tts)
+        };
+        restart_if_changed(tts_except_live_keys_changed, "tts");
         // `registry` minus `auto_sync`: the mirror / host / TTL are read once when the checkout is set up, but `auto_sync` is re-read from the config snapshot on every tick of the 24 h catalog task, so it belongs in the NOOP block below.
         // Classifying the whole section as restart-required made the documented "flip it off and the next automatic refresh stops" impossible: `should_store_config` swaps the config only when there is a hot action or a noop change, so a registry-only reload was recorded as restart-required and then discarded, leaving the task reading the old value until the daemon actually restarted.
         let registry_except_auto_sync_changed = {
@@ -963,7 +981,13 @@ pub fn build_reload_plan_with_caps(
             field_changed(&old.notification, &new.notification),
             "notification",
         );
-        noop_if_changed(field_changed(&old.tts, &new.tts), "tts");
+        // Only the two keys the runtime re-reads per turn; the rest of `[tts]` is
+        // restart-required above because it is captured in `TtsEngine` at boot.
+        noop_if_changed(old.tts.enabled != new.tts.enabled, "tts.enabled");
+        noop_if_changed(
+            old.tts.output_format != new.tts.output_format,
+            "tts.output_format",
+        );
         // The hands marketplace install handler reads `hands.registry_allowed_hosts`
         // live from `config_snapshot()` on every request, so a swap is effective
         // on the next install with no explicit reapply action.
@@ -1462,6 +1486,100 @@ mod tests {
             .restart_reasons
             .iter()
             .any(|r| r.contains("memory config")));
+    }
+
+    /// The two `[tts]` keys the runtime re-reads per turn must reach a running
+    /// daemon, and the plan must be storable — `should_store_config` swaps the
+    /// config only when there is a hot action or a noop change, so classifying
+    /// the whole section restart-required would throw the new value away and
+    /// `[tts] output_format` would keep resolving to the boot-time value (#8272).
+    #[test]
+    fn tts_live_keys_are_read_per_turn_and_reach_the_config_store() {
+        for (label, mutate) in [
+            (
+                "tts.enabled",
+                Box::new(|c: &mut KernelConfig| c.tts.enabled = !c.tts.enabled)
+                    as Box<dyn Fn(&mut KernelConfig)>,
+            ),
+            (
+                "tts.output_format",
+                Box::new(|c: &mut KernelConfig| c.tts.output_format = Some("ogg_opus".to_string()))
+                    as Box<dyn Fn(&mut KernelConfig)>,
+            ),
+        ] {
+            let a = default_cfg();
+            let mut b = default_cfg();
+            mutate(&mut b);
+            let plan = build_reload_plan(&a, &b);
+
+            assert!(
+                !plan.restart_required,
+                "{label} is read per turn; restart_reasons: {:?}",
+                plan.restart_reasons
+            );
+            assert!(
+                plan.noop_changes.iter().any(|r| r.contains(label)),
+                "{label} must be recorded as a live-read change: {:?}",
+                plan.noop_changes
+            );
+            for mode in [ReloadMode::Hot, ReloadMode::Hybrid] {
+                assert!(
+                    should_store_config(mode, &plan),
+                    "{label}: the reloaded config must be stored in {mode:?} mode, \
+                     or the next turn keeps reading the old value"
+                );
+            }
+        }
+    }
+
+    /// Everything else in `[tts]` reaches the tool through `TtsEngine`, which is
+    /// built once at boot from `config.tts.clone()` with no rebuild path. A bare
+    /// config swap does nothing for these, so the reload report must say so
+    /// rather than claim "effective on next message" — the same honesty fix
+    /// `browser` got when its hot action turned out to be a no-op.
+    #[test]
+    fn tts_fields_other_than_the_live_keys_still_require_restart() {
+        for (label, mutate) in [
+            (
+                "provider",
+                Box::new(|c: &mut KernelConfig| c.tts.provider = Some("elevenlabs".to_string()))
+                    as Box<dyn Fn(&mut KernelConfig)>,
+            ),
+            (
+                "timeout_secs",
+                Box::new(|c: &mut KernelConfig| c.tts.timeout_secs = 99)
+                    as Box<dyn Fn(&mut KernelConfig)>,
+            ),
+            (
+                "elevenlabs.output_format",
+                Box::new(|c: &mut KernelConfig| {
+                    c.tts.elevenlabs.output_format = "mp3_44100_128".to_string()
+                }) as Box<dyn Fn(&mut KernelConfig)>,
+            ),
+            (
+                "custom.base_url",
+                Box::new(|c: &mut KernelConfig| {
+                    c.tts.custom.base_url = "http://example.invalid/v1/audio/speech".to_string()
+                }) as Box<dyn Fn(&mut KernelConfig)>,
+            ),
+        ] {
+            let a = default_cfg();
+            let mut b = default_cfg();
+            mutate(&mut b);
+            let plan = build_reload_plan(&a, &b);
+
+            assert!(
+                plan.restart_required,
+                "[tts] {label} is captured in TtsEngine at boot and must be \
+                 reported restart-required; noop_changes: {:?}",
+                plan.noop_changes
+            );
+            assert!(
+                plan.restart_reasons.iter().any(|r| r.contains("tts")),
+                "[tts] {label} must name `tts` as the reason: {:?}",
+                plan.restart_reasons
+            );
+        }
     }
 
     /// Flipping `[registry] auto_sync` must reach the running catalog task.

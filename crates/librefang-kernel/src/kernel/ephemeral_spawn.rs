@@ -427,6 +427,7 @@ impl LibreFangKernel {
             gateway_compression: Some(cfg.gateway_compression.clone()),
             parallel_tools_config: Some(cfg.parallel_tools.clone()),
             canvas_config: Some(cfg.canvas.clone()),
+            tts_config: Some(cfg.tts.clone()),
             system_call: false,
         };
 

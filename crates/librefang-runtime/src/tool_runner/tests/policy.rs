@@ -31,6 +31,7 @@ async fn tool_runner_rbac_user_deny_returns_hard_error() {
         None, // media_drivers
         None, // exec_policy
         None,
+        None, // tts_config
         None,
         None,
         None,
@@ -97,6 +98,7 @@ async fn tool_runner_rbac_user_needs_approval_routes_through_approval_queue() {
         None,
         None,
         None,
+        None, // tts_config
         None,
         None,
         None,
@@ -163,6 +165,7 @@ async fn tool_runner_rbac_full_mode_does_not_bypass_user_needs_approval() {
         None,
         Some(&policy), // Full mode!
         None,
+        None, // tts_config
         None,
         None,
         None,
@@ -224,6 +227,7 @@ async fn tool_runner_rbac_user_allow_falls_through_to_existing_approval_logic() 
         None,
         None,
         None,
+        None, // tts_config
         None,
         None,
         None,
@@ -282,6 +286,7 @@ async fn test_shell_exec_uses_exec_policy_allowed_env_vars() {
         None, // media_drivers
         Some(&policy),
         None,
+        None, // tts_config
         None,
         None,
         None,
@@ -506,6 +511,7 @@ async fn test_image_analyze_missing_file() {
         None, // media_drivers
         None, // exec_policy
         None, // tts_engine
+        None, // tts_config
         None, // docker_config
         None, // process_manager
         None, // process_registry
@@ -605,6 +611,7 @@ async fn test_schedule_tools_without_kernel() {
         None, // media_drivers
         None, // exec_policy
         None, // tts_engine
+        None, // tts_config
         None, // docker_config
         None, // process_manager
         None, // process_registry
@@ -884,6 +891,7 @@ async fn test_file_read_no_workspace_root_returns_error() {
         None, // media_drivers
         None, // exec_policy
         None, // tts_engine
+        None, // tts_config
         None, // docker_config
         None, // process_manager
         None, // process_registry
@@ -934,6 +942,7 @@ async fn test_file_write_no_workspace_root_returns_error() {
         None, // media_drivers
         None, // exec_policy
         None, // tts_engine
+        None, // tts_config
         None, // docker_config
         None, // process_manager
         None, // process_registry
@@ -981,6 +990,7 @@ async fn test_file_list_no_workspace_root_returns_error() {
         None, // media_drivers
         None, // exec_policy
         None, // tts_engine
+        None, // tts_config
         None, // docker_config
         None, // process_manager
         None, // process_registry
@@ -1037,6 +1047,7 @@ async fn test_agent_spawn_capability_escalation_denied() {
         None, // media_drivers
         None, // exec_policy
         None, // tts_engine
+        None, // tts_config
         None, // docker_config
         None, // process_manager
         None, // process_registry
@@ -1097,6 +1108,7 @@ async fn test_agent_spawn_subset_capabilities_allowed() {
         None, // media_drivers
         None, // exec_policy
         None, // tts_engine
+        None, // tts_config
         None, // docker_config
         None, // process_manager
         None, // process_registry
@@ -1200,6 +1212,7 @@ async fn test_mcp_tool_blocked_by_allowed_tools() {
         None, // media_drivers
         None, // exec_policy
         None, // tts_engine
+        None, // tts_config
         None, // docker_config
         None, // process_manager
         None, // process_registry
@@ -1246,6 +1259,7 @@ async fn test_mcp_tool_allowed_passes_check() {
         None, // media_drivers
         None, // exec_policy
         None, // tts_engine
+        None, // tts_config
         None, // docker_config
         None, // process_manager
         None, // process_registry
@@ -1301,6 +1315,7 @@ async fn test_allowed_tools_wildcard_prefix_match() {
         None, // media_drivers
         None, // exec_policy
         None, // tts_engine
+        None, // tts_config
         None, // docker_config
         None, // process_manager
         None, // process_registry
@@ -1346,6 +1361,7 @@ async fn test_allowed_tools_wildcard_blocks_non_matching() {
         None, // media_drivers
         None, // exec_policy
         None, // tts_engine
+        None, // tts_config
         None, // docker_config
         None, // process_manager
         None, // process_registry
@@ -1391,6 +1407,7 @@ async fn test_allowed_tools_star_allows_everything() {
         None, // media_drivers
         None, // exec_policy
         None, // tts_engine
+        None, // tts_config
         None, // docker_config
         None, // process_manager
         None, // process_registry
@@ -1435,6 +1452,7 @@ async fn test_allowed_tools_mixed_wildcard_and_exact() {
         None, // media_drivers
         None, // exec_policy
         None, // tts_engine
+        None, // tts_config
         None, // docker_config
         None, // process_manager
         None, // process_registry
@@ -1479,6 +1497,7 @@ async fn test_mcp_tool_wildcard_allowed() {
         None, // media_drivers
         None, // exec_policy
         None, // tts_engine
+        None, // tts_config
         None, // docker_config
         None, // process_manager
         None, // process_registry

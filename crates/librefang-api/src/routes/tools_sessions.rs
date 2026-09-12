@@ -300,6 +300,7 @@ pub async fn invoke_tool(
     let workspace_root = cfg.effective_workspaces_dir();
     let exec_policy = cfg.exec_policy.clone();
     let docker_config = cfg.docker.clone();
+    let tts_config = cfg.tts.clone();
     let kernel: Arc<dyn KernelHandle> = state.kernel.clone();
 
     let result = execute_tool(
@@ -319,7 +320,24 @@ pub async fn invoke_tool(
         Some(state.kernel.media()),
         Some(state.kernel.media_drivers()),
         Some(&exec_policy),
-        Some(state.kernel.tts()),
+        // Gated on `enabled` like every other producer of this argument
+        // (`messaging.rs`, `agent_execution.rs`, `ephemeral_spawn.rs`,
+        // `network.rs`, and the approval-resume context).
+        //
+        // This does not stop a provider request: `TtsEngine::synthesize`
+        // already refuses on `!config.enabled` as its first statement, before
+        // any network call. What the gate buys is the *live* value — the engine
+        // holds the boot-time `config.tts.clone()`, so without it a daemon
+        // booted with `enabled = true` and hot-reloaded to `false` kept
+        // synthesising here, which is exactly the window `[tts] enabled` is
+        // classified N for. Plus one fewer producer behaving differently from
+        // the other five.
+        if tts_config.enabled {
+            Some(state.kernel.tts())
+        } else {
+            None
+        },
+        Some(&tts_config),
         Some(&docker_config),
         Some(state.kernel.processes()),
         Some(state.kernel.process_registry()),

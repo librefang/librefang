@@ -1992,6 +1992,9 @@ impl LibreFangKernel {
         kernel_handle: &'a Arc<dyn librefang_runtime::kernel_handle::KernelHandle>,
         skill_snapshot: &'a librefang_skills::registry::SkillRegistry,
         deferred: &'a librefang_types::tool::DeferredToolExecution,
+        // Borrowed from the caller's `config.load()` guard: the guard has to
+        // outlive the context it is lent to, and a local one here would not.
+        tts_config: &'a librefang_types::config::TtsConfig,
     ) -> librefang_runtime::tool_runner::ToolExecContext<'a> {
         let cfg = self.config.load();
         librefang_runtime::tool_runner::ToolExecContext {
@@ -2019,7 +2022,21 @@ impl LibreFangKernel {
             media_engine: Some(&self.media.media_engine),
             media_drivers: Some(&self.media.media_drivers),
             exec_policy: deferred.exec_policy.as_ref(),
-            tts_engine: Some(&self.media.tts_engine),
+            // Gated on `enabled` exactly as the agent-loop producers are.
+            //
+            // Not a billing fix: `TtsEngine::synthesize` refuses on
+            // `!config.enabled` before any network call. The gate supplies the
+            // *live* value in place of the engine's boot-time clone, so a
+            // daemon hot-reloaded from `enabled = true` to `false` stops
+            // synthesising on resume too — and it removes the discrepancy where
+            // the same call yielded `.mp3` directly and `.ogg` after
+            // "Allow once".
+            tts_engine: if tts_config.enabled {
+                Some(&self.media.tts_engine)
+            } else {
+                None
+            },
+            tts_config: Some(tts_config),
             docker_config: None,
             process_manager: Some(&self.processes.manager),
             sender_id: deferred.sender_id.as_deref(),
@@ -2102,7 +2119,13 @@ impl LibreFangKernel {
             .map_err(|e| format!("skill_registry lock poisoned: {e}"))?
             .snapshot();
 
-        let ctx = self.build_deferred_tool_exec_context(&kernel_handle, &skill_snapshot, deferred);
+        let resume_cfg = self.config.load();
+        let ctx = self.build_deferred_tool_exec_context(
+            &kernel_handle,
+            &skill_snapshot,
+            deferred,
+            &resume_cfg.tts,
+        );
 
         let result = execute_tool_raw(
             &deferred.tool_use_id,

@@ -1684,6 +1684,7 @@ Gemini 完全不读取 thinking 配置。
 [tts]
 enabled = false
 provider = "openai"          # openai | elevenlabs
+output_format = "mp3"        # mp3 | ogg_opus
 max_text_length = 4096
 timeout_secs = 30
 
@@ -1706,6 +1707,7 @@ similarity_boost = 0.75
 |------|------|--------|------|
 | `enabled` | bool | `false` | 启用 TTS 合成。 |
 | `provider` | string 或 null | `null` | 默认 TTS 提供商：`"openai"` 或 `"elevenlabs"`。 |
+| `output_format` | string 或 null | `null`（→ `"mp3"`） | `text_to_speech` 工具 `output_format` 参数的默认值，对所有提供商生效：`"mp3"` 或 `"ogg_opus"`。`"mp3"` 不做任何转换——保留提供商返回的原始格式。当音频要作为语音消息发送到消息平台时设为 `"ogg_opus"`。工具调用中显式传入的值优先。 |
 | `max_text_length` | usize | `4096` | 单次 TTS 请求的最大文本长度（字符数）。 |
 | `timeout_secs` | u64 | `30` | 每次 TTS 调用的请求超时时间（秒）。 |
 
@@ -1726,6 +1728,7 @@ similarity_boost = 0.75
 | `model_id` | string | `"eleven_monolingual_v1"` | ElevenLabs 模型 ID。 |
 | `stability` | f32 | `0.5` | 语音稳定性（0.0-1.0）。越高越稳定，但表现力越低。 |
 | `similarity_boost` | f32 | `0.75` | 语音相似度增强（0.0-1.0）。 |
+| `output_format` | string | `"opus_48000_32"` | 发送给 ElevenLabs 的 `?output_format=` 查询参数——这是提供商侧的设置，与上面的 `[tts] output_format` 不同。其他取值：`mp3_44100_128`、`mp3_22050_32`、`opus_24000_32`、`pcm_16000`、`pcm_44100`、`ulaw_8000`。 |
 
 ---
 

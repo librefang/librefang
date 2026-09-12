@@ -513,6 +513,7 @@ async fn run_file_read_for_dedup(
         None,
         None,
         None,
+        None, // tts_config
         None,
         None,
         None,

@@ -39,6 +39,7 @@ async fn test_shell_exec_blocked_for_readonly_workspace_path() {
         None,
         None,
         None,
+        None, // tts_config
         None,
         None,
         None,
@@ -102,6 +103,7 @@ async fn test_shell_exec_allowed_when_not_targeting_readonly_workspace() {
         None,
         None,
         None,
+        None, // tts_config
         None,
         None,
         None,
@@ -677,6 +679,7 @@ async fn test_web_search() {
         None, // media_drivers
         None, // exec_policy
         None, // tts_engine
+        None, // tts_config
         None, // docker_config
         None, // process_manager
         None, // process_registry
@@ -716,6 +719,7 @@ async fn test_unknown_tool() {
         None, // media_drivers
         None, // exec_policy
         None, // tts_engine
+        None, // tts_config
         None, // docker_config
         None, // process_manager
         None, // process_registry
@@ -756,6 +760,7 @@ async fn test_agent_tools_without_kernel() {
         None, // media_drivers
         None, // exec_policy
         None, // tts_engine
+        None, // tts_config
         None, // docker_config
         None, // process_manager
         None, // process_registry
@@ -799,6 +804,7 @@ async fn test_capability_enforcement_denied() {
         None, // media_drivers
         None, // exec_policy
         None, // tts_engine
+        None, // tts_config
         None, // docker_config
         None, // process_manager
         None, // process_registry
@@ -840,6 +846,7 @@ async fn test_capability_enforcement_allowed() {
         None, // media_drivers
         None, // exec_policy
         None, // tts_engine
+        None, // tts_config
         None, // docker_config
         None, // process_manager
         None, // process_registry
@@ -911,6 +918,7 @@ async fn test_capability_enforcement_aliased_tool_name() {
         None, // media_drivers
         None, // exec_policy
         None, // tts_engine
+        None, // tts_config
         None, // docker_config
         None, // process_manager
         None, // process_registry
@@ -956,6 +964,7 @@ async fn test_capability_enforcement_aliased_denied() {
         None, // media_drivers
         None, // exec_policy
         None, // tts_engine
+        None, // tts_config
         None, // docker_config
         None, // process_manager
         None, // process_registry
@@ -1010,6 +1019,7 @@ async fn test_shell_exec_full_policy_skips_approval_gate() {
         None, // media_drivers
         Some(&policy),
         None,
+        None, // tts_config
         None,
         None,
         None,
@@ -1065,6 +1075,7 @@ async fn test_shell_exec_non_full_policy_still_requires_approval() {
         None, // media_drivers
         Some(&policy),
         None,
+        None, // tts_config
         None,
         None,
         None,
@@ -1132,6 +1143,7 @@ async fn test_shell_exec_safe_bins_skip_approval_when_enabled() {
         None, // media_drivers
         Some(&policy),
         None,
+        None, // tts_config
         None,
         None,
         None,
@@ -1192,6 +1204,7 @@ async fn test_shell_exec_safe_bins_still_require_approval_by_default() {
         None, // media_drivers
         Some(&policy),
         None,
+        None, // tts_config
         None,
         None,
         None,
@@ -1252,6 +1265,7 @@ async fn test_shell_exec_safe_bins_chained_non_safe_still_requires_approval() {
         None, // media_drivers
         Some(&policy),
         None,
+        None, // tts_config
         None,
         None,
         None,
@@ -1313,6 +1327,7 @@ async fn test_shell_exec_safe_bins_redirect_still_requires_approval() {
         None, // media_drivers
         Some(&policy),
         None,
+        None, // tts_config
         None,
         None,
         None,
@@ -1373,6 +1388,7 @@ async fn test_shell_exec_safe_bins_command_substitution_still_requires_approval(
         None, // media_drivers
         Some(&policy),
         None,
+        None, // tts_config
         None,
         None,
         None,
@@ -1435,6 +1451,7 @@ async fn test_shell_exec_safe_bins_skip_approval_respects_rbac_needs_approval() 
         None, // media_drivers
         Some(&policy),
         None,
+        None, // tts_config
         None,
         None,
         None,
@@ -1495,6 +1512,7 @@ async fn run_full_mode_approval_case(
         None, // media_drivers
         Some(policy),
         None,
+        None, // tts_config
         None,
         None,
         None,
@@ -1731,6 +1749,7 @@ async fn test_shell_exec_drains_pipe_above_buffer_size() {
         None, // media_drivers
         Some(&policy),
         None,
+        None, // tts_config
         None,
         None,
         None,

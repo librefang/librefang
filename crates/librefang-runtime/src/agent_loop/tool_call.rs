@@ -1136,6 +1136,7 @@ pub(super) async fn execute_single_tool_call_core(
             ctx.media_drivers,
             effective_exec_policy,
             ctx.tts_engine,
+            ctx.opts.tts_config.as_ref(),
             ctx.docker_config,
             ctx.process_manager,
             ctx.process_registry,

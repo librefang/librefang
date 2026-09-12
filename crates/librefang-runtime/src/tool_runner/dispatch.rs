@@ -57,6 +57,10 @@ pub struct ToolExecContext<'a> {
     pub media_drivers: Option<&'a crate::media::MediaDriverCache>,
     pub exec_policy: Option<&'a librefang_types::config::ExecPolicy>,
     pub tts_engine: Option<&'a crate::tts::TtsEngine>,
+    /// Live `[tts]` section for the turn. Separate from `tts_engine`:
+    /// that handle is `None` whenever `[tts] enabled = false`, while
+    /// `text_to_speech` still runs on the media-driver path (#8272).
+    pub tts_config: Option<&'a librefang_types::config::TtsConfig>,
     pub docker_config: Option<&'a librefang_types::config::DockerSandboxConfig>,
     pub process_manager: Option<&'a crate::process_manager::ProcessManager>,
     /// Background process registry — tracks fire-and-forget processes spawned by
@@ -216,7 +220,7 @@ pub async fn execute_tool_raw(
 /// This is the pure dispatch layer: it pattern-matches on `tool_name` and calls the right implementation.
 /// All pre-flight checks (capability enforcement, approval gate, taint checks, truncated-args detection) live in the outer [`execute_tool`] wrapper, and the network byte quota lives in [`execute_tool_raw`]; this function only handles the match.
 //
-// The `#[allow(unused_variables)]` is for `--no-default-features` builds where the media / browser / docker-sandbox tool arms are cfg-gated out and the destructured `media_engine`, `media_drivers`, `browser_ctx`, `tts_engine`, `docker_config` bindings have no consumer.
+// The `#[allow(unused_variables)]` is for `--no-default-features` builds where the media / browser / docker-sandbox tool arms are cfg-gated out and the destructured `media_engine`, `media_drivers`, `browser_ctx`, `tts_engine`, `tts_config`, `docker_config` bindings have no consumer.
 // Re-flagging them per-feature would be 5 nested `cfg_attr` blocks; this is cleaner.
 #[allow(unused_variables)]
 async fn dispatch_tool_call(
@@ -268,6 +272,7 @@ async fn dispatch_tool_call(
         media_drivers,
         exec_policy,
         tts_engine,
+        tts_config,
         docker_config,
         process_manager,
         process_registry,
@@ -1195,7 +1200,14 @@ async fn dispatch_tool_call(
         // TTS/STT tools
         #[cfg(feature = "media")]
         "text_to_speech" => {
-            tool_text_to_speech(input, *media_drivers, *tts_engine, *workspace_root).await
+            tool_text_to_speech(
+                input,
+                *media_drivers,
+                *tts_engine,
+                *tts_config,
+                *workspace_root,
+            )
+            .await
         }
         #[cfg(feature = "media")]
         "speech_to_text" => {
@@ -1661,6 +1673,7 @@ pub async fn execute_tool(
     media_drivers: Option<&crate::media::MediaDriverCache>,
     exec_policy: Option<&librefang_types::config::ExecPolicy>,
     tts_engine: Option<&crate::tts::TtsEngine>,
+    tts_config: Option<&librefang_types::config::TtsConfig>,
     docker_config: Option<&librefang_types::config::DockerSandboxConfig>,
     process_manager: Option<&crate::process_manager::ProcessManager>,
     process_registry: Option<&crate::process_registry::ProcessRegistry>,
@@ -1695,6 +1708,7 @@ pub async fn execute_tool(
         media_drivers,
         exec_policy,
         tts_engine,
+        tts_config,
         docker_config,
         process_manager,
         process_registry,
@@ -1744,6 +1758,7 @@ pub async fn execute_tool_with_sender_account(
     media_drivers: Option<&crate::media::MediaDriverCache>,
     exec_policy: Option<&librefang_types::config::ExecPolicy>,
     tts_engine: Option<&crate::tts::TtsEngine>,
+    tts_config: Option<&librefang_types::config::TtsConfig>,
     docker_config: Option<&librefang_types::config::DockerSandboxConfig>,
     process_manager: Option<&crate::process_manager::ProcessManager>,
     process_registry: Option<&crate::process_registry::ProcessRegistry>,
@@ -2008,6 +2023,7 @@ pub async fn execute_tool_with_sender_account(
         media_drivers,
         exec_policy,
         tts_engine,
+        tts_config,
         docker_config,
         process_manager,
         process_registry,

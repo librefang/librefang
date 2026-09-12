@@ -647,6 +647,24 @@ impl KernelConfig {
             }
         }
 
+        // #8272: an unrecognised `[tts] output_format` is indistinguishable
+        // from `"mp3"` at the point of use — the conversion branch simply does
+        // not match — so an operator who typed `ogg-opus` would keep getting
+        // undeliverable MP3 with nothing in the log to say why. Name it once at
+        // config load instead.
+        if let Some(fmt) = self.tts.output_format.as_deref() {
+            if !super::TTS_OUTPUT_FORMATS.contains(&fmt) {
+                warnings.push(format!(
+                    "[tts] output_format = \"{fmt}\" is not one of {:?}; \
+                     text_to_speech will skip the conversion step and save the \
+                     provider's own format, exactly as \"{}\" does, so audio \
+                     meant for a voice note may be rejected on delivery (#8272)",
+                    super::TTS_OUTPUT_FORMATS,
+                    super::DEFAULT_TTS_OUTPUT_FORMAT,
+                ));
+            }
+        }
+
         warnings
     }
 

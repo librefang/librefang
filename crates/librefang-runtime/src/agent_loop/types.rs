@@ -210,6 +210,20 @@ pub struct LoopOptions {
     ///
     /// Kernel populates this from `KernelConfig.canvas`.
     pub canvas_config: Option<librefang_types::config::CanvasConfig>,
+    /// Text-to-speech configuration (`[tts]` in config.toml).
+    ///
+    /// Supplies the operator default for the `text_to_speech` tool's
+    /// `output_format` argument. Carried here rather than read off the
+    /// `TtsEngine` handle the loop already receives, because that handle is
+    /// deliberately `None` whenever `[tts] enabled = false` — while the tool
+    /// itself still runs, on the media-driver path — and holds a boot-time
+    /// clone besides. Reading config through it made `[tts] output_format`
+    /// unreachable in the default configuration and stale after
+    /// `POST /api/config/reload` (#8272).
+    ///
+    /// Kernel populates this from `KernelConfig.tts`; `None` (the default and
+    /// the test path) leaves the tool on its built-in `"mp3"`.
+    pub tts_config: Option<librefang_types::config::TtsConfig>,
     /// When true, this invocation is a **system-internal fork** with no
     /// attributable end user — currently the auto_dream background cycle,
     /// spawned via `LibreFangKernel::run_forked_agent_streaming` with a

@@ -1498,6 +1498,7 @@
       "description": "Text-to-speech configuration.",
       "default": {
         "enabled": false,
+        "output_format": null,
         "provider": null,
         "openai": {
           "voice": "alloy",
@@ -7734,6 +7735,14 @@
             {
               "$ref": "#/definitions/TtsOpenAiConfig"
             }
+          ]
+        },
+        "output_format": {
+          "description": "Operator default for the `text_to_speech` tool's `output_format` argument — the container the tool finally writes to `output/`, applied to every provider. One of [`TTS_OUTPUT_FORMATS`]. Unset (`None`) keeps the built-in [`DEFAULT_TTS_OUTPUT_FORMAT`]; an `output_format` passed in the tool call always wins over this.\n\n`\"mp3\"` is the name of the no-op, not a conversion target: it keeps whatever the provider returned, so a provider configured to emit Opus still emits Opus. Only `\"ogg_opus\"` triggers a conversion.\n\nSet it to `\"ogg_opus\"` when the audio is destined for a messaging channel: a voice note has to be Ogg/Opus, and most providers return MP3, which such a channel rejects. Synthesis still reports success in that case — the file exists, it simply cannot be delivered — so without this key the mismatch surfaces only as a reply that never arrives (#8272). The conversion runs through ffmpeg and falls back to the provider format when ffmpeg is missing.\n\nDistinct from `[tts.elevenlabs] output_format`: that one is a provider query parameter with its own vocabulary (`opus_48000_32`, …) and already defaults to Opus (#6116), so ElevenLabs needs no conversion step here.",
+          "default": null,
+          "type": [
+            "string",
+            "null"
           ]
         },
         "provider": {

@@ -478,6 +478,7 @@ Configures text-to-speech synthesis for voice output.
 [tts]
 enabled = false
 provider = "openai"          # openai | elevenlabs | google_tts
+output_format = "mp3"        # mp3 | ogg_opus
 max_text_length = 4096
 timeout_secs = 30
 
@@ -507,8 +508,23 @@ format = "mp3"
 |-------|------|---------|-------------|
 | `enabled` | bool | `false` | Enable TTS synthesis. |
 | `provider` | string or null | `null` | Default TTS provider: `"openai"`, `"elevenlabs"`, or `"google_tts"`. |
+| `output_format` | string or null | `null` (→ `"mp3"`) | Default for the `text_to_speech` tool's `output_format` argument, applied to every provider: `"mp3"` or `"ogg_opus"`. `"mp3"` performs no conversion — the provider's own format is kept. A value passed in the tool call wins. |
 | `max_text_length` | usize | `4096` | Maximum text length in characters for a single TTS request. |
 | `timeout_secs` | u64 | `30` | Request timeout per TTS call in seconds. |
+
+Only `"ogg_opus"` triggers a conversion; `"mp3"` is the name of the no-op and
+leaves whatever the provider returned, so a provider emitting Opus still emits
+Opus.
+
+Set `output_format = "ogg_opus"` when synthesised audio is sent to a messaging
+channel. A voice note has to be Ogg/Opus, and most providers return MP3, which
+the channel rejects — while `text_to_speech` itself reports success, because the
+file was written. The conversion runs through ffmpeg and falls back to the
+provider's own format when ffmpeg is not installed.
+
+This is separate from `[tts.elevenlabs] output_format` below, which is a
+provider query parameter with its own vocabulary and already asks ElevenLabs for
+Opus directly, so no conversion step is needed there.
 
 **`[tts.openai]` fields:**
 
@@ -527,6 +543,7 @@ format = "mp3"
 | `model_id` | string | `"eleven_monolingual_v1"` | ElevenLabs model ID. |
 | `stability` | f32 | `0.5` | Voice stability (0.0–1.0). Higher = more consistent, less expressive. |
 | `similarity_boost` | f32 | `0.75` | Voice similarity boost (0.0–1.0). |
+| `output_format` | string | `"opus_48000_32"` | The `?output_format=` query parameter sent to ElevenLabs. Others: `mp3_44100_128`, `mp3_22050_32`, `opus_24000_32`, `pcm_16000`, `pcm_44100`, `ulaw_8000`. |
 
 **`[tts.google]` fields:**
 
