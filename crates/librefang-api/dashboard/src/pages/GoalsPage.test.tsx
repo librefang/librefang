@@ -9,6 +9,7 @@ import {
   progressForGoalStatus,
   runIndependentBatch,
 } from "./GoalsPage";
+import { useAgents } from "../lib/queries/agents";
 import { useGoals, useGoalTemplates, useGoalRun } from "../lib/queries/goals";
 import {
   useCreateGoal,
@@ -17,7 +18,11 @@ import {
   useStartGoalRun,
   useStopGoalRun,
 } from "../lib/mutations/goals";
-import type { GoalItem, GoalTemplate } from "../api";
+import type { AgentItem, GoalItem, GoalTemplate } from "../api";
+
+vi.mock("../lib/queries/agents", () => ({
+  useAgents: vi.fn(),
+}));
 
 vi.mock("../lib/queries/goals", () => ({
   useGoals: vi.fn(),
@@ -46,6 +51,7 @@ vi.mock("react-i18next", async () => {
   };
 });
 
+const useAgentsMock = useAgents as unknown as ReturnType<typeof vi.fn>;
 const useGoalsMock = useGoals as unknown as ReturnType<typeof vi.fn>;
 const useGoalTemplatesMock = useGoalTemplates as unknown as ReturnType<typeof vi.fn>;
 const useGoalRunMock = useGoalRun as unknown as ReturnType<typeof vi.fn>;
@@ -139,6 +145,11 @@ const CHILD_GOAL: GoalItem = {
   progress: 0,
 };
 
+const AGENTS: AgentItem[] = [
+  { id: "a-worker", name: "worker" },
+  { id: "a-reviewer", name: "reviewer" },
+];
+
 const COMPLETED_GOAL: GoalItem = {
   id: "g-done",
   title: "Finished goal",
@@ -150,6 +161,7 @@ describe("GoalsPage", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     setMutations();
+    useAgentsMock.mockReturnValue(makeQuery<AgentItem[]>(AGENTS));
     // GoalRunControl calls useGoalRun for every rendered goal; default to an
     // idle (no active run) query so the control renders its start button.
     useGoalRunMock.mockReturnValue(makeQuery({ running: false }));
@@ -293,6 +305,93 @@ describe("GoalsPage", () => {
     // `parent_id: ""` used to reach the backend and fail its parent-existence check with "Parent goal '' not found"; `agent_id: ""` persisted an unparsable assignment that broke the goal runner's start route.
     expect(payload).not.toHaveProperty("parent_id");
     expect(payload).not.toHaveProperty("agent_id");
+    // Same rule for the loop-engineering ids: the backend rejects a non-UUID
+    // verify_agent_id outright, and `""` is not a UUID.
+    expect(payload).not.toHaveProperty("verify_agent_id");
+    expect(payload).not.toHaveProperty("evaluator_model");
+  });
+
+  // Loop engineering is opt-in, so the controls that configure it stay out of
+  // the way until it is switched on — and a goal that never switches it on
+  // must say so explicitly rather than omitting the field.
+  it("reveals the verifier and evaluator controls only once loop engineering is ticked", () => {
+    useGoalsMock.mockReturnValue(makeQuery([PARENT_GOAL]));
+    useGoalTemplatesMock.mockReturnValue(makeQuery<GoalTemplate[]>([]));
+    renderPage();
+
+    expect(
+      screen.queryByPlaceholderText("goals.evaluator_model_placeholder"),
+    ).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByLabelText("goals.loop_engineering"));
+
+    expect(
+      screen.getByPlaceholderText("goals.evaluator_model_placeholder"),
+    ).toBeInTheDocument();
+    expect(screen.getByText("goals.no_verifier_selected")).toBeInTheDocument();
+  });
+
+  it("sends the loop-engineering configuration on create", async () => {
+    useGoalsMock.mockReturnValue(makeQuery([PARENT_GOAL]));
+    useGoalTemplatesMock.mockReturnValue(makeQuery<GoalTemplate[]>([]));
+    const { create } = setMutations();
+    renderPage();
+
+    fireEvent.change(
+      screen.getByPlaceholderText("goals.goal_title_placeholder"),
+      { target: { value: "Verified goal" } },
+    );
+    fireEvent.click(screen.getByLabelText("goals.loop_engineering"));
+    // The verifier is picked from the agent list, not typed: a hand-typed id
+    // is how a goal ends up storing something the run route has to reject.
+    fireEvent.change(screen.getByLabelText("goals.verifier_agent"), {
+      target: { value: "a-reviewer" },
+    });
+    fireEvent.change(
+      screen.getByPlaceholderText("goals.evaluator_model_placeholder"),
+      { target: { value: "haiku" } },
+    );
+
+    const submitBtn = screen
+      .getAllByText("goals.create_goal")
+      .map((el) => el.closest("button"))
+      .find((b): b is HTMLButtonElement => !!b && b.type === "submit");
+    fireEvent.click(submitBtn!);
+
+    await Promise.resolve();
+
+    expect(create).toHaveBeenCalledTimes(1);
+    expect(create.mock.calls[0][0]).toMatchObject({
+      title: "Verified goal",
+      loop_engineering: true,
+      verify_agent_id: "a-reviewer",
+      evaluator_model: "haiku",
+    });
+  });
+
+  it("marks a loop-engineered goal in the tree and leaves a plain one unmarked", () => {
+    useGoalTemplatesMock.mockReturnValue(makeQuery<GoalTemplate[]>([]));
+
+    useGoalsMock.mockReturnValue(makeQuery([PARENT_GOAL]));
+    const plain = render(
+      <QueryClientProvider
+        client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}
+      >
+        <GoalsPage />
+      </QueryClientProvider>,
+    );
+    // The badge carries the hint as its title, which the checkbox label does
+    // not — so this identifies the tree marker and nothing else.
+    expect(
+      plain.queryByTitle("goals.loop_engineering_hint"),
+    ).not.toBeInTheDocument();
+    plain.unmount();
+
+    useGoalsMock.mockReturnValue(
+      makeQuery([{ ...PARENT_GOAL, loop_engineering: true }]),
+    );
+    renderPage();
+    expect(screen.getByTitle("goals.loop_engineering_hint")).toBeInTheDocument();
   });
 
   it("does not submit the create form when the title is whitespace-only", () => {
@@ -525,18 +624,21 @@ describe("GoalRunPhaseBadge", () => {
     expect(badge!.querySelector("svg")!.getAttribute("class")).not.toMatch(/\bmr-/);
   });
 
+  // #8067 wrote this case against "paused", the phase this branch adds. Now that
+  // the switch knows "paused" the case needs a phase no build knows, or it would
+  // assert the neutral variant against an arm that is deliberately not neutral —
+  // and pass again the moment someone deleted that arm.
   it("renders an unknown phase under the neutral variant with its own key, not a confident Stopped", () => {
-    // "paused" is the phase #7973 adds — the unknown-phase case that fires first here.
-    const { container } = render(<GoalRunPhaseBadge phase="paused" />);
+    const { container } = render(<GoalRunPhaseBadge phase="quiesced" />);
 
     // The label is asked of i18n by the phase's own key with the raw phase as
-    // the fallback, so a locale that gains `run_phase_paused` starts using it
+    // the fallback, so a locale that gains `run_phase_quiesced` starts using it
     // with no code change. The previous shape gated translation on a hardcoded
     // `labelKey` per phase, so an unknown phase could never pick one up.
     // (`t` is mocked here as `key:{options}`; in production this renders the
-    // translation when the key exists and "paused" when it does not.)
+    // translation when the key exists and "quiesced" when it does not.)
     expect(
-      screen.getByText('goals.run_phase_paused:{"defaultValue":"paused"}'),
+      screen.getByText('goals.run_phase_quiesced:{"defaultValue":"quiesced"}'),
     ).toBeInTheDocument();
     expect(screen.queryByText(/goals\.run_phase_stopped/)).not.toBeInTheDocument();
 
@@ -549,6 +651,23 @@ describe("GoalRunPhaseBadge", () => {
     // The unknown branch is the one that keeps the dot, having no icon.
     expect(badge.querySelectorAll("span[aria-hidden='true']")).toHaveLength(1);
     expect(badge.querySelectorAll("svg")).toHaveLength(0);
+  });
+
+  // The arm this branch adds, and the one a merge with #8067 could have dropped
+  // without any other test noticing: without it "paused" falls through to
+  // `default`, which is what the unknown-phase case above asserts and would
+  // therefore still be green.
+  it("gives paused its own warning variant and icon rather than the unknown fallback", () => {
+    const { container } = render(<GoalRunPhaseBadge phase="paused" />);
+    const badge = container.querySelector("span.inline-flex")!;
+
+    expect(
+      screen.getByText('goals.run_phase_paused:{"defaultValue":"paused"}'),
+    ).toBeInTheDocument();
+    expect(badge.className).toContain("bg-warning/10");
+    expect(badge.className).not.toContain("bg-main");
+    expect(badge.querySelectorAll("svg")).toHaveLength(1);
+    expect(badge.querySelectorAll("span[aria-hidden='true']")).toHaveLength(0);
   });
 });
 

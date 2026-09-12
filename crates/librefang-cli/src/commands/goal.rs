@@ -190,12 +190,20 @@ fn api_error(body: &serde_json::Value) -> String {
 }
 
 /// Locale key summarising a terminal run phase, or `None` while still running.
+///
+/// `paused` counts as terminal for `--watch`'s purposes even though the run
+/// itself is resumable: nothing in this invocation is going to resume it, so
+/// treating it as "still running" left the CLI polling forever and treating
+/// it as unclassified burned the bounded unobservable-poll retry budget on a
+/// perfectly well-understood state (`classify_poll` calls this to decide
+/// `Terminal` vs. `Unobservable`).
 fn terminal_phase_message(phase: &str) -> Option<&'static str> {
     match phase {
         "finished" => Some("cmd-goal-finished"),
         "max_iterations_reached" => Some("cmd-goal-max-iterations"),
         "rate_limited" => Some("cmd-goal-rate-limited"),
         "stopped" => Some("cmd-goal-stopped"),
+        "paused" => Some("cmd-goal-paused"),
         _ => None,
     }
 }
@@ -251,12 +259,15 @@ mod tests {
     #[test]
     fn every_terminal_phase_has_a_summary() {
         // Mirrors `GoalRunPhase` in librefang-types minus `Running`, which is
-        // the one phase that is not terminal.
+        // the one phase that is not terminal. `paused` counts as terminal
+        // here even though the run itself is resumable — see
+        // `terminal_phase_message`'s doc comment.
         for phase in [
             "finished",
             "max_iterations_reached",
             "rate_limited",
             "stopped",
+            "paused",
         ] {
             assert!(
                 terminal_phase_message(phase).is_some(),
@@ -295,6 +306,7 @@ mod tests {
             "max_iterations_reached",
             "rate_limited",
             "stopped",
+            "paused",
         ] {
             let body = serde_json::json!({ "running": false, "run": { "phase": phase } });
             assert!(

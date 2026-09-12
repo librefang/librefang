@@ -1,0 +1,3 @@
+Set how often a goal run prompts its agent with `tick_interval_secs` on the goal itself, accepted by `POST /api/goals` and `PUT /api/goals/{id}`.
+Every goal previously ticked at the same hard-wired cadence, which is the wrong rate at both ends: a goal whose progress depends on something outside the daemon burned turns re-reading an unchanged world, and one that needs to react quickly could not be told to.
+An out-of-range value is refused rather than clamped, so an operator who types a cadence learns their number was rejected instead of discovering later that the loop runs at a rate they never chose (#7973) (@DaBlitzStein)

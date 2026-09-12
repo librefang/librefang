@@ -304,6 +304,10 @@ pub enum AppEvent {
     GoalRunStarted(String),
     /// Goal run stopped.
     GoalRunStopped(String),
+    /// A goal run was checkpointed and paused.
+    GoalRunPaused(String),
+    /// A paused goal run was resumed from its checkpoint.
+    GoalRunResumed(String),
     /// Hand definitions loaded (marketplace).
     HandsLoaded(Vec<HandInfo>),
     /// Active hand instances loaded.
@@ -4549,6 +4553,82 @@ pub fn spawn_stop_goal_run(backend: BackendRef, goal_id: String, tx: mpsc::Sende
                 }
                 Err(_) => {
                     let _ = tx.send(AppEvent::FetchError(crate::i18n::t("tui-goal-stop-failed")));
+                }
+            }
+        }
+        BackendRef::InProcess(_) => {
+            let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
+                "tui-goal-inproc-unavailable",
+            )));
+        }
+    });
+}
+
+/// Pause a running goal, checkpointing its iteration count and progress.
+///
+/// `POST /api/goals/{id}/pause`. The daemon signals the loop rather than
+/// aborting it, so success here means "the pause was accepted", not "the loop
+/// has already stopped" — the phase the detail pane shows afterwards comes from
+/// the refresh, not from this response.
+pub fn spawn_pause_goal_run(backend: BackendRef, goal_id: String, tx: mpsc::Sender<AppEvent>) {
+    std::thread::spawn(move || match backend {
+        BackendRef::Daemon { base_url, api_key } => {
+            let client = make_daemon_client(api_key.as_deref());
+            match client
+                .post(format!("{base_url}/api/goals/{goal_id}/pause"))
+                .send()
+            {
+                Ok(resp) if resp.status().is_success() => {
+                    let _ = tx.send(AppEvent::GoalRunPaused(goal_id));
+                }
+                Ok(resp) => {
+                    let _ = tx.send(AppEvent::FetchError(api_error_text(
+                        resp,
+                        "tui-goal-pause-failed",
+                    )));
+                }
+                Err(_) => {
+                    let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
+                        "tui-goal-pause-failed",
+                    )));
+                }
+            }
+        }
+        BackendRef::InProcess(_) => {
+            let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
+                "tui-goal-inproc-unavailable",
+            )));
+        }
+    });
+}
+
+/// Resume a paused goal from its checkpoint.
+///
+/// `POST /api/goals/{id}/resume` with no body, which is the daemon's "keep the
+/// cap the paused run was already under" path. Re-budgeting a resumed run is a
+/// deliberate act and belongs to a surface that can ask for the number, not to
+/// a single keypress.
+pub fn spawn_resume_goal_run(backend: BackendRef, goal_id: String, tx: mpsc::Sender<AppEvent>) {
+    std::thread::spawn(move || match backend {
+        BackendRef::Daemon { base_url, api_key } => {
+            let client = make_daemon_client(api_key.as_deref());
+            match client
+                .post(format!("{base_url}/api/goals/{goal_id}/resume"))
+                .send()
+            {
+                Ok(resp) if resp.status().is_success() => {
+                    let _ = tx.send(AppEvent::GoalRunResumed(goal_id));
+                }
+                Ok(resp) => {
+                    let _ = tx.send(AppEvent::FetchError(api_error_text(
+                        resp,
+                        "tui-goal-resume-failed",
+                    )));
+                }
+                Err(_) => {
+                    let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
+                        "tui-goal-resume-failed",
+                    )));
                 }
             }
         }

@@ -1,0 +1,2 @@
+`POST /api/goals/{id}/resume` (and `/start` on a paused goal, which auto-resumes the same way) now rejects an explicit `max_iterations` at or below the paused run's already-completed iteration count.
+Resuming with a cap that low used to immediately trip the iteration-cap check with no turn run and discard the checkpoint on the way out — including the learnings it carried — for a request that could never have advanced the run in the first place. (#7973) (@DaBlitzStein)
