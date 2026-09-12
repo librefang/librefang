@@ -6288,3 +6288,135 @@ async fn test_message_rejects_malformed_session_id() {
         "error code must be stable for scripted callers: {body}"
     );
 }
+
+/// Spawn an agent through the production router and return its id.
+const EXPORT_TEST_KEY: &str = "export-audit-key";
+
+async fn full_router_spawn_agent(app: &Router, manifest: &str) -> String {
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/agents")
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {EXPORT_TEST_KEY}"))
+                .body(Body::from(
+                    serde_json::json!({ "manifest_toml": manifest }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED, "spawn must succeed");
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    body["agent_id"].as_str().unwrap().to_string()
+}
+
+/// GET through the production router, returning status, content-type and body.
+async fn full_router_get(app: &Router, uri: &str) -> (StatusCode, String, String) {
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(uri)
+                .header("authorization", format!("Bearer {EXPORT_TEST_KEY}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = resp.status();
+    let content_type = resp
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    (status, content_type, String::from_utf8_lossy(&bytes).into())
+}
+
+/// A session id that does not exist is a 404 from the handler, not a 500.
+///
+/// The kernel returns the miss as `LibreFangError::Internal("Session not
+/// found")`, and `kernel_err_to_status` types only `AgentNotFound` and
+/// `AgentAlreadyExists` — everything else falls through to 500. The scrub in
+/// `kernel_err_body` then replaces the message with the generic internal-error
+/// body, so asking for a session that simply is not there returns
+/// `{"error":"Internal server error"}` with no way to tell a typo from an
+/// outage.
+///
+/// This runs against `start_full_router`, the real `server::build_router`.
+/// `start_test_server` mounts a hand-picked subset that does not include this
+/// route, so the same assertions there pass against the axum fallback without
+/// the handler ever running — which is why the content type is asserted too.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_export_missing_session_is_404_not_500() {
+    let harness = start_full_router(EXPORT_TEST_KEY).await;
+    let agent_id = full_router_spawn_agent(&harness.app, TEST_MANIFEST).await;
+
+    // Well-formed UUID, no such session. A malformed one is already a 400.
+    const MISSING_SESSION: &str = "11111111-1111-4111-8111-111111111111";
+    let (status, content_type, body) = full_router_get(
+        &harness.app,
+        &format!("/api/agents/{agent_id}/sessions/{MISSING_SESSION}/export"),
+    )
+    .await;
+
+    assert!(
+        content_type.starts_with("application/json"),
+        "must be the handler's answer, not the axum fallback: \
+         content-type={content_type:?} body={body:?}"
+    );
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "a missing session must be a 404, not a server fault: {body}"
+    );
+}
+
+/// A session that exists but belongs to another agent is also a 404.
+///
+/// Same kernel function, same `Internal(String)` shape, same 500. 404 rather
+/// than 403 matches what `can_access_agent` already does one branch earlier in
+/// this handler: refusing without confirming the resource exists.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_export_session_of_another_agent_is_404_not_500() {
+    let harness = start_full_router(EXPORT_TEST_KEY).await;
+
+    let agent_a = full_router_spawn_agent(&harness.app, TEST_MANIFEST).await;
+    let manifest_b =
+        TEST_MANIFEST.replace("name = \"test-agent\"", "name = \"test-agent-export-b\"");
+    let agent_b = full_router_spawn_agent(&harness.app, &manifest_b).await;
+
+    let (status, _, body) =
+        full_router_get(&harness.app, &format!("/api/agents/{agent_a}/session")).await;
+    assert_eq!(status, StatusCode::OK, "agent A session: {body}");
+    let session_a = serde_json::from_str::<serde_json::Value>(&body).unwrap()["session_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let (status, content_type, body) = full_router_get(
+        &harness.app,
+        &format!("/api/agents/{agent_b}/sessions/{session_a}/export"),
+    )
+    .await;
+
+    assert!(
+        content_type.starts_with("application/json"),
+        "must be the handler's answer, not the axum fallback: \
+         content-type={content_type:?} body={body:?}"
+    );
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "another agent's session must be a 404, not a server fault: {body}"
+    );
+}

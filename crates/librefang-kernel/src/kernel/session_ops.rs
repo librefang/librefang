@@ -757,12 +757,17 @@ impl LibreFangKernel {
             .get_session(session_id)
             .map_err(KernelError::LibreFang)?
             .ok_or_else(|| {
-                KernelError::LibreFang(LibreFangError::Internal("Session not found".to_string()))
+                KernelError::LibreFang(LibreFangError::SessionNotFound(session_id.0.to_string()))
             })?;
 
         if session.agent_id != agent_id {
-            return Err(KernelError::LibreFang(LibreFangError::Internal(
-                "Session belongs to a different agent".to_string(),
+            // Reported as "not found" rather than a distinct "wrong owner":
+            // the caller has no claim on this session either way, and saying
+            // which of the two it is confirms the session exists to someone
+            // who cannot read it. Matches `can_access_agent`, which answers a
+            // non-owner with 404 one branch earlier in the same handlers.
+            return Err(KernelError::LibreFang(LibreFangError::SessionNotFound(
+                session_id.0.to_string(),
             )));
         }
 
@@ -791,12 +796,17 @@ impl LibreFangKernel {
             .get_session(session_id)
             .map_err(KernelError::LibreFang)?
             .ok_or_else(|| {
-                KernelError::LibreFang(LibreFangError::Internal("Session not found".to_string()))
+                KernelError::LibreFang(LibreFangError::SessionNotFound(session_id.0.to_string()))
             })?;
 
         if session.agent_id != agent_id {
-            return Err(KernelError::LibreFang(LibreFangError::Internal(
-                "Session belongs to a different agent".to_string(),
+            // Reported as "not found" rather than a distinct "wrong owner":
+            // the caller has no claim on this session either way, and saying
+            // which of the two it is confirms the session exists to someone
+            // who cannot read it. Matches `can_access_agent`, which answers a
+            // non-owner with 404 one branch earlier in the same handlers.
+            return Err(KernelError::LibreFang(LibreFangError::SessionNotFound(
+                session_id.0.to_string(),
             )));
         }
 
