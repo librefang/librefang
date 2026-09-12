@@ -287,6 +287,9 @@ class _AgentsResource(_Resource):
     def agent_logs(self, id: str, n: Any = None, level: Any = None, offset: Any = None):
         return self._c._request("GET", f"/api/agents/{id}/logs", None, query={"n": n, "level": level, "offset": offset})
 
+    def get_agent_manifest_toml(self, id: str):
+        return self._c._request("GET", f"/api/agents/{id}/manifest")
+
     def get_agent_mcp_servers(self, id: str):
         return self._c._request("GET", f"/api/agents/{id}/mcp_servers")
 

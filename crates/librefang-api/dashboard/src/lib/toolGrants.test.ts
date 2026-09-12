@@ -5,6 +5,7 @@ import {
   isToolBlocked,
   normalizeMcpName,
   resolveMcpGrantMode,
+  toggleMcpServerGrant,
   toolPatternMatches,
 } from "./toolGrants";
 
@@ -112,6 +113,32 @@ describe("isMcpServerGranted", () => {
 
   it("compares server names after normalization", () => {
     expect(isMcpServerGranted("Brave-Search", ["brave_search"], "allowlist")).toBe(true);
+  });
+});
+
+// Grant/revoke logic behind the agent detail Tools tab's MCP group toggle
+// (#6565 follow-up). AgentsPage has no render harness (~20 hooks — see
+// AgentsPage.test.tsx), so this pure helper carries the test coverage for
+// the tab's new "click an MCP group to grant/revoke it" behavior.
+describe("toggleMcpServerGrant", () => {
+  it("adds an ungranted server", () => {
+    expect(toggleMcpServerGrant(["brave"], "github")).toEqual(["brave", "github"]);
+  });
+
+  it("removes an already-granted server", () => {
+    expect(toggleMcpServerGrant(["brave", "github"], "brave")).toEqual(["github"]);
+  });
+
+  it("grants from an empty list", () => {
+    expect(toggleMcpServerGrant([], "brave")).toEqual(["brave"]);
+  });
+
+  it("recognizes an already-granted server across a case/dash variant", () => {
+    expect(toggleMcpServerGrant(["Brave-Search"], "brave_search")).toEqual([]);
+  });
+
+  it("does not add a duplicate case/dash variant of an already-granted server", () => {
+    expect(toggleMcpServerGrant(["brave_search"], "Brave-Search")).toEqual([]);
   });
 });
 

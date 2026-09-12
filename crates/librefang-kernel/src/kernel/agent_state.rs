@@ -537,6 +537,12 @@ impl LibreFangKernel {
         // System-owned `hand:*` tags stay pinned.
         new_manifest.tags = merge_agent_tags(&entry.tags, &new_manifest.tags);
 
+        // Tags: `replace_manifest_and_retag` (#7742) already reprojects
+        // `entry.tags` and the `tag_index` from `manifest.tags` as part of
+        // the same call, so there is no separate `update_tags` step here —
+        // calling both would reproject tags twice, fire `notify_changed()`
+        // twice, and (if the retag call failed after `update_tags` already
+        // wrote the new tags) leave `entry.tags` ahead of `entry.manifest`.
         self.agents
             .registry
             .replace_manifest_and_retag(agent_id, new_manifest)

@@ -1231,6 +1231,14 @@ pub async fn list_agent_runtime(
 // The legacy `PUT /api/agents/{id}/update` endpoint was removed in #3748 —
 // callers should send `{"manifest_toml": "..."}` to `PATCH /api/agents/{id}`
 // instead, which now also handles full-manifest replacement.
+//
+// That replacement is whole-file and carries no version or ETag
+// precondition: a caller doing read-modify-write over `GET
+// /api/agents/{id}/manifest` + this PATCH (the TUI shared-folders editor,
+// #7835) can overwrite a manifest written between its read and write with a
+// stale base. Surfaces adopting the pattern inherit that limitation until
+// the endpoint grows a manifest generation counter (also the natural hook
+// for #8047's manifest history work).
 #[utoipa::path(
     patch,
     path = "/api/agents/{id}",
@@ -1522,6 +1530,81 @@ pub async fn reload_agent_manifest(
                 status,
                 Json(serde_json::json!({"error": kernel_err_body(status, &e, &t)})),
             )
+        }
+    }
+}
+
+/// GET /api/agents/{id}/manifest — Get the agent's full manifest as raw TOML.
+///
+/// Powers the dashboard's full manifest editor (#7742): the Configure
+/// drawer's quick-edit widgets only cover a handful of fields, so this
+/// endpoint hands back every field `AgentManifest` carries for
+/// `AgentManifestForm` to parse and pre-fill, with `PATCH /api/agents/{id}`
+/// (`manifest_toml`) as the matching write path. Renders the live
+/// in-memory manifest the same way `persist_manifest_to_disk` writes
+/// `agent.toml`, rather than re-reading the on-disk file, so the response
+/// always reflects the latest state even if a prior partial PATCH hasn't
+/// flushed to disk yet.
+#[utoipa::path(
+    get,
+    path = "/api/agents/{id}/manifest",
+    tag = "agents",
+    params(("id" = String, Path, description = "Agent ID")),
+    responses(
+        (status = 200, description = "Agent manifest as raw TOML", content_type = "application/toml"),
+        (status = 404, description = "Agent not found")
+    )
+)]
+pub async fn get_agent_manifest_toml(
+    State(state): State<Arc<AppState>>,
+    api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
+    Path(id): Path<String>,
+    lang: Option<axum::Extension<RequestLanguage>>,
+) -> impl IntoResponse {
+    use axum::body::Body;
+
+    let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
+    let agent_id: AgentId = match id.parse() {
+        Ok(id) => id,
+        Err(_) => {
+            return ApiErrorResponse::bad_request(t.t("api-error-agent-invalid-id"))
+                .with_code("invalid_agent_id")
+                .into_response();
+        }
+    };
+    let entry = match state.kernel.agent_registry().get(agent_id) {
+        Some(e) => e,
+        None => {
+            return ApiErrorResponse::not_found(t.t("api-error-agent-not-found"))
+                .with_code("agent_not_found")
+                .into_response();
+        }
+    };
+    if !super::super::can_access_agent(&state, agent_id, api_user.as_ref()) {
+        return ApiErrorResponse::not_found(t.t("api-error-agent-not-found"))
+            .with_code("agent_not_found")
+            .into_response();
+    }
+    // Localize before dropping the translator (`ErrorTranslator` is
+    // `!Send`) — the toml::to_string_pretty call below doesn't await, but
+    // matching the established pattern (see `patch_agent`) keeps this file
+    // consistent and future-proof against a refactor that adds one.
+    let internal_error_msg = t.t("api-error-internal");
+    drop(t);
+    match toml::to_string_pretty(&entry.manifest) {
+        Ok(text) => (
+            StatusCode::OK,
+            [(axum::http::header::CONTENT_TYPE, "application/toml")],
+            Body::from(text),
+        )
+            .into_response(),
+        Err(e) => {
+            tracing::error!(error = %e, "failed to serialize agent manifest to TOML");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": internal_error_msg})),
+            )
+                .into_response()
         }
     }
 }

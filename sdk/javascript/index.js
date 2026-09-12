@@ -271,6 +271,10 @@ class AgentsResource {
     return this._c._request("GET", `/api/agents/${id}/logs`, undefined, query);
   }
 
+  async getAgentManifestToml(id) {
+    return this._c._request("GET", `/api/agents/${id}/manifest`);
+  }
+
   async getAgentMcpServers(id) {
     return this._c._request("GET", `/api/agents/${id}/mcp_servers`);
   }

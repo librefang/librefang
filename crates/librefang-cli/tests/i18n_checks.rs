@@ -344,6 +344,10 @@ fn is_potential_untranslated_literal(lit: &str) -> bool {
     {
         return false;
     }
+    // `{path:<28}` was exempted for the workspace row's format string, which
+    // was later rewritten to positional args (`screens/agents.rs`) — nothing
+    // in the crate contains that literal anymore. `{name:<28}` is still live
+    // in `commands/mcp_cmds.rs`.
     if trimmed.contains("{name:<28}") {
         return false;
     }
