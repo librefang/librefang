@@ -541,10 +541,8 @@ fn resolve_config_includes(
     let mut merged_base = toml::Value::Table(toml::map::Map::new());
 
     for include_path_str in &includes {
-        // SECURITY: reject anything that is not a plain relative path — an
-        // absolute or (on Windows) rooted/drive-relative entry, and `..`
-        // traversal. Both forms survive `Path::join` and land outside the
-        // config directory.
+        // SECURITY: reject anything that is not a plain relative path — an absolute or (on Windows) rooted/drive-relative entry, and `..` traversal.
+        // Both forms survive `Path::join` and land outside the config directory.
         let include_path = Path::new(include_path_str);
         if include_is_not_plainly_relative(include_path) {
             return Err(format!(
