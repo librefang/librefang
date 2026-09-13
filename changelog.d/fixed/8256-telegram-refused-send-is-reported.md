@@ -1,8 +1,0 @@
-A Telegram reply the API refuses is now reported instead of vanishing.
-Both halves of the send path discarded the verdict: the daemon's `send` frame is fire-and-forget with no response frame, so it can only report a failed write to the sidecar's stdin, and the adapter dropped the API response on the floor.
-A `403 bot was blocked by the user` therefore produced no journal line, no stderr and no counter, while the daemon logged the outbound message and reported success.
-That turns "the agent stopped answering" into an investigation of the entire pipeline, because every hop that can be observed looks healthy and the one that failed cannot be.
-The adapter now logs the verdict — method, chat id, HTTP status, error code and a truncated description, never the token and never the message body — and the daemon already forwards sidecar stderr into its own log, so the trace appears with no new plumbing.
-Reporting sits in the one function every outbound chunk passes through, so it covers the streaming path as well as the ordinary one, and for an agent that streams its replies the streaming path is the ordinary one.
-It also covers a refusal partway through a long answer, which used to be hidden behind a delivered opening chunk, and a refused edit, which freezes a half-written reply on screen and reads to the user exactly like no reply at all.
-Deliveries stay silent, including the two negotiations that reach one through a rejection — `sendRichMessage` refused by a Bot API server older than 10.1, and an HTML chunk refused for its markup and re-sent as plain text — because an error line per delivered message teaches operators to ignore the one that matters. (#8256) (@DaBlitzStein)

@@ -1,4 +1,0 @@
-The instruction a cron or autonomous turn receives about `channel_send` is now the same sentence #8149 writes into the same block, which it was not before: one branch offered the tool with an explicit channel and recipient while the other forbade it outright, and only one of those can be true.
-It is the offer: `channel_send` reads its target channel and recipient straight from its own arguments and dispatches to that adapter, so the sentinel channel the turn itself runs under never enters into the decision.
-What is genuinely impossible is replying *into* `cron` or `autonomous`, which have no adapter, and that is what the prompt now says.
-Whichever of the two merges second, the resolution is textual rather than a choice between two contradictory instructions, and a test on each side asserts the shared sentence by name (#7995) (@DaBlitzStein)

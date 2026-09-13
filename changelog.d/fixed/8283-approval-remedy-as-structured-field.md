@@ -1,4 +1,0 @@
-The warning raised when an approval reaches no channel now carries its remedy as a `remedy=` field instead of splicing it into the event message.
-The remedy is worded off what the adapters actually reported and takes four different forms, so interpolating it meant one operational condition arrived as four distinct message strings: any log backend that groups or counts by message saw four rare events rather than one recurring one, and an operator asking "how often are approvals going undelivered on this host" could not get an answer out of it.
-The four values already beside it on that same `warn!` — the request id, the requesting agent, the adapter count and the skipped-adapter list — were structured fields all along; the remedy was the one exception, so this aligns it with the convention rather than inventing one.
-Nothing is lost from the log: the same sentence still reaches the operator, one field to the right (#8283) (@DaBlitzStein)

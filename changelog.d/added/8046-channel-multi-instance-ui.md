@@ -1,4 +1,0 @@
-Add dashboard support for running multiple named instances of the same channel type (e.g. two Telegram bots, each routed to a different agent).
-The backend already stored several `[[sidecar_channels]]` entries of one type, but `POST /api/channels/sidecar/{name}/configure` always wrote under the catalog type's own name, so a second save silently overwrote the first instance's config and its secret.
-The endpoint now accepts an `instance_name` and a per-instance `agent` field, rejects a name already used by a different channel type, and namespaces a second-plus instance's secrets under `<INSTANCE>__<KEY>` in `secrets.env` (reusing the existing per-instance secret precedence from #6169) so two bots never share a token.
-The Channels page groups configured instances by type, the Add picker always offers every catalog type so a second instance can be started, and the configure form gained instance-name and default-agent fields (#8046) (@DaBlitzStein)

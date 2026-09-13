@@ -1,4 +1,0 @@
-The daemon now notices a chat client leaving while a turn is running, instead of only when the turn ends.
-The WebSocket loop awaited the whole agent turn, so while one ran it read nothing from the socket: a liveness probe went unanswered, and a peer that navigated away stayed invisible — its connection task, and the per-IP connection slot it held, outlived its reader.
-The loop now polls the socket alongside the turn: probes are answered mid-turn, any other frame is deferred under a byte budget and replayed in order, and a peer going away ends the wait immediately.
-Leaving detaches rather than cancels, so the turn finishes and persists to the session; note that sending a *new* message to the same agent and session still supersedes a running turn and aborts it, which is unchanged (#8287) (@DaBlitzStein)

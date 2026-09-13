@@ -1,1 +1,0 @@
-The standalone dashboard locale check now uses the same CLDR-aware comparison as CI, so valid Korean, Polish, and Ukrainian plurals no longer appear as translation drift while missing required forms, orphan plural families, and invalid locale names still fail (#8203) (@be-student)

@@ -7,7 +7,7 @@ rustls-tls = ["reqwest/rustls-tls"]
 
 [package]
 name = "librefang"
-version = "2026.8.30"
+version = "2026.9.14"
 edition = "2021"
 description = "Official Rust client for LibreFang Agent OS"
 license = "MIT"
