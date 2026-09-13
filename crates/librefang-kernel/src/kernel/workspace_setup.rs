@@ -994,7 +994,7 @@ pub(super) fn resolve_workspace_decl(
                 }
             };
             match abs.canonicalize() {
-                Ok(p) if p.starts_with(&canon_root) => Some((p, decl.mode.clone())),
+                Ok(p) if p.starts_with(&canon_root) => Some((p, decl.mode)),
                 Ok(p) => {
                     tracing::warn!(
                         name,
@@ -1053,7 +1053,7 @@ pub(super) fn resolve_workspace_decl(
                 );
                 return None;
             }
-            Some((canonical, decl.mode.clone()))
+            Some((canonical, decl.mode))
         }
     }
 }

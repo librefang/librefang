@@ -1669,7 +1669,7 @@ impl CompactionOverrides {
 }
 
 /// Access mode for a named workspace.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum WorkspaceMode {
     /// Full read-write access (default).
@@ -1693,7 +1693,7 @@ pub enum WorkspaceMode {
 ///   target. The path must canonicalize to a prefix of one of the
 ///   `allowed_mount_roots` entries in `config.toml`; otherwise the
 ///   declaration is rejected at boot. See issue #3230.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct WorkspaceDecl {
     /// Path relative to `workspaces_dir` (e.g. `"shared/library"`).
     /// Mutually exclusive with `mount`.

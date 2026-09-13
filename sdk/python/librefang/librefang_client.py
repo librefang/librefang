@@ -57,6 +57,7 @@ class LibreFang:
         self.groups = _GroupsResource(self)
         self.hands = _HandsResource(self)
         self.inbox = _InboxResource(self)
+        self.knowledge = _KnowledgeResource(self)
         self.mcp = _McpResource(self)
         self.memory = _MemoryResource(self)
         self.models = _ModelsResource(self)
@@ -711,6 +712,32 @@ class _InboxResource(_Resource):
 
     def inbox_status(self):
         return self._c._request("GET", "/api/inbox/status")
+
+
+# ── Knowledge Resource ─────────────────────────────────────────
+
+class _KnowledgeResource(_Resource):
+
+    def list_bases(self):
+        return self._c._request("GET", "/api/knowledge")
+
+    def create_base(self, **data):
+        return self._c._request("POST", "/api/knowledge", data)
+
+    def delete_base(self, name: str):
+        return self._c._request("DELETE", f"/api/knowledge/{name}")
+
+    def set_holders(self, name: str, **data):
+        return self._c._request("PUT", f"/api/knowledge/{name}/agents", data)
+
+    def list_documents(self, name: str):
+        return self._c._request("GET", f"/api/knowledge/{name}/documents")
+
+    def put_document(self, name: str, filename: str, **data):
+        return self._c._request("PUT", f"/api/knowledge/{name}/documents/{filename}", data)
+
+    def delete_document(self, name: str, filename: str):
+        return self._c._request("DELETE", f"/api/knowledge/{name}/documents/{filename}")
 
 
 # ── Mcp Resource ───────────────────────────────────────────────

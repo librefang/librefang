@@ -27,6 +27,7 @@ import {
   Hand,
   BarChart3,
   Database,
+  Library,
   Activity,
   FileText,
   Settings,
@@ -90,6 +91,7 @@ type DashboardRoute =
   | "/providers"
   | "/models"
   | "/memory"
+  | "/knowledge"
   | "/network"
   | "/a2a"
   | "/hands"
@@ -1129,6 +1131,7 @@ function DashboardApp() {
           { to: "/providers", label: t("nav.providers"), icon: Server },
           { to: "/models", label: t("nav.models"), icon: Cpu },
           { to: "/memory", label: t("nav.memory"), icon: Database },
+          { to: "/knowledge", label: t("nav.knowledge", { defaultValue: "Knowledge" }), icon: Library },
           { to: "/network", label: t("nav.network"), icon: Share2 },
           { to: "/a2a", label: t("nav.a2a"), icon: Globe },
           { to: "/hands", label: t("nav.hands"), icon: Hand },

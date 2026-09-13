@@ -776,6 +776,65 @@ impl LibreFangKernel {
         Ok(())
     }
 
+    /// Replace an agent's named-workspace declarations.
+    ///
+    /// The sandbox reads the declarations live — `named_ws_prefixes` and
+    /// `named_ws_aliases` ask the kernel on every tool call — so `file_read`
+    /// accepts a newly granted `@alias` immediately, with no restart.
+    /// `TOOLS.md` is the part that does not update by itself: it is written at
+    /// spawn, and it is what tells the model the alias exists at all. Rewriting
+    /// it here is the difference between granting an agent a knowledge base and
+    /// granting it one it has not been told about until it next restarts.
+    ///
+    /// Only `TOOLS.md` is overwritten. The other identity files are written with
+    /// `create_new`, so an operator's hand edits to SOUL.md survive this.
+    pub fn set_agent_workspaces(
+        &self,
+        agent_id: AgentId,
+        workspaces: std::collections::HashMap<String, librefang_types::agent::WorkspaceDecl>,
+    ) -> KernelResult<()> {
+        let prev_workspaces = self
+            .agents
+            .registry
+            .get(agent_id)
+            .map(|e| e.manifest.workspaces.clone());
+
+        self.agents
+            .registry
+            .update_workspaces(agent_id, workspaces)
+            .map_err(KernelError::LibreFang)?;
+
+        if let Some(entry) = self.agents.registry.get(agent_id) {
+            if let Err(e) = self.memory.substrate.save_agent(&entry) {
+                if let Some(previous) = prev_workspaces {
+                    let _ = self.agents.registry.update_workspaces(agent_id, previous);
+                }
+                return Err(KernelError::LibreFang(e));
+            }
+
+            let cfg = self.config_snapshot();
+            let resolved = super::workspace_setup::ensure_named_workspaces(
+                &cfg.effective_workspaces_dir(),
+                &entry.manifest.workspaces,
+                &cfg.allowed_mount_roots,
+            );
+            if entry.manifest.generate_identity_files {
+                if let Some(workspace) = entry.manifest.workspace.as_ref() {
+                    super::workspace_setup::generate_identity_files(
+                        workspace,
+                        &entry.manifest,
+                        &resolved,
+                    );
+                }
+            }
+        }
+
+        self.persist_manifest_to_disk(agent_id);
+
+        info!(agent_id = %agent_id, "Agent named workspaces updated");
+        Ok(())
+    }
+
     /// Update an agent's channel allowlist. Empty = all channels (backward compat).
     pub fn set_agent_channels(&self, agent_id: AgentId, channels: Vec<String>) -> KernelResult<()> {
         // Snapshot previous channel list for rollback on DB persist failure.

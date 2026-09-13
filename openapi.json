@@ -7634,6 +7634,333 @@
         }
       }
     },
+    "/api/knowledge": {
+      "get": {
+        "tags": [
+          "knowledge"
+        ],
+        "summary": "GET /api/knowledge — every base with its documents' totals and its holders.",
+        "operationId": "list_bases",
+        "responses": {
+          "200": {
+            "description": "Shared knowledge bases",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "knowledge"
+        ],
+        "summary": "POST /api/knowledge — create an empty base.",
+        "operationId": "create_base",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateBaseRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid name",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "A base of that name already exists",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/knowledge/{name}": {
+      "delete": {
+        "tags": [
+          "knowledge"
+        ],
+        "summary": "DELETE /api/knowledge/{name} — remove the base and revoke it everywhere.",
+        "operationId": "delete_base",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Knowledge base name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Deleted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such base",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/knowledge/{name}/agents": {
+      "put": {
+        "tags": [
+          "knowledge"
+        ],
+        "summary": "PUT /api/knowledge/{name}/agents — set exactly which agents hold this base.",
+        "operationId": "set_holders",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Knowledge base name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetHoldersRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Holders updated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such base",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/knowledge/{name}/documents": {
+      "get": {
+        "tags": [
+          "knowledge"
+        ],
+        "summary": "GET /api/knowledge/{name}/documents — list the documents in a base.",
+        "operationId": "list_documents",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Knowledge base name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Documents",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such base",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/knowledge/{name}/documents/{filename}": {
+      "put": {
+        "tags": [
+          "knowledge"
+        ],
+        "summary": "PUT /api/knowledge/{name}/documents/{filename} — write a document.",
+        "description": "The body is the file, raw. That is the convention `POST /api/agents/{id}/upload`\nalready set in this codebase, and it keeps `multipart` off the dependency list\nfor a payload that is one file.",
+        "operationId": "put_document",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Knowledge base name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "filename",
+            "in": "path",
+            "description": "Document filename",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/octet-stream": {
+              "schema": {
+                "type": "string"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Written",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such base",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Document too large",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "knowledge"
+        ],
+        "summary": "DELETE /api/knowledge/{name}/documents/{filename} — remove a document.",
+        "operationId": "delete_document",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Knowledge base name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "filename",
+            "in": "path",
+            "description": "Document filename",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Deleted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such base or document",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/logs/stream": {
       "get": {
         "tags": [
@@ -15129,6 +15456,25 @@
           }
         }
       },
+      "BaseHolderRequest": {
+        "type": "object",
+        "required": [
+          "agent_id"
+        ],
+        "properties": {
+          "agent_id": {
+            "type": "string"
+          },
+          "mode": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`\"rw\"` or `\"r\"`. Defaults to read-only: a knowledge base is a thing to\nread, and an agent that can rewrite the documents every other agent\nreads is a decision the operator should have to make explicitly."
+          }
+        },
+        "additionalProperties": false
+      },
       "BulkActionResult": {
         "type": "object",
         "description": "Outcome of a single bulk action (delete/start/stop).",
@@ -15424,6 +15770,18 @@
             }
           }
         }
+      },
+      "CreateBaseRequest": {
+        "type": "object",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
       },
       "EphemeralRunRollupView": {
         "type": "object",
@@ -16396,6 +16754,22 @@
         "properties": {
           "enabled": {
             "type": "boolean"
+          }
+        },
+        "additionalProperties": false
+      },
+      "SetHoldersRequest": {
+        "type": "object",
+        "required": [
+          "agents"
+        ],
+        "properties": {
+          "agents": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/BaseHolderRequest"
+            },
+            "description": "The complete set of agents that should hold this base. Agents absent\nfrom the list have it revoked, which is what makes \"share with nobody\"\nexpressible as `[]` rather than needing a separate route."
           }
         },
         "additionalProperties": false

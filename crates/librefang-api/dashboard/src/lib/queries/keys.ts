@@ -364,6 +364,17 @@ export const usageKeys = {
     [...usageKeys.all, "daily", filters, days ?? null] as const,
 };
 
+export const knowledgeKeys = {
+  all: ["knowledge"] as const,
+  lists: () => [...knowledgeKeys.all, "list"] as const,
+  list: () => [...knowledgeKeys.lists()] as const,
+  documents: () => [...knowledgeKeys.all, "documents"] as const,
+  // Nested under `documents()` rather than under `all` directly, so writing a
+  // document can drop one base's document cache without also refetching the
+  // base list of every other base on the page.
+  documentsFor: (name: string) => [...knowledgeKeys.documents(), name] as const,
+};
+
 export const budgetKeys = {
   all: ["budget"] as const,
   status: () => [...budgetKeys.all, "status"] as const,

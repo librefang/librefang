@@ -52,7 +52,8 @@
     "more": "더",
     "mobile_tabs": "하단 탐색",
     "console": "콘솔",
-    "groups": "그룹"
+    "groups": "그룹",
+    "knowledge": "지식"
   },
   "partner": {
     "everyapi_label": "EveryAPI 공식 파트너 통합",
@@ -4337,5 +4338,40 @@
     "temperature_placeholder": "0 ~ 2",
     "top_p": "Top-p",
     "top_p_placeholder": "0 ~ 1"
+  },
+  "knowledge": {
+    "title": "지식",
+    "description": "한 번 업로드하여 선택한 에이전트와 공유하는 문서입니다. 각 지식 베이스는 에이전트가 @이름으로 읽는 명명된 작업공간이 됩니다.",
+    "new_base": "새 지식 베이스",
+    "search": "지식 베이스 또는 에이전트 검색…",
+    "empty_title": "아직 지식 베이스가 없습니다",
+    "empty_description": "하나 만들고, 에이전트가 읽을 문서를 업로드한 다음, 어떤 에이전트에게 줄지 선택하세요.",
+    "base_summary_other": "문서 {{count}}개 · {{size}}",
+    "no_holders": "공유된 에이전트 없음",
+    "mode_rw": "읽기·쓰기",
+    "share": "공유",
+    "documents": "문서",
+    "name_placeholder": "handbook",
+    "name_hint": "어떤 언어든 사용할 수 있습니다. 슬래시, 앞뒤의 마침표, 앞뒤 공백은 쓸 수 없습니다. 에이전트는 @이름으로 읽습니다.",
+    "delete_title": "이 지식 베이스를 삭제할까요?",
+    "delete_message": "문서가 삭제되고 보유한 모든 에이전트에서 회수됩니다. 되돌릴 수 없습니다.",
+    "upload": "업로드",
+    "no_documents": "아직 문서가 없습니다.",
+    "remove_document": "이 문서 삭제",
+    "bad_filename": "{{name}}은(는) 문서 이름으로 쓸 수 없습니다. 어떤 언어든 괜찮지만 슬래시, 앞뒤의 마침표, 앞뒤 공백은 쓸 수 없습니다.",
+    "share_title": "{{name}}을(를) 누가 읽을 수 있나요?",
+    "share_hint": "선택한 에이전트는 @{{name}}으로 문서를 읽습니다. 읽기·쓰기는 다른 모두를 위해 문서를 바꿀 수도 있게 합니다.",
+    "create_failed": "지식 베이스를 만들지 못했습니다.",
+    "delete_failed": "지식 베이스를 삭제하지 못했습니다.",
+    "upload_failed": "문서를 업로드하지 못했습니다.",
+    "share_failed": "공유를 변경하지 못했습니다.",
+    "no_matches_title": "일치하는 지식 베이스 없음",
+    "no_matches_description": "{{query}}과(와) 일치하는 지식 베이스나 에이전트가 없습니다.",
+    "delete_base": "이 지식 베이스 삭제",
+    "delete_document_title": "이 문서를 삭제할까요?",
+    "delete_document_message": "{{name}}이(가) 지식 베이스에서 삭제되어 이를 보유한 모든 에이전트가 문서를 잃게 됩니다. 되돌릴 수 없습니다.",
+    "size_hint": "문서당 최대 {{limit}}",
+    "too_large": "{{name}}은(는) {{size}}입니다 — 문서는 최대 {{limit}}까지 가능합니다.",
+    "no_agents": "아직 공유할 에이전트가 없습니다."
   }
 }

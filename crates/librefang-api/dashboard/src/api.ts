@@ -6005,3 +6005,111 @@ export async function listPairedDevices(): Promise<PairedDevice[]> {
 export async function removePairedDevice(deviceId: string): Promise<void> {
   return del<void>(`/api/pairing/devices/${encodeURIComponent(deviceId)}`);
 }
+
+// ---------------------------------------------------------------------------
+// Knowledge bases (#8327)
+// ---------------------------------------------------------------------------
+// Documents uploaded once and readable by chosen agents. A base is a named
+// workspace under `{workspaces_dir}/knowledge/`, so the sharing decision is
+// stored in each agent's manifest rather than in a store of this feature's own.
+
+/** An agent that holds a base, as the base sees it. */
+export interface KnowledgeHolder {
+  agent_id: string;
+  agent_name: string;
+  /** Alias the agent reaches it by — the `@name` in its TOOLS.md. */
+  alias: string;
+  mode: "r" | "rw";
+}
+
+export interface KnowledgeBase {
+  name: string;
+  /** Path as written in `agent.toml`, relative to `workspaces_dir`. */
+  path: string;
+  document_count: number;
+  total_bytes: number;
+  agents: KnowledgeHolder[];
+}
+
+export interface KnowledgeDocument {
+  filename: string;
+  bytes: number;
+  modified?: string | null;
+}
+
+export async function listKnowledgeBases(): Promise<KnowledgeBase[]> {
+  const data = await get<{ bases: KnowledgeBase[] }>("/api/knowledge");
+  return data.bases ?? [];
+}
+
+export async function createKnowledgeBase(name: string): Promise<void> {
+  await post<unknown>("/api/knowledge", { name });
+}
+
+export async function deleteKnowledgeBase(name: string): Promise<void> {
+  return del<void>(`/api/knowledge/${encodeURIComponent(name)}`);
+}
+
+export async function listKnowledgeDocuments(name: string): Promise<KnowledgeDocument[]> {
+  const data = await get<{ documents: KnowledgeDocument[] }>(
+    `/api/knowledge/${encodeURIComponent(name)}/documents`,
+  );
+  return data.documents ?? [];
+}
+
+/**
+ * Upload one document. The body is the raw file, following the
+ * `POST /api/agents/{id}/upload` convention rather than introducing multipart
+ * for a single-file payload.
+ *
+ * Unlike `uploadAgentFile`, which forwards the browser's `file.type`, the
+ * content type is pinned to `application/octet-stream`: the handler takes the
+ * body as `Bytes` and stores it under the filename from the path, so a media
+ * type would be recorded nowhere and only risks tripping a content-type guard.
+ *
+ * The filename travels in the path, not a header, because it is also the
+ * document's identity for the delete route — one place for the server to
+ * validate it.
+ */
+export async function putKnowledgeDocument(
+  name: string,
+  filename: string,
+  file: Blob,
+): Promise<void> {
+  const response = await fetchWithTimeout(
+    `/api/knowledge/${encodeURIComponent(name)}/documents/${encodeURIComponent(filename)}`,
+    {
+      method: "PUT",
+      headers: buildHeaders({ "Content-Type": "application/octet-stream" }),
+      body: file,
+    },
+    LONG_RUNNING_TIMEOUT_MS,
+  );
+  if (!response.ok) {
+    throw await parseError(response);
+  }
+}
+
+export async function deleteKnowledgeDocument(name: string, filename: string): Promise<void> {
+  return del<void>(
+    `/api/knowledge/${encodeURIComponent(name)}/documents/${encodeURIComponent(filename)}`,
+  );
+}
+
+/**
+ * Set exactly which agents hold a base.
+ *
+ * The complete set is sent every time: agents left out are revoked, which is
+ * what makes "share with nobody" an ordinary empty list rather than a separate
+ * route.
+ */
+export async function setKnowledgeHolders(
+  name: string,
+  agents: { agent_id: string; mode: "r" | "rw" }[],
+): Promise<KnowledgeHolder[]> {
+  const data = await put<{ agents: KnowledgeHolder[] }>(
+    `/api/knowledge/${encodeURIComponent(name)}/agents`,
+    { agents },
+  );
+  return data.agents ?? [];
+}

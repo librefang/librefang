@@ -52,7 +52,8 @@
     "more": "Więcej",
     "mobile_tabs": "Dolna nawigacja",
     "console": "Konsola",
-    "groups": "Grupy"
+    "groups": "Grupy",
+    "knowledge": "Wiedza"
   },
   "partner": {
     "everyapi_label": "Oficjalna integracja partnerska EveryAPI",
@@ -4353,5 +4354,43 @@
     "temperature_placeholder": "od 0 do 2",
     "top_p": "Top-p",
     "top_p_placeholder": "od 0 do 1"
+  },
+  "knowledge": {
+    "title": "Wiedza",
+    "description": "Dokumenty wgrane raz i udostępnione wybranym agentom. Każda baza staje się nazwaną przestrzenią roboczą, którą agent czyta przez @nazwa.",
+    "new_base": "Nowa baza",
+    "search": "Szukaj baz lub agentów…",
+    "empty_title": "Nie ma jeszcze baz wiedzy",
+    "empty_description": "Utwórz bazę, wgraj dokumenty, które agenci mają czytać, a potem wybierz, którzy je dostaną.",
+    "base_summary_one": "{{count}} dokument · {{size}}",
+    "base_summary_few": "{{count}} dokumenty · {{size}}",
+    "base_summary_many": "{{count}} dokumentów · {{size}}",
+    "base_summary_other": "{{count}} dokumentu · {{size}}",
+    "no_holders": "Nieudostępniona nikomu",
+    "mode_rw": "odczyt i zapis",
+    "share": "Udostępnij",
+    "documents": "Dokumenty",
+    "name_placeholder": "handbook",
+    "name_hint": "Dowolny język. Bez ukośnika, kropki na początku lub końcu oraz spacji na brzegach. Agenci odczytają to jako @nazwa.",
+    "delete_title": "Usunąć tę bazę wiedzy?",
+    "delete_message": "Jej dokumenty zostaną usunięte, a dostęp odebrany każdemu agentowi, który ją miał. Tego nie da się cofnąć.",
+    "upload": "Wgraj",
+    "no_documents": "Brak dokumentów.",
+    "remove_document": "Usuń ten dokument",
+    "bad_filename": "{{name}} nie może być nazwą dokumentu. Dowolny język jest w porządku, ale nie ukośnik, kropka na początku lub końcu ani spacje na brzegach.",
+    "share_title": "Kto może czytać {{name}}?",
+    "share_hint": "Wybrany agent czyta dokumenty przez @{{name}}. Odczyt i zapis pozwala mu też zmieniać je dla wszystkich pozostałych.",
+    "create_failed": "Nie udało się utworzyć bazy wiedzy.",
+    "delete_failed": "Nie udało się usunąć bazy wiedzy.",
+    "upload_failed": "Nie udało się wgrać dokumentu.",
+    "share_failed": "Nie udało się zmienić udostępniania.",
+    "no_matches_title": "Brak pasujących baz",
+    "no_matches_description": "Żadna baza ani agent nie pasuje do {{query}}.",
+    "delete_base": "Usuń tę bazę wiedzy",
+    "delete_document_title": "Usunąć ten dokument?",
+    "delete_document_message": "{{name}} zostanie usunięty z bazy, więc każdy agent, który ją posiada, straci ten dokument. Tej operacji nie można cofnąć.",
+    "size_hint": "Do {{limit}} na dokument",
+    "too_large": "{{name}} ma {{size}} — dokument może mieć najwyżej {{limit}}.",
+    "no_agents": "Nie ma jeszcze agentów do udostępnienia."
   }
 }

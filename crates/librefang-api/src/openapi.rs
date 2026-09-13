@@ -417,6 +417,15 @@ use crate::types;
         // ── Inbox ──
         routes::inbox_status,
 
+        // ── Knowledge bases ──
+        routes::knowledge::list_bases,
+        routes::knowledge::create_base,
+        routes::knowledge::delete_base,
+        routes::knowledge::list_documents,
+        routes::knowledge::put_document,
+        routes::knowledge::delete_document,
+        routes::knowledge::set_holders,
+
         // ── Webhooks ──
         routes::webhook_wake,
         routes::webhook_agent,

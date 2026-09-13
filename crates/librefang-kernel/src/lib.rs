@@ -104,6 +104,7 @@ pub use librefang_runtime::compactor;
 pub use librefang_runtime::copilot_oauth;
 pub use librefang_runtime::drivers;
 pub use librefang_runtime::http_client;
+pub use librefang_runtime::injection_guard;
 pub use librefang_runtime::kernel_handle;
 pub use librefang_runtime::llm_driver;
 pub use librefang_runtime::llm_errors;

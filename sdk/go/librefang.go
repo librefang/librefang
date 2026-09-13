@@ -44,6 +44,7 @@ type Client struct {
 	Groups *GroupsResource
 	Hands *HandsResource
 	Inbox *InboxResource
+	Knowledge *KnowledgeResource
 	Mcp *McpResource
 	Memory *MemoryResource
 	Models *ModelsResource
@@ -81,6 +82,7 @@ func New(baseURL string) *Client {
 		c.Groups = &GroupsResource{client: c}
 		c.Hands = &HandsResource{client: c}
 		c.Inbox = &InboxResource{client: c}
+		c.Knowledge = &KnowledgeResource{client: c}
 		c.Mcp = &McpResource{client: c}
 		c.Memory = &MemoryResource{client: c}
 		c.Models = &ModelsResource{client: c}
@@ -946,6 +948,38 @@ type InboxResource struct{ client *Client }
 
 func (r *InboxResource) InboxStatus() (interface{}, error) {
 	return r.client.request("GET", "/api/inbox/status", nil, nil)
+}
+
+// ── Knowledge Resource
+
+type KnowledgeResource struct{ client *Client }
+
+func (r *KnowledgeResource) ListBases() (interface{}, error) {
+	return r.client.request("GET", "/api/knowledge", nil, nil)
+}
+
+func (r *KnowledgeResource) CreateBase(data map[string]interface{}) (interface{}, error) {
+	return r.client.request("POST", "/api/knowledge", data, nil)
+}
+
+func (r *KnowledgeResource) DeleteBase(name string) (interface{}, error) {
+	return r.client.request("DELETE", fmt.Sprintf("/api/knowledge/%s", name), nil, nil)
+}
+
+func (r *KnowledgeResource) SetHolders(name string, data map[string]interface{}) (interface{}, error) {
+	return r.client.request("PUT", fmt.Sprintf("/api/knowledge/%s/agents", name), data, nil)
+}
+
+func (r *KnowledgeResource) ListDocuments(name string) (interface{}, error) {
+	return r.client.request("GET", fmt.Sprintf("/api/knowledge/%s/documents", name), nil, nil)
+}
+
+func (r *KnowledgeResource) PutDocument(name string, filename string, data map[string]interface{}) (interface{}, error) {
+	return r.client.request("PUT", fmt.Sprintf("/api/knowledge/%s/documents/%s", name, filename), data, nil)
+}
+
+func (r *KnowledgeResource) DeleteDocument(name string, filename string) (interface{}, error) {
+	return r.client.request("DELETE", fmt.Sprintf("/api/knowledge/%s/documents/%s", name, filename), nil, nil)
 }
 
 // ── Mcp Resource

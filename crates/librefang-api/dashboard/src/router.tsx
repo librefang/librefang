@@ -176,6 +176,7 @@ const McpServersPage = lazyWithReload(() => import("./pages/McpServersPage").the
 const ConfigPage = lazyWithReload(() => import("./pages/ConfigPage").then(m => ({ default: m.ConfigPage })));
 const UsersPage = lazyWithReload(() => import("./pages/UsersPage").then(m => ({ default: m.UsersPage })));
 const GroupsPage = lazyWithReload(() => import("./pages/GroupsPage").then(m => ({ default: m.GroupsPage })));
+const KnowledgePage = lazyWithReload(() => import("./pages/KnowledgePage").then(m => ({ default: m.KnowledgePage })));
 const PermissionSimulatorPage = lazyWithReload(() => import("./pages/PermissionSimulatorPage").then(m => ({ default: m.PermissionSimulatorPage })));
 const AuditPage = lazyWithReload(() => import("./pages/AuditPage").then(m => ({ default: m.AuditPage })));
 const UserBudgetPage = lazyWithReload(() => import("./pages/UserBudgetPage").then(m => ({ default: m.UserBudgetPage })));
@@ -424,6 +425,13 @@ const groupsRoute = createRoute({
   path: "/groups",
   component: () => <LazyRouteBoundary><GroupsPage /></LazyRouteBoundary>
 });
+// #8327 — shared knowledge bases. A base is a named workspace, so this route
+// edits agent manifests and a directory rather than a store of its own.
+const knowledgeRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/knowledge",
+  component: () => <LazyRouteBoundary><KnowledgePage /></LazyRouteBoundary>
+});
 const usersSimulatorRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/users/simulator",
@@ -546,6 +554,7 @@ const routeTree = rootRoute.addChildren([
   configInfraRoute,
   usersRoute,
   groupsRoute,
+  knowledgeRoute,
   usersSimulatorRoute,
   userBudgetRoute,
   userPolicyRoute,
