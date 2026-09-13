@@ -1756,6 +1756,15 @@ export interface AgentChannelInstance {
   agent: string | null;
   /** True when `agent` is the agent this response is about. */
   bound_to_this_agent: boolean;
+  /**
+   * Whether `agent` names an agent that exists.
+   *
+   * A binding to an agent that was never spawned, has been deleted, or is a
+   * typo delivers nowhere — `ChannelRouter` resolves the name and skips the
+   * binding on a miss. Without this an operator cannot tell "this bot belongs
+   * to someone else" from "this bot's messages are being dropped".
+   */
+  resolves: boolean;
 }
 
 export interface AgentChannelsResponse {

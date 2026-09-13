@@ -679,6 +679,20 @@ pub async fn get_agent_channels(
     // bot's messages arrive at it. Surfacing both from one place is what lets an
     // agent's own editor answer "which of the three Telegram bots is mine?",
     // which previously could only be read from the channel's side.
+    //
+    // `resolves` is the difference between "this bot belongs to another agent"
+    // and "this bot is wired to nothing and its messages are dropped", which the
+    // binding alone cannot express. `ChannelRouter::resolve_bindings` looks
+    // `binding.agent` up by exact key and `continue`s on a miss (`router.rs`),
+    // so a binding naming an agent that was never spawned — or has since been
+    // deleted, or is a typo — delivers nowhere. Reported as `false` rather than
+    // by omitting the instance: the row is real, it is only its target that is
+    // not, and an operator needs to see the one to fix the other.
+    //
+    // The registry's `name_index` and the router's `agent_name_cache` are
+    // separate maps, but both are exact-keyed and both written when an agent
+    // registers, so this answer and the router's cannot disagree.
+    let registry = state.kernel.agent_registry();
     let instances: Vec<serde_json::Value> = config
         .sidecar_channels
         .iter()
@@ -688,6 +702,10 @@ pub async fn get_agent_channels(
                 "channel_type": sc.channel_type.clone().unwrap_or_else(|| sc.name.clone()),
                 "agent": sc.agent,
                 "bound_to_this_agent": sc.agent.as_deref() == Some(agent_name.as_str()),
+                "resolves": sc
+                    .agent
+                    .as_deref()
+                    .is_some_and(|name| registry.find_by_name(name).is_some()),
             })
         })
         .collect();
