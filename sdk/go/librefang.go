@@ -157,6 +157,41 @@ func (c *Client) request(method, path string, body interface{}, query map[string
 	return result, nil
 }
 
+// requestRaw sends body as-is instead of JSON-marshaling it — for the few
+// endpoints (raw-TOML saves, file upload) whose OpenAPI requestBody isn't
+// application/json, where the caller already has the exact bytes to send.
+func (c *Client) requestRaw(method, path string, body []byte, contentType string, query map[string]string) (interface{}, error) {
+	urlStr := c.BaseURL + c.withQuery(path, query)
+	req, err := http.NewRequest(method, urlStr, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	for k, v := range c.Headers {
+		req.Header.Set(k, v)
+	}
+	if contentType != "" {
+		req.Header.Set("Content-Type", contentType)
+	}
+	resp, err := c.HTTP.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	respBody, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode >= 400 {
+		return nil, &LibreFangError{Message: string(respBody), Status: resp.StatusCode, Body: string(respBody)}
+	}
+	var arr []json.RawMessage
+	if err := json.Unmarshal(respBody, &arr); err == nil {
+		return arr, nil
+	}
+	var result map[string]interface{}
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return string(respBody), nil
+	}
+	return result, nil
+}
+
 func (c *Client) stream(method, path string, body interface{}, query map[string]string) <-chan map[string]interface{} {
 	ch := make(chan map[string]interface{})
 	go func() {
@@ -536,8 +571,8 @@ func (r *AgentsResource) GetAgentTraces(id string) (interface{}, error) {
 	return r.client.request("GET", fmt.Sprintf("/api/agents/%s/traces", id), nil, nil)
 }
 
-func (r *AgentsResource) UploadFile(id string, data map[string]interface{}) (interface{}, error) {
-	return r.client.request("POST", fmt.Sprintf("/api/agents/%s/upload", id), data, nil)
+func (r *AgentsResource) UploadFile(id string, body string) (interface{}, error) {
+	return r.client.requestRaw("POST", fmt.Sprintf("/api/agents/%s/upload", id), []byte(body), "application/octet-stream", nil)
 }
 
 func (r *AgentsResource) ServeUpload(file_id string) (interface{}, error) {
@@ -1754,6 +1789,14 @@ func (r *SystemResource) PromoteAgentType(name string) (interface{}, error) {
 
 func (r *SystemResource) GetAgentTemplateToml(name string) (interface{}, error) {
 	return r.client.request("GET", fmt.Sprintf("/api/templates/%s/toml", name), nil, nil)
+}
+
+func (r *SystemResource) PutAgentTemplateToml(name string, body string) (interface{}, error) {
+	return r.client.requestRaw("PUT", fmt.Sprintf("/api/templates/%s/toml", name), []byte(body), "text/plain", nil)
+}
+
+func (r *SystemResource) PostAgentTemplateToml(name string, body string) (interface{}, error) {
+	return r.client.requestRaw("POST", fmt.Sprintf("/api/templates/%s/toml", name), []byte(body), "text/plain", nil)
 }
 
 func (r *SystemResource) Version() (interface{}, error) {

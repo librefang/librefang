@@ -7,7 +7,6 @@ import { useAgentType, useAgentTypes, useAgentTypeHistory } from "../lib/queries
 import { useAgents, useTools } from "../lib/queries/agents";
 import { useSkills } from "../lib/queries/skills";
 import {
-  useCreateAgentType,
   useDeleteAgentType,
   usePromoteAgentType,
   useRestoreTemplateVersion,
@@ -37,14 +36,16 @@ vi.mock("../lib/queries/agents", () => ({
 
 vi.mock("../lib/queries/skills", () => ({ useSkills: vi.fn() }));
 
-// Both names for the manifest-write hook: `main` exports it as
-// `useUpdateAgentType` and #8028 renames it to `useUpdateAgentTypeToml`.
-// This test only needs it stubbed — it never asserts on it — so the factory
-// provides both and the page gets whichever one it imports. Pinning a single
-// name would break this file on whichever of the two PRs merges second, for a
-// hook that has nothing to do with what is being tested.
+// Both names for the manifest-write and manifest-create hooks: `main` exports
+// them as `useUpdateAgentType` / `useCreateAgentType` and #8028 renames them to
+// `useUpdateAgentTypeToml` / `useCreateAgentTypeFromToml`.
+// This test only needs them stubbed — it never asserts on either — so the
+// factory provides both spellings and the page gets whichever one it imports.
+// Pinning a single name would break this file on whichever of the two PRs
+// merges second, for hooks that have nothing to do with what is being tested.
 vi.mock("../lib/mutations/agentTypes", () => ({
   useCreateAgentType: vi.fn(),
+  useCreateAgentTypeFromToml: vi.fn(),
   useDeleteAgentType: vi.fn(),
   usePromoteAgentType: vi.fn(),
   useRestoreTemplateVersion: vi.fn(),
@@ -167,15 +168,17 @@ function renderPage(promote: { mutateAsync: ReturnType<typeof vi.fn>; isPending:
   vi.mocked(useAgents).mockReturnValue(mockQuery([]) as unknown as ReturnType<typeof useAgents>);
   vi.mocked(useTools).mockReturnValue(mockQuery([]) as unknown as ReturnType<typeof useTools>);
   vi.mocked(useSkills).mockReturnValue(mockQuery([]) as unknown as ReturnType<typeof useSkills>);
-  // Stub both spellings of the manifest-write hook rather than picking one:
-  // the page calls whichever it imports, and an unstubbed `vi.fn()` returns
-  // `undefined`, which the page then destructures and crashes on.
+  // Stub both spellings of the manifest-write and manifest-create hooks rather
+  // than picking one: the page calls whichever it imports, and an unstubbed
+  // `vi.fn()` returns `undefined`, which the page then destructures and
+  // crashes on.
   const mutations = agentTypeMutations as unknown as Record<string, unknown>;
   for (const hook of [
-    useCreateAgentType,
     useDeleteAgentType,
     useRestoreTemplateVersion,
     useSpawnEphemeral,
+    mutations.useCreateAgentType,
+    mutations.useCreateAgentTypeFromToml,
     mutations.useUpdateAgentType,
     mutations.useUpdateAgentTypeToml,
   ]) {

@@ -446,6 +446,17 @@ const writeStringScalar = (lines: string[], key: string, value: string): void =>
   if (!value) return;
   lines.push(`${key} = ${escapeTomlString(value)}`);
 };
+// `system_prompt` is not tri-state like the sampling knobs above it: a blank
+// value here means "this agent has no system prompt", not "no opinion, fall
+// back to the canned default" — that was the removed flat editor's documented
+// contract (`system_prompt_hint`: "Left blank, the agent type stores a blank
+// prompt — nothing is substituted for you"). Routing it through the
+// skip-if-empty `writeStringScalar` drops the key on an intentionally blank
+// prompt, and `ModelConfig`'s container-level `#[serde(default)]` then fills
+// the missing key with "You are a helpful AI agent." on the very next save.
+const writeSystemPrompt = (lines: string[], value: string): void => {
+  lines.push(`system_prompt = ${escapeTomlString(value)}`);
+};
 const writeNumberScalar = (lines: string[], key: string, value: number | null): void => {
   if (value === null) return;
   lines.push(`${key} = ${value}`);
@@ -584,7 +595,7 @@ export const serializeManifestForm = (
   const modelBody: string[] = [];
   writeStringScalar(modelBody, "provider", form.model.provider.trim());
   writeStringScalar(modelBody, "model", form.model.model.trim());
-  writeStringScalar(modelBody, "system_prompt", form.model.system_prompt);
+  writeSystemPrompt(modelBody, form.model.system_prompt);
   writeNumberScalar(modelBody, "temperature", parseFloatish(form.model.temperature));
   writeNumberScalar(modelBody, "max_tokens", parseInteger(form.model.max_tokens));
   writeNumberScalar(modelBody, "top_p", parseFloatish(form.model.top_p));
@@ -943,6 +954,16 @@ export const preservedWorkspaceNamesFromExtras = (extras: ManifestExtras): strin
 };
 
 // Form-validation errors. Returns an empty array when submittable.
+//
+// `model.provider` / `model.model` are deliberately NOT required here even
+// though the form marks them `required` visually: a blank value is the
+// documented way an agent inherits the daemon's configured default (the
+// `provider_hint` / hint text the form shows next to them says exactly
+// this), and `ModelConfig`'s own `""` is written through verbatim by both
+// `AgentTypeSpec::apply_to` and `into_new_manifest`. Treating blank as an
+// error here made Save silently no-op on every agent (type) that was ever
+// created without a pinned provider — there was no toast, just two red
+// borders that may be scrolled out of view.
 export const validateManifestForm = (
   form: ManifestFormState,
   // Names already present as preserved declarations (e.g. mount-based
@@ -951,8 +972,6 @@ export const validateManifestForm = (
 ): string[] => {
   const errors: string[] = [];
   if (!form.name.trim()) errors.push("name");
-  if (!form.model.provider.trim()) errors.push("model.provider");
-  if (!form.model.model.trim()) errors.push("model.model");
   if (form.schedule.mode === "periodic" && !form.schedule.cron.trim()) {
     errors.push("schedule.cron");
   }

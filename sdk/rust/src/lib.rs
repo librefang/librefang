@@ -101,6 +101,45 @@ async fn do_req(
     Ok(serde_json::from_str(&text).unwrap_or(Value::String(text)))
 }
 
+// Sends `body` as-is instead of JSON-encoding it — for the few endpoints
+// (raw-TOML saves, file upload) whose OpenAPI requestBody isn't
+// application/json, where the caller already has the exact string to send.
+async fn do_req_raw(
+    client: &Client,
+    base_url: &str,
+    method: reqwest::Method,
+    path_segments: &[&str],
+    body: String,
+    content_type: &str,
+    query: &[(&str, Option<&str>)],
+) -> Result<Value> {
+    let url = build_url(client, base_url, path_segments.iter().copied())?;
+    let req = client
+        .request(method, url)
+        .timeout(DEFAULT_REQUEST_TIMEOUT)
+        .header("Content-Type", content_type)
+        .body(body);
+    let filtered: Vec<(&str, &str)> = query
+        .iter()
+        .filter_map(|(k, v)| v.map(|vv| (*k, vv)))
+        .collect();
+    let req = if filtered.is_empty() {
+        req
+    } else {
+        req.query(&filtered)
+    };
+    let res = req.send().await?;
+    let status = res.status();
+    let text = res.text().await?;
+    if !status.is_success() {
+        return Err(Error::Api {
+            status: status.as_u16(),
+            body: text,
+        });
+    }
+    Ok(serde_json::from_str(&text).unwrap_or(Value::String(text)))
+}
+
 fn do_stream(
     client: Client,
     base_url: String,
@@ -1223,13 +1262,14 @@ impl AgentsResource {
         .await
     }
 
-    pub async fn upload_file(&self, id: &str, data: Value) -> Result<Value> {
-        do_req(
+    pub async fn upload_file(&self, id: &str, body: String) -> Result<Value> {
+        do_req_raw(
             &self.client,
             &self.base_url,
             reqwest::Method::POST,
             &["api", "agents", id, "upload"],
-            Some(data),
+            body,
+            "application/octet-stream",
             &[],
         )
         .await
@@ -5069,6 +5109,32 @@ impl SystemResource {
             reqwest::Method::GET,
             &["api", "templates", name, "toml"],
             None,
+            &[],
+        )
+        .await
+    }
+
+    pub async fn put_agent_template_toml(&self, name: &str, body: String) -> Result<Value> {
+        do_req_raw(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::PUT,
+            &["api", "templates", name, "toml"],
+            body,
+            "text/plain",
+            &[],
+        )
+        .await
+    }
+
+    pub async fn post_agent_template_toml(&self, name: &str, body: String) -> Result<Value> {
+        do_req_raw(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::POST,
+            &["api", "templates", name, "toml"],
+            body,
+            "text/plain",
             &[],
         )
         .await

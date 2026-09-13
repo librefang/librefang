@@ -55,6 +55,26 @@ describe("agentManifest serializer", () => {
     expect(parsed.form.model.system_prompt).toBe(form.model.system_prompt);
   });
 
+  // #8028: `system_prompt` is not tri-state like the sampling knobs — a
+  // blank value means "this agent has no system prompt", not "no opinion".
+  // Routing it through the generic skip-if-empty writer dropped the key on
+  // an intentionally blank prompt, and the server's `#[serde(default)]`
+  // then filled the missing key with the canned default text on the very
+  // next save. The key must always be emitted, even empty, so a blank
+  // prompt round-trips as blank rather than acquiring text the operator
+  // never asked for.
+  it("writes system_prompt through even when blank, rather than omitting the key", () => {
+    const form = emptyManifestForm();
+    form.name = "blank-prompt";
+    form.model.provider = "openai";
+    form.model.model = "gpt-4o";
+    form.model.system_prompt = "";
+
+    const toml = serializeManifestForm(form);
+
+    expect(toml).toContain('system_prompt = ""');
+  });
+
   it("preserves Unicode scalars and replaces isolated UTF-16 surrogates", () => {
     const form = emptyManifestForm();
     form.name = "unicode-boundaries";
@@ -160,11 +180,24 @@ describe("agentManifest serializer", () => {
 });
 
 describe("agentManifest validator", () => {
-  it("flags missing name and model fields", () => {
+  it("flags a missing name", () => {
     const errors = validateManifestForm(emptyManifestForm());
     expect(errors).toContain("name");
-    expect(errors).toContain("model.provider");
-    expect(errors).toContain("model.model");
+  });
+
+  // #8028: a blank provider/model is the documented way an agent inherits
+  // the daemon's configured default (the form's own hint text next to
+  // these fields says so), and `ModelConfig`'s empty string is written
+  // through verbatim by both the flat editor's patch and its create path.
+  // Every agent (type) ever saved without a pinned provider had these two
+  // blank on disk, so requiring them here made Save silently no-op on all
+  // of them.
+  it("does not require provider/model — blank means inherit the daemon default", () => {
+    const form = emptyManifestForm();
+    form.name = "agent";
+    const errors = validateManifestForm(form);
+    expect(errors).not.toContain("model.provider");
+    expect(errors).not.toContain("model.model");
   });
 
   it("returns no errors when minimum fields are filled", () => {
@@ -871,6 +904,60 @@ params = { region = "us" }
     expect(cleanForm(reparsed.form)).toEqual(cleanForm(parsed.form));
     expect(reparsed.extras).toEqual(parsed.extras);
   });
+  it("round-trips a manifest with triggers, compaction, an MCP allowlist and unknown keys without losing or moving anything", () => {
+    const original = `name = "parity"
+session_mode = "new"
+mcp_servers = ["github"]
+tool_allowlist = ["file_read"]
+future_field = "unknown to this daemon"
+
+[workspaces]
+notes = { path = "notes", mode = "rw" }
+
+[compaction]
+threshold_messages = 7
+
+[[triggers]]
+pattern = "git.push"
+prompt_template = "on push"
+`;
+    const parsed = parseManifestToml(original);
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    const out = serializeManifestForm(parsed.form, parsed.extras);
+
+    // Nothing was lost — the sections the deleted editor note promised to preserve
+    // survive the parse -> serialize -> parse cycle.
+    const reparsed = parseManifestToml(out);
+    expect(reparsed.ok).toBe(true);
+    if (!reparsed.ok) return;
+    expect(reparsed.form.session_mode).toBe("new");
+    expect(reparsed.form.mcp_servers).toEqual(["github"]);
+    expect(reparsed.form.tool_allowlist).toEqual(["file_read"]);
+    expect(reparsed.extras.topLevel["future_field"]).toBe("unknown to this daemon");
+    expect(reparsed.extras.topLevel["compaction"]).toEqual({ threshold_messages: 7 });
+    // `[workspaces]` is a first-class form field since #8013, so a path-based row round-trips through `form.workspaces` instead of surviving as an unknown top-level key.
+    // Where it survives changed; that it survives has not.
+    expect(reparsed.form.workspaces).toHaveLength(1);
+    const { _uid: _ignoredWorkspaceUid, ...workspace } = reparsed.form.workspaces[0];
+    expect(workspace).toEqual({ name: "notes", path: "notes", mode: "rw" });
+    expect(reparsed.extras.topLevel["triggers"]).toEqual([
+      { pattern: "git.push", prompt_template: "on push" },
+    ]);
+
+    // …and nothing was moved: every scalar/array still sits before the first table
+    // header, so no later key can be absorbed into a preceding section (the #8013
+    // hazard — a table emitted before the remaining top-level scalars would swallow
+    // tags, skills, mcp_servers, schedule and the rest).
+    const firstTableHeader = out.search(/^\[/m);
+    expect(firstTableHeader).toBeGreaterThan(-1);
+    for (const key of ["session_mode", "mcp_servers", "tool_allowlist", "future_field"]) {
+      const at = out.indexOf(`${key} =`);
+      expect(at).toBeGreaterThanOrEqual(0);
+      expect(at).toBeLessThan(firstTableHeader);
+    }
+  });
+
 });
 
 describe("agentManifest — inference parameters (#7781)", () => {

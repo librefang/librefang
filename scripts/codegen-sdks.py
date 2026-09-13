@@ -58,6 +58,25 @@ def _is_stream(op: dict) -> bool:
 def _has_body(op: dict, method: str) -> bool:
     return method in ("post", "put", "patch") and bool(op.get("requestBody"))
 
+def _raw_body_content_type(op: dict) -> str:
+    """The declared content type when a requestBody is anything other than JSON, else "".
+
+    Every generated SDK method sends its body by JSON-encoding whatever the caller passed —
+    correct for the overwhelming majority of endpoints, which all declare `application/json`.
+    A couple (raw-TOML template saves, the raw-bytes file upload) declare `text/plain` or
+    `application/octet-stream` instead: the caller already has the exact string/bytes to send,
+    and running that through `json.dumps` (or the equivalent in the other three languages)
+    produces a body the server's `text/plain` / `application/octet-stream` extractor cannot
+    parse, so every call answers 400 no matter what the caller passes. Callers of such an
+    endpoint get a raw string body parameter instead of the usual dict/object.
+    """
+    content = (op.get("requestBody") or {}).get("content") or {}
+    if len(content) == 1:
+        (ct,) = content.keys()
+        if ct != "application/json":
+            return ct
+    return ""
+
 def _py_path(path: str) -> str:
     """'/api/agents/{id}' → f-string body '/api/agents/{id}'"""
     return path  # same syntax for Python f-strings
@@ -121,6 +140,7 @@ def load_ops() -> dict:
                     "params": _path_params(path),
                     "query_params": _query_params(op),
                     "has_body": _has_body(op, method),
+                    "raw_content_type": _raw_body_content_type(op),
                     "is_stream": _is_stream(op),
                 })
     return dict(tag_ops)
@@ -177,14 +197,33 @@ class LibreFang:
         if headers:
             self._headers.update(headers)
 {resource_init}
-    def _request(self, method: str, path: str, body: Any = None, query: Optional[Dict[str, Any]] = None) -> Any:
+    def _request(
+        self,
+        method: str,
+        path: str,
+        body: Any = None,
+        query: Optional[Dict[str, Any]] = None,
+        raw_body: Optional[str] = None,
+        content_type: Optional[str] = None,
+    ) -> Any:
         url = self.base_url + path
         if query:
             filtered = {k: v for k, v in query.items() if v is not None}
             if filtered:
                 url += ("&" if "?" in url else "?") + urlencode(filtered, doseq=True)
-        data = json.dumps(body).encode() if body is not None else None
-        req = Request(url, data=data, headers=self._headers, method=method)
+        # `raw_body` bypasses JSON encoding entirely — for the few endpoints (raw-TOML
+        # saves, file upload) whose OpenAPI requestBody isn't `application/json`, the
+        # caller already has the exact string to send and `json.dumps`-ing it would
+        # produce a body the server's extractor can't parse.
+        if raw_body is not None:
+            data = raw_body.encode()
+            headers = dict(self._headers)
+            if content_type:
+                headers["Content-Type"] = content_type
+        else:
+            data = json.dumps(body).encode() if body is not None else None
+            headers = self._headers
+        req = Request(url, data=data, headers=headers, method=method)
         try:
             with urlopen(req, timeout=self.timeout) as resp:
                 ct = resp.headers.get("content-type", "")
@@ -301,6 +340,7 @@ def gen_python(tag_ops: dict) -> str:
             params = op["params"]
             query_params = op["query_params"]
             has_body = op["has_body"]
+            raw_ct = op["raw_content_type"]
             is_stream = op["is_stream"]
             http = op["http"]
             path = op["path"]
@@ -308,7 +348,9 @@ def gen_python(tag_ops: dict) -> str:
             sig_parts = ["self"] + [f"{p}: str" for p in params]
             for qp in query_params:
                 sig_parts.append(f"{_py_safe(qp)}: Any = None")
-            if has_body:
+            if raw_ct and not is_stream:
+                sig_parts.append("body: str")
+            elif has_body:
                 sig_parts.append("**data")
 
             sig = ", ".join(sig_parts)
@@ -325,7 +367,9 @@ def gen_python(tag_ops: dict) -> str:
 
             out += f"\n    def {op_id}({sig}){ret_type}:\n"
             call = "_stream" if is_stream else "_request"
-            if has_body or query_params:
+            if raw_ct and not is_stream:
+                out += f'        return self._c.{call}("{http}", {path_expr}, raw_body=body, content_type={json.dumps(raw_ct)}{query_arg})\n'
+            elif has_body or query_params:
                 out += f'        return self._c.{call}("{http}", {path_expr}, {body_arg}{query_arg})\n'
             else:
                 out += f'        return self._c.{call}("{http}", {path_expr})\n'
@@ -384,10 +428,21 @@ class LibreFang {
     return path + (path.includes("?") ? "&" : "?") + q;
   }
 
-  async _request(method, path, body, query) {
+  // `rawBody` / `contentType` bypass JSON encoding — for the few endpoints
+  // (raw-TOML saves, file upload) whose OpenAPI requestBody isn't
+  // `application/json`, the caller already has the exact string to send and
+  // `JSON.stringify`-ing it would produce a body the server's extractor
+  // can't parse.
+  async _request(method, path, body, query, rawBody, contentType) {
     const url = this.baseUrl + this._withQuery(path, query);
-    const opts = { method, headers: this._headers };
-    if (body !== undefined && body !== null) opts.body = JSON.stringify(body);
+    const headers = Object.assign({}, this._headers);
+    const opts = { method, headers };
+    if (rawBody !== undefined) {
+      if (contentType) headers["Content-Type"] = contentType;
+      opts.body = rawBody;
+    } else if (body !== undefined && body !== null) {
+      opts.body = JSON.stringify(body);
+    }
     const res = await fetch(url, opts);
     const text = await res.text();
     if (!res.ok) throw new LibreFangError(`HTTP ${res.status}: ${text}`, res.status, text);
@@ -460,13 +515,16 @@ def gen_js(tag_ops: dict) -> str:
             params = op["params"]
             query_params = op["query_params"]
             has_body = op["has_body"]
+            raw_ct = op["raw_content_type"]
             is_stream = op["is_stream"]
             http = op["http"]
             path = op["path"]
 
             js_method = _op_camel(op_id)
             js_params = list(params)
-            if has_body:
+            if raw_ct and not is_stream:
+                js_params.append("body")
+            elif has_body:
                 js_params.append("data")
             if query_params:
                 js_params.append("query")
@@ -479,7 +537,11 @@ def gen_js(tag_ops: dict) -> str:
             keyword = "async *" if is_stream else "async "
             invoke = "yield* " if is_stream else "return "
 
-            if has_body or query_params:
+            if raw_ct and not is_stream:
+                out += f'\n  {keyword}{js_method}({sig}) {{\n'
+                out += f'    {invoke}this._c.{call}("{http}", {path_expr}, undefined, {query_arg}, body, {json.dumps(raw_ct)});\n'
+                out += "  }\n"
+            elif has_body or query_params:
                 out += f'\n  {keyword}{js_method}({sig}) {{\n'
                 out += f'    {invoke}this._c.{call}("{http}", {path_expr}, {body_arg}, {query_arg});\n'
                 out += "  }\n"
@@ -583,6 +645,41 @@ func (c *Client) request(method, path string, body interface{}, query map[string
 \t}
 \tfor k, v := range c.Headers {
 \t\treq.Header.Set(k, v)
+\t}
+\tresp, err := c.HTTP.Do(req)
+\tif err != nil {
+\t\treturn nil, err
+\t}
+\tdefer resp.Body.Close()
+\trespBody, _ := io.ReadAll(resp.Body)
+\tif resp.StatusCode >= 400 {
+\t\treturn nil, &LibreFangError{Message: string(respBody), Status: resp.StatusCode, Body: string(respBody)}
+\t}
+\tvar arr []json.RawMessage
+\tif err := json.Unmarshal(respBody, &arr); err == nil {
+\t\treturn arr, nil
+\t}
+\tvar result map[string]interface{}
+\tif err := json.Unmarshal(respBody, &result); err != nil {
+\t\treturn string(respBody), nil
+\t}
+\treturn result, nil
+}
+
+// requestRaw sends body as-is instead of JSON-marshaling it — for the few
+// endpoints (raw-TOML saves, file upload) whose OpenAPI requestBody isn't
+// application/json, where the caller already has the exact bytes to send.
+func (c *Client) requestRaw(method, path string, body []byte, contentType string, query map[string]string) (interface{}, error) {
+\turlStr := c.BaseURL + c.withQuery(path, query)
+\treq, err := http.NewRequest(method, urlStr, bytes.NewReader(body))
+\tif err != nil {
+\t\treturn nil, err
+\t}
+\tfor k, v := range c.Headers {
+\t\treq.Header.Set(k, v)
+\t}
+\tif contentType != "" {
+\t\treq.Header.Set("Content-Type", contentType)
 \t}
 \tresp, err := c.HTTP.Do(req)
 \tif err != nil {
@@ -737,13 +834,16 @@ def gen_go(tag_ops: dict) -> str:
             params = op["params"]
             query_params = op["query_params"]
             has_body = op["has_body"]
+            raw_ct = op["raw_content_type"]
             is_stream = op["is_stream"]
             http = op["http"]
             path = op["path"]
 
             go_method = _op_pascal(op_id)
             go_params = [f"{p} string" for p in params]
-            if has_body:
+            if raw_ct and not is_stream:
+                go_params.append("body string")
+            elif has_body:
                 go_params.append("data map[string]interface{}")
             if query_params:
                 go_params.append("query map[string]string")
@@ -758,6 +858,10 @@ def gen_go(tag_ops: dict) -> str:
             if is_stream:
                 out += f"func (r *{cls}) {go_method}({sig_args}) <-chan map[string]interface{{}} {{\n"
                 out += f'\treturn r.client.stream("{http}", {path_expr}, {body_arg}, {query_arg})\n'
+                out += "}\n\n"
+            elif raw_ct:
+                out += f"func (r *{cls}) {go_method}({sig_args}) (interface{{}}, error) {{\n"
+                out += f'\treturn r.client.requestRaw("{http}", {path_expr}, []byte(body), {json.dumps(raw_ct)}, {query_arg})\n'
                 out += "}\n\n"
             else:
                 out += f"func (r *{cls}) {go_method}({sig_args}) (interface{{}}, error) {{\n"
@@ -857,6 +961,38 @@ async fn do_req(
         .collect();
     let req = if filtered.is_empty() { req } else { req.query(&filtered) };
     let req = if let Some(b) = body { req.json(&b) } else { req };
+    let res = req.send().await?;
+    let status = res.status();
+    let text = res.text().await?;
+    if !status.is_success() {
+        return Err(Error::Api { status: status.as_u16(), body: text });
+    }
+    Ok(serde_json::from_str(&text).unwrap_or(Value::String(text)))
+}
+
+// Sends `body` as-is instead of JSON-encoding it — for the few endpoints
+// (raw-TOML saves, file upload) whose OpenAPI requestBody isn't
+// application/json, where the caller already has the exact string to send.
+async fn do_req_raw(
+    client: &Client,
+    base_url: &str,
+    method: reqwest::Method,
+    path_segments: &[&str],
+    body: String,
+    content_type: &str,
+    query: &[(&str, Option<&str>)],
+) -> Result<Value> {
+    let url = build_url(client, base_url, path_segments.iter().copied())?;
+    let req = client
+        .request(method, url)
+        .timeout(DEFAULT_REQUEST_TIMEOUT)
+        .header("Content-Type", content_type)
+        .body(body);
+    let filtered: Vec<(&str, &str)> = query
+        .iter()
+        .filter_map(|(k, v)| v.map(|vv| (*k, vv)))
+        .collect();
+    let req = if filtered.is_empty() { req } else { req.query(&filtered) };
     let res = req.send().await?;
     let status = res.status();
     let text = res.text().await?;
@@ -1085,12 +1221,15 @@ def gen_rust(tag_ops: dict) -> str:
             params = op["params"]
             query_params = op["query_params"]
             has_body = op["has_body"]
+            raw_ct = op["raw_content_type"]
             is_stream = op["is_stream"]
             http = op["http"]
             path = op["path"]
 
             rust_params = [f"{_rust_safe(p)}: &str" for p in params]
-            if has_body:
+            if raw_ct and not is_stream:
+                rust_params.append("body: String")
+            elif has_body:
                 rust_params.append("data: Value")
             for qp in query_params:
                 rust_params.append(f"{_rust_safe(qp)}: Option<&str>")
@@ -1122,7 +1261,10 @@ def gen_rust(tag_ops: dict) -> str:
                 else:
                     query_arg = "&[]"
                 out += f"\n    pub async fn {op_id}({sig}) -> Result<Value> {{\n"
-                out += f"        do_req(&self.client, &self.base_url, {method_const}, {path_arg}, {body_arg}, {query_arg}).await\n"
+                if raw_ct:
+                    out += f"        do_req_raw(&self.client, &self.base_url, {method_const}, {path_arg}, body, {json.dumps(raw_ct)}, {query_arg}).await\n"
+                else:
+                    out += f"        do_req(&self.client, &self.base_url, {method_const}, {path_arg}, {body_arg}, {query_arg}).await\n"
                 out += "    }\n"
 
         out += "}\n\n"

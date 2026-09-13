@@ -70,10 +70,21 @@ class LibreFang {
     return path + (path.includes("?") ? "&" : "?") + q;
   }
 
-  async _request(method, path, body, query) {
+  // `rawBody` / `contentType` bypass JSON encoding — for the few endpoints
+  // (raw-TOML saves, file upload) whose OpenAPI requestBody isn't
+  // `application/json`, the caller already has the exact string to send and
+  // `JSON.stringify`-ing it would produce a body the server's extractor
+  // can't parse.
+  async _request(method, path, body, query, rawBody, contentType) {
     const url = this.baseUrl + this._withQuery(path, query);
-    const opts = { method, headers: this._headers };
-    if (body !== undefined && body !== null) opts.body = JSON.stringify(body);
+    const headers = Object.assign({}, this._headers);
+    const opts = { method, headers };
+    if (rawBody !== undefined) {
+      if (contentType) headers["Content-Type"] = contentType;
+      opts.body = rawBody;
+    } else if (body !== undefined && body !== null) {
+      opts.body = JSON.stringify(body);
+    }
     const res = await fetch(url, opts);
     const text = await res.text();
     if (!res.ok) throw new LibreFangError(`HTTP ${res.status}: ${text}`, res.status, text);
@@ -399,8 +410,8 @@ class AgentsResource {
     return this._c._request("GET", `/api/agents/${id}/traces`);
   }
 
-  async uploadFile(id, data) {
-    return this._c._request("POST", `/api/agents/${id}/upload`, data, undefined);
+  async uploadFile(id, body) {
+    return this._c._request("POST", `/api/agents/${id}/upload`, undefined, undefined, body, "application/octet-stream");
   }
 
   async serveUpload(file_id) {
@@ -1657,6 +1668,14 @@ class SystemResource {
 
   async getAgentTemplateToml(name) {
     return this._c._request("GET", `/api/templates/${name}/toml`);
+  }
+
+  async putAgentTemplateToml(name, body) {
+    return this._c._request("PUT", `/api/templates/${name}/toml`, undefined, undefined, body, "text/plain");
+  }
+
+  async postAgentTemplateToml(name, body) {
+    return this._c._request("POST", `/api/templates/${name}/toml`, undefined, undefined, body, "text/plain");
   }
 
   async version() {

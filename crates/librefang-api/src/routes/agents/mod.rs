@@ -24,7 +24,7 @@ mod config;
 mod ephemeral;
 mod files;
 mod identity;
-mod lifecycle;
+pub(crate) mod lifecycle;
 mod messaging;
 mod observability;
 mod sessions;
