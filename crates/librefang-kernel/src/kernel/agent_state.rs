@@ -114,8 +114,13 @@ impl LibreFangKernel {
                 }
                 if let Err(error) = atomic_write_toml(toml_path, &toml_str) {
                     warn!(agent = %entry.name, "Failed to persist manifest to disk: {error}");
+                    // History must not go silent exactly when an operator needs it: the
+                    // in-memory manifest has already changed, so snapshot it with a
+                    // change_source that marks the disk write as failed.
+                    self.record_manifest_version(entry, &toml_str, "update-persist-failed");
                 } else {
                     debug!(agent = %entry.name, path = %toml_path.display(), "Persisted manifest to disk");
+                    self.record_manifest_version(entry, &toml_str, "update");
                 }
             }
             // Not a cosmetic warning: boot reconciliation re-syncs each agent from its on-disk
@@ -197,6 +202,14 @@ impl LibreFangKernel {
             warn!(agent = %entry.name, "Failed to persist MCP servers to agent manifest: {error}");
         } else {
             debug!(agent = %entry.name, path = %toml_path.display(), "Persisted MCP servers to agent manifest");
+            // This path patches the `mcp_servers` array in the existing file rather
+            // than going through `persist_full_manifest_at`, so it has to record its
+            // own snapshot. Without it an MCP allowlist change leaves the newest
+            // recorded version disagreeing with what is on disk, and "what changed on
+            // this agent, and when" answers wrong rather than incompletely (#8231).
+            // The snapshot is `patched` — what the file now holds — not a re-serialized
+            // manifest, so history stays a record of the file.
+            self.record_manifest_version(&current_entry, &patched, "mcp-servers");
         }
     }
 
@@ -258,25 +271,30 @@ impl LibreFangKernel {
         drop(catalog);
 
         // Snapshot the full model state for rollback on DB persist failure (#3499).
-        let prev_model_state = self.agents.registry.get(agent_id).map(|e| {
-            (
-                e.manifest.model.model.clone(),
-                e.manifest.model.provider.clone(),
-                e.manifest.model.api_key_env.clone(),
-                e.manifest.model.base_url.clone(),
-            )
-        });
+        // The whole `[model]` block, not a hand-picked tuple of it: a provider
+        // switch clears the capacity limits too, and a rollback that put back
+        // only the fields someone remembered to list would leave the agent
+        // with the new endpoint's cleared limits (#7781 review).
+        let prev_model_config = self
+            .agents
+            .registry
+            .get(agent_id)
+            .map(|e| e.manifest.model.clone());
 
         if let Some(provider) = provider {
-            // When the provider changes, also clear any per-agent api_key_env
-            // and base_url overrides — they belonged to the previous provider
-            // and would route subsequent requests to the wrong endpoint with
-            // the wrong credentials. resolve_driver falls back to the global
-            // [provider_api_keys] / [provider_urls] tables (or convention) for
-            // the new provider, which is what the user expects when picking a
-            // model from the dashboard. When the provider is unchanged we
-            // leave the override fields alone so that genuine per-agent
-            // overrides on the same provider are preserved.
+            // When the provider changes, also clear the overrides that
+            // described the previous provider's endpoint — its credentials
+            // (api_key_env / base_url) and its capacity limits
+            // (context_window / max_output_tokens). resolve_driver falls back
+            // to the global [provider_api_keys] / [provider_urls] tables (or
+            // convention) for the new provider, and the limits fall back to
+            // the registry / probe chain, which is what the user expects when
+            // picking a model from the dashboard: a 200k window carried onto
+            // an endpoint that accepts 8k is a request the new provider
+            // rejects on every turn. `switch_model_provider` shares the field
+            // list with the model router (#7781 review). When the provider is
+            // unchanged we leave the override fields alone so that genuine
+            // per-agent overrides on the same provider are preserved.
             let prev_provider = self
                 .agents
                 .registry
@@ -286,13 +304,7 @@ impl LibreFangKernel {
             if provider_changed {
                 self.agents
                     .registry
-                    .update_model_provider_config(
-                        agent_id,
-                        normalized_model.clone(),
-                        provider.clone(),
-                        None,
-                        None,
-                    )
+                    .switch_model_provider(agent_id, normalized_model.clone(), provider.clone())
                     .map_err(KernelError::LibreFang)?;
             } else {
                 self.agents
@@ -314,14 +326,8 @@ impl LibreFangKernel {
         // silently drifting registry vs. disk (#3499).
         if let Some(entry) = self.agents.registry.get(agent_id) {
             if let Err(e) = self.memory.substrate.save_agent(&entry) {
-                if let Some((p_model, p_provider, p_api_key_env, p_base_url)) = prev_model_state {
-                    let _ = self.agents.registry.update_model_provider_config(
-                        agent_id,
-                        p_model,
-                        p_provider,
-                        p_api_key_env,
-                        p_base_url,
-                    );
+                if let Some(previous) = prev_model_config {
+                    let _ = self.agents.registry.set_model_config(agent_id, previous);
                 }
                 return Err(KernelError::LibreFang(e));
             }
@@ -537,6 +543,12 @@ impl LibreFangKernel {
         // System-owned `hand:*` tags stay pinned.
         new_manifest.tags = merge_agent_tags(&entry.tags, &new_manifest.tags);
 
+        // Tags: `replace_manifest_and_retag` (#7742) already reprojects
+        // `entry.tags` and the `tag_index` from `manifest.tags` as part of
+        // the same call, so there is no separate `update_tags` step here —
+        // calling both would reproject tags twice, fire `notify_changed()`
+        // twice, and (if the retag call failed after `update_tags` already
+        // wrote the new tags) leave `entry.tags` ahead of `entry.manifest`.
         self.agents
             .registry
             .replace_manifest_and_retag(agent_id, new_manifest)
@@ -776,6 +788,65 @@ impl LibreFangKernel {
         Ok(())
     }
 
+    /// Replace an agent's named-workspace declarations.
+    ///
+    /// The sandbox reads the declarations live — `named_ws_prefixes` and
+    /// `named_ws_aliases` ask the kernel on every tool call — so `file_read`
+    /// accepts a newly granted `@alias` immediately, with no restart.
+    /// `TOOLS.md` is the part that does not update by itself: it is written at
+    /// spawn, and it is what tells the model the alias exists at all. Rewriting
+    /// it here is the difference between granting an agent a knowledge base and
+    /// granting it one it has not been told about until it next restarts.
+    ///
+    /// Only `TOOLS.md` is overwritten. The other identity files are written with
+    /// `create_new`, so an operator's hand edits to SOUL.md survive this.
+    pub fn set_agent_workspaces(
+        &self,
+        agent_id: AgentId,
+        workspaces: std::collections::HashMap<String, librefang_types::agent::WorkspaceDecl>,
+    ) -> KernelResult<()> {
+        let prev_workspaces = self
+            .agents
+            .registry
+            .get(agent_id)
+            .map(|e| e.manifest.workspaces.clone());
+
+        self.agents
+            .registry
+            .update_workspaces(agent_id, workspaces)
+            .map_err(KernelError::LibreFang)?;
+
+        if let Some(entry) = self.agents.registry.get(agent_id) {
+            if let Err(e) = self.memory.substrate.save_agent(&entry) {
+                if let Some(previous) = prev_workspaces {
+                    let _ = self.agents.registry.update_workspaces(agent_id, previous);
+                }
+                return Err(KernelError::LibreFang(e));
+            }
+
+            let cfg = self.config_snapshot();
+            let resolved = super::workspace_setup::ensure_named_workspaces(
+                &cfg.effective_workspaces_dir(),
+                &entry.manifest.workspaces,
+                &cfg.allowed_mount_roots,
+            );
+            if entry.manifest.generate_identity_files {
+                if let Some(workspace) = entry.manifest.workspace.as_ref() {
+                    super::workspace_setup::generate_identity_files(
+                        workspace,
+                        &entry.manifest,
+                        &resolved,
+                    );
+                }
+            }
+        }
+
+        self.persist_manifest_to_disk(agent_id);
+
+        info!(agent_id = %agent_id, "Agent named workspaces updated");
+        Ok(())
+    }
+
     /// Update an agent's channel allowlist. Empty = all channels (backward compat).
     pub fn set_agent_channels(&self, agent_id: AgentId, channels: Vec<String>) -> KernelResult<()> {
         // Snapshot previous channel list for rollback on DB persist failure.
@@ -803,6 +874,61 @@ impl LibreFangKernel {
         self.persist_manifest_to_disk(agent_id);
 
         info!(agent_id = %agent_id, channels = ?channels, "Agent channel allowlist updated");
+        Ok(())
+    }
+
+    /// Update an agent's model selection mode and per-agent router override
+    /// (profile allowlist + cost budget).
+    ///
+    /// Names in `allowed_profiles` are not cross-checked against the live
+    /// profile catalog: `model_router::match_profile` treats an unknown name
+    /// as one that simply never matches, so a stale entry costs the agent a
+    /// candidate rather than breaking the turn. Rejecting it here would also
+    /// make the call order-dependent — an operator could not name a profile
+    /// before adding it to `model_profiles.toml`.
+    ///
+    /// Mirrors [`Self::set_agent_channels`]: snapshot-then-rollback if the DB
+    /// write fails, then mirror the result to `agent.toml` on disk.
+    pub fn set_agent_model_routing(
+        &self,
+        agent_id: AgentId,
+        mode: librefang_types::agent::ModelMode,
+        router_override: Option<librefang_types::model_profile::AgentRouterOverride>,
+    ) -> KernelResult<()> {
+        let prev_state = self.agents.registry.get(agent_id).map(|e| {
+            (
+                e.manifest.model.mode,
+                e.manifest.model.router_override.clone(),
+            )
+        });
+
+        self.agents
+            .registry
+            .update_model_routing(agent_id, mode, router_override.clone())
+            .map_err(KernelError::LibreFang)?;
+
+        if let Some(entry) = self.agents.registry.get(agent_id) {
+            if let Err(e) = self.memory.substrate.save_agent(&entry) {
+                if let Some((p_mode, p_override)) = prev_state {
+                    let _ = self
+                        .agents
+                        .registry
+                        .update_model_routing(agent_id, p_mode, p_override);
+                }
+                return Err(KernelError::LibreFang(e));
+            }
+        }
+
+        // Persist to agent.toml so the change survives a daemon restart —
+        // same reasoning as set_agent_channels above.
+        self.persist_manifest_to_disk(agent_id);
+
+        info!(
+            agent_id = %agent_id,
+            mode = ?mode,
+            router_override = ?router_override,
+            "Agent model routing updated"
+        );
         Ok(())
     }
 
@@ -959,6 +1085,32 @@ impl LibreFangKernel {
         self.prompt_metadata_cache.tools.remove(&agent_id);
 
         Ok(())
+    }
+
+    /// Best-effort record of a manifest snapshot for version history.
+    ///
+    /// `change_source` vocabulary: this path is shared by every control-plane write that re-serializes the full manifest (API routes, TUI commands, and the MCP-servers fallback all funnel through the same kernel setters), so the call site cannot tell who triggered the persist.
+    /// It records two values:
+    /// - `update` — the `agent.toml` write succeeded.
+    /// - `update-persist-failed` — the in-memory manifest changed but the disk write failed, so disk and memory now disagree.
+    ///
+    /// Suspend/resume does not go through here: `persist_agent_enabled` patches the `enabled` line directly rather than re-serializing the manifest, so it records its own `suspend` / `resume` snapshots via `ManifestVersionStore` directly.
+    fn record_manifest_version(
+        &self,
+        entry: &librefang_types::agent::AgentEntry,
+        toml_str: &str,
+        change_source: &str,
+    ) {
+        let store = librefang_memory::ManifestVersionStore::new(self.memory.substrate.pool());
+        if let Err(e) =
+            store.record_version(&entry.id.to_string(), &entry.name, toml_str, change_source)
+        {
+            warn!(
+                agent = %entry.name,
+                error = %e,
+                "Failed to record manifest version snapshot"
+            );
+        }
     }
 }
 

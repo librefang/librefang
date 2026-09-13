@@ -41,7 +41,9 @@ class LibreFang {
     this.groups = new GroupsResource(this);
     this.hands = new HandsResource(this);
     this.inbox = new InboxResource(this);
+    this.knowledge = new KnowledgeResource(this);
     this.mcp = new McpResource(this);
+    this.media = new MediaResource(this);
     this.memory = new MemoryResource(this);
     this.models = new ModelsResource(this);
     this.network = new NetworkResource(this);
@@ -51,6 +53,7 @@ class LibreFang {
     this.sessions = new SessionsResource(this);
     this.skills = new SkillsResource(this);
     this.system = new SystemResource(this);
+    this.tasks = new TasksResource(this);
     this.tools = new ToolsResource(this);
     this.users = new UsersResource(this);
     this.vault = new VaultResource(this);
@@ -70,10 +73,14 @@ class LibreFang {
     return path + (path.includes("?") ? "&" : "?") + q;
   }
 
-  async _request(method, path, body, query) {
+  // `contentType` sends `body` as-is (Buffer / Uint8Array / Blob) instead of JSON.
+  async _request(method, path, body, query, contentType) {
     const url = this.baseUrl + this._withQuery(path, query);
-    const opts = { method, headers: this._headers };
-    if (body !== undefined && body !== null) opts.body = JSON.stringify(body);
+    const headers = contentType
+      ? Object.assign({}, this._headers, { "Content-Type": contentType })
+      : this._headers;
+    const opts = { method, headers };
+    if (body !== undefined && body !== null) opts.body = contentType ? body : JSON.stringify(body);
     const res = await fetch(url, opts);
     const text = await res.text();
     if (!res.ok) throw new LibreFangError(`HTTP ${res.status}: ${text}`, res.status, text);
@@ -271,6 +278,10 @@ class AgentsResource {
     return this._c._request("GET", `/api/agents/${id}/logs`, undefined, query);
   }
 
+  async getAgentManifestToml(id) {
+    return this._c._request("GET", `/api/agents/${id}/manifest`);
+  }
+
   async getAgentMcpServers(id) {
     return this._c._request("GET", `/api/agents/${id}/mcp_servers`);
   }
@@ -297,6 +308,14 @@ class AgentsResource {
 
   async setModel(id, data) {
     return this._c._request("PUT", `/api/agents/${id}/model`, data, undefined);
+  }
+
+  async getAgentModelRouting(id) {
+    return this._c._request("GET", `/api/agents/${id}/model_routing`);
+  }
+
+  async setAgentModelRouting(id, data) {
+    return this._c._request("PUT", `/api/agents/${id}/model_routing`, data, undefined);
   }
 
   async pushMessage(id, data) {
@@ -399,8 +418,8 @@ class AgentsResource {
     return this._c._request("GET", `/api/agents/${id}/traces`);
   }
 
-  async uploadFile(id, data) {
-    return this._c._request("POST", `/api/agents/${id}/upload`, data, undefined);
+  async uploadFile(id, body, contentType) {
+    return this._c._request("POST", `/api/agents/${id}/upload`, body, undefined, contentType || "application/octet-stream");
   }
 
   async serveUpload(file_id) {
@@ -832,6 +851,40 @@ class InboxResource {
   }
 }
 
+// ── Knowledge Resource
+
+class KnowledgeResource {
+  constructor(client) { this._c = client; }
+
+  async listBases() {
+    return this._c._request("GET", "/api/knowledge");
+  }
+
+  async createBase(data) {
+    return this._c._request("POST", "/api/knowledge", data, undefined);
+  }
+
+  async deleteBase(name) {
+    return this._c._request("DELETE", `/api/knowledge/${name}`);
+  }
+
+  async setHolders(name, data) {
+    return this._c._request("PUT", `/api/knowledge/${name}/agents`, data, undefined);
+  }
+
+  async listDocuments(name) {
+    return this._c._request("GET", `/api/knowledge/${name}/documents`);
+  }
+
+  async putDocument(name, filename, data) {
+    return this._c._request("PUT", `/api/knowledge/${name}/documents/${filename}`, data, undefined);
+  }
+
+  async deleteDocument(name, filename) {
+    return this._c._request("DELETE", `/api/knowledge/${name}/documents/${filename}`);
+  }
+}
+
 // ── Mcp Resource
 
 class McpResource {
@@ -898,6 +951,40 @@ class McpResource {
   }
 }
 
+// ── Media Resource
+
+class MediaResource {
+  constructor(client) { this._c = client; }
+
+  async generateImage(data) {
+    return this._c._request("POST", "/api/media/image", data, undefined);
+  }
+
+  async generateMusic(data) {
+    return this._c._request("POST", "/api/media/music", data, undefined);
+  }
+
+  async listMediaProviders() {
+    return this._c._request("GET", "/api/media/providers");
+  }
+
+  async synthesizeSpeech(data) {
+    return this._c._request("POST", "/api/media/speech", data, undefined);
+  }
+
+  async transcribeAudio(body, contentType) {
+    return this._c._request("POST", "/api/media/transcribe", body, undefined, contentType || "audio/webm");
+  }
+
+  async submitVideo(data) {
+    return this._c._request("POST", "/api/media/video", data, undefined);
+  }
+
+  async pollVideoTask(task_id, query) {
+    return this._c._request("GET", `/api/media/video/${task_id}`, undefined, query);
+  }
+}
+
 // ── Memory Resource
 
 class MemoryResource {
@@ -951,6 +1038,10 @@ class ModelsResource {
 
   async listCredentialPools() {
     return this._c._request("GET", "/api/credential-pools");
+  }
+
+  async listModelRouterProfiles() {
+    return this._c._request("GET", "/api/model-router/profiles");
   }
 
   async listAllModels() {
@@ -1655,6 +1746,14 @@ class SystemResource {
     return this._c._request("POST", `/api/templates/${name}/promote`);
   }
 
+  async getAgentTypeRegistryDiff(name) {
+    return this._c._request("GET", `/api/templates/${name}/registry-diff`);
+  }
+
+  async restoreAgentTypeFromRegistry(name) {
+    return this._c._request("POST", `/api/templates/${name}/restore`);
+  }
+
   async getAgentTemplateToml(name) {
     return this._c._request("GET", `/api/templates/${name}/toml`);
   }
@@ -1665,6 +1764,16 @@ class SystemResource {
 
   async apiVersions() {
     return this._c._request("GET", "/api/versions");
+  }
+}
+
+// ── Tasks Resource
+
+class TasksResource {
+  constructor(client) { this._c = client; }
+
+  async taskQueuePostRoot(data) {
+    return this._c._request("POST", "/api/tasks", data, undefined);
   }
 }
 

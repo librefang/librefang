@@ -75,6 +75,34 @@ fn warn_if_concurrency_fields_changed(
     );
 }
 
+/// Clear the overrides that describe the *previous* provider's endpoint —
+/// its credentials, its capacity limits, and its non-standard request
+/// parameters — so a provider change never leaves them attached to the new
+/// one (#7781 review).
+///
+/// Shared by every path that repoints an agent at a different provider:
+/// [`AgentRegistry::switch_model_provider`] (the dashboard's model picker,
+/// via `set_agent_model`), the model router's `apply_routed_profile` /
+/// `apply_tier_routed_model`, and the boot-time normalisation of a restored
+/// legacy agent back to the `default` sentinel. One list of fields, so a
+/// future addition cannot be cleared on one path and forgotten on the other —
+/// which is exactly how `context_window` / `max_output_tokens` came to be
+/// dropped by the router and kept by the picker.
+///
+/// The fields left alone are the ones that mean the same thing on any
+/// endpoint: `max_tokens`, the four sampling knobs, `system_prompt`, and the
+/// router's own `mode` / `router_override`. `extra_params` is not one of
+/// them — it is flattened verbatim into the request body and is
+/// provider-specific by definition (Qwen's `enable_memory` has no meaning to
+/// Anthropic, which rejects the unknown key rather than ignoring it).
+pub(crate) fn clear_stale_provider_overrides(model: &mut librefang_types::agent::ModelConfig) {
+    model.api_key_env = None;
+    model.base_url = None;
+    model.context_window = None;
+    model.max_output_tokens = None;
+    model.extra_params.clear();
+}
+
 impl AgentRegistry {
     /// Create a new empty registry.
     pub fn new() -> Self {
@@ -446,6 +474,44 @@ impl AgentRegistry {
         Ok(())
     }
 
+    /// Update an agent's tags, keeping `entry.tags` (index-backing),
+    /// `entry.manifest.tags` (what gets persisted to `agent.toml`), and the
+    /// `tag_index` all in sync (#7742).
+    ///
+    /// `replace_manifest`'s doc comment explains why a blind manifest swap
+    /// leaves tags alone: `entry.tags` and `tag_index` are a snapshot taken
+    /// at spawn time, and there was no runtime API to update either one.
+    /// This is that API — retract the agent from tag buckets it no longer
+    /// belongs to (mirroring `remove()`'s bucket cleanup) and add it to any
+    /// newly-added tag buckets, then update both tag-carrying fields on the
+    /// entry itself.
+    pub fn update_tags(&self, id: AgentId, tags: Vec<String>) -> LibreFangResult<()> {
+        let old_tags = self.with_entry_mut(id, |entry| {
+            let old = entry.tags.clone();
+            entry.tags = tags.clone();
+            entry.manifest.tags = tags.clone();
+            entry.last_active = chrono::Utc::now();
+            old
+        })?;
+        for tag in old_tags.iter().filter(|t| !tags.contains(t)) {
+            if let Entry::Occupied(mut bucket) = self.tag_index.entry(tag.clone()) {
+                bucket.get_mut().retain(|&agent_id| agent_id != id);
+                if bucket.get().is_empty() {
+                    bucket.remove();
+                }
+            }
+        }
+        for tag in tags.iter().filter(|t| !old_tags.contains(t)) {
+            let mut bucket = self.tag_index.entry(tag.clone()).or_default();
+            if !bucket.contains(&id) {
+                bucket.push(id);
+            }
+        }
+
+        self.notify_changed();
+        Ok(())
+    }
+
     /// Update an agent's visual identity (emoji, avatar, color).
     pub fn update_identity(
         &self,
@@ -500,6 +566,46 @@ impl AgentRegistry {
             entry.manifest.model.provider = new_provider;
             entry.manifest.model.api_key_env = api_key_env;
             entry.manifest.model.base_url = base_url;
+            entry.last_active = chrono::Utc::now();
+        })?;
+        self.notify_changed();
+        Ok(())
+    }
+
+    /// Point an agent at a **different** provider's model, dropping every
+    /// override that described the previous provider's endpoint (#7781
+    /// review).
+    ///
+    /// Distinct from [`Self::update_model_and_provider`], which is the
+    /// same-provider swap and must leave genuine per-agent overrides alone.
+    pub fn switch_model_provider(
+        &self,
+        id: AgentId,
+        new_model: String,
+        new_provider: String,
+    ) -> LibreFangResult<()> {
+        self.with_entry_mut(id, |entry| {
+            entry.manifest.model.model = new_model;
+            entry.manifest.model.provider = new_provider;
+            clear_stale_provider_overrides(&mut entry.manifest.model);
+            entry.last_active = chrono::Utc::now();
+        })?;
+        self.notify_changed();
+        Ok(())
+    }
+
+    /// Replace an agent's whole `[model]` block.
+    ///
+    /// For restoring a snapshot taken before a multi-field mutation — the
+    /// caller already holds every value, and putting them back one setter at
+    /// a time would leave the entry half-rolled-back in between.
+    pub fn set_model_config(
+        &self,
+        id: AgentId,
+        model: librefang_types::agent::ModelConfig,
+    ) -> LibreFangResult<()> {
+        self.with_entry_mut(id, |entry| {
+            entry.manifest.model = model;
             entry.last_active = chrono::Utc::now();
         })?;
         self.notify_changed();
@@ -601,6 +707,25 @@ impl AgentRegistry {
         Ok(())
     }
 
+    /// Update an agent's model selection mode and per-agent router override
+    /// (profile allowlist + cost budget). Mutates the manifest only; use
+    /// [`crate::LibreFangKernel::set_agent_model_routing`] to also persist to
+    /// SQLite and `agent.toml`. Mirrors `update_web_search_augmentation`.
+    pub fn update_model_routing(
+        &self,
+        id: AgentId,
+        mode: librefang_types::agent::ModelMode,
+        router_override: Option<librefang_types::model_profile::AgentRouterOverride>,
+    ) -> LibreFangResult<()> {
+        self.with_entry_mut(id, |entry| {
+            entry.manifest.model.mode = mode;
+            entry.manifest.model.router_override = router_override;
+            entry.last_active = chrono::Utc::now();
+        })?;
+        self.notify_changed();
+        Ok(())
+    }
+
     /// Update an agent's schedule mode (Reactive / Periodic / Proactive /
     /// Continuous). Mutates the manifest only — the kernel-level wrapper
     /// `LibreFangKernel::set_agent_schedule` is what callers should use to
@@ -648,6 +773,24 @@ impl AgentRegistry {
     pub fn update_channels(&self, id: AgentId, channels: Vec<String>) -> LibreFangResult<()> {
         self.with_entry_mut(id, |entry| {
             entry.manifest.channels = channels;
+            entry.last_active = chrono::Utc::now();
+        })?;
+        self.notify_changed();
+        Ok(())
+    }
+
+    /// Replace an agent's named-workspace declarations.
+    ///
+    /// The whole map is replaced rather than merged, matching every other
+    /// allowlist setter here: a caller that wants to add one entry sends the
+    /// map it wants to end up with, and "remove the last one" stays expressible.
+    pub fn update_workspaces(
+        &self,
+        id: AgentId,
+        workspaces: std::collections::HashMap<String, librefang_types::agent::WorkspaceDecl>,
+    ) -> LibreFangResult<()> {
+        self.with_entry_mut(id, |entry| {
+            entry.manifest.workspaces = workspaces;
             entry.last_active = chrono::Utc::now();
         })?;
         self.notify_changed();
@@ -1058,6 +1201,38 @@ mod tests {
             registry.tag_index.get("shared").unwrap().as_slice(),
             &[second_id]
         );
+    }
+
+    #[test]
+    fn update_tags_syncs_entry_tags_manifest_tags_and_tag_index_7742() {
+        let registry = AgentRegistry::new();
+        let mut entry = test_entry("tag-update-agent");
+        entry.tags = vec!["alpha".to_string(), "beta".to_string()];
+        entry.manifest.tags = vec!["alpha".to_string(), "beta".to_string()];
+        let id = entry.id;
+        registry.register(entry).unwrap();
+
+        // Drop "alpha", keep "beta", add "gamma".
+        registry
+            .update_tags(id, vec!["beta".to_string(), "gamma".to_string()])
+            .unwrap();
+
+        let refreshed = registry.get(id).unwrap();
+        assert_eq!(
+            refreshed.tags,
+            vec!["beta".to_string(), "gamma".to_string()]
+        );
+        assert_eq!(
+            refreshed.manifest.tags, refreshed.tags,
+            "manifest.tags must mirror entry.tags after update_tags"
+        );
+
+        assert!(
+            !registry.tag_index.contains_key("alpha"),
+            "dropped tag's bucket should be pruned once empty"
+        );
+        assert_eq!(registry.tag_index.get("beta").unwrap().as_slice(), &[id]);
+        assert_eq!(registry.tag_index.get("gamma").unwrap().as_slice(), &[id]);
     }
 
     #[test]

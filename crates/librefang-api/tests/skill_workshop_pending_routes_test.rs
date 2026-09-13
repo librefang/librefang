@@ -843,6 +843,7 @@ async fn auto_policy_promotes_to_active_and_reloads_registry() {
     let session = Session {
         id: session_id,
         agent_id,
+        parent_session_id: None,
         messages: vec![
             Message::user("from now on always run cargo fmt before committing."),
             Message::assistant("Got it, I'll run cargo fmt first."),
@@ -1119,6 +1120,7 @@ async fn auto_policy_recovers_orphaned_pending_via_retry() {
     let session = Session {
         id: session_id,
         agent_id,
+        parent_session_id: None,
         messages: vec![Message::user(user_msg), Message::assistant("Got it.")],
         context_window_tokens: 0,
         label: None,

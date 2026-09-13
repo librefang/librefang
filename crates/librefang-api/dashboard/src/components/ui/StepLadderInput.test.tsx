@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { useState } from "react";
 import { describe, expect, it } from "vitest";
@@ -190,5 +190,34 @@ describe("StepLadderInput — custom entry against a value-parsing call site", (
     expect(field).toHaveAttribute("min", "-2");
     await userEvent.type(field, "0");
     expect(field).toBeValid();
+  });
+});
+
+describe("StepLadderInput — a value that passes through negative zero", () => {
+  /**
+   * `userEvent.type` cannot show this one. A real `<input type="number">`
+   * sanitizes its `value` to `""` for anything that is not yet a valid float,
+   * so typing `-0.25` reaches the handler as `"-0"`, `""`, `"-0.2"`, `"-0.25"`;
+   * jsdom does not implement that sanitization and hands the raw buffer over,
+   * so the round trip that breaks in a browser never happens in the test.
+   *
+   * `fireEvent.change` with the exact strings a browser reports is what makes
+   * it visible. The defect: a parent that stores the parsed number takes
+   * `Number("-0")` — a legitimate penalty — and hands back `String(-0)`, which
+   * is `"0"`. The field is controlled, so the minus sign is erased from under
+   * the operator mid-keystroke, and the rest of what they type lands on a
+   * positive number. They save `+0.25` having typed `-0.25`, with no error.
+   */
+  it("does not erase the minus sign when the parent normalises -0 to \"0\"", () => {
+    render(<NumericHarness ladder={PENALTY_LADDER} />);
+    fireEvent.click(screen.getByRole("button", { name: "custom" }));
+
+    const field = screen.getByRole("spinbutton", {
+      name: "Temperature — custom",
+    }) as HTMLInputElement;
+    fireEvent.change(field, { target: { value: "-0" } });
+
+    // What the operator can still see and keep typing into.
+    expect(field.value).toBe("-0");
   });
 });

@@ -5,6 +5,8 @@ import {
   deleteGoal,
   startGoalRun,
   stopGoalRun,
+  pauseGoalRun,
+  resumeGoalRun,
 } from "../http/client";
 import type { GoalItem } from "../../api";
 import { goalKeys } from "../queries/keys";
@@ -53,8 +55,21 @@ export function useDeleteGoal() {
 export function useStartGoalRun() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: ({ id, maxIterations }: { id: string; maxIterations?: number }) =>
-      startGoalRun(id, maxIterations !== undefined ? { max_iterations: maxIterations } : undefined),
+    mutationFn: ({
+      id,
+      maxIterations,
+      verifyMaxRetries,
+    }: {
+      id: string;
+      maxIterations?: number;
+      verifyMaxRetries?: number;
+    }) =>
+      startGoalRun(
+        id,
+        maxIterations !== undefined || verifyMaxRetries !== undefined
+          ? { max_iterations: maxIterations, verify_max_retries: verifyMaxRetries }
+          : undefined,
+      ),
     onSuccess: (_data, { id }) => {
       qc.invalidateQueries({ queryKey: goalKeys.run(id) });
       qc.invalidateQueries({ queryKey: goalKeys.lists() });
@@ -66,6 +81,28 @@ export function useStopGoalRun() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (id: string) => stopGoalRun(id),
+    onSuccess: (_data, id) => {
+      qc.invalidateQueries({ queryKey: goalKeys.run(id) });
+      qc.invalidateQueries({ queryKey: goalKeys.lists() });
+    },
+  });
+}
+
+export function usePauseGoalRun() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => pauseGoalRun(id),
+    onSuccess: (_data, id) => {
+      qc.invalidateQueries({ queryKey: goalKeys.run(id) });
+      qc.invalidateQueries({ queryKey: goalKeys.lists() });
+    },
+  });
+}
+
+export function useResumeGoalRun() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => resumeGoalRun(id),
     onSuccess: (_data, id) => {
       qc.invalidateQueries({ queryKey: goalKeys.run(id) });
       qc.invalidateQueries({ queryKey: goalKeys.lists() });

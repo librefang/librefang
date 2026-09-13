@@ -18,7 +18,7 @@ use crate::web_search::WebToolsContext;
 use librefang_memory::session::Session;
 use librefang_memory::{MemorySubstrate, ProactiveMemoryHooks};
 use librefang_skills::registry::SkillRegistry;
-use librefang_types::agent::AgentManifest;
+use librefang_types::agent::{AgentManifest, ModelConfig};
 use librefang_types::error::{LibreFangError, LibreFangResult};
 use librefang_types::memory::{Memory, MemoryFilter, MemorySource};
 use librefang_types::memory::{MemoryFragment, MemoryId};
@@ -27,7 +27,7 @@ use librefang_types::message::{
 };
 use librefang_types::model_catalog::VisionSupport;
 use librefang_types::tool::{AgentLoopSignal, DecisionTrace, ToolCall, ToolDefinition};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -36,6 +36,13 @@ use tracing::{debug, info, instrument, warn};
 
 mod end_turn;
 mod history;
+// The orchestration half of this module is deliberately feature-agnostic so its
+// unit tests run in every configuration, but with `media` off nothing in the
+// crate calls it — the entry point compiles to a pass-through. Silence the
+// resulting dead-code wall there rather than splitting the file along a feature
+// seam that has no behavioural meaning.
+#[cfg_attr(not(feature = "media"), allow(dead_code))]
+mod media_routing;
 mod message;
 pub mod model;
 mod prompt;
@@ -461,6 +468,29 @@ pub(super) fn redact_images_for_text_only(mut messages: Vec<Message>, model: &st
     messages
 }
 
+/// Merge the typed sampling fields into the request's `extra_body` map.
+///
+/// `top_p` / `frequency_penalty` / `presence_penalty` are typed [`ModelConfig`]
+/// fields (#8112) but have no slot in [`CompletionRequest`]; the drivers flatten
+/// `extra_body` into the API request body, which is the same wire position
+/// these OpenAI-compatible parameters occupied when they were untyped
+/// `extra_params` keys. Merging at the single request-construction site keeps
+/// one wire path, and a `None` field sends nothing — providers without the
+/// parameter are unaffected. `BTreeMap` key order stays deterministic (#3298).
+pub(super) fn build_extra_body(model: &ModelConfig) -> Option<BTreeMap<String, serde_json::Value>> {
+    let mut body = model.extra_params.clone();
+    if let Some(v) = model.top_p {
+        body.insert("top_p".to_string(), serde_json::json!(v));
+    }
+    if let Some(v) = model.frequency_penalty {
+        body.insert("frequency_penalty".to_string(), serde_json::json!(v));
+    }
+    if let Some(v) = model.presence_penalty {
+        body.insert("presence_penalty".to_string(), serde_json::json!(v));
+    }
+    (!body.is_empty()).then_some(body)
+}
+
 /// Run the agent execution loop for a single user message.
 ///
 /// This is the core of LibreFang: it loads session context, recalls memories,
@@ -855,6 +885,20 @@ async fn run_agent_loop_inner(
             (user_message, user_content_blocks)
         };
 
+    // Capability routing: an image bound for a model with no vision support is
+    // described by the provider the resolved `[capabilities]` block nominates,
+    // and the description is inserted next to the image. Done here — once, on
+    // the inbound turn, before it enters history — rather than at the redaction
+    // gate inside the loop, which would re-describe on every iteration.
+    // No-op for vision-capable models and for turns without images.
+    let guarded_user_content_blocks = media_routing::describe_images_for_text_only_model(
+        guarded_user_content_blocks,
+        manifest,
+        kernel.as_ref(),
+        media_engine,
+    )
+    .await;
+
     // Add the user message to session history.
     // When content blocks are provided (e.g. text + image from a channel),
     // use multimodal message format so the LLM receives the image for vision.
@@ -866,6 +910,18 @@ async fn run_agent_loop_inner(
         &privacy_config,
         combined_prefix.as_deref(),
     );
+
+    // Persist the inbound message before the first LLM call. The turn can
+    // die long before the first interim save (daemon restart, a provider
+    // that hangs, a circuit breaker that opens) and a session that loses the
+    // operator's message is the worst failure mode of all: the conversation
+    // forgets what was asked, silently. Same guards as the interim save —
+    // fork and incognito turns stay ephemeral even on mid-turn crashes.
+    if !opts.is_fork && !opts.incognito {
+        if let Err(e) = memory.save_session_async(session).await {
+            warn!("Failed to save inbound message: {e}");
+        }
+    }
 
     let max_history = resolve_max_history(manifest, opts);
     let PreparedMessages {
@@ -1325,11 +1381,7 @@ async fn run_agent_loop_inner(
             prompt_cache_strategy,
             response_format: manifest.response_format.clone(),
             timeout_secs: timeout_override,
-            extra_body: if manifest.model.extra_params.is_empty() {
-                None
-            } else {
-                Some(manifest.model.extra_params.clone())
-            },
+            extra_body: build_extra_body(&manifest.model),
             agent_id: Some(agent_id_str.clone()),
             session_id: Some(session.id.to_string()),
             step_id: Some(iteration.to_string()),

@@ -877,14 +877,6 @@ mod tests {
 
     // ── VaultKeyCheck ──────────────────────────────────────────────────────
 
-    /// Process-wide lock for tests that mutate `LIBREFANG_VAULT_KEY`.
-    /// `cargo test` runs tests in parallel by default, and env-var mutation is process-global, so without serialization these races clobber each other (and `run_all_returns_one_result_per_check`, which also reads the env var).
-    /// No external dep needed — std `Mutex` is enough.
-    fn env_lock() -> &'static std::sync::Mutex<()> {
-        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
-        LOCK.get_or_init(|| std::sync::Mutex::new(()))
-    }
-
     /// Run a closure with `LIBREFANG_VAULT_KEY` temporarily set to `value`.
     /// Holds [`env_lock`] for the entire body so concurrent vault-key tests in
     /// this module don't race. `LIBREFANG_VAULT_KEY` isn't touched by any
@@ -893,27 +885,7 @@ mod tests {
     /// both mutate `LIBREFANG_HOME`) doesn't need to be crate-wide.
     /// The original value is restored before the lock is released.
     fn with_vault_key<F: FnOnce() -> AuditResult>(value: Option<&str>, f: F) -> AuditResult {
-        // poison is fine — a panicking sibling test shouldn't make the rest
-        // hang or incorrectly skip.
-        let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
-        let prev = std::env::var("LIBREFANG_VAULT_KEY").ok();
-        // SAFETY: guarded by env_lock() mutex; no concurrent thread reads/writes
-        // LIBREFANG_VAULT_KEY while the lock is held.
-        unsafe {
-            match value {
-                Some(v) => std::env::set_var("LIBREFANG_VAULT_KEY", v),
-                None => std::env::remove_var("LIBREFANG_VAULT_KEY"),
-            }
-        }
-        let result = f();
-        // SAFETY: same as above.
-        unsafe {
-            match prev {
-                Some(p) => std::env::set_var("LIBREFANG_VAULT_KEY", p),
-                None => std::env::remove_var("LIBREFANG_VAULT_KEY"),
-            }
-        }
-        result
+        crate::test_env::with_env_vars(&[("LIBREFANG_VAULT_KEY", value)], f)
     }
 
     #[test]
@@ -1428,7 +1400,7 @@ mod tests {
         // Hold `env_lock` so this can't race with `with_vault_key` callers
         // mid-flight — otherwise the result count is fine, but the
         // observed env state is non-deterministic for any future asserts here.
-        let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::test_env::env_lock();
         let tmp = tmp_home();
         let ctx = ctx_with_home(tmp.path().to_path_buf());
         let results = run_all(&ctx);

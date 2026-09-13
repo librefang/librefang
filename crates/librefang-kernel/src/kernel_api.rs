@@ -174,14 +174,41 @@ pub trait KernelApi: KernelHandle + Send + Sync {
     /// Start a long-horizon autonomous run driving `agent_id` toward
     /// `goal_id`. `max_iterations` bounds the run (default
     /// [`librefang_types::goal::DEFAULT_GOAL_MAX_ITERATIONS`]).
+    ///
+    /// `loop_engineering` opts the run into the verifier gate and the
+    /// evaluator; the three arguments after it are inert without it.
+    #[allow(clippy::too_many_arguments)]
     fn start_goal_run(
         &self,
         goal_id: librefang_types::goal::GoalId,
         agent_id: AgentId,
         max_iterations: Option<u32>,
+        loop_engineering: bool,
+        verify_agent_id: Option<AgentId>,
+        verify_max_retries: Option<u32>,
+        evaluator_model: Option<String>,
     ) -> bool;
     /// Stop an active goal run. Returns whether a run was stopped.
     fn stop_goal_run(&self, goal_id: librefang_types::goal::GoalId) -> bool;
+    /// Pause an active goal run, checkpointing progress for a later resume.
+    fn pause_goal_run(&self, goal_id: librefang_types::goal::GoalId) -> bool;
+    /// Resume a goal run from its pause checkpoint.
+    ///
+    /// Takes the same loop-engineering arguments as [`Self::start_goal_run`]:
+    /// the checkpoint records the run's progress, not its verifier
+    /// configuration, so a resume that did not carry them would silently drop
+    /// the gate the operator configured on the goal.
+    #[allow(clippy::too_many_arguments)]
+    fn resume_goal_run(
+        &self,
+        goal_id: librefang_types::goal::GoalId,
+        agent_id: AgentId,
+        max_iterations: Option<u32>,
+        loop_engineering: bool,
+        verify_agent_id: Option<AgentId>,
+        verify_max_retries: Option<u32>,
+        evaluator_model: Option<String>,
+    ) -> bool;
     /// Snapshot the observable state of a goal's run, if one is active.
     fn goal_run_state(
         &self,
@@ -346,13 +373,14 @@ pub trait KernelApi: KernelHandle + Send + Sync {
     /// [`ResetScope`] for the agent-wide vs. per-session split (#4868).
     async fn reboot_session(&self, agent_id: AgentId, scope: ResetScope) -> KernelResult<usize>;
     async fn clear_agent_history(&self, agent_id: AgentId) -> KernelResult<()>;
-    /// Delete a single session by id and any process-local side-state keyed
-    /// on it (currently the per-session `file_read_tracker` bucket — see
+    /// Delete a single session by id, cascading to every descendant
+    /// session, and any process-local side-state keyed on the ids removed
+    /// (currently the per-session `file_read_tracker` bucket — see
     /// `librefang_runtime::file_read_tracker::forget_session`). Use this in
     /// preference to calling `memory_substrate().delete_session(...)`
     /// directly so the side-state map does not leak across the daemon's
-    /// lifetime.
-    fn delete_session(&self, session_id: SessionId) -> KernelResult<()>;
+    /// lifetime. Returns every session id actually removed.
+    fn delete_session(&self, session_id: SessionId) -> KernelResult<Vec<SessionId>>;
     fn list_agent_sessions(&self, agent_id: AgentId) -> KernelResult<Vec<serde_json::Value>>;
     fn create_agent_session(
         &self,
@@ -381,6 +409,21 @@ pub trait KernelApi: KernelHandle + Send + Sync {
     fn set_agent_skills(&self, agent_id: AgentId, skills: Vec<String>) -> KernelResult<()>;
     fn set_agent_mcp_servers(&self, agent_id: AgentId, servers: Vec<String>) -> KernelResult<()>;
     fn set_agent_channels(&self, agent_id: AgentId, channels: Vec<String>) -> KernelResult<()>;
+    /// Replace an agent's named-workspace declarations, rewriting its `TOOLS.md`
+    /// so the model is told about an alias the sandbox already accepts.
+    fn set_agent_workspaces(
+        &self,
+        agent_id: AgentId,
+        workspaces: std::collections::HashMap<String, librefang_types::agent::WorkspaceDecl>,
+    ) -> KernelResult<()>;
+    /// Update an agent's model selection mode and per-agent router override.
+    /// See [`LibreFangKernel::set_agent_model_routing`] for the full contract.
+    fn set_agent_model_routing(
+        &self,
+        agent_id: AgentId,
+        mode: librefang_types::agent::ModelMode,
+        router_override: Option<librefang_types::model_profile::AgentRouterOverride>,
+    ) -> KernelResult<()>;
     /// Update an agent's schedule mode and restart its background loop so
     /// the change takes effect immediately, without a daemon restart.
     /// See [`LibreFangKernel::set_agent_schedule`] for the full contract.
@@ -490,7 +533,10 @@ pub trait KernelApi: KernelHandle + Send + Sync {
     async fn disconnect_mcp_server(&self, name: &str) -> bool;
     async fn retry_mcp_connection(self: Arc<Self>, server_name: &str);
     async fn reload_mcp_servers(self: Arc<Self>) -> Result<usize, String>;
-    async fn reconnect_mcp_server(self: Arc<Self>, id: &str) -> Result<usize, String>;
+    async fn reconnect_mcp_server(
+        self: Arc<Self>,
+        id: &str,
+    ) -> Result<usize, crate::McpReconnectError>;
 
     // ====================================================================
     // Triggers / workflows / events
@@ -973,16 +1019,52 @@ impl KernelApi for LibreFangKernel {
         LibreFangKernel::preview_step_agent(self, agent_ref)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn start_goal_run(
         &self,
         goal_id: librefang_types::goal::GoalId,
         agent_id: AgentId,
         max_iterations: Option<u32>,
+        loop_engineering: bool,
+        verify_agent_id: Option<AgentId>,
+        verify_max_retries: Option<u32>,
+        evaluator_model: Option<String>,
     ) -> bool {
-        self.goal_run_start(goal_id, agent_id, max_iterations)
+        self.goal_run_start(
+            goal_id,
+            agent_id,
+            max_iterations,
+            loop_engineering,
+            verify_agent_id,
+            verify_max_retries,
+            evaluator_model,
+        )
     }
     fn stop_goal_run(&self, goal_id: librefang_types::goal::GoalId) -> bool {
         self.goal_run_stop(goal_id)
+    }
+    fn pause_goal_run(&self, goal_id: librefang_types::goal::GoalId) -> bool {
+        self.goal_run_pause(goal_id)
+    }
+    fn resume_goal_run(
+        &self,
+        goal_id: librefang_types::goal::GoalId,
+        agent_id: AgentId,
+        max_iterations: Option<u32>,
+        loop_engineering: bool,
+        verify_agent_id: Option<AgentId>,
+        verify_max_retries: Option<u32>,
+        evaluator_model: Option<String>,
+    ) -> bool {
+        self.goal_run_resume(
+            goal_id,
+            agent_id,
+            max_iterations,
+            loop_engineering,
+            verify_agent_id,
+            verify_max_retries,
+            evaluator_model,
+        )
     }
     fn goal_run_state(
         &self,
@@ -1178,7 +1260,7 @@ impl KernelApi for LibreFangKernel {
     async fn clear_agent_history(&self, agent_id: AgentId) -> KernelResult<()> {
         Self::clear_agent_history(self, agent_id).await
     }
-    fn delete_session(&self, session_id: SessionId) -> KernelResult<()> {
+    fn delete_session(&self, session_id: SessionId) -> KernelResult<Vec<SessionId>> {
         Self::delete_session(self, session_id)
     }
     fn list_agent_sessions(&self, agent_id: AgentId) -> KernelResult<Vec<serde_json::Value>> {
@@ -1230,8 +1312,25 @@ impl KernelApi for LibreFangKernel {
     fn set_agent_mcp_servers(&self, agent_id: AgentId, servers: Vec<String>) -> KernelResult<()> {
         Self::set_agent_mcp_servers(self, agent_id, servers)
     }
+    fn set_agent_model_routing(
+        &self,
+        agent_id: AgentId,
+        mode: librefang_types::agent::ModelMode,
+        router_override: Option<librefang_types::model_profile::AgentRouterOverride>,
+    ) -> KernelResult<()> {
+        Self::set_agent_model_routing(self, agent_id, mode, router_override)
+    }
+
     fn set_agent_channels(&self, agent_id: AgentId, channels: Vec<String>) -> KernelResult<()> {
         Self::set_agent_channels(self, agent_id, channels)
+    }
+
+    fn set_agent_workspaces(
+        &self,
+        agent_id: AgentId,
+        workspaces: std::collections::HashMap<String, librefang_types::agent::WorkspaceDecl>,
+    ) -> KernelResult<()> {
+        Self::set_agent_workspaces(self, agent_id, workspaces)
     }
     fn set_agent_schedule(
         self: Arc<Self>,
@@ -1363,7 +1462,10 @@ impl KernelApi for LibreFangKernel {
     async fn reload_mcp_servers(self: Arc<Self>) -> Result<usize, String> {
         LibreFangKernel::reload_mcp_servers(&self).await
     }
-    async fn reconnect_mcp_server(self: Arc<Self>, id: &str) -> Result<usize, String> {
+    async fn reconnect_mcp_server(
+        self: Arc<Self>,
+        id: &str,
+    ) -> Result<usize, crate::McpReconnectError> {
         LibreFangKernel::reconnect_mcp_server(&self, id).await
     }
 

@@ -610,6 +610,25 @@ pub enum SessionMode {
     New,
 }
 
+/// Model selection mode for an agent.
+///
+/// Like [`SessionMode`] above, this deserializes strictly: there is no
+/// `#[serde(other)]` arm, so `mode = "Flexible"` (capitalised typo) is a hard
+/// parse error rather than a silent downgrade to `Fixed`. A typo that quietly
+/// pinned the agent back to its manifest model would be invisible — the agent
+/// would keep working, just never routed.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelMode {
+    /// Always use the provider/model in [`ModelConfig`]. Default, and
+    /// fully backward-compatible with manifests written before routing existed.
+    #[default]
+    Fixed,
+    /// Let the profile router pick the model for each turn.
+    /// Only honoured when `[model_router] enabled = true` in `config.toml`.
+    Flexible,
+}
+
 /// Web search augmentation mode.
 ///
 /// Controls whether the agent loop automatically searches the web using the
@@ -884,6 +903,9 @@ impl ToolProfile {
             memory_write: Some(vec!["self.*".into()]),
             ofp_discover: false,
             ofp_connect: vec![],
+            // A tool profile says nothing about which provider services a
+            // modality — that stays inherited from the global block.
+            routing: crate::media::CapabilityRouting::default(),
         }
     }
 }
@@ -907,6 +929,16 @@ pub const DEFAULT_MODEL_TEMPERATURE: f32 = 0.7;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ModelConfig {
+    /// Model selection mode. `"fixed"` (default) always uses the
+    /// provider/model below; `"flexible"` lets the profile router pick per
+    /// turn. Only honoured when `[model_router] enabled = true` in
+    /// `config.toml`.
+    #[serde(default)]
+    pub mode: ModelMode,
+    /// Per-agent router constraints, applied when `mode = "flexible"`.
+    /// Ignored entirely in `"fixed"` mode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub router_override: Option<crate::model_profile::AgentRouterOverride>,
     /// LLM provider name.
     pub provider: String,
     /// Model identifier.
@@ -919,6 +951,10 @@ pub struct ModelConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f32>,
     /// Top-p / nucleus sampling (0.0–1.0). `None` = inherit.
+    ///
+    /// Reaches the wire through `extra_body`, so every OpenAI-compatible provider (including groq, which routes through `OpenAIDriver`) plus Ollama honour it.
+    /// Typed-body drivers (Anthropic, Gemini) never read `extra_body` and silently drop the value; the dashboard field carries a provider hint so the operator is not left guessing.
+    /// The same applies to [`Self::frequency_penalty`] and [`Self::presence_penalty`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub top_p: Option<f32>,
     /// Frequency penalty (-2.0–2.0). `None` = inherit.
@@ -971,6 +1007,8 @@ pub struct ModelConfig {
 impl Default for ModelConfig {
     fn default() -> Self {
         Self {
+            mode: ModelMode::default(),
+            router_override: None,
             provider: "default".to_string(),
             model: "default".to_string(),
             max_tokens: None,
@@ -1669,7 +1707,7 @@ impl CompactionOverrides {
 }
 
 /// Access mode for a named workspace.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum WorkspaceMode {
     /// Full read-write access (default).
@@ -1693,7 +1731,7 @@ pub enum WorkspaceMode {
 ///   target. The path must canonicalize to a prefix of one of the
 ///   `allowed_mount_roots` entries in `config.toml`; otherwise the
 ///   declaration is rejected at boot. See issue #3230.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct WorkspaceDecl {
     /// Path relative to `workspaces_dir` (e.g. `"shared/library"`).
     /// Mutually exclusive with `mount`.
@@ -1873,6 +1911,22 @@ pub struct ManifestCapabilities {
     /// Allowed OFP peer patterns.
     #[serde(default, deserialize_with = "crate::serde_compat::vec_lenient")]
     pub ofp_connect: Vec<String>,
+    /// Per-agent media capability routing — the same keys the kernel-global
+    /// `[capabilities]` block in `config.toml` accepts, flattened into this
+    /// block so `agent.toml` spells it identically:
+    ///
+    /// ```toml
+    /// [capabilities]
+    /// tools = ["*"]
+    /// image_understanding = "openai/gpt-4o"   # this agent's model can't see
+    /// ```
+    ///
+    /// Absent keys inherit the global block (see
+    /// [`crate::media::MediaConfig::with_capability_routing`]); the whole
+    /// struct defaulting to empty is what "inherit everything" looks like on
+    /// disk.
+    #[serde(flatten)]
+    pub routing: crate::media::CapabilityRouting,
 }
 
 impl ManifestCapabilities {
@@ -3262,6 +3316,61 @@ memory_write = ["self.*"]
         );
     }
 
+    /// The per-agent `[capabilities]` block carries both the historical tool /
+    /// memory grants and the flattened media routing keys, and neither side
+    /// may swallow the other. An unknown key must stay non-fatal — this block
+    /// is hand-edited.
+    #[test]
+    fn test_manifest_capabilities_block_holds_grants_and_media_routing_together() {
+        use crate::media::MediaCapability;
+
+        let toml_str = r#"
+name = "profesor"
+module = "builtin:chat"
+
+[capabilities]
+tools = ["memory_recall", "web_fetch"]
+memory_read = ["*"]
+image_understanding = "openai/gpt-4o"
+speech_to_text = { provider = "groq" }
+some_future_key = "ignored"
+"#;
+        let manifest: AgentManifest = toml::from_str(toml_str).unwrap();
+        assert_eq!(
+            manifest.capabilities.tools,
+            vec!["memory_recall".to_string(), "web_fetch".to_string()]
+        );
+        assert_eq!(
+            manifest.capabilities.memory_read,
+            Some(vec!["*".to_string()])
+        );
+
+        let vision = manifest
+            .capabilities
+            .routing
+            .get(MediaCapability::ImageUnderstanding)
+            .expect("vision routed");
+        assert_eq!(vision.provider.as_deref(), Some("openai"));
+        assert_eq!(vision.model.as_deref(), Some("gpt-4o"));
+
+        let stt = manifest
+            .capabilities
+            .routing
+            .get(MediaCapability::SpeechToText)
+            .expect("stt routed");
+        assert_eq!(stt.provider.as_deref(), Some("groq"));
+        assert_eq!(stt.model, None);
+    }
+
+    /// A manifest that says nothing about media must produce an empty routing
+    /// block — that is what inheriting resolves to at the merge step.
+    #[test]
+    fn test_manifest_capabilities_media_routing_defaults_to_inherit() {
+        let manifest: AgentManifest =
+            toml::from_str("name = \"plain\"\nmodule = \"builtin:chat\"\n").unwrap();
+        assert!(manifest.capabilities.routing.is_empty());
+    }
+
     #[test]
     fn test_manifest_allowed_plugins_default_empty() {
         let manifest = AgentManifest::default();
@@ -3411,6 +3520,8 @@ model = "llama-3.3-70b-versatile"
         extra.insert("memory_max_window".to_string(), serde_json::json!(50));
 
         let config = ModelConfig {
+            mode: ModelMode::Fixed,
+            router_override: None,
             provider: "qwen".to_string(),
             model: "qwen3.6".to_string(),
             max_tokens: Some(4096),

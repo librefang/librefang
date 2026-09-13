@@ -1033,16 +1033,30 @@ async fn handle_terminal_ws(
     let mut input_times: Vec<std::time::Instant> = Vec::new();
     let input_window: Duration = Duration::from_secs(60);
 
+    // Liveness probe. This socket needs it more than the chat one does:
+    // `mark_terminal_activity` is called on PTY *output* too, so a shell that
+    // keeps printing resets the idle timer forever and a dead peer holds its
+    // child process, its tmux window and one of only `max_ws_per_ip` slots for
+    // as long as the daemon runs.
+    let ping_interval = Duration::from_secs(rl_cfg.ws_ping_interval_secs);
+    let pings_enabled = !ping_interval.is_zero();
+    let mut awaiting_pong = false;
+
     enum ExitReason {
         ClientClose,
         Timeout,
         ProcessExited,
+        HeartbeatTimeout,
     }
     let exit_reason: ExitReason;
 
     loop {
         tokio::select! {
             msg = receiver.next() => {
+                // Any frame proves the peer is answering. Not routed through
+                // `mark_terminal_activity`: a Pong must not count as activity or
+                // the idle timeout could never fire on an open browser tab.
+                awaiting_pong = false;
                 match msg {
                     Some(Ok(msg)) => {
                         match msg {
@@ -1232,6 +1246,25 @@ async fn handle_terminal_ws(
                     exit_reason = ExitReason::Timeout;
                     break;
                 }
+            }
+            _ = tokio::time::sleep(ping_interval), if pings_enabled => {
+                if awaiting_pong {
+                    tracing::info!(
+                        interval_secs = ping_interval.as_secs(),
+                        "terminal WebSocket peer did not answer a ping"
+                    );
+                    exit_reason = ExitReason::HeartbeatTimeout;
+                    break;
+                }
+                let send_failed = {
+                    let mut s = sender.lock().await;
+                    s.send(Message::Ping(Default::default())).await.is_err()
+                };
+                if send_failed {
+                    exit_reason = ExitReason::ClientClose;
+                    break;
+                }
+                awaiting_pong = true;
             }
             _ = &mut pty_read_handle => {
                 mark_terminal_activity(&last_activity_shared);

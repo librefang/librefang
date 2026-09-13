@@ -1,0 +1,5 @@
+Returning to a chat tab whose WebSocket died while it was hidden no longer swallows the next message (#8273).
+  A half-open socket never fires `onclose`, so the browser kept reporting `readyState === OPEN` and the frame was written into a connection whose bytes went nowhere: the turn spun forever, and reloading showed neither the question nor an answer, because nothing had reached the daemon to persist.
+  The `visibilitychange` wake-up added in #4063 could not help, since it was gated on the retries-exhausted flag that only a disconnect the browser actually noticed can set — leaving the one case the listener existed for as the one case it could not act on.
+  Coming back to the tab now probes the link with the `{"type":"ping"}` / `{"type":"pong"}` exchange the daemon has answered since the socket was first written and no client had ever sent, and hands a socket that does not answer to the reconnect path that already exists.
+  A probe is skipped while a turn is in flight, because the daemon stops reading the socket for the duration of a turn and could not answer one. (#8275) (@DaBlitzStein)

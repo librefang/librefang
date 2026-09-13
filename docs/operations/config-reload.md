@@ -139,6 +139,7 @@ classified differently — the row note spells out which is which.
 | `local_probe_interval_secs` | R | Interval between local-provider reachability probes. |
 | `thinking` | N | Extended-thinking config (read live per message). |
 | `default_routing` | N | Kernel-wide Smart Model Router defaults. |
+| `model_router` | N | Profile router settings, read live from `config_snapshot()` on every routed turn. The profile catalog itself lives in `model_profiles.toml` and is re-read whenever that file's mtime moves, so editing profiles needs no reload at all. |
 
 ### Prompt / caching / context
 
@@ -199,7 +200,7 @@ classified differently — the row note spells out which is which.
 | `mcp_runtime_store` | N | Selects where `/api/mcp/servers` writes land (`file` → config.toml, `db` → SQLite `mcp_server_configs`). Read live by the handler; effective on the next write. |
 | `taint_rules` | H | Named taint rule sets pushed into the shared swap (see field note: already-connected servers pick them up on next scan, not via reconnect). |
 | `a2a` | H | Agent-to-Agent protocol config. |
-| `skills` | H | Skills config (bundled + user-installed) — reloads registry. |
+| `skills` | H | Skills config (bundled + user-installed) — reloads registry. The `registry_repo` and `[skills.promotion]` sub-section are effectively **N** within that: both promotion handlers read them from `config_snapshot()` per request, so a change is live on the next promotion regardless of the registry reload the section triggers. They are left inside the section's single hot action deliberately — the reload is cheap and one classification per section is easier to keep honest than a carve-out that has to be re-argued every time a field is added. |
 | `plugins` | R | Plugin registry config. |
 | `registry` | R/N | Registry sync config. `cache_ttl_secs` / `registry_mirror` / `registry_host` are **R**: they are read when the checkout is set up. `auto_sync` is **N**: the 24 h catalog task calls `config_snapshot()` at the top of each tick and passes the value into `sync_catalog_to`, so flipping it off freezes `~/.librefang/registry/` from the next tick on, with no restart. Splitting the section this way is what makes that true — while the whole section was classified R, a registry-only reload produced neither a hot action nor a noop change, so `should_store_config` discarded the new config and the task kept reading the old value until the daemon restarted. Boot's own sync pass has of course already run by reload time, so `auto_sync = false` written *before* a start is still what prevents the boot-time fast-forward. |
 | `hands` | N | Hands marketplace SSRF allowlist (`registry_allowed_hosts`) — read live by the install handler per request. |
@@ -231,6 +232,7 @@ classified differently — the row note spells out which is which.
 | `web` | H | Web tools config (search + fetch) — rebuilds web context. |
 | `browser` | R | Browser automation config — the `BrowserManager` captures it by value at boot with no rebuild path, so a change needs a restart. |
 | `media` | R | Media-understanding config — `MediaEngine` captures it by value at boot with no rebuild path, so a change needs a restart. |
+| `capabilities` | R | Capability routing config — folded into `MediaEngine` and `MediaDriverCache` at boot; same restart contract as `media`. |
 | `links` | N | Link-understanding config. |
 | `canvas` | R | Canvas (A2UI) config. |
 | `tts` | N | Text-to-speech config. |

@@ -57,6 +57,17 @@ pub const AGENT_SCOPED_TABLES: &[(AgentTableGroup, &str, &str)] = &[
     // goal_runs (v42) persists per-agent goal-run state; purge it on agent
     // removal so deleting an agent doesn't orphan its runs.
     (AgentTableGroup::Structured, "goal_runs", "agent_id"),
+    // manifest_versions (v58) keeps an agent's manifest history, which holds
+    // whole `agent.toml` bodies — system prompts, model choices, capability
+    // lists. It is not an audit trail: nothing chains its rows and nothing
+    // verifies them, so unlike `audit_entries` there is no integrity argument
+    // for keeping it past the agent it describes.
+    (AgentTableGroup::Structured, "manifest_versions", "agent_id"),
+    // manifest_versions (v58) holds one full serialized manifest per config
+    // change; removing an agent has to take its history with it, or the rows
+    // outlive the agent they describe and a later agent reusing the id would
+    // inherit them.
+    (AgentTableGroup::Structured, "manifest_versions", "agent_id"),
     (AgentTableGroup::Structured, "agents", "id"),
     // `sessions` and `sessions_fts` MUST be cleared together — `search_sessions`
     // reads from `sessions_fts` without joining `sessions`, so an orphan FTS row

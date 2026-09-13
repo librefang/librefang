@@ -1,7 +1,10 @@
 //! Inline unit tests for tool_runner — moved out of mod.rs in #3710 so the
 //! parent module stays focused on dispatch + child-module wiring.
 
-use super::agent::{build_agent_manifest_toml, tools_to_parent_capabilities};
+use super::agent::{
+    build_agent_manifest_toml, check_profile_against_parent, tools_to_parent_capabilities,
+    unknown_profile_error,
+};
 use super::channel::parse_poll_options;
 use super::image::{detect_image_format, extract_image_dimensions, format_file_size};
 use super::media::{
@@ -1039,6 +1042,7 @@ impl TaskQueue for DispatchCapture {
         _description: &str,
         _assigned_to: Option<&str>,
         _created_by: Option<&str>,
+        _opts: &librefang_kernel_handle::TaskPostOptions,
     ) -> Result<String, librefang_kernel_handle::KernelOpError> {
         Ok("task".into())
     }
@@ -1731,6 +1735,7 @@ impl TaskQueue for MirrorKernel {
         _description: &str,
         _assigned_to: Option<&str>,
         _created_by: Option<&str>,
+        _opts: &librefang_kernel_handle::TaskPostOptions,
     ) -> Result<String, librefang_kernel_handle::KernelOpError> {
         Err("not used".into())
     }
@@ -2088,6 +2093,7 @@ impl TaskQueue for ApprovalKernel {
         _description: &str,
         _assigned_to: Option<&str>,
         _created_by: Option<&str>,
+        _opts: &librefang_kernel_handle::TaskPostOptions,
     ) -> Result<String, librefang_kernel_handle::KernelOpError> {
         Err("not used".into())
     }
@@ -2334,6 +2340,7 @@ impl TaskQueue for ForceHumanCapturingKernel {
         _description: &str,
         _assigned_to: Option<&str>,
         _created_by: Option<&str>,
+        _opts: &librefang_kernel_handle::TaskPostOptions,
     ) -> Result<String, librefang_kernel_handle::KernelOpError> {
         Err("not used".into())
     }

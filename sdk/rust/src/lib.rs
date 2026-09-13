@@ -89,6 +89,31 @@ async fn do_req(
     } else {
         req
     };
+    send_and_parse(req).await
+}
+
+/// Sends `body` verbatim under `content_type`, for endpoints that read the
+/// request body as bytes and reject `application/json`.
+async fn do_req_raw(
+    client: &Client,
+    base_url: &str,
+    method: reqwest::Method,
+    path_segments: &[&str],
+    body: Vec<u8>,
+    content_type: &str,
+) -> Result<Value> {
+    let url = build_url(client, base_url, path_segments.iter().copied())?;
+    send_and_parse(
+        client
+            .request(method, url)
+            .timeout(DEFAULT_REQUEST_TIMEOUT)
+            .header(reqwest::header::CONTENT_TYPE, content_type)
+            .body(body),
+    )
+    .await
+}
+
+async fn send_and_parse(req: reqwest::RequestBuilder) -> Result<Value> {
     let res = req.send().await?;
     let status = res.status();
     let text = res.text().await?;
@@ -276,7 +301,9 @@ pub struct LibreFang {
     pub groups: Arc<GroupsResource>,
     pub hands: Arc<HandsResource>,
     pub inbox: Arc<InboxResource>,
+    pub knowledge: Arc<KnowledgeResource>,
     pub mcp: Arc<McpResource>,
+    pub media: Arc<MediaResource>,
     pub memory: Arc<MemoryResource>,
     pub models: Arc<ModelsResource>,
     pub network: Arc<NetworkResource>,
@@ -286,6 +313,7 @@ pub struct LibreFang {
     pub sessions: Arc<SessionsResource>,
     pub skills: Arc<SkillsResource>,
     pub system: Arc<SystemResource>,
+    pub tasks: Arc<TasksResource>,
     pub tools: Arc<ToolsResource>,
     pub users: Arc<UsersResource>,
     pub vault: Arc<VaultResource>,
@@ -323,7 +351,9 @@ impl LibreFang {
             groups: Arc::new(GroupsResource::new(base_url.clone(), client.clone())),
             hands: Arc::new(HandsResource::new(base_url.clone(), client.clone())),
             inbox: Arc::new(InboxResource::new(base_url.clone(), client.clone())),
+            knowledge: Arc::new(KnowledgeResource::new(base_url.clone(), client.clone())),
             mcp: Arc::new(McpResource::new(base_url.clone(), client.clone())),
+            media: Arc::new(MediaResource::new(base_url.clone(), client.clone())),
             memory: Arc::new(MemoryResource::new(base_url.clone(), client.clone())),
             models: Arc::new(ModelsResource::new(base_url.clone(), client.clone())),
             network: Arc::new(NetworkResource::new(base_url.clone(), client.clone())),
@@ -336,6 +366,7 @@ impl LibreFang {
             sessions: Arc::new(SessionsResource::new(base_url.clone(), client.clone())),
             skills: Arc::new(SkillsResource::new(base_url.clone(), client.clone())),
             system: Arc::new(SystemResource::new(base_url.clone(), client.clone())),
+            tasks: Arc::new(TasksResource::new(base_url.clone(), client.clone())),
             tools: Arc::new(ToolsResource::new(base_url.clone(), client.clone())),
             users: Arc::new(UsersResource::new(base_url.clone(), client.clone())),
             vault: Arc::new(VaultResource::new(base_url.clone(), client.clone())),
@@ -815,6 +846,18 @@ impl AgentsResource {
         .await
     }
 
+    pub async fn get_agent_manifest_toml(&self, id: &str) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::GET,
+            &["api", "agents", id, "manifest"],
+            None,
+            &[],
+        )
+        .await
+    }
+
     pub async fn get_agent_mcp_servers(&self, id: &str) -> Result<Value> {
         do_req(
             &self.client,
@@ -898,6 +941,30 @@ impl AgentsResource {
             &self.base_url,
             reqwest::Method::PUT,
             &["api", "agents", id, "model"],
+            Some(data),
+            &[],
+        )
+        .await
+    }
+
+    pub async fn get_agent_model_routing(&self, id: &str) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::GET,
+            &["api", "agents", id, "model_routing"],
+            None,
+            &[],
+        )
+        .await
+    }
+
+    pub async fn set_agent_model_routing(&self, id: &str, data: Value) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::PUT,
+            &["api", "agents", id, "model_routing"],
             Some(data),
             &[],
         )
@@ -1223,14 +1290,20 @@ impl AgentsResource {
         .await
     }
 
-    pub async fn upload_file(&self, id: &str, data: Value) -> Result<Value> {
-        do_req(
+    /// Sends a raw `application/octet-stream` body; `content_type` overrides that default.
+    pub async fn upload_file(
+        &self,
+        id: &str,
+        body: Vec<u8>,
+        content_type: Option<&str>,
+    ) -> Result<Value> {
+        do_req_raw(
             &self.client,
             &self.base_url,
             reqwest::Method::POST,
             &["api", "agents", id, "upload"],
-            Some(data),
-            &[],
+            body,
+            content_type.unwrap_or("application/octet-stream"),
         )
         .await
     }
@@ -2525,6 +2598,104 @@ impl InboxResource {
     }
 }
 
+// ── Knowledge ──
+
+#[derive(Debug, Clone)]
+pub struct KnowledgeResource {
+    base_url: String,
+    client: Client,
+}
+
+impl KnowledgeResource {
+    fn new(base_url: String, client: Client) -> Self {
+        Self { base_url, client }
+    }
+
+    pub async fn list_bases(&self) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::GET,
+            &["api", "knowledge"],
+            None,
+            &[],
+        )
+        .await
+    }
+
+    pub async fn create_base(&self, data: Value) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::POST,
+            &["api", "knowledge"],
+            Some(data),
+            &[],
+        )
+        .await
+    }
+
+    pub async fn delete_base(&self, name: &str) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::DELETE,
+            &["api", "knowledge", name],
+            None,
+            &[],
+        )
+        .await
+    }
+
+    pub async fn set_holders(&self, name: &str, data: Value) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::PUT,
+            &["api", "knowledge", name, "agents"],
+            Some(data),
+            &[],
+        )
+        .await
+    }
+
+    pub async fn list_documents(&self, name: &str) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::GET,
+            &["api", "knowledge", name, "documents"],
+            None,
+            &[],
+        )
+        .await
+    }
+
+    pub async fn put_document(&self, name: &str, filename: &str, data: Value) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::PUT,
+            &["api", "knowledge", name, "documents", filename],
+            Some(data),
+            &[],
+        )
+        .await
+    }
+
+    pub async fn delete_document(&self, name: &str, filename: &str) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::DELETE,
+            &["api", "knowledge", name, "documents", filename],
+            None,
+            &[],
+        )
+        .await
+    }
+}
+
 // ── Mcp ──
 
 #[derive(Debug, Clone)]
@@ -2719,6 +2890,109 @@ impl McpResource {
     }
 }
 
+// ── Media ──
+
+#[derive(Debug, Clone)]
+pub struct MediaResource {
+    base_url: String,
+    client: Client,
+}
+
+impl MediaResource {
+    fn new(base_url: String, client: Client) -> Self {
+        Self { base_url, client }
+    }
+
+    pub async fn generate_image(&self, data: Value) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::POST,
+            &["api", "media", "image"],
+            Some(data),
+            &[],
+        )
+        .await
+    }
+
+    pub async fn generate_music(&self, data: Value) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::POST,
+            &["api", "media", "music"],
+            Some(data),
+            &[],
+        )
+        .await
+    }
+
+    pub async fn list_media_providers(&self) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::GET,
+            &["api", "media", "providers"],
+            None,
+            &[],
+        )
+        .await
+    }
+
+    pub async fn synthesize_speech(&self, data: Value) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::POST,
+            &["api", "media", "speech"],
+            Some(data),
+            &[],
+        )
+        .await
+    }
+
+    /// Sends a raw `audio/webm` body; `content_type` overrides that default.
+    pub async fn transcribe_audio(
+        &self,
+        body: Vec<u8>,
+        content_type: Option<&str>,
+    ) -> Result<Value> {
+        do_req_raw(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::POST,
+            &["api", "media", "transcribe"],
+            body,
+            content_type.unwrap_or("audio/webm"),
+        )
+        .await
+    }
+
+    pub async fn submit_video(&self, data: Value) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::POST,
+            &["api", "media", "video"],
+            Some(data),
+            &[],
+        )
+        .await
+    }
+
+    pub async fn poll_video_task(&self, task_id: &str, provider: Option<&str>) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::GET,
+            &["api", "media", "video", task_id],
+            None,
+            &[("provider", provider)],
+        )
+        .await
+    }
+}
+
 // ── Memory ──
 
 #[derive(Debug, Clone)]
@@ -2872,6 +3146,18 @@ impl ModelsResource {
             &self.base_url,
             reqwest::Method::GET,
             &["api", "credential-pools"],
+            None,
+            &[],
+        )
+        .await
+    }
+
+    pub async fn list_model_router_profiles(&self) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::GET,
+            &["api", "model-router", "profiles"],
             None,
             &[],
         )
@@ -5062,6 +5348,30 @@ impl SystemResource {
         .await
     }
 
+    pub async fn get_agent_type_registry_diff(&self, name: &str) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::GET,
+            &["api", "templates", name, "registry-diff"],
+            None,
+            &[],
+        )
+        .await
+    }
+
+    pub async fn restore_agent_type_from_registry(&self, name: &str) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::POST,
+            &["api", "templates", name, "restore"],
+            None,
+            &[],
+        )
+        .await
+    }
+
     pub async fn get_agent_template_toml(&self, name: &str) -> Result<Value> {
         do_req(
             &self.client,
@@ -5093,6 +5403,32 @@ impl SystemResource {
             reqwest::Method::GET,
             &["api", "versions"],
             None,
+            &[],
+        )
+        .await
+    }
+}
+
+// ── Tasks ──
+
+#[derive(Debug, Clone)]
+pub struct TasksResource {
+    base_url: String,
+    client: Client,
+}
+
+impl TasksResource {
+    fn new(base_url: String, client: Client) -> Self {
+        Self { base_url, client }
+    }
+
+    pub async fn task_queue_post_root(&self, data: Value) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::POST,
+            &["api", "tasks"],
+            Some(data),
             &[],
         )
         .await

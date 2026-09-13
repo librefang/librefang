@@ -31,11 +31,11 @@ pub(crate) fn safe_truncate_str(s: &str, max_bytes: usize) -> &str {
 use async_trait::async_trait;
 use dashmap::DashMap;
 use librefang_types::media::{
-    MediaCapability, MediaImageRequest, MediaImageResult, MediaMusicRequest, MediaMusicResult,
-    MediaTaskStatus, MediaTtsRequest, MediaTtsResult, MediaVideoRequest, MediaVideoResult,
-    MediaVideoSubmitResult,
+    CapabilityRouting, MediaCapability, MediaImageRequest, MediaImageResult, MediaMusicRequest,
+    MediaMusicResult, MediaTaskStatus, MediaTtsRequest, MediaTtsResult, MediaVideoRequest,
+    MediaVideoResult, MediaVideoSubmitResult,
 };
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
 use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use tracing::warn;
@@ -152,6 +152,15 @@ pub trait MediaDriver: Send + Sync {
 
 // ── Driver cache ───────────────────────────────────────────────────────
 
+/// Provider names `create_media_driver` serves with a purpose-built driver.
+///
+/// These have no registry entry to derive them from — `google_tts` is not in
+/// the provider registry at all — so any surface enumerating media providers
+/// has to add them, and had been doing so from its own copy of the list.
+/// One list, exported, so a driver added here cannot go missing from a surface.
+pub const BUILTIN_MEDIA_DRIVERS: &[&str] =
+    &["openai", "gemini", "elevenlabs", "minimax", "google_tts"];
+
 /// Thread-safe, lazy-initializing cache for media drivers.
 ///
 /// Holds an optional `provider_urls` map (from `KernelConfig`) so that
@@ -162,9 +171,34 @@ pub struct MediaDriverCache {
     /// Provider name → custom base URL, sourced from config `[provider_urls]`.
     /// Behind RwLock for hot-reload support (update URLs via `&self`).
     provider_urls: RwLock<HashMap<String, String>>,
-    /// Provider IDs that support media, in preference order.
-    /// Loaded from the registry (providers/*.toml) at boot.
+    /// Provider IDs that support media, in registry order with the built-ins
+    /// appended. Loaded from the registry (providers/*.toml) at boot.
     media_providers: RwLock<Vec<String>>,
+    /// Provider ID → the `base_url` the registry declares for it.
+    ///
+    /// Separate from `provider_urls`, which is the operator's override and
+    /// wins. A provider whose endpoint the registry already states should not
+    /// require a `config.toml` edit before it can be reached at all.
+    registry_base_urls: RwLock<HashMap<String, String>>,
+    /// Operator-nominated provider per capability, from the kernel-global
+    /// `[capabilities]` block. Consulted *before* `media_providers` in
+    /// [`MediaDriverCache::detect_for_capability`] so "use MiniMax for video,
+    /// ElevenLabs for speech" is a config line rather than a code change.
+    ///
+    /// `BTreeMap` (not `HashMap`) because the resolved routing is logged and
+    /// surfaced to operators, and this repo requires deterministic ordering
+    /// for anything that gets stringified.
+    capability_routing: RwLock<BTreeMap<MediaCapability, String>>,
+    /// Capabilities whose nomination has already been reported as unusable.
+    ///
+    /// [`MediaDriverCache::detect_for_capability`] runs once per media
+    /// request, so warning on every miss turns one stale config line into a
+    /// log entry per `POST /api/media/image` and per `image_generate` tool
+    /// call, for the life of the daemon. The information is actionable exactly
+    /// once; the fallback itself is not an error. Cleared by
+    /// [`MediaDriverCache::set_capability_routing`] so a config reload that
+    /// changes the nomination is allowed to warn again.
+    warned_capability_misses: RwLock<BTreeSet<MediaCapability>>,
 }
 
 fn read_media_state<'a, T>(lock: &'a RwLock<T>, state: &'static str) -> RwLockReadGuard<'a, T> {
@@ -202,6 +236,9 @@ impl MediaDriverCache {
                 "minimax".into(),
                 "google_tts".into(),
             ]),
+            registry_base_urls: RwLock::new(HashMap::new()),
+            capability_routing: RwLock::new(BTreeMap::new()),
+            warned_capability_misses: RwLock::new(BTreeSet::new()),
         }
     }
 
@@ -225,6 +262,9 @@ impl MediaDriverCache {
                 "minimax".into(),
                 "google_tts".into(),
             ]),
+            registry_base_urls: RwLock::new(HashMap::new()),
+            capability_routing: RwLock::new(BTreeMap::new()),
+            warned_capability_misses: RwLock::new(BTreeSet::new()),
         }
     }
 
@@ -240,17 +280,26 @@ impl MediaDriverCache {
             .filter(|p| !p.media_capabilities.is_empty())
             .map(|p| p.id.clone())
             .collect();
-        for builtin in ["openai", "gemini", "elevenlabs", "minimax", "google_tts"] {
+        for builtin in BUILTIN_MEDIA_DRIVERS {
             if !media_provs.iter().any(|p| p == builtin) {
-                media_provs.push(builtin.to_string());
+                media_provs.push((*builtin).to_string());
             }
         }
         *write_media_state(&self.media_providers, "media_providers") = media_provs;
+
+        let base_urls: HashMap<String, String> = providers
+            .iter()
+            .filter(|p| !p.base_url.trim().is_empty())
+            .map(|p| (p.id.clone(), p.base_url.trim_end_matches('/').to_string()))
+            .collect();
+        *write_media_state(&self.registry_base_urls, "registry_base_urls") = base_urls;
     }
 
-    /// The media provider IDs this cache knows about, in preference order.
+    /// The media provider IDs this cache knows about.
     ///
-    /// This is the same list [`detect_for_capability`](Self::detect_for_capability) picks from, which is the point of exposing it: a surface that enumerates media providers from its own hardcoded list can disagree with the list auto-detection actually uses, and then the daemon selects a provider the UI never showed.
+    /// This is the same list [`detect_for_capability`](Self::detect_for_capability) picks from, which is the point of exposing it: a surface that enumerates media providers from its own hardcoded list can disagree with the list auto-detection actually uses.
+    ///
+    /// **Not a preference order**, despite what this said before. The registry portion arrives in whatever sequence `std::fs::read_dir` produced (`model_catalog.rs`), so with two configured providers serving one capability, which one `detect_for_capability` returns is filesystem-dependent. Pinning that order is a separate change with its own behavioural decision to make.
     pub fn media_provider_ids(&self) -> Vec<String> {
         read_media_state(&self.media_providers, "media_providers").clone()
     }
@@ -278,6 +327,19 @@ impl MediaDriverCache {
                         None
                     }
                 })
+                .or_else(|| {
+                    // The registry already states where this provider lives.
+                    // Without this a provider it fully describes still needed a
+                    // `provider_urls` line in config.toml before it could be
+                    // reached, and the only symptom was `configured: false`
+                    // with the API key correctly set.
+                    let declared =
+                        read_media_state(&self.registry_base_urls, "registry_base_urls");
+                    declared
+                        .get(provider)
+                        .or_else(|| declared.get(canonical_provider_name(provider)))
+                        .cloned()
+                })
         });
         let url_ref = resolved_url.as_deref();
 
@@ -292,12 +354,71 @@ impl MediaDriverCache {
         Ok(driver)
     }
 
+    /// Install the operator-nominated provider per capability from a
+    /// `[capabilities]` block.
+    ///
+    /// Only the `provider` half is used here — the generation drivers take
+    /// their model from the per-request `model` field, so a `model` in the
+    /// routing block has no driver-selection meaning. Entries with no
+    /// provider are skipped rather than stored as an empty preference.
+    pub fn set_capability_routing(&self, routing: &CapabilityRouting) {
+        let mut table = BTreeMap::new();
+        for cap in CapabilityRouting::ALL {
+            if let Some(provider) = routing.get(cap).and_then(|t| t.provider.as_deref()) {
+                table.insert(cap, provider.to_string());
+            }
+        }
+        *write_media_state(&self.capability_routing, "capability_routing") = table;
+        // A reload that changes the nomination deserves a fresh warning if the
+        // new one is also unusable.
+        write_media_state(&self.warned_capability_misses, "warned_capability_misses").clear();
+    }
+
     /// Auto-detect and return the first configured driver that supports the
     /// given capability.
+    ///
+    /// The operator's `[capabilities]` nomination is tried first; it only
+    /// wins if that provider is actually configured *and* actually advertises
+    /// the capability, so a stale or mistaken nomination degrades to the
+    /// registry preference order instead of failing the call outright.
     pub fn detect_for_capability(
         &self,
         capability: MediaCapability,
     ) -> Result<Arc<dyn MediaDriver>, MediaError> {
+        let nominated = read_media_state(&self.capability_routing, "capability_routing")
+            .get(&capability)
+            .cloned();
+        if let Some(provider) = nominated {
+            match self.get_or_create(&provider, None) {
+                Ok(driver)
+                    if driver.is_configured() && driver.capabilities().contains(&capability) =>
+                {
+                    return Ok(driver);
+                }
+                _ => {
+                    let first_time = write_media_state(
+                        &self.warned_capability_misses,
+                        "warned_capability_misses",
+                    )
+                    .insert(capability);
+                    if first_time {
+                        warn!(
+                            provider = %provider,
+                            capability = %capability,
+                            "[capabilities] nominates a provider that is not configured for this \
+                             capability; falling back to the registry preference order"
+                        );
+                    } else {
+                        tracing::debug!(
+                            provider = %provider,
+                            capability = %capability,
+                            "[capabilities] nomination still unusable; already warned once"
+                        );
+                    }
+                }
+            }
+        }
+
         let providers = read_media_state(&self.media_providers, "media_providers");
         for provider in providers.iter() {
             if let Ok(driver) = self.get_or_create(provider, None) {
@@ -414,6 +535,144 @@ mod tests {
         assert_eq!(cache.media_providers.read().unwrap().as_slice(), ["custom"]);
     }
 
+    /// Minimal driver used to exercise capability selection without needing
+    /// any provider credentials in the test environment.
+    struct FakeDriver {
+        name: &'static str,
+        caps: Vec<MediaCapability>,
+    }
+
+    #[async_trait]
+    impl MediaDriver for FakeDriver {
+        fn capabilities(&self) -> Vec<MediaCapability> {
+            self.caps.clone()
+        }
+        fn provider_name(&self) -> &str {
+            self.name
+        }
+    }
+
+    fn cache_with_fakes(fakes: &[(&'static str, Vec<MediaCapability>)]) -> MediaDriverCache {
+        let cache = MediaDriverCache::new();
+        for (name, caps) in fakes {
+            cache.cache.insert(
+                format!("{name}|default"),
+                Arc::new(FakeDriver {
+                    name,
+                    caps: caps.clone(),
+                }) as Arc<dyn MediaDriver>,
+            );
+        }
+        *write_media_state(&cache.media_providers, "media_providers") =
+            fakes.iter().map(|(n, _)| n.to_string()).collect();
+        cache
+    }
+
+    #[test]
+    fn detect_for_capability_prefers_the_nominated_provider_over_registry_order() {
+        let cache = cache_with_fakes(&[
+            ("beta", vec![MediaCapability::ImageGeneration]),
+            ("alpha", vec![MediaCapability::ImageGeneration]),
+        ]);
+        assert_eq!(
+            cache
+                .detect_for_capability(MediaCapability::ImageGeneration)
+                .unwrap()
+                .provider_name(),
+            "beta"
+        );
+
+        let routing: CapabilityRouting =
+            toml::from_str("image_generation = \"alpha\"\n").expect("parse routing");
+        cache.set_capability_routing(&routing);
+        assert_eq!(
+            cache
+                .detect_for_capability(MediaCapability::ImageGeneration)
+                .unwrap()
+                .provider_name(),
+            "alpha",
+            "[capabilities] nomination must win over the registry preference order"
+        );
+    }
+
+    #[test]
+    fn detect_for_capability_falls_back_when_the_nomination_lacks_the_capability() {
+        let cache = cache_with_fakes(&[
+            ("beta", vec![MediaCapability::ImageGeneration]),
+            ("alpha", vec![MediaCapability::TextToSpeech]),
+        ]);
+        let routing: CapabilityRouting =
+            toml::from_str("image_generation = \"alpha\"\n").expect("parse routing");
+        cache.set_capability_routing(&routing);
+
+        assert_eq!(
+            cache
+                .detect_for_capability(MediaCapability::ImageGeneration)
+                .unwrap()
+                .provider_name(),
+            "beta",
+            "a mistaken nomination must degrade to the preference order, not fail the call"
+        );
+    }
+
+    /// The fallback is a per-request event; the misconfiguration behind it is
+    /// not. Latching keeps one stale config line from emitting a `WARN` on
+    /// every media call for the life of the daemon, while a reload that
+    /// changes the nomination is still allowed to complain about the new one.
+    #[test]
+    fn an_unusable_nomination_is_warned_about_once_until_the_routing_changes() {
+        let cache = cache_with_fakes(&[
+            ("beta", vec![MediaCapability::ImageGeneration]),
+            ("alpha", vec![MediaCapability::TextToSpeech]),
+        ]);
+        let routing: CapabilityRouting =
+            toml::from_str("image_generation = \"alpha\"\n").expect("parse routing");
+        cache.set_capability_routing(&routing);
+        assert!(
+            read_media_state(&cache.warned_capability_misses, "warned_capability_misses")
+                .is_empty(),
+            "nothing has been detected yet"
+        );
+
+        for _ in 0..5 {
+            let _ = cache.detect_for_capability(MediaCapability::ImageGeneration);
+        }
+        assert_eq!(
+            read_media_state(&cache.warned_capability_misses, "warned_capability_misses")
+                .iter()
+                .copied()
+                .collect::<Vec<_>>(),
+            vec![MediaCapability::ImageGeneration],
+            "five failing lookups must latch exactly one warned capability"
+        );
+
+        // Re-nominating resets the latch: the operator changed something, so
+        // the next verdict on it is news again.
+        cache.set_capability_routing(&routing);
+        assert!(
+            read_media_state(&cache.warned_capability_misses, "warned_capability_misses")
+                .is_empty(),
+            "a routing change must re-arm the warning"
+        );
+    }
+
+    #[test]
+    fn set_capability_routing_ignores_entries_that_name_no_provider() {
+        let cache = cache_with_fakes(&[("beta", vec![MediaCapability::ImageGeneration])]);
+        let routing: CapabilityRouting =
+            toml::from_str("image_generation = { model = \"only-a-model\" }\n")
+                .expect("parse routing");
+        cache.set_capability_routing(&routing);
+        assert!(read_media_state(&cache.capability_routing, "capability_routing").is_empty());
+        assert_eq!(
+            cache
+                .detect_for_capability(MediaCapability::ImageGeneration)
+                .unwrap()
+                .provider_name(),
+            "beta"
+        );
+    }
+
     #[test]
     fn test_media_error_display() {
         let err = MediaError::NotSupported("video".into());
@@ -500,6 +759,49 @@ mod tests {
         // Different key means a separate cache entry from the config-resolved one
         let driver2 = cache.get_or_create("minimax", None).unwrap();
         assert!(!Arc::ptr_eq(&driver, &driver2));
+    }
+
+    #[test]
+    fn a_provider_the_registry_gives_a_base_url_needs_no_config_toml_entry() {
+        let cache = MediaDriverCache::new();
+        // byteplus is the real case: the registry states its endpoint, it has
+        // no compiled-in driver, and before this the only way to reach it was
+        // a `provider_urls.byteplus` line in config.toml — with no hint that
+        // one was needed. Setting the API key and restarting left it reported
+        // as unconfigured.
+        cache.load_providers_from_registry(&[librefang_types::model_catalog::ProviderInfo {
+            id: "byteplus".into(),
+            base_url: "https://ark.ap-southeast.bytepluses.com/api/v3".into(),
+            media_capabilities: vec!["image_generation".into()],
+            ..Default::default()
+        }]);
+
+        let driver = cache
+            .get_or_create("byteplus", None)
+            .expect("a provider the registry gives a base_url for must be reachable");
+        assert_eq!(driver.provider_name(), "byteplus");
+    }
+
+    #[test]
+    fn an_operator_override_still_beats_the_registry_base_url() {
+        let cache = MediaDriverCache::new_with_urls([(
+            "byteplus".to_string(),
+            "https://proxy.internal/v1".to_string(),
+        )]);
+        cache.load_providers_from_registry(&[librefang_types::model_catalog::ProviderInfo {
+            id: "byteplus".into(),
+            base_url: "https://ark.ap-southeast.bytepluses.com/api/v3".into(),
+            media_capabilities: vec!["image_generation".into()],
+            ..Default::default()
+        }]);
+
+        // Two different URLs must not collapse onto one cache entry, which is
+        // how the override would silently stop applying.
+        let overridden = cache.get_or_create("byteplus", None).unwrap();
+        let explicit = cache
+            .get_or_create("byteplus", Some("https://proxy.internal/v1"))
+            .unwrap();
+        assert!(Arc::ptr_eq(&overridden, &explicit));
     }
 
     #[test]

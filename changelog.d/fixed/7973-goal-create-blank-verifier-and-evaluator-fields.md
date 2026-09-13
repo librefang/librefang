@@ -1,0 +1,2 @@
+`POST /api/goals` now treats a blank `verify_agent_id` as "not set" instead of 400ing as an invalid UUID, matching the existing blank-means-absent rule for `parent_id` and `agent_id` (#6562).
+A blank `evaluator_model` is now filtered the same way `parent_id` / `agent_id` already are on update, instead of being stored verbatim as an empty string that the field's own documentation says should read as "no evaluator configured". (#7973) (@DaBlitzStein)

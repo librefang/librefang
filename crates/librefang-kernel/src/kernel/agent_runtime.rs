@@ -273,7 +273,7 @@ impl LibreFangKernel {
     }
 
     /// Write enabled flag to agent's TOML file.
-    fn persist_agent_enabled(&self, _agent_id: AgentId, name: &str, enabled: bool) {
+    fn persist_agent_enabled(&self, agent_id: AgentId, name: &str, enabled: bool) {
         let cfg = self.config.load();
         // Check both workspaces/agents/ and workspaces/hands/ directories
         let agents_path = cfg
@@ -312,6 +312,20 @@ impl LibreFangKernel {
                 };
                 if let Err(e) = atomic_write_toml(&toml_path, &new_content) {
                     warn!("Failed to persist enabled={enabled} for {name}: {e}");
+                    return;
+                }
+                // Suspend/resume rewrites agent.toml outside `persist_full_manifest_at`
+                // (this function patches the `enabled` line directly rather than
+                // re-serializing the whole manifest), so it must record its own
+                // history snapshot or the History tab silently misses every
+                // suspend/resume (#8041).
+                let store =
+                    librefang_memory::ManifestVersionStore::new(self.memory.substrate.pool());
+                let change_source = if enabled { "resume" } else { "suspend" };
+                if let Err(e) =
+                    store.record_version(&agent_id.to_string(), name, &new_content, change_source)
+                {
+                    warn!("Failed to record manifest version snapshot for {name}: {e}");
                 }
             }
             Err(e) => warn!("Failed to read agent TOML for {name}: {e}"),
@@ -442,6 +456,7 @@ impl LibreFangKernel {
             .unwrap_or_else(|| librefang_memory::session::Session {
                 id: target_session_id,
                 agent_id,
+                parent_session_id: None,
                 messages: Vec::new(),
                 context_window_tokens: 0,
                 label: None,
@@ -642,6 +657,7 @@ impl LibreFangKernel {
             .unwrap_or_else(|| librefang_memory::session::Session {
                 id: target_session_id,
                 agent_id,
+                parent_session_id: None,
                 messages: Vec::new(),
                 context_window_tokens: 0,
                 label: None,

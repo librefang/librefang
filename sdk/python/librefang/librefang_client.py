@@ -57,7 +57,9 @@ class LibreFang:
         self.groups = _GroupsResource(self)
         self.hands = _HandsResource(self)
         self.inbox = _InboxResource(self)
+        self.knowledge = _KnowledgeResource(self)
         self.mcp = _McpResource(self)
+        self.media = _MediaResource(self)
         self.memory = _MemoryResource(self)
         self.models = _ModelsResource(self)
         self.network = _NetworkResource(self)
@@ -67,6 +69,7 @@ class LibreFang:
         self.sessions = _SessionsResource(self)
         self.skills = _SkillsResource(self)
         self.system = _SystemResource(self)
+        self.tasks = _TasksResource(self)
         self.tools = _ToolsResource(self)
         self.users = _UsersResource(self)
         self.vault = _VaultResource(self)
@@ -74,14 +77,21 @@ class LibreFang:
         self.workflows = _WorkflowsResource(self)
 
 
-    def _request(self, method: str, path: str, body: Any = None, query: Optional[Dict[str, Any]] = None) -> Any:
+    def _request(self, method: str, path: str, body: Any = None, query: Optional[Dict[str, Any]] = None, content_type: Optional[str] = None) -> Any:
+        """Send a request. `content_type` sends `body` as raw bytes instead of JSON."""
         url = self.base_url + path
         if query:
             filtered = {k: v for k, v in query.items() if v is not None}
             if filtered:
                 url += ("&" if "?" in url else "?") + urlencode(filtered, doseq=True)
-        data = json.dumps(body).encode() if body is not None else None
-        req = Request(url, data=data, headers=self._headers, method=method)
+        headers = self._headers
+        if content_type is not None:
+            data = bytes(body) if body is not None else None
+            headers = dict(headers)
+            headers["Content-Type"] = content_type
+        else:
+            data = json.dumps(body).encode() if body is not None else None
+        req = Request(url, data=data, headers=headers, method=method)
         try:
             with urlopen(req, timeout=self.timeout) as resp:
                 ct = resp.headers.get("content-type", "")
@@ -287,6 +297,9 @@ class _AgentsResource(_Resource):
     def agent_logs(self, id: str, n: Any = None, level: Any = None, offset: Any = None):
         return self._c._request("GET", f"/api/agents/{id}/logs", None, query={"n": n, "level": level, "offset": offset})
 
+    def get_agent_manifest_toml(self, id: str):
+        return self._c._request("GET", f"/api/agents/{id}/manifest")
+
     def get_agent_mcp_servers(self, id: str):
         return self._c._request("GET", f"/api/agents/{id}/mcp_servers")
 
@@ -307,6 +320,12 @@ class _AgentsResource(_Resource):
 
     def set_model(self, id: str, **data):
         return self._c._request("PUT", f"/api/agents/{id}/model", data)
+
+    def get_agent_model_routing(self, id: str):
+        return self._c._request("GET", f"/api/agents/{id}/model_routing")
+
+    def set_agent_model_routing(self, id: str, **data):
+        return self._c._request("PUT", f"/api/agents/{id}/model_routing", data)
 
     def push_message(self, id: str, **data):
         return self._c._request("POST", f"/api/agents/{id}/push", data)
@@ -383,8 +402,8 @@ class _AgentsResource(_Resource):
     def get_agent_traces(self, id: str):
         return self._c._request("GET", f"/api/agents/{id}/traces")
 
-    def upload_file(self, id: str, **data):
-        return self._c._request("POST", f"/api/agents/{id}/upload", data)
+    def upload_file(self, id: str, body: bytes, content_type: str = "application/octet-stream"):
+        return self._c._request("POST", f"/api/agents/{id}/upload", body, content_type=content_type)
 
     def serve_upload(self, file_id: str):
         return self._c._request("GET", f"/api/uploads/{file_id}")
@@ -713,6 +732,32 @@ class _InboxResource(_Resource):
         return self._c._request("GET", "/api/inbox/status")
 
 
+# ── Knowledge Resource ─────────────────────────────────────────
+
+class _KnowledgeResource(_Resource):
+
+    def list_bases(self):
+        return self._c._request("GET", "/api/knowledge")
+
+    def create_base(self, **data):
+        return self._c._request("POST", "/api/knowledge", data)
+
+    def delete_base(self, name: str):
+        return self._c._request("DELETE", f"/api/knowledge/{name}")
+
+    def set_holders(self, name: str, **data):
+        return self._c._request("PUT", f"/api/knowledge/{name}/agents", data)
+
+    def list_documents(self, name: str):
+        return self._c._request("GET", f"/api/knowledge/{name}/documents")
+
+    def put_document(self, name: str, filename: str, **data):
+        return self._c._request("PUT", f"/api/knowledge/{name}/documents/{filename}", data)
+
+    def delete_document(self, name: str, filename: str):
+        return self._c._request("DELETE", f"/api/knowledge/{name}/documents/{filename}")
+
+
 # ── Mcp Resource ───────────────────────────────────────────────
 
 class _McpResource(_Resource):
@@ -763,6 +808,32 @@ class _McpResource(_Resource):
         return self._c._request("GET", "/api/mcp/taint-rules")
 
 
+# ── Media Resource ─────────────────────────────────────────────
+
+class _MediaResource(_Resource):
+
+    def generate_image(self, **data):
+        return self._c._request("POST", "/api/media/image", data)
+
+    def generate_music(self, **data):
+        return self._c._request("POST", "/api/media/music", data)
+
+    def list_media_providers(self):
+        return self._c._request("GET", "/api/media/providers")
+
+    def synthesize_speech(self, **data):
+        return self._c._request("POST", "/api/media/speech", data)
+
+    def transcribe_audio(self, body: bytes, content_type: str = "audio/webm"):
+        return self._c._request("POST", "/api/media/transcribe", body, content_type=content_type)
+
+    def submit_video(self, **data):
+        return self._c._request("POST", "/api/media/video", data)
+
+    def poll_video_task(self, task_id: str, provider: Any = None):
+        return self._c._request("GET", f"/api/media/video/{task_id}", None, query={"provider": provider})
+
+
 # ── Memory Resource ────────────────────────────────────────────
 
 class _MemoryResource(_Resource):
@@ -804,6 +875,9 @@ class _ModelsResource(_Resource):
 
     def list_credential_pools(self):
         return self._c._request("GET", "/api/credential-pools")
+
+    def list_model_router_profiles(self):
+        return self._c._request("GET", "/api/model-router/profiles")
 
     def list_all_models(self):
         return self._c._request("GET", "/api/models")
@@ -1335,6 +1409,12 @@ class _SystemResource(_Resource):
     def promote_agent_type(self, name: str):
         return self._c._request("POST", f"/api/templates/{name}/promote")
 
+    def get_agent_type_registry_diff(self, name: str):
+        return self._c._request("GET", f"/api/templates/{name}/registry-diff")
+
+    def restore_agent_type_from_registry(self, name: str):
+        return self._c._request("POST", f"/api/templates/{name}/restore")
+
     def get_agent_template_toml(self, name: str):
         return self._c._request("GET", f"/api/templates/{name}/toml")
 
@@ -1343,6 +1423,14 @@ class _SystemResource(_Resource):
 
     def api_versions(self):
         return self._c._request("GET", "/api/versions")
+
+
+# ── Tasks Resource ─────────────────────────────────────────────
+
+class _TasksResource(_Resource):
+
+    def task_queue_post_root(self, **data):
+        return self._c._request("POST", "/api/tasks", data)
 
 
 # ── Tools Resource ─────────────────────────────────────────────

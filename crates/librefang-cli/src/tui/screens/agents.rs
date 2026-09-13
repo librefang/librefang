@@ -56,8 +56,14 @@ pub enum AgentSubScreen {
     EditMcpServers,
     /// Edit the channel allowlist for an existing agent
     EditChannels,
+    /// Shared folders editor (`[workspaces]`).
+    EditWorkspaces,
+    /// Edit model routing (mode, profile allowlist, cost budget) for existing agent
+    EditModelRouting,
     /// Edit the inference parameters (temperature, ladders, limits) for an existing agent
     EditModelParams,
+    /// Read-only timeline of this agent's recorded manifest snapshots
+    ManifestHistory,
     /// Spawning agent (waiting for result)
     Spawning,
 }
@@ -97,6 +103,17 @@ pub struct AgentSelectState {
     // Skill/MCP editor (shared by creation wizard + detail editor)
     pub available_skills: Vec<(String, bool)>,
     pub skill_cursor: usize,
+    // Shared folders editor: (name, path, mode).
+    pub workspaces: Vec<(String, String, String)>,
+    pub ws_cursor: usize,
+    /// `(row, field)` while a cell is being typed into; 0 = name, 1 = path, 2 = mode.
+    pub ws_editing: Option<(usize, u8)>,
+    pub ws_buf: String,
+    /// Set once `AgentWorkspacesLoaded` has populated `workspaces` for the
+    /// agent currently open. While false the editor blocks every key but
+    /// `Esc`, so a slow or failed fetch can't be saved over the wrong
+    /// agent's manifest (or an empty one).
+    pub ws_loaded: bool,
     pub available_mcp: Vec<(String, bool)>,
     pub mcp_cursor: usize,
     // Channel allowlist editor. Detail-only: agent creation writes no `channels`
@@ -106,8 +123,46 @@ pub struct AgentSelectState {
     pub channel_cursor: usize,
 
     pub token_usage: Option<AgentTokenUsage>,
+    // Model routing editor
+    /// `"fixed"` or `"flexible"`.
+    pub model_mode: String,
+    /// The resolved profile catalog with this agent's allowlist applied:
+    /// `(profile name, allowed)`. All-unchecked means "any profile".
+    pub router_profiles: Vec<(String, bool)>,
+    pub router_profile_cursor: usize,
+    /// Index into [`COST_BUDGET_OPTIONS`].
+    pub cost_budget_idx: usize,
+    /// The fallback profile loaded from the agent's stored routing settings.
+    /// Not editable from this screen — carried through unchanged on save so
+    /// it is not silently cleared (#7781 review).
+    pub router_default_profile: Option<String>,
+    /// The per-agent router bypass loaded from the agent's stored routing
+    /// settings. Not editable from this screen — carried through unchanged
+    /// on save for the same reason as `router_default_profile` (#7781
+    /// review).
+    pub router_fixed: bool,
+    /// Set only by `AgentModelRoutingLoaded`. `Enter` in the routing editor
+    /// is a no-op while this is `false` — a fetch that failed after `r` was
+    /// pressed must not let a save write the reset placeholder values (or,
+    /// before the reset, a previous agent's stale ones) onto this agent
+    /// (#7781 review).
+    pub routing_loaded: bool,
+
     // Inference-parameter editor (detail view)
     pub model_params: super::model_params::ModelParamsEditor,
+
+    // Manifest version history (detail view, read-only)
+    pub manifest_history: Vec<ManifestVersion>,
+    pub manifest_history_list: ListState,
+    /// A fetch is in flight. Distinguishes "still loading" from "this agent has
+    /// no recorded history", which would otherwise render the same empty pane.
+    pub manifest_history_loading: bool,
+    /// Why the last history fetch produced nothing, when it failed.
+    ///
+    /// Its own field rather than the shared `status_msg`: that one collects every
+    /// agent-tab message, so a skills or channels error arriving while a history
+    /// fetch is outstanding would otherwise be rendered as this fetch's reason.
+    pub manifest_history_error: Option<String>,
 
     // Result
     pub spawned_toml: Option<String>,
@@ -130,6 +185,16 @@ pub struct InProcessAgent {
     pub state: String,
     pub provider: String,
     pub model: String,
+}
+
+/// One recorded manifest snapshot, as `GET /api/agents/{id}/manifest-history`
+/// returns it. The endpoint is read-only, so there is nothing here to write back.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ManifestVersion {
+    /// SQLite `datetime('now')` shape: `YYYY-MM-DD HH:MM:SS`, UTC, no offset.
+    pub timestamp: String,
+    pub change_source: String,
+    pub manifest_toml: String,
 }
 
 #[derive(Clone, Default)]
@@ -160,7 +225,15 @@ pub struct AgentTokenUsage {
 }
 
 /// What the agent screen decided.
+#[derive(Debug)]
 pub enum AgentAction {
+    /// Load the agent's `[workspaces]` table for the shared-folders editor.
+    FetchAgentWorkspaces(String),
+    /// Write the edited shared folders back to the agent's manifest.
+    UpdateWorkspaces {
+        id: String,
+        workspaces: Vec<(String, String, String)>,
+    },
     /// No action yet, keep rendering.
     Continue,
     /// User created a new agent manifest (TOML).
@@ -202,6 +275,24 @@ pub enum AgentAction {
     /// and "no MCP servers" no matter what its manifest said.
     LoadAgentDetail(String),
     FetchAgentTokenUsage(String),
+    /// Update an agent's model routing mode and router override.
+    UpdateModelRouting {
+        id: String,
+        /// `"fixed"` or `"flexible"`.
+        mode: String,
+        /// Empty means "any profile".
+        allowed_profiles: Vec<String>,
+        /// `None` means "no cap".
+        cost_budget: Option<String>,
+        /// Not editable from this screen — the value loaded from the
+        /// agent's stored settings, carried through unchanged (#7781 review).
+        default_profile: Option<String>,
+        /// Not editable from this screen — the value loaded from the
+        /// agent's stored settings, carried through unchanged (#7781 review).
+        fixed: bool,
+    },
+    /// Fetch an agent's model routing settings and the profile catalog.
+    FetchAgentModelRouting(String),
     /// Fetch the agent's current inference parameters before editing them.
     FetchAgentModelParams(String),
     /// Persist edited inference parameters. `None` in a pair clears the agent's
@@ -210,7 +301,21 @@ pub enum AgentAction {
         id: String,
         changes: Vec<(String, Option<f64>)>,
     },
+    /// Load this agent's recorded manifest snapshots for the history pane.
+    FetchManifestHistory(String),
 }
+
+/// Cost-budget choices in the model routing editor, cycled with `+` / `-`.
+///
+/// `(i18n key for the label, wire value)`. The first entry is the no-cap
+/// choice, which has no `CostTier`; the rest map onto one. The label is a
+/// translation key rather than the display text so the picker is localised.
+pub const COST_BUDGET_OPTIONS: &[(&str, Option<&str>)] = &[
+    ("tui-agents-label-routing-no-cap", None),
+    ("tui-agents-label-routing-cheap", Some("cheap")),
+    ("tui-agents-label-routing-medium", Some("medium")),
+    ("tui-agents-label-routing-expensive", Some("expensive")),
+];
 
 impl AgentSelectState {
     pub fn new() -> Self {
@@ -232,6 +337,10 @@ impl AgentSelectState {
             tool_checks: DEFAULT_TOOLS.to_vec(),
             tool_cursor: 0,
             model_params: super::model_params::ModelParamsEditor::new(),
+            manifest_history: Vec::new(),
+            manifest_history_list: ListState::default(),
+            manifest_history_loading: false,
+            manifest_history_error: None,
             available_skills: Vec::new(),
             skill_cursor: 0,
             available_mcp: Vec::new(),
@@ -239,8 +348,20 @@ impl AgentSelectState {
             channel_cursor: 0,
             mcp_cursor: 0,
             token_usage: None,
+            model_mode: "fixed".to_string(),
+            router_profiles: Vec::new(),
+            router_profile_cursor: 0,
+            cost_budget_idx: 0,
+            router_default_profile: None,
+            router_fixed: false,
+            routing_loaded: false,
             spawned_toml: None,
             status_msg: String::new(),
+            workspaces: Vec::new(),
+            ws_cursor: 0,
+            ws_editing: None,
+            ws_buf: String::new(),
+            ws_loaded: false,
         }
     }
 
@@ -260,6 +381,17 @@ impl AgentSelectState {
         self.mcp_cursor = 0;
         self.available_channels.clear();
         self.channel_cursor = 0;
+        self.model_mode = "fixed".to_string();
+        self.router_profiles.clear();
+        self.router_profile_cursor = 0;
+        self.cost_budget_idx = 0;
+        self.router_default_profile = None;
+        self.router_fixed = false;
+        self.routing_loaded = false;
+        self.manifest_history.clear();
+        self.manifest_history_list.select(None);
+        self.manifest_history_loading = false;
+        self.manifest_history_error = None;
         self.spawned_toml = None;
         self.status_msg.clear();
         self.search_active = false;
@@ -438,6 +570,7 @@ impl AgentSelectState {
             AgentSubScreen::AgentList => self.handle_agent_list(key),
             AgentSubScreen::AgentDetail => self.handle_detail(key),
             AgentSubScreen::EditModelParams => self.handle_edit_model_params(key),
+            AgentSubScreen::ManifestHistory => self.handle_manifest_history(key),
             AgentSubScreen::CreateMethod => self.handle_create_method(key),
             AgentSubScreen::TemplatePicker => self.handle_template_picker(key),
             AgentSubScreen::CustomName => self.handle_custom_name(key),
@@ -449,6 +582,8 @@ impl AgentSelectState {
             AgentSubScreen::EditSkills => self.handle_edit_skills(key),
             AgentSubScreen::EditMcpServers => self.handle_edit_mcp_servers(key),
             AgentSubScreen::EditChannels => self.handle_edit_channels(key),
+            AgentSubScreen::EditWorkspaces => self.handle_edit_workspaces(key),
+            AgentSubScreen::EditModelRouting => self.handle_edit_model_routing(key),
             AgentSubScreen::Spawning => AgentAction::Continue,
         }
     }
@@ -571,6 +706,24 @@ impl AgentSelectState {
                     return AgentAction::FetchAgentSkills(id);
                 }
             }
+            KeyCode::Char('w') => {
+                // Edit shared folders for this agent. Reset the editor's
+                // state rather than opening it optimistically over
+                // whatever the last agent (or edit) left behind — the fetch
+                // is async, and a stale row, cursor, or in-progress edit
+                // surviving into this agent's editor is how a save ends up
+                // PATCHing the wrong manifest (#7835).
+                if let Some(ref detail) = self.detail {
+                    let id = detail.id.clone();
+                    self.workspaces = Vec::new();
+                    self.ws_cursor = 0;
+                    self.ws_editing = None;
+                    self.ws_buf.clear();
+                    self.ws_loaded = false;
+                    self.sub = AgentSubScreen::EditWorkspaces;
+                    return AgentAction::FetchAgentWorkspaces(id);
+                }
+            }
             KeyCode::Char('m') => {
                 // Edit MCP servers for this agent
                 if let Some(ref detail) = self.detail {
@@ -592,6 +745,25 @@ impl AgentSelectState {
                     return AgentAction::FetchAgentTokenUsage(detail.id.clone());
                 }
             }
+            KeyCode::Char('r') => {
+                // Edit model routing for this agent. Reset the editor state
+                // up front: if the fetch below fails (FetchError instead of
+                // AgentModelRoutingLoaded), a stale value left over from
+                // whatever agent was edited last must not get written onto
+                // this one on Enter (#7781 review).
+                if let Some(ref detail) = self.detail {
+                    let id = detail.id.clone();
+                    self.model_mode = "fixed".to_string();
+                    self.router_profiles.clear();
+                    self.router_profile_cursor = 0;
+                    self.cost_budget_idx = 0;
+                    self.router_default_profile = None;
+                    self.router_fixed = false;
+                    self.routing_loaded = false;
+                    self.sub = AgentSubScreen::EditModelRouting;
+                    return AgentAction::FetchAgentModelRouting(id);
+                }
+            }
             KeyCode::Char('p') => {
                 // Edit this agent's inference parameters
                 if let Some(ref detail) = self.detail {
@@ -600,9 +772,73 @@ impl AgentSelectState {
                     return AgentAction::FetchAgentModelParams(id);
                 }
             }
+            KeyCode::Char('h') => {
+                // Read-only manifest version history for this agent
+                if let Some(ref detail) = self.detail {
+                    let id = detail.id.clone();
+                    self.manifest_history.clear();
+                    self.manifest_history_list.select(None);
+                    self.manifest_history_loading = true;
+                    // Cleared so any reason the pane shows afterwards belongs to
+                    // this fetch and not to an earlier one.
+                    self.manifest_history_error = None;
+                    self.sub = AgentSubScreen::ManifestHistory;
+                    return AgentAction::FetchManifestHistory(id);
+                }
+            }
             _ => {}
         }
         AgentAction::Continue
+    }
+
+    /// Key handling for the manifest history pane.
+    ///
+    /// Navigation only — the endpoint records snapshots and offers no restore,
+    /// so there is nothing here that writes.
+    fn handle_manifest_history(&mut self, key: KeyEvent) -> AgentAction {
+        let len = self.manifest_history.len();
+        match key.code {
+            KeyCode::Esc => {
+                self.sub = AgentSubScreen::AgentDetail;
+            }
+            // An empty history has no cursor to move, and `% 0` would panic.
+            KeyCode::Up | KeyCode::Char('k') if len > 0 => {
+                let i = self.manifest_history_list.selected().unwrap_or(0);
+                let next = if i == 0 { len - 1 } else { i - 1 };
+                self.manifest_history_list.select(Some(next));
+            }
+            KeyCode::Down | KeyCode::Char('j') if len > 0 => {
+                let i = self.manifest_history_list.selected().unwrap_or(0);
+                self.manifest_history_list.select(Some((i + 1) % len));
+            }
+            _ => {}
+        }
+        AgentAction::Continue
+    }
+
+    /// Record the snapshots a fetch returned and put the cursor on the newest.
+    pub fn set_manifest_history(&mut self, versions: Vec<ManifestVersion>) {
+        self.manifest_history_loading = false;
+        self.manifest_history_error = None;
+        self.manifest_history_list
+            .select((!versions.is_empty()).then_some(0));
+        self.manifest_history = versions;
+    }
+
+    /// Record why a history fetch produced nothing, so the pane says that rather
+    /// than reporting the agent has no recorded history.
+    pub fn set_manifest_history_error(&mut self, message: String) {
+        self.manifest_history_loading = false;
+        self.manifest_history_error = Some(message);
+    }
+
+    /// Whether a history response for `agent_id` belongs to the agent now open.
+    ///
+    /// A slow response for agent A can land after the operator has moved to agent
+    /// B and asked for its history; this pane renders a whole `agent.toml`, so
+    /// showing A's under B's header actively misleads rather than merely lagging.
+    pub fn manifest_history_is_for(&self, agent_id: &str) -> bool {
+        self.detail.as_ref().is_some_and(|d| d.id == agent_id)
     }
 
     /// Key handling for the inference-parameter editor.
@@ -917,6 +1153,236 @@ impl AgentSelectState {
         AgentAction::Continue
     }
 
+    /// The value currently held by one of a row's three fields, used to
+    /// seed `ws_buf` when opening it for editing so committing without
+    /// retyping keeps the field instead of blanking it.
+    fn workspace_field(entry: &(String, String, String), field: u8) -> String {
+        match field {
+            0 => entry.0.clone(),
+            1 => entry.1.clone(),
+            _ => entry.2.clone(),
+        }
+    }
+
+    /// Recognizes both the canonical spelling `GET /api/agents/{id}/manifest`
+    /// renders (`readonly` / `readwrite`) and the deserialize-only
+    /// `WorkspaceMode` aliases (`r`, `rw`, ... — `librefang-types/src/agent.rs`)
+    /// a user might type from habit. Returns `None` for anything else so the
+    /// caller can keep the previous value instead of defaulting to the more
+    /// permissive mode.
+    fn parse_mode_input(v: &str) -> Option<&'static str> {
+        match v {
+            "r" | "read" | "read-only" | "readonly" => Some("readonly"),
+            "rw" | "read-write" | "readwrite" => Some("readwrite"),
+            _ => None,
+        }
+    }
+
+    fn handle_edit_workspaces(&mut self, key: KeyEvent) -> AgentAction {
+        if let Some((row, field)) = self.ws_editing {
+            match key.code {
+                KeyCode::Esc => {
+                    self.ws_editing = None;
+                    self.ws_buf.clear();
+                }
+                KeyCode::Enter | KeyCode::Tab => {
+                    // Commit the buffer to the field, then move on.
+                    let v = self.ws_buf.clone();
+                    if let Some(entry) = self.workspaces.get_mut(row) {
+                        match field {
+                            0 => entry.0 = v,
+                            1 => entry.1 = v,
+                            // Unrecognized input keeps the previous mode
+                            // rather than escalating a read-only folder to
+                            // read-write by default.
+                            _ => {
+                                if let Some(m) = Self::parse_mode_input(&v) {
+                                    entry.2 = m.to_string();
+                                }
+                            }
+                        }
+                    }
+                    self.ws_buf.clear();
+                    if field == 2 {
+                        self.ws_editing = None;
+                    } else {
+                        self.ws_editing = Some((row, field + 1));
+                        self.ws_buf = self
+                            .workspaces
+                            .get(row)
+                            .map(|e| Self::workspace_field(e, field + 1))
+                            .unwrap_or_default();
+                    }
+                }
+                KeyCode::Backspace => {
+                    self.ws_buf.pop();
+                }
+                KeyCode::Char(c) => self.ws_buf.push(c),
+                _ => {}
+            }
+            return AgentAction::Continue;
+        }
+
+        // The fetch this editor depends on hasn't landed yet (or failed —
+        // `FetchError` never sets `ws_loaded`). Only `Esc` works: adding,
+        // deleting or saving now would act on an editor `workspaces` never
+        // populated for this agent.
+        if !self.ws_loaded {
+            if key.code == KeyCode::Esc {
+                self.sub = AgentSubScreen::AgentDetail;
+            }
+            return AgentAction::Continue;
+        }
+
+        let len = self.workspaces.len();
+        match key.code {
+            KeyCode::Esc => {
+                self.sub = AgentSubScreen::AgentDetail;
+            }
+            KeyCode::Up | KeyCode::Char('k') if self.ws_cursor > 0 => self.ws_cursor -= 1,
+            KeyCode::Down | KeyCode::Char('j') if len > 0 && self.ws_cursor < len - 1 => {
+                self.ws_cursor += 1;
+            }
+            KeyCode::Char('a') => {
+                self.workspaces
+                    .push(("".into(), "".into(), "readwrite".into()));
+                self.ws_cursor = self.workspaces.len() - 1;
+                self.ws_editing = Some((self.ws_cursor, 0));
+            }
+            KeyCode::Char('d') if len > 0 => {
+                self.workspaces.remove(self.ws_cursor);
+                if self.ws_cursor >= self.workspaces.len() && self.ws_cursor > 0 {
+                    self.ws_cursor -= 1;
+                }
+            }
+            KeyCode::Enter if len > 0 => {
+                self.ws_editing = Some((self.ws_cursor, 0));
+                self.ws_buf = self
+                    .workspaces
+                    .get(self.ws_cursor)
+                    .map(|e| Self::workspace_field(e, 0))
+                    .unwrap_or_default();
+            }
+            KeyCode::Char('s') => {
+                if let Some(ref detail) = self.detail {
+                    // A row with an empty name or path is an abandoned edit,
+                    // not a declaration: sending it would write a broken
+                    // `[workspaces]` entry the kernel then fails to resolve.
+                    let total = self.workspaces.len();
+                    let entries: Vec<(String, String, String)> = self
+                        .workspaces
+                        .iter()
+                        .filter(|(n, p, _)| !n.trim().is_empty() && !p.trim().is_empty())
+                        .map(|(n, p, m)| (n.trim().to_string(), p.trim().to_string(), m.clone()))
+                        .collect();
+                    if entries.len() < total {
+                        self.status_msg = crate::i18n::t("tui-agents-workspaces-row-dropped");
+                    }
+                    return AgentAction::UpdateWorkspaces {
+                        id: detail.id.clone(),
+                        workspaces: entries,
+                    };
+                }
+                self.sub = AgentSubScreen::AgentDetail;
+            }
+            _ => {}
+        }
+        AgentAction::Continue
+    }
+
+    /// Model routing editor.
+    ///
+    /// `Tab` flips fixed <-> flexible, `Space` toggles a profile in the
+    /// allowlist, `+` / `-` cycle the cost budget, `Enter` saves.
+    ///
+    /// Enter always emits [`AgentAction::UpdateModelRouting`] — including for
+    /// `fixed`, which is how an operator turns routing back off. Returning to
+    /// the detail screen without emitting would silently discard the edit.
+    fn handle_edit_model_routing(&mut self, key: KeyEvent) -> AgentAction {
+        let profile_count = self.router_profiles.len();
+        let flexible = self.model_mode == "flexible";
+        match key.code {
+            KeyCode::Esc => {
+                self.sub = AgentSubScreen::AgentDetail;
+            }
+            KeyCode::Tab => {
+                self.model_mode = if flexible { "fixed" } else { "flexible" }.to_string();
+            }
+            KeyCode::Up | KeyCode::Char('k') if flexible && self.router_profile_cursor > 0 => {
+                self.router_profile_cursor -= 1;
+            }
+            KeyCode::Down | KeyCode::Char('j')
+                if flexible
+                    && profile_count > 0
+                    && self.router_profile_cursor < profile_count - 1 =>
+            {
+                self.router_profile_cursor += 1;
+            }
+            KeyCode::Char(' ') if flexible && profile_count > 0 => {
+                let checked = &mut self.router_profiles[self.router_profile_cursor].1;
+                *checked = !*checked;
+            }
+            KeyCode::Char('+') | KeyCode::Char('=') if flexible => {
+                self.cost_budget_idx = (self.cost_budget_idx + 1) % COST_BUDGET_OPTIONS.len();
+            }
+            KeyCode::Char('-') if flexible => {
+                self.cost_budget_idx = if self.cost_budget_idx == 0 {
+                    COST_BUDGET_OPTIONS.len() - 1
+                } else {
+                    self.cost_budget_idx - 1
+                };
+            }
+            KeyCode::Enter => {
+                // The fetch that populates this screen may still be in
+                // flight or may have failed (`AppEvent::FetchError` only
+                // writes a status message; it does not leave the editor).
+                // Saving before `AgentModelRoutingLoaded` ever arrived would
+                // write this screen's reset placeholder values over the
+                // agent's real settings (#7781 review).
+                // The two cases are indistinguishable from in here, and a
+                // failed fetch cannot be retried from inside the editor —
+                // so the message names both and points at the way out
+                // (Esc, then `r`, which re-dispatches the fetch) instead of
+                // repeating "still loading" forever at an operator whose
+                // fetch is never coming back.
+                if !self.routing_loaded {
+                    self.status_msg = crate::i18n::t("tui-agents-model-routing-not-loaded");
+                    return AgentAction::Continue;
+                }
+                if let Some(ref detail) = self.detail {
+                    // In fixed mode the allowlist and budget describe a routing
+                    // decision that will not happen, so they are not sent — the
+                    // server clears the override wholesale.
+                    let (allowed_profiles, cost_budget) = if flexible {
+                        (
+                            self.router_profiles
+                                .iter()
+                                .filter(|(_, checked)| *checked)
+                                .map(|(name, _)| name.clone())
+                                .collect(),
+                            COST_BUDGET_OPTIONS[self.cost_budget_idx]
+                                .1
+                                .map(str::to_string),
+                        )
+                    } else {
+                        (Vec::new(), None)
+                    };
+                    return AgentAction::UpdateModelRouting {
+                        id: detail.id.clone(),
+                        mode: self.model_mode.clone(),
+                        allowed_profiles,
+                        cost_budget,
+                        default_profile: self.router_default_profile.clone(),
+                        fixed: self.router_fixed,
+                    };
+                }
+                self.sub = AgentSubScreen::AgentDetail;
+            }
+            _ => {}
+        }
+        AgentAction::Continue
+    }
+
     fn handle_edit_mcp_servers(&mut self, key: KeyEvent) -> AgentAction {
         let len = self.available_mcp.len();
         match key.code {
@@ -1075,8 +1541,20 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut AgentSelectState) {
             draw_edit_allowlist(f, area, state);
             return;
         }
+        AgentSubScreen::EditWorkspaces => {
+            draw_edit_workspaces(f, area, state);
+            return;
+        }
+        AgentSubScreen::EditModelRouting => {
+            draw_edit_model_routing(f, area, state);
+            return;
+        }
         AgentSubScreen::EditModelParams => {
             draw_edit_model_params(f, area, state);
+            return;
+        }
+        AgentSubScreen::ManifestHistory => {
+            draw_manifest_history(f, area, state);
             return;
         }
         _ => {}
@@ -1088,7 +1566,10 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut AgentSelectState) {
         | AgentSubScreen::EditSkills
         | AgentSubScreen::EditMcpServers
         | AgentSubScreen::EditChannels
-        | AgentSubScreen::EditModelParams => unreachable!(),
+        | AgentSubScreen::EditWorkspaces
+        | AgentSubScreen::EditModelRouting
+        | AgentSubScreen::EditModelParams
+        | AgentSubScreen::ManifestHistory => unreachable!(),
         AgentSubScreen::CreateMethod => crate::i18n::t("tui-agents-title-create-method"),
         AgentSubScreen::TemplatePicker => crate::i18n::t("tui-agents-title-templates"),
         AgentSubScreen::CustomName => crate::i18n::t("tui-agents-title-custom-name"),
@@ -1690,6 +2171,55 @@ fn draw_mcp_select(f: &mut Frame, area: Rect, state: &AgentSelectState) {
     );
 }
 
+fn draw_edit_workspaces(f: &mut Frame, area: Rect, state: &AgentSelectState) {
+    let mut lines: Vec<Line> = vec![Line::from(Span::styled(
+        crate::i18n::t("tui-agents-workspaces-help"),
+        Style::default().fg(theme::TEXT_SECONDARY),
+    ))];
+    for (i, (name, path, mode)) in state.workspaces.iter().enumerate() {
+        let marker = if i == state.ws_cursor { ">" } else { " " };
+        let mut spans = vec![Span::styled(
+            format!("{} {:<16} {:<28} {}", marker, name, path, mode),
+            if i == state.ws_cursor {
+                Style::default().fg(theme::ACCENT)
+            } else {
+                Style::default()
+            },
+        )];
+        if let Some((row, field)) = state.ws_editing {
+            if row == i {
+                spans.push(Span::styled(
+                    format!("  [{}]", ["name", "path", "mode"][field as usize]),
+                    Style::default().fg(theme::ACCENT),
+                ));
+                spans.push(Span::styled(
+                    format!(" {}", state.ws_buf),
+                    Style::default().add_modifier(Modifier::BOLD),
+                ));
+            }
+        }
+        lines.push(Line::from(spans));
+    }
+    if state.workspaces.is_empty() {
+        let key = if state.ws_loaded {
+            "tui-agents-workspaces-empty"
+        } else {
+            "tui-agents-workspaces-loading"
+        };
+        lines.push(Line::from(crate::i18n::t(key)));
+    }
+    // A failed fetch, a rejected save (duplicate name), or a dropped
+    // half-typed row all land here via `status_msg` — without this the
+    // operator saw nothing distinguish a reject from a save (#7835).
+    if !state.status_msg.is_empty() {
+        lines.push(Line::from(Span::styled(
+            state.status_msg.clone(),
+            Style::default().fg(theme::YELLOW),
+        )));
+    }
+    f.render_widget(Paragraph::new(lines), area);
+}
+
 fn draw_edit_allowlist(f: &mut Frame, area: Rect, state: &AgentSelectState) {
     let (title, items, cursor) = match state.sub {
         AgentSubScreen::EditSkills => (
@@ -1727,6 +2257,104 @@ fn draw_edit_allowlist(f: &mut Frame, area: Rect, state: &AgentSelectState) {
         items,
         cursor,
         &crate::i18n::t("tui-agents-hints-save"),
+    );
+}
+
+/// Model routing editor: mode, profile allowlist, cost budget.
+///
+/// Labels are the human-readable names an operator recognises; the wire
+/// values (`fixed` / `flexible`, `cheap` / `medium` / `expensive`) are shown
+/// in the value column rather than as the label itself.
+fn draw_edit_model_routing(f: &mut Frame, area: Rect, state: &AgentSelectState) {
+    let inner = widgets::render_screen_block(
+        f,
+        area,
+        crate::i18n::t("tui-agents-title-model-routing").trim(),
+    );
+
+    let chunks = Layout::vertical([
+        Constraint::Length(3),
+        Constraint::Min(3),
+        Constraint::Length(2),
+        Constraint::Length(1),
+    ])
+    .split(inner);
+
+    let flexible = state.model_mode == "flexible";
+    let mode_label = if flexible {
+        crate::i18n::t("tui-agents-label-routing-flexible")
+    } else {
+        crate::i18n::t("tui-agents-label-routing-fixed")
+    };
+    // Label and value are joined inside the Fluent message rather than by a
+    // format literal here, so a locale can reorder or re-punctuate the line.
+    let mode_line = crate::i18n::t_args("tui-agents-line-routing-mode", &[("mode", &mode_label)]);
+    f.render_widget(
+        Paragraph::new(format!(
+            "{}\n{}",
+            mode_line,
+            crate::i18n::t("tui-agents-hint-routing-mode"),
+        )),
+        chunks[0],
+    );
+
+    if !flexible {
+        // Nothing below applies while the agent is pinned to its own model;
+        // showing a disabled picker would imply the values still matter.
+        f.render_widget(
+            widgets::empty_state(&crate::i18n::t("tui-agents-label-routing-fixed-explainer")),
+            chunks[1],
+        );
+    } else if state.router_profiles.is_empty() {
+        f.render_widget(
+            widgets::empty_state(&crate::i18n::t("tui-agents-label-no-router-profiles")),
+            chunks[1],
+        );
+    } else {
+        let items: Vec<ListItem> = state
+            .router_profiles
+            .iter()
+            .enumerate()
+            .map(|(i, (name, checked))| {
+                let check = if *checked { "\u{25c9}" } else { "\u{25cb}" };
+                let style = if i == state.router_profile_cursor {
+                    Style::default()
+                        .fg(theme::CYAN)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default()
+                };
+                ListItem::new(format!("  {check} {name}")).style(style)
+            })
+            .collect();
+        f.render_widget(List::new(items), chunks[1]);
+    }
+
+    let budget_label = crate::i18n::t(COST_BUDGET_OPTIONS[state.cost_budget_idx].0);
+    let allowed = state
+        .router_profiles
+        .iter()
+        .filter(|(_, checked)| *checked)
+        .count();
+    let allowlist_summary = if !flexible {
+        String::new()
+    } else if allowed == 0 {
+        crate::i18n::t("tui-agents-label-routing-any-profile")
+    } else {
+        format!("{allowed}")
+    };
+    f.render_widget(
+        Paragraph::new(crate::i18n::t_args(
+            "tui-agents-line-routing-summary",
+            &[("budget", &budget_label), ("allowed", &allowlist_summary)],
+        )),
+        chunks[2],
+    );
+
+    f.render_widget(
+        Paragraph::new(crate::i18n::t("tui-agents-hints-model-routing"))
+            .style(Style::default().fg(theme::DIM)),
+        chunks[3],
     );
 }
 
@@ -1825,6 +2453,109 @@ fn draw_edit_model_params(f: &mut Frame, area: Rect, state: &AgentSelectState) {
     f.render_widget(widgets::hint_bar(&hints), chunks[3]);
 }
 
+/// Render `manifest_versions.timestamp` the way the dashboard does.
+///
+/// The column is defaulted to SQLite's `datetime('now')`, which stores
+/// `YYYY-MM-DD HH:MM:SS` in UTC carrying no offset. Read as-is it would show a
+/// UTC instant as if it were local, so it is parsed as UTC and converted; a
+/// value in any other shape is shown verbatim rather than as an error string,
+/// which is what `formatSqliteDateTime` in the dashboard also does.
+fn format_manifest_timestamp(raw: &str) -> String {
+    chrono::NaiveDateTime::parse_from_str(raw, "%Y-%m-%d %H:%M:%S")
+        .map(|naive| {
+            naive
+                .and_utc()
+                .with_timezone(&chrono::Local)
+                .format("%Y-%m-%d %H:%M:%S")
+                .to_string()
+        })
+        .unwrap_or_else(|_| raw.to_string())
+}
+
+/// Render the read-only manifest version timeline.
+///
+/// Left: one row per snapshot, newest first. Right: the selected snapshot's
+/// full TOML. An agent that has never been persisted, and a fetch that is still
+/// in flight, each get their own line — an empty pane on its own would not say
+/// which of the two happened.
+fn draw_manifest_history(f: &mut Frame, area: Rect, state: &mut AgentSelectState) {
+    let inner = widgets::render_screen_block(
+        f,
+        area,
+        crate::i18n::t("tui-agents-title-manifest-history").trim(),
+    );
+
+    let chunks = Layout::vertical([Constraint::Min(3), Constraint::Length(1)]).split(inner);
+
+    if state.manifest_history.is_empty() {
+        // A failed fetch writes `manifest_history_error` and clears the loading
+        // flag, so the pane says why it is empty instead of claiming the agent has
+        // no recorded history. Reading the shared `status_msg` here instead would
+        // show whatever unrelated agent-tab message happened to arrive first.
+        let message = if state.manifest_history_loading {
+            crate::i18n::t("tui-agents-label-manifest-history-loading")
+        } else if let Some(reason) = state.manifest_history_error.clone() {
+            reason
+        } else {
+            crate::i18n::t("tui-agents-label-manifest-history-empty")
+        };
+        f.render_widget(widgets::empty_state(&message), chunks[0]);
+        f.render_widget(
+            widgets::hint_bar(&crate::i18n::t("tui-agents-hints-manifest-history")),
+            chunks[1],
+        );
+        return;
+    }
+
+    let panes = Layout::horizontal([Constraint::Percentage(45), Constraint::Percentage(55)])
+        .split(chunks[0]);
+
+    let items: Vec<ListItem> = state
+        .manifest_history
+        .iter()
+        .map(|v| {
+            ListItem::new(Line::from(vec![
+                Span::styled(
+                    format!("  {:<21}", format_manifest_timestamp(&v.timestamp)),
+                    Style::default().fg(theme::CYAN),
+                ),
+                Span::styled(widgets::truncate(&v.change_source, 18), theme::dim_style()),
+            ]))
+        })
+        .collect();
+    f.render_stateful_widget(
+        widgets::themed_list(items),
+        panes[0],
+        &mut state.manifest_history_list,
+    );
+
+    // `selected()` can outlive its row when a refresh returns fewer snapshots,
+    // so the index is looked up rather than indexed into.
+    let toml = state
+        .manifest_history_list
+        .selected()
+        .and_then(|i| state.manifest_history.get(i))
+        .map(|v| v.manifest_toml.as_str())
+        .unwrap_or_default();
+    f.render_widget(
+        Paragraph::new(toml)
+            .style(theme::dim_style())
+            .wrap(ratatui::widgets::Wrap { trim: false })
+            .block(
+                Block::default()
+                    .borders(Borders::LEFT)
+                    .border_style(Style::default().fg(theme::DIM))
+                    .padding(Padding::horizontal(1)),
+            ),
+        panes[1],
+    );
+
+    f.render_widget(
+        widgets::hint_bar(&crate::i18n::t("tui-agents-hints-manifest-history")),
+        chunks[1],
+    );
+}
+
 fn draw_checkbox_list(
     f: &mut Frame,
     area: Rect,
@@ -1878,6 +2609,239 @@ fn draw_checkbox_list(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn version(timestamp: &str) -> ManifestVersion {
+        ManifestVersion {
+            timestamp: timestamp.to_string(),
+            change_source: "api".to_string(),
+            manifest_toml: format!("name = \"a\"\n# {timestamp}\n"),
+        }
+    }
+
+    fn press(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    /// Draw the screen into an off-screen buffer and return it as text, so a
+    /// test can assert what the pane actually shows.
+    fn render(state: &mut AgentSelectState) -> String {
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 24)).unwrap();
+        terminal
+            .draw(|f| draw(f, f.area(), state))
+            .unwrap()
+            .buffer
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect()
+    }
+
+    #[test]
+    fn history_key_opens_the_pane_and_asks_for_the_agents_versions() {
+        let mut state = AgentSelectState::new();
+        state.sub = AgentSubScreen::AgentDetail;
+        state.detail = Some(AgentDetail {
+            id: "11111111-2222-3333-4444-555555555555".to_string(),
+            ..Default::default()
+        });
+        state.status_msg = "stale message".to_string();
+        state.manifest_history_error = Some("an earlier fetch failed".to_string());
+
+        let action = state.handle_key(press(KeyCode::Char('h')));
+
+        assert!(state.sub == AgentSubScreen::ManifestHistory);
+        assert!(state.manifest_history_loading);
+        assert_eq!(
+            state.manifest_history_error, None,
+            "an earlier status must not be mistaken for this fetch's error"
+        );
+        // `status_msg` is deliberately left alone: it is the agent list's message
+        // line, not this pane's, and the pane no longer reads it. Clearing it here
+        // would silently drop an unrelated agent-tab message the operator has not
+        // seen yet.
+        assert_eq!(state.status_msg, "stale message");
+        match action {
+            AgentAction::FetchManifestHistory(id) => {
+                assert_eq!(id, "11111111-2222-3333-4444-555555555555");
+            }
+            _ => panic!("expected a manifest-history fetch"),
+        }
+    }
+
+    #[test]
+    fn loaded_versions_populate_the_list_and_select_the_newest() {
+        let mut state = AgentSelectState::new();
+        state.manifest_history_loading = true;
+
+        state.set_manifest_history(vec![
+            version("2026-09-07 10:00:00"),
+            version("2026-09-06 09:00:00"),
+        ]);
+
+        assert!(!state.manifest_history_loading);
+        assert_eq!(state.manifest_history.len(), 2);
+        assert_eq!(state.manifest_history_list.selected(), Some(0));
+    }
+
+    #[test]
+    fn arrows_move_through_the_versions_and_wrap() {
+        let mut state = AgentSelectState::new();
+        state.sub = AgentSubScreen::ManifestHistory;
+        state.set_manifest_history(vec![
+            version("2026-09-07 10:00:00"),
+            version("2026-09-06 09:00:00"),
+        ]);
+
+        state.handle_key(press(KeyCode::Down));
+        assert_eq!(state.manifest_history_list.selected(), Some(1));
+        state.handle_key(press(KeyCode::Down));
+        assert_eq!(state.manifest_history_list.selected(), Some(0));
+        state.handle_key(press(KeyCode::Up));
+        assert_eq!(state.manifest_history_list.selected(), Some(1));
+    }
+
+    /// The endpoint answers an agent that was never persisted with `[]`, and
+    /// `limit=0` clamps to 1 rather than erroring — either way the pane can be
+    /// asked to navigate an empty list, where a wrapping `% len` would panic.
+    #[test]
+    fn navigating_an_empty_history_neither_panics_nor_selects() {
+        let mut state = AgentSelectState::new();
+        state.sub = AgentSubScreen::ManifestHistory;
+        state.set_manifest_history(Vec::new());
+
+        state.handle_key(press(KeyCode::Down));
+        state.handle_key(press(KeyCode::Up));
+        state.handle_key(press(KeyCode::Char('j')));
+        state.handle_key(press(KeyCode::Char('k')));
+
+        assert_eq!(state.manifest_history_list.selected(), None);
+        assert!(state.sub == AgentSubScreen::ManifestHistory);
+    }
+
+    #[test]
+    fn esc_returns_from_the_history_pane_to_the_detail_pane() {
+        let mut state = AgentSelectState::new();
+        state.sub = AgentSubScreen::ManifestHistory;
+
+        state.handle_key(press(KeyCode::Esc));
+
+        assert!(state.sub == AgentSubScreen::AgentDetail);
+    }
+
+    #[test]
+    fn an_empty_history_renders_the_empty_state_not_a_blank_pane() {
+        let mut state = AgentSelectState::new();
+        state.sub = AgentSubScreen::ManifestHistory;
+        state.set_manifest_history(Vec::new());
+
+        let rendered = render(&mut state);
+
+        assert!(
+            rendered.contains(&crate::i18n::t("tui-agents-label-manifest-history-empty")),
+            "empty history must say so:\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn a_fetch_still_in_flight_says_loading_rather_than_no_history() {
+        let mut state = AgentSelectState::new();
+        state.sub = AgentSubScreen::ManifestHistory;
+        state.manifest_history_loading = true;
+
+        let rendered = render(&mut state);
+
+        assert!(
+            rendered.contains(&crate::i18n::t("tui-agents-label-manifest-history-loading")),
+            "an in-flight fetch must not claim the agent has no history:\n{rendered}"
+        );
+    }
+
+    /// A rejected id (400 for a non-UUID, 404 for one the registry does not
+    /// know) arrives as a history failure; the pane must show it instead of the
+    /// "no changes recorded" line, which would be a different and wrong answer.
+    #[test]
+    fn a_rejected_agent_id_shows_the_daemons_reason_not_the_empty_state() {
+        let mut state = AgentSelectState::new();
+        state.sub = AgentSubScreen::ManifestHistory;
+        state.set_manifest_history_error("Agent not found".to_string());
+
+        let rendered = render(&mut state);
+
+        assert!(
+            rendered.contains("Agent not found"),
+            "the failure reason must reach the pane:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains(&crate::i18n::t("tui-agents-label-manifest-history-empty")),
+            "a failed fetch must not read as an agent with no history:\n{rendered}"
+        );
+    }
+
+    /// `status_msg` collects every agent-tab message. A skills or channels error
+    /// arriving while a history fetch is outstanding used to be rendered here as
+    /// this fetch's reason, so an operator read an unrelated failure where "no
+    /// configuration changes recorded" belonged.
+    #[test]
+    fn an_unrelated_agent_tab_error_is_not_shown_as_the_history_fetchs_reason() {
+        let mut state = AgentSelectState::new();
+        state.sub = AgentSubScreen::ManifestHistory;
+        state.set_manifest_history(Vec::new());
+        state.status_msg = "Failed to save skills".to_string();
+
+        let rendered = render(&mut state);
+
+        assert!(
+            !rendered.contains("Failed to save skills"),
+            "an unrelated agent-tab error must not stand in for the history fetch's reason:\n{rendered}"
+        );
+        assert!(
+            rendered.contains(&crate::i18n::t("tui-agents-label-manifest-history-empty")),
+            "an agent with no recorded history must still say so:\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn a_populated_history_renders_its_versions_and_the_selected_toml() {
+        let mut state = AgentSelectState::new();
+        state.sub = AgentSubScreen::ManifestHistory;
+        state.set_manifest_history(vec![version("2026-09-07 10:00:00")]);
+
+        let rendered = render(&mut state);
+
+        assert!(
+            rendered.contains("api"),
+            "the change source belongs on the row:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("2026-09-07"),
+            "the version's timestamp belongs on the row:\n{rendered}"
+        );
+    }
+
+    /// `manifest_versions.timestamp` is stored in SQLite's `datetime('now')`
+    /// shape — UTC with no offset — which is the interpretation the dashboard's
+    /// `formatSqliteDateTime` also applies.
+    #[test]
+    fn a_utc_timestamp_is_rendered_in_local_time() {
+        use chrono::TimeZone;
+
+        let formatted = format_manifest_timestamp("2026-09-07 10:00:00");
+        let expected = chrono::Utc
+            .with_ymd_and_hms(2026, 9, 7, 10, 0, 0)
+            .unwrap()
+            .with_timezone(&chrono::Local)
+            .format("%Y-%m-%d %H:%M:%S")
+            .to_string();
+
+        assert_eq!(formatted, expected);
+    }
+
+    #[test]
+    fn an_unparseable_timestamp_is_shown_verbatim() {
+        assert_eq!(format_manifest_timestamp("not a date"), "not a date");
+        assert_eq!(format_manifest_timestamp(""), "");
+    }
 
     #[test]
     fn custom_agent_template_has_unlimited_hourly_token_budget() {
@@ -1980,6 +2944,381 @@ mod tests {
         assert!(
             state.token_usage.is_none(),
             "the panel must not show agent A's figures for agent B"
+        );
+    }
+}
+
+#[cfg(test)]
+mod workspaces_tests {
+    use super::*;
+    use ratatui::backend::TestBackend;
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use ratatui::Terminal;
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    /// Renders `draw_edit_workspaces` to an in-memory buffer and returns its
+    /// text content, so a test can assert on what an operator would actually
+    /// see rather than on internal state alone (#7835).
+    fn rendered_edit_workspaces(state: &AgentSelectState) -> String {
+        let backend = TestBackend::new(120, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| draw_edit_workspaces(f, f.area(), state))
+            .unwrap();
+        terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect()
+    }
+
+    fn editing_state() -> AgentSelectState {
+        let mut state = AgentSelectState::new();
+        state.sub = AgentSubScreen::EditWorkspaces;
+        state.ws_loaded = true;
+        state.detail = Some(AgentDetail {
+            id: "agent-1".to_string(),
+            name: String::new(),
+            state: String::new(),
+            model: String::new(),
+            provider: String::new(),
+            created: String::new(),
+            last_active: String::new(),
+            tags: vec![],
+            capabilities: vec![],
+            parent: None,
+            children: vec![],
+            skills: vec![],
+            skills_mode: String::new(),
+            mcp_servers: vec![],
+            mcp_servers_mode: String::new(),
+            channels: vec![],
+            channels_mode: String::new(),
+        });
+        state
+    }
+
+    #[test]
+    fn adding_a_folder_focuses_the_name_field() {
+        let mut state = editing_state();
+        state.handle_key(key(KeyCode::Char('a')));
+        assert_eq!(state.workspaces.len(), 1);
+        assert!(matches!(state.ws_editing, Some((0, 0))));
+    }
+
+    #[test]
+    fn typing_then_tab_fills_name_and_path() {
+        let mut state = editing_state();
+        state.handle_key(key(KeyCode::Char('a')));
+        for c in "library".chars() {
+            state.handle_key(key(KeyCode::Char(c)));
+        }
+        state.handle_key(key(KeyCode::Tab));
+        assert_eq!(state.workspaces[0].0, "library");
+        assert!(matches!(state.ws_editing, Some((0, 1))));
+        for c in "shared/library".chars() {
+            state.handle_key(key(KeyCode::Char(c)));
+        }
+        state.handle_key(key(KeyCode::Tab));
+        assert_eq!(state.workspaces[0].1, "shared/library");
+    }
+
+    #[test]
+    fn deleting_removes_the_selected_row() {
+        let mut state = editing_state();
+        state.workspaces.push(("a".into(), "p".into(), "rw".into()));
+        state.workspaces.push(("b".into(), "q".into(), "r".into()));
+        state.ws_cursor = 1;
+        state.handle_key(key(KeyCode::Char('d')));
+        assert_eq!(state.workspaces.len(), 1);
+        assert_eq!(state.workspaces[0].0, "a");
+    }
+
+    #[test]
+    fn save_emits_only_complete_rows() {
+        let mut state = editing_state();
+        state
+            .workspaces
+            .push(("library".into(), "shared/library".into(), "rw".into()));
+        state.workspaces.push(("".into(), "".into(), "rw".into()));
+        match state.handle_key(key(KeyCode::Char('s'))) {
+            AgentAction::UpdateWorkspaces { id, workspaces } => {
+                assert_eq!(id, "agent-1");
+                assert_eq!(workspaces.len(), 1);
+                assert_eq!(workspaces[0].0, "library");
+            }
+            other => panic!("expected update, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn save_trims_the_values_it_emits_and_reports_dropped_rows() {
+        let mut state = editing_state();
+        state.workspaces.push((
+            "library ".into(),
+            " shared/library".into(),
+            "readwrite".into(),
+        ));
+        state
+            .workspaces
+            .push(("half".into(), "".into(), "readwrite".into()));
+        match state.handle_key(key(KeyCode::Char('s'))) {
+            AgentAction::UpdateWorkspaces { workspaces, .. } => {
+                assert_eq!(workspaces.len(), 1);
+                assert_eq!(
+                    workspaces[0].0, "library",
+                    "the emitted name must be trimmed"
+                );
+                assert_eq!(
+                    workspaces[0].1, "shared/library",
+                    "the emitted path must be trimmed"
+                );
+            }
+            other => panic!("expected update, got {other:?}"),
+        }
+        assert!(
+            !state.status_msg.is_empty(),
+            "dropping a half-typed row must surface a message, not fail silently"
+        );
+        let rendered = rendered_edit_workspaces(&state);
+        assert!(
+            rendered.contains(state.status_msg.trim()),
+            "the status message must actually be painted, not just set: {rendered:?}"
+        );
+    }
+
+    #[test]
+    fn entering_edit_seeds_the_buffer_so_committing_untouched_keeps_the_value() {
+        let mut state = editing_state();
+        state
+            .workspaces
+            .push(("library".into(), "shared/library".into(), "readonly".into()));
+        state.handle_key(key(KeyCode::Enter)); // open the name field
+        state.handle_key(key(KeyCode::Enter)); // commit name untouched, advance to path
+        state.handle_key(key(KeyCode::Enter)); // commit path untouched, advance to mode
+        state.handle_key(key(KeyCode::Enter)); // commit mode untouched, close the row
+
+        assert_eq!(
+            state.workspaces[0],
+            (
+                "library".to_string(),
+                "shared/library".to_string(),
+                "readonly".to_string()
+            ),
+            "committing every field without retyping must not blank any of them"
+        );
+    }
+
+    #[test]
+    fn retyping_the_displayed_readonly_value_does_not_escalate_to_readwrite() {
+        let mut state = editing_state();
+        state
+            .workspaces
+            .push(("library".into(), "shared/library".into(), "readonly".into()));
+        state.handle_key(key(KeyCode::Enter)); // field 0 (name)
+        state.handle_key(key(KeyCode::Tab)); // field 1 (path)
+        state.handle_key(key(KeyCode::Tab)); // field 2 (mode), buf seeded "readonly"
+        for _ in 0.."readonly".len() {
+            state.handle_key(key(KeyCode::Backspace));
+        }
+        for c in "readonly".chars() {
+            state.handle_key(key(KeyCode::Char(c)));
+        }
+        state.handle_key(key(KeyCode::Enter));
+
+        assert_eq!(
+            state.workspaces[0].2, "readonly",
+            "retyping the exact value the row already displays must not grant read-write"
+        );
+    }
+
+    #[test]
+    fn unrecognized_mode_input_keeps_the_previous_value() {
+        let mut state = editing_state();
+        state
+            .workspaces
+            .push(("library".into(), "shared/library".into(), "readonly".into()));
+        state.handle_key(key(KeyCode::Enter));
+        state.handle_key(key(KeyCode::Tab));
+        state.handle_key(key(KeyCode::Tab));
+        for _ in 0.."readonly".len() {
+            state.handle_key(key(KeyCode::Backspace));
+        }
+        for c in "garbage".chars() {
+            state.handle_key(key(KeyCode::Char(c)));
+        }
+        state.handle_key(key(KeyCode::Enter));
+
+        assert_eq!(
+            state.workspaces[0].2, "readonly",
+            "unrecognized mode input must not default to the more permissive read-write"
+        );
+    }
+
+    #[test]
+    fn editor_ignores_every_key_but_esc_until_loaded() {
+        let mut state = editing_state();
+        // A non-empty `workspaces` with `ws_loaded == false` isn't reachable
+        // through the normal `w` reset, but proves the gate itself — not an
+        // empty vector — is what blocks `Enter`/`'d'` below. With an empty
+        // vector both are already no-ops regardless of the gate
+        // (`if len > 0`), so that alone wouldn't distinguish the two.
+        state.workspaces.push((
+            "library".into(),
+            "shared/library".into(),
+            "readwrite".into(),
+        ));
+        state.ws_loaded = false;
+
+        state.handle_key(key(KeyCode::Char('a')));
+        assert_eq!(
+            state.workspaces.len(),
+            1,
+            "adding a row before the fetch lands must not touch the table"
+        );
+        assert!(matches!(
+            state.handle_key(key(KeyCode::Char('s'))),
+            AgentAction::Continue
+        ));
+        state.handle_key(key(KeyCode::Char('d')));
+        assert_eq!(
+            state.workspaces.len(),
+            1,
+            "'d' must not delete a row while the fetch hasn't landed"
+        );
+        state.handle_key(key(KeyCode::Enter));
+        assert!(
+            state.ws_editing.is_none(),
+            "Enter must not open a field for editing while the fetch hasn't landed"
+        );
+
+        state.handle_key(key(KeyCode::Esc));
+        assert!(matches!(state.sub, AgentSubScreen::AgentDetail));
+    }
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    /// #7781 review: `default_profile` is not editable from this screen, so
+    /// saving a routing edit (Enter) must carry through whatever value was
+    /// loaded rather than silently dropping it.
+    #[test]
+    fn saving_model_routing_preserves_the_loaded_default_profile() {
+        let mut state = AgentSelectState::new();
+        state.detail = Some(AgentDetail {
+            id: "agent-1".to_string(),
+            ..AgentDetail::default()
+        });
+        state.model_mode = "flexible".to_string();
+        state.router_default_profile = Some("coder".to_string());
+        state.routing_loaded = true;
+
+        let action = state.handle_edit_model_routing(key(KeyCode::Enter));
+
+        match action {
+            AgentAction::UpdateModelRouting {
+                default_profile, ..
+            } => {
+                assert_eq!(
+                    default_profile,
+                    Some("coder".to_string()),
+                    "save must not clear the loaded default_profile"
+                );
+            }
+            _ => panic!("Enter must emit UpdateModelRouting"),
+        }
+    }
+
+    /// #7781 review: `fixed` — the per-agent router bypass — is not
+    /// editable from this screen either, and the InProcess save path used
+    /// to hardcode it to `false` unconditionally. Same contract as
+    /// `default_profile` above.
+    #[test]
+    fn saving_model_routing_preserves_the_loaded_fixed_flag() {
+        let mut state = AgentSelectState::new();
+        state.detail = Some(AgentDetail {
+            id: "agent-1".to_string(),
+            ..AgentDetail::default()
+        });
+        state.model_mode = "flexible".to_string();
+        state.router_fixed = true;
+        state.routing_loaded = true;
+
+        let action = state.handle_edit_model_routing(key(KeyCode::Enter));
+
+        match action {
+            AgentAction::UpdateModelRouting { fixed, .. } => {
+                assert!(fixed, "save must not clear the loaded fixed flag");
+            }
+            _ => panic!("Enter must emit UpdateModelRouting"),
+        }
+    }
+
+    /// #7781 review: opening the editor for a different agent (`r` from the
+    /// detail pane) must not let the previous agent's routing values leak
+    /// into a save for the new one if the fetch that follows fails.
+    #[test]
+    fn entering_the_routing_editor_resets_stale_values() {
+        let mut state = AgentSelectState::new();
+        state.detail = Some(AgentDetail {
+            id: "agent-2".to_string(),
+            ..AgentDetail::default()
+        });
+        // Simulate leftover state from a previously edited agent.
+        state.model_mode = "flexible".to_string();
+        state.router_profiles = vec![("coder".to_string(), true)];
+        state.router_profile_cursor = 1;
+        state.cost_budget_idx = 2;
+        state.router_default_profile = Some("coder".to_string());
+        state.router_fixed = true;
+        state.routing_loaded = true;
+
+        state.handle_detail(key(KeyCode::Char('r')));
+
+        assert_eq!(state.model_mode, "fixed");
+        assert!(state.router_profiles.is_empty());
+        assert_eq!(state.router_profile_cursor, 0);
+        assert_eq!(state.cost_budget_idx, 0);
+        assert_eq!(state.router_default_profile, None);
+        assert!(!state.router_fixed);
+        assert!(
+            !state.routing_loaded,
+            "re-entering must require a fresh AgentModelRoutingLoaded before Enter can save"
+        );
+    }
+
+    /// #7781 review: if the fetch after `r` fails (or has not returned yet),
+    /// `Enter` must not save — it would write this screen's reset
+    /// placeholder values over the agent's real settings. `FetchError` only
+    /// sets a status message; it does not leave the editor, so this guard
+    /// is the only thing standing between a failed fetch and a bad write.
+    #[test]
+    fn saving_before_routing_loaded_is_a_no_op() {
+        let mut state = AgentSelectState::new();
+        state.detail = Some(AgentDetail {
+            id: "agent-3".to_string(),
+            ..AgentDetail::default()
+        });
+        state.model_mode = "flexible".to_string();
+        state.router_default_profile = Some("coder".to_string());
+        state.router_fixed = true;
+        // routing_loaded defaults to false and was not set here.
+
+        let action = state.handle_edit_model_routing(key(KeyCode::Enter));
+
+        assert!(
+            matches!(action, AgentAction::Continue),
+            "Enter must not emit a save before the real settings have loaded"
+        );
+        assert!(
+            !state.status_msg.is_empty(),
+            "the operator needs to know why Enter did nothing"
         );
     }
 }

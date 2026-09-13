@@ -221,6 +221,7 @@ fn test_push_filtered_user_message_applies_prefix_after_pii() {
     let mut session = librefang_memory::session::Session {
         id: librefang_types::agent::SessionId::new(),
         agent_id: librefang_types::agent::AgentId::new(),
+        parent_session_id: None,
         messages: Vec::new(),
         context_window_tokens: 0,
         label: None,
@@ -269,6 +270,7 @@ fn test_push_filtered_user_message_no_prefix_non_group() {
     let mut session = librefang_memory::session::Session {
         id: librefang_types::agent::SessionId::new(),
         agent_id: librefang_types::agent::AgentId::new(),
+        parent_session_id: None,
         messages: Vec::new(),
         context_window_tokens: 0,
         label: None,
@@ -347,6 +349,7 @@ fn test_finalize_tool_use_results_skips_empty_message() {
     let mut session = librefang_memory::session::Session {
         id: librefang_types::agent::SessionId::new(),
         agent_id,
+        parent_session_id: None,
         messages: Vec::new(),
         context_window_tokens: 0,
         label: None,
@@ -384,6 +387,7 @@ fn test_handle_mid_turn_signal_injects_without_tool_results() {
     let mut session = librefang_memory::session::Session {
         id: librefang_types::agent::SessionId::new(),
         agent_id,
+        parent_session_id: None,
         messages: Vec::new(),
         context_window_tokens: 0,
         label: None,
@@ -448,6 +452,7 @@ fn test_handle_mid_turn_signal_mixed_flush_resets_consecutive_all_failed() {
     let mut session = librefang_memory::session::Session {
         id: librefang_types::agent::SessionId::new(),
         agent_id,
+        parent_session_id: None,
         messages: Vec::new(),
         context_window_tokens: 0,
         label: None,
@@ -590,6 +595,7 @@ fn test_handle_mid_turn_signal_approval_resolved_updates_waiting_result_and_rese
     let mut session = librefang_memory::session::Session {
         id: librefang_types::agent::SessionId::new(),
         agent_id,
+        parent_session_id: None,
         messages: vec![Message {
             role: Role::User,
             content: MessageContent::Blocks(vec![waiting_result.clone()]),
@@ -808,6 +814,7 @@ fn injection_resolution_does_not_pollute_other_sessions() {
     let mut session_b = librefang_memory::session::Session {
         id: librefang_types::agent::SessionId::new(),
         agent_id,
+        parent_session_id: None,
         messages: Vec::new(),
         context_window_tokens: 0,
         label: None,
@@ -915,6 +922,7 @@ fn injection_resolution_still_applies_when_session_owns_pending_approval() {
     let mut session_a = librefang_memory::session::Session {
         id: librefang_types::agent::SessionId::new(),
         agent_id,
+        parent_session_id: None,
         messages: vec![Message {
             role: Role::User,
             content: MessageContent::Blocks(vec![waiting]),
@@ -1123,6 +1131,7 @@ fn test_prepare_llm_messages_new_messages_start_keeps_full_turn_after_trim() {
     let mut session = librefang_memory::session::Session {
         id: librefang_types::agent::SessionId::new(),
         agent_id,
+        parent_session_id: None,
         messages: Vec::new(),
         context_window_tokens: 0,
         label: None,
@@ -1198,6 +1207,7 @@ fn test_prepare_llm_messages_new_messages_start_ignores_trimmed_context_injectio
     let mut session = librefang_memory::session::Session {
         id: librefang_types::agent::SessionId::new(),
         agent_id,
+        parent_session_id: None,
         messages: Vec::new(),
         context_window_tokens: 0,
         label: None,
@@ -1298,6 +1308,7 @@ fn test_prepare_llm_messages_current_time_msg_survives_trim_in_long_session() {
         messages: Vec::new(),
         context_window_tokens: 0,
         label: None,
+        parent_session_id: None,
         model_override: None,
 
         messages_generation: 0,
@@ -1370,6 +1381,7 @@ fn test_prepare_llm_messages_current_time_msg_never_splits_tool_use_result_pair(
         messages: Vec::new(),
         context_window_tokens: 0,
         label: None,
+        parent_session_id: None,
         model_override: None,
 
         messages_generation: 0,
@@ -1481,6 +1493,7 @@ fn test_prepare_llm_messages_cold_load_triggers_repair() {
         .save_session(&Session {
             id: session_id,
             agent_id,
+            parent_session_id: None,
             messages,
             context_window_tokens: 0,
             label: None,
@@ -1521,6 +1534,7 @@ fn test_prepare_llm_messages_generation_skip_equivalence() {
     let mut session = librefang_memory::session::Session {
         id: librefang_types::agent::SessionId::new(),
         agent_id,
+        parent_session_id: None,
         messages: vec![Message::user("hello"), Message::assistant("hi")],
         context_window_tokens: 0,
         label: None,
@@ -1640,6 +1654,7 @@ async fn test_mid_turn_signal_preserves_partial_hard_failure_results_for_classif
     let mut session = librefang_memory::session::Session {
         id: librefang_types::agent::SessionId::new(),
         agent_id,
+        parent_session_id: None,
         messages: Vec::new(),
         context_window_tokens: 0,
         label: None,

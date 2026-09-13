@@ -1,0 +1,2 @@
+Resuming a paused goal run now actually continues from the checkpointed iteration instead of silently restarting at 0.
+`GoalRunner::start` already resolved the resumed iteration count into the run's observable state, but the run loop itself kept its own separate counter hardcoded to 0, so the loop's iteration cap and every progress write after the first tick counted from scratch — a run paused at iteration 30 under a cap of 100 got a fresh 100-iteration budget instead of the 70 remaining. (#7973) (@DaBlitzStein)

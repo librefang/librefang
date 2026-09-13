@@ -55,9 +55,21 @@ vi.mock("../lib/mutations/agents", () => ({
   useDeletePromptVersion: vi.fn().mockReturnValue({ mutate: vi.fn() }),
 }));
 
+/**
+ * The variant cap, mocked deliberately low.
+ *
+ * What the cap test asserts is that selection stops at the cap and says so, which
+ * is the same behaviour at three variants as at a hundred.
+ * Driving the production value meant a hundred sequential clicks through a subtree
+ * the motion mock remounts on every state change, and that is quadratic: two seconds
+ * on an idle machine against vitest's five-second default, so the test failed
+ * whenever the rest of the suite happened to be loading the same cores.
+ */
+const { TEST_VARIANT_CAP } = vi.hoisted(() => ({ TEST_VARIANT_CAP: 3 }));
+
 vi.mock("./trafficSplit", () => ({
   buildEvenTrafficSplit: vi.fn().mockReturnValue([50, 50]),
-  MAX_TRAFFIC_VARIANTS: 100,
+  MAX_TRAFFIC_VARIANTS: TEST_VARIANT_CAP,
 }));
 
 describe("PromptsExperimentsModal", () => {
@@ -220,7 +232,7 @@ describe("PromptsExperimentsModal", () => {
   it("stops selection when every variant has a traffic bucket", async () => {
     const user = userEvent.setup();
     vi.mocked(usePromptVersions).mockReturnValue({
-      data: Array.from({ length: 101 }, (_, index) => ({
+      data: Array.from({ length: TEST_VARIANT_CAP + 1 }, (_, index) => ({
         id: `version-${index}`,
         version: index + 1,
         is_active: false,
@@ -248,7 +260,7 @@ describe("PromptsExperimentsModal", () => {
       }),
     );
 
-    for (let index = 0; index < 100; index += 1) {
+    for (let index = 0; index < TEST_VARIANT_CAP; index += 1) {
       // The lightweight motion mock remounts its host subtree after state
       // changes, so read each current checkbox before clicking it.
       const checkbox = container.querySelectorAll<HTMLInputElement>(
@@ -258,7 +270,9 @@ describe("PromptsExperimentsModal", () => {
     }
 
     expect(
-      container.querySelectorAll<HTMLInputElement>('input[type="checkbox"]')[100],
+      container.querySelectorAll<HTMLInputElement>('input[type="checkbox"]')[
+        TEST_VARIANT_CAP
+      ],
     ).toBeDisabled();
     expect(
       screen.getByText("agents.prompts_experiments.variant_limit"),

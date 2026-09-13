@@ -239,6 +239,7 @@ async fn test_tool_failure_allows_retry_on_next_iteration() {
     let mut session = librefang_memory::session::Session {
         id: librefang_types::agent::SessionId::new(),
         agent_id,
+        parent_session_id: None,
         messages: Vec::new(),
         context_window_tokens: 0,
         label: None,
@@ -303,6 +304,7 @@ async fn test_repeated_tool_failures_cap_exits_loop() {
     let mut session = librefang_memory::session::Session {
         id: librefang_types::agent::SessionId::new(),
         agent_id,
+        parent_session_id: None,
         messages: Vec::new(),
         context_window_tokens: 0,
         label: None,
@@ -366,6 +368,7 @@ async fn test_streaming_tool_failure_allows_retry() {
     let mut session = librefang_memory::session::Session {
         id: librefang_types::agent::SessionId::new(),
         agent_id,
+        parent_session_id: None,
         messages: Vec::new(),
         context_window_tokens: 0,
         label: None,
@@ -432,6 +435,7 @@ async fn test_streaming_repeated_tool_failures_cap_exits() {
     let mut session = librefang_memory::session::Session {
         id: librefang_types::agent::SessionId::new(),
         agent_id,
+        parent_session_id: None,
         messages: Vec::new(),
         context_window_tokens: 0,
         label: None,
@@ -490,6 +494,262 @@ async fn test_streaming_repeated_tool_failures_cap_exits() {
     }
 }
 
+/// A stream that fails with a provider error whose `Display` carries an
+/// endpoint URL and an upstream response body — the shape the note must not
+/// reproduce.
+struct ProviderErrorStreamDriver;
+
+/// Stands in for the endpoint/model/upstream-body detail a real driver error
+/// drags along. A 400 with no "unsupported parameter" wording classifies as
+/// `Format`, which is the branch of `build_user_facing_llm_error` that appends
+/// the raw error verbatim — and also where an unrecognised provider error
+/// lands by default.
+const PROVIDER_ERROR_LEAK_MARKER: &str =
+    "https://internal-gw.example/v1/messages model=acme-secret-v3 body={\"detail\":\"leaked\"}";
+
+#[async_trait]
+impl LlmDriver for ProviderErrorStreamDriver {
+    async fn complete(&self, _request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
+        unreachable!("streaming test must use stream")
+    }
+
+    async fn stream(
+        &self,
+        _request: CompletionRequest,
+        _tx: mpsc::Sender<StreamEvent>,
+    ) -> Result<CompletionResponse, LlmError> {
+        Err(LlmError::Api {
+            status: 400,
+            message: PROVIDER_ERROR_LEAK_MARKER.to_string(),
+            code: None,
+        })
+    }
+}
+
+/// Records what the substrate already held at the moment the provider was
+/// called, then fails the turn so nothing further can write.
+struct SessionSnapshotDriver {
+    memory: Arc<librefang_memory::MemorySubstrate>,
+    session_id: librefang_types::agent::SessionId,
+    persisted_at_call: Arc<std::sync::Mutex<Option<Vec<String>>>>,
+}
+
+#[async_trait]
+impl LlmDriver for SessionSnapshotDriver {
+    async fn complete(&self, _request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
+        unreachable!("streaming test must use stream")
+    }
+
+    async fn stream(
+        &self,
+        _request: CompletionRequest,
+        _tx: mpsc::Sender<StreamEvent>,
+    ) -> Result<CompletionResponse, LlmError> {
+        let persisted = self
+            .memory
+            .get_session_async(self.session_id)
+            .await
+            .ok()
+            .flatten()
+            .map(|s| {
+                s.messages
+                    .iter()
+                    .map(|m| m.content.text_content())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        *self.persisted_at_call.lock().unwrap() = Some(persisted);
+        Err(LlmError::Api {
+            status: 500,
+            message: "stop the turn here".to_string(),
+            code: None,
+        })
+    }
+}
+
+/// The inbound message has to be on disk *before* the provider is called.
+///
+/// This is the path the dashboard takes, and the failure it guards is the one
+/// nothing else covers: a daemon restart, or a hang that outlives the
+/// surrounding timeout, between pushing the user's message and the first
+/// interim save. The provider-failure note added elsewhere in this loop only
+/// covers `stream_with_retry` returning `Err` — not a crash, not a restart,
+/// not a cancellation — so asserting on the session *after* the loop would
+/// pass with the save deleted.
+#[tokio::test]
+async fn the_streaming_loop_persists_the_inbound_message_before_calling_the_provider() {
+    let memory = Arc::new(librefang_memory::MemorySubstrate::open_in_memory(0.01).unwrap());
+    let mut session = fresh_session();
+    let session_id = session.id;
+    let mut manifest = test_manifest();
+    manifest.model.provider = "test-inbound-save".to_string();
+
+    let persisted_at_call = Arc::new(std::sync::Mutex::new(None));
+    let driver: Arc<dyn LlmDriver> = Arc::new(SessionSnapshotDriver {
+        memory: Arc::clone(&memory),
+        session_id,
+        persisted_at_call: Arc::clone(&persisted_at_call),
+    });
+    let (tx, _rx) = mpsc::channel(64);
+
+    let _ = run_agent_loop_streaming(
+        &manifest,
+        "the message that must not be lost",
+        &mut session,
+        &memory,
+        driver,
+        &[],
+        None,
+        tx,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None, // on_phase
+        None, // media_engine
+        None, // media_drivers
+        None, // tts_engine
+        None, // docker_config
+        None, // hooks
+        None, // context_window_tokens
+        None, // process_manager
+        None, // checkpoint_manager
+        None, // process_registry
+        None, // user_content_blocks
+        None, // proactive_memory
+        None, // context_engine
+        None, // pending_messages
+        &LoopOptions::default(),
+    )
+    .await;
+
+    let snapshot = persisted_at_call
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("the driver must have been reached");
+    assert!(
+        snapshot
+            .iter()
+            .any(|t| t.contains("the message that must not be lost")),
+        "the inbound message must already be persisted when the provider is called, \
+         got: {snapshot:?}"
+    );
+}
+
+/// A provider failure must leave a visible note so the turn does not die
+/// silently. The note carries none of the driver error's `Display`, and it has
+/// to be stored in a role that survives both `session_repair` and the driver's
+/// message conversion — a `Role::System` note reads correctly in the dashboard
+/// and reaches no hosted model at all.
+#[tokio::test]
+async fn streaming_provider_failure_note_is_opaque_and_reaches_the_model() {
+    let memory = librefang_memory::MemorySubstrate::open_in_memory(0.01).unwrap();
+    let mut session = fresh_session();
+    let mut manifest = test_manifest();
+    // Own cooldown key: the circuit breaker is a process-wide static, so a
+    // shared provider name would let this failure leak into sibling tests.
+    manifest.model.provider = "test-provider-failure-note".to_string();
+    let driver: Arc<dyn LlmDriver> = Arc::new(ProviderErrorStreamDriver);
+    let (tx, _rx) = mpsc::channel(64);
+
+    let err = run_agent_loop_streaming(
+        &manifest,
+        "Do something",
+        &mut session,
+        &memory,
+        driver,
+        &[],
+        None,
+        tx,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None, // on_phase
+        None, // media_engine
+        None, // media_drivers
+        None, // tts_engine
+        None, // docker_config
+        None, // hooks
+        None, // context_window_tokens
+        None, // process_manager
+        None, // checkpoint_manager
+        None, // process_registry
+        None, // user_content_blocks
+        None, // proactive_memory
+        None, // context_engine
+        None, // pending_messages
+        &LoopOptions::default(),
+    )
+    .await
+    .expect_err("Streaming loop must surface the provider error");
+
+    let note = session
+        .messages
+        .last()
+        .expect("Provider failure must leave a note in the session");
+
+    let text = match &note.content {
+        MessageContent::Text(t) => t.clone(),
+        MessageContent::Blocks(blocks) => blocks
+            .iter()
+            .filter_map(|b| match b {
+                ContentBlock::Text { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+    };
+
+    assert_ne!(
+        note.role,
+        Role::System,
+        "A system-role note in the middle of history reaches no hosted model: anthropic \
+         filters it out of the request, gemini and bedrock skip it, and openai / ollama \
+         emit one only when the request carries no system prompt — which the agent loop \
+         always sets. The `[System: …]` text prefix is what marks this as a daemon fact. \
+         Got: {text:?}"
+    );
+    assert!(
+        !text.contains(PROVIDER_ERROR_LEAK_MARKER),
+        "The visible note must not reproduce the provider error's endpoint / model / \
+         upstream body. Got: {text:?}"
+    );
+    assert!(
+        !text.contains(&err.to_string()),
+        "The visible note must not contain the provider error's Display. Got: {text:?}"
+    );
+    assert!(
+        !text.trim().is_empty(),
+        "The note must still be there — a turn that dies leaving the chat blank is the \
+         failure this branch exists to prevent"
+    );
+
+    // …and it must survive the round trip to the provider. `session_repair`
+    // merges only *adjacent* same-role messages, so a note interposed between
+    // two user turns is not merged; the driver then strips it and hands the
+    // provider the `user, user` pair that merge exists to prevent.
+    let mut next_turn = session.messages.clone();
+    next_turn.push(Message::user("and now?"));
+    let repaired = crate::session_repair::validate_and_repair(&next_turn);
+    let sent: Vec<&Message> = repaired.iter().filter(|m| m.role != Role::System).collect();
+    assert!(
+        sent.iter()
+            .any(|m| matches!(&m.content, MessageContent::Text(t) if t == &text)),
+        "the note must still be present in what the provider receives"
+    );
+    assert!(
+        sent.windows(2).all(|w| w[0].role != w[1].role),
+        "the history handed to the provider must alternate: {:?}",
+        sent.iter().map(|m| m.role).collect::<Vec<_>>()
+    );
+}
+
 // -------------------------------------------------------------------
 // StagedToolUseTurn invariants (closes #2381 by construction)
 //
@@ -512,6 +772,7 @@ fn fresh_session() -> librefang_memory::session::Session {
     librefang_memory::session::Session {
         id: librefang_types::agent::SessionId::new(),
         agent_id: librefang_types::agent::AgentId::new(),
+        parent_session_id: None,
         messages: Vec::new(),
         context_window_tokens: 0,
         label: None,
@@ -1765,6 +2026,7 @@ async fn test_normal_turn_persists_session_as_incognito_control() {
     let mut session = librefang_memory::session::Session {
         id: session_id,
         agent_id,
+        parent_session_id: None,
         messages: Vec::new(),
         context_window_tokens: 0,
         label: None,
@@ -1839,6 +2101,7 @@ async fn test_heartbeat_pruning_keeps_new_messages_start_on_current_turn() {
     let mut session = librefang_memory::session::Session {
         id: session_id,
         agent_id,
+        parent_session_id: None,
         messages,
         context_window_tokens: 0,
         label: None,
@@ -1914,6 +2177,7 @@ async fn test_incognito_skips_session_save_on_end_turn() {
     let mut session = librefang_memory::session::Session {
         id: session_id,
         agent_id,
+        parent_session_id: None,
         messages: Vec::new(),
         context_window_tokens: 0,
         label: None,
@@ -1995,6 +2259,7 @@ async fn test_incognito_skips_proactive_memory_auto_memorize() {
     let mut session = librefang_memory::session::Session {
         id: librefang_types::agent::SessionId::new(),
         agent_id,
+        parent_session_id: None,
         messages: Vec::new(),
         context_window_tokens: 0,
         label: None,
@@ -2077,6 +2342,7 @@ async fn test_normal_turn_auto_memorizes_proactive_memory_control() {
     let mut session = librefang_memory::session::Session {
         id: librefang_types::agent::SessionId::new(),
         agent_id,
+        parent_session_id: None,
         messages: Vec::new(),
         context_window_tokens: 0,
         label: None,
@@ -2480,5 +2746,53 @@ fn record_loop_guard_outcome_does_not_pace_ordinary_calls_that_mention_status() 
     assert!(
         matches!(&verdict, LoopGuardVerdict::Block(msg) if msg.contains("identical results")),
         "the fourth identical listing must hit the strict outcome threshold, got: {verdict:?}"
+    );
+}
+
+// --- Tests for build_extra_body (#8112 typed sampling fields) ---
+#[test]
+fn test_build_extra_body_merges_typed_sampling_fields() {
+    let model = ModelConfig {
+        top_p: Some(0.9),
+        frequency_penalty: Some(0.5),
+        presence_penalty: Some(-0.5),
+        ..Default::default()
+    };
+    let body = build_extra_body(&model).expect("typed sampling fields must produce a body");
+    // `f32` widens to `f64` inside `serde_json::Value`, so compare numerically
+    // with a tolerance instead of against the `f64` literal.
+    let v = |k: &str| body.get(k).and_then(serde_json::Value::as_f64).unwrap();
+    assert!((v("top_p") - 0.9).abs() < 1e-6);
+    assert!((v("frequency_penalty") - 0.5).abs() < 1e-6);
+    assert!((v("presence_penalty") - (-0.5)).abs() < 1e-6);
+}
+
+#[test]
+fn test_build_extra_body_typed_field_overrides_extra_params_key() {
+    // The agent manifest's typed field is the operator's intent; a stale
+    // `extra_params` key of the same name (e.g. left by an older form or a
+    // model-catalog override) must not win.
+    let model = ModelConfig {
+        top_p: Some(0.9),
+        extra_params: BTreeMap::from([("top_p".to_string(), serde_json::json!(0.1))]),
+        ..Default::default()
+    };
+    let body = build_extra_body(&model).expect("non-empty body");
+    let v = body
+        .get("top_p")
+        .and_then(serde_json::Value::as_f64)
+        .unwrap();
+    assert!(
+        (v - 0.9).abs() < 1e-6,
+        "typed field must override the legacy extra_params key"
+    );
+}
+
+#[test]
+fn test_build_extra_body_none_sends_nothing() {
+    let model = ModelConfig::default();
+    assert!(
+        build_extra_body(&model).is_none(),
+        "a ModelConfig without typed sampling fields and without extra_params must produce no extra_body"
     );
 }

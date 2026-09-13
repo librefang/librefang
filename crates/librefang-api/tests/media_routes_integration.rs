@@ -461,16 +461,23 @@ async fn media_providers_lists_registry_declared_providers_with_no_builtin_drive
         names.contains(&"byteplus"),
         "registry provider declaring media_capabilities is missing from: {names:?}"
     );
-    // A provider with no compiled-in driver still has to report which
-    // functions it would serve, or the dashboard cannot file it under a tab.
+    // A provider with no compiled-in driver reports what it would serve *here*,
+    // which is what the generic OpenAI-compatible driver implements — images
+    // and nothing else. The registry declares the service can also do video,
+    // and this assertion used to repeat that, which made configuring the
+    // provider look like it removed a capability: the driver reports only
+    // `image_generation`, so the dashboard's video tab dropped byteplus at the
+    // exact moment it started working. One answer on both sides of
+    // `configured` is the honest one; offering video here would advertise a
+    // path that has no implementation behind it.
     let byteplus = listed
         .iter()
         .find(|p| p["name"] == "byteplus")
         .expect("byteplus entry");
     assert_eq!(
         byteplus["capabilities"],
-        serde_json::json!(["image_generation", "video_generation"]),
-        "declared capabilities lost: {byteplus}"
+        serde_json::json!(["image_generation"]),
+        "unconfigured capabilities must be what we can actually serve: {byteplus}"
     );
     assert_eq!(byteplus["configured"], false, "got: {byteplus}");
 

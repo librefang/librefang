@@ -38,6 +38,7 @@ fn security_status_payload(
             "websocket_limits": {
                 "max_per_ip": rate_limit.max_ws_per_ip,
                 "idle_timeout_secs": rate_limit.ws_idle_timeout_secs,
+                "ping_interval_secs": rate_limit.ws_ping_interval_secs,
                 "max_message_size": 64 * 1024,
                 "max_messages_per_minute": rate_limit.ws_messages_per_minute
             },
@@ -126,6 +127,7 @@ mod tests {
             max_ws_per_ip: 9,
             ws_messages_per_minute: 41,
             ws_idle_timeout_secs: 73,
+            ws_ping_interval_secs: 17,
             ..RateLimitConfig::default()
         };
         let signers = vec!["00".repeat(32)];
@@ -144,6 +146,12 @@ mod tests {
         assert_eq!(
             status["configurable"]["websocket_limits"]["max_messages_per_minute"],
             41
+        );
+        // A config field that parses but never surfaces is the failure mode this
+        // payload exists to prevent, so the ping cadence is asserted like the rest.
+        assert_eq!(
+            status["configurable"]["websocket_limits"]["ping_interval_secs"],
+            17
         );
         assert_eq!(status["monitoring"]["manifest_signing"]["available"], true);
         assert_eq!(status["monitoring"]["audit_trail"]["entry_count"], 12);

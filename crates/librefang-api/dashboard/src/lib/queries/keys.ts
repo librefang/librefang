@@ -29,6 +29,8 @@ export const agentTypeKeys = {
   list: () => [...agentTypeKeys.lists()] as const,
   details: () => [...agentTypeKeys.all, "detail"] as const,
   detail: (name: string) => [...agentTypeKeys.details(), name] as const,
+  registryDiff: (name: string) =>
+    [...agentTypeKeys.detail(name), "registry-diff"] as const,
   history: (name: string) => [...agentTypeKeys.detail(name), "history"] as const,
 };
 
@@ -72,11 +74,26 @@ export const agentKeys = {
   // PUT only invalidates the skill read, not the tool read.
   skills: (agentId: string) =>
     [...agentKeys.all, "skills", agentId] as const,
-  // Per-agent MCP server assignment (#7713) — backs the pending-server surface
-  // on the agent detail Tools tab. Its own subtree for the same reason `skills`
-  // is separate from `tools`: an MCP read must not be invalidated by a tool write.
+  // Per-agent MCP server grant (#6565 follow-up) — backs `useAgentMcpServers`,
+  // the live GET the agent detail Tools tab reads for its MCP grant/revoke
+  // sub-view. Kept in its own subtree, distinct from `tools`, so a
+  // tool-capability write (`useUpdateAgentTools`) does not invalidate this
+  // MCP read.
   mcpServers: (agentId: string) =>
     [...agentKeys.all, "mcpServers", agentId] as const,
+  // Full manifest as raw TOML (#7742) — backs the dashboard's full manifest
+  // editor, distinct from `detail(id)`'s curated JSON projection.
+  manifest: (agentId: string) =>
+    [...agentKeys.all, "manifest", agentId] as const,
+  // Per-agent channel allowlist (#7742) — backs the Configure drawer's
+  // Channels section. Named distinctly from `channelKeys` (the
+  // instance-wide `/api/channels` integration domain) to avoid confusion
+  // between "channels this agent is reachable from" and "channels
+  // configured on this instance".
+  channels: (agentId: string) =>
+    [...agentKeys.all, "channels", agentId] as const,
+  manifestHistory: (agentId: string) =>
+    [...agentKeys.all, "manifestHistory", agentId] as const,
 };
 
 // Central prompt repository (#6160). The fleet-wide overview
@@ -116,6 +133,18 @@ export const modelKeys = {
   detail: (id: string) => [...modelKeys.details(), id] as const,
   overrides: (modelKey: string) =>
     [...modelKeys.all, "overrides", modelKey] as const,
+};
+
+// Profile-based model routing. `profiles()` is the kernel-wide catalog
+// (builtin asset + `~/.librefang/model_profiles.toml`); `agent(id)` is one
+// agent's mode + router override. Both hang off `all` so a mutation can
+// invalidate the whole domain in a single call.
+export const modelRouterKeys = {
+  all: ["modelRouter"] as const,
+  lists: () => [...modelRouterKeys.all, "list"] as const,
+  profiles: () => [...modelRouterKeys.lists(), "profiles"] as const,
+  details: () => [...modelRouterKeys.all, "detail"] as const,
+  agent: (agentId: string) => [...modelRouterKeys.details(), agentId] as const,
 };
 
 export const providerKeys = {
@@ -364,6 +393,17 @@ export const usageKeys = {
     [...usageKeys.all, "daily", filters, days ?? null] as const,
 };
 
+export const knowledgeKeys = {
+  all: ["knowledge"] as const,
+  lists: () => [...knowledgeKeys.all, "list"] as const,
+  list: () => [...knowledgeKeys.lists()] as const,
+  documents: () => [...knowledgeKeys.all, "documents"] as const,
+  // Nested under `documents()` rather than under `all` directly, so writing a
+  // document can drop one base's document cache without also refetching the
+  // base list of every other base on the page.
+  documentsFor: (name: string) => [...knowledgeKeys.documents(), name] as const,
+};
+
 export const budgetKeys = {
   all: ["budget"] as const,
   status: () => [...budgetKeys.all, "status"] as const,
@@ -525,6 +565,19 @@ export const configKeys = {
   schema: () => [...configKeys.all, "schema"] as const,
   status: () => [...configKeys.all, "status"] as const,
   rawToml: () => [...configKeys.all, "rawToml"] as const,
+};
+
+/**
+ * Credential vault (`/api/vault/keys`, #8164).
+ *
+ * Only ever caches the allowlist and a per-key set/not-set boolean; the API has
+ * no read-back endpoint, so there is no `detail(key)` holding a value and none
+ * should ever be added.
+ */
+export const vaultKeys = {
+  all: ["vault"] as const,
+  lists: () => [...vaultKeys.all, "list"] as const,
+  list: () => [...vaultKeys.lists()] as const,
 };
 
 export const registryKeys = {

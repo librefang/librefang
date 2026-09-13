@@ -305,12 +305,33 @@ impl App {
                 }
                 self.workflows.loading = false;
             }
-            AppEvent::WorkflowRunsLoaded(runs) => {
-                self.workflows.runs = runs;
-                if !self.workflows.runs.is_empty() {
-                    self.workflows.runs_list_state.select(Some(0));
+            AppEvent::WorkflowRunsLoaded {
+                runs,
+                clear_loading,
+            } => {
+                // Any answer, good or bad, ends the outstanding poll.
+                self.workflows.poll_in_flight = false;
+                // `None` means the fetch failed. Keep the rows already on
+                // screen rather than replacing a populated history with
+                // "No runs yet" because of one transient 500.
+                if let Some(runs) = runs {
+                    self.workflows.runs = runs;
                 }
-                self.workflows.loading = false;
+                // The auto-poll delivers this event every ~2s, so re-selecting
+                // row 0 unconditionally would drag the cursor off whatever the
+                // operator had highlighted. Select only when nothing is, and
+                // clamp when the list came back shorter.
+                let len = self.workflows.runs.len();
+                let selected = match self.workflows.runs_list_state.selected() {
+                    _ if len == 0 => None,
+                    Some(i) if i < len => Some(i),
+                    Some(_) => Some(len - 1),
+                    None => Some(0),
+                };
+                self.workflows.runs_list_state.select(selected);
+                if clear_loading {
+                    self.workflows.loading = false;
+                }
             }
             AppEvent::WorkflowRunResult(result) => {
                 self.workflows.run_result = Some(result);
@@ -458,6 +479,38 @@ impl App {
                     .collect();
                 self.agents.mcp_cursor = 0;
             }
+            AppEvent::AgentModelRoutingLoaded {
+                mode,
+                allowed_profiles,
+                cost_budget,
+                default_profile,
+                fixed,
+                available,
+            } => {
+                // Populate the routing editor from the agent's real stored
+                // state, not from whatever the previous screen left behind.
+                self.agents.model_mode = mode;
+                self.agents.router_profiles = available
+                    .into_iter()
+                    .map(|name| {
+                        let checked = allowed_profiles.contains(&name);
+                        (name, checked)
+                    })
+                    .collect();
+                self.agents.router_profile_cursor = 0;
+                self.agents.cost_budget_idx = agents::COST_BUDGET_OPTIONS
+                    .iter()
+                    .position(|(_, wire)| *wire == cost_budget.as_deref())
+                    .unwrap_or(0);
+                self.agents.router_default_profile = default_profile;
+                self.agents.router_fixed = fixed;
+                self.agents.routing_loaded = true;
+            }
+            AppEvent::AgentModelRoutingUpdated(id) => {
+                self.agents.status_msg =
+                    crate::i18n::t_args("tui-mod-agent-model-routing-updated", &[("id", &id)]);
+                self.agents.sub = agents::AgentSubScreen::AgentDetail;
+            }
             AppEvent::AgentSkillsUpdated(id) => {
                 self.agents.status_msg =
                     crate::i18n::t_args("tui-mod-agent-skills-updated", &[("id", &id)]);
@@ -533,9 +586,31 @@ impl App {
                 };
                 self.agents.sub = agents::AgentSubScreen::AgentDetail;
             }
+            AppEvent::AgentManifestHistoryLoaded { agent_id, versions } => {
+                // A response that outlived its request would otherwise render one
+                // agent's whole `agent.toml` under another's header.
+                if self.agents.manifest_history_is_for(&agent_id) {
+                    self.agents.set_manifest_history(versions);
+                }
+            }
+            AppEvent::AgentManifestHistoryFailed { agent_id, failure } => {
+                if self.agents.manifest_history_is_for(&agent_id) {
+                    self.agents.set_manifest_history_error(match failure {
+                        // Unreachable for this event: both backends read the
+                        // snapshots, so there is no arm that needs a daemon.
+                        event::FetchFailure::RequiresDaemon => {
+                            crate::i18n::t("tui-event-manifest-history-fetch-failed")
+                        }
+                        event::FetchFailure::Error(reason) => reason,
+                    });
+                }
+            }
             AppEvent::FetchError(err) => {
                 // Route to the active tab's status message
                 match self.active_tab {
+                    Tab::Agents => {
+                        self.agents.status_msg = err;
+                    }
                     Tab::Workflows => self.workflows.status_msg = err,
                     Tab::Triggers => self.triggers.status_msg = err,
                     Tab::Goals => self.goals.status_msg = err,
@@ -569,6 +644,11 @@ impl App {
                         self.settings.loading = false;
                         self.settings.status_msg = err;
                     }
+                    // Covers every failure the shared-folders editor can hit
+                    // (fetch, unreadable manifest, duplicate name on save) —
+                    // without this arm they fell into `_ => {}` and vanished
+                    // (#7835).
+                    Tab::Agents => self.agents.status_msg = err,
                     Tab::Channels => {
                         // `draw_list` renders its spinner unconditionally while
                         // `loading` is set, so a failed fetch that only wrote a
@@ -583,8 +663,7 @@ impl App {
 
             // ── Goals events ──
             AppEvent::GoalsLoaded(list) => {
-                self.goals.goals = list;
-                self.goals.refilter();
+                self.goals.replace_goals(list);
                 self.goals.loading = false;
             }
             AppEvent::GoalRunLoaded {
@@ -634,6 +713,16 @@ impl App {
                 self.refresh_goal_run(id);
                 self.refresh_goals();
             }
+            AppEvent::GoalRunPaused(id) => {
+                self.goals.status_msg = crate::i18n::t_args("tui-goal-run-paused", &[("id", &id)]);
+                self.refresh_goal_run(id);
+                self.refresh_goals();
+            }
+            AppEvent::GoalRunResumed(id) => {
+                self.goals.status_msg = crate::i18n::t_args("tui-goal-run-resumed", &[("id", &id)]);
+                self.refresh_goal_run(id);
+                self.refresh_goals();
+            }
 
             // ── New screen events ──
             AppEvent::SessionsLoaded(list) => {
@@ -657,6 +746,41 @@ impl App {
                 // asking the daemon what each one now is.
                 let next = self.memory.apply_save_result(result);
                 self.handle_memory_action(next);
+            }
+            AppEvent::AgentWorkspacesLoaded(id, entries) => {
+                // `!ws_loaded` accepts only the first response of the
+                // current edit session. `w` → `Esc` → `w` fires a second
+                // fetch for the same agent; without this, a late #1
+                // landing after #2 has already loaded (or after the
+                // operator has started editing) would replace the table
+                // out from under them and reset `ws_cursor` to 0.
+                if !self.agents.ws_loaded
+                    && self.agents.detail.as_ref().map(|d| d.id.clone()) == Some(id)
+                {
+                    self.agents.workspaces = entries;
+                    self.agents.ws_loaded = true;
+                    if !self.agents.workspaces.is_empty() {
+                        self.agents.ws_cursor = 0;
+                    }
+                }
+            }
+            AppEvent::AgentWorkspacesUpdated(id) => {
+                // Guard on both the agent id and the sub-screen. This is
+                // stricter than `AgentWorkspacesLoaded` above, which only
+                // checks the id: that arm just refreshes `workspaces` in
+                // place, harmless to apply even if the operator has moved
+                // to a different sub-screen, while this arm also moves
+                // `sub` — which would eject them from wherever they went.
+                // The PATCH is a two-request round trip, so this can land
+                // after the operator has moved on to editing something
+                // else (or a different agent).
+                if self.agents.detail.as_ref().map(|d| d.id.clone()) == Some(id.clone())
+                    && matches!(self.agents.sub, agents::AgentSubScreen::EditWorkspaces)
+                {
+                    self.agents.status_msg =
+                        crate::i18n::t_args("tui-mod-agent-workspaces-updated", &[("id", &id)]);
+                    self.agents.sub = agents::AgentSubScreen::AgentDetail;
+                }
             }
             AppEvent::MemoryConfigFailed(failure) => {
                 // Clear `loading` on the failure path too, or the screen sits
@@ -752,6 +876,58 @@ impl App {
                     );
                 }
             },
+            AppEvent::RegistryRestoreResult { name, ok, message } => {
+                self.templates.status_msg = if ok {
+                    crate::i18n::t_args(
+                        "tui-templates-restore-ok",
+                        &[("name", &name), ("message", &message)],
+                    )
+                } else {
+                    crate::i18n::t_args(
+                        "tui-templates-restore-fail",
+                        &[("name", &name), ("message", &message)],
+                    )
+                };
+                if ok {
+                    self.refresh_templates();
+                }
+            }
+            AppEvent::TemplateHistoryLoaded { name, result } => {
+                self.templates.history_name = name;
+                self.templates.version_history.clear();
+                self.templates.history_error = None;
+                match result {
+                    Ok(rows) => {
+                        self.templates.version_history = rows;
+                    }
+                    Err(message) => {
+                        self.templates.history_error = Some(message);
+                    }
+                }
+                self.templates.showing_history = true;
+                self.templates.history_list = ratatui::widgets::ListState::default();
+                if !self.templates.version_history.is_empty() {
+                    self.templates.history_list.select(Some(0));
+                }
+                self.templates.loading = false;
+            }
+            AppEvent::TemplateVersionRestoreResult { name, ok, message } => {
+                self.templates.status_msg = if ok {
+                    crate::i18n::t_args(
+                        "tui-templates-restore-ok",
+                        &[("name", &name), ("message", &message)],
+                    )
+                } else {
+                    crate::i18n::t_args(
+                        "tui-templates-restore-fail",
+                        &[("name", &name), ("message", &message)],
+                    )
+                };
+                if ok {
+                    self.templates.showing_history = false;
+                    self.refresh_templates();
+                }
+            }
             AppEvent::AgentTypePromoted { name, result } => match result {
                 Ok(pr_url) => {
                     self.templates.status_msg =
@@ -844,6 +1020,41 @@ impl App {
             }
             AppEvent::ProviderTestResult(result) => {
                 self.settings.test_result = Some(result);
+            }
+            AppEvent::VaultKeysLoaded(keys) => {
+                self.settings.vault_keys = keys;
+                if !self.settings.vault_keys.is_empty()
+                    && self.settings.vault_list.selected().is_none()
+                {
+                    self.settings.vault_list.select(Some(0));
+                }
+                self.settings.loading = false;
+            }
+            // A write that lands under an environment override is stored and
+            // inert. Confirming it as a plain success is the report houko
+            // flagged: the operator walks away believing they changed what the
+            // daemon uses.
+            AppEvent::VaultKeySaved(key, source) => {
+                self.settings.status_msg = crate::i18n::t_args(
+                    if source == settings::VaultKeySource::Environment {
+                        "tui-mod-vault-key-saved-env-override"
+                    } else {
+                        "tui-mod-vault-key-saved"
+                    },
+                    &[("key", &key)],
+                );
+                self.refresh_settings_vault();
+            }
+            AppEvent::VaultKeyDeleted(key, source) => {
+                self.settings.status_msg = crate::i18n::t_args(
+                    if source == settings::VaultKeySource::Environment {
+                        "tui-mod-vault-key-deleted-env-override"
+                    } else {
+                        "tui-mod-vault-key-deleted"
+                    },
+                    &[("key", &key)],
+                );
+                self.refresh_settings_vault();
             }
             AppEvent::ModelCatalogLoaded(list) => {
                 self.models.models = list;
@@ -1190,7 +1401,14 @@ impl App {
                 _ => {}
             }
             // Tab cycling: Tab / Shift+Tab
-            if key.code == KeyCode::Tab && key.modifiers.is_empty() {
+            //
+            // Exempted while the shared-folders editor has a field open —
+            // there, Tab is the field-to-field advance documented in
+            // `tui-agents-workspaces-help`, not a tab switch (#7835).
+            let editing_workspace_field = matches!(self.active_tab, Tab::Agents)
+                && matches!(self.agents.sub, agents::AgentSubScreen::EditWorkspaces)
+                && self.agents.ws_editing.is_some();
+            if key.code == KeyCode::Tab && key.modifiers.is_empty() && !editing_workspace_field {
                 self.next_tab();
                 return;
             }
@@ -1437,6 +1655,28 @@ impl App {
                 Tab::Peers if self.peers.should_poll() => self.refresh_peers(),
                 Tab::Groups if self.groups.should_poll() => self.refresh_groups(),
                 Tab::Comms if self.comms.should_poll() => self.refresh_comms(),
+                // Keeps the step counter on the run history moving while a
+                // workflow executes, instead of freezing at whatever it read
+                // when the operator opened the screen.
+                //
+                // Deliberately not routed through `WorkflowAction::LoadRuns`:
+                // that sets the screen-wide `loading` flag, which the workflow
+                // list and the run-result pane both render. A background
+                // refresh must not put a spinner on a screen nobody asked to
+                // reload.
+                Tab::Workflows if self.workflows.should_poll() => {
+                    if let (Some(backend), Some(wf_id)) =
+                        (self.backend.to_ref(), self.workflows.selected_workflow_id())
+                    {
+                        self.workflows.poll_in_flight = true;
+                        event::spawn_fetch_workflow_runs(
+                            backend,
+                            wf_id,
+                            self.event_tx.clone(),
+                            false,
+                        );
+                    }
+                }
                 _ => {}
             }
         }
@@ -1482,7 +1722,13 @@ impl App {
             Tab::Skills => self.refresh_skills(),
             Tab::Hands => self.refresh_hands(),
             Tab::Extensions => self.refresh_extensions(),
-            Tab::Templates => self.refresh_templates(),
+            Tab::Templates => {
+                // The history overlay is a plain field that outlives the tab, same as
+                // Settings' sub-tab below — Esc is not the only way out of it.
+                self.templates.showing_history = false;
+                self.templates.history_error = None;
+                self.refresh_templates();
+            }
             Tab::Security => self.refresh_security(),
             Tab::Audit => self.refresh_audit(),
             Tab::Usage => self.refresh_usage(),
@@ -1687,6 +1933,13 @@ impl App {
         if let Some(backend) = self.backend.to_ref() {
             self.settings.loading = true;
             event::spawn_fetch_auxiliary(backend, self.event_tx.clone());
+        }
+    }
+
+    fn refresh_settings_vault(&mut self) {
+        if let Some(backend) = self.backend.to_ref() {
+            self.settings.loading = true;
+            event::spawn_fetch_vault_keys(backend, self.event_tx.clone());
         }
     }
 
@@ -1896,6 +2149,21 @@ impl App {
 
     fn handle_agent_action(&mut self, action: agents::AgentAction) {
         match action {
+            agents::AgentAction::FetchAgentWorkspaces(id) => {
+                if let Some(backend) = self.backend.to_ref() {
+                    event::spawn_fetch_agent_workspaces(backend, id, self.event_tx.clone());
+                }
+            }
+            agents::AgentAction::UpdateWorkspaces { id, workspaces } => {
+                if let Some(backend) = self.backend.to_ref() {
+                    event::spawn_update_agent_workspaces(
+                        backend,
+                        id,
+                        workspaces,
+                        self.event_tx.clone(),
+                    );
+                }
+            }
             agents::AgentAction::Continue => {}
             agents::AgentAction::Back => {
                 // In Main phase, Esc from agents just stays on the tab
@@ -1986,9 +2254,53 @@ impl App {
                     );
                 }
             }
+            agents::AgentAction::FetchAgentModelRouting(id) => {
+                if let Some(backend) = self.backend.to_ref() {
+                    event::spawn_fetch_agent_model_routing(backend, id, self.event_tx.clone());
+                }
+            }
+            agents::AgentAction::UpdateModelRouting {
+                id,
+                mode,
+                allowed_profiles,
+                cost_budget,
+                default_profile,
+                fixed,
+            } => {
+                if let Some(backend) = self.backend.to_ref() {
+                    event::spawn_update_agent_model_routing(
+                        backend,
+                        id,
+                        mode,
+                        allowed_profiles,
+                        cost_budget,
+                        default_profile,
+                        fixed,
+                        self.event_tx.clone(),
+                    );
+                }
+            }
             agents::AgentAction::FetchAgentModelParams(id) => {
                 if let Some(backend) = self.backend.to_ref() {
                     event::spawn_fetch_agent_model_params(backend, id, self.event_tx.clone());
+                }
+            }
+            agents::AgentAction::FetchManifestHistory(id) => {
+                match self.backend.to_ref() {
+                    Some(backend) => {
+                        event::spawn_fetch_agent_manifest_history(
+                            backend,
+                            id,
+                            self.event_tx.clone(),
+                        );
+                    }
+                    // Nothing will ever answer, so the pane is told now rather
+                    // than left on its loading line for the rest of the session.
+                    None => {
+                        self.agents.set_manifest_history_error(crate::i18n::t(
+                            "chat-runner-no-backend-connected",
+                        ));
+                    }
                 }
             }
             agents::AgentAction::UpdateModelParams { id, changes } => {
@@ -2057,7 +2369,7 @@ impl App {
             workflows::WorkflowAction::LoadRuns(wf_id) => {
                 if let Some(backend) = self.backend.to_ref() {
                     self.workflows.loading = true;
-                    event::spawn_fetch_workflow_runs(backend, wf_id, self.event_tx.clone());
+                    event::spawn_fetch_workflow_runs(backend, wf_id, self.event_tx.clone(), true);
                 }
             }
             workflows::WorkflowAction::CreateWorkflow {
@@ -2098,6 +2410,7 @@ impl App {
                 title,
                 description,
                 agent_id,
+                tick_interval_secs,
             } => {
                 if let Some(backend) = self.backend.to_ref() {
                     event::spawn_create_goal(
@@ -2105,6 +2418,7 @@ impl App {
                         title,
                         description,
                         agent_id,
+                        tick_interval_secs,
                         self.event_tx.clone(),
                     );
                 }
@@ -2122,6 +2436,16 @@ impl App {
             goals::GoalsAction::StopRun { goal_id } => {
                 if let Some(backend) = self.backend.to_ref() {
                     event::spawn_stop_goal_run(backend, goal_id, self.event_tx.clone());
+                }
+            }
+            goals::GoalsAction::PauseRun { goal_id } => {
+                if let Some(backend) = self.backend.to_ref() {
+                    event::spawn_pause_goal_run(backend, goal_id, self.event_tx.clone());
+                }
+            }
+            goals::GoalsAction::ResumeRun { goal_id } => {
+                if let Some(backend) = self.backend.to_ref() {
+                    event::spawn_resume_goal_run(backend, goal_id, self.event_tx.clone());
                 }
             }
         }
@@ -2340,6 +2664,39 @@ impl App {
                     }
                 }
             },
+            templates::TemplatesAction::RestoreFromRegistry { name } => {
+                if let Some(backend) = self.backend.to_ref() {
+                    self.templates.status_msg =
+                        crate::i18n::t_args("tui-templates-restoring", &[("name", &name)]);
+                    event::spawn_restore_from_registry(backend, name, self.event_tx.clone());
+                } else {
+                    self.templates.status_msg = crate::i18n::t("tui-templates-restore-daemon-only");
+                }
+            }
+            templates::TemplatesAction::ShowVersionHistory { name } => {
+                if let Some(backend) = self.backend.to_ref() {
+                    self.templates.status_msg =
+                        crate::i18n::t_args("tui-templates-history-loading", &[("name", &name)]);
+                    self.templates.loading = true;
+                    event::spawn_fetch_template_history(backend, name, self.event_tx.clone());
+                } else {
+                    self.templates.status_msg = crate::i18n::t("tui-templates-history-daemon-only");
+                }
+            }
+            templates::TemplatesAction::RestoreTemplateVersion { name, version_id } => {
+                if let Some(backend) = self.backend.to_ref() {
+                    self.templates.status_msg =
+                        crate::i18n::t_args("tui-templates-version-restoring", &[("name", &name)]);
+                    event::spawn_restore_template_version(
+                        backend,
+                        name,
+                        version_id,
+                        self.event_tx.clone(),
+                    );
+                } else {
+                    self.templates.status_msg = crate::i18n::t("tui-templates-restore-daemon-only");
+                }
+            }
             templates::TemplatesAction::PromoteTemplate { name } => {
                 self.templates.status_msg =
                     crate::i18n::t_args("tui-templates-promoting", &[("name", &name)]);
@@ -2390,6 +2747,17 @@ impl App {
             settings::SettingsAction::RefreshTools => self.refresh_settings_tools(),
             settings::SettingsAction::RefreshBackups => self.refresh_settings_backups(),
             settings::SettingsAction::RefreshAuxiliary => self.refresh_settings_auxiliary(),
+            settings::SettingsAction::RefreshVault => self.refresh_settings_vault(),
+            settings::SettingsAction::SetVaultKey { key, value } => {
+                if let Some(backend) = self.backend.to_ref() {
+                    event::spawn_set_vault_key(backend, key, value, self.event_tx.clone());
+                }
+            }
+            settings::SettingsAction::DeleteVaultKey(key) => {
+                if let Some(backend) = self.backend.to_ref() {
+                    event::spawn_delete_vault_key(backend, key, self.event_tx.clone());
+                }
+            }
             settings::SettingsAction::SaveProviderKey { name, key } => {
                 if let Some(backend) = self.backend.to_ref() {
                     event::spawn_save_provider_key(backend, name, key, self.event_tx.clone());
@@ -3331,4 +3699,356 @@ pub fn run(config: Option<PathBuf>) {
         ratatui::crossterm::event::DisableBracketedPaste
     );
     ratatui::restore();
+}
+
+#[cfg(test)]
+mod agent_workspaces_event_tests {
+    use super::*;
+
+    /// The four `workspaces_tests` live in `screens/agents.rs` and exercise the key
+    /// handler, which deliberately leaves `sub` alone; only the event arm here can
+    /// take the operator out of the editor once the PATCH lands.
+    #[test]
+    fn workspaces_updated_event_returns_to_detail_with_status() {
+        let (tx, _rx) = mpsc::channel();
+        let mut app = App::new(None, tx);
+        app.agents.detail = Some(agents::AgentDetail {
+            id: "agent-1".to_string(),
+            ..Default::default()
+        });
+        app.agents.sub = agents::AgentSubScreen::EditWorkspaces;
+
+        app.handle_event(AppEvent::AgentWorkspacesUpdated("agent-1".to_string()));
+
+        assert!(
+            matches!(app.agents.sub, agents::AgentSubScreen::AgentDetail),
+            "a successful save must return the operator to the detail view"
+        );
+        assert!(
+            app.agents.status_msg.contains("agent-1"),
+            "status message should name the saved agent, got {:?}",
+            app.agents.status_msg
+        );
+    }
+
+    /// A late-arriving save for an agent (or sub-screen) the operator has
+    /// since moved away from must not eject them from whatever they moved
+    /// on to — the same race `AgentWorkspacesLoaded` already guards against.
+    #[test]
+    fn workspaces_updated_event_ignored_for_stale_agent_or_subscreen() {
+        let (tx, _rx) = mpsc::channel();
+        let mut app = App::new(None, tx);
+        app.agents.detail = Some(agents::AgentDetail {
+            id: "agent-1".to_string(),
+            ..Default::default()
+        });
+        app.agents.sub = agents::AgentSubScreen::EditModelParams;
+
+        app.handle_event(AppEvent::AgentWorkspacesUpdated("agent-1".to_string()));
+
+        assert!(
+            matches!(app.agents.sub, agents::AgentSubScreen::EditModelParams),
+            "a save for a sub-screen the operator already left must not move them"
+        );
+        assert!(
+            app.agents.status_msg.is_empty(),
+            "a stale save must not overwrite the status message either"
+        );
+
+        app.agents.sub = agents::AgentSubScreen::EditWorkspaces;
+        app.handle_event(AppEvent::AgentWorkspacesUpdated("agent-2".to_string()));
+
+        assert!(
+            matches!(app.agents.sub, agents::AgentSubScreen::EditWorkspaces),
+            "a save for a different agent than the one on screen must not move the operator"
+        );
+    }
+
+    /// `Tab::Agents` was missing from the `FetchError` routing match, so
+    /// every failure the shared-folders editor produces — failed GET,
+    /// unreadable manifest, duplicate-name rejection on save — fell into
+    /// `_ => {}` and vanished with no operator-visible trace (#7835).
+    #[test]
+    fn fetch_error_while_on_the_agents_tab_reaches_the_editor_status_msg() {
+        let (tx, _rx) = mpsc::channel();
+        let mut app = App::new(None, tx);
+        app.active_tab = Tab::Agents;
+
+        app.handle_event(AppEvent::FetchError("daemon unreachable".to_string()));
+
+        assert_eq!(app.agents.status_msg, "daemon unreachable");
+    }
+
+    /// `w` → `Esc` → `w` fires a second fetch for the same agent. A late
+    /// first response landing after the second has already loaded — or
+    /// after the operator has started editing — must not replace the
+    /// table out from under them.
+    #[test]
+    fn second_workspaces_loaded_response_does_not_clobber_the_first() {
+        let (tx, _rx) = mpsc::channel();
+        let mut app = App::new(None, tx);
+        app.agents.detail = Some(agents::AgentDetail {
+            id: "agent-1".to_string(),
+            ..Default::default()
+        });
+
+        app.handle_event(AppEvent::AgentWorkspacesLoaded(
+            "agent-1".to_string(),
+            vec![(
+                "library".to_string(),
+                "shared/library".to_string(),
+                "readwrite".to_string(),
+            )],
+        ));
+        assert!(app.agents.ws_loaded);
+
+        // The operator moves the cursor / starts editing on the first
+        // response before a stale second response for the same agent
+        // arrives (e.g. a duplicate `w` fetch).
+        app.agents.ws_cursor = 0;
+
+        app.handle_event(AppEvent::AgentWorkspacesLoaded(
+            "agent-1".to_string(),
+            vec![
+                ("a".to_string(), "p".to_string(), "readwrite".to_string()),
+                ("b".to_string(), "q".to_string(), "readwrite".to_string()),
+            ],
+        ));
+
+        assert_eq!(
+            app.agents.workspaces,
+            vec![(
+                "library".to_string(),
+                "shared/library".to_string(),
+                "readwrite".to_string()
+            )],
+            "a second response for the same edit session must not replace the loaded table"
+        );
+    }
+}
+
+#[cfg(test)]
+mod agent_workspaces_tab_exemption_tests {
+    use super::*;
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    /// `Tab` while a shared-folders field is open must advance the field,
+    /// not switch tabs — the global Tab-cycling handler used to consume
+    /// bare `Tab` before screen dispatch ever ran (#7835).
+    #[test]
+    fn tab_advances_workspace_field_instead_of_switching_tabs() {
+        let (tx, _rx) = mpsc::channel();
+        let mut app = App::new(None, tx);
+        app.phase = Phase::Main;
+        app.active_tab = Tab::Agents;
+        app.agents.detail = Some(agents::AgentDetail {
+            id: "agent-1".to_string(),
+            ..Default::default()
+        });
+        app.agents.sub = agents::AgentSubScreen::EditWorkspaces;
+        app.agents.ws_loaded = true;
+        app.agents.handle_key(key(KeyCode::Char('a')));
+        assert!(matches!(app.agents.ws_editing, Some((0, 0))));
+
+        for c in "library".chars() {
+            app.handle_key(key(KeyCode::Char(c)));
+        }
+        app.handle_key(key(KeyCode::Tab));
+
+        assert_eq!(app.agents.workspaces[0].0, "library");
+        assert!(
+            matches!(app.agents.ws_editing, Some((0, 1))),
+            "Tab must advance to the next field, not fall through to tab-cycling"
+        );
+        assert!(
+            matches!(app.active_tab, Tab::Agents),
+            "the global Tab-cycling handler must not fire while a field is open"
+        );
+    }
+}
+
+#[cfg(test)]
+mod run_history_refresh_tests {
+    use super::*;
+
+    fn app_on_the_run_history() -> App {
+        let (tx, _rx) = mpsc::channel();
+        let mut app = App::new(None, tx);
+        app.workflows.sub = workflows::WorkflowSubScreen::Runs;
+        app.workflows.runs = vec![workflows::WorkflowRun {
+            id: "run-1".to_string(),
+            state: "running".to_string(),
+            started_at: "2026-09-09T10:00:00+00:00".to_string(),
+            duration: String::new(),
+            steps_completed: 1,
+            current_step_index: Some(1),
+            total_steps: 4,
+        }];
+        app
+    }
+
+    /// The `loading` flag belongs to a load the operator asked for, and both
+    /// the workflow list and the run-result pane render it. A background poll
+    /// landing just after they launched a run would otherwise clear it and drop
+    /// the run-result spinner while the run is still executing.
+    #[test]
+    fn a_background_poll_does_not_touch_the_operators_spinner() {
+        let mut app = app_on_the_run_history();
+        app.workflows.loading = true;
+        app.workflows.poll_in_flight = true;
+
+        app.handle_event(AppEvent::WorkflowRunsLoaded {
+            runs: Some(Vec::new()),
+            clear_loading: false,
+        });
+
+        assert!(
+            app.workflows.loading,
+            "a poll must leave the operator's own spinner alone"
+        );
+        assert!(
+            !app.workflows.poll_in_flight,
+            "the answer ends the outstanding poll either way"
+        );
+    }
+
+    /// The operator's own load owns the flag and must clear it.
+    #[test]
+    fn an_operator_load_clears_the_spinner() {
+        let mut app = app_on_the_run_history();
+        app.workflows.loading = true;
+
+        app.handle_event(AppEvent::WorkflowRunsLoaded {
+            runs: Some(Vec::new()),
+            clear_loading: true,
+        });
+
+        assert!(!app.workflows.loading);
+    }
+
+    /// A failed fetch reports `runs: None`. Replacing the rows with an empty
+    /// list would blank a populated history to "No runs yet" on one transient
+    /// 500 — every two seconds, with nothing on screen saying anything failed.
+    #[test]
+    fn a_failed_fetch_leaves_the_rows_that_are_on_screen() {
+        let mut app = app_on_the_run_history();
+        app.workflows.loading = true;
+
+        app.handle_event(AppEvent::WorkflowRunsLoaded {
+            runs: None,
+            clear_loading: true,
+        });
+
+        assert_eq!(
+            app.workflows.runs.len(),
+            1,
+            "a failed fetch must not empty the run history"
+        );
+        assert!(
+            !app.workflows.loading,
+            "the spinner still has to come down, or an operator load hangs forever"
+        );
+    }
+}
+
+#[cfg(test)]
+mod manifest_history_dispatch_tests {
+    use super::*;
+    use crate::tui::screens::agents::{AgentDetail, ManifestVersion};
+
+    fn app_showing(agent_id: &str) -> App {
+        let (tx, _rx) = mpsc::channel();
+        let mut app = App::new(None, tx);
+        app.active_tab = Tab::Agents;
+        app.agents.detail = Some(AgentDetail {
+            id: agent_id.to_string(),
+            ..Default::default()
+        });
+        app
+    }
+
+    fn snapshot(toml: &str) -> ManifestVersion {
+        ManifestVersion {
+            timestamp: "2026-09-08 10:00:00".to_string(),
+            change_source: "update".to_string(),
+            manifest_toml: toml.to_string(),
+        }
+    }
+
+    /// Press `h` on agent A over a slow link, `Esc`, select agent B, press `h`.
+    /// A's response arrives first and used to populate B's pane with A's entire
+    /// `agent.toml` — the payload where attributing it to the wrong agent
+    /// misleads rather than merely lags.
+    #[test]
+    fn a_late_response_for_another_agent_does_not_populate_this_ones_pane() {
+        let mut app = app_showing("agent-uuid-b");
+        app.agents.manifest_history_loading = true;
+
+        app.handle_event(AppEvent::AgentManifestHistoryLoaded {
+            agent_id: "agent-uuid-a".to_string(),
+            versions: vec![snapshot("name = \"agent-uuid-a\"")],
+        });
+
+        assert!(
+            app.agents.manifest_history.is_empty(),
+            "another agent's snapshots must not land in this agent's pane"
+        );
+        assert!(
+            app.agents.manifest_history_loading,
+            "the outstanding fetch for this agent is still in flight"
+        );
+
+        app.handle_event(AppEvent::AgentManifestHistoryLoaded {
+            agent_id: "agent-uuid-b".to_string(),
+            versions: vec![snapshot("name = \"agent-uuid-b\"")],
+        });
+
+        assert_eq!(app.agents.manifest_history.len(), 1);
+        assert_eq!(
+            app.agents.manifest_history[0].manifest_toml,
+            "name = \"agent-uuid-b\""
+        );
+        assert!(!app.agents.manifest_history_loading);
+    }
+
+    /// The same mismatch on the failure path: agent A's failure must not clear
+    /// agent B's spinner or supply B's pane with A's reason.
+    #[test]
+    fn a_failure_for_another_agent_does_not_clear_this_ones_loading_state() {
+        let mut app = app_showing("agent-uuid-b");
+        app.agents.manifest_history_loading = true;
+
+        app.handle_event(AppEvent::AgentManifestHistoryFailed {
+            agent_id: "agent-uuid-a".to_string(),
+            failure: event::FetchFailure::Error("agent A blew up".to_string()),
+        });
+
+        assert!(app.agents.manifest_history_loading);
+        assert_eq!(app.agents.manifest_history_error, None);
+    }
+
+    /// A skills save failure arriving while a history fetch is outstanding used
+    /// to clear the history pane's loading flag, so the pane stopped saying
+    /// "loading" and showed the skills error as this fetch's reason.
+    #[test]
+    fn an_unrelated_agent_tab_fetch_error_leaves_the_history_fetch_alone() {
+        let mut app = app_showing("agent-uuid-b");
+        app.agents.manifest_history_loading = true;
+
+        app.handle_event(AppEvent::FetchError("Failed to save skills".to_string()));
+
+        assert!(
+            app.agents.manifest_history_loading,
+            "an unrelated agent-tab failure must not end the history fetch"
+        );
+        assert_eq!(
+            app.agents.manifest_history_error, None,
+            "an unrelated agent-tab failure is not the history fetch's reason"
+        );
+        assert_eq!(app.agents.status_msg, "Failed to save skills");
+    }
 }

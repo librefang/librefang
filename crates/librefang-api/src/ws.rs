@@ -936,6 +936,17 @@ async fn handle_agent_ws(
     let mut deferred: std::collections::VecDeque<Message> = std::collections::VecDeque::new();
     let mut deferred_bytes: usize = 0;
 
+    // Liveness probe. Deliberately separate from `last_activity`: an answered
+    // Ping must NOT count as activity, or an open browser tab would auto-Pong
+    // forever and `ws_idle_timeout_secs` could never fire again.
+    let ping_interval = Duration::from_secs(rl_cfg.ws_ping_interval_secs);
+    let pings_enabled = !ping_interval.is_zero();
+    // Set when a Ping goes out, cleared by any frame from the peer. Still set at
+    // the next tick means one whole interval passed with nothing received, which
+    // is the only bounded evidence a half-open socket ever produces — a write
+    // into one succeeds locally until the TCP retransmit budget runs out.
+    let mut awaiting_pong = false;
+
     // Main message loop with idle timeout
     loop {
         // A frame read off the socket while a turn was running is dispatched by
@@ -970,6 +981,33 @@ async fn handle_agent_ws(
                 disconnect_reason = "idle_timeout";
                 break;
             }
+            // Paused while a turn runs, because `handle_text_message` awaits the
+            // whole turn below and this loop is not polling `receiver` then — no
+            // Pong could be observed and a healthy connection would be closed
+            // mid-answer. That window already has outbound stream deltas, so a
+            // failing write covers it.
+            _ = tokio::time::sleep(ping_interval), if pings_enabled => {
+                if awaiting_pong {
+                    info!(
+                        agent_id = %id_str,
+                        conn_id = %conn_id,
+                        interval_secs = ping_interval.as_secs(),
+                        "WebSocket peer did not answer a ping"
+                    );
+                    disconnect_reason = "heartbeat_timeout";
+                    break;
+                }
+                let send_failed = {
+                    let mut s = sender.lock().await;
+                    s.send(Message::Ping(Default::default())).await.is_err()
+                };
+                if send_failed {
+                    disconnect_reason = "send_error";
+                    break;
+                }
+                awaiting_pong = true;
+                continue;
+            }
             }
         };
 
@@ -981,6 +1019,10 @@ async fn handle_agent_ws(
                 break;
             }
         };
+
+        // Any frame at all proves the peer is answering, including the Pong that
+        // lands in the catch-all arm below.
+        awaiting_pong = false;
 
         match msg {
             Message::Text(text) => {

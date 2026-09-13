@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect } from "react";
+import { useState, useCallback, useEffect, useMemo } from "react";
 import { useTranslation } from "react-i18next";
 import {
   Kanban,
@@ -18,14 +18,16 @@ import { Card } from "../components/ui/Card";
 import { Badge } from "../components/ui/Badge";
 import { Button } from "../components/ui/Button";
 import { Modal } from "../components/ui/Modal";
+import { useAgents } from "../lib/queries/agents";
 import { useTaskQueue } from "../lib/queries/runtime";
+import { useAgents } from "../lib/queries/agents";
 import {
   useCreateTask,
   useUpdateTaskStatus,
   useDeleteTask,
   useRetryTask,
 } from "../lib/mutations/runtime";
-import type { TaskQueueItem } from "../api";
+import type { AgentItem, TaskQueueItem } from "../api";
 import { toastErr } from "../lib/errors";
 import { useUIStore } from "../lib/store";
 
@@ -44,6 +46,32 @@ const COLUMNS: Array<{
   { key: "failed",      labelKey: "tasks.col_failed",      variant: "error",   statuses: ["failed"] },
   { key: "cancelled",   labelKey: "tasks.col_cancelled",   variant: "default", statuses: ["cancelled"] },
 ];
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+// `assigned_to` is stored as whichever spelling the poster used: the backend's
+// `task_claim` matches the canonical UUID *or* the display name (issue #2841),
+// and tasks predating the agent-registry-backed picker hold names. Resolve to a
+// name for display so a task posted by id does not render as a raw UUID, and
+// fall back to the stored string so a name-stored (or orphaned) task stays
+// readable instead of blanking out.
+function assigneeLabel(raw: string, agentsById: Map<string, AgentItem>): string {
+  const known = agentsById.get(raw);
+  if (known) return known.name;
+  return UUID_RE.test(raw) ? raw.slice(0, 8) : raw;
+}
+
+// True when `task` is assigned to `agentId`, in either stored spelling.
+function taskMatchesAgent(
+  task: TaskQueueItem,
+  agentId: string,
+  agentsById: Map<string, AgentItem>,
+): boolean {
+  const raw = task.assigned_to ?? "";
+  if (!raw) return false;
+  if (raw === agentId) return true;
+  return agentsById.get(agentId)?.name === raw;
+}
 
 function relativeTime(iso?: string): string {
   if (!iso) return "-";
@@ -77,9 +105,10 @@ interface TaskCardProps {
   task: TaskQueueItem;
   isDragTarget?: boolean;
   onDragStart: (id: string) => void;
+  agentsById: Map<string, AgentItem>;
 }
 
-function TaskCard({ task, isDragTarget, onDragStart }: TaskCardProps) {
+function TaskCard({ task, isDragTarget, onDragStart, agentsById }: TaskCardProps) {
   const { t } = useTranslation();
   const addToast = useUIStore((s) => s.addToast);
   const deleteMutation = useDeleteTask();
@@ -148,9 +177,12 @@ function TaskCard({ task, isDragTarget, onDragStart }: TaskCardProps) {
       {/* Meta row */}
       <div className="flex items-center gap-2 mt-1.5 flex-wrap">
         {task.assigned_to ? (
-          <span className="flex items-center gap-1 text-[10px] font-mono text-brand bg-brand/8 px-1.5 py-0.5 rounded-md shrink-0">
+          <span
+            title={task.assigned_to}
+            className="flex items-center gap-1 text-[10px] font-mono text-brand bg-brand/8 px-1.5 py-0.5 rounded-md shrink-0"
+          >
             <User className="w-2.5 h-2.5" />
-            {task.assigned_to}
+            {assigneeLabel(task.assigned_to, agentsById)}
           </span>
         ) : (
           <span className="text-[10px] text-text-dim/50 italic shrink-0">{t("tasks.unassigned")}</span>
@@ -158,6 +190,18 @@ function TaskCard({ task, isDragTarget, onDragStart }: TaskCardProps) {
         {task.created_by && (
           <span className="text-[10px] text-text-dim/50 shrink-0">
             {t("tasks.by")} {task.created_by}
+          </span>
+        )}
+        {!!task.priority && (
+          <span className="text-[10px] text-text-dim/50 shrink-0">
+            {t("tasks.priority_badge", { priority: task.priority })}
+          </span>
+        )}
+        {task.timeout_secs != null && (
+          <span className="text-[10px] text-text-dim/50 shrink-0">
+            {task.timeout_secs === 0
+              ? t("tasks.timeout_badge_never")
+              : t("tasks.timeout_badge", { secs: task.timeout_secs })}
           </span>
         )}
         <span className="ml-auto flex items-center gap-1 text-[10px] text-text-dim/50 shrink-0">
@@ -227,6 +271,7 @@ interface KanbanColumnProps {
   dragTaskId: string | null;
   onDragStart: (id: string) => void;
   onDropRequeue: (taskId: string) => void;
+  agentsById: Map<string, AgentItem>;
 }
 
 function KanbanColumn({
@@ -237,6 +282,7 @@ function KanbanColumn({
   dragTaskId,
   onDragStart,
   onDropRequeue,
+  agentsById,
 }: KanbanColumnProps) {
   const { t } = useTranslation();
   const [isDragOver, setIsDragOver] = useState(false);
@@ -299,6 +345,7 @@ function KanbanColumn({
               task={task}
               isDragTarget={dragTaskId === task.id && !acceptsDrop}
               onDragStart={onDragStart}
+              agentsById={agentsById}
             />
           ))
         )}
@@ -314,7 +361,7 @@ function KanbanColumn({
 interface NewTaskModalProps {
   isOpen: boolean;
   onClose: () => void;
-  agents: string[];
+  agents: AgentItem[];
 }
 
 function NewTaskModal({ isOpen, onClose, agents }: NewTaskModalProps) {
@@ -326,6 +373,8 @@ function NewTaskModal({ isOpen, onClose, agents }: NewTaskModalProps) {
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
   const [assignee, setAssignee] = useState("");
+  const [priority, setPriority] = useState("");
+  const [timeoutSecs, setTimeoutSecs] = useState("");
 
   function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -333,11 +382,12 @@ function NewTaskModal({ isOpen, onClose, agents }: NewTaskModalProps) {
     createMutation.mutate({
       title: title.trim(),
       description: description.trim(),
-      ...(assignee.trim() ? { assigned_to: assignee.trim() } : {}),
+      ...(assignee ? { assigned_to: assignee } : {}),
+      ...(priority.trim() ? { priority: Number(priority) } : {}),
+      ...(timeoutSecs.trim() ? { timeout_secs: Number(timeoutSecs) } : {}),
     });
   }
 
-  // Reset form when modal opens
   // Reset form when modal opens. The previous `if (isOpen && !prev.current)
   // setX(...)` block called setState during render, which React strict-mode
   // warns against and can misbehave under Suspense / concurrent rendering.
@@ -346,6 +396,8 @@ function NewTaskModal({ isOpen, onClose, agents }: NewTaskModalProps) {
       setTitle("");
       setDescription("");
       setAssignee("");
+      setPriority("");
+      setTimeoutSecs("");
     }
   }, [isOpen]);
 
@@ -373,39 +425,41 @@ function NewTaskModal({ isOpen, onClose, agents }: NewTaskModalProps) {
           <label className="block text-xs font-semibold text-text-dim mb-1.5">
             {t("tasks.field_description")} <span className="text-error">*</span>
           </label>
+          {/* The agent reads this verbatim, so it is where the operator puts
+              the actual brief — resizable and roomy rather than a 3-line slot. */}
           <textarea
             value={description}
             onChange={(e) => setDescription(e.target.value)}
             placeholder={t("tasks.field_description_placeholder")}
             required
-            rows={3}
-            className={`${INPUT_CLASS} resize-none`}
+            rows={8}
+            className={`${INPUT_CLASS} resize-y min-h-[8rem] font-mono text-[13px] leading-relaxed`}
           />
+          <p className="mt-1 text-[10px] text-text-dim/50">{t("tasks.field_description_hint")}</p>
         </div>
 
         <div>
           <label className="block text-xs font-semibold text-text-dim mb-1.5">
             {t("tasks.field_assignee")}
           </label>
-          {agents.length > 0 ? (
-            <select
-              value={assignee}
-              onChange={(e) => setAssignee(e.target.value)}
-              className={INPUT_CLASS}
-            >
-              <option value="">{t("tasks.all_agents")}</option>
-              {agents.map((a) => (
-                <option key={a} value={a}>{a}</option>
-              ))}
-            </select>
-          ) : (
-            <input
-              type="text"
-              value={assignee}
-              onChange={(e) => setAssignee(e.target.value)}
-              placeholder={t("tasks.field_assignee_placeholder")}
-              className={INPUT_CLASS}
-            />
+          {/* Sourced from the agent registry, not from the assignees of tasks
+              that happen to exist: a brand-new agent is selectable before its
+              first task, and a deleted one stops being offered. The value is
+              the agent id, which survives a rename — the label resolves back
+              to the name on the board. */}
+          <select
+            value={assignee}
+            onChange={(e) => setAssignee(e.target.value)}
+            disabled={agents.length === 0}
+            className={`${INPUT_CLASS} disabled:opacity-50`}
+          >
+            <option value="">{t("tasks.assignee_none")}</option>
+            {agents.map((a) => (
+              <option key={a.id} value={a.id}>{a.name}</option>
+            ))}
+          </select>
+          {agents.length === 0 && (
+            <p className="mt-1 text-[10px] text-text-dim/60">{t("tasks.no_agents_hint")}</p>
           )}
         </div>
 
@@ -434,7 +488,9 @@ function NewTaskModal({ isOpen, onClose, agents }: NewTaskModalProps) {
             size="md"
             className="flex-1"
             isLoading={createMutation.isPending}
-            disabled={!title.trim() || !description.trim() || createMutation.isPending}
+            disabled={
+              !title.trim() || !description.trim() || createMutation.isPending
+            }
           >
             {t("tasks.submit")}
           </Button>
@@ -458,24 +514,38 @@ export function TasksPage() {
 
   // Fetch all tasks (no status filter — we split client-side)
   const taskListQuery = useTaskQueue();
+  // The registry — the new-task assignee picker is built from this, not from
+  // historical tasks: the kernel validates the assignee against the registry
+  // now, so a picker offering a deleted agent's name (or a typo on an empty
+  // board) produces a 400 the moment the operator picks it.
+  // `includeHands: true` because the kernel accepts hand agents as assignees
+  // too; the default-excluding list here would otherwise offer strictly less
+  // than what a claim can actually target.
+  const agentsQuery = useAgents({ includeHands: true });
 
   const allTasks: TaskQueueItem[] = taskListQuery.data?.tasks ?? [];
   const validTasks = allTasks.filter(
     (task): task is TaskQueueItem & { id: string } => typeof task.id === "string" && task.id.length > 0,
   );
 
-  // Derive unique agent names for the filter dropdown
-  const agentNames = Array.from(
-    new Set(
-      validTasks
-        .map((t) => t.assigned_to)
-        .filter((a): a is string => typeof a === "string" && a.length > 0),
-    ),
-  ).sort();
+  // The agent registry is the source of truth for who can hold a task. The
+  // previous list was derived from the `assigned_to` of tasks that already
+  // existed, which meant a new agent was unreachable until someone had already
+  // assigned it something, a deleted agent lingered forever, and an empty
+  // board offered no picker at all.
+  const agentsQuery = useAgents();
+  const agents = useMemo(() => agentsQuery.data ?? [], [agentsQuery.data]);
+  const agentsById = useMemo(
+    () => new Map(agents.map((a) => [a.id, a])),
+    [agents],
+  );
 
-  // Apply agent filter
+  // Apply agent filter. Filtered from `validTasks`, not `allTasks` — an
+  // id-less row can never render a card (`KanbanColumn` drops it), so
+  // counting it here would make the column/total tiles disagree with
+  // what's actually on the board.
   const filteredTasks = agentFilter
-    ? validTasks.filter((t) => t.assigned_to === agentFilter)
+    ? validTasks.filter((t) => taskMatchesAgent(t, agentFilter, agentsById))
     : validTasks;
 
   // Group by status
@@ -555,8 +625,8 @@ export function TasksPage() {
               className="rounded-lg border border-border-subtle bg-main px-2 py-1 text-xs focus:border-brand focus:ring-1 focus:ring-brand/10 outline-none"
             >
               <option value="">{t("tasks.all_agents")}</option>
-              {agentNames.map((a) => (
-                <option key={a} value={a}>{a}</option>
+              {agents.map((a) => (
+                <option key={a.id} value={a.id}>{a.name}</option>
               ))}
             </select>
 
@@ -623,6 +693,7 @@ export function TasksPage() {
                 dragTaskId={dragTaskId}
                 onDragStart={handleDragStart}
                 onDropRequeue={handleDropRequeue}
+                agentsById={agentsById}
               />
             );
           })}
@@ -649,7 +720,7 @@ export function TasksPage() {
       <NewTaskModal
         isOpen={showNewTask}
         onClose={() => setShowNewTask(false)}
-        agents={agentNames}
+        agents={agents}
       />
     </div>
   );

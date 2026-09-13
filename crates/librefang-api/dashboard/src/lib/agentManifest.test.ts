@@ -102,6 +102,79 @@ describe("agentManifest serializer", () => {
     expect(toml).not.toContain("max_tokens =");
   });
 
+  it("serializes out-of-range sampling values unclamped, for the validator to catch", () => {
+    // Clamping used to rewrite `5` to `1` here — a number the operator never
+    // chose, reaching the TOML silently. `PATCH /api/agents/{id}/model`
+    // rejects the same out-of-range values with an explicit 400, so the
+    // editor now reports the same conflict via `validateManifestForm`
+    // instead (#8112).
+    const form = emptyManifestForm();
+    form.name = "agent";
+    form.model.provider = "openai";
+    form.model.model = "gpt-4o";
+    form.model.temperature = "9";
+    form.model.top_p = "5";
+    form.model.frequency_penalty = "9";
+    form.model.presence_penalty = "-9";
+
+    const toml = serializeManifestForm(form);
+    expect(toml).toContain("temperature = 9");
+    expect(toml).toContain("top_p = 5");
+    expect(toml).toContain("frequency_penalty = 9");
+    expect(toml).toContain("presence_penalty = -9");
+
+    const errors = validateManifestForm(form);
+    expect(errors).toContain("model.temperature");
+    expect(errors).toContain("model.top_p");
+    expect(errors).toContain("model.frequency_penalty");
+    expect(errors).toContain("model.presence_penalty");
+  });
+
+  it("serializes a negative top_p unclamped rather than dropping it to inherit", () => {
+    // `parseFloatish` rejects negatives outright (it backs the cost/quota
+    // fields, which are never negative), so routing `top_p` through it made
+    // "-0.5" parse to `null` and the field silently revert to "inherit"
+    // instead of surfacing as the out-of-range value it is (#8112).
+    const form = emptyManifestForm();
+    form.name = "agent";
+    form.model.provider = "openai";
+    form.model.model = "gpt-4o";
+    form.model.top_p = "-0.5";
+
+    const toml = serializeManifestForm(form);
+    expect(toml).toContain("top_p = -0.5");
+    expect(validateManifestForm(form)).toContain("model.top_p");
+  });
+
+  it("omits sampling fields when empty or garbage", () => {
+    const form = emptyManifestForm();
+    form.name = "agent";
+    form.model.provider = "openai";
+    form.model.model = "gpt-4o";
+    form.model.top_p = "";
+    form.model.frequency_penalty = "not a number";
+    form.model.presence_penalty = "";
+
+    const toml = serializeManifestForm(form);
+    expect(toml).not.toContain("top_p");
+    expect(toml).not.toContain("frequency_penalty");
+    expect(toml).not.toContain("presence_penalty");
+  });
+
+  it("round-trips a negative penalty through parse and serialize", () => {
+    const form = emptyManifestForm();
+    form.name = "agent";
+    form.model.provider = "openai";
+    form.model.model = "gpt-4o";
+    form.model.presence_penalty = "-0.5";
+    const toml = serializeManifestForm(form);
+    const parsed = parseManifestToml(toml);
+    if (!parsed.ok) throw new Error(parsed.message);
+    expect(parsed.form.model.presence_penalty).toBe("-0.5");
+    const round = serializeManifestForm(parsed.form);
+    expect(round).toContain("presence_penalty = -0.5");
+  });
+
   it("emits arrays only when populated", () => {
     const form = emptyManifestForm();
     form.name = "agent";
@@ -197,6 +270,59 @@ describe("agentManifest validator", () => {
       expect(validateManifestForm(form)).toContain("schedule.check_interval_secs");
     },
   );
+
+  // Ranges mirror `PATCH /api/agents/{id}/model`
+  // (crates/librefang-api/src/routes/agents/config.rs): temperature 0..2,
+  // top_p 0..1, frequency_penalty and presence_penalty -2..2.
+  const outOfRangeForm = (field: "temperature" | "top_p" | "frequency_penalty" | "presence_penalty", badValue: string) => {
+    const form = emptyManifestForm();
+    form.name = "agent";
+    form.model.provider = "openai";
+    form.model.model = "gpt-4o";
+    form.model[field] = badValue;
+    return form;
+  };
+
+  it("flags an out-of-range model.temperature above the max", () => {
+    expect(validateManifestForm(outOfRangeForm("temperature", "9"))).toContain("model.temperature");
+  });
+
+  it("flags an out-of-range model.temperature below the min", () => {
+    expect(validateManifestForm(outOfRangeForm("temperature", "-1"))).toContain("model.temperature");
+  });
+
+  it("flags an out-of-range model.top_p above the max", () => {
+    expect(validateManifestForm(outOfRangeForm("top_p", "5"))).toContain("model.top_p");
+  });
+
+  it("flags an out-of-range model.top_p below the min", () => {
+    expect(validateManifestForm(outOfRangeForm("top_p", "-0.5"))).toContain("model.top_p");
+  });
+
+  it("flags an out-of-range model.frequency_penalty", () => {
+    expect(validateManifestForm(outOfRangeForm("frequency_penalty", "9"))).toContain(
+      "model.frequency_penalty",
+    );
+  });
+
+  it("flags an out-of-range model.presence_penalty", () => {
+    expect(validateManifestForm(outOfRangeForm("presence_penalty", "-9"))).toContain(
+      "model.presence_penalty",
+    );
+  });
+
+  it("accepts sampling values at the edge of their range, and empty as inherit", () => {
+    const form = emptyManifestForm();
+    form.name = "agent";
+    form.model.provider = "openai";
+    form.model.model = "gpt-4o";
+    form.model.temperature = "2";
+    form.model.top_p = "0";
+    form.model.frequency_penalty = "-2";
+    form.model.presence_penalty = "2";
+
+    expect(validateManifestForm(form)).toEqual([]);
+  });
 
   it("accepts the largest TOML integer for a continuous schedule", () => {
     const form = emptyManifestForm();
@@ -426,6 +552,31 @@ params = { region = "us" }
     expect(result.extras.topLevel.tools).toEqual({
       web_search: { params: { region: "us" } },
     });
+  });
+
+  it("preserves an unmapped 'channels' allowlist through extras on round-trip (#7742)", () => {
+    // `channels` is a real AgentManifest field (agent.toml, PUT
+    // /agents/{id}/channels) but the visual editor doesn't have a
+    // first-class form widget for it — it must survive a
+    // parse → serialize → re-parse cycle unchanged via extras, the same
+    // guarantee every other unmapped field gets.
+    const toml = `name = "agent"
+channels = ["telegram", "discord"]
+
+[model]
+provider = "openai"
+model = "gpt-4o"
+`;
+    const parsed = parseManifestToml(toml);
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(parsed.extras.topLevel.channels).toEqual(["telegram", "discord"]);
+
+    const reserialized = serializeManifestForm(parsed.form, parsed.extras);
+    const reparsed = parseManifestToml(reserialized);
+    expect(reparsed.ok).toBe(true);
+    if (!reparsed.ok) return;
+    expect(reparsed.extras.topLevel.channels).toEqual(["telegram", "discord"]);
   });
 
   it("returns a structured error on malformed TOML", () => {
@@ -870,6 +1021,105 @@ params = { region = "us" }
     });
     expect(cleanForm(reparsed.form)).toEqual(cleanForm(parsed.form));
     expect(reparsed.extras).toEqual(parsed.extras);
+  });
+});
+
+describe("agentManifest capability routing", () => {
+  it("omits an empty field instead of pinning an empty provider", () => {
+    const form = emptyManifestForm();
+    form.name = "profesor";
+    form.capabilities.image_understanding = "";
+
+    const toml = serializeManifestForm(form, emptyManifestExtras());
+    // Omission is what the kernel reads as "inherit the global block"; an
+    // `image_understanding = ""` would pin an empty provider instead.
+    expect(toml).not.toContain("image_understanding");
+  });
+
+  it("writes a filled field into [capabilities]", () => {
+    const form = emptyManifestForm();
+    form.name = "profesor";
+    form.capabilities.image_understanding = "openai/gpt-4o";
+    form.capabilities.speech_to_text = "groq";
+
+    const toml = serializeManifestForm(form, emptyManifestExtras());
+    expect(toml).toContain("[capabilities]");
+    expect(toml).toContain('image_understanding = "openai/gpt-4o"');
+    expect(toml).toContain('speech_to_text = "groq"');
+  });
+
+  it("round-trips the string shorthand through parse and serialize", () => {
+    const parsed = parseManifestToml(
+      ['name = "profesor"', "", "[capabilities]", 'image_understanding = "openai/gpt-4o"'].join("\n"),
+    );
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+
+    expect(parsed.form.capabilities.image_understanding).toBe("openai/gpt-4o");
+    const toml = serializeManifestForm(parsed.form, parsed.extras);
+    expect(toml).toContain('image_understanding = "openai/gpt-4o"');
+    // Exactly once — the key must not survive in `extras` as well, which
+    // would emit two spellings of the same setting.
+    expect(toml.match(/image_understanding/g)).toHaveLength(1);
+  });
+
+  it("normalises the { provider, model } table form to the shorthand", () => {
+    const parsed = parseManifestToml(
+      [
+        'name = "profesor"',
+        "",
+        "[capabilities]",
+        'speech_to_text = { provider = "groq", model = "whisper-large-v3" }',
+      ].join("\n"),
+    );
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(parsed.form.capabilities.speech_to_text).toBe("groq/whisper-large-v3");
+  });
+
+  it("keeps a model-only override inheriting the provider", () => {
+    const parsed = parseManifestToml(
+      ['name = "profesor"', "", "[capabilities]", 'image_understanding = { model = "gpt-4o-mini" }'].join("\n"),
+    );
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    // "/model" is how an inherited provider survives a round-trip through a
+    // single text field; the kernel parses it back to provider=None.
+    expect(parsed.form.capabilities.image_understanding).toBe("/gpt-4o-mini");
+  });
+
+  it("loads the kernel's aliases into the canonical field", () => {
+    const parsed = parseManifestToml(
+      ['name = "profesor"', "", "[capabilities]", 'vision = "gemini/gemini-2.5-flash"', 'transcription = "openai"'].join(
+        "\n",
+      ),
+    );
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(parsed.form.capabilities.image_understanding).toBe("gemini/gemini-2.5-flash");
+    expect(parsed.form.capabilities.speech_to_text).toBe("openai");
+    // The alias must not also linger in extras, or the re-emitted block would
+    // carry both `vision` and `image_understanding`.
+    expect(parsed.extras.capabilities).not.toHaveProperty("vision");
+    expect(parsed.extras.capabilities).not.toHaveProperty("transcription");
+  });
+
+  it("leaves the existing tool and memory grants untouched", () => {
+    const parsed = parseManifestToml(
+      [
+        'name = "profesor"',
+        "",
+        "[capabilities]",
+        'tools = ["memory_recall"]',
+        'memory_read = ["*"]',
+        'image_understanding = "openai/gpt-4o"',
+      ].join("\n"),
+    );
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(parsed.form.capabilities.tools).toEqual(["memory_recall"]);
+    expect(parsed.form.capabilities.memory_read).toEqual(["*"]);
+    expect(parsed.form.capabilities.image_understanding).toBe("openai/gpt-4o");
   });
 });
 

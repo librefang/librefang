@@ -74,6 +74,58 @@ async fn boot() -> Harness {
     }
 }
 
+/// Boot with several sidecar instances of the same channel type.
+///
+/// This is the shape a real host takes: three Telegram bots, each delivering
+/// to a different agent, distinguishable only by `name`.
+async fn boot_with_sidecars(instances: &[(&str, &str, Option<&str>)]) -> Harness {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    librefang_kernel::registry_sync::seed_registry_fixture_for_tests(tmp.path());
+
+    // Deserialized rather than built field by field: the type has no `Default`
+    // and a dozen `#[serde(default)]` knobs, and going through serde is also
+    // how a real `[[sidecar_channels]]` block reaches the config.
+    let sidecar_channels = instances
+        .iter()
+        .map(|(name, channel_type, agent)| {
+            serde_json::from_value(serde_json::json!({
+                "name": name,
+                "command": "true",
+                "channel_type": channel_type,
+                "agent": agent,
+            }))
+            .expect("sidecar channel fixture")
+        })
+        .collect();
+
+    let config = KernelConfig {
+        home_dir: tmp.path().to_path_buf(),
+        data_dir: tmp.path().join("data"),
+        api_key: TEST_TOKEN.to_string(),
+        sidecar_channels,
+        default_model: DefaultModelConfig {
+            provider: "ollama".to_string(),
+            model: "test-model".to_string(),
+            api_key_env: "OLLAMA_API_KEY".to_string(),
+            base_url: None,
+            message_timeout_secs: 300,
+            extra_params: std::collections::BTreeMap::new(),
+            cli_profile_dirs: Vec::new(),
+        },
+        ..KernelConfig::default()
+    };
+
+    let kernel = LibreFangKernel::boot_with_config(config).expect("kernel boot");
+    let kernel = Arc::new(kernel);
+    kernel.set_self_handle();
+    let (app, state) = server::build_router(kernel, "127.0.0.1:0".parse().expect("addr")).await;
+    Harness {
+        app,
+        state,
+        _tmp: tmp,
+    }
+}
+
 fn spawn_named(state: &Arc<AppState>, name: &str) -> AgentId {
     let manifest = AgentManifest {
         name: name.to_string(),
@@ -351,5 +403,85 @@ async fn channels_survive_a_reload_from_disk() {
         names,
         vec!["slack", "telegram"],
         "the allowlist must come back off disk, not only out of memory"
+    );
+}
+
+/// Three Telegram bots, told apart.
+///
+/// `available` is the manifest allowlist's choices, and that allowlist is
+/// matched against a bare channel *type* — `agent_allows_channel` in
+/// `librefang-channels` compares `channel_type_str(&message.channel)`, which
+/// `the_roster_key_is_the_bare_channel_type` pins — so one entry per type is
+/// the whole list. It used to map every configured instance to its type, so a
+/// host running three Telegram bots was offered "telegram" three times, three
+/// identical strings all meaning the same thing.
+///
+/// Which specific bot reaches an agent is a different and finer mechanism:
+/// the per-instance binding on `[[sidecar_channels]].agent` (#6131). Reporting
+/// it here is what lets an agent's own editor answer "which of these bots is
+/// mine?", which until now could only be read from the channel's side.
+#[tokio::test(flavor = "multi_thread")]
+async fn channels_distinguishes_instances_of_one_type() {
+    let h = boot_with_sidecars(&[
+        ("telegram", "telegram", Some("deannatroi")),
+        ("laforge", "telegram", Some("LaForge")),
+        ("mercaman", "telegram", Some("Mercaman")),
+    ])
+    .await;
+    let agent_id = spawn_named(&h.state, "Mercaman");
+
+    let (status, body) = send(
+        h.app.clone(),
+        get(&format!("/api/agents/{agent_id}/channels")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "got: {body:?}");
+
+    let available: Vec<&str> = body["available"]
+        .as_array()
+        .expect("available array")
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    assert_eq!(
+        available,
+        vec!["telegram"],
+        "the allowlist is per type, so three instances of one type are one choice: {body}"
+    );
+
+    let instances = body["instances"].as_array().expect("instances array");
+    assert_eq!(
+        instances.len(),
+        3,
+        "every configured instance must be listed: {body}"
+    );
+
+    let named: Vec<&str> = instances
+        .iter()
+        .filter_map(|i| i["name"].as_str())
+        .collect();
+    assert_eq!(
+        named,
+        vec!["telegram", "laforge", "mercaman"],
+        "got: {body}"
+    );
+
+    for instance in instances {
+        assert_eq!(
+            instance["channel_type"], "telegram",
+            "each instance carries its type as well as its name: {instance}"
+        );
+    }
+
+    // Exactly the one bound to this agent says so.
+    let bound: Vec<&str> = instances
+        .iter()
+        .filter(|i| i["bound_to_this_agent"] == true)
+        .filter_map(|i| i["name"].as_str())
+        .collect();
+    assert_eq!(
+        bound,
+        vec!["mercaman"],
+        "the agent's own view must say which instance delivers to it: {body}"
     );
 }

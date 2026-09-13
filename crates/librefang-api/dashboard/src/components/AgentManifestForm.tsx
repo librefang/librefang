@@ -1,11 +1,15 @@
 import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { AlertTriangle, ChevronDown, Plus, Trash2, X } from "lucide-react";
-import { generateUid } from "../lib/agentManifest";
+import { CAPABILITY_ROUTING_KEYS, generateUid } from "../lib/agentManifest";
 import type { ManifestExtras, ManifestFormState } from "../lib/agentManifest";
 import { MultiSelectCmdk } from "./ui/MultiSelectCmdk";
 import { ModelParamField } from "./ui/ModelParamField";
-import { formatTokens } from "../lib/modelParamLadders";
+import {
+  overLimitWarning,
+  resolveMaxTokensLimit,
+  selectModelLimits,
+} from "../lib/modelLimits";
 
 /**
  * Catalog entry for the skill/tool finder (#5049). Both fields are
@@ -65,6 +69,16 @@ interface AgentManifestFormProps {
    * users can reference servers the dashboard doesn't know about yet.
    */
   mcpCatalog?: ManifestCatalogEntry[];
+  /**
+   * When true, the Name field is rendered disabled with a hint explaining
+   * where to rename instead. Set this when editing an *existing* agent
+   * (#7742): `update_manifest` always keeps `entry.manifest.name` pinned to
+   * `entry.name` (renames go through the dedicated rename API so the
+   * registry's `name_index` stays consistent), so a submitted name change
+   * would otherwise be silently discarded — the same antipattern this
+   * editor exists to eliminate elsewhere. Defaults to false (create flow).
+   */
+  nameLocked?: boolean;
 }
 
 export function AgentManifestForm({
@@ -77,6 +91,7 @@ export function AgentManifestForm({
   skillCatalog,
   toolCatalog,
   mcpCatalog,
+  nameLocked = false,
 }: AgentManifestFormProps) {
   const { t } = useTranslation();
 
@@ -127,39 +142,20 @@ export function AgentManifestForm({
   );
 
   // Limits for the selected model, and only when the catalog vouches for them.
-  const selectedModelLimits = useMemo(() => {
-    const entry = models.find(
-      (m) => m.id === value.model.model && m.provider === value.model.provider,
-    );
-    if (!entry || entry.limits_known === false) return {};
-    return {
-      contextWindow: entry.context_window && entry.context_window > 0 ? entry.context_window : undefined,
-      maxOutputTokens:
-        entry.max_output_tokens && entry.max_output_tokens > 0 ? entry.max_output_tokens : undefined,
-    };
-  }, [models, value.model.model, value.model.provider]);
-
-  // Advisory, not a validation error: the field is not marked invalid and the
-  // value is saved as typed. If the catalog figure is the thing that is wrong,
-  // an explicit provider error beats a silent truncation.
-  const overLimit = (raw: string, limit?: number): string | undefined => {
-    const parsed = Number(raw.trim());
-    if (raw.trim() === "" || !Number.isFinite(parsed) || limit === undefined) return undefined;
-    return parsed > limit
-      ? t("agents.form.over_limit_warning", { limit: formatTokens(limit) })
-      : undefined;
-  };
-  const maxTokensWarning = overLimit(
-    value.model.max_tokens,
-    // An operator-set output cap describes this endpoint and outranks the
-    // catalog's figure for it.
-    value.model.max_output_tokens.trim() !== ""
-      ? Number(value.model.max_output_tokens)
-      : selectedModelLimits.maxOutputTokens,
+  // Shared with the agent detail drawer, which needs the same three answers and had none of them.
+  const selectedModelLimits = useMemo(
+    () => selectModelLimits(models, value.model.model, value.model.provider),
+    [models, value.model.model, value.model.provider],
   );
-  const contextWindowWarning = overLimit(
+  const maxTokensWarning = overLimitWarning(
+    value.model.max_tokens,
+    resolveMaxTokensLimit(value.model.max_output_tokens, selectedModelLimits.maxOutputTokens),
+    t,
+  );
+  const contextWindowWarning = overLimitWarning(
     value.model.context_window,
     selectedModelLimits.contextWindow,
+    t,
   );
 
   const jsonSchemaFormat =
@@ -168,14 +164,20 @@ export function AgentManifestForm({
   return (
     <div className="space-y-4">
       <Section title={t("agents.form.basics")}>
-        <Field label={t("agents.form.name")} required invalid={invalidFields.has("name")}>
+        <Field
+          label={t("agents.form.name")}
+          required
+          invalid={invalidFields.has("name")}
+          hint={nameLocked ? t("agents.form.name_locked_hint") : undefined}
+        >
           <input
             type="text"
             value={value.name}
             onChange={(e) => update({ name: e.target.value })}
             placeholder={t("agents.form.name_placeholder")}
             className={inputClass}
-            autoFocus
+            autoFocus={!nameLocked}
+            disabled={nameLocked}
           />
         </Field>
         <Field label={t("agents.form.description")}>
@@ -537,6 +539,39 @@ export function AgentManifestForm({
             checked={value.capabilities.ofp_discover}
             onChange={(checked) => updateCapabilities({ ofp_discover: checked })}
           />
+        </div>
+
+        {/*
+          Media capability routing. Each field is one modality this agent's own
+          model may not handle; leaving it blank inherits the kernel-global
+          `[capabilities]` block, which is why the placeholder is the word
+          "inherit" rather than an example value — a blank field here is a real
+          setting, not an unfilled one.
+        */}
+        <div className="space-y-2.5 border-t border-border-subtle/60 pt-2.5">
+          <p className="text-[10px] font-bold uppercase tracking-widest text-text-dim">
+            {t("agents.form.capability_routing")}
+          </p>
+          <p className="text-[11px] leading-snug text-text-dim">
+            {t("agents.form.capability_routing_hint")}
+          </p>
+          <div className="grid grid-cols-2 gap-3">
+            {CAPABILITY_ROUTING_KEYS.map((key) => (
+              <Field
+                key={key}
+                label={t(`agents.form.capability_${key}`)}
+                hint={t(`agents.form.capability_${key}_hint`)}
+              >
+                <input
+                  type="text"
+                  value={value.capabilities[key]}
+                  onChange={(e) => updateCapabilities({ [key]: e.target.value })}
+                  placeholder={t("agents.form.capability_inherit_placeholder")}
+                  className={inputClass}
+                />
+              </Field>
+            ))}
+          </div>
         </div>
       </Section>
 

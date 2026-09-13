@@ -1651,6 +1651,38 @@
         }
       }
     },
+    "/api/agents/{id}/manifest": {
+      "get": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "GET /api/agents/{id}/manifest — Get the agent's full manifest as raw TOML.",
+        "description": "Powers the dashboard's full manifest editor (#7742): the Configure\ndrawer's quick-edit widgets only cover a handful of fields, so this\nendpoint hands back every field `AgentManifest` carries for\n`AgentManifestForm` to parse and pre-fill, with `PATCH /api/agents/{id}`\n(`manifest_toml`) as the matching write path. Renders the live\nin-memory manifest the same way `persist_manifest_to_disk` writes\n`agent.toml`, rather than re-reading the on-disk file, so the response\nalways reflects the latest state even if a prior partial PATCH hasn't\nflushed to disk yet.",
+        "operationId": "get_agent_manifest_toml",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Agent ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Agent manifest as raw TOML",
+            "content": {
+              "application/toml": {}
+            }
+          },
+          "404": {
+            "description": "Agent not found"
+          }
+        }
+      }
+    },
     "/api/agents/{id}/mcp_servers": {
       "get": {
         "tags": [
@@ -2010,6 +2042,130 @@
         "responses": {
           "200": {
             "description": "Change an agent's LLM model",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/agents/{id}/model_routing": {
+      "get": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "GET /api/agents/{id}/model_routing — Read an agent's model routing settings.",
+        "operationId": "get_agent_model_routing",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Agent ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "An agent's model routing mode and router override",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed agent id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Agent not found, or not visible to the caller",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "PUT /api/agents/{id}/model_routing — Update an agent's model routing settings.",
+        "description": "`mode` is `\"fixed\"` or `\"flexible\"`. In `\"fixed\"` mode no override is\nstored: the remaining fields describe constraints on a routing decision\nthat will not happen, and persisting them would let a later flip back to\n`\"flexible\"` silently resurrect stale constraints the operator has\nforgotten about.\n\n`cost_budget` accepts `\"cheap\"`, `\"medium\"`, `\"expensive\"`, or `null` for\nno cap; any other string is rejected rather than silently treated as \"no\ncap\", because a typo that removed a spending cap would be invisible.",
+        "operationId": "set_agent_model_routing",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Agent ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "description": "Mode, allowed profiles, cost budget and default profile",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Updated model routing settings",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid agent id, mode or cost budget",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Agent not found, or not visible to the caller",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "423": {
+            "description": "This agent is provisioned by the deployment; its manifest cannot be changed through the API",
             "content": {
               "application/json": {
                 "schema": {
@@ -5828,8 +5984,18 @@
           "required": true
         },
         "responses": {
-          "200": {
-            "description": "Post a task to the agent task queue",
+          "201": {
+            "description": "Task enqueued",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Missing title, or an unknown assignee",
             "content": {
               "application/json": {
                 "schema": {
@@ -7634,6 +7800,333 @@
         }
       }
     },
+    "/api/knowledge": {
+      "get": {
+        "tags": [
+          "knowledge"
+        ],
+        "summary": "GET /api/knowledge — every base with its documents' totals and its holders.",
+        "operationId": "list_bases",
+        "responses": {
+          "200": {
+            "description": "Shared knowledge bases",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "knowledge"
+        ],
+        "summary": "POST /api/knowledge — create an empty base.",
+        "operationId": "create_base",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateBaseRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid name",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "A base of that name already exists",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/knowledge/{name}": {
+      "delete": {
+        "tags": [
+          "knowledge"
+        ],
+        "summary": "DELETE /api/knowledge/{name} — remove the base and revoke it everywhere.",
+        "operationId": "delete_base",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Knowledge base name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Deleted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such base",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/knowledge/{name}/agents": {
+      "put": {
+        "tags": [
+          "knowledge"
+        ],
+        "summary": "PUT /api/knowledge/{name}/agents — set exactly which agents hold this base.",
+        "operationId": "set_holders",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Knowledge base name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetHoldersRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Holders updated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such base",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/knowledge/{name}/documents": {
+      "get": {
+        "tags": [
+          "knowledge"
+        ],
+        "summary": "GET /api/knowledge/{name}/documents — list the documents in a base.",
+        "operationId": "list_documents",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Knowledge base name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Documents",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such base",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/knowledge/{name}/documents/{filename}": {
+      "put": {
+        "tags": [
+          "knowledge"
+        ],
+        "summary": "PUT /api/knowledge/{name}/documents/{filename} — write a document.",
+        "description": "The body is the file, raw. That is the convention `POST /api/agents/{id}/upload`\nalready set in this codebase, and it keeps `multipart` off the dependency list\nfor a payload that is one file.",
+        "operationId": "put_document",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Knowledge base name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "filename",
+            "in": "path",
+            "description": "Document filename",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/octet-stream": {
+              "schema": {
+                "type": "string"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Written",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such base",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Document too large",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "knowledge"
+        ],
+        "summary": "DELETE /api/knowledge/{name}/documents/{filename} — remove a document.",
+        "operationId": "delete_document",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Knowledge base name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "filename",
+            "in": "path",
+            "description": "Document filename",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Deleted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such base or document",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/logs/stream": {
       "get": {
         "tags": [
@@ -8093,6 +8586,26 @@
                 }
               }
             }
+          },
+          "409": {
+            "description": "The server's own configuration blocks the reconnect — no transport declared, or an OAuth authorization the operator has not completed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The MCP server did not answer",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
           }
         }
       }
@@ -8163,6 +8676,471 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/JsonArray"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/media/image": {
+      "post": {
+        "tags": [
+          "media"
+        ],
+        "summary": "Generate one or more images from a text prompt.",
+        "description": "The provider is taken from the request body's `provider` when set;\notherwise it is resolved from the `[capabilities] image_generation`\nnomination and then the registry preference order.",
+        "operationId": "generate_image",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Generated images, saved to the uploads directory and returned as URLs",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request, unsupported capability, or provider content filter",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "No provider configured for image generation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Upstream provider rate limit",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Upstream provider error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/media/music": {
+      "post": {
+        "tags": [
+          "media"
+        ],
+        "summary": "Generate music from a prompt and/or lyrics.",
+        "description": "At least one of `prompt` or `lyrics` must be present; `instrumental`\nselects a lyric-free rendering.",
+        "operationId": "generate_music",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Generated audio, saved to the uploads directory and returned as a URL",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Neither prompt nor lyrics supplied, or unsupported capability",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "No provider configured for music generation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Upstream provider rate limit",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Failed to persist the generated audio",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Upstream provider error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/media/providers": {
+      "get": {
+        "tags": [
+          "media"
+        ],
+        "summary": "List available media providers with their capabilities and config status.",
+        "description": "`configured` reports whether the provider's credentials are present, and\n`capabilities` is the set of `MediaCapability` values it advertises — the\nsame values the `[capabilities]` config block routes by.",
+        "operationId": "list_media_providers",
+        "responses": {
+          "200": {
+            "description": "Known media providers with their capabilities and configuration status",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/media/speech": {
+      "post": {
+        "tags": [
+          "media"
+        ],
+        "summary": "Synthesize speech from text (TTS).",
+        "description": "Returns an upload URL rather than inline audio; the bytes are written to\nthe uploads directory and served by `GET /api/uploads/{id}`.",
+        "operationId": "synthesize_speech",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Synthesized audio, saved to the uploads directory and returned as a URL",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request or unsupported capability",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "No provider configured for text-to-speech",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Upstream provider rate limit",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Failed to persist the generated audio",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Upstream provider error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/media/transcribe": {
+      "post": {
+        "tags": [
+          "media"
+        ],
+        "summary": "Transcribe audio to text (STT).",
+        "description": "Accepts raw audio bytes with `Content-Type` set to the audio MIME type\n(e.g. `audio/webm`, `audio/wav`). Returns the transcribed text.\n\nThe body is the audio itself, not a JSON envelope, and is capped at 10 MB.\nThe provider is resolved from `[capabilities] speech_to_text`, then\n`[media] audio_provider`, then env-var auto-detection.",
+        "operationId": "transcribe_audio",
+        "requestBody": {
+          "description": "Raw audio bytes; `Content-Type` must be an `audio/*` type",
+          "content": {
+            "audio/webm": {
+              "schema": {
+                "type": "string"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Transcript, with the provider and model that produced it",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Empty body or a non-audio Content-Type",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Audio larger than 10 MB",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Transcription failed, or the temp file could not be written",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/media/video": {
+      "post": {
+        "tags": [
+          "media"
+        ],
+        "summary": "Submit a video generation task (async — returns a task ID for polling).",
+        "description": "Video generation is long-running everywhere it is offered, so this returns\n`202 Accepted` with a provider-scoped `task_id`. Poll it with\n`GET /api/media/video/{task_id}?provider=…` — the same provider must be\nnamed, because the task id is only meaningful to the provider that issued\nit.",
+        "operationId": "submit_video",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "Task accepted; poll `task_id` for the result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request or unsupported capability",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "No provider configured for video generation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Upstream provider rate limit",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Upstream provider error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/media/video/{task_id}": {
+      "get": {
+        "tags": [
+          "media"
+        ],
+        "summary": "Poll video generation task status and retrieve result when complete.",
+        "description": "Query parameter `provider` is required to route the poll to the correct\ndriver (the task ID is provider-specific).\n\nWhile the task is running the response is `{\"status\": …, \"task_id\": …}`;\non completion it carries a `result` object with the video URL and\ndimensions. A failed task answers `200` with `status: \"failed\"` and an\n`error` field — the HTTP status describes the poll, not the task.",
+        "operationId": "poll_video_task",
+        "parameters": [
+          {
+            "name": "task_id",
+            "in": "path",
+            "description": "Provider-scoped task id returned by POST /api/media/video",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "provider",
+            "in": "query",
+            "description": "Provider that issued the task id — required, the id is not portable",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Task status, or the finished video when complete",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Missing `provider` query parameter",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown task id for this provider",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Upstream provider error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
                 }
               }
             }
@@ -9365,6 +10343,28 @@
         "responses": {
           "200": {
             "description": "Scan directory for migratable workspace",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/model-router/profiles": {
+      "get": {
+        "tags": [
+          "models"
+        ],
+        "summary": "GET /api/model-router/profiles — List the resolved model-router profiles.",
+        "description": "The catalog is the builtin asset with `~/.librefang/model_profiles.toml`\nmerged over it, so this is what the router will actually match against —\nnot just the compiled-in defaults. Profiles come back ordered by name.\n\n`enabled` reports whether `[model_router]` is switched on kernel-wide; the\nprofile list is returned either way so an operator can review the catalog\nbefore flipping the switch.",
+        "operationId": "list_model_router_profiles",
+        "responses": {
+          "200": {
+            "description": "List resolved model-router profiles",
             "content": {
               "application/json": {
                 "schema": {
@@ -11476,6 +12476,7 @@
           "sessions"
         ],
         "summary": "DELETE /api/sessions/:id — Delete a session.",
+        "description": "Cascades to every descendant session (#7752) — deleting a session that\nspawned sub-agent runs takes the whole delegated subtree with it. The\nresponse body reports what actually came down rather than a bare 204, so\na caller who only asked to delete one id can tell a subtree was removed\n(#7991 review).",
         "operationId": "delete_session",
         "parameters": [
           {
@@ -11490,7 +12491,14 @@
         ],
         "responses": {
           "200": {
-            "description": "Session deleted"
+            "description": "Session deleted, cascading to descendants",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
           }
         }
       }
@@ -11867,6 +12875,9 @@
           },
           "404": {
             "description": "Candidate not found"
+          },
+          "500": {
+            "description": "Invalid skills.promotion configuration"
           },
           "502": {
             "description": "GitHub request failed"
@@ -12372,6 +13383,9 @@
           "404": {
             "description": "Skill not found"
           },
+          "500": {
+            "description": "Invalid skills.promotion configuration"
+          },
           "502": {
             "description": "GitHub request failed"
           }
@@ -12387,6 +13401,48 @@
         "responses": {
           "200": {
             "description": "Daemon status",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/tasks": {
+      "post": {
+        "tags": [
+          "tasks"
+        ],
+        "summary": "POST /api/tasks — Enqueue a task on behalf of an external caller.",
+        "description": "Body: `{\"title\": \"...\", \"description\": \"...\", \"assigned_to\": \"<agent-id|name>\"?, \"created_by\": \"<agent-id>\"?, \"priority\": <int>?, \"timeout_secs\": <uint>?}`\n\nWraps `KernelHandle::task_post` so HTTP clients (skill subprocesses,\ncron scripts, external integrations) can enqueue tasks without a\nruntime/agent context. The agent-side `task_post` tool keeps the\ncaller's agent id automatically.\nAuthenticated HTTP requests use the caller's stable user id for\nprovenance and ignore a body-supplied `created_by` value.\n\n`priority` orders the claim queue (higher first, ties by age) and\n`timeout_secs` overrides `[task_board] claim_ttl_secs` for this task —\nboth are enforced by the kernel, not merely recorded.\n\nAn `assigned_to` that names no known agent is rejected with 400 rather\nthan stored: `task_claim` refuses an unknown agent, so such a row would\nsit `pending` forever with nothing to say why.",
+        "operationId": "task_queue_post_root",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Task enqueued",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid title, description, priority, timeout_secs, or unknown assignee",
             "content": {
               "application/json": {
                 "schema": {
@@ -12714,8 +13770,78 @@
           "409": {
             "description": "Manifest still contains private details that require review"
           },
+          "500": {
+            "description": "Invalid skills.promotion configuration"
+          },
           "502": {
             "description": "GitHub request failed"
+          }
+        }
+      }
+    },
+    "/api/templates/{name}/registry-diff": {
+      "get": {
+        "tags": [
+          "system"
+        ],
+        "summary": "GET /api/templates/:name/registry-diff — Compare local agent type with its registry original.",
+        "description": "Scoped to `TemplateSource::AgentType` like `restore_from_registry` — a name that only resolves\nthrough a live agent's own workspace manifest has nothing `restore` can ever act on, so a diff\noffered for it is a comparison for a control that cannot succeed (#8042).",
+        "operationId": "get_agent_type_registry_diff",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Agent type name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Diff between local and registry versions"
+          },
+          "404": {
+            "description": "Agent type or registry version not found"
+          },
+          "409": {
+            "description": "The name belongs to a live agent"
+          }
+        }
+      }
+    },
+    "/api/templates/{name}/restore": {
+      "post": {
+        "tags": [
+          "system"
+        ],
+        "summary": "POST /api/templates/:name/restore — Overwrite local agent type with the registry version.",
+        "description": "Records two snapshots, because this write destroys the local copy by design.\nA manifest whose current content came from a hand-edit of the file has no snapshot anywhere, so the pre-restore content is recorded first (`pre-registry-restore`) — otherwise, after the overwrite, that content is gone from disk and was never in history either, leaving nothing to go back to.\nThat first snapshot is a precondition, not a courtesy: if it fails the route answers 500 and writes nothing, because proceeding would destroy the only copy of the content it just failed to save.\nThe post-restore content is then recorded too (`registry-restore`), so `GET /api/templates/{name}/history` reports the registry copy as current rather than the previous dashboard save.\nThat second one is best-effort — losing it costs a history row, not the manifest.",
+        "operationId": "restore_agent_type_from_registry",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Agent type name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Agent type restored from registry"
+          },
+          "404": {
+            "description": "Agent type or registry version not found"
+          },
+          "409": {
+            "description": "The name belongs to a live agent"
+          },
+          "500": {
+            "description": "The pre-restore snapshot could not be recorded; nothing was overwritten"
           }
         }
       }
@@ -15129,6 +16255,25 @@
           }
         }
       },
+      "BaseHolderRequest": {
+        "type": "object",
+        "required": [
+          "agent_id"
+        ],
+        "properties": {
+          "agent_id": {
+            "type": "string"
+          },
+          "mode": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`\"rw\"` or `\"r\"`. Defaults to read-only: a knowledge base is a thing to\nread, and an agent that can rewrite the documents every other agent\nreads is a decision the operator should have to make explicitly."
+          }
+        },
+        "additionalProperties": false
+      },
       "BulkActionResult": {
         "type": "object",
         "description": "Outcome of a single bulk action (delete/start/stop).",
@@ -15202,6 +16347,13 @@
               "string",
               "null"
             ]
+          },
+          "code": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Machine-readable failure reason (`template_not_found`,\n`template_read_failed`, `manifest_too_large`, `signature_invalid`,\n`invalid_manifest`, `agent_already_exists`, `spawn_failed`, …), the\nsame codes `POST /api/agents` returns as the response `code` field.\n`error` alone is already translated into nine locales, so a caller\ncannot branch on it to tell \"template missing\" apart from \"template\nunreadable\" without substring-matching localized prose (#8112)."
           },
           "error": {
             "type": [
@@ -15424,6 +16576,18 @@
             }
           }
         }
+      },
+      "CreateBaseRequest": {
+        "type": "object",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
       },
       "EphemeralRunRollupView": {
         "type": "object",
@@ -16400,6 +17564,22 @@
         },
         "additionalProperties": false
       },
+      "SetHoldersRequest": {
+        "type": "object",
+        "required": [
+          "agents"
+        ],
+        "properties": {
+          "agents": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/BaseHolderRequest"
+            },
+            "description": "The complete set of agents that should hold this base. Agents absent\nfrom the list have it revoked, which is what makes \"share with nobody\"\nexpressible as `[]` rather than needing a separate route."
+          }
+        },
+        "additionalProperties": false
+      },
       "SetModeRequest": {
         "type": "object",
         "description": "Request to change an agent's operational mode.",
@@ -16995,6 +18175,10 @@
     {
       "name": "vault",
       "description": "Credential vault writes — store, list presence of, and delete the secrets the daemon resolves at runtime. Values are never returned"
+    },
+    {
+      "name": "media",
+      "description": "Media generation (image, speech, video, music) and transcription; provider selection follows the `[capabilities]` routing block"
     }
   ]
 }

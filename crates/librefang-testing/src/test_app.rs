@@ -305,12 +305,18 @@ impl TestAppState {
                         || !cfg.dashboard_pass.trim().is_empty()),
             )
         };
-        // Mirrors `kernel::boot`, which loads the media provider order from the
-        // catalog right after constructing the cache. Without this the harness
-        // hands every test the five compiled-in built-ins while production
-        // serves whatever the registry declares, so a test over
-        // `GET /media/providers` would pass against a list production never
-        // produces.
+        // Mirrors `kernel::boot`, which loads the media provider list from the
+        // catalog right after constructing the cache, so the list
+        // `detect_for_capability` picks from follows the test kernel's catalog
+        // rather than staying at the compiled-in built-ins.
+        //
+        // It is load-bearing only for tests that give the kernel a catalog —
+        // `with_catalog_seed` or `with_registry_fixture`. CI runs with
+        // `LIBREFANG_REGISTRY_OFFLINE=1`, which leaves the catalog empty, and
+        // then this call adds nothing. An earlier version of this comment
+        // claimed it closed a harness/production divergence in general, which
+        // is not true and would have sent someone looking for a difference that
+        // is not there.
         let media_drivers = librefang_runtime::media::MediaDriverCache::new();
         // `KernelApi` is called through its path rather than imported: bringing
         // the trait into scope makes `set_self_handle` resolve to the

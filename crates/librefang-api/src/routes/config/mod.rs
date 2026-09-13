@@ -459,7 +459,9 @@ pub fn ui_sections_overlay() -> serde_json::Value {
         // Background autonomous-loop executor knobs (#5168).
         {"key": "background", "struct_field": "background"},
         // Org-wide LLM provider allowlist (#6459).
-        {"key": "providers", "struct_field": "providers"}
+        {"key": "providers", "struct_field": "providers"},
+        // Complexity-based model routing (#7781).
+        {"key": "model_router", "struct_field": "model_router"}
     ])
 }
 
@@ -915,6 +917,25 @@ pub(crate) fn is_scrubbed_config_key(key: &str) -> bool {
         // in depth in case anything slips through a writable section.
         "client_id",
         "client_secret",
+        // Outbound-destination fields of the skill registry promotion flow
+        // (#8163): every request built from them carries the repo-scoped
+        // GitHub token as `Authorization: Bearer …`, so a post-auth write
+        // hands the credential to a new destination. Same threat model that
+        // kept `proxy.` / `telemetry.otlp_endpoint` / `audit.anchor_path`
+        // off the writable allowlist — edit on disk (#8179 review).
+        //
+        // All three fields of this flow's destination triangle are covered
+        // deliberately, not just `api_base_url`: `verify_fork` only proves
+        // `fork_owner`'s repository is *a* fork of the configured upstream,
+        // not that the caller who set `fork_owner` is trusted — an
+        // Owner-role attacker who forks the public registry into their own
+        // namespace once, then posts that namespace as `fork_owner`, has
+        // every subsequent promotion push the skill's files (and rewrite the
+        // PR's source branch after review) to a repository they control,
+        // using the operator's token (#8179 review, finding 2).
+        "api_base_url",
+        "fork_owner",
+        "base_branch",
     ];
     // Round-4 review of #4678: env-var-name redirects. Codebase
     // pervasively uses `*_token_env`, `*_password_env`,

@@ -1,0 +1,3 @@
+The dashboard test suite no longer goes red at random on the prompt-experiments variant cap.
+The test drove the production cap of a hundred variants literally — a hundred sequential clicks through a subtree the file's motion mock remounts on every state change — which cost two seconds of vitest's five-second budget on an idle machine and crossed it whenever the rest of the suite was competing for the same cores.
+The cap was already mocked in that file, so it is now mocked low: the assertion is that selection stops at the cap and says so, which is the same behaviour at three variants as at a hundred, and it still fails if the comparison is off by one. (#8329, #8328) (@DaBlitzStein)

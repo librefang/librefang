@@ -866,6 +866,140 @@ fn test_channel_send_hint_without_tool() {
 }
 
 #[test]
+fn test_channel_send_hint_suppressed_for_webui() {
+    let tools = vec!["channel_send".to_string()];
+    let section =
+        build_channel_section("webui", Some("Alice"), Some("user-1"), false, false, &tools);
+    assert!(
+        section.contains("web interface"),
+        "webui should be told channel_send is not how media reaches the browser"
+    );
+    assert!(
+        !section.contains("image_url"),
+        "webui should not get the channel_send media hint"
+    );
+}
+
+#[test]
+fn test_channel_send_hint_webui_match_is_case_insensitive() {
+    let tools = vec!["channel_send".to_string()];
+    let section =
+        build_channel_section("WebUI", Some("Alice"), Some("user-1"), false, false, &tools);
+    assert!(
+        section.contains("web interface"),
+        "a mixed-case webui is still the web interface — the literal match is case-insensitive, so the branch must be too"
+    );
+    assert!(
+        !section.contains("background run"),
+        "a live web session must not be told this is a background run"
+    );
+}
+
+#[test]
+fn test_channel_send_hint_suppressed_for_cron_and_autonomous() {
+    let tools = vec!["channel_send".to_string()];
+    for channel in ["cron", "autonomous"] {
+        let section =
+            build_channel_section(channel, Some("Alice"), Some("12345"), false, false, &tools);
+        assert!(
+            section.contains("background run"),
+            "{channel} should be told channel_send cannot reach a system channel"
+        );
+        assert!(
+            !section.contains("image_url"),
+            "{channel} should not get the channel_send media hint"
+        );
+    }
+}
+
+// PR #8149 round 2 — the prompt must describe what the system actually does,
+// not a plausible-sounding mechanism that doesn't exist.
+
+#[test]
+fn test_channel_send_hint_cron_does_not_claim_nobody_reads_the_response() {
+    // A cron job with a configured delivery target hands `result.response`
+    // to a real person — `KernelCronBridge::deliver_cron_output`
+    // (kernel/cron_bridge.rs) reads `&result.response` and pushes it through
+    // `cron_deliver_response` / `cron_fan_out_targets`. `autonomous` really
+    // has no watcher (`background_lifecycle.rs` discards the whole result),
+    // but that claim is false for `cron` and must not appear for it.
+    let tools = vec!["channel_send".to_string()];
+    let section = build_channel_section("cron", Some("Alice"), Some("12345"), false, false, &tools);
+    assert!(
+        !section.contains("live user watching"),
+        "cron delivery can reach a real person; the prompt must not claim nobody reads the response: {section}"
+    );
+    assert!(
+        section.contains("background run"),
+        "channel_send still cannot reach the cron system channel"
+    );
+}
+
+#[test]
+fn test_channel_send_hint_background_run_does_not_recommend_notify_owner() {
+    // `tool_notify_owner` only sets `ToolResult.owner_notice`
+    // (tool_runner/notify.rs). That field is consumed solely by the
+    // interactive API surfaces (routes/agents/messaging.rs,
+    // routes/agents/sessions.rs) — the cron tick reads only
+    // `result.response` and the autonomous tick discards `result`
+    // entirely, so `owner_notice` is dropped on the floor for both.
+    // Recommending it here is the #7086 dead end.
+    let tools = vec!["channel_send".to_string()];
+    for channel in ["cron", "autonomous"] {
+        let section =
+            build_channel_section(channel, Some("Alice"), Some("12345"), false, false, &tools);
+        assert!(
+            !section.contains("notify_owner"),
+            "{channel}: notify_owner delivers nothing on this path, recommending it is a dead end: {section}"
+        );
+    }
+}
+
+/// #7995 rewrites this exact block from a different pre-image, and the two
+/// commits previously disagreed about whether `channel_send` may be used at
+/// all on a background turn — this one said "do NOT use it here" and then
+/// explained how to use it. Both now emit the same sentence, so whichever
+/// merges second the resolution is textual, not a choice between two
+/// instructions.
+#[test]
+fn test_channel_send_hint_background_run_wording_matches_7995() {
+    let tools = vec!["channel_send".to_string()];
+    for channel in ["cron", "autonomous"] {
+        let section =
+            build_channel_section(channel, Some("Alice"), Some("12345"), false, false, &tools);
+        assert!(
+            section.contains("This is a background run: no chat is attached to it"),
+            "{channel}: the background-run wording must stay byte-identical across \
+             #8149 and #7995, got: {section}"
+        );
+        assert!(
+            !section.contains("do NOT use it here"),
+            "{channel}: `channel_send` with an explicit real channel and recipient works \
+             on a background turn exactly as anywhere else, got: {section}"
+        );
+    }
+}
+
+#[test]
+fn test_channel_send_hint_webui_does_not_claim_automatic_media_delivery() {
+    // Nothing attaches a generated artefact to a webui turn. `tool_image_generate`
+    // returns `image_urls` (`/api/uploads/<id>`, minted by routes/media.rs)
+    // inside the tool result; it reaches the browser only when the agent's
+    // reply text embeds that URL.
+    let tools = vec!["channel_send".to_string()];
+    let section =
+        build_channel_section("webui", Some("Alice"), Some("user-1"), false, false, &tools);
+    assert!(
+        !section.contains("shown to the user automatically"),
+        "no mechanism attaches generated media to a webui turn automatically: {section}"
+    );
+    assert!(
+        section.contains("/api/uploads"),
+        "webui hint should point the agent at the actual URL contract: {section}"
+    );
+}
+
+#[test]
 fn test_user_name_known() {
     let mut ctx = basic_ctx();
     ctx.user_name = Some("Alice".to_string());

@@ -1,0 +1,1 @@
+`POST /api/goals/{id}/start` and `/resume` now validate `verify_max_retries` the same way they already validate `max_iterations`: an out-of-range or wrongly-typed value gets a 400 naming the field, instead of a bare `as u32` cast that silently wrapped a value like `u32::MAX + 1` down to something else entirely. (#7973) (@DaBlitzStein)

@@ -1,0 +1,3 @@
+The instruction a cron or autonomous turn receives about `channel_send` no longer contradicts itself within its own paragraph: it said "do NOT use it here" and then, in the next sentence, explained how to use it.
+`channel_send` reads its target channel and recipient straight from its own arguments and dispatches to that adapter, so a background turn reaches a person on a real channel exactly like any other turn; what is genuinely impossible is replying *into* `cron` or `autonomous`, which have no adapter.
+The wording is now byte-identical to the one #7995 writes into the same block from a different starting point, so the two commits no longer give an agent opposite instructions depending on which of them was merged last (#8149) (@DaBlitzStein)

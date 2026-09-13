@@ -995,6 +995,7 @@ pub async fn get_skill_detail(
         (status = 400, description = "Invalid request"),
         (status = 401, description = "No GitHub token configured"),
         (status = 404, description = "Skill not found"),
+        (status = 500, description = "Invalid skills.promotion configuration"),
         (status = 502, description = "GitHub request failed")
     )
 )]
@@ -1014,18 +1015,11 @@ pub async fn propose_skill_to_registry(
         .into_json_tuple();
     };
 
-    let registry_repo = state
-        .kernel
-        .config_snapshot()
-        .skills
-        .registry_repo
-        .clone()
-        .filter(|r| !r.trim().is_empty())
-        .unwrap_or_else(|| librefang_skills::registry_pr::DEFAULT_REGISTRY_REPO.to_string());
+    let skills_config = state.kernel.config_snapshot().skills.clone();
 
     let evolution = librefang_skills::evolution::get_evolution_info(&skill);
 
-    run_registry_proposal(&skill, &evolution, &registry_repo, &token).await
+    run_registry_proposal(&skill, &evolution, &skills_config, &token).await
 }
 
 /// Shared core for the two "propose to registry" routes: the installed-skill
@@ -1038,15 +1032,21 @@ pub async fn propose_skill_to_registry(
 async fn run_registry_proposal(
     skill: &librefang_skills::InstalledSkill,
     evolution: &librefang_skills::evolution::SkillEvolutionMeta,
-    registry_repo: &str,
+    skills_config: &librefang_types::config::SkillsConfig,
     token: &str,
 ) -> (StatusCode, Json<serde_json::Value>) {
+    let registry_repo = skills_config
+        .registry_repo
+        .clone()
+        .filter(|r| !r.trim().is_empty())
+        .unwrap_or_else(|| librefang_skills::registry_pr::DEFAULT_REGISTRY_REPO.to_string());
     let result = librefang_skills::registry_pr::propose_skill_to_registry(
         librefang_skills::registry_pr::ProposeRequest {
             skill,
             evolution,
-            registry_repo,
+            registry_repo: &registry_repo,
             token,
+            promotion: &skills_config.promotion,
         },
     )
     .await;
@@ -1065,6 +1065,14 @@ async fn run_registry_proposal(
         }
         Err(librefang_skills::SkillError::InvalidManifest(msg)) => {
             ApiErrorResponse::bad_request(msg).into_json_tuple()
+        }
+        // A server-side configuration error is not a malformed request: the
+        // promotion validators (`api_base_url`, `fork_owner`, `base_branch`,
+        // fork-parent) name the exact config key, and the value was
+        // operator-supplied, so it is echoed rather than scrubbed (#8179
+        // review).
+        Err(librefang_skills::SkillError::InvalidConfig(msg)) => {
+            ApiErrorResponse::internal(msg).into_json_tuple()
         }
         Err(librefang_skills::SkillError::NotFound(msg)) => {
             ApiErrorResponse::not_found(msg).into_json_tuple()
@@ -1100,6 +1108,7 @@ async fn run_registry_proposal(
         (status = 400, description = "Invalid candidate id"),
         (status = 401, description = "No GitHub token configured"),
         (status = 404, description = "Candidate not found"),
+        (status = 500, description = "Invalid skills.promotion configuration"),
         (status = 502, description = "GitHub request failed")
     )
 )]
@@ -1131,14 +1140,7 @@ pub async fn propose_pending_to_registry(
         .into_json_tuple();
     };
 
-    let registry_repo = state
-        .kernel
-        .config_snapshot()
-        .skills
-        .registry_repo
-        .clone()
-        .filter(|r| !r.trim().is_empty())
-        .unwrap_or_else(|| librefang_skills::registry_pr::DEFAULT_REGISTRY_REPO.to_string());
+    let skills_config = state.kernel.config_snapshot().skills.clone();
 
     // For an update candidate, carry the target skill's evolution history
     // into the PR description (version diff / changelog). For a create, or
@@ -1163,7 +1165,7 @@ pub async fn propose_pending_to_registry(
         Err(e) => return ApiErrorResponse::internal_scrub(e.to_string()).into_json_tuple(),
     };
 
-    let response = run_registry_proposal(&staged.skill, &evolution, &registry_repo, &token).await;
+    let response = run_registry_proposal(&staged.skill, &evolution, &skills_config, &token).await;
 
     // Best-effort cleanup of the staging directory — the proposal is done
     // (success or failure) and the temp tree is no longer needed.

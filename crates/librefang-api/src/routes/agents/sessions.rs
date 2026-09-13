@@ -746,6 +746,9 @@ pub async fn attach_session_stream(
         ) else {
             return StatusCode::TOO_MANY_REQUESTS.into_response();
         };
+        let ping_interval = std::time::Duration::from_secs(
+            state.kernel.config_ref().rate_limit.ws_ping_interval_secs,
+        );
 
         let upgrade = match crate::ws::ws_bearer_protocol(&headers) {
             Some(protocol) => ws.protocols([protocol]),
@@ -763,6 +766,7 @@ pub async fn attach_session_stream(
                         agent_id,
                         session_id,
                         connection_guard,
+                        ping_interval,
                     )
                 }),
             ),
@@ -860,14 +864,33 @@ async fn session_stream_websocket(
     agent_id: AgentId,
     session_id: librefang_types::agent::SessionId,
     _connection_guard: crate::ws::WsConnectionGuard,
+    ping_interval: std::time::Duration,
 ) {
     use axum::extract::ws::Message;
     use futures::SinkExt as _;
     use tokio::sync::broadcast::error::RecvError;
 
     let mut stream_state = SessionStreamState::new();
+    // Liveness probe. This socket holds a `WsConnectionGuard`, one of only
+    // `max_ws_per_ip` slots, and its loop exits on a turn-terminal event — so a
+    // dead peer on a turn that never terminates holds that slot indefinitely.
+    let pings_enabled = !ping_interval.is_zero();
+    let mut awaiting_pong = false;
     loop {
         tokio::select! {
+            _ = tokio::time::sleep(ping_interval), if pings_enabled => {
+                if awaiting_pong {
+                    tracing::info!(
+                        interval_secs = ping_interval.as_secs(),
+                        "session stream WebSocket peer did not answer a ping"
+                    );
+                    break;
+                }
+                if socket.send(Message::Ping(Default::default())).await.is_err() {
+                    break;
+                }
+                awaiting_pong = true;
+            }
             received = receiver.recv() => {
                 let event = match received {
                     Ok(event) => event,
@@ -915,6 +938,7 @@ async fn session_stream_websocket(
                 break;
             }
             incoming = socket.recv() => {
+                awaiting_pong = false;
                 match incoming {
                     Some(Ok(Message::Ping(data))) => {
                         if socket.send(Message::Pong(data)).await.is_err() {

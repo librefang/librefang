@@ -228,6 +228,15 @@
         }
       ]
     },
+    "capabilities": {
+      "description": "Kernel-global media capability routing — which provider and model services each modality the agent's own model cannot handle.\n\n```toml [capabilities] image_understanding = \"openai/gpt-4o\" speech_to_text = { provider = \"groq\", model = \"whisper-large-v3\" } ```\n\nEvery agent inherits this block; `agent.toml`'s own `[capabilities]` overrides it key by key. Resolution is agent > global > the historical `[media] image_provider` / `audio_provider` selectors > env-var auto-detection.",
+      "default": {},
+      "allOf": [
+        {
+          "$ref": "#/definitions/CapabilityRouting"
+        }
+      ]
+    },
     "channel_role_mapping": {
       "description": "Maps platform-native channel roles (Telegram admin, Discord guild roles, Slack workspace roles) to LibreFang `UserRole`. Used by `AuthManager::resolve_role_for_sender` after explicit `UserConfig.role` is consulted (explicit beats channel-derived; both beat default-deny).",
       "allOf": [
@@ -888,6 +897,19 @@
         }
       ]
     },
+    "model_router": {
+      "description": "Profile router settings. Complements `default_routing` above: the tier router maps a scored request onto three fixed model slots, while the profile router matches the task against named profiles that also carry a cost tier and a complexity ceiling. Off by default; an agent opts in with `mode = \"flexible\"` in its manifest `[model]` block.",
+      "default": {
+        "enabled": false,
+        "profiles_path": "model_profiles.toml",
+        "complexity_threshold": 0.30000001192092896
+      },
+      "allOf": [
+        {
+          "$ref": "#/definitions/ModelRouterConfig"
+        }
+      ]
+    },
     "network": {
       "description": "Network configuration.",
       "default": {
@@ -1185,6 +1207,7 @@
         "ws_messages_per_minute": 10,
         "ws_terminal_messages_per_minute": 3600,
         "ws_idle_timeout_secs": 1800,
+        "ws_ping_interval_secs": 30,
         "ws_debounce_ms": 100,
         "ws_debounce_chars": 200,
         "auth_rate_limit_per_ip": 10
@@ -1297,7 +1320,16 @@
           "GITHUB_*"
         ],
         "env_passthrough_per_skill": {},
-        "registry_repo": null
+        "registry_repo": null,
+        "promotion": {
+          "api_base_url": null,
+          "fork_owner": null,
+          "base_branch": null,
+          "head_branch_prefix": null,
+          "commit_author_name": null,
+          "commit_author_email": null,
+          "mode": "fork"
+        }
       },
       "allOf": [
         {
@@ -2422,6 +2454,98 @@
           "type": "integer",
           "format": "uint",
           "minimum": 0.0
+        }
+      }
+    },
+    "CapabilityRouting": {
+      "description": "The `[capabilities]` block — one target per media capability.\n\nExists twice, with the *same* shape: kernel-global in `config.toml` and per-agent in `agent.toml`. Resolution is agent > global > the historical auto-detection, and inheriting is simply leaving the key out. It is applied by folding each level onto a [`MediaConfig`] in turn — global at boot, agent at turn time — via [`MediaConfig::with_capability_routing`]; there is no separate routing-over-routing merge, so that is the one place the precedence lives.\n\nField names match [`MediaCapability`]'s serde spellings so the dashboard, the TUI, and the provider registry all label the same capability the same way. `vision` / `transcription` are accepted as aliases because those are the words operators actually use.",
+      "type": "object",
+      "properties": {
+        "image_generation": {
+          "description": "Generating an image.",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/CapabilityTarget"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "image_understanding": {
+          "description": "Describing an image the agent's own model cannot see.",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/CapabilityTarget"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "music_generation": {
+          "description": "Generating music.",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/CapabilityTarget"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "speech_to_text": {
+          "description": "Turning inbound speech into text.",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/CapabilityTarget"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "text_to_speech": {
+          "description": "Generating speech from text.",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/CapabilityTarget"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "video_generation": {
+          "description": "Generating video.",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/CapabilityTarget"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "CapabilityTarget": {
+      "description": "Which provider (and optionally which model) services one media capability.\n\nAccepts three TOML spellings so the same value can be typed into a single text input on the dashboard / TUI and still round-trip:\n\n```toml image_understanding = \"openai/gpt-4o\"                          # provider/model speech_to_text      = \"groq\"                                   # provider only image_generation    = { provider = \"openai\", model = \"gpt-image-1\" } ```\n\nBoth fields are independently optional so a per-agent override can change only the model and inherit the globally configured provider (see [`MediaConfig::with_capability_routing`], which is where resolution actually happens).",
+      "type": "object",
+      "properties": {
+        "model": {
+          "description": "Model id passed to that provider. `None` uses the provider default.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "provider": {
+          "description": "Provider id as registered in the provider registry (`openai`, `groq`, `anthropic`, `gemini`, …). `None` inherits the next level down.",
+          "type": [
+            "string",
+            "null"
+          ]
         }
       }
     },
@@ -5172,6 +5296,35 @@
         "obsidian"
       ]
     },
+    "ModelRouterConfig": {
+      "description": "Router configuration — `config.toml [model_router]`.",
+      "type": "object",
+      "properties": {
+        "complexity_threshold": {
+          "description": "Complexity threshold above which routing is allowed to leave the cheapest tier. Range 0.0–1.0.",
+          "default": 0.30000001192092896,
+          "type": "number",
+          "format": "float"
+        },
+        "default_profile": {
+          "description": "Profile name used when no profile matches the task.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "enabled": {
+          "description": "Master switch. When false the profile router is bypassed entirely and every agent keeps the provider/model in its own manifest.",
+          "default": false,
+          "type": "boolean"
+        },
+        "profiles_path": {
+          "description": "Profile catalog filename, resolved relative to the LibreFang home dir. When the file is absent the builtin profiles are used unchanged.",
+          "default": "model_profiles.toml",
+          "type": "string"
+        }
+      }
+    },
     "ModelRoutingConfig": {
       "description": "Model routing configuration — auto-selects cheap/mid/expensive models by complexity.",
       "type": "object",
@@ -6124,6 +6277,13 @@
           "format": "uint32",
           "minimum": 0.0
         },
+        "ws_ping_interval_secs": {
+          "description": "WebSocket ping interval in seconds. Default: 30. Set to 0 to disable.\n\nThe server sends a Ping frame after this much silence from the peer and closes the connection if a further interval passes with still nothing received, so a half-open socket is detected in at most twice this value. Without it the only thing that ever discovers a dead peer is a failing write, which means a connection sitting idle between turns — the state a chat socket spends most of its life in — is never probed at all. Detection is deliberately not tied to `ws_idle_timeout_secs`: an answered Ping must not count as activity, or an open browser tab would keep the idle timeout from ever firing.",
+          "default": 30,
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
         "ws_terminal_messages_per_minute": {
           "description": "Maximum terminal WebSocket input messages per minute per connection. Default: 3600.\n\nTerminal sessions send one WebSocket message per keystroke, so the generic `ws_messages_per_minute = 10` (sized for chat WS where a \"message\" is a whole utterance) is two orders of magnitude too low for an interactive PTY — typing `vim` + `:wq` in vim already exhausts the budget and the session appears to freeze. 3600/min (60/sec ≈ 720 WPM) covers any human typing speed plus TUI navigation bursts while still capping pathological floods.",
           "default": 3600,
@@ -6196,6 +6356,88 @@
           "type": "string"
         }
       }
+    },
+    "RegistryPromotionConfig": {
+      "description": "GitHub-side settings for promoting a skill or an agent type to the registry repository named by `skills.registry_repo`.\n\nThe engine lives in `librefang-skills::registry_pr` and is shared by `POST /api/skills/{name}/propose` and `POST /api/templates/{name}/promote`. Each field is optional and, when unset, reproduces exactly what the flow did before this section existed: `api.github.com`, a fork under whoever owns the token, the fork's own default branch as the PR base, a path-derived head-branch prefix, and no explicit commit author.\n\nThe GitHub token is deliberately *not* configured here. It continues to resolve from the `GITHUB_TOKEN` environment variable and then the vault, so no credential is readable back out of `GET /api/config`.",
+      "type": "object",
+      "properties": {
+        "api_base_url": {
+          "description": "Base URL of the GitHub REST API, without a trailing slash. Defaults to `https://api.github.com`. Set it to something like `https://github.example.com/api/v3` to promote against a GitHub Enterprise Server installation, which the flow could not reach at all while the host was a compiled-in constant. Must be `https://` — plain `http` is accepted only for loopback hosts — and it is not writable through `POST /api/config/set`: the promotion flow attaches the repo-scoped GitHub token to every request built from it, so the value is an edit-on-disk destination field (#8179 review).",
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "base_branch": {
+          "description": "Branch the pull request targets on the upstream registry, and the branch the head branch is cut from. Defaults to the default branch of the repository being pushed to.",
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "commit_author_email": {
+          "description": "Email recorded as the commit author and committer. See `commit_author_name` — both are required for either to apply.",
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "commit_author_name": {
+          "description": "Name recorded as the commit author and committer. Takes effect only together with `commit_author_email`; with either half missing, no author is sent and GitHub attributes the commit to the account that owns the token.",
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "fork_owner": {
+          "description": "Account or organisation the fork is created under. Defaults to the login `GET /user` reports for the token, which is the right answer whenever the fork belongs to the token's owner and the wrong one whenever an organisation owns it. Ignored in `direct_push` mode, where there is no fork.",
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "head_branch_prefix": {
+          "description": "First path component of the generated head branch name, which is otherwise `<prefix>/<name>-<timestamp>`. Defaults to `skill` for skill promotions and to the registry directory (`agent-types`, …) for everything else.",
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "mode": {
+          "description": "Whether to fork the registry or push to it directly.",
+          "default": "fork",
+          "allOf": [
+            {
+              "$ref": "#/definitions/RegistryPromotionMode"
+            }
+          ]
+        }
+      }
+    },
+    "RegistryPromotionMode": {
+      "description": "How the promotion flow gets a branch onto the registry repository.",
+      "oneOf": [
+        {
+          "description": "Fork the upstream registry under the promoting account, push the branch to that fork, and open a cross-repository pull request. This is what the flow has always done.",
+          "type": "string",
+          "enum": [
+            "fork"
+          ]
+        },
+        {
+          "description": "Push the branch straight to the upstream registry and open a same-repository pull request. Requires the token to carry write access to the registry, and is the mode to pick when the registry is an internal repository nobody is meant to fork.",
+          "type": "string",
+          "enum": [
+            "direct_push"
+          ]
+        }
+      ]
     },
     "ReloadConfig": {
       "description": "Configuration for config file watching and hot-reload.",
@@ -6989,6 +7231,23 @@
           "default": true,
           "type": "boolean"
         },
+        "promotion": {
+          "description": "GitHub-side settings for the promotion flow that `registry_repo` names its target for. Every field defaults to the behaviour the flow had before the section existed, so an installation that omits `[skills.promotion]` entirely is unaffected.",
+          "default": {
+            "api_base_url": null,
+            "fork_owner": null,
+            "base_branch": null,
+            "head_branch_prefix": null,
+            "commit_author_name": null,
+            "commit_author_email": null,
+            "mode": "fork"
+          },
+          "allOf": [
+            {
+              "$ref": "#/definitions/RegistryPromotionConfig"
+            }
+          ]
+        },
         "registry_repo": {
           "description": "Upstream registry repository, in GitHub `owner/name` form, targeted by the \"Propose to Registry\" actions for skills (`POST /api/skills/{name}/propose`) and agent types (`POST /api/templates/{name}/promote`). When unset the API falls back to the built-in default (`librefang/librefang-registry`). The proposal flow forks this repo under the authenticated GitHub user, pushes the files to a branch, and opens a pull request back upstream.",
           "default": null,
@@ -7161,7 +7420,7 @@
       ]
     },
     "TaskBoardConfig": {
-      "description": "Task-board (shared-task-queue) safety knobs.\n\nWhen a worker agent calls `task_claim` the task transitions to `in_progress` and `claimed_at` is stamped. If the worker's LLM stalls (empty response, crash, timeout) it will never call `task_complete` and the task would otherwise stay `in_progress` forever — no retry, no external signal, no way for the delegator to know something broke (issues #2923, #2926).\n\nThe sweeper runs in the kernel and flips stuck tasks back to `pending` so they can be reclaimed, clearing `assigned_to` in the process.\n\nConfigure in config.toml: ```toml [task_board] claim_ttl_secs = 600         # 10 minutes — auto-reset after this sweep_interval_secs = 30     # how often the sweeper runs assignee_wake = true         # wake the assignee even with no trigger declared ```\n\nSetting `claim_ttl_secs = 0` disables the sweeper entirely — useful for long-running human-in-the-loop tasks where a 10 minute reset would be wrong.\n\nEvery field is re-read live by its consumer — the sweeper re-reads its three knobs on each tick, and `assignee_wake` is read at the synthesis site on each `TaskPosted` — so the whole struct is hot-reloadable (`config_reload::build_reload_plan`).",
+      "description": "Task-board (shared-task-queue) safety knobs.\n\nWhen a worker agent calls `task_claim` the task transitions to `in_progress` and `claimed_at` is stamped. If the worker's LLM stalls (empty response, crash, timeout) it will never call `task_complete` and the task would otherwise stay `in_progress` forever — no retry, no external signal, no way for the delegator to know something broke (issues #2923, #2926).\n\nThe sweeper runs in the kernel and flips stuck tasks back to `pending` so they can be reclaimed, clearing `assigned_to` in the process.\n\nConfigure in config.toml: ```toml [task_board] claim_ttl_secs = 600         # 10 minutes — auto-reset after this sweep_interval_secs = 30     # how often the sweeper runs assignee_wake = true         # wake the assignee even with no trigger declared ```\n\nSetting `claim_ttl_secs = 0` disables the *global* clock, not a clock a task explicitly carries: a task that declared its own `timeout_secs` still expires, because that is a more specific statement than the global default. Useful for long-running human-in-the-loop tasks where a 10 minute reset would be wrong — as long as those tasks do not carry a per-task timeout.\n\nEvery field is re-read live by its consumer — the sweeper re-reads its three knobs on each tick, and `assignee_wake` is read at the synthesis site on each `TaskPosted` — so the whole struct is hot-reloadable (`config_reload::build_reload_plan`).",
       "type": "object",
       "properties": {
         "assignee_wake": {
@@ -7170,7 +7429,7 @@
           "type": "boolean"
         },
         "claim_ttl_secs": {
-          "description": "How long an `in_progress` task may stay claimed before the sweeper resets it to `pending`. Default: 600 s (10 minutes). 0 disables.",
+          "description": "How long an `in_progress` task may stay claimed before the sweeper resets it to `pending`. Default: 600 s (10 minutes). 0 disables the global clock only — a task that declared its own `timeout_secs` still expires.",
           "default": 600,
           "type": "integer",
           "format": "uint64",

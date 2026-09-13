@@ -129,6 +129,7 @@ mod goal_lifecycle;
 mod hands_lifecycle;
 mod llm_drivers;
 mod mcp_setup;
+pub use mcp_setup::McpReconnectError;
 mod mcp_summary;
 mod messaging;
 pub mod mission_workspace;

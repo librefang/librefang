@@ -84,6 +84,23 @@ export interface ManifestFormState {
     ofp_connect: string[];
     agent_spawn: boolean;
     ofp_discover: boolean;
+    /**
+     * Media capability routing, flattened into `[capabilities]` exactly as the
+     * kernel reads it. Each value is the `"provider/model"` shorthand, or a
+     * bare provider id.
+     *
+     * An **empty string means inherit** the kernel-global `[capabilities]`
+     * block — the key is then omitted from the emitted TOML entirely, which is
+     * what inheritance looks like on disk. There is no separate "inherit"
+     * sentinel precisely so that clearing the field and saving cannot leave a
+     * value pinned behind.
+     */
+    image_understanding: string;
+    speech_to_text: string;
+    image_generation: string;
+    text_to_speech: string;
+    video_generation: string;
+    music_generation: string;
   };
 
   thinking: {
@@ -218,6 +235,12 @@ export const emptyManifestForm = (): ManifestFormState => ({
     ofp_connect: [],
     agent_spawn: false,
     ofp_discover: false,
+    image_understanding: "",
+    speech_to_text: "",
+    image_generation: "",
+    text_to_speech: "",
+    video_generation: "",
+    music_generation: "",
   },
   thinking: { enabled: false, budget_tokens: "", stream_thinking: false },
   autonomous: {
@@ -254,6 +277,54 @@ export const emptyManifestForm = (): ManifestFormState => ({
   generate_identity_files: true,
   workspaces: [],
 });
+
+/**
+ * The media capabilities the form renders, in the order they appear in the
+ * "Capabilities" section. Understanding first, then generation — that is the
+ * order an operator reasons about them in, and the first two are the ones that
+ * change how an inbound message is handled.
+ */
+export const CAPABILITY_ROUTING_KEYS = [
+  "image_understanding",
+  "speech_to_text",
+  "image_generation",
+  "text_to_speech",
+  "video_generation",
+  "music_generation",
+] as const;
+
+export type CapabilityRoutingKey = (typeof CAPABILITY_ROUTING_KEYS)[number];
+
+/** Kernel-side aliases → the canonical key the form stores. */
+const CAPABILITY_ROUTING_ALIASES: Record<string, CapabilityRoutingKey> = {
+  vision: "image_understanding",
+  transcription: "speech_to_text",
+  speech: "text_to_speech",
+};
+
+/**
+ * Read one routing value out of a parsed `[capabilities]` table.
+ *
+ * Accepts both spellings the kernel accepts — the `"provider/model"` string
+ * and the `{ provider, model }` table — and normalises the table form back to
+ * the shorthand, because the form edits a single text field. A table carrying
+ * only `model` round-trips as `"/model"`, which the kernel parses back to an
+ * empty provider plus that model, preserving the inherit-the-provider case.
+ */
+function readCapabilityRouting(capTable: TomlTable, key: CapabilityRoutingKey): string {
+  const aliasKey = Object.keys(CAPABILITY_ROUTING_ALIASES).find(
+    (a) => CAPABILITY_ROUTING_ALIASES[a] === key,
+  );
+  const raw = capTable[key] ?? (aliasKey ? capTable[aliasKey] : undefined);
+  if (typeof raw === "string") return raw.trim();
+  if (isTomlTable(raw)) {
+    const provider = typeof raw.provider === "string" ? raw.provider.trim() : "";
+    const model = typeof raw.model === "string" ? raw.model.trim() : "";
+    if (!provider && !model) return "";
+    return model ? `${provider}/${model}` : provider;
+  }
+  return "";
+}
 
 // Keys the form fully owns within each scope. Anything else is preserved
 // as `extras` and re-emitted on serialize.
@@ -332,6 +403,15 @@ const FORM_CAPABILITY_KEYS = new Set([
   "ofp_connect",
   "agent_spawn",
   "ofp_discover",
+  // Media capability routing (flattened into `[capabilities]` kernel-side).
+  ...CAPABILITY_ROUTING_KEYS,
+  // Aliases the kernel accepts. Listed so a manifest that spells the key the
+  // other way is loaded into the form field rather than silently preserved as
+  // an "extra" — which would then be re-emitted alongside the form's own key
+  // and give the block two spellings of the same setting.
+  "vision",
+  "transcription",
+  "speech",
 ]);
 const FORM_THINKING_KEYS = new Set(["budget_tokens", "stream_thinking"]);
 
@@ -440,6 +520,17 @@ const parseFloatish = (raw: string): number | null => {
   if (!Number.isFinite(n)) return null;
   if (n < 0) return null; // all our float fields are cost/quota — never negative
   return n;
+};
+
+// The number inputs declare min/max, but min/max does not stop pasted or
+// programmatic values on a non-submitted form. `PATCH /api/agents/{id}/model`
+// rejects an out-of-range sampling value with an explicit 400 rather than
+// clamping it; `validateManifestForm` (below) mirrors those same ranges so
+// this editor reports the same conflict instead of silently rewriting the
+// number to one the operator never chose (#8112 review).
+const isInRange = (raw: string, min: number, max: number): boolean => {
+  const v = parseSignedFloat(raw);
+  return v === null || (v >= min && v <= max);
 };
 
 const writeStringScalar = (lines: string[], key: string, value: string): void => {
@@ -585,9 +676,9 @@ export const serializeManifestForm = (
   writeStringScalar(modelBody, "provider", form.model.provider.trim());
   writeStringScalar(modelBody, "model", form.model.model.trim());
   writeStringScalar(modelBody, "system_prompt", form.model.system_prompt);
-  writeNumberScalar(modelBody, "temperature", parseFloatish(form.model.temperature));
+  writeNumberScalar(modelBody, "temperature", parseSignedFloat(form.model.temperature));
   writeNumberScalar(modelBody, "max_tokens", parseInteger(form.model.max_tokens));
-  writeNumberScalar(modelBody, "top_p", parseFloatish(form.model.top_p));
+  writeNumberScalar(modelBody, "top_p", parseSignedFloat(form.model.top_p));
   writeNumberScalar(modelBody, "frequency_penalty", parseSignedFloat(form.model.frequency_penalty));
   writeNumberScalar(modelBody, "presence_penalty", parseSignedFloat(form.model.presence_penalty));
   writeNumberScalar(modelBody, "context_window", parseInteger(form.model.context_window));
@@ -625,6 +716,13 @@ export const serializeManifestForm = (
   if (form.capabilities.ofp_connect.length) capabilityBody.push(`ofp_connect = ${tomlArray(form.capabilities.ofp_connect)}`);
   if (form.capabilities.agent_spawn) writeBoolScalar(capabilityBody, "agent_spawn", true);
   if (form.capabilities.ofp_discover) writeBoolScalar(capabilityBody, "ofp_discover", true);
+  // Media capability routing. An empty field is *omitted*, not written as
+  // `""` — omission is what the kernel reads as "inherit the global block",
+  // and an empty string would pin an empty provider instead.
+  for (const key of CAPABILITY_ROUTING_KEYS) {
+    const spec = form.capabilities[key].trim();
+    if (spec) capabilityBody.push(`${key} = ${escapeTomlString(spec)}`);
+  }
   const capabilityExtras = renderExtraScalars(safeCapabilityExtras);
   if (capabilityBody.length || capabilityExtras.length) {
     lines.push("", "[capabilities]", ...capabilityBody, ...capabilityExtras);
@@ -968,6 +1066,14 @@ export const validateManifestForm = (
       errors.push("response_format.schema");
     }
   }
+  // Sampling preferences — same ranges `PATCH /api/agents/{id}/model` enforces
+  // (crates/librefang-api/src/routes/agents/config.rs), so an out-of-range
+  // value is reported here too instead of reaching the TOML at all (#8112).
+  if (!isInRange(form.model.temperature, 0, 2)) errors.push("model.temperature");
+  if (!isInRange(form.model.top_p, 0, 1)) errors.push("model.top_p");
+  if (!isInRange(form.model.frequency_penalty, -2, 2)) errors.push("model.frequency_penalty");
+  if (!isInRange(form.model.presence_penalty, -2, 2)) errors.push("model.presence_penalty");
+
   // Folder rows: duplicate names produce a duplicate TOML key (hard parse
   // failure on the daemon), and `path` mirrors the kernel's rule — relative
   // to workspaces_dir, no `..`. A mount row carries an absolute host path
@@ -1172,6 +1278,9 @@ export const parseManifestToml = (toml: string): ParseResult | ParseError => {
   form.capabilities.ofp_connect = asStringArray(capTable.ofp_connect);
   form.capabilities.agent_spawn = asBoolean(capTable.agent_spawn, false);
   form.capabilities.ofp_discover = asBoolean(capTable.ofp_discover, false);
+  for (const key of CAPABILITY_ROUTING_KEYS) {
+    form.capabilities[key] = readCapabilityRouting(capTable, key);
+  }
   extras.capabilities = stripKnown(capTable, FORM_CAPABILITY_KEYS);
 
   // [thinking]

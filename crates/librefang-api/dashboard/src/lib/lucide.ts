@@ -95,6 +95,7 @@ export { default as MessageSquare } from "lucide-react/dist/esm/icons/message-sq
 export { default as Mic } from "lucide-react/dist/esm/icons/mic.mjs";
 export { default as MicOff } from "lucide-react/dist/esm/icons/mic-off.mjs";
 export { default as Minimize2 } from "lucide-react/dist/esm/icons/minimize-2.mjs";
+export { default as Minus } from "lucide-react/dist/esm/icons/minus.mjs";
 export { default as Monitor } from "lucide-react/dist/esm/icons/monitor.mjs";
 export { default as Moon } from "lucide-react/dist/esm/icons/moon.mjs";
 export { default as MoreHorizontal } from "lucide-react/dist/esm/icons/ellipsis.mjs";
@@ -121,6 +122,7 @@ export { default as Repeat } from "lucide-react/dist/esm/icons/repeat.mjs";
 export { default as Rocket } from "lucide-react/dist/esm/icons/rocket.mjs";
 export { default as RotateCcw } from "lucide-react/dist/esm/icons/rotate-ccw.mjs";
 export { default as RotateCw } from "lucide-react/dist/esm/icons/rotate-cw.mjs";
+export { default as Route } from "lucide-react/dist/esm/icons/route.mjs";
 export { default as Save } from "lucide-react/dist/esm/icons/save.mjs";
 export { default as Scan } from "lucide-react/dist/esm/icons/scan.mjs";
 export { default as Scissors } from "lucide-react/dist/esm/icons/scissors.mjs";

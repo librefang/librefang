@@ -51,11 +51,14 @@ use crate::types;
         routes::update_agent_type,
         routes::delete_agent_type,
         routes::promote_agent_type,
+        routes::get_registry_diff,
+        routes::restore_from_registry,
         routes::list_template_history,
         routes::restore_template_version,
         routes::list_commands,
         routes::get_command,
         routes::queue_status,
+        routes::task_queue_post_root,
 
         // ── Agents ──
         routes::list_agents,
@@ -99,6 +102,8 @@ use crate::types;
         routes::set_agent_mcp_servers,
         routes::get_agent_channels,
         routes::set_agent_channels,
+        routes::get_agent_model_routing,
+        routes::set_agent_model_routing,
         routes::update_agent_identity,
         routes::patch_agent_config,
         routes::patch_hand_agent_runtime_config,
@@ -114,10 +119,12 @@ use crate::types;
         routes::inject_message,
         routes::push_message,
         routes::reload_agent_manifest,
+        routes::get_agent_manifest_toml,
         routes::suspend_agent,
         routes::resume_agent,
         routes::agent_metrics,
         routes::agent_logs,
+        routes::list_agent_manifest_history,
 
         // ── Bulk Operations ──
         routes::bulk_create_agents,
@@ -219,6 +226,7 @@ use crate::types;
         routes::add_custom_model,
         routes::remove_custom_model,
         routes::list_providers,
+        routes::list_model_router_profiles,
         routes::get_provider,
         routes::set_provider_key,
         routes::delete_provider_key,
@@ -355,6 +363,15 @@ use crate::types;
         routes::effective_permissions,
         routes::authz::whoami,
 
+        // ── Media generation / understanding ──
+        routes::generate_image,
+        routes::synthesize_speech,
+        routes::submit_video,
+        routes::poll_video_task,
+        routes::generate_music,
+        routes::transcribe_audio,
+        routes::list_media_providers,
+
         // ── Memory (KV) ──
         routes::get_agent_kv,
         routes::get_agent_kv_key,
@@ -416,6 +433,15 @@ use crate::types;
 
         // ── Inbox ──
         routes::inbox_status,
+
+        // ── Knowledge bases ──
+        routes::knowledge::list_bases,
+        routes::knowledge::create_base,
+        routes::knowledge::delete_base,
+        routes::knowledge::list_documents,
+        routes::knowledge::put_document,
+        routes::knowledge::delete_document,
+        routes::knowledge::set_holders,
 
         // ── Webhooks ──
         routes::webhook_wake,
@@ -599,6 +625,7 @@ use crate::types;
         (name = "users", description = "RBAC user management — CRUD over UserConfig entries plus bulk CSV import"),
         (name = "groups", description = "User groups — CRUD over GroupConfig entries, membership, and the per-user reverse lookup"),
         (name = "vault", description = "Credential vault writes — store, list presence of, and delete the secrets the daemon resolves at runtime. Values are never returned"),
+        (name = "media", description = "Media generation (image, speech, video, music) and transcription; provider selection follows the `[capabilities]` routing block"),
     ),
 )]
 pub struct ApiDoc;

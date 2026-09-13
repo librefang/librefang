@@ -1,0 +1,3 @@
+`skills.promotion.api_base_url` no longer accepts a plain `http://` origin unless the host is a loopback address, and `POST /api/config/set` now refuses to write `api_base_url`, `fork_owner`, or `base_branch` at all.
+Every request the registry promotion flow makes attaches the repo-scoped GitHub token as an `Authorization: Bearer` header, so a writable, unencrypted, or attacker-chosen value in any of the three handed that credential — or the files it pushes — to a destination the caller picked rather than the operator.
+The three fields now join `proxy.http_proxy`, `telemetry.otlp_endpoint` and `audit.anchor_path` as edit-on-disk destination fields instead of dashboard-tunable ones. (#8179) (@DaBlitzStein)

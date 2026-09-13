@@ -6389,3 +6389,551 @@ async fn a_message_sent_while_a_turn_runs_is_not_lost_and_keeps_its_order() {
 
     socket.close(None).await.unwrap();
 }
+
+/// Spawn an agent through the production router and return its id.
+const EXPORT_TEST_KEY: &str = "export-audit-key";
+
+async fn full_router_spawn_agent(app: &Router, manifest: &str) -> String {
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/agents")
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {EXPORT_TEST_KEY}"))
+                .body(Body::from(
+                    serde_json::json!({ "manifest_toml": manifest }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED, "spawn must succeed");
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    body["agent_id"].as_str().unwrap().to_string()
+}
+
+/// GET through the production router, returning status, content-type and body.
+async fn full_router_get(app: &Router, uri: &str) -> (StatusCode, String, String) {
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(uri)
+                .header("authorization", format!("Bearer {EXPORT_TEST_KEY}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = resp.status();
+    let content_type = resp
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    (status, content_type, String::from_utf8_lossy(&bytes).into())
+}
+
+/// A session id that does not exist is a 404 from the handler, not a 500.
+///
+/// The kernel returns the miss as `LibreFangError::Internal("Session not
+/// found")`, and `kernel_err_to_status` types only `AgentNotFound` and
+/// `AgentAlreadyExists` — everything else falls through to 500. The scrub in
+/// `kernel_err_body` then replaces the message with the generic internal-error
+/// body, so asking for a session that simply is not there returns
+/// `{"error":"Internal server error"}` with no way to tell a typo from an
+/// outage.
+///
+/// This runs against `start_full_router`, the real `server::build_router`.
+/// `start_test_server` mounts a hand-picked subset that does not include this
+/// route, so the same assertions there pass against the axum fallback without
+/// the handler ever running — which is why the content type is asserted too.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_export_missing_session_is_404_not_500() {
+    let harness = start_full_router(EXPORT_TEST_KEY).await;
+    let agent_id = full_router_spawn_agent(&harness.app, TEST_MANIFEST).await;
+
+    // Well-formed UUID, no such session. A malformed one is already a 400.
+    const MISSING_SESSION: &str = "11111111-1111-4111-8111-111111111111";
+    let (status, content_type, body) = full_router_get(
+        &harness.app,
+        &format!("/api/agents/{agent_id}/sessions/{MISSING_SESSION}/export"),
+    )
+    .await;
+
+    assert!(
+        content_type.starts_with("application/json"),
+        "must be the handler's answer, not the axum fallback: \
+         content-type={content_type:?} body={body:?}"
+    );
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "a missing session must be a 404, not a server fault: {body}"
+    );
+}
+
+/// A session that exists but belongs to another agent is also a 404.
+///
+/// Same kernel function, same `Internal(String)` shape, same 500. 404 rather
+/// than 403 matches what `can_access_agent` already does one branch earlier in
+/// this handler: refusing without confirming the resource exists.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_export_session_of_another_agent_is_404_not_500() {
+    let harness = start_full_router(EXPORT_TEST_KEY).await;
+
+    let agent_a = full_router_spawn_agent(&harness.app, TEST_MANIFEST).await;
+    let manifest_b =
+        TEST_MANIFEST.replace("name = \"test-agent\"", "name = \"test-agent-export-b\"");
+    let agent_b = full_router_spawn_agent(&harness.app, &manifest_b).await;
+
+    let (status, _, body) =
+        full_router_get(&harness.app, &format!("/api/agents/{agent_a}/session")).await;
+    assert_eq!(status, StatusCode::OK, "agent A session: {body}");
+    let session_a = serde_json::from_str::<serde_json::Value>(&body).unwrap()["session_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let (status, content_type, body) = full_router_get(
+        &harness.app,
+        &format!("/api/agents/{agent_b}/sessions/{session_a}/export"),
+    )
+    .await;
+
+    assert!(
+        content_type.starts_with("application/json"),
+        "must be the handler's answer, not the axum fallback: \
+         content-type={content_type:?} body={body:?}"
+    );
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "another agent's session must be a 404, not a server fault: {body}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Task Board: assignee validation and enforced per-task limits
+// ---------------------------------------------------------------------------
+//
+// These go through `start_full_router`, i.e. `server::build_router`, because
+// the hand-rolled router in `start_test_server` never registered `/api/tasks`
+// — against it every assertion below would pass or fail on a 404 that has
+// nothing to do with the task queue.
+
+/// Drive one request through the real router and decode the JSON body.
+///
+/// `oneshot` carries no peer address, so without an explicit loopback
+/// `ConnectInfo` the auth layer classifies every request as remote and answers
+/// 401 before the handler runs — the whole suite would then assert against the
+/// auth layer rather than the task queue.
+async fn task_request(
+    harness: &FullRouterHarness,
+    method: &str,
+    uri: &str,
+    body: Option<serde_json::Value>,
+) -> (StatusCode, serde_json::Value) {
+    let builder = Request::builder().method(method).uri(uri);
+    let mut request = match body {
+        Some(b) => builder
+            .header("content-type", "application/json")
+            .body(Body::from(b.to_string()))
+            .unwrap(),
+        None => builder.body(Body::empty()).unwrap(),
+    };
+    request
+        .extensions_mut()
+        .insert(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+            [127, 0, 0, 1],
+            0,
+        ))));
+
+    let resp = harness.app.clone().oneshot(request).await.unwrap();
+    let status = resp.status();
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+    (status, json)
+}
+
+/// POST a task body against the real router, returning `(status, json)`.
+async fn post_task(
+    harness: &FullRouterHarness,
+    body: serde_json::Value,
+) -> (StatusCode, serde_json::Value) {
+    task_request(harness, "POST", "/api/tasks", Some(body)).await
+}
+
+async fn get_json(harness: &FullRouterHarness, uri: &str) -> (StatusCode, serde_json::Value) {
+    task_request(harness, "GET", uri, None).await
+}
+
+/// `POST /api/tasks` used to accept any `assigned_to` string. A task addressed
+/// to an agent that does not exist was stored `pending` and stayed there
+/// forever: the sweeper only touches `in_progress`, and `task_claim` refuses
+/// the unknown agent with `AgentNotFound`, so nothing ever moved it and nothing
+/// said why. The asymmetry between the two ends is the bug — this asserts the
+/// post end now refuses too.
+#[tokio::test(flavor = "multi_thread")]
+async fn task_post_rejects_unknown_assignee() {
+    let harness = start_full_router("").await;
+
+    let (status, body) = post_task(
+        &harness,
+        serde_json::json!({
+            "title": "Orphan",
+            "description": "Assigned to nobody real",
+            "assigned_to": "no-such-agent",
+        }),
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "an assignee that resolves to no agent must be refused, not queued forever (body: {body})"
+    );
+    let err = body["error"].as_str().unwrap_or_default();
+    assert!(
+        err.contains("assigned_to") && err.contains("no-such-agent"),
+        "the error must name the offending field and value, got: {err}"
+    );
+
+    // The decisive part: nothing was written. A 400 that still queued the row
+    // would leave the exact ghost task this rejection exists to prevent.
+    let (status, body) = get_json(&harness, "/api/tasks").await;
+    assert_eq!(status, StatusCode::OK);
+    let tasks = body["tasks"].as_array().unwrap();
+    assert!(
+        !tasks.iter().any(|t| t["title"] == "Orphan"),
+        "the rejected task must not have been stored"
+    );
+}
+
+/// `POST /api/comms/task` is the dashboard's path onto the same queue as
+/// `POST /api/tasks`, but it had its own `Err(e) => internal_scrub(e)` catch-all
+/// with no `AgentNotFound` arm, so the same unresolvable assignee that
+/// `/api/tasks` refuses with 400 blew this route up as a 500. Asserts the two
+/// routes now agree.
+#[tokio::test(flavor = "multi_thread")]
+async fn comms_task_rejects_unknown_assignee_with_400_not_500() {
+    let harness = start_full_router("").await;
+
+    let (status, body) = task_request(
+        &harness,
+        "POST",
+        "/api/comms/task",
+        Some(serde_json::json!({
+            "title": "Orphan",
+            "description": "Assigned to nobody real",
+            "assigned_to": "no-such-agent",
+        })),
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "an assignee that resolves to no agent must be refused as a bad request, not 500'd (body: {body})"
+    );
+    let err = body["error"].as_str().unwrap_or_default();
+    assert!(
+        err.contains("assigned_to") && err.contains("no-such-agent"),
+        "the error must name the offending field and value, got: {err}"
+    );
+}
+
+/// The other half of the `/api/comms/task` ↔ `/api/tasks` agreement: this
+/// route hardcoded `TaskPostOptions::default()`, so a client sending
+/// `priority` / `timeout_secs` got a 201 for a task queued at priority 0 with
+/// no per-task deadline, and no way to tell (#7974 review).
+///
+/// Asserts against the claim queue rather than the read-back alone: the
+/// read-back proves the columns were written, the claim proves the value is
+/// the one the `ORDER BY` uses. Both matter — a route that stored `priority`
+/// somewhere the queue never reads would pass a read-back-only assertion.
+#[tokio::test(flavor = "multi_thread")]
+async fn comms_task_honours_priority_and_timeout_secs() {
+    let harness = start_full_router("").await;
+
+    // Posted first and with the lower priority, so age alone would claim it
+    // first. Only a priority that actually reached the INSERT reorders these.
+    let (status, low) = task_request(
+        &harness,
+        "POST",
+        "/api/comms/task",
+        Some(serde_json::json!({
+            "title": "Low",
+            "description": "d",
+            "priority": 0,
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "body: {low}");
+    let low = low["task_id"].as_str().unwrap().to_string();
+
+    let (status, high) = task_request(
+        &harness,
+        "POST",
+        "/api/comms/task",
+        Some(serde_json::json!({
+            "title": "High",
+            "description": "d",
+            "priority": 5,
+            "timeout_secs": 300,
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "body: {high}");
+    let high = high["task_id"].as_str().unwrap().to_string();
+
+    let (_, task) = get_json(&harness, &format!("/api/tasks/{high}")).await;
+    assert_eq!(
+        task["priority"], 5,
+        "priority must survive `/api/comms/task`, not be replaced by the default 0"
+    );
+    assert_eq!(
+        task["timeout_secs"], 300,
+        "timeout_secs must survive `/api/comms/task`, not be dropped to NULL"
+    );
+
+    let substrate = harness.state.kernel.memory_substrate();
+    let claimed = substrate
+        .task_claim("worker", Some("worker"))
+        .await
+        .unwrap()
+        .expect("a pending task is claimable");
+    assert_eq!(
+        claimed["id"], high,
+        "the priority posted through /api/comms/task must outrank age in the claim queue"
+    );
+    let claimed = substrate
+        .task_claim("worker", Some("worker"))
+        .await
+        .unwrap()
+        .expect("the second task is still claimable");
+    assert_eq!(claimed["id"], low);
+}
+
+/// An unassigned task is legitimate — it is the "any worker may claim this"
+/// form that `task_claim` matches via `assigned_to = ''`. Validation must not
+/// have turned the optional field into a required one.
+#[tokio::test(flavor = "multi_thread")]
+async fn task_post_still_accepts_an_absent_assignee() {
+    let harness = start_full_router("").await;
+
+    for body in [
+        serde_json::json!({"title": "Unowned", "description": "anyone"}),
+        serde_json::json!({"title": "Unowned2", "description": "anyone", "assigned_to": ""}),
+    ] {
+        let (status, resp) = post_task(&harness, body.clone()).await;
+        assert_eq!(
+            status,
+            StatusCode::CREATED,
+            "unassigned tasks must still be accepted ({body} -> {resp})"
+        );
+    }
+}
+
+/// The round trip an operator actually performs: pick a real agent from the
+/// registry, post, and read the task back with the assignment intact.
+#[tokio::test(flavor = "multi_thread")]
+async fn task_post_accepts_a_real_agent_by_id_and_by_name() {
+    let harness = start_full_router("").await;
+
+    let (status, spawned) = task_request(
+        &harness,
+        "POST",
+        "/api/agents",
+        Some(serde_json::json!({"manifest_toml": TEST_MANIFEST})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "spawn failed: {spawned}");
+    let agent_id = spawned["agent_id"].as_str().unwrap().to_string();
+
+    // Both spellings are accepted because `task_claim` matches both (#2841);
+    // rejecting the name here would break every task posted before the
+    // dashboard picker started sending ids.
+    for (label, assignee) in [
+        ("uuid", agent_id.clone()),
+        ("name", "test-agent".to_string()),
+    ] {
+        let (status, created) = post_task(
+            &harness,
+            serde_json::json!({
+                "title": format!("Real {label}"),
+                "description": "Assigned to a registered agent",
+                "assigned_to": assignee,
+            }),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::CREATED,
+            "{label} assignment must be accepted (body: {created})"
+        );
+        let task_id = created["id"].as_str().unwrap().to_string();
+
+        let (status, task) = get_json(&harness, &format!("/api/tasks/{task_id}")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(task["assigned_to"], assignee, "{label} must round-trip");
+        assert_eq!(task["status"], "pending");
+    }
+}
+
+/// `priority` is enforced, not decorative: the claim queue is ordered
+/// `priority DESC, created_at ASC`. Posting the low-priority task *first* is
+/// the point — under the historical hard-coded `priority = 0` both rows tie
+/// and age alone decides, so this asserts the value survives the HTTP layer,
+/// the kernel and the INSERT all the way to the ORDER BY.
+#[tokio::test(flavor = "multi_thread")]
+async fn task_priority_is_stored_and_orders_the_claim_queue() {
+    let harness = start_full_router("").await;
+
+    let (status, low) = post_task(
+        &harness,
+        serde_json::json!({"title": "Low", "description": "d", "priority": 0}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let low = low["id"].as_str().unwrap().to_string();
+
+    let (status, high) = post_task(
+        &harness,
+        serde_json::json!({"title": "High", "description": "d", "priority": 5}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let high = high["id"].as_str().unwrap().to_string();
+
+    // Read-back: the board shows the priority the queue will order by.
+    let (_, task) = get_json(&harness, &format!("/api/tasks/{high}")).await;
+    assert_eq!(task["priority"], 5, "priority must survive the round trip");
+
+    // Enforcement: the later high-priority task is claimed before the older
+    // low-priority one.
+    let substrate = harness.state.kernel.memory_substrate();
+    let claimed = substrate
+        .task_claim("worker", Some("worker"))
+        .await
+        .unwrap()
+        .expect("a pending task is claimable");
+    assert_eq!(
+        claimed["id"], high,
+        "priority DESC must outrank age in the claim queue"
+    );
+
+    let claimed = substrate
+        .task_claim("worker", Some("worker"))
+        .await
+        .unwrap()
+        .expect("the second task is still claimable");
+    assert_eq!(claimed["id"], low);
+}
+
+/// A per-task `timeout_secs` overrides the global `[task_board]
+/// claim_ttl_secs` at the one place that enforces a claim deadline — the
+/// stuck-task sweeper.
+#[tokio::test(flavor = "multi_thread")]
+async fn task_timeout_secs_overrides_the_global_claim_ttl() {
+    let harness = start_full_router("").await;
+
+    let (status, created) = post_task(
+        &harness,
+        serde_json::json!({
+            "title": "Quick probe",
+            "description": "one-second budget",
+            "timeout_secs": 1,
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let task_id = created["id"].as_str().unwrap().to_string();
+
+    let (_, task) = get_json(&harness, &format!("/api/tasks/{task_id}")).await;
+    assert_eq!(
+        task["timeout_secs"], 1,
+        "the deadline must be readable back"
+    );
+
+    let substrate = harness.state.kernel.memory_substrate();
+    let claimed = substrate
+        .task_claim("worker", Some("worker"))
+        .await
+        .unwrap()
+        .expect("the posted task is claimable");
+    assert_eq!(claimed["id"], task_id);
+
+    // Back-date `claimed_at` directly instead of racing a real 1s deadline
+    // against however long the test runner takes to get here — an
+    // immediate assert right after the claim, with nothing to fall back on
+    // if the process stalls even briefly, is exactly the kind of margin-free
+    // timing check that turns into a false red under load.
+    let set_claimed_at = |age: chrono::Duration| {
+        let conn = substrate.pool().get().unwrap();
+        let claimed_at = (chrono::Utc::now() - age).to_rfc3339();
+        conn.execute(
+            "UPDATE task_queue SET claimed_at = ?1 WHERE id = ?2",
+            rusqlite::params![claimed_at, task_id],
+        )
+        .unwrap();
+    };
+
+    // Before the deadline the sweeper must leave it alone, so the reset below
+    // is attributable to the elapsed timeout and not to an always-reset bug.
+    set_claimed_at(chrono::Duration::milliseconds(200));
+    let reset = substrate.task_reset_stuck(3600, 0).await.unwrap();
+    assert!(
+        reset.is_empty(),
+        "a claim 200ms old is not yet past its 1s deadline, got {reset:?}"
+    );
+
+    // A one-hour global TTL would leave this claimed; the row's own 1s wins.
+    set_claimed_at(chrono::Duration::seconds(5));
+    let reset = substrate.task_reset_stuck(3600, 0).await.unwrap();
+    assert_eq!(
+        reset,
+        vec![task_id.clone()],
+        "the per-task timeout must be the deadline the sweeper enforces"
+    );
+
+    let (_, task) = get_json(&harness, &format!("/api/tasks/{task_id}")).await;
+    assert_eq!(
+        task["status"], "pending",
+        "the reclaimed task returns to the queue"
+    );
+}
+
+/// Malformed limits are refused rather than silently coerced to the default: a
+/// caller that sent `"priority": "high"` should learn that, not get a 201 for a
+/// task the queue orders as if it had said nothing.
+#[tokio::test(flavor = "multi_thread")]
+async fn task_post_rejects_malformed_limits() {
+    let harness = start_full_router("").await;
+
+    for (field, value) in [
+        ("priority", serde_json::json!("high")),
+        ("timeout_secs", serde_json::json!(-5)),
+        ("timeout_secs", serde_json::json!("soon")),
+    ] {
+        let mut body = serde_json::json!({"title": "Bad", "description": "d"});
+        body[field] = value.clone();
+        let (status, resp) = post_task(&harness, body).await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "{field} = {value} must be rejected, not coerced to the default (got {resp})"
+        );
+    }
+}

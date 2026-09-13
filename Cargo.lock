@@ -4593,6 +4593,7 @@ dependencies = [
  "tracing-opentelemetry",
  "tracing-subscriber",
  "unic-langid",
+ "urlencoding",
  "uuid",
  "walkdir",
  "which",
@@ -4778,6 +4779,7 @@ dependencies = [
  "totp-rs",
  "tracing",
  "tracing-subscriber",
+ "url",
  "uuid",
  "wiremock",
  "zeroize",
@@ -5068,6 +5070,7 @@ dependencies = [
  "serial_test",
  "tempfile",
  "tokio",
+ "toml 1.1.3+spec-1.1.0",
  "tracing",
 ]
 
@@ -5109,6 +5112,7 @@ dependencies = [
  "tracing",
  "walkdir",
  "webpki-roots",
+ "wiremock",
  "zip 8.6.0",
 ]
 

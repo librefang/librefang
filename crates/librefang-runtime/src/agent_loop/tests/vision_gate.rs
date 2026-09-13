@@ -172,6 +172,7 @@ impl librefang_kernel_handle::TaskQueue for VisionKernel {
         _: &str,
         _: Option<&str>,
         _: Option<&str>,
+        _: &librefang_kernel_handle::TaskPostOptions,
     ) -> Result<String, librefang_kernel_handle::KernelOpError> {
         Err("not used".into())
     }
@@ -298,6 +299,7 @@ fn blank_session() -> Session {
         messages: Vec::new(),
         context_window_tokens: 0,
         label: None,
+        parent_session_id: None,
         model_override: None,
         messages_generation: 0,
         last_repaired_generation: None,

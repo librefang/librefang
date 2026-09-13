@@ -99,6 +99,15 @@ fn patch_json(path: &str, body: serde_json::Value) -> Request<Body> {
         .unwrap()
 }
 
+fn get_json(path: &str) -> Request<Body> {
+    Request::builder()
+        .method(Method::GET)
+        .uri(path)
+        .header("authorization", format!("Bearer {TEST_TOKEN}"))
+        .body(Body::empty())
+        .unwrap()
+}
+
 fn manifest_of(state: &Arc<AppState>, id: AgentId) -> AgentManifest {
     state
         .kernel
@@ -323,5 +332,213 @@ async fn manifest_toml_cannot_rename_an_agent_out_from_under_the_registry() {
             .name,
         "renamed-properly",
         "the registry entry tracks the rename, which is the invariant the pin protects"
+    );
+}
+
+/// `GET /api/agents/{id}/manifest-history` exposes the snapshots the persist
+/// path records, so an operator can see how an agent's config changed over
+/// time. Viewing only — there is no restore of a prior version.
+///
+/// Covers the whole route contract: two PATCHes produce two rows (newest
+/// first, with the fields the dashboard's diff view reads), `limit=0` is
+/// clamped to at least one row instead of returning an empty array, and the
+/// error paths use the standard `ApiErrorResponse` envelope with
+/// machine-readable codes.
+#[tokio::test(flavor = "multi_thread")]
+async fn manifest_history_route_lists_recorded_versions_and_rejects_bad_ids() {
+    let h = boot().await;
+    let id = spawn_named(&h.state, "history-route");
+
+    let first = r#"
+name = "history-route"
+description = "first write"
+
+[model]
+provider = "ollama"
+model = "test-model"
+"#;
+    let (status, body) = send(
+        h.app.clone(),
+        patch_json(
+            &format!("/api/agents/{id}"),
+            serde_json::json!({"manifest_toml": first}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body={body:?}");
+
+    let second = first.replace("first write", "second write");
+    let (status, body) = send(
+        h.app.clone(),
+        patch_json(
+            &format!("/api/agents/{id}"),
+            serde_json::json!({"manifest_toml": second}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body={body:?}");
+
+    // Two writes, two rows, newest first.
+    let (status, body) = send(
+        h.app.clone(),
+        get_json(&format!("/api/agents/{id}/manifest-history")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body={body:?}");
+    let versions = body["versions"]
+        .as_array()
+        .expect("versions array in response body")
+        .clone();
+    assert_eq!(versions.len(), 2, "body={body:?}");
+    for v in &versions {
+        for key in [
+            "id",
+            "agent_id",
+            "agent_name",
+            "timestamp",
+            "manifest_toml",
+            "change_source",
+        ] {
+            assert!(
+                v.get(key).is_some(),
+                "row is missing the '{key}' the dashboard diff view reads: {v:?}"
+            );
+        }
+    }
+    assert!(
+        versions[0]["manifest_toml"]
+            .as_str()
+            .expect("manifest_toml is a string")
+            .contains("second write"),
+        "rows are newest first: {versions:?}"
+    );
+    assert_eq!(
+        versions[0]["change_source"], "update",
+        "a successful persist records the 'update' change_source"
+    );
+
+    // The exact timestamp shape is a contract with the dashboard — see the
+    // dedicated test below.
+
+    // `limit=0` is clamped to at least one row rather than honoured literally.
+    let (status, body) = send(
+        h.app.clone(),
+        get_json(&format!("/api/agents/{id}/manifest-history?limit=0")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body={body:?}");
+    assert_eq!(
+        body["versions"].as_array().expect("versions array").len(),
+        1,
+        "limit=0 must clamp to 1, not return an empty array"
+    );
+
+    // A well-formed but unregistered id is a 404 in the standard envelope.
+    let unregistered = "00000000-0000-0000-0000-000000000000";
+    let (status, body) = send(
+        h.app.clone(),
+        get_json(&format!("/api/agents/{unregistered}/manifest-history")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "body={body:?}");
+    assert_eq!(
+        body["error"]["code"], "agent_not_found",
+        "the 404 carries the standard envelope code"
+    );
+
+    // A malformed id is a 400 in the standard envelope.
+    let (status, body) = send(
+        h.app.clone(),
+        get_json("/api/agents/not-a-uuid/manifest-history"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body={body:?}");
+    assert_eq!(
+        body["error"]["code"], "invalid_agent_id",
+        "the 400 carries the standard envelope code"
+    );
+
+    // A non-numeric limit is rejected at extraction rather than coerced.
+    let (status, _) = send(
+        h.app.clone(),
+        get_json(&format!("/api/agents/{id}/manifest-history?limit=abc")),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "non-numeric limit must 400"
+    );
+}
+
+/// The shape of `timestamp` is a contract with the dashboard, so pin it here
+/// rather than in a hand-written literal on the TypeScript side.
+///
+/// `manifest_versions.timestamp` defaults to SQLite's `datetime('now')` and
+/// `ManifestVersionStore::record_version` never supplies the column, so the
+/// value reaches the client as `YYYY-MM-DD HH:MM:SS`: space-separated, UTC,
+/// and carrying no offset.
+/// The dashboard's `formatSqliteDateTime` swaps the space for a `T` and stamps
+/// the missing `Z` on that basis. Were this ever serialised through `chrono` as
+/// RFC 3339 instead, that helper still copes — it leaves a zone-bearing value
+/// alone — but the assumption stops being load-bearing, and this test is how
+/// that change announces itself.
+#[tokio::test(flavor = "multi_thread")]
+async fn manifest_history_timestamp_is_sqlite_naive_utc() {
+    let h = boot().await;
+    let id = spawn_named(&h.state, "history-timestamp");
+
+    let manifest = r#"
+name = "history-timestamp"
+description = "records one version"
+
+[model]
+provider = "ollama"
+model = "test-model"
+"#;
+    let (status, body) = send(
+        h.app.clone(),
+        patch_json(
+            &format!("/api/agents/{id}"),
+            serde_json::json!({"manifest_toml": manifest}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body={body:?}");
+
+    let (status, body) = send(
+        h.app.clone(),
+        get_json(&format!("/api/agents/{id}/manifest-history")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body={body:?}");
+    let ts = body["versions"][0]["timestamp"]
+        .as_str()
+        .expect("timestamp is a string")
+        .to_string();
+
+    assert_eq!(
+        ts.len(),
+        19,
+        "expected the 19-char `YYYY-MM-DD HH:MM:SS` form, got {ts:?}"
+    );
+    assert_eq!(
+        &ts[10..11],
+        " ",
+        "SQLite separates date and time with a space, not a `T` — the dashboard \
+         normalises on this: {ts:?}"
+    );
+    assert_eq!(&ts[4..5], "-", "date separator: {ts:?}");
+    assert_eq!(&ts[7..8], "-", "date separator: {ts:?}");
+    assert_eq!(&ts[13..14], ":", "time separator: {ts:?}");
+    assert_eq!(&ts[16..17], ":", "time separator: {ts:?}");
+    assert!(
+        !ts.ends_with('Z') && !ts.contains('+'),
+        "the naive form declares no zone, which is why the dashboard appends one: {ts:?}"
+    );
+    assert!(
+        ts.chars()
+            .all(|c| c.is_ascii_digit() || c == '-' || c == ':' || c == ' '),
+        "unexpected character in the timestamp: {ts:?}"
     );
 }

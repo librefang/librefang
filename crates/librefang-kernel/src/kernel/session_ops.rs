@@ -238,17 +238,28 @@ impl LibreFangKernel {
     /// dashboard "delete session" affordance and any equivalent CLI path.
     /// Callers that need the recreate-and-fire-hooks semantic want
     /// `reset_session(_, ResetScope::Session(sid))` instead.
-    pub fn delete_session(&self, session_id: SessionId) -> KernelResult<()> {
-        self.memory
+    ///
+    /// The substrate delete cascades to every descendant session (#7752), so
+    /// this reclaims `file_read_tracker` for the *whole* removed set, not
+    /// just the requested id — otherwise a cascade of N children leaked N-1
+    /// tracker entries, invisibly, because nothing told this layer they were
+    /// gone (#7991 review). Returns every id actually removed so the caller
+    /// (the API route) can report the cascade instead of a silent 204.
+    pub fn delete_session(&self, session_id: SessionId) -> KernelResult<Vec<SessionId>> {
+        let removed = self
+            .memory
             .substrate
             .delete_session(session_id)
             .map_err(KernelError::LibreFang)?;
-        // Reclaim the per-session `file_read_tracker` bucket so the
-        // process-wide registry doesn't accumulate one entry per ever-deleted
-        // session. Context-compression GC remains the fallback for live
-        // sessions that never reach this path.
-        librefang_runtime::file_read_tracker::forget_session(&session_id);
-        Ok(())
+        // Reclaim the per-session `file_read_tracker` bucket for every
+        // session the cascade actually removed, so the process-wide
+        // registry doesn't accumulate one entry per ever-deleted session.
+        // Context-compression GC remains the fallback for live sessions
+        // that never reach this path.
+        for sid in &removed {
+            librefang_runtime::file_read_tracker::forget_session(sid);
+        }
+        Ok(removed)
     }
 
     /// Implementation of [`ResetScope::Agent`] — wipe every session for this
@@ -506,10 +517,16 @@ impl LibreFangKernel {
             }
 
             // Delete the SQL row + FTS index transactionally. Skip when the
-            // session never existed — `delete_session` would just no-op.
+            // session never existed — `delete_session_only` would just no-op.
+            //
+            // Deliberately the non-cascading primitive, NOT `delete_session`:
+            // resetting a chat's own history must not also delete every
+            // sub-agent session it ever delegated to. Using the cascading
+            // delete here used to silently take the whole descendant
+            // subtree down with a "reset this one chat" call (#7991 review).
             self.memory
                 .substrate
-                .delete_session(sid)
+                .delete_session_only(sid)
                 .map_err(KernelError::LibreFang)?;
 
             // Best-effort JSONL cleanup (see `reset_all_sessions` for rationale).
@@ -524,6 +541,7 @@ impl LibreFangKernel {
         let mut new_session = librefang_memory::session::Session {
             id: sid,
             agent_id,
+            parent_session_id: None,
             messages: Vec::new(),
             context_window_tokens: 0,
             label: None,
@@ -813,12 +831,17 @@ impl LibreFangKernel {
             .get_session(session_id)
             .map_err(KernelError::LibreFang)?
             .ok_or_else(|| {
-                KernelError::LibreFang(LibreFangError::Internal("Session not found".to_string()))
+                KernelError::LibreFang(LibreFangError::SessionNotFound(session_id.0.to_string()))
             })?;
 
         if session.agent_id != agent_id {
-            return Err(KernelError::LibreFang(LibreFangError::Internal(
-                "Session belongs to a different agent".to_string(),
+            // Reported as "not found" rather than a distinct "wrong owner":
+            // the caller has no claim on this session either way, and saying
+            // which of the two it is confirms the session exists to someone
+            // who cannot read it. Matches `can_access_agent`, which answers a
+            // non-owner with 404 one branch earlier in the same handlers.
+            return Err(KernelError::LibreFang(LibreFangError::SessionNotFound(
+                session_id.0.to_string(),
             )));
         }
 
@@ -847,12 +870,17 @@ impl LibreFangKernel {
             .get_session(session_id)
             .map_err(KernelError::LibreFang)?
             .ok_or_else(|| {
-                KernelError::LibreFang(LibreFangError::Internal("Session not found".to_string()))
+                KernelError::LibreFang(LibreFangError::SessionNotFound(session_id.0.to_string()))
             })?;
 
         if session.agent_id != agent_id {
-            return Err(KernelError::LibreFang(LibreFangError::Internal(
-                "Session belongs to a different agent".to_string(),
+            // Reported as "not found" rather than a distinct "wrong owner":
+            // the caller has no claim on this session either way, and saying
+            // which of the two it is confirms the session exists to someone
+            // who cannot read it. Matches `can_access_agent`, which answers a
+            // non-owner with 404 one branch earlier in the same handlers.
+            return Err(KernelError::LibreFang(LibreFangError::SessionNotFound(
+                session_id.0.to_string(),
             )));
         }
 
@@ -910,6 +938,7 @@ impl LibreFangKernel {
         let new_session = librefang_memory::session::Session {
             id: SessionId::new(),
             agent_id,
+            parent_session_id: None,
             messages: export.messages,
             context_window_tokens: export.context_window_tokens,
             label: export.label,

@@ -333,6 +333,11 @@ async fn manifest_writes_to_a_provisioned_agent_are_refused_with_the_documented_
         ),
         (
             Method::PUT,
+            format!("/api/agents/{id}/model_routing"),
+            serde_json::json!({"mode": "flexible"}),
+        ),
+        (
+            Method::PUT,
             format!("/api/agents/{id}/channels"),
             serde_json::json!({"channels": []}),
         ),

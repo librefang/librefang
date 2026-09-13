@@ -86,6 +86,50 @@ def main():
     assert_in(".connect_timeout(DEFAULT_CONNECT_TIMEOUT)", rs, "rust-default-client-connect-timeout")
     assert_in("pub fn with_client(base_url: impl Into<String>, client: Client) -> Self", rs, "rust-custom-client-constructor")
 
+    # Raw-body endpoints. Every SDK's default request path sends
+    # `Content-Type: application/json`, so an operation whose requestBody
+    # declares only a non-JSON type must not be emitted through it — the
+    # handler rejects the content type before it ever reads the body, making
+    # the generated method a 400 in every case.
+    raw_ops = [
+        operation
+        for operations in tag_ops.values()
+        for operation in operations
+        if operation["raw_body_ct"]
+    ]
+    expect(
+        {o["op_id"]: o["raw_body_ct"] for o in raw_ops}
+        == {"transcribe_audio": "audio/webm", "upload_file": "application/octet-stream"},
+        f"unexpected raw-body operations: {[(o['op_id'], o['raw_body_ct']) for o in raw_ops]}",
+    )
+    expect(
+        all(not o["has_body"] for o in raw_ops),
+        "a raw-body operation must not also take the JSON body path",
+    )
+
+    assert_matches(
+        r'def\s+transcribe_audio\(\s*self,\s*body:\s*bytes,\s*content_type:\s*str\s*=\s*"audio/webm"\s*\)',
+        py,
+        "python-transcribe-raw-sig",
+    )
+    assert_in('self._c._request("POST", "/api/media/transcribe", body, content_type=content_type)', py, "python-transcribe-raw-call")
+    assert_matches(r"async\s+transcribeAudio\(\s*body,\s*contentType\s*\)", js, "js-transcribe-raw-sig")
+    assert_matches(
+        r"TranscribeAudio\(\s*body\s+\[\]byte,\s*contentType\s+string\s*\)",
+        go,
+        "go-transcribe-raw-sig",
+    )
+    assert_in("func (c *Client) requestRaw(", go, "go-raw-request-helper")
+    assert_matches(
+        r"pub\s+async\s+fn\s+transcribe_audio\(\s*&self,\s*body:\s*Vec<u8>,\s*content_type:\s*Option<&str>,?\s*\)",
+        rs,
+        "rust-transcribe-raw-sig",
+    )
+    assert_in("async fn do_req_raw(", rs, "rust-raw-request-helper")
+    # The upload endpoint has the same shape and had the same defect; it also
+    # keeps its path parameter ahead of the body.
+    assert_matches(r"async\s+uploadFile\(\s*id,\s*body,\s*contentType\s*\)", js, "js-upload-raw-sig")
+
     # Stream correctness
     assert_in("bufio.NewReaderSize", go, "go-bufio-reader")
     assert_not_in('strings.Split(string(buf[:n])', go, "go-no-bare-split")

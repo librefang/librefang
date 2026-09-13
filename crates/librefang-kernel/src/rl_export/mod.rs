@@ -454,6 +454,8 @@ target = { type = "wandb", project = "rollouts", entity = "team", api_key_env = 
             author: "test".to_string(),
             module: "builtin:chat".to_string(),
             model: ModelConfig {
+                mode: librefang_types::agent::ModelMode::Fixed,
+                router_override: None,
                 provider: "ollama".to_string(),
                 model: "test-model".to_string(),
                 max_tokens: Some(4096),
