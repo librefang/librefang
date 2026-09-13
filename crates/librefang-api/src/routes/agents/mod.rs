@@ -97,6 +97,10 @@ pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
             axum::routing::get(list_agent_ephemeral_runs),
         )
         .route(
+            "/agents/{id}/manifest-history",
+            axum::routing::get(list_agent_manifest_history),
+        )
+        .route(
             "/agents/{id}/mode",
             axum::routing::put(set_agent_mode),
         )

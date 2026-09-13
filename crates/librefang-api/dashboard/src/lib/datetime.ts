@@ -25,6 +25,29 @@ export function formatTime(value: string | number | Date | undefined | null): st
   return date ? date.toLocaleTimeString() : "-";
 }
 
+/**
+ * Format a timestamp that arrives in SQLite's `datetime('now')` shape.
+ *
+ * A column defaulted to `datetime('now')` stores `YYYY-MM-DD HH:MM:SS`: UTC,
+ * space-separated, carrying no offset.
+ * That is not a form the spec requires `Date` to accept, and parsing it as-is
+ * would read a UTC instant as local time, so the space becomes a `T` and a `Z`
+ * is appended — but only when the value does not already declare a zone, since
+ * appending a second one to an RFC 3339 string yields `Invalid Date`.
+ *
+ * An unparseable value is returned verbatim. `new Date` does not throw on bad
+ * input, so a `try`/`catch` around it never fires and the caller would render
+ * the literal text "Invalid Date"; showing the stored value is the honest
+ * failure.
+ */
+export function formatSqliteDateTime(value: string | undefined | null): string {
+  if (!value) return "—";
+  const iso = value.includes(" ") ? value.replace(" ", "T") : value;
+  const zoned = /(?:Z|[+-]\d{2}:?\d{2})$/i.test(iso) ? iso : `${iso}Z`;
+  const date = new Date(zoned);
+  return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
+}
+
 function validDate(value: string | number | Date | undefined | null): Date | undefined {
   if (value === null || value === undefined || value === "") return undefined;
   const date = new Date(value);

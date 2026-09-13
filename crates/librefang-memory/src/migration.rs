@@ -5,7 +5,7 @@
 use rusqlite::Connection;
 
 /// Current schema version.
-const SCHEMA_VERSION: u32 = 57;
+const SCHEMA_VERSION: u32 = 58;
 
 /// Run all migrations to bring the database up to date.
 pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
@@ -288,6 +288,20 @@ pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
     // v57: narrow the `memories_fts_au` trigger to the columns it mirrors.
     // As created by v50 it fired on every UPDATE of `memories`, including the per-fragment access bump every recall performs and the bulk confidence decay each consolidation sweep runs — rebuilding FTS rows whose content was byte-identical before and after.
     run_step!(57, migrate_v57);
+
+    // v58: agent manifest version history so operators can see how an
+    // agent's config changed over time. Viewing only — there is no restore
+    // endpoint for agent manifests.
+    // Purely additive: one new table, no existing row changes meaning.
+    //
+    // 58 is the next free number above main's 57. Two other open branches
+    // create this same table with byte-identical DDL — #8041 (the dashboard
+    // view of the same history, whose commits this branch is built on) and
+    // `fix/schema-forward-compat-59` — so whichever merges first keeps 58 and
+    // the rest renumber on rebase rather than redefining the function. The migration itself is a no-op against a
+    // database that already has the table; see
+    // `test_migrate_v58_is_a_noop_when_the_table_already_exists`.
+    run_step!(58, migrate_v58);
 
     // Audit-trail consistency (#3538): user_version must match the count
     // of distinct rows in `migrations`. Drift means an earlier migration
@@ -1324,6 +1338,36 @@ fn migrate_v57(conn: &Connection) -> Result<(), rusqlite::Error> {
     conn.execute(
         "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
          VALUES (57, datetime('now'), 'Guard memories_fts_au with a WHEN clause so the recall access bump and the decay sweep stop rebuilding identical memories_fts rows')",
+        [],
+    )?;
+    Ok(())
+}
+
+/// v58: agent manifest version history.
+///
+/// One row per recorded persist of `agent.toml`, holding the full serialized manifest so an operator can see what changed and when.
+/// `agent_name` is denormalised on purpose: it is the name at snapshot time, so a rename leaves old rows carrying the historical name.
+/// `change_source` is a short tag naming the write outcome: the kernel persist path writes `update` on success and `update-persist-failed` when the disk write failed after the in-memory manifest had already changed.
+/// The schema default `unknown` covers rows written by any future writer that does not classify its persist.
+///
+/// Retention is per-agent, trimmed on insert by the store (not here).
+fn migrate_v58(conn: &Connection) -> Result<(), rusqlite::Error> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS manifest_versions (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            agent_id        TEXT NOT NULL,
+            agent_name      TEXT NOT NULL DEFAULT '',
+            timestamp       TEXT NOT NULL DEFAULT (datetime('now')),
+            manifest_toml   TEXT NOT NULL,
+            change_source   TEXT NOT NULL DEFAULT 'unknown',
+            created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_manifest_versions_agent_id
+            ON manifest_versions(agent_id, timestamp DESC);",
+    )?;
+    conn.execute(
+        "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
+         VALUES (58, datetime('now'), 'Agent manifest version history table')",
         [],
     )?;
     Ok(())
@@ -4003,6 +4047,38 @@ mod tests {
         migrate_v33(&conn).unwrap();
         run_migrations(&conn).unwrap();
         assert_eq!(get_schema_version(&conn).unwrap(), SCHEMA_VERSION);
+    }
+
+    /// v58 is a no-op against a database that already has `manifest_versions`.
+    ///
+    /// This is not hypothetical. `fix/schema-forward-compat-59` creates the
+    /// same table under the same number with byte-identical DDL, so whichever
+    /// of the two reaches a deployment first, the other one runs against a
+    /// database that already has the table. `CREATE TABLE IF NOT EXISTS` plus
+    /// `INSERT OR IGNORE` is what makes that a no-op instead of
+    /// "table manifest_versions already exists" on boot — this test is what
+    /// stops someone simplifying either clause away.
+    #[test]
+    fn test_migrate_v58_is_a_noop_when_the_table_already_exists() {
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+        assert!(try_table_exists(&conn, "manifest_versions").unwrap());
+
+        // Second run, directly and then through the ladder.
+        migrate_v58(&conn).expect("re-running v58 on an existing table must not error");
+        run_migrations(&conn).expect("a second full run must not error");
+        assert_eq!(get_schema_version(&conn).unwrap(), SCHEMA_VERSION);
+
+        // The audit row is recorded exactly once — `INSERT OR IGNORE` rather
+        // than a second row claiming the same version was applied twice.
+        let audit_rows: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM migrations WHERE version = 58",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(audit_rows, 1, "v58 must record exactly one migrations row");
     }
 
     #[test]

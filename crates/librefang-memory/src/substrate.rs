@@ -2817,6 +2817,48 @@ mod tests {
         assert_eq!(memory_count, 0, "memories must cascade-delete");
     }
 
+    /// `manifest_versions` (v56) must be in the cascade, and this test is the
+    /// only thing that says so.
+    ///
+    /// The table's `DELETE` used to be spelled out in
+    /// `execute_structured_agent_deletes`; it now has to be an entry in
+    /// [`AGENT_SCOPED_TABLES`](crate::agent_tables::AGENT_SCOPED_TABLES)
+    /// instead. Losing it in that move compiles, passes every other test, and
+    /// leaves an agent's manifest history readable under its id forever after
+    /// the agent is gone — which is also what `agent_purge`'s orphan scan walks
+    /// the same constant to report.
+    #[tokio::test]
+    async fn test_remove_agent_cascades_manifest_versions() {
+        use crate::manifest_version_store::ManifestVersionStore;
+
+        let substrate = MemorySubstrate::open_in_memory(0.1).unwrap();
+        let agent_id = AgentId::new();
+        let id_str = agent_id.0.to_string();
+
+        let versions = ManifestVersionStore::new(substrate.pool.clone());
+        versions
+            .record_version(&id_str, "scribe", "name = \"scribe\"\n", "update")
+            .unwrap();
+
+        let count = |c: &Connection| -> i64 {
+            c.query_row(
+                "SELECT COUNT(*) FROM manifest_versions WHERE agent_id = ?1",
+                rusqlite::params![id_str],
+                |row| row.get(0),
+            )
+            .unwrap()
+        };
+        assert_eq!(count(&substrate.pool.get().unwrap()), 1, "seed row");
+
+        substrate.remove_agent(agent_id).unwrap();
+
+        assert_eq!(
+            count(&substrate.pool.get().unwrap()),
+            0,
+            "manifest_versions must cascade-delete with the agent"
+        );
+    }
+
     /// `remove_agent` must also wipe the `sessions_fts` index inside the
     /// cascade transaction. `search_sessions` reads FTS rows directly
     /// (no JOIN to `sessions`), so an orphan FTS row would let the

@@ -114,8 +114,13 @@ impl LibreFangKernel {
                 }
                 if let Err(error) = atomic_write_toml(toml_path, &toml_str) {
                     warn!(agent = %entry.name, "Failed to persist manifest to disk: {error}");
+                    // History must not go silent exactly when an operator needs it: the
+                    // in-memory manifest has already changed, so snapshot it with a
+                    // change_source that marks the disk write as failed.
+                    self.record_manifest_version(entry, &toml_str, "update-persist-failed");
                 } else {
                     debug!(agent = %entry.name, path = %toml_path.display(), "Persisted manifest to disk");
+                    self.record_manifest_version(entry, &toml_str, "update");
                 }
             }
             // Not a cosmetic warning: boot reconciliation re-syncs each agent from its on-disk
@@ -197,6 +202,14 @@ impl LibreFangKernel {
             warn!(agent = %entry.name, "Failed to persist MCP servers to agent manifest: {error}");
         } else {
             debug!(agent = %entry.name, path = %toml_path.display(), "Persisted MCP servers to agent manifest");
+            // This path patches the `mcp_servers` array in the existing file rather
+            // than going through `persist_full_manifest_at`, so it has to record its
+            // own snapshot. Without it an MCP allowlist change leaves the newest
+            // recorded version disagreeing with what is on disk, and "what changed on
+            // this agent, and when" answers wrong rather than incompletely (#8231).
+            // The snapshot is `patched` — what the file now holds — not a re-serialized
+            // manifest, so history stays a record of the file.
+            self.record_manifest_version(&current_entry, &patched, "mcp-servers");
         }
     }
 
@@ -959,6 +972,32 @@ impl LibreFangKernel {
         self.prompt_metadata_cache.tools.remove(&agent_id);
 
         Ok(())
+    }
+
+    /// Best-effort record of a manifest snapshot for version history.
+    ///
+    /// `change_source` vocabulary: this path is shared by every control-plane write that re-serializes the full manifest (API routes, TUI commands, and the MCP-servers fallback all funnel through the same kernel setters), so the call site cannot tell who triggered the persist.
+    /// It records two values:
+    /// - `update` — the `agent.toml` write succeeded.
+    /// - `update-persist-failed` — the in-memory manifest changed but the disk write failed, so disk and memory now disagree.
+    ///
+    /// Suspend/resume does not go through here: `persist_agent_enabled` patches the `enabled` line directly rather than re-serializing the manifest, so it records its own `suspend` / `resume` snapshots via `ManifestVersionStore` directly.
+    fn record_manifest_version(
+        &self,
+        entry: &librefang_types::agent::AgentEntry,
+        toml_str: &str,
+        change_source: &str,
+    ) {
+        let store = librefang_memory::ManifestVersionStore::new(self.memory.substrate.pool());
+        if let Err(e) =
+            store.record_version(&entry.id.to_string(), &entry.name, toml_str, change_source)
+        {
+            warn!(
+                agent = %entry.name,
+                error = %e,
+                "Failed to record manifest version snapshot"
+            );
+        }
     }
 }
 

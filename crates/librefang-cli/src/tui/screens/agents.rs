@@ -58,6 +58,8 @@ pub enum AgentSubScreen {
     EditChannels,
     /// Edit the inference parameters (temperature, ladders, limits) for an existing agent
     EditModelParams,
+    /// Read-only timeline of this agent's recorded manifest snapshots
+    ManifestHistory,
     /// Spawning agent (waiting for result)
     Spawning,
 }
@@ -109,6 +111,19 @@ pub struct AgentSelectState {
     // Inference-parameter editor (detail view)
     pub model_params: super::model_params::ModelParamsEditor,
 
+    // Manifest version history (detail view, read-only)
+    pub manifest_history: Vec<ManifestVersion>,
+    pub manifest_history_list: ListState,
+    /// A fetch is in flight. Distinguishes "still loading" from "this agent has
+    /// no recorded history", which would otherwise render the same empty pane.
+    pub manifest_history_loading: bool,
+    /// Why the last history fetch produced nothing, when it failed.
+    ///
+    /// Its own field rather than the shared `status_msg`: that one collects every
+    /// agent-tab message, so a skills or channels error arriving while a history
+    /// fetch is outstanding would otherwise be rendered as this fetch's reason.
+    pub manifest_history_error: Option<String>,
+
     // Result
     pub spawned_toml: Option<String>,
     pub status_msg: String,
@@ -130,6 +145,16 @@ pub struct InProcessAgent {
     pub state: String,
     pub provider: String,
     pub model: String,
+}
+
+/// One recorded manifest snapshot, as `GET /api/agents/{id}/manifest-history`
+/// returns it. The endpoint is read-only, so there is nothing here to write back.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ManifestVersion {
+    /// SQLite `datetime('now')` shape: `YYYY-MM-DD HH:MM:SS`, UTC, no offset.
+    pub timestamp: String,
+    pub change_source: String,
+    pub manifest_toml: String,
 }
 
 #[derive(Clone, Default)]
@@ -210,6 +235,8 @@ pub enum AgentAction {
         id: String,
         changes: Vec<(String, Option<f64>)>,
     },
+    /// Load this agent's recorded manifest snapshots for the history pane.
+    FetchManifestHistory(String),
 }
 
 impl AgentSelectState {
@@ -232,6 +259,10 @@ impl AgentSelectState {
             tool_checks: DEFAULT_TOOLS.to_vec(),
             tool_cursor: 0,
             model_params: super::model_params::ModelParamsEditor::new(),
+            manifest_history: Vec::new(),
+            manifest_history_list: ListState::default(),
+            manifest_history_loading: false,
+            manifest_history_error: None,
             available_skills: Vec::new(),
             skill_cursor: 0,
             available_mcp: Vec::new(),
@@ -260,6 +291,10 @@ impl AgentSelectState {
         self.mcp_cursor = 0;
         self.available_channels.clear();
         self.channel_cursor = 0;
+        self.manifest_history.clear();
+        self.manifest_history_list.select(None);
+        self.manifest_history_loading = false;
+        self.manifest_history_error = None;
         self.spawned_toml = None;
         self.status_msg.clear();
         self.search_active = false;
@@ -438,6 +473,7 @@ impl AgentSelectState {
             AgentSubScreen::AgentList => self.handle_agent_list(key),
             AgentSubScreen::AgentDetail => self.handle_detail(key),
             AgentSubScreen::EditModelParams => self.handle_edit_model_params(key),
+            AgentSubScreen::ManifestHistory => self.handle_manifest_history(key),
             AgentSubScreen::CreateMethod => self.handle_create_method(key),
             AgentSubScreen::TemplatePicker => self.handle_template_picker(key),
             AgentSubScreen::CustomName => self.handle_custom_name(key),
@@ -600,9 +636,73 @@ impl AgentSelectState {
                     return AgentAction::FetchAgentModelParams(id);
                 }
             }
+            KeyCode::Char('h') => {
+                // Read-only manifest version history for this agent
+                if let Some(ref detail) = self.detail {
+                    let id = detail.id.clone();
+                    self.manifest_history.clear();
+                    self.manifest_history_list.select(None);
+                    self.manifest_history_loading = true;
+                    // Cleared so any reason the pane shows afterwards belongs to
+                    // this fetch and not to an earlier one.
+                    self.manifest_history_error = None;
+                    self.sub = AgentSubScreen::ManifestHistory;
+                    return AgentAction::FetchManifestHistory(id);
+                }
+            }
             _ => {}
         }
         AgentAction::Continue
+    }
+
+    /// Key handling for the manifest history pane.
+    ///
+    /// Navigation only — the endpoint records snapshots and offers no restore,
+    /// so there is nothing here that writes.
+    fn handle_manifest_history(&mut self, key: KeyEvent) -> AgentAction {
+        let len = self.manifest_history.len();
+        match key.code {
+            KeyCode::Esc => {
+                self.sub = AgentSubScreen::AgentDetail;
+            }
+            // An empty history has no cursor to move, and `% 0` would panic.
+            KeyCode::Up | KeyCode::Char('k') if len > 0 => {
+                let i = self.manifest_history_list.selected().unwrap_or(0);
+                let next = if i == 0 { len - 1 } else { i - 1 };
+                self.manifest_history_list.select(Some(next));
+            }
+            KeyCode::Down | KeyCode::Char('j') if len > 0 => {
+                let i = self.manifest_history_list.selected().unwrap_or(0);
+                self.manifest_history_list.select(Some((i + 1) % len));
+            }
+            _ => {}
+        }
+        AgentAction::Continue
+    }
+
+    /// Record the snapshots a fetch returned and put the cursor on the newest.
+    pub fn set_manifest_history(&mut self, versions: Vec<ManifestVersion>) {
+        self.manifest_history_loading = false;
+        self.manifest_history_error = None;
+        self.manifest_history_list
+            .select((!versions.is_empty()).then_some(0));
+        self.manifest_history = versions;
+    }
+
+    /// Record why a history fetch produced nothing, so the pane says that rather
+    /// than reporting the agent has no recorded history.
+    pub fn set_manifest_history_error(&mut self, message: String) {
+        self.manifest_history_loading = false;
+        self.manifest_history_error = Some(message);
+    }
+
+    /// Whether a history response for `agent_id` belongs to the agent now open.
+    ///
+    /// A slow response for agent A can land after the operator has moved to agent
+    /// B and asked for its history; this pane renders a whole `agent.toml`, so
+    /// showing A's under B's header actively misleads rather than merely lagging.
+    pub fn manifest_history_is_for(&self, agent_id: &str) -> bool {
+        self.detail.as_ref().is_some_and(|d| d.id == agent_id)
     }
 
     /// Key handling for the inference-parameter editor.
@@ -1079,6 +1179,10 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut AgentSelectState) {
             draw_edit_model_params(f, area, state);
             return;
         }
+        AgentSubScreen::ManifestHistory => {
+            draw_manifest_history(f, area, state);
+            return;
+        }
         _ => {}
     }
 
@@ -1088,7 +1192,8 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut AgentSelectState) {
         | AgentSubScreen::EditSkills
         | AgentSubScreen::EditMcpServers
         | AgentSubScreen::EditChannels
-        | AgentSubScreen::EditModelParams => unreachable!(),
+        | AgentSubScreen::EditModelParams
+        | AgentSubScreen::ManifestHistory => unreachable!(),
         AgentSubScreen::CreateMethod => crate::i18n::t("tui-agents-title-create-method"),
         AgentSubScreen::TemplatePicker => crate::i18n::t("tui-agents-title-templates"),
         AgentSubScreen::CustomName => crate::i18n::t("tui-agents-title-custom-name"),
@@ -1825,6 +1930,109 @@ fn draw_edit_model_params(f: &mut Frame, area: Rect, state: &AgentSelectState) {
     f.render_widget(widgets::hint_bar(&hints), chunks[3]);
 }
 
+/// Render `manifest_versions.timestamp` the way the dashboard does.
+///
+/// The column is defaulted to SQLite's `datetime('now')`, which stores
+/// `YYYY-MM-DD HH:MM:SS` in UTC carrying no offset. Read as-is it would show a
+/// UTC instant as if it were local, so it is parsed as UTC and converted; a
+/// value in any other shape is shown verbatim rather than as an error string,
+/// which is what `formatSqliteDateTime` in the dashboard also does.
+fn format_manifest_timestamp(raw: &str) -> String {
+    chrono::NaiveDateTime::parse_from_str(raw, "%Y-%m-%d %H:%M:%S")
+        .map(|naive| {
+            naive
+                .and_utc()
+                .with_timezone(&chrono::Local)
+                .format("%Y-%m-%d %H:%M:%S")
+                .to_string()
+        })
+        .unwrap_or_else(|_| raw.to_string())
+}
+
+/// Render the read-only manifest version timeline.
+///
+/// Left: one row per snapshot, newest first. Right: the selected snapshot's
+/// full TOML. An agent that has never been persisted, and a fetch that is still
+/// in flight, each get their own line — an empty pane on its own would not say
+/// which of the two happened.
+fn draw_manifest_history(f: &mut Frame, area: Rect, state: &mut AgentSelectState) {
+    let inner = widgets::render_screen_block(
+        f,
+        area,
+        crate::i18n::t("tui-agents-title-manifest-history").trim(),
+    );
+
+    let chunks = Layout::vertical([Constraint::Min(3), Constraint::Length(1)]).split(inner);
+
+    if state.manifest_history.is_empty() {
+        // A failed fetch writes `manifest_history_error` and clears the loading
+        // flag, so the pane says why it is empty instead of claiming the agent has
+        // no recorded history. Reading the shared `status_msg` here instead would
+        // show whatever unrelated agent-tab message happened to arrive first.
+        let message = if state.manifest_history_loading {
+            crate::i18n::t("tui-agents-label-manifest-history-loading")
+        } else if let Some(reason) = state.manifest_history_error.clone() {
+            reason
+        } else {
+            crate::i18n::t("tui-agents-label-manifest-history-empty")
+        };
+        f.render_widget(widgets::empty_state(&message), chunks[0]);
+        f.render_widget(
+            widgets::hint_bar(&crate::i18n::t("tui-agents-hints-manifest-history")),
+            chunks[1],
+        );
+        return;
+    }
+
+    let panes = Layout::horizontal([Constraint::Percentage(45), Constraint::Percentage(55)])
+        .split(chunks[0]);
+
+    let items: Vec<ListItem> = state
+        .manifest_history
+        .iter()
+        .map(|v| {
+            ListItem::new(Line::from(vec![
+                Span::styled(
+                    format!("  {:<21}", format_manifest_timestamp(&v.timestamp)),
+                    Style::default().fg(theme::CYAN),
+                ),
+                Span::styled(widgets::truncate(&v.change_source, 18), theme::dim_style()),
+            ]))
+        })
+        .collect();
+    f.render_stateful_widget(
+        widgets::themed_list(items),
+        panes[0],
+        &mut state.manifest_history_list,
+    );
+
+    // `selected()` can outlive its row when a refresh returns fewer snapshots,
+    // so the index is looked up rather than indexed into.
+    let toml = state
+        .manifest_history_list
+        .selected()
+        .and_then(|i| state.manifest_history.get(i))
+        .map(|v| v.manifest_toml.as_str())
+        .unwrap_or_default();
+    f.render_widget(
+        Paragraph::new(toml)
+            .style(theme::dim_style())
+            .wrap(ratatui::widgets::Wrap { trim: false })
+            .block(
+                Block::default()
+                    .borders(Borders::LEFT)
+                    .border_style(Style::default().fg(theme::DIM))
+                    .padding(Padding::horizontal(1)),
+            ),
+        panes[1],
+    );
+
+    f.render_widget(
+        widgets::hint_bar(&crate::i18n::t("tui-agents-hints-manifest-history")),
+        chunks[1],
+    );
+}
+
 fn draw_checkbox_list(
     f: &mut Frame,
     area: Rect,
@@ -1878,6 +2086,239 @@ fn draw_checkbox_list(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn version(timestamp: &str) -> ManifestVersion {
+        ManifestVersion {
+            timestamp: timestamp.to_string(),
+            change_source: "api".to_string(),
+            manifest_toml: format!("name = \"a\"\n# {timestamp}\n"),
+        }
+    }
+
+    fn press(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    /// Draw the screen into an off-screen buffer and return it as text, so a
+    /// test can assert what the pane actually shows.
+    fn render(state: &mut AgentSelectState) -> String {
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 24)).unwrap();
+        terminal
+            .draw(|f| draw(f, f.area(), state))
+            .unwrap()
+            .buffer
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect()
+    }
+
+    #[test]
+    fn history_key_opens_the_pane_and_asks_for_the_agents_versions() {
+        let mut state = AgentSelectState::new();
+        state.sub = AgentSubScreen::AgentDetail;
+        state.detail = Some(AgentDetail {
+            id: "11111111-2222-3333-4444-555555555555".to_string(),
+            ..Default::default()
+        });
+        state.status_msg = "stale message".to_string();
+        state.manifest_history_error = Some("an earlier fetch failed".to_string());
+
+        let action = state.handle_key(press(KeyCode::Char('h')));
+
+        assert!(state.sub == AgentSubScreen::ManifestHistory);
+        assert!(state.manifest_history_loading);
+        assert_eq!(
+            state.manifest_history_error, None,
+            "an earlier status must not be mistaken for this fetch's error"
+        );
+        // `status_msg` is deliberately left alone: it is the agent list's message
+        // line, not this pane's, and the pane no longer reads it. Clearing it here
+        // would silently drop an unrelated agent-tab message the operator has not
+        // seen yet.
+        assert_eq!(state.status_msg, "stale message");
+        match action {
+            AgentAction::FetchManifestHistory(id) => {
+                assert_eq!(id, "11111111-2222-3333-4444-555555555555");
+            }
+            _ => panic!("expected a manifest-history fetch"),
+        }
+    }
+
+    #[test]
+    fn loaded_versions_populate_the_list_and_select_the_newest() {
+        let mut state = AgentSelectState::new();
+        state.manifest_history_loading = true;
+
+        state.set_manifest_history(vec![
+            version("2026-09-07 10:00:00"),
+            version("2026-09-06 09:00:00"),
+        ]);
+
+        assert!(!state.manifest_history_loading);
+        assert_eq!(state.manifest_history.len(), 2);
+        assert_eq!(state.manifest_history_list.selected(), Some(0));
+    }
+
+    #[test]
+    fn arrows_move_through_the_versions_and_wrap() {
+        let mut state = AgentSelectState::new();
+        state.sub = AgentSubScreen::ManifestHistory;
+        state.set_manifest_history(vec![
+            version("2026-09-07 10:00:00"),
+            version("2026-09-06 09:00:00"),
+        ]);
+
+        state.handle_key(press(KeyCode::Down));
+        assert_eq!(state.manifest_history_list.selected(), Some(1));
+        state.handle_key(press(KeyCode::Down));
+        assert_eq!(state.manifest_history_list.selected(), Some(0));
+        state.handle_key(press(KeyCode::Up));
+        assert_eq!(state.manifest_history_list.selected(), Some(1));
+    }
+
+    /// The endpoint answers an agent that was never persisted with `[]`, and
+    /// `limit=0` clamps to 1 rather than erroring — either way the pane can be
+    /// asked to navigate an empty list, where a wrapping `% len` would panic.
+    #[test]
+    fn navigating_an_empty_history_neither_panics_nor_selects() {
+        let mut state = AgentSelectState::new();
+        state.sub = AgentSubScreen::ManifestHistory;
+        state.set_manifest_history(Vec::new());
+
+        state.handle_key(press(KeyCode::Down));
+        state.handle_key(press(KeyCode::Up));
+        state.handle_key(press(KeyCode::Char('j')));
+        state.handle_key(press(KeyCode::Char('k')));
+
+        assert_eq!(state.manifest_history_list.selected(), None);
+        assert!(state.sub == AgentSubScreen::ManifestHistory);
+    }
+
+    #[test]
+    fn esc_returns_from_the_history_pane_to_the_detail_pane() {
+        let mut state = AgentSelectState::new();
+        state.sub = AgentSubScreen::ManifestHistory;
+
+        state.handle_key(press(KeyCode::Esc));
+
+        assert!(state.sub == AgentSubScreen::AgentDetail);
+    }
+
+    #[test]
+    fn an_empty_history_renders_the_empty_state_not_a_blank_pane() {
+        let mut state = AgentSelectState::new();
+        state.sub = AgentSubScreen::ManifestHistory;
+        state.set_manifest_history(Vec::new());
+
+        let rendered = render(&mut state);
+
+        assert!(
+            rendered.contains(&crate::i18n::t("tui-agents-label-manifest-history-empty")),
+            "empty history must say so:\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn a_fetch_still_in_flight_says_loading_rather_than_no_history() {
+        let mut state = AgentSelectState::new();
+        state.sub = AgentSubScreen::ManifestHistory;
+        state.manifest_history_loading = true;
+
+        let rendered = render(&mut state);
+
+        assert!(
+            rendered.contains(&crate::i18n::t("tui-agents-label-manifest-history-loading")),
+            "an in-flight fetch must not claim the agent has no history:\n{rendered}"
+        );
+    }
+
+    /// A rejected id (400 for a non-UUID, 404 for one the registry does not
+    /// know) arrives as a history failure; the pane must show it instead of the
+    /// "no changes recorded" line, which would be a different and wrong answer.
+    #[test]
+    fn a_rejected_agent_id_shows_the_daemons_reason_not_the_empty_state() {
+        let mut state = AgentSelectState::new();
+        state.sub = AgentSubScreen::ManifestHistory;
+        state.set_manifest_history_error("Agent not found".to_string());
+
+        let rendered = render(&mut state);
+
+        assert!(
+            rendered.contains("Agent not found"),
+            "the failure reason must reach the pane:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains(&crate::i18n::t("tui-agents-label-manifest-history-empty")),
+            "a failed fetch must not read as an agent with no history:\n{rendered}"
+        );
+    }
+
+    /// `status_msg` collects every agent-tab message. A skills or channels error
+    /// arriving while a history fetch is outstanding used to be rendered here as
+    /// this fetch's reason, so an operator read an unrelated failure where "no
+    /// configuration changes recorded" belonged.
+    #[test]
+    fn an_unrelated_agent_tab_error_is_not_shown_as_the_history_fetchs_reason() {
+        let mut state = AgentSelectState::new();
+        state.sub = AgentSubScreen::ManifestHistory;
+        state.set_manifest_history(Vec::new());
+        state.status_msg = "Failed to save skills".to_string();
+
+        let rendered = render(&mut state);
+
+        assert!(
+            !rendered.contains("Failed to save skills"),
+            "an unrelated agent-tab error must not stand in for the history fetch's reason:\n{rendered}"
+        );
+        assert!(
+            rendered.contains(&crate::i18n::t("tui-agents-label-manifest-history-empty")),
+            "an agent with no recorded history must still say so:\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn a_populated_history_renders_its_versions_and_the_selected_toml() {
+        let mut state = AgentSelectState::new();
+        state.sub = AgentSubScreen::ManifestHistory;
+        state.set_manifest_history(vec![version("2026-09-07 10:00:00")]);
+
+        let rendered = render(&mut state);
+
+        assert!(
+            rendered.contains("api"),
+            "the change source belongs on the row:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("2026-09-07"),
+            "the version's timestamp belongs on the row:\n{rendered}"
+        );
+    }
+
+    /// `manifest_versions.timestamp` is stored in SQLite's `datetime('now')`
+    /// shape — UTC with no offset — which is the interpretation the dashboard's
+    /// `formatSqliteDateTime` also applies.
+    #[test]
+    fn a_utc_timestamp_is_rendered_in_local_time() {
+        use chrono::TimeZone;
+
+        let formatted = format_manifest_timestamp("2026-09-07 10:00:00");
+        let expected = chrono::Utc
+            .with_ymd_and_hms(2026, 9, 7, 10, 0, 0)
+            .unwrap()
+            .with_timezone(&chrono::Local)
+            .format("%Y-%m-%d %H:%M:%S")
+            .to_string();
+
+        assert_eq!(formatted, expected);
+    }
+
+    #[test]
+    fn an_unparseable_timestamp_is_shown_verbatim() {
+        assert_eq!(format_manifest_timestamp("not a date"), "not a date");
+        assert_eq!(format_manifest_timestamp(""), "");
+    }
 
     #[test]
     fn custom_agent_template_has_unlimited_hourly_token_budget() {
