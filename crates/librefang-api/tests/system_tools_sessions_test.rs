@@ -900,3 +900,74 @@ async fn session_detail_label_falls_back_to_the_snippet_then_prefers_an_explicit
     assert_eq!(status, StatusCode::OK, "{body:?}");
     assert_eq!(body["label"].as_str(), Some("release triage"), "{body:?}");
 }
+
+async fn delete_json(h: &Harness, path: &str) -> (StatusCode, serde_json::Value) {
+    let req = Request::builder()
+        .method(Method::DELETE)
+        .uri(path)
+        .body(Body::empty())
+        .unwrap();
+    let resp = h.app.clone().oneshot(req).await.unwrap();
+    let status = resp.status();
+    let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20)
+        .await
+        .unwrap();
+    let value: serde_json::Value = if bytes.is_empty() {
+        serde_json::Value::Null
+    } else {
+        serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null)
+    };
+    (status, value)
+}
+
+/// #7991 review: `DELETE /api/sessions/{id}` cascades to every descendant
+/// session (#7752's substrate-level cascade), and used to report that with
+/// a bare 204 — a caller who asked to delete one id had no way to learn a
+/// whole subtree came down with it. The response body must say what was
+/// actually removed.
+///
+/// The child session here is constructed directly through the substrate
+/// rather than via a real spawn path, because no production writer sets
+/// `parent_session_id` today (see `ephemeral_spawn.rs`'s
+/// `new_ephemeral_session` and its doc comment) — this test exercises the
+/// cascade/reporting mechanism itself, which must be correct for whichever
+/// writer eventually uses it.
+#[tokio::test(flavor = "multi_thread")]
+async fn delete_session_cascades_to_children_and_reports_them() {
+    let h = boot().await;
+    let agent_id = AgentId(uuid::Uuid::new_v4());
+    let substrate = h.state.kernel.memory_substrate();
+
+    let parent = substrate.create_session(agent_id).expect("seed parent");
+    let child = librefang_memory::session::Session {
+        id: librefang_types::agent::SessionId::new(),
+        agent_id,
+        parent_session_id: Some(parent.id),
+        messages: vec![],
+        context_window_tokens: 0,
+        label: None,
+        model_override: None,
+        messages_generation: 0,
+        last_repaired_generation: None,
+        peer_id: None,
+    };
+    substrate.save_session(&child).expect("seed child");
+
+    let (status, body) = delete_json(&h, &format!("/api/sessions/{}", parent.id.0)).await;
+    assert_eq!(status, StatusCode::OK, "{body:?}");
+    assert_eq!(
+        body["deleted_count"], 2,
+        "the cascade must report the parent AND the child it took down, got: {body}"
+    );
+    let deleted_ids: Vec<String> = body["deleted_session_ids"]
+        .as_array()
+        .expect("deleted_session_ids array")
+        .iter()
+        .map(|v| v.as_str().unwrap().to_string())
+        .collect();
+    assert!(deleted_ids.contains(&parent.id.0.to_string()));
+    assert!(deleted_ids.contains(&child.id.0.to_string()));
+
+    assert!(substrate.get_session(parent.id).unwrap().is_none());
+    assert!(substrate.get_session(child.id).unwrap().is_none());
+}

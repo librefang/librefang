@@ -34,9 +34,11 @@ pub trait SessionStore {
     /// Return all session ids belonging to `agent_id`, newest first.
     fn get_agent_session_ids(&self, agent_id: AgentId) -> LibreFangResult<Vec<SessionId>>;
 
-    /// Delete a session by id. Implementations should treat a missing id as
-    /// a no-op (do not return an error when the row is already gone).
-    fn delete_session(&self, session_id: SessionId) -> LibreFangResult<()>;
+    /// Delete a session by id, cascading to every descendant session, and
+    /// return every id actually removed. Implementations should treat a
+    /// missing id as a no-op (do not return an error when the row is
+    /// already gone).
+    fn delete_session(&self, session_id: SessionId) -> LibreFangResult<Vec<SessionId>>;
 }
 
 impl SessionStore for MemorySubstrate {
@@ -52,7 +54,7 @@ impl SessionStore for MemorySubstrate {
         MemorySubstrate::get_agent_session_ids(self, agent_id)
     }
 
-    fn delete_session(&self, session_id: SessionId) -> LibreFangResult<()> {
+    fn delete_session(&self, session_id: SessionId) -> LibreFangResult<Vec<SessionId>> {
         MemorySubstrate::delete_session(self, session_id)
     }
 }

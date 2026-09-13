@@ -442,6 +442,7 @@ impl LibreFangKernel {
             .unwrap_or_else(|| librefang_memory::session::Session {
                 id: target_session_id,
                 agent_id,
+                parent_session_id: None,
                 messages: Vec::new(),
                 context_window_tokens: 0,
                 label: None,
@@ -642,6 +643,7 @@ impl LibreFangKernel {
             .unwrap_or_else(|| librefang_memory::session::Session {
                 id: target_session_id,
                 agent_id,
+                parent_session_id: None,
                 messages: Vec::new(),
                 context_window_tokens: 0,
                 label: None,

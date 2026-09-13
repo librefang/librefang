@@ -85,6 +85,28 @@ pub(crate) fn clamp_iterations(requested: Option<u32>, configured: Option<u32>) 
         .map_or(ceiling, |n| n.min(ceiling))
 }
 
+/// Build the throwaway session an ephemeral worker's turn runs on.
+///
+/// `parent_session_id` is always `None`: this session is run with
+/// `incognito: true` (see `loop_opts` in `spawn_ephemeral_worker`), which
+/// suppresses the end-of-turn `save_session` call entirely, so nothing here
+/// ever reaches the `sessions` table. Setting a parent pointer on a row that
+/// is never written would be a write nobody reads (#7991 review).
+fn new_ephemeral_session(agent_id: AgentId, label: String) -> librefang_memory::session::Session {
+    librefang_memory::session::Session {
+        id: SessionId::new(),
+        agent_id,
+        parent_session_id: None,
+        messages: Vec::new(),
+        context_window_tokens: 0,
+        label: Some(label),
+        model_override: None,
+        messages_generation: 0,
+        last_repaired_generation: None,
+        peer_id: None,
+    }
+}
+
 impl LibreFangKernel {
     /// The tool set an ephemeral worker spawned by `parent_id` both advertises and can execute.
     ///
@@ -386,17 +408,18 @@ impl LibreFangKernel {
         //
         // The `SessionId` is fresh and never persisted: `incognito` suppresses
         // the end-of-turn save, and nothing here writes the session table.
-        let mut session = librefang_memory::session::Session {
-            id: SessionId::new(),
-            agent_id: parent_id,
-            messages: Vec::new(),
-            context_window_tokens: 0,
-            label: Some(format!("ephemeral mission {mission_name}")),
-            model_override: None,
-            messages_generation: 0,
-            last_repaired_generation: None,
-            peer_id: None,
-        };
+        //
+        // `parent_session_id` is deliberately `None`, not `Some(parent.session_id)`
+        // (#7991 review: the only production writer of the field was building it
+        // on exactly this session). Stamping a parent on a session nothing ever
+        // saves is a write nobody reads — `children_of` can never find it, and
+        // the value would only ever surface in a test that calls `save_session`
+        // by hand, which is not a path a real deployment takes. If a real
+        // sub-agent lineage feature needs this field, it needs a session that
+        // is actually persisted (a non-incognito sub-agent session, or the
+        // #7904 `ephemeral_runs` row) — not this one.
+        let mut session =
+            new_ephemeral_session(parent_id, format!("ephemeral mission {mission_name}"));
 
         let max_iterations = Some(clamp_iterations(
             request.max_iterations,
@@ -660,5 +683,28 @@ impl LibreFangKernel {
         librefang_memory::EphemeralRunStore::new(self.memory.substrate.pool())
             .rollup_for_parent(&parent_id.0.to_string())
             .map_err(KernelError::LibreFang)
+    }
+}
+
+#[cfg(test)]
+mod ephemeral_session_tests {
+    use super::new_ephemeral_session;
+    use librefang_types::agent::AgentId;
+
+    /// Regression for #7991 review: the ephemeral worker's session is
+    /// `incognito`, so `save_session` is never called on it — nothing
+    /// downstream can ever read a `parent_session_id` stamped here. Pins
+    /// the value at the point of construction, since no round-trip
+    /// through the database can distinguish the two (both leave
+    /// `sessions` untouched either way).
+    #[test]
+    fn ephemeral_session_has_no_parent_session_id() {
+        let session = new_ephemeral_session(AgentId::new(), "test mission".to_string());
+        assert!(
+            session.parent_session_id.is_none(),
+            "an ephemeral worker's session is never persisted (incognito=true \
+             suppresses save_session), so a parent pointer here is a write \
+             nobody reads and falsely implies lineage `children_of` could find"
+        );
     }
 }

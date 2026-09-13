@@ -559,7 +559,13 @@ pub async fn get_session(
 }
 
 /// DELETE /api/sessions/:id — Delete a session.
-#[utoipa::path(delete, path = "/api/sessions/{id}", tag = "sessions", params(("id" = String, Path, description = "Session ID")), responses((status = 200, description = "Session deleted")))]
+///
+/// Cascades to every descendant session (#7752) — deleting a session that
+/// spawned sub-agent runs takes the whole delegated subtree with it. The
+/// response body reports what actually came down rather than a bare 204, so
+/// a caller who only asked to delete one id can tell a subtree was removed
+/// (#7991 review).
+#[utoipa::path(delete, path = "/api/sessions/{id}", tag = "sessions", params(("id" = String, Path, description = "Session ID")), responses((status = 200, description = "Session deleted, cascading to descendants", body = crate::types::JsonObject)))]
 pub async fn delete_session(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -582,7 +588,19 @@ pub async fn delete_session(
     // for the daemon's lifetime — context-compression GC never runs on a
     // dead session.
     match state.kernel.delete_session(session_id) {
-        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Ok(removed) => {
+            let removed_ids: Vec<String> = removed.iter().map(|sid| sid.0.to_string()).collect();
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "status": "deleted",
+                    "session_id": id,
+                    "deleted_count": removed_ids.len(),
+                    "deleted_session_ids": removed_ids,
+                })),
+            )
+                .into_response()
+        }
         Err(e) => session_storage_error(e).into_json_tuple().into_response(),
     }
 }
