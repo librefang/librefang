@@ -37,7 +37,12 @@ import { copyToClipboard } from "../lib/clipboard";
 import { toastErr } from "../lib/errors";
 import { filterVisible } from "../lib/hiddenModels";
 import { Search, Users, MessageCircle, X, Cpu, Wrench, Shield, Plus, Loader2, Pause, Play, Clock, Brain, Zap, FlaskConical, Trash2, Copy, RotateCcw, Pencil, Bot, Database, FileText, MoreHorizontal, Sparkles, ChevronDown, Check, Save, Library, GitBranch } from "lucide-react";
-import { buildModelConfigPatch } from "../lib/agentModelPatch";
+import {
+  buildModelConfigPatch,
+  emptyModelNumerics,
+  seedModelNumerics,
+  type ModelDraft,
+} from "../lib/agentModelPatch";
 import { truncateId } from "../lib/string";
 import { pickLatestSessionId } from "../lib/sessionSelector";
 import { getStatusVariant } from "../lib/status";
@@ -52,6 +57,8 @@ import { useModels } from "../lib/queries/models";
 import { useSkills } from "../lib/queries/skills";
 import { useMcpServers } from "../lib/queries/mcp";
 import { AgentManifestForm } from "../components/AgentManifestForm";
+import { AgentModelParamFields } from "../components/AgentModelParamFields";
+import { selectModelLimits } from "../lib/modelLimits";
 import { AgentSchedulePanel } from "../components/AgentSchedulePanel";
 import { AgentSkillItem } from "../components/AgentSkillItem";
 import {
@@ -347,7 +354,11 @@ export function AgentsPage() {
   const [tomlParseError, setTomlParseError] = useState<string | null>(null);
   const [showPrompts, setShowPrompts] = useState(false);
   const [editingModel, setEditingModel] = useState(false);
-  const [modelDraft, setModelDraft] = useState({ provider: "", model: "", max_tokens: "", temperature: "" });
+  const [modelDraft, setModelDraft] = useState<ModelDraft>({
+    provider: "",
+    model: "",
+    ...emptyModelNumerics(),
+  });
   // Inline-rename state for the detail/edit modal header. The agent name is
   // the primary identifier in the UI and was previously read-only — now
   // clicking the title swaps it for an input and PATCHes /agents/{id}.
@@ -502,9 +513,7 @@ export function AgentsPage() {
       // An empty field is the inherit state, so a `null` from the backend seeds
       // an empty box rather than the compiled default. Seeding 4096 / 0.7 here
       // is what used to make an untouched field look like a deliberate choice.
-      max_tokens: detailAgent?.model?.max_tokens == null ? "" : String(detailAgent.model.max_tokens),
-      temperature:
-        detailAgent?.model?.temperature == null ? "" : String(detailAgent.model.temperature),
+      ...seedModelNumerics(detailAgent?.model),
     });
     setEditingModel(true);
   }
@@ -1016,6 +1025,13 @@ export function AgentsPage() {
   // Both facts are read off `buildModelConfigPatch`, the same strict builder Save itself calls: a null patch means the draft is invalid, an empty patch means nothing changed.
   // Sharing the builder also keeps trailing garbage ("4096abc") from enabling a button that then no-ops, because the parse that rejects it is the parse that would have built the request.
   const currentModel = detailAgent?.model;
+  // The declared capacities for the model being edited, so the drawer trims rungs the endpoint
+  // cannot honour and warns on an over-limit value — the same two things the create form does with
+  // the same helper, instead of the drawer silently offering both.
+  const drawerModelLimits = useMemo(
+    () => selectModelLimits(visibleModels, modelDraft.model, modelDraft.provider),
+    [visibleModels, modelDraft.model, modelDraft.provider],
+  );
   const modelPatchPreview = buildModelConfigPatch(modelDraft, currentModel).patch;
   const modelValid = modelPatchPreview !== null;
   const modelDirty = modelPatchPreview !== null && Object.keys(modelPatchPreview).length > 0;
@@ -2748,26 +2764,27 @@ export function AgentsPage() {
                             ))}
                           </datalist>
                         </DetailRow>
-                        <DetailRow label={t("agents.max_tokens")}>
-                          <input
-                            type="number"
-                            min={1}
-                            value={modelDraft.max_tokens}
-                            onChange={e => setModelDraft(d => ({ ...d, max_tokens: e.target.value }))}
-                            className="w-44 px-2 py-1 rounded-md border border-border-subtle bg-surface text-sm font-mono outline-none focus:border-brand text-right"
-                          />
-                        </DetailRow>
-                        <DetailRow label={t("agents.temperature")}>
-                          <input
-                            type="number"
-                            min={0}
-                            max={2}
-                            step={0.1}
-                            value={modelDraft.temperature}
-                            onChange={e => setModelDraft(d => ({ ...d, temperature: e.target.value }))}
-                            className="w-44 px-2 py-1 rounded-md border border-border-subtle bg-surface text-sm font-mono outline-none focus:border-brand text-right"
-                          />
-                        </DetailRow>
+                        {/*
+                          The same step ladders the create form and the model
+                          settings use, rather than a second set of hand-rolled
+                          number boxes. One parameter, one control: a bare
+                          `<input type="number">` stated neither the usual value
+                          nor the ceiling, so setting a temperature meant knowing
+                          that 0.7 is typical and 2 is the limit, while the
+                          identical parameter elsewhere in the app was a labelled
+                          ladder.
+
+                          Every field is tri-state, and `""` is the third state:
+                          it means the agent has no opinion and the model's own
+                          setting applies. That is why an untouched row must stay
+                          empty (#5917).
+                        */}
+                        <AgentModelParamFields
+                          draft={modelDraft}
+                          onChange={(field, next) => setModelDraft(d => ({ ...d, [field]: next }))}
+                          isHand={detailAgent.is_hand === true}
+                          limits={drawerModelLimits}
+                        />
                         <div className="flex justify-end gap-2 pt-1">
                           <button
                             onClick={cancelModelEdit}
@@ -2813,6 +2830,30 @@ export function AgentsPage() {
                               : detailAgent.model.temperature}
                           </span>
                         </DetailRow>
+                        {/*
+                          The rest of what the editor can set. Leaving them out
+                          made a saved value invisible the moment edit mode
+                          closed, so there was nowhere to notice that a write
+                          had not taken — which is how the hand-agent drop
+                          stayed hidden.
+                        */}
+                        {([
+                          ["model_param.top_p", detailAgent.model.top_p, false],
+                          ["model_param.frequency_penalty", detailAgent.model.frequency_penalty, false],
+                          ["model_param.presence_penalty", detailAgent.model.presence_penalty, false],
+                          ["model_param.context_window", detailAgent.model.context_window, true],
+                          ["model_param.max_output_tokens", detailAgent.model.max_output_tokens, true],
+                        ] as const).map(([key, value, isTokenCount]) => (
+                          <DetailRow key={key} label={t(key)}>
+                            <span className="font-mono">
+                              {value == null
+                                ? t("agents.form.inherit_default")
+                                : isTokenCount
+                                  ? formatNumber(value)
+                                  : value}
+                            </span>
+                          </DetailRow>
+                        ))}
                       </>
                     )}
                   </div>

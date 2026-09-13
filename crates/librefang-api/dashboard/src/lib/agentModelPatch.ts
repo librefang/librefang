@@ -14,12 +14,40 @@
 // an emptied field is a deliberate "hand this back to the model's setting" that reaches the
 // backend as `null` instead of being silently indistinguishable from no edit at all.
 
+import {
+  isValidParamValue,
+  MODEL_PARAM_NAMES,
+  type ModelParamName,
+} from "../components/ui/ModelParamField";
+
+/**
+ * The numeric half of the draft is exactly the shared parameter set, not a second list of its own.
+ *
+ * What a field may hold lives in `MODEL_PARAM_RANGES` next to the control that renders it, and
+ * `isValidParamValue` is the one function that answers it — the same answer the create form and the
+ * model settings already get. A table here would be a second opinion about the same seven fields,
+ * free to drift from the `min`/`max`/`step` the operator's own input box enforces.
+ *
+ * The shared bounds are what `patch_agent_config` validates on `PatchAgentConfigRequest`
+ * (`routes/agents/config.rs`): a range table covers the four float fields, and the three integer
+ * ones are rejected only at zero. Sending a value outside them is a 400, so catching it here is the
+ * difference between a disabled Save and a failed request.
+ */
+export type ModelNumericField = ModelParamName;
+
+export const MODEL_NUMERIC_FIELDS = MODEL_PARAM_NAMES;
+
 export interface PersistedModel {
   provider?: string;
   model?: string;
   /** `null` / absent means the agent inherits rather than pinning a number. */
   max_tokens?: number | null;
   temperature?: number | null;
+  top_p?: number | null;
+  frequency_penalty?: number | null;
+  presence_penalty?: number | null;
+  context_window?: number | null;
+  max_output_tokens?: number | null;
 }
 
 export interface ModelDraft {
@@ -28,6 +56,11 @@ export interface ModelDraft {
   /** `""` is the inherit state, not zero. */
   max_tokens: string;
   temperature: string;
+  top_p: string;
+  frequency_penalty: string;
+  presence_penalty: string;
+  context_window: string;
+  max_output_tokens: string;
 }
 
 export interface ModelConfigPatch {
@@ -36,6 +69,34 @@ export interface ModelConfigPatch {
   /** `null` clears the agent's own value. */
   max_tokens?: number | null;
   temperature?: number | null;
+  top_p?: number | null;
+  frequency_penalty?: number | null;
+  presence_penalty?: number | null;
+  context_window?: number | null;
+  max_output_tokens?: number | null;
+}
+
+/** Every numeric field in its inherit state — the shape a fresh draft starts in. */
+export function emptyModelNumerics(): Pick<ModelDraft, ModelNumericField> {
+  return Object.fromEntries(MODEL_NUMERIC_FIELDS.map((f) => [f, ""])) as Pick<
+    ModelDraft,
+    ModelNumericField
+  >;
+}
+
+/**
+ * Seed the numeric half of a draft from what the daemon returned.
+ *
+ * A `null` on the wire becomes `""`, not the compiled default: an untouched
+ * field has to look untouched, or opening the drawer and saving would pin every
+ * inherited value as a deliberate choice (#5917).
+ */
+export function seedModelNumerics(
+  persisted: PersistedModel | undefined,
+): Pick<ModelDraft, ModelNumericField> {
+  return Object.fromEntries(
+    MODEL_NUMERIC_FIELDS.map((f) => [f, persisted?.[f] == null ? "" : String(persisted[f])]),
+  ) as Pick<ModelDraft, ModelNumericField>;
 }
 
 export interface BuildModelConfigPatchResult {
@@ -50,16 +111,15 @@ export interface BuildModelConfigPatchResult {
  * `undefined` when the text is not a number this field accepts — which the
  * caller treats as an invalid draft.
  */
-function parseTriState(
-  raw: string,
-  parse: (s: string) => number,
-  valid: (n: number) => boolean,
-): number | null | undefined {
+function parseTriState(param: ModelNumericField, raw: string): number | null | undefined {
   const trimmed = raw.trim();
   if (trimmed === "") return null;
-  if (Number.isNaN(Number(trimmed))) return undefined;
-  const parsed = parse(trimmed);
-  return Number.isNaN(parsed) || !valid(parsed) ? undefined : parsed;
+  // `isValidParamValue` covers finiteness, the range, and whole-numberness for the token counts, so
+  // `Number` is the only parse needed and cannot come back NaN after it. The previous `parseInt`
+  // read a prefix rather than the value: `1e5` became 1 and `4096.7` became 4096, both stored
+  // silently, and both accepted here while the shared validator rejected them.
+  if (!isValidParamValue(param, trimmed)) return undefined;
+  return Number(trimmed);
 }
 
 // Build the PATCH payload from the draft, including a field only when the user
@@ -73,9 +133,14 @@ export function buildModelConfigPatch(
   const trimmedModel = draft.model.trim();
   if (!trimmedProvider || !trimmedModel) return { patch: null };
 
-  const maxTokens = parseTriState(draft.max_tokens, (s) => parseInt(s, 10), (n) => n > 0);
-  const temperature = parseTriState(draft.temperature, parseFloat, (n) => n >= 0 && n <= 2);
-  if (maxTokens === undefined || temperature === undefined) return { patch: null };
+  const parsed = {} as Record<ModelNumericField, number | null>;
+  for (const field of MODEL_NUMERIC_FIELDS) {
+    const value = parseTriState(field, draft[field]);
+    // One invalid field invalidates the whole draft: a partial PATCH would
+    // save some of what the operator typed and silently drop the rest.
+    if (value === undefined) return { patch: null };
+    parsed[field] = value;
+  }
 
   const patch: ModelConfigPatch = {};
 
@@ -92,13 +157,22 @@ export function buildModelConfigPatch(
     patch.model = trimmedModel;
   }
 
-  // `?? null` rather than `|| null`: a persisted explicit `0` is a real value,
-  // not an absent one.
-  if (maxTokens !== (persisted?.max_tokens ?? null) && (!providerChanged || maxTokens !== null)) {
-    patch.max_tokens = maxTokens;
-  }
-  if (temperature !== (persisted?.temperature ?? null) && (!providerChanged || temperature !== null)) {
-    patch.temperature = temperature;
+  for (const field of MODEL_NUMERIC_FIELDS) {
+    const next = parsed[field];
+    // `?? null` rather than `|| null`: a persisted explicit `0` is a real
+    // value, not an absent one.
+    const current = persisted?.[field] ?? null;
+    if (next === current) continue;
+    // A `null` here goes out even when the provider changed in the same edit.
+    // This used to be skipped on the theory that switching provider resets
+    // these server-side; it does not. `set_agent_model`
+    // (`librefang-kernel/src/kernel/agent_state.rs`) clears `api_key_env` and
+    // `base_url` and nothing else, and `patch_agent_config` writes model and
+    // provider before the sampling fields, so a `null` alongside a provider
+    // change lands rather than being overwritten. Skipping it could only ever
+    // drop a clear the operator made by hand: an untouched pinned field seeds
+    // to its own value and leaves by the equality check above.
+    patch[field] = next;
   }
 
   return { patch };
