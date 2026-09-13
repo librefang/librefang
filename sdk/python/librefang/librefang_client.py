@@ -67,6 +67,7 @@ class LibreFang:
         self.sessions = _SessionsResource(self)
         self.skills = _SkillsResource(self)
         self.system = _SystemResource(self)
+        self.tasks = _TasksResource(self)
         self.tools = _ToolsResource(self)
         self.users = _UsersResource(self)
         self.vault = _VaultResource(self)
@@ -1343,6 +1344,14 @@ class _SystemResource(_Resource):
 
     def api_versions(self):
         return self._c._request("GET", "/api/versions")
+
+
+# ── Tasks Resource ─────────────────────────────────────────────
+
+class _TasksResource(_Resource):
+
+    def task_queue_post_root(self, **data):
+        return self._c._request("POST", "/api/tasks", data)
 
 
 # ── Tools Resource ─────────────────────────────────────────────

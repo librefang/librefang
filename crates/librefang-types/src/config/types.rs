@@ -3232,9 +3232,12 @@ impl Default for QueueConcurrencyConfig {
 /// assignee_wake = true         # wake the assignee even with no trigger declared
 /// ```
 ///
-/// Setting `claim_ttl_secs = 0` disables the sweeper entirely — useful
-/// for long-running human-in-the-loop tasks where a 10 minute reset
-/// would be wrong.
+/// Setting `claim_ttl_secs = 0` disables the *global* clock, not a clock a
+/// task explicitly carries: a task that declared its own `timeout_secs`
+/// still expires, because that is a more specific statement than the
+/// global default. Useful for long-running human-in-the-loop tasks where
+/// a 10 minute reset would be wrong — as long as those tasks do not
+/// carry a per-task timeout.
 ///
 /// Every field is re-read live by its consumer — the sweeper re-reads its
 /// three knobs on each tick, and `assignee_wake` is read at the synthesis
@@ -3244,7 +3247,9 @@ impl Default for QueueConcurrencyConfig {
 #[serde(default)]
 pub struct TaskBoardConfig {
     /// How long an `in_progress` task may stay claimed before the sweeper
-    /// resets it to `pending`. Default: 600 s (10 minutes). 0 disables.
+    /// resets it to `pending`. Default: 600 s (10 minutes). 0 disables the
+    /// global clock only — a task that declared its own `timeout_secs`
+    /// still expires.
     pub claim_ttl_secs: u64,
     /// How often the sweeper scans for stuck tasks. Default: 30 s.
     pub sweep_interval_secs: u64,

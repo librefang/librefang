@@ -82,6 +82,7 @@ impl TaskQueue for TrackingSendHandle {
         _description: &str,
         _assigned_to: Option<&str>,
         _created_by: Option<&str>,
+        _opts: &librefang_kernel_handle::TaskPostOptions,
     ) -> Result<String, librefang_kernel_handle::KernelOpError> {
         Ok("task".into())
     }
@@ -281,6 +282,7 @@ impl TaskQueue for TrackingSpawnHandle {
         _description: &str,
         _assigned_to: Option<&str>,
         _created_by: Option<&str>,
+        _opts: &librefang_kernel_handle::TaskPostOptions,
     ) -> Result<String, librefang_kernel_handle::KernelOpError> {
         Ok("task".into())
     }
@@ -481,6 +483,7 @@ impl TaskQueue for TrackingApprovalHandle {
         _description: &str,
         _assigned_to: Option<&str>,
         _created_by: Option<&str>,
+        _opts: &librefang_kernel_handle::TaskPostOptions,
     ) -> Result<String, librefang_kernel_handle::KernelOpError> {
         Ok("task".into())
     }

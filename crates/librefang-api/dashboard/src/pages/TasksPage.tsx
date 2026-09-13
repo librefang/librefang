@@ -18,6 +18,7 @@ import { Card } from "../components/ui/Card";
 import { Badge } from "../components/ui/Badge";
 import { Button } from "../components/ui/Button";
 import { Modal } from "../components/ui/Modal";
+import { useAgents } from "../lib/queries/agents";
 import { useTaskQueue } from "../lib/queries/runtime";
 import {
   useCreateTask,
@@ -158,6 +159,18 @@ function TaskCard({ task, isDragTarget, onDragStart }: TaskCardProps) {
         {task.created_by && (
           <span className="text-[10px] text-text-dim/50 shrink-0">
             {t("tasks.by")} {task.created_by}
+          </span>
+        )}
+        {!!task.priority && (
+          <span className="text-[10px] text-text-dim/50 shrink-0">
+            {t("tasks.priority_badge", { priority: task.priority })}
+          </span>
+        )}
+        {task.timeout_secs != null && (
+          <span className="text-[10px] text-text-dim/50 shrink-0">
+            {task.timeout_secs === 0
+              ? t("tasks.timeout_badge_never")
+              : t("tasks.timeout_badge", { secs: task.timeout_secs })}
           </span>
         )}
         <span className="ml-auto flex items-center gap-1 text-[10px] text-text-dim/50 shrink-0">
@@ -326,6 +339,8 @@ function NewTaskModal({ isOpen, onClose, agents }: NewTaskModalProps) {
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
   const [assignee, setAssignee] = useState("");
+  const [priority, setPriority] = useState("");
+  const [timeoutSecs, setTimeoutSecs] = useState("");
 
   function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -334,6 +349,8 @@ function NewTaskModal({ isOpen, onClose, agents }: NewTaskModalProps) {
       title: title.trim(),
       description: description.trim(),
       ...(assignee.trim() ? { assigned_to: assignee.trim() } : {}),
+      ...(priority.trim() ? { priority: Number(priority) } : {}),
+      ...(timeoutSecs.trim() ? { timeout_secs: Number(timeoutSecs) } : {}),
     });
   }
 
@@ -346,6 +363,8 @@ function NewTaskModal({ isOpen, onClose, agents }: NewTaskModalProps) {
       setTitle("");
       setDescription("");
       setAssignee("");
+      setPriority("");
+      setTimeoutSecs("");
     }
   }, [isOpen]);
 
@@ -387,26 +406,58 @@ function NewTaskModal({ isOpen, onClose, agents }: NewTaskModalProps) {
           <label className="block text-xs font-semibold text-text-dim mb-1.5">
             {t("tasks.field_assignee")}
           </label>
-          {agents.length > 0 ? (
-            <select
-              value={assignee}
-              onChange={(e) => setAssignee(e.target.value)}
-              className={INPUT_CLASS}
-            >
-              <option value="">{t("tasks.all_agents")}</option>
-              {agents.map((a) => (
-                <option key={a} value={a}>{a}</option>
-              ))}
-            </select>
-          ) : (
+          {/* A single free-text input with a <datalist> of suggestions,
+              never a <select> that swaps in once the registry loads: a
+              two-widget swap left a value typed while `agents` was still
+              `[]` sitting in state under a dropdown that had already
+              re-rendered with nothing selected, so a submit right after
+              looked like it targeted no one but silently posted the typed
+              name. A single input has no mode to swap, so there is nothing
+              to desync — and typing a name outside the suggestion list
+              (a hand agent, or another operator's agent excluded by the
+              per-user scoping on GET /api/agents) still works exactly as
+              before. */}
+          <input
+            type="text"
+            list="new-task-assignee-agents"
+            value={assignee}
+            onChange={(e) => setAssignee(e.target.value)}
+            placeholder={t("tasks.field_assignee_placeholder")}
+            className={INPUT_CLASS}
+          />
+          <datalist id="new-task-assignee-agents">
+            {agents.map((a) => (
+              <option key={a} value={a} />
+            ))}
+          </datalist>
+        </div>
+
+        <div className="flex gap-3">
+          <div className="flex-1">
+            <label className="block text-xs font-semibold text-text-dim mb-1.5">
+              {t("tasks.field_priority")}
+            </label>
             <input
-              type="text"
-              value={assignee}
-              onChange={(e) => setAssignee(e.target.value)}
-              placeholder={t("tasks.field_assignee_placeholder")}
+              type="number"
+              value={priority}
+              onChange={(e) => setPriority(e.target.value)}
+              placeholder={t("tasks.field_priority_placeholder")}
               className={INPUT_CLASS}
             />
-          )}
+          </div>
+          <div className="flex-1">
+            <label className="block text-xs font-semibold text-text-dim mb-1.5">
+              {t("tasks.field_timeout")}
+            </label>
+            <input
+              type="number"
+              min={0}
+              value={timeoutSecs}
+              onChange={(e) => setTimeoutSecs(e.target.value)}
+              placeholder={t("tasks.field_timeout_placeholder")}
+              className={INPUT_CLASS}
+            />
+          </div>
         </div>
 
         {createMutation.isError && (
@@ -458,18 +509,36 @@ export function TasksPage() {
 
   // Fetch all tasks (no status filter — we split client-side)
   const taskListQuery = useTaskQueue();
+  // The registry — the new-task assignee picker is built from this, not from
+  // historical tasks: the kernel validates the assignee against the registry
+  // now, so a picker offering a deleted agent's name (or a typo on an empty
+  // board) produces a 400 the moment the operator picks it.
+  // `includeHands: true` because the kernel accepts hand agents as assignees
+  // too; the default-excluding list here would otherwise offer strictly less
+  // than what a claim can actually target.
+  const agentsQuery = useAgents({ includeHands: true });
 
   const allTasks: TaskQueueItem[] = taskListQuery.data?.tasks ?? [];
   const validTasks = allTasks.filter(
     (task): task is TaskQueueItem & { id: string } => typeof task.id === "string" && task.id.length > 0,
   );
 
-  // Derive unique agent names for the filter dropdown
+  // The filter dropdown still derives from the tasks themselves: filtering
+  // by a historical assignee whose agent has since been deleted is a read,
+  // not a write — those rows are still there and still filterable.
   const agentNames = Array.from(
     new Set(
       validTasks
         .map((t) => t.assigned_to)
         .filter((a): a is string => typeof a === "string" && a.length > 0),
+    ),
+  ).sort();
+
+  const registryAgentNames = Array.from(
+    new Set(
+      (agentsQuery.data ?? [])
+        .map((a) => a.name)
+        .filter((n): n is string => typeof n === "string" && n.length > 0),
     ),
   ).sort();
 
@@ -649,7 +718,7 @@ export function TasksPage() {
       <NewTaskModal
         isOpen={showNewTask}
         onClose={() => setShowNewTask(false)}
-        agents={agentNames}
+        agents={registryAgentNames}
       />
     </div>
   );

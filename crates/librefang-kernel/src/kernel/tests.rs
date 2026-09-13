@@ -3319,7 +3319,14 @@ async fn test_task_board_sweep_resets_stuck_in_progress_task() {
 
     // Post and claim a task so status = in_progress.
     let task_id = mem
-        .task_post("Stuck work", "Worker will stall", Some("worker"), None)
+        .task_post(
+            "Stuck work",
+            "Worker will stall",
+            Some("worker"),
+            None,
+            0,
+            None,
+        )
         .await
         .expect("post");
     let claimed = mem

@@ -88,7 +88,7 @@ Lazy loading 在 manifest 用 `lazy_tools = true` 按 agent 开启。关掉则�
 | 工具 | 参数 | 用途 |
 |---|---|---|
 | `task_post` | `title`、`body`、可选 `assignee`、`priority` | 在共享队列创建新任务。 |
-| `task_claim` | 可选 `priority_filter` | 认领最高优先级 pending 任务。TTL 是 `[task_board] claim_ttl_secs`(默认 600s)。 |
+| `task_claim` | 可选 `priority_filter` | 认领最高优先级 pending 任务。超过 `[task_board] claim_ttl_secs`(默认 600s)后被重置;如果任务发布时带了自己的 `timeout_secs` 覆盖值,则以那个为准——`task_post` 从不设置这个覆盖值,所以只有通过 API 或 dashboard 发布的任务才会有。 |
 | `task_complete` | `task_id`、可选 `result` | 标记已认领任务为完成。 |
 | `task_list` | 可选 `status`、`assignee` | 带可选过滤条件列出任务。 |
 | `task_status` | `task_id` | 按 ID 查询单个任务，返回 `status`、`result`、`title`、`assigned_to`、`created_at`、`completed_at`。`comms_task_status` MCP bridge 工具的 native 版本——通过 `task_post` 委派工作的 agent 可以直接轮询结果，不必加载 bridge。 |
