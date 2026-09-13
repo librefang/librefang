@@ -551,21 +551,11 @@ pub(super) fn has_unsafe_relative_components(path: &Path) -> bool {
     // `ParentDir` (..) is always unsafe — it can escape the workspaces root
     // after joining regardless of the rest of the path.
     //
-    // `Prefix` (Windows drive / UNC prefix like `C:` or `\\?\C:`) and `RootDir`
-    // are unsafe ONLY when the path is not already absolute. A fully absolute
-    // Windows path *always* begins with a `Prefix` component followed by
-    // `RootDir` (e.g. `C:\Users\foo` decomposes into `Prefix("C:")`,
-    // `RootDir`, `Normal("Users")`, …), so treating either as unsafe
-    // unconditionally rejects every well-formed absolute path on Windows —
-    // including ones already validated by `starts_with(workspaces_root)`.
-    // What we actually want to block is the two forms Windows calls relative
-    // while `Path::join` still honours them: drive-relative `C:foo`, which
-    // carries a `Prefix`, and rooted-but-driveless `/etc/passwd`, which
-    // carries a `RootDir`. `is_absolute()` is false for both, yet
-    // `<root>.join(rel)` yields `C:foo` and `C:\etc\passwd` respectively —
-    // outside the root, with no containment check downstream in
-    // `resolve_workspace_dir`. On Unix `/etc/passwd` *is* absolute, so the
-    // `!is_absolute` guard leaves that platform's behaviour untouched.
+    // `Prefix` (Windows drive / UNC prefix like `C:` or `\\?\C:`) and `RootDir` are unsafe ONLY when the path is not already absolute.
+    // A fully absolute Windows path *always* begins with a `Prefix` component followed by `RootDir` (e.g. `C:\Users\foo` decomposes into `Prefix("C:")`, `RootDir`, `Normal("Users")`, …), so treating either as unsafe unconditionally rejects every well-formed absolute path on Windows — including ones already validated by `starts_with(workspaces_root)`.
+    // What we actually want to block is the two forms Windows calls relative while `Path::join` still honours them: drive-relative `C:foo`, which carries a `Prefix`, and rooted-but-driveless `/etc/passwd`, which carries a `RootDir`.
+    // `is_absolute()` is false for both, yet `<root>.join(rel)` yields `C:foo` and `C:\etc\passwd` respectively — outside the root, with no containment check downstream in `resolve_workspace_dir`.
+    // On Unix `/etc/passwd` *is* absolute, so the `!is_absolute` guard leaves that platform's behaviour untouched.
     let is_absolute = path.is_absolute();
     path.components().any(|c| match c {
         Component::ParentDir => true,
