@@ -1443,12 +1443,9 @@ fn migrate_v60(conn: &Connection) -> Result<(), rusqlite::Error> {
         );",
     )?;
 
-    // Every column the code reads, with the default `ALTER TABLE ADD COLUMN`
-    // accepts. SQLite refuses a non-constant default there — `datetime('now')`
-    // is rejected outright — so a reconciled column gets `''` rather than the
-    // expression the `CREATE` uses. That difference only reaches rows written
-    // by the build that created the divergent table; everything written
-    // afterwards goes through the INSERTs, which supply the value.
+    // Every column the code reads, with the default `ALTER TABLE ADD COLUMN` accepts.
+    // SQLite refuses a non-constant default there — `datetime('now')` is rejected outright — so a reconciled column gets `''` rather than the expression the `CREATE` uses.
+    // That difference only reaches rows written by the build that created the divergent table; everything written afterwards goes through the INSERTs, which supply the value.
     for (table, column) in [
         ("manifest_versions", "agent_id"),
         ("manifest_versions", "agent_name"),
@@ -1478,8 +1475,7 @@ fn migrate_v60(conn: &Connection) -> Result<(), rusqlite::Error> {
         )?;
     }
 
-    // After the reconciliation, not with the `CREATE TABLE` above: the index is
-    // over `timestamp`, and on a divergent table that column may not exist yet.
+    // After the reconciliation, not with the `CREATE TABLE` above: the index is over `timestamp`, and on a divergent table that column may not exist yet.
     // Batched with the create, it failed the whole step with "no such column".
     conn.execute_batch(
         "CREATE INDEX IF NOT EXISTS idx_manifest_versions_agent_id

@@ -680,18 +680,11 @@ pub async fn get_agent_channels(
     // agent's own editor answer "which of the three Telegram bots is mine?",
     // which previously could only be read from the channel's side.
     //
-    // `resolves` is the difference between "this bot belongs to another agent"
-    // and "this bot is wired to nothing and its messages are dropped", which the
-    // binding alone cannot express. `ChannelRouter::resolve_bindings` looks
-    // `binding.agent` up by exact key and `continue`s on a miss (`router.rs`),
-    // so a binding naming an agent that was never spawned — or has since been
-    // deleted, or is a typo — delivers nowhere. Reported as `false` rather than
-    // by omitting the instance: the row is real, it is only its target that is
-    // not, and an operator needs to see the one to fix the other.
+    // `resolves` is the difference between "this bot belongs to another agent" and "this bot is wired to nothing and its messages are dropped", which the binding alone cannot express.
+    // `ChannelRouter::resolve_bindings` looks `binding.agent` up by exact key and `continue`s on a miss (`router.rs`), so a binding naming an agent that was never spawned — or has since been deleted, or is a typo — delivers nowhere.
+    // Reported as `false` rather than by omitting the instance: the row is real, it is only its target that is not, and an operator needs to see the one to fix the other.
     //
-    // The registry's `name_index` and the router's `agent_name_cache` are
-    // separate maps, but both are exact-keyed and both written when an agent
-    // registers, so this answer and the router's cannot disagree.
+    // The registry's `name_index` and the router's `agent_name_cache` are separate maps, but both are exact-keyed and both written when an agent registers, so this answer and the router's cannot disagree.
     let registry = state.kernel.agent_registry();
     let instances: Vec<serde_json::Value> = config
         .sidecar_channels

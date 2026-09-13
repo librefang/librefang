@@ -485,10 +485,8 @@ async fn channels_distinguishes_instances_of_one_type() {
         "the agent's own view must say which instance delivers to it: {body}"
     );
 
-    // And a binding whose target does not exist is distinguishable from one
-    // that belongs to a different agent. `deannatroi` is never spawned by this
-    // fixture, so `ChannelRouter::resolve_bindings` would find nothing in its
-    // name cache and drop the message; `LaForge` is not spawned either.
+    // And a binding whose target does not exist is distinguishable from one that belongs to a different agent.
+    // `deannatroi` is never spawned by this fixture, so `ChannelRouter::resolve_bindings` would find nothing in its name cache and drop the message; `LaForge` is not spawned either.
     // Without `resolves` both read identically to `mercaman`'s live sibling.
     let unresolved: Vec<&str> = instances
         .iter()
