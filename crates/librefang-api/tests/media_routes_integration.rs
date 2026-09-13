@@ -428,6 +428,48 @@ async fn media_providers_lists_all_known_with_unconfigured_status() {
     }
 }
 
+/// A registry provider this daemon has no way to reach is not listed at all.
+///
+/// The `Err` branch narrows the registry's declared set to what the generic
+/// OpenAI-compatible driver implements, which is image generation and nothing
+/// else. For a provider that declares only video — no compiled-in driver, and
+/// no overlap with the generic one — that leaves an empty array.
+///
+/// An entry with no capabilities is worse than no entry: it files under no
+/// dashboard tab and reads as "this provider can do nothing" rather than "we
+/// have no way to serve this yet". The route is called
+/// `list_media_providers`; a provider nothing can serve is not one.
+///
+/// Reachable without a code change, because the provider registry is fetched
+/// rather than checked in — a video-only entry can arrive at any time.
+#[tokio::test(flavor = "multi_thread")]
+async fn media_providers_omits_a_provider_nothing_here_can_serve() {
+    let providers = vec![librefang_types::model_catalog::ProviderInfo {
+        id: "videoonly".to_string(),
+        display_name: "Video Only".to_string(),
+        api_key_env: "VIDEOONLY_API_KEY".to_string(),
+        media_capabilities: vec!["video_generation".into()],
+        ..Default::default()
+    }];
+    let h = boot_with_catalog(Some((providers, Vec::new()))).await;
+    let (status, body) = json_request(&h, Method::GET, "/api/media/providers", None).await;
+    assert_eq!(status, StatusCode::OK, "got: {body:?}");
+    let listed = body["providers"].as_array().expect("providers array");
+
+    assert!(
+        !listed.iter().any(|p| p["name"] == "videoonly"),
+        "a provider whose only declared capability the generic driver cannot \
+         serve must be omitted, not listed with an empty array: {body}"
+    );
+    // The compiled-in drivers are still there — the omission is scoped to the
+    // unreachable entry, not a blanket filter.
+    let names: Vec<&str> = listed.iter().filter_map(|p| p["name"].as_str()).collect();
+    assert!(
+        names.contains(&"google_tts"),
+        "built-in drivers must survive: {names:?}"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn media_providers_lists_registry_declared_providers_with_no_builtin_driver() {
     // `byteplus` is the real case this guards: it declares image and video

@@ -581,10 +581,12 @@ pub async fn list_media_providers(State(state): State<Arc<AppState>>) -> impl In
     for name in names {
         match state.media_drivers.get_or_create(&name, None) {
             Ok(driver) => {
-                // A provider served by the generic driver can only do what the
-                // generic driver does, so intersect rather than take either
-                // side whole: the registry may promise more, and a purpose-built
-                // driver reports its own set and is unaffected by this.
+                // Ask the driver, which is the only thing that knows what can
+                // actually be served: a purpose-built driver reports its own
+                // set, and the generic OpenAI-compatible one already reports
+                // `GENERIC_DRIVER_CAPABILITIES`. Nothing is intersected here —
+                // the ceiling is applied on the `Err` side below, where there is
+                // no driver to ask.
                 let capabilities: Vec<String> = driver
                     .capabilities()
                     .iter()
@@ -609,6 +611,18 @@ pub async fn list_media_providers(State(state): State<Arc<AppState>>) -> impl In
                     .map(String::as_str)
                     .filter(|c| GENERIC_DRIVER_CAPABILITIES.contains(c))
                     .collect();
+                // Nothing left after the ceiling means this daemon has no way to
+                // reach the provider at all: no compiled-in driver, and the
+                // generic one implements none of what the registry says the
+                // service does. Listing it with an empty capability array is
+                // worse than omitting it — it files under no dashboard tab and
+                // reads as "this provider can do nothing", rather than "we have
+                // no way to serve this yet". A route called
+                // `list_media_providers` should list the ones that are
+                // available.
+                if capabilities.is_empty() {
+                    continue;
+                }
                 providers.push(serde_json::json!({
                     "name": name,
                     "configured": false,

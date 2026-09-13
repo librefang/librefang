@@ -161,6 +161,19 @@ pub trait MediaDriver: Send + Sync {
 pub const BUILTIN_MEDIA_DRIVERS: &[&str] =
     &["openai", "gemini", "elevenlabs", "minimax", "google_tts"];
 
+/// [`BUILTIN_MEDIA_DRIVERS`] as an owned list, for the fields that hold one.
+///
+/// The constructors below used to spell the same five names inline, which is the
+/// duplication the constant was introduced to remove — a driver added to
+/// `create_media_driver` and to the constant would still have gone missing from
+/// a freshly constructed cache.
+fn builtin_media_provider_ids() -> Vec<String> {
+    BUILTIN_MEDIA_DRIVERS
+        .iter()
+        .map(|s| (*s).to_string())
+        .collect()
+}
+
 /// Thread-safe, lazy-initializing cache for media drivers.
 ///
 /// Holds an optional `provider_urls` map (from `KernelConfig`) so that
@@ -210,13 +223,7 @@ impl MediaDriverCache {
         Self {
             cache: DashMap::new(),
             provider_urls: RwLock::new(HashMap::new()),
-            media_providers: RwLock::new(vec![
-                "openai".into(),
-                "gemini".into(),
-                "elevenlabs".into(),
-                "minimax".into(),
-                "google_tts".into(),
-            ]),
+            media_providers: RwLock::new(builtin_media_provider_ids()),
             registry_base_urls: RwLock::new(HashMap::new()),
         }
     }
@@ -234,13 +241,7 @@ impl MediaDriverCache {
         Self {
             cache: DashMap::new(),
             provider_urls: RwLock::new(provider_urls.into_iter().collect()),
-            media_providers: RwLock::new(vec![
-                "openai".into(),
-                "gemini".into(),
-                "elevenlabs".into(),
-                "minimax".into(),
-                "google_tts".into(),
-            ]),
+            media_providers: RwLock::new(builtin_media_provider_ids()),
             registry_base_urls: RwLock::new(HashMap::new()),
         }
     }
