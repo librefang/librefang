@@ -61,6 +61,14 @@ pub fn workspace_agent_manifest_path(name: &str) -> PathBuf {
     workspace_agents_dir().join(name).join("agent.toml")
 }
 
+/// The registry checkout root (`$LIBREFANG_HOME/registry/`), the source side of a registry sync.
+///
+/// This store's own directory is the *destination* side, so the two are siblings under the same home and a caller that wants to compare an installed agent type against the copy the registry ships needs both.
+/// Named here rather than derived by the caller because the obvious derivation — taking the parent of [`agent_types_dir`] — is only correct while the store stays exactly one level below home, and it fails open: `Path::parent` returning `None` is indistinguishable from a registry that ships no such type, so a caller that mis-derives the root reports "not in the registry" for every name instead of erroring.
+pub fn registry_cache_dir() -> PathBuf {
+    librefang_home().join("registry")
+}
+
 /// Validate an agent-type name before it is joined onto the store directory.
 ///
 /// Only permits `[A-Za-z0-9_-]` to guarantee the result cannot escape the base directory through `..`, absolute paths, or platform separators (`/`, `\`).
