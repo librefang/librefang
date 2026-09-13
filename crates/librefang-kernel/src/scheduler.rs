@@ -55,18 +55,29 @@ const ONE_MINUTE: Duration = Duration::from_secs(60);
 /// One hour as a Duration constant.
 const ONE_HOUR: Duration = Duration::from_secs(3600);
 
-/// `Instant::now() - d`, but panic-proof.
+/// The oldest `Instant` a `d`-wide rolling window still covers, or `None` when the platform's monotonic clock is not yet `d` old.
 ///
-/// `Instant - Duration` panics when the result would predate the platform's
-/// monotonic origin (on Linux that origin is process boot). During the first
-/// minute of a cold-started daemon, `Instant::now() - ONE_MINUTE` underflows
-/// and panics inside the scheduler hot path. `checked_sub` returns `None`
-/// instead; we fall back to `now` (an empty look-back window — no timestamp is
-/// older than "now", so eviction simply keeps everything this tick, which is
-/// correct because nothing can yet be a full minute old).
-fn instant_now_minus(d: Duration) -> Instant {
-    let now = Instant::now();
-    now.checked_sub(d).unwrap_or(now)
+/// `Instant - Duration` panics when the result would predate the monotonic origin (process start on Linux, boot on Windows and macOS).
+/// A cold-started daemon hits that within its first minute for `ONE_MINUTE`, and a host booted under an hour ago hits it for `ONE_HOUR` on every call the scheduler makes.
+///
+/// `None` means "nothing recorded so far can possibly have aged out", so every caller skips eviction entirely.
+/// The previous fallback returned `now`, which reads as an empty look-back window and is the opposite of correct: every timestamp already in a deque is strictly older than `now`, so the eviction loops drained the whole window on each call and the rolling counters read zero.
+/// On a host with sub-hour uptime that silently disabled `max_network_bytes_per_hour` (and, in the first minute of daemon life, the tool-call and token burst gates) — the quota never accumulated a spend to refuse on.
+fn window_cutoff(d: Duration) -> Option<Instant> {
+    Instant::now().checked_sub(d)
+}
+
+/// Drop every entry at the front of `deque` that predates `cutoff`.
+///
+/// `cutoff` is a [`window_cutoff`] answer, so `None` means the window is wider than the monotonic clock and nothing can have aged out of it yet — evict nothing.
+/// The deques are push-ordered, so the stale entries are always a prefix.
+fn evict_before<T>(deque: &mut VecDeque<T>, cutoff: Option<Instant>, at: impl Fn(&T) -> Instant) {
+    let Some(cutoff) = cutoff else {
+        return;
+    };
+    while deque.front().is_some_and(|entry| at(entry) < cutoff) {
+        deque.pop_front();
+    }
 }
 
 impl Default for UsageTracker {
@@ -104,40 +115,31 @@ impl UsageTracker {
 
     /// Evict tool-call timestamps older than 1 minute and return how many remain.
     fn tool_calls_in_last_minute(&mut self) -> u32 {
-        let cutoff = instant_now_minus(ONE_MINUTE);
-        while self
-            .tool_call_timestamps
-            .front()
-            .is_some_and(|t| *t < cutoff)
-        {
-            self.tool_call_timestamps.pop_front();
-        }
+        evict_before(
+            &mut self.tool_call_timestamps,
+            window_cutoff(ONE_MINUTE),
+            |t| *t,
+        );
         self.tool_call_timestamps.len() as u32
     }
 
     /// Return total tokens consumed in the last minute (burst window).
     fn tokens_in_last_minute(&mut self) -> u64 {
-        let cutoff = instant_now_minus(ONE_MINUTE);
-        while self
-            .token_timestamps
-            .front()
-            .is_some_and(|(t, _)| *t < cutoff)
-        {
-            self.token_timestamps.pop_front();
-        }
+        evict_before(
+            &mut self.token_timestamps,
+            window_cutoff(ONE_MINUTE),
+            |(t, _)| *t,
+        );
         self.token_timestamps.iter().map(|(_, n)| n).sum()
     }
 
     /// Evict network-byte entries older than an hour and return what remains — the rolling-hour total the quota is compared against.
     fn network_bytes_in_last_hour(&mut self) -> u64 {
-        let cutoff = instant_now_minus(ONE_HOUR);
-        while self
-            .network_byte_timestamps
-            .front()
-            .is_some_and(|(t, _)| *t < cutoff)
-        {
-            self.network_byte_timestamps.pop_front();
-        }
+        evict_before(
+            &mut self.network_byte_timestamps,
+            window_cutoff(ONE_HOUR),
+            |(t, _)| *t,
+        );
         self.network_byte_timestamps.iter().map(|(_, n)| n).sum()
     }
 
@@ -392,14 +394,11 @@ impl AgentScheduler {
             // configured (the prune-then-len read at quota time
             // sees the same result); pure memory-leak plug for
             // agents that don't.
-            let cutoff = instant_now_minus(ONE_MINUTE);
-            while tracker
-                .tool_call_timestamps
-                .front()
-                .is_some_and(|t| *t < cutoff)
-            {
-                tracker.tool_call_timestamps.pop_front();
-            }
+            evict_before(
+                &mut tracker.tool_call_timestamps,
+                window_cutoff(ONE_MINUTE),
+                |t| *t,
+            );
             for _ in 0..count {
                 tracker.tool_call_timestamps.push_back(now);
             }
@@ -418,14 +417,11 @@ impl AgentScheduler {
         if let Some(mut tracker) = self.usage.get_mut(&agent_id) {
             tracker.reset_if_expired();
             // Evict on push for the same reason `record_tool_calls` does: the read side runs only for an agent that has a cap configured, so an uncapped agent would otherwise accrete one entry per transfer with no upper bound until the daemon restarts.
-            let cutoff = instant_now_minus(ONE_HOUR);
-            while tracker
-                .network_byte_timestamps
-                .front()
-                .is_some_and(|(t, _)| *t < cutoff)
-            {
-                tracker.network_byte_timestamps.pop_front();
-            }
+            evict_before(
+                &mut tracker.network_byte_timestamps,
+                window_cutoff(ONE_HOUR),
+                |(t, _)| *t,
+            );
             tracker
                 .network_byte_timestamps
                 .push_back((Instant::now(), bytes));
@@ -1480,33 +1476,56 @@ mod tests {
     // -- #5136: Instant - Duration underflow guard --------------------------
 
     #[test]
-    fn instant_now_minus_does_not_panic_on_huge_duration() {
-        // `Instant::now() - Duration::from_secs(u64::MAX)` underflows the
-        // platform monotonic origin and panics. The helper must return a
-        // valid Instant (the `now` fallback) instead — this is the cold-start
-        // path that previously panicked within the first minute of daemon
-        // life. A normal small subtraction must still produce an earlier
-        // Instant.
-        let now = Instant::now();
-        // Huge duration → fallback to ~now (never panics).
-        let fallback = instant_now_minus(Duration::from_secs(u64::MAX));
+    fn window_cutoff_does_not_panic_on_huge_duration() {
+        // `Instant::now() - Duration::from_secs(u64::MAX)` underflows the platform monotonic origin and panics.
+        // The helper must answer `None` instead — this is the cold-start path that previously panicked within the first minute of daemon life.
+        // A look-back well inside process lifetime must still produce a genuine earlier Instant.
         assert!(
-            fallback >= now,
-            "fallback instant must not predate the call site"
+            window_cutoff(Duration::from_secs(u64::MAX)).is_none(),
+            "a look-back longer than the monotonic clock has no cutoff"
         );
-        // Small duration well within process lifetime → genuine subtraction.
         std::thread::sleep(Duration::from_millis(5));
-        let earlier = instant_now_minus(Duration::from_millis(1));
+        let earlier = window_cutoff(Duration::from_millis(1)).expect("1 ms is within process life");
         assert!(
             earlier < Instant::now(),
             "small look-back must yield an earlier instant"
         );
     }
 
+    /// The underflow fallback used to be `Instant::now()`, which is not an empty look-back window but a *total* one: every timestamp already recorded is strictly older than `now`, so each eviction loop drained its whole deque and the rolling counters read zero.
+    /// On a host booted less than an hour ago — a fresh CI runner, a container, a rebooted box — that silently switched `max_network_bytes_per_hour` off: the spend never accumulated, so the gate never had anything to refuse on.
+    ///
+    /// Reverting `window_cutoff` to the `unwrap_or(now)` form fails this with `0`.
+    #[test]
+    fn a_window_wider_than_uptime_evicts_nothing() {
+        let mut t = UsageTracker::default();
+        t.network_byte_timestamps.push_back((Instant::now(), 4096));
+        t.token_timestamps.push_back((Instant::now(), 128));
+        t.tool_call_timestamps.push_back(Instant::now());
+
+        // `None` is what `window_cutoff` answers for a window wider than the monotonic clock — `ONE_HOUR` on a freshly-booted host, `ONE_MINUTE` in a daemon's first minute.
+        // Driving `evict_before` with it directly is what makes this deterministic; asserting through `network_bytes_in_last_hour()` would only reproduce the bug on a machine that happens to have booted within the hour.
+        assert!(window_cutoff(Duration::from_secs(u64::MAX)).is_none());
+        evict_before(&mut t.network_byte_timestamps, None, |(i, _)| *i);
+        evict_before(&mut t.token_timestamps, None, |(i, _)| *i);
+        evict_before(&mut t.tool_call_timestamps, None, |i| *i);
+
+        assert_eq!(
+            t.network_byte_timestamps
+                .iter()
+                .map(|(_, n)| n)
+                .sum::<u64>(),
+            4096,
+            "a spend recorded moments ago must survive a window wider than uptime"
+        );
+        assert_eq!(t.token_timestamps.iter().map(|(_, n)| n).sum::<u64>(), 128);
+        assert_eq!(t.tool_call_timestamps.len(), 1);
+    }
+
     #[test]
     fn tool_call_and_token_eviction_survive_huge_window() {
         // Exercises the two call sites: with no timestamps recorded yet the
-        // eviction helpers must run their `instant_now_minus(ONE_MINUTE)`
+        // eviction helpers must run their `window_cutoff(ONE_MINUTE)`
         // cutoff without panicking even if invoked on a freshly-started
         // process (the helper is the guard, this asserts wiring).
         let mut t = UsageTracker::default();
@@ -1533,14 +1552,8 @@ mod tests {
         scheduler.usage.insert(agent_id, UsageTracker::default());
         // Seed: 200 timestamps from 2 hours ago.
         //
-        // `instant_now_minus` uses `checked_sub` internally and returns
-        // `Instant::now()` when the requested look-back exceeds system uptime
-        // (e.g. freshly-provisioned Windows CI runners). In that case
-        // the "stale" timestamps equal `now`, which is inside the eviction
-        // window, so the eviction assertion below would falsely fail (#5726).
-        // Skip the eviction sub-test when we can't materialize a truly stale
-        // instant; the bounded-deque invariant is covered by the sibling test
-        // `record_tool_calls_long_horizon_stays_bounded_without_quota`.
+        // `Instant::now() - 2h` has no answer on a host whose monotonic clock is younger than that (a freshly-provisioned CI runner, a container, a rebooted box), so the seeding itself is what cannot be done there — not the eviction, which now correctly keeps everything when its own window is wider than uptime.
+        // Skip the eviction sub-test when we can't materialize a truly stale instant; the bounded-deque invariant is covered by the sibling test `record_tool_calls_long_horizon_stays_bounded_without_quota`.
         let two_hours = ONE_MINUTE * 120;
         let stale = match Instant::now().checked_sub(two_hours) {
             Some(t) => t,
