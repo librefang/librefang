@@ -1415,6 +1415,21 @@ fn migrate_v59(conn: &Connection) -> Result<(), rusqlite::Error> {
 ///
 /// Idempotent, and on the machines that already have it the only observable
 /// change is the version stamp and an audit row.
+///
+/// `CREATE TABLE IF NOT EXISTS` alone is not enough, which is the second half of
+/// this step. Once it is established that pre-release builds disagreed with each
+/// other about what 58 meant, it cannot also be assumed they agreed about the
+/// *shape* of what they created: a table that is present with a different column
+/// set makes the `IF NOT EXISTS` a silent no-op and the divergence survives into
+/// a release binary. The cascade still works, because it only needs `agent_id`,
+/// so the failure surfaces much later and elsewhere — wherever `manifest_toml`
+/// or `change_source` is read.
+///
+/// `template_versions` is reconciled for the same reason and is the more urgent
+/// of the two: it is created by [`migrate_v55`], so on a database a pre-release
+/// build stamped at 58 or higher that step is *below the stamp and skipped for
+/// the life of the database*. This is the only place left in the ladder that
+/// will still execute there.
 fn migrate_v60(conn: &Connection) -> Result<(), rusqlite::Error> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS manifest_versions (
@@ -1425,13 +1440,55 @@ fn migrate_v60(conn: &Connection) -> Result<(), rusqlite::Error> {
             manifest_toml   TEXT NOT NULL,
             change_source   TEXT NOT NULL DEFAULT 'unknown',
             created_at      TEXT NOT NULL DEFAULT (datetime('now'))
-        );
-        CREATE INDEX IF NOT EXISTS idx_manifest_versions_agent_id
+        );",
+    )?;
+
+    // Every column the code reads, with the default `ALTER TABLE ADD COLUMN`
+    // accepts. SQLite refuses a non-constant default there — `datetime('now')`
+    // is rejected outright — so a reconciled column gets `''` rather than the
+    // expression the `CREATE` uses. That difference only reaches rows written
+    // by the build that created the divergent table; everything written
+    // afterwards goes through the INSERTs, which supply the value.
+    for (table, column) in [
+        ("manifest_versions", "agent_id"),
+        ("manifest_versions", "agent_name"),
+        ("manifest_versions", "timestamp"),
+        ("manifest_versions", "manifest_toml"),
+        ("manifest_versions", "change_source"),
+        ("manifest_versions", "created_at"),
+        ("template_versions", "template_name"),
+        ("template_versions", "timestamp"),
+        ("template_versions", "manifest_toml"),
+        ("template_versions", "change_source"),
+    ] {
+        if !try_table_exists(conn, table)? {
+            continue;
+        }
+        if try_column_exists(conn, table, column)? {
+            continue;
+        }
+        let default = if column == "change_source" {
+            "'unknown'"
+        } else {
+            "''"
+        };
+        conn.execute(
+            &format!("ALTER TABLE {table} ADD COLUMN {column} TEXT NOT NULL DEFAULT {default}"),
+            [],
+        )?;
+    }
+
+    // After the reconciliation, not with the `CREATE TABLE` above: the index is
+    // over `timestamp`, and on a divergent table that column may not exist yet.
+    // Batched with the create, it failed the whole step with "no such column".
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_manifest_versions_agent_id
             ON manifest_versions(agent_id, timestamp DESC);",
     )?;
+
     conn.execute(
         "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
-         VALUES (60, datetime('now'), 'Ensure manifest_versions exists on databases a pre-release build stamped past 58 without it')",
+         VALUES (60, datetime('now'), 'Ensure manifest_versions and template_versions exist with the columns the code reads, on databases a pre-release build stamped past 58')",
         [],
     )?;
     Ok(())
@@ -4455,6 +4512,73 @@ mod tests {
                 .unwrap();
             assert_eq!(n, 1, "{kind} {name} must exist exactly once");
         }
+    }
+
+    /// The hazard `CREATE TABLE IF NOT EXISTS` cannot address on its own.
+    ///
+    /// A pre-release build that created one of these tables with a different
+    /// column set leaves the `IF NOT EXISTS` a silent no-op, so the divergence
+    /// survives into a release binary. For `template_versions` there is no
+    /// second chance anywhere else in the ladder: [`migrate_v55`] creates it,
+    /// and on a database stamped at 58 or higher that step is below the stamp
+    /// and never runs again.
+    ///
+    /// Both tables are seeded here missing the columns the code reads, at a
+    /// stamp past 58, and must come back complete.
+    #[test]
+    fn v60_reconciles_a_table_a_pre_release_build_created_with_fewer_columns() {
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+
+        // Stand where such a build left it: both tables present but truncated,
+        // and the stamp past the steps that would otherwise have created them.
+        conn.execute_batch(
+            "DROP TABLE manifest_versions;
+             DROP TABLE template_versions;
+             CREATE TABLE manifest_versions (
+                 id       INTEGER PRIMARY KEY AUTOINCREMENT,
+                 agent_id TEXT NOT NULL
+             );
+             CREATE TABLE template_versions (
+                 id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                 template_name TEXT NOT NULL
+             );",
+        )
+        .unwrap();
+        conn.execute("DELETE FROM migrations WHERE version > 59", [])
+            .unwrap();
+        conn.pragma_update(None, "user_version", 59i64).unwrap();
+
+        // The fixture must actually be divergent, or this passes vacuously.
+        assert!(!try_column_exists(&conn, "manifest_versions", "manifest_toml").unwrap());
+        assert!(!try_column_exists(&conn, "template_versions", "manifest_toml").unwrap());
+
+        run_migrations(&conn).expect("a stamped-past-58 database must still open");
+        assert_eq!(get_schema_version(&conn).unwrap(), 60);
+
+        for (table, column) in [
+            ("manifest_versions", "agent_name"),
+            ("manifest_versions", "timestamp"),
+            ("manifest_versions", "manifest_toml"),
+            ("manifest_versions", "change_source"),
+            ("manifest_versions", "created_at"),
+            ("template_versions", "timestamp"),
+            ("template_versions", "manifest_toml"),
+            ("template_versions", "change_source"),
+        ] {
+            assert!(
+                try_column_exists(&conn, table, column).unwrap(),
+                "{table}.{column} must be reconciled — nothing later in the ladder will"
+            );
+        }
+
+        // And the reconciled table is writable through the shape the code uses.
+        conn.execute(
+            "INSERT INTO manifest_versions (agent_id, agent_name, manifest_toml, change_source) \
+             VALUES ('a', 'n', 'name = \"x\"', 'edit')",
+            [],
+        )
+        .expect("the reconciled table must accept the columns the code writes");
     }
 
     /// The hazard v60 exists for.
