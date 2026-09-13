@@ -202,20 +202,12 @@ impl FallbackChain {
                     //
                     // 5xx stays retryable: that is the server's state, not the
                     // request's, and it can differ a second later.
-                    // Gate on the *reason* the classifier produced, not on the
-                    // status read back off the error. `failover_reason` does not
-                    // derive `RateLimit` from 429 alone: an `Api { code:
-                    // Some(ProviderErrorCode::RateLimit), .. }` maps to
-                    // `RateLimit` whatever the status is, and that arm is reached
-                    // before the status-only fallback. Re-deriving from the
-                    // status therefore cancelled the backoff for a gateway that
-                    // reports a rate limit as 403 (or 400 with `error.code =
-                    // "rate_limit_exceeded"`) — the one case the retry loop
-                    // exists for.
+                    // Gate on the *reason* the classifier produced, not on the status read back off the error.
+                    // `failover_reason` does not derive `RateLimit` from 429 alone: an `Api { code: Some(ProviderErrorCode::RateLimit), .. }` maps to `RateLimit` whatever the status is, and that arm is reached before the status-only fallback.
+                    // Re-deriving from the status therefore cancelled the backoff for a gateway that reports a rate limit as 403 (or 400 with `error.code = "rate_limit_exceeded"`) — the one case the retry loop exists for.
                     let retryable = match reason {
                         FailoverReason::RateLimit(_) | FailoverReason::Timeout => true,
-                        // The ambiguous-status catch-all: retry only when the
-                        // ambiguity belongs to the server.
+                        // The ambiguous-status catch-all: retry only when the ambiguity belongs to the server.
                         FailoverReason::HttpError => !is_deterministic_client_error(&e),
                         _ => false,
                     };
@@ -909,9 +901,7 @@ mod tests {
         calls: std::sync::atomic::AtomicUsize,
         /// The typed `error.code` the provider returned, when it returned one.
         ///
-        /// Load-bearing rather than cosmetic: `failover_reason` classifies via
-        /// this value *before* it looks at the status, so a driver that only
-        /// ever sends `None` cannot exercise the arm where the two disagree.
+        /// Load-bearing rather than cosmetic: `failover_reason` classifies via this value *before* it looks at the status, so a driver that only ever sends `None` cannot exercise the arm where the two disagree.
         code: Option<ProviderErrorCode>,
     }
 
@@ -1003,21 +993,12 @@ mod tests {
         );
     }
 
-    /// A rate limit the classifier identified by its typed code keeps its
-    /// backoff, whatever status carried it.
+    /// A rate limit the classifier identified by its typed code keeps its backoff, whatever status carried it.
     ///
-    /// `failover_reason` maps `Api { code: Some(ProviderErrorCode::RateLimit), .. }`
-    /// to `FailoverReason::RateLimit` before it ever consults the status, so a
-    /// gateway that reports a rate limit as 403 — or as 400 with
-    /// `error.code = "rate_limit_exceeded"` — produces a `RateLimit` reason on a
-    /// 4xx status. Deciding retryability by re-reading the status therefore
-    /// cancelled the backoff for the exact case the retry loop exists for, while
-    /// `a_client_error_fails_over_without_retrying_the_same_provider` above
-    /// stayed green because its 400 carries no typed code.
+    /// `failover_reason` maps `Api { code: Some(ProviderErrorCode::RateLimit), .. }` to `FailoverReason::RateLimit` before it ever consults the status, so a gateway that reports a rate limit as 403 — or as 400 with `error.code = "rate_limit_exceeded"` — produces a `RateLimit` reason on a 4xx status.
+    /// Deciding retryability by re-reading the status therefore cancelled the backoff for the exact case the retry loop exists for, while `a_client_error_fails_over_without_retrying_the_same_provider` above stayed green because its 400 carries no typed code.
     ///
-    /// Gating on the reason instead of the status is what this pins: revert the
-    /// `match reason` to `matches!(...) && !is_deterministic_client_error(&e)`
-    /// and the call count drops to 1.
+    /// Gating on the reason instead of the status is what this pins: revert the `match reason` to `matches!(...) && !is_deterministic_client_error(&e)` and the call count drops to 1.
     #[tokio::test]
     async fn a_typed_rate_limit_keeps_its_retries_on_a_4xx_status() {
         for status in [400, 403] {
