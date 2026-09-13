@@ -1,2 +1,0 @@
-Add `CustomImageConfig` and `CustomVideoConfig` to `MediaConfig`, plus `video_provider` / `video_model` fields, completing the custom-endpoint pattern across all four media understanding domains (STT, TTS, image description, video description).
-Custom image providers are routed through the existing OpenAI-compatible vision dispatch; custom video providers resolve config but remain placeholder-only until a real provider is integrated. (#8012) (@DaBlitzStein)

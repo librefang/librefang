@@ -1,6 +1,0 @@
-The `workflow_create` agent tool no longer reports success when the definition never reached disk.
-`WorkflowEngine::persist_definition` logged every serialisation, directory, write and rename failure and returned nothing, so `register_unique_name` handed back an id regardless and the agent was told the workflow "outlives the conversation" when it would not survive a restart.
-The write path now returns a result, `register_unique_name` propagates it as `RegisterWorkflowError::NotPersisted`, and the tool surfaces that as an internal error rather than a name conflict — a collision is the agent's to fix by renaming, a failed write is not.
-A failed write also rolls the in-memory reservation back, so the name is free for the retry instead of being held by a workflow that will not survive and cannot be found.
-`PUT /api/workflows/{id}` stops swallowing a serialisation failure without even a log line, now that it shares the one writer instead of carrying a copy of it.
-Still open, and now stated in the source rather than implied: `POST /api/workflows` and template instantiation remain best-effort, so the CLI, the TUI and the dashboard can still answer success for a definition that did not land. (#6943) (@DaBlitzStein)

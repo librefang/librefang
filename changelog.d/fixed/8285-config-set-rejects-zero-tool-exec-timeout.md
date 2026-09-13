@@ -1,4 +1,0 @@
-`POST /api/config/set` now refuses `tool_exec.default_timeout_secs = 0` instead of answering 200 OK and persisting it.
-  The value has been rejected since the field was introduced, but only by the check kernel boot runs, and that section takes effect on restart — so saving a zero from the dashboard looked like it worked and the daemon then refused to start, with `Invalid [tool_exec] config` arriving long afterwards and nothing connecting it to the save that caused it.
-  Recovering meant editing `~/.librefang/config.toml` by hand on the host, because the API that would undo the write was exactly what no longer came up.
-  The check now lives in the validator every config write already funnels through, so the reload endpoint and the user and budget writers are covered by the same guard rather than each growing its own copy (#8285) (@DaBlitzStein)

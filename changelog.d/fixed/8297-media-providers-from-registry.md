@@ -1,3 +1,0 @@
-The media providers the API reports are now the ones the daemon actually knows about, read from the provider registry instead of a list of five names compiled into the route.
-The two had drifted apart in both directions: a provider that declares image and video generation in the registry was invisible to every surface while auto-detection could already select it, so the daemon could pick a provider the dashboard never offered.
-A provider the registry declares but no driver serves yet is now reported as unconfigured, with the functions it would cover, rather than as a driver that failed to start. (#8297) (@DaBlitzStein)
