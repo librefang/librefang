@@ -7,7 +7,7 @@ use librefang_types::config::{
     default_config_version, run_migrations, KernelConfig, CONFIG_VERSION,
 };
 use std::collections::HashSet;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use tracing::info;
 
 /// Maximum include nesting depth.
@@ -541,20 +541,15 @@ fn resolve_config_includes(
     let mut merged_base = toml::Value::Table(toml::map::Map::new());
 
     for include_path_str in &includes {
-        // SECURITY: reject absolute paths
+        // SECURITY: reject anything that is not a plain relative path — an
+        // absolute or (on Windows) rooted/drive-relative entry, and `..`
+        // traversal. Both forms survive `Path::join` and land outside the
+        // config directory.
         let include_path = Path::new(include_path_str);
-        if include_path.is_absolute() {
+        if include_is_not_plainly_relative(include_path) {
             return Err(format!(
-                "Config include rejects absolute path: {include_path_str}"
+                "Config include rejects non-relative path: {include_path_str}"
             ));
-        }
-        // SECURITY: reject `..` components
-        for component in include_path.components() {
-            if let std::path::Component::ParentDir = component {
-                return Err(format!(
-                    "Config include rejects path traversal: {include_path_str}"
-                ));
-            }
         }
 
         let resolved = config_dir.join(include_path);
@@ -718,6 +713,26 @@ pub fn config_path_for(config: &KernelConfig) -> PathBuf {
     config_path_override().unwrap_or_else(|| config.home_dir.join("config.toml"))
 }
 
+/// Whether a config `include` entry is anything other than a plain relative path *on this platform* — the two string rules `resolve_config_includes` enforces before touching the filesystem.
+///
+/// `Path::is_absolute` is not that question on Windows.
+/// It answers `false` for a rooted path carrying no drive (`/etc/passwd`, `\\Windows\\win.ini`) and for a drive-relative one (`C:passwd`), yet `Path::join` honours both the root and the drive: `config_dir.join("/etc/passwd")` yields `C:\\etc\\passwd`, outside the config directory, having passed the absolute-path check.
+/// Matching the leading [`Component`] instead catches the prefix and root forms on whichever platform gives them meaning, and `Component::Prefix` simply never occurs on Unix, so nothing that used to load stops loading there.
+///
+/// The `..` scan is the second rule and is platform-independent.
+pub fn include_is_not_plainly_relative(include: &Path) -> bool {
+    let mut components = include.components();
+    if matches!(
+        components.next(),
+        Some(Component::Prefix(_) | Component::RootDir)
+    ) {
+        return true;
+    }
+    include
+        .components()
+        .any(|c| matches!(c, Component::ParentDir))
+}
+
 /// Every file that contributes to the effective configuration, the primary file first (#6695).
 ///
 /// Deliberately tolerant where [`resolve_config_includes`] is strict: this feeds a status endpoint, not a loader, so a broken `include` chain yields a shorter list rather than an error.
@@ -768,11 +783,7 @@ fn collect_config_sources(
             continue;
         };
         let relative = Path::new(relative);
-        if relative.is_absolute()
-            || relative
-                .components()
-                .any(|c| matches!(c, std::path::Component::ParentDir))
-        {
+        if include_is_not_plainly_relative(relative) {
             continue;
         }
         collect_config_sources(&dir.join(relative), depth + 1, seen, out);
@@ -2055,5 +2066,48 @@ mod tests {
             captured.contains("#5476"),
             "warning must reference the tracking issue; captured: {captured:?}"
         );
+    }
+
+    /// The rules that hold on every platform: a `..` anywhere, and a Unix-style absolute path, are both non-relative.
+    #[test]
+    fn traversal_and_absolute_includes_are_not_plainly_relative() {
+        assert!(include_is_not_plainly_relative(Path::new("../escape.toml")));
+        assert!(include_is_not_plainly_relative(Path::new(
+            "nested/../../escape.toml"
+        )));
+        assert!(!include_is_not_plainly_relative(Path::new("channels.toml")));
+        assert!(!include_is_not_plainly_relative(Path::new(
+            "nested/channels.toml"
+        )));
+    }
+
+    /// The Windows half, and the reason this is a shared helper rather than an `is_absolute()` call at each site.
+    ///
+    /// Windows calls both of these relative — `is_absolute()` is `false` for each — while `Path::join` honours the root and the drive anyway, so `config_dir.join(entry)` lands outside the config directory.
+    /// The rooted-no-drive form is what `librefang-api`'s include scan tried to read as `C:\etc\passwd`, failing the whole scan on the read error rather than skipping the entry.
+    #[cfg(windows)]
+    #[test]
+    fn rooted_and_drive_relative_includes_are_not_plainly_relative_on_windows() {
+        for entry in [
+            "/etc/passwd",
+            "\\Windows\\win.ini",
+            "C:passwd",
+            "C:\\passwd",
+        ] {
+            let path = Path::new(entry);
+            assert!(
+                include_is_not_plainly_relative(path),
+                "{entry} must be refused as an include"
+            );
+        }
+    }
+
+    /// The same strings on Unix, where only the leading-slash form is rooted.
+    /// `C:passwd` is an ordinary relative filename there, and refusing it would stop a config that loads today from loading.
+    #[cfg(unix)]
+    #[test]
+    fn a_drive_letter_stays_an_ordinary_relative_name_on_unix() {
+        assert!(include_is_not_plainly_relative(Path::new("/etc/passwd")));
+        assert!(!include_is_not_plainly_relative(Path::new("C:passwd")));
     }
 }

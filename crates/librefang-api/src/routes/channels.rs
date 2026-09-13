@@ -1165,13 +1165,15 @@ fn included_files_with_sidecars_blocking(
             .unwrap_or_else(|| std::path::Path::new("."));
         for raw in include_array.iter().filter_map(|entry| entry.as_str()) {
             let raw_path = std::path::Path::new(raw);
-            // Same three rules `resolve_config_includes` enforces: absolute
-            // paths and `..` components are skipped, never followed…
-            if raw_path.is_absolute()
-                || raw_path
-                    .components()
-                    .any(|c| matches!(c, std::path::Component::ParentDir))
-            {
+            // Same three rules `resolve_config_includes` enforces: anything
+            // that is not a plain relative path is skipped, never followed…
+            //
+            // Shared with the kernel rather than restated, because the
+            // restatement was wrong on Windows: `is_absolute()` is false for
+            // `/etc/passwd` there, `Path::join` honours the root anyway, and
+            // the walk then tried to read `C:\etc\passwd` and failed the whole
+            // scan on the read error.
+            if librefang_kernel::config::include_is_not_plainly_relative(raw_path) {
                 continue;
             }
             let resolved = parent.join(raw_path);
