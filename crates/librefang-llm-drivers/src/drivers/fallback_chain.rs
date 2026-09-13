@@ -202,12 +202,23 @@ impl FallbackChain {
                     //
                     // 5xx stays retryable: that is the server's state, not the
                     // request's, and it can differ a second later.
-                    let retryable = matches!(
-                        reason,
-                        FailoverReason::RateLimit(_)
-                            | FailoverReason::HttpError
-                            | FailoverReason::Timeout
-                    ) && !is_deterministic_client_error(&e);
+                    // Gate on the *reason* the classifier produced, not on the
+                    // status read back off the error. `failover_reason` does not
+                    // derive `RateLimit` from 429 alone: an `Api { code:
+                    // Some(ProviderErrorCode::RateLimit), .. }` maps to
+                    // `RateLimit` whatever the status is, and that arm is reached
+                    // before the status-only fallback. Re-deriving from the
+                    // status therefore cancelled the backoff for a gateway that
+                    // reports a rate limit as 403 (or 400 with `error.code =
+                    // "rate_limit_exceeded"`) — the one case the retry loop
+                    // exists for.
+                    let retryable = match reason {
+                        FailoverReason::RateLimit(_) | FailoverReason::Timeout => true,
+                        // The ambiguous-status catch-all: retry only when the
+                        // ambiguity belongs to the server.
+                        FailoverReason::HttpError => !is_deterministic_client_error(&e),
+                        _ => false,
+                    };
 
                     if retryable && attempts < MAX_RATE_LIMIT_RETRIES {
                         let sleep_ms = match &e {
@@ -658,6 +669,7 @@ pub(crate) fn exhaustion_until_for(err: &LlmError, failover: &FailoverReason) ->
 mod tests {
     use super::*;
     use crate::llm_driver::CompletionResponse;
+    use librefang_llm_driver::llm_errors::ProviderErrorCode;
     use librefang_types::message::{ContentBlock, StopReason, TokenUsage};
 
     fn ok_response(text: &str) -> CompletionResponse {
@@ -895,6 +907,30 @@ mod tests {
     struct StatusDriver {
         status: u16,
         calls: std::sync::atomic::AtomicUsize,
+        /// The typed `error.code` the provider returned, when it returned one.
+        ///
+        /// Load-bearing rather than cosmetic: `failover_reason` classifies via
+        /// this value *before* it looks at the status, so a driver that only
+        /// ever sends `None` cannot exercise the arm where the two disagree.
+        code: Option<ProviderErrorCode>,
+    }
+
+    impl StatusDriver {
+        fn new(status: u16) -> Self {
+            Self {
+                status,
+                calls: std::sync::atomic::AtomicUsize::new(0),
+                code: None,
+            }
+        }
+
+        fn with_code(status: u16, code: ProviderErrorCode) -> Self {
+            Self {
+                status,
+                calls: std::sync::atomic::AtomicUsize::new(0),
+                code: Some(code),
+            }
+        }
     }
 
     #[async_trait]
@@ -907,7 +943,7 @@ mod tests {
             Err(LlmError::Api {
                 status: self.status,
                 message: "context length exceeded".to_string(),
-                code: None,
+                code: self.code,
             })
         }
     }
@@ -921,10 +957,7 @@ mod tests {
     /// before moving on, on every compaction attempt.
     #[tokio::test]
     async fn a_client_error_fails_over_without_retrying_the_same_provider() {
-        let driver = Arc::new(StatusDriver {
-            status: 400,
-            calls: std::sync::atomic::AtomicUsize::new(0),
-        });
+        let driver = Arc::new(StatusDriver::new(400));
         let calls_ref = Arc::clone(&driver);
         let chain = FallbackChain::new(vec![
             ChainEntry {
@@ -949,10 +982,7 @@ mod tests {
     /// and can differ a second later. It keeps its retries.
     #[tokio::test]
     async fn a_server_error_still_retries_the_same_provider() {
-        let driver = Arc::new(StatusDriver {
-            status: 500,
-            calls: std::sync::atomic::AtomicUsize::new(0),
-        });
+        let driver = Arc::new(StatusDriver::new(500));
         let calls_ref = Arc::clone(&driver);
         let chain = FallbackChain::new(vec![
             ChainEntry {
@@ -971,6 +1001,49 @@ mod tests {
             MAX_RATE_LIMIT_RETRIES + 1,
             "a 5xx keeps its retries"
         );
+    }
+
+    /// A rate limit the classifier identified by its typed code keeps its
+    /// backoff, whatever status carried it.
+    ///
+    /// `failover_reason` maps `Api { code: Some(ProviderErrorCode::RateLimit), .. }`
+    /// to `FailoverReason::RateLimit` before it ever consults the status, so a
+    /// gateway that reports a rate limit as 403 — or as 400 with
+    /// `error.code = "rate_limit_exceeded"` — produces a `RateLimit` reason on a
+    /// 4xx status. Deciding retryability by re-reading the status therefore
+    /// cancelled the backoff for the exact case the retry loop exists for, while
+    /// `a_client_error_fails_over_without_retrying_the_same_provider` above
+    /// stayed green because its 400 carries no typed code.
+    ///
+    /// Gating on the reason instead of the status is what this pins: revert the
+    /// `match reason` to `matches!(...) && !is_deterministic_client_error(&e)`
+    /// and the call count drops to 1.
+    #[tokio::test]
+    async fn a_typed_rate_limit_keeps_its_retries_on_a_4xx_status() {
+        for status in [400, 403] {
+            let driver = Arc::new(StatusDriver::with_code(
+                status,
+                ProviderErrorCode::RateLimit,
+            ));
+            let calls_ref = Arc::clone(&driver);
+            let chain = FallbackChain::new(vec![
+                ChainEntry {
+                    driver: driver as Arc<dyn LlmDriver>,
+                    model_override: String::new(),
+                    provider_name: "p1".to_string(),
+                },
+                entry(Arc::new(OkDriver("fallback")), "p2"),
+            ])
+            .with_rate_limit_sleep_ms(0);
+
+            let r = chain.complete(test_request()).await.unwrap();
+            assert_eq!(r.text(), "fallback", "{status}: it must still fail over");
+            assert_eq!(
+                calls_ref.calls.load(std::sync::atomic::Ordering::SeqCst),
+                MAX_RATE_LIMIT_RETRIES + 1,
+                "{status}: a typed rate limit must keep its backoff retries"
+            );
+        }
     }
 
     #[tokio::test]
