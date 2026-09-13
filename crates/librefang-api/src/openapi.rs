@@ -118,6 +118,7 @@ use crate::types;
         routes::resume_agent,
         routes::agent_metrics,
         routes::agent_logs,
+        routes::list_agent_manifest_history,
 
         // ── Bulk Operations ──
         routes::bulk_create_agents,

@@ -104,6 +104,30 @@ describe("query key factories", () => {
       const ls = agentKeys.lists();
       expect(l.slice(0, ls.length)).toEqual(ls);
     });
+
+    // #8041: `manifestHistory` used to be a sibling of `details()`, so every
+    // mutation that produced a snapshot had to remember a second explicit
+    // invalidation — and suspend/resume, which invalidate only `lists()`,
+    // could not reach it at all even though they now record a snapshot of
+    // their own. Nesting it under `detail(agentId)` makes one invalidation
+    // cover both.
+    it("nests manifestHistory under detail, so detail invalidation reaches it", () => {
+      expect(agentKeys.manifestHistory("abc")).toEqual([
+        ...agentKeys.detail("abc"),
+        "manifestHistory",
+      ]);
+      const prefix = agentKeys.detail("abc");
+      expect(agentKeys.manifestHistory("abc").slice(0, prefix.length)).toEqual(
+        prefix,
+      );
+    });
+
+    // The nesting must not make one agent's history invalidate another's.
+    it("scopes manifestHistory per agent", () => {
+      expect(agentKeys.manifestHistory("abc")).not.toEqual(
+        agentKeys.manifestHistory("xyz"),
+      );
+    });
   });
 
   describe("modelKeys", () => {

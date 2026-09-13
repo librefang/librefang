@@ -15310,6 +15310,82 @@ fn suspend_resume_actually_transition_in_memory_state() {
     kernel.shutdown();
 }
 
+/// #8041: suspend/resume rewrites `agent.toml` through `persist_agent_enabled`,
+/// a path that patches the `enabled` line directly instead of going through
+/// `persist_full_manifest_at`. Before this test's fix that write recorded no
+/// version-history snapshot at all, contradicting the changelog's "every
+/// config change is now recorded" — an operator toggling an agent off and
+/// back on would see the History tab unchanged.
+#[test]
+fn suspend_and_resume_each_record_a_manifest_version_snapshot() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp
+        .path()
+        .join("librefang-kernel-suspend-resume-history-8041");
+    std::fs::create_dir_all(&home_dir).unwrap();
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+
+    let agent_id = kernel
+        .spawn_agent_inner(
+            AgentManifest {
+                name: "suspend-resume-history-agent".to_string(),
+                source_template: None,
+                description: "exercises suspend/resume version history".to_string(),
+                author: "test".to_string(),
+                module: "builtin:chat".to_string(),
+                ..Default::default()
+            },
+            None,
+            None,
+            None,
+        )
+        .expect("agent should spawn");
+
+    let store = librefang_memory::ManifestVersionStore::new(kernel.memory.substrate.pool());
+
+    // `persist_agent_enabled` only patches `agent.toml` if it already exists on disk
+    // (`spawn_agent_inner` sets up the workspace but does not itself write the
+    // manifest file) — write the baseline first, matching a real agent that was
+    // loaded from an on-disk manifest before ever being suspended.
+    kernel.persist_manifest_to_disk(agent_id);
+
+    kernel
+        .suspend_agent(agent_id)
+        .expect("suspend should succeed");
+    let after_suspend = store
+        .list_for_agent(&agent_id.to_string(), 10)
+        .expect("history read should succeed");
+    assert_eq!(
+        after_suspend.first().map(|v| v.change_source.as_str()),
+        Some("suspend"),
+        "suspend must record its own version-history snapshot"
+    );
+
+    kernel
+        .resume_agent(agent_id)
+        .expect("resume should succeed");
+    let after_resume = store
+        .list_for_agent(&agent_id.to_string(), 10)
+        .expect("history read should succeed");
+    assert_eq!(
+        after_resume.first().map(|v| v.change_source.as_str()),
+        Some("resume"),
+        "resume must record its own version-history snapshot"
+    );
+    assert_eq!(
+        after_resume.len(),
+        3,
+        "the initial persist, the suspend snapshot, and the resume snapshot must all be present: {after_resume:?}"
+    );
+
+    kernel.shutdown();
+}
+
 /// #5137: `sync_default_model_agents` previously discarded update and save errors, so a provider switch could half-apply with no signal.
 /// The legacy concrete row must still migrate successfully.
 /// An agent carrying `default/default` must retain that sentinel because execution-time resolution now follows the effective global model.

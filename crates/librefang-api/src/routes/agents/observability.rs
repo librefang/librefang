@@ -687,3 +687,98 @@ pub async fn list_agent_ephemeral_runs(
     })
     .into_response()
 }
+
+// ---------------------------------------------------------------------------
+// Agent manifest version history
+// ---------------------------------------------------------------------------
+
+/// Query parameters for `GET /api/agents/{id}/manifest-history`.
+///
+/// A non-numeric `limit` is rejected at extraction (400) instead of being
+/// silently coerced to the default.
+#[derive(Debug, serde::Deserialize)]
+pub struct ManifestHistoryQuery {
+    #[serde(default = "default_history_limit")]
+    pub limit: u32,
+}
+
+/// Default page size for the manifest history listing.
+fn default_history_limit() -> u32 {
+    30
+}
+
+/// GET /api/agents/{id}/manifest-history — how this agent's config changed over time.
+///
+/// Returns an array of manifest snapshots, newest first.
+/// Each entry carries the full TOML so the dashboard can render a diff between
+/// consecutive versions. This endpoint is read-only: there is no restore.
+#[utoipa::path(
+    get,
+    path = "/api/agents/{id}/manifest-history",
+    tag = "agents",
+    params(
+        ("id" = String, Path, description = "Agent UUID"),
+        ("limit" = Option<u32>, Query, description = "Max entries to return (default 30, max 200)")
+    ),
+    responses(
+        (status = 200, description = "Manifest version history", body = crate::types::JsonObject),
+        (status = 400, description = "Invalid agent id or limit"),
+        (status = 404, description = "Agent not found")
+    )
+)]
+pub async fn list_agent_manifest_history(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    query: Result<Query<ManifestHistoryQuery>, axum::extract::rejection::QueryRejection>,
+    lang: Option<axum::Extension<RequestLanguage>>,
+) -> impl IntoResponse {
+    let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
+
+    let Query(params) = match query {
+        Ok(q) => q,
+        Err(rejection) => {
+            let reason = rejection.body_text();
+            return ApiErrorResponse::bad_request(
+                t.t_args("api-error-bad-request", &[("reason", &reason)]),
+            )
+            .into_response();
+        }
+    };
+
+    let agent_uuid = match uuid::Uuid::parse_str(&id) {
+        Ok(u) => librefang_types::agent::AgentId(u),
+        Err(_) => {
+            return ApiErrorResponse::bad_request(t.t("api-error-agent-invalid-id"))
+                .with_code("invalid_agent_id")
+                .into_response();
+        }
+    };
+    if state.kernel.agent_registry().get(agent_uuid).is_none() {
+        return ApiErrorResponse::not_found(t.t("api-error-agent-not-found"))
+            .with_code("agent_not_found")
+            .into_response();
+    }
+
+    let limit = params.limit.clamp(1, 200) as usize;
+
+    let store = librefang_memory::ManifestVersionStore::new(state.kernel.memory_substrate().pool());
+    match store.list_for_agent(&agent_uuid.0.to_string(), limit) {
+        Ok(versions) => {
+            let items: Vec<serde_json::Value> = versions
+                .iter()
+                .map(|v| {
+                    serde_json::json!({
+                        "id": v.id,
+                        "agent_id": v.agent_id,
+                        "agent_name": v.agent_name,
+                        "timestamp": v.timestamp,
+                        "manifest_toml": v.manifest_toml,
+                        "change_source": v.change_source,
+                    })
+                })
+                .collect();
+            Json(serde_json::json!({ "versions": items })).into_response()
+        }
+        Err(e) => ApiErrorResponse::internal_scrub(e).into_response(),
+    }
+}

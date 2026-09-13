@@ -77,6 +77,15 @@ export const agentKeys = {
   // is separate from `tools`: an MCP read must not be invalidated by a tool write.
   mcpServers: (agentId: string) =>
     [...agentKeys.all, "mcpServers", agentId] as const,
+  // Nested under `detail(agentId)`, not a sibling of `details()`: the history
+  // of one agent's manifest is a property of that agent, and every write that
+  // produces a new snapshot already invalidates its detail. As a sibling it
+  // needed each of those mutations to remember a second, explicit
+  // invalidation — and the ones that only invalidate `lists()` (suspend,
+  // resume) could not reach it at all, so the History tab sat stale after the
+  // very write that added a row. Same shape as `agentTypeKeys.registryDiff`.
+  manifestHistory: (agentId: string) =>
+    [...agentKeys.detail(agentId), "manifestHistory"] as const,
 };
 
 // Central prompt repository (#6160). The fleet-wide overview
