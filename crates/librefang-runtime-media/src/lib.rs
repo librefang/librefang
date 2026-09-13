@@ -163,10 +163,7 @@ pub const BUILTIN_MEDIA_DRIVERS: &[&str] =
 
 /// [`BUILTIN_MEDIA_DRIVERS`] as an owned list, for the fields that hold one.
 ///
-/// The constructors below used to spell the same five names inline, which is the
-/// duplication the constant was introduced to remove — a driver added to
-/// `create_media_driver` and to the constant would still have gone missing from
-/// a freshly constructed cache.
+/// The constructors below used to spell the same five names inline, which is the duplication the constant was introduced to remove — a driver added to `create_media_driver` and to the constant would still have gone missing from a freshly constructed cache.
 fn builtin_media_provider_ids() -> Vec<String> {
     BUILTIN_MEDIA_DRIVERS
         .iter()
