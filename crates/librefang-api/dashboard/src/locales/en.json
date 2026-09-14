@@ -52,7 +52,8 @@
     "more": "More",
     "mobile_tabs": "Bottom navigation",
     "console": "Console",
-    "groups": "Groups"
+    "groups": "Groups",
+    "knowledge": "Knowledge"
   },
   "partner": {
     "everyapi_label": "EveryAPI official partner integration",
@@ -4339,5 +4340,41 @@
     "temperature_placeholder": "0 to 2",
     "top_p": "Top-p",
     "top_p_placeholder": "0 to 1"
+  },
+  "knowledge": {
+    "title": "Knowledge",
+    "description": "Documents uploaded once and shared with the agents you choose. Each base becomes a named workspace the agent reads with @name.",
+    "new_base": "New base",
+    "search": "Search bases or agents…",
+    "empty_title": "No knowledge bases yet",
+    "empty_description": "Create one, upload the documents your agents should be able to read, then pick which agents get it.",
+    "base_summary_one": "{{count}} document · {{size}}",
+    "base_summary_other": "{{count}} documents · {{size}}",
+    "no_holders": "Shared with nobody",
+    "mode_rw": "read-write",
+    "share": "Share",
+    "documents": "Documents",
+    "name_placeholder": "handbook",
+    "name_hint": "Any language. Not a slash, a leading or trailing dot, or surrounding spaces. Agents will read it as @name.",
+    "delete_title": "Delete this knowledge base?",
+    "delete_message": "Its documents are removed and it is revoked from every agent holding it. This cannot be undone.",
+    "upload": "Upload",
+    "no_documents": "No documents yet.",
+    "remove_document": "Remove this document",
+    "bad_filename": "{{name}} cannot be used as a document name. Any language is fine, but not a slash, a leading or trailing dot, or surrounding spaces.",
+    "share_title": "Who can read {{name}}?",
+    "share_hint": "A selected agent reads the documents with @{{name}}. Read-write also lets it change them for everyone else.",
+    "create_failed": "Could not create the knowledge base.",
+    "delete_failed": "Could not delete the knowledge base.",
+    "upload_failed": "Could not upload the document.",
+    "share_failed": "Could not update sharing.",
+    "no_matches_title": "No matching bases",
+    "no_matches_description": "No base or agent matches {{query}}.",
+    "delete_base": "Delete this knowledge base",
+    "delete_document_title": "Remove this document?",
+    "delete_document_message": "{{name}} is deleted from the base, so every agent holding it loses the document. This cannot be undone.",
+    "size_hint": "Up to {{limit}} per document",
+    "too_large": "{{name}} is {{size}} — a document may be at most {{limit}}.",
+    "no_agents": "No agents to share with yet."
   }
 }

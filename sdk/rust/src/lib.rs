@@ -276,6 +276,7 @@ pub struct LibreFang {
     pub groups: Arc<GroupsResource>,
     pub hands: Arc<HandsResource>,
     pub inbox: Arc<InboxResource>,
+    pub knowledge: Arc<KnowledgeResource>,
     pub mcp: Arc<McpResource>,
     pub memory: Arc<MemoryResource>,
     pub models: Arc<ModelsResource>,
@@ -323,6 +324,7 @@ impl LibreFang {
             groups: Arc::new(GroupsResource::new(base_url.clone(), client.clone())),
             hands: Arc::new(HandsResource::new(base_url.clone(), client.clone())),
             inbox: Arc::new(InboxResource::new(base_url.clone(), client.clone())),
+            knowledge: Arc::new(KnowledgeResource::new(base_url.clone(), client.clone())),
             mcp: Arc::new(McpResource::new(base_url.clone(), client.clone())),
             memory: Arc::new(MemoryResource::new(base_url.clone(), client.clone())),
             models: Arc::new(ModelsResource::new(base_url.clone(), client.clone())),
@@ -2518,6 +2520,104 @@ impl InboxResource {
             &self.base_url,
             reqwest::Method::GET,
             &["api", "inbox", "status"],
+            None,
+            &[],
+        )
+        .await
+    }
+}
+
+// ── Knowledge ──
+
+#[derive(Debug, Clone)]
+pub struct KnowledgeResource {
+    base_url: String,
+    client: Client,
+}
+
+impl KnowledgeResource {
+    fn new(base_url: String, client: Client) -> Self {
+        Self { base_url, client }
+    }
+
+    pub async fn list_bases(&self) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::GET,
+            &["api", "knowledge"],
+            None,
+            &[],
+        )
+        .await
+    }
+
+    pub async fn create_base(&self, data: Value) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::POST,
+            &["api", "knowledge"],
+            Some(data),
+            &[],
+        )
+        .await
+    }
+
+    pub async fn delete_base(&self, name: &str) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::DELETE,
+            &["api", "knowledge", name],
+            None,
+            &[],
+        )
+        .await
+    }
+
+    pub async fn set_holders(&self, name: &str, data: Value) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::PUT,
+            &["api", "knowledge", name, "agents"],
+            Some(data),
+            &[],
+        )
+        .await
+    }
+
+    pub async fn list_documents(&self, name: &str) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::GET,
+            &["api", "knowledge", name, "documents"],
+            None,
+            &[],
+        )
+        .await
+    }
+
+    pub async fn put_document(&self, name: &str, filename: &str, data: Value) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::PUT,
+            &["api", "knowledge", name, "documents", filename],
+            Some(data),
+            &[],
+        )
+        .await
+    }
+
+    pub async fn delete_document(&self, name: &str, filename: &str) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::DELETE,
+            &["api", "knowledge", name, "documents", filename],
             None,
             &[],
         )

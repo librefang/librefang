@@ -654,6 +654,24 @@ impl AgentRegistry {
         Ok(())
     }
 
+    /// Replace an agent's named-workspace declarations.
+    ///
+    /// The whole map is replaced rather than merged, matching every other
+    /// allowlist setter here: a caller that wants to add one entry sends the
+    /// map it wants to end up with, and "remove the last one" stays expressible.
+    pub fn update_workspaces(
+        &self,
+        id: AgentId,
+        workspaces: std::collections::HashMap<String, librefang_types::agent::WorkspaceDecl>,
+    ) -> LibreFangResult<()> {
+        self.with_entry_mut(id, |entry| {
+            entry.manifest.workspaces = workspaces;
+            entry.last_active = chrono::Utc::now();
+        })?;
+        self.notify_changed();
+        Ok(())
+    }
+
     /// Update an agent's MCP server allowlist.
     pub fn update_mcp_servers(&self, id: AgentId, servers: Vec<String>) -> LibreFangResult<()> {
         self.with_entry_mut(id, |entry| {

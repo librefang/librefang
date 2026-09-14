@@ -52,7 +52,8 @@
     "more": "更多",
     "mobile_tabs": "底部导航",
     "console": "控制台",
-    "groups": "用户组"
+    "groups": "用户组",
+    "knowledge": "知识库"
   },
   "partner": {
     "everyapi_label": "EveryAPI 官方合作伙伴集成",
@@ -4338,5 +4339,40 @@
     "temperature_placeholder": "0 到 2",
     "top_p": "Top-p",
     "top_p_placeholder": "0 到 1"
+  },
+  "knowledge": {
+    "title": "知识库",
+    "description": "文档只需上传一次，即可分享给你选定的智能体。每个知识库都会成为一个命名工作区，智能体用 @名称 读取。",
+    "new_base": "新建知识库",
+    "search": "搜索知识库或智能体…",
+    "empty_title": "还没有知识库",
+    "empty_description": "先创建一个，上传智能体需要读取的文档，然后选择哪些智能体可以使用它。",
+    "base_summary_other": "{{count}} 份文档 · {{size}}",
+    "no_holders": "尚未分享给任何智能体",
+    "mode_rw": "读写",
+    "share": "分享",
+    "documents": "文档",
+    "name_placeholder": "handbook",
+    "name_hint": "任何语言均可。不能包含斜杠、开头或结尾的点号，以及首尾空格。代理将以 @名称 读取它。",
+    "delete_title": "要删除这个知识库吗？",
+    "delete_message": "其文档会被删除，并从持有它的每个智能体处撤回。此操作无法撤销。",
+    "upload": "上传",
+    "no_documents": "还没有文档。",
+    "remove_document": "删除此文档",
+    "bad_filename": "{{name}} 不能用作文档名称。任何语言均可，但不能包含斜杠、开头或结尾的点号，以及首尾空格。",
+    "share_title": "谁可以读取 {{name}}？",
+    "share_hint": "选中的智能体通过 @{{name}} 读取这些文档。读写还允许它为其他所有人修改这些文档。",
+    "create_failed": "无法创建知识库。",
+    "delete_failed": "无法删除知识库。",
+    "upload_failed": "无法上传文档。",
+    "share_failed": "无法更新分享设置。",
+    "no_matches_title": "没有匹配的知识库",
+    "no_matches_description": "没有与 {{query}} 匹配的知识库或代理。",
+    "delete_base": "删除此知识库",
+    "delete_document_title": "移除此文档？",
+    "delete_document_message": "{{name}} 将从知识库中删除，持有该知识库的每个代理都会失去这份文档。此操作无法撤销。",
+    "size_hint": "每份文档最大 {{limit}}",
+    "too_large": "{{name}} 为 {{size}} — 文档最大不能超过 {{limit}}。",
+    "no_agents": "尚无可共享的代理。"
   }
 }
