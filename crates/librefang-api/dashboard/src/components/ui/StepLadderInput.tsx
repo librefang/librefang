@@ -32,6 +32,15 @@ interface StepLadderInputProps {
   step?: number;
   /** Optional advisory shown under the control, e.g. an over-limit warning. */
   warning?: string;
+  /**
+   * The stored value is one the editor refuses to save.
+   *
+   * Distinct from `warning`, which is advisory and still saves: this marks the
+   * control the way `Field` marks a plain input, so a value the form is
+   * rejecting is visible on the control itself and not only in whatever the
+   * page shows for "cannot save" (#8112).
+   */
+  invalid?: boolean;
 }
 
 /**
@@ -58,6 +67,7 @@ export function StepLadderInput({
   min,
   max,
   step,
+  invalid,
 }: StepLadderInputProps) {
   const id = useId();
   const rungs = ladderUpTo(ladder, cap);
@@ -95,7 +105,10 @@ export function StepLadderInput({
     // element is non-labellable, so the control announced itself as an
     // unnamed group.
     <div className="space-y-1.5">
-      <span id={`${id}-label`} className="block text-xs font-bold text-text-dim">
+      <span
+        id={`${id}-label`}
+        className={`block text-xs font-bold ${invalid ? "text-error" : "text-text-dim"}`}
+      >
         {label}
       </span>
       <div role="group" aria-labelledby={`${id}-label`} className="flex flex-wrap gap-1.5">
@@ -143,11 +156,13 @@ export function StepLadderInput({
           step={step}
           value={value}
           aria-label={`${label} — ${customLabel}`}
-          aria-invalid={warning ? true : undefined}
+          aria-invalid={invalid || warning ? true : undefined}
           aria-describedby={warning ? `${id}-warning` : undefined}
           onChange={(e) => onChange(e.target.value)}
           placeholder={customPlaceholder}
-          className="w-full rounded-lg border border-border-subtle bg-main px-2 py-1 text-xs font-mono outline-none focus:border-brand"
+          className={`w-full rounded-lg border bg-main px-2 py-1 text-xs font-mono outline-none focus:border-brand ${
+            invalid ? "border-error" : "border-border-subtle"
+          }`}
         />
       ) : null}
       {warning ? (

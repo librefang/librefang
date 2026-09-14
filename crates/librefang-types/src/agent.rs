@@ -918,13 +918,24 @@ pub struct ModelConfig {
     /// Sampling temperature. `None` = inherit.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f32>,
-    /// Top-p / nucleus sampling (0.0–1.0). `None` = inherit.
+    /// Optional nucleus-sampling threshold (OpenAI-compatible `top_p`).
+    ///
+    /// A typed [`Self`] field rather than an `extra_params` entry so the same intent cannot be expressed two ways with different validation: the form serializes it through one validated path and the agent loop merges it into `extra_body` at one site.
+    /// Providers that flatten `extra_body` receive it — that is every OpenAI-compatible provider (including groq, which routes through `OpenAIDriver`) plus Ollama.
+    /// Typed-body drivers (Anthropic, Gemini) never read `extra_body`, so the value is silently dropped there.
+    /// For the current Claude generations that is the right outcome anyway, since they reject sampling controls outright; on Claude 4.6 and earlier, which do accept `top_p`, it is a real gap — the dashboard field carries a provider hint so the operator is not left guessing.
+    /// `None` (the default) sends nothing, so unaffected providers see no extra parameter.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub top_p: Option<f32>,
-    /// Frequency penalty (-2.0–2.0). `None` = inherit.
+    /// Optional OpenAI-compatible `frequency_penalty`.
+    ///
+    /// Not an Anthropic parameter — fill it only on providers that support it.
+    /// Same contract as [`Self::top_p`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub frequency_penalty: Option<f32>,
-    /// Presence penalty (-2.0–2.0). `None` = inherit.
+    /// Optional OpenAI-compatible `presence_penalty`.
+    ///
+    /// Same contract as [`Self::top_p`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub presence_penalty: Option<f32>,
     /// System prompt for the agent.

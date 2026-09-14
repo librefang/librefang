@@ -3222,6 +3222,213 @@ async fn test_send_message_ephemeral_does_not_modify_session() {
     kernel.shutdown();
 }
 
+/// Boot a kernel whose only agent talks to a mocked Ollama backend, with
+/// `top_p` present **only** as a per-model catalog override.
+///
+/// The agent's own `top_p` is left unset, so a value observed on the wire can
+/// only have come from the resolution step each dispatcher is supposed to run.
+/// The returned `TempDir` owns the kernel's home directory and must outlive it.
+async fn boot_kernel_with_catalog_top_p_override() -> (
+    wiremock::MockServer,
+    Arc<LibreFangKernel>,
+    AgentId,
+    tempfile::TempDir,
+) {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let backend = MockServer::start().await;
+    // Non-empty content and an explicit `done_reason: "stop"`: an empty-text
+    // `EndTurn` reply retries in-loop (agent_loop/mod.rs:212) rather than
+    // completing the turn, which against this deterministic mock would spin
+    // until `MaxIterationsExceeded` instead of returning after one call.
+    //
+    // `done: true` and the **trailing newline** are what make this one body
+    // serve the streaming dispatcher as well. Native Ollama streams NDJSON —
+    // one JSON object per line, the last carrying `done: true` — and the
+    // driver's reader only consumes a line once it finds a `\n`
+    // (drivers/ollama.rs: `while let Some(pos) = buffer.find('\n')`).
+    // A `set_body_json` body has no terminator, so the single chunk would sit
+    // unparsed in the buffer, the turn would come back empty, and the agent
+    // loop would retry it to `MaxIterationsExceeded(50)` instead of ending.
+    // `set_body_raw` keeps the `application/json` content type the
+    // non-streaming path expects while letting us append that newline.
+    Mock::given(method("POST"))
+        .and(path("/api/chat"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
+            format!(
+                "{}\n",
+                serde_json::json!({
+                    "message": {"content": "ok"},
+                    "done": true,
+                    "done_reason": "stop",
+                })
+            ),
+            "application/json",
+        ))
+        .mount(&backend)
+        .await;
+
+    let dir = tempfile::tempdir().unwrap();
+    let home_dir = dir.path().to_path_buf();
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        default_model: DefaultModelConfig::driverless(),
+        ..KernelConfig::default()
+    };
+    let kernel = Arc::new(LibreFangKernel::boot_with_config(config).expect("kernel should boot"));
+    // Every dispatcher here builds its kernel-handle arg via `kernel_handle()`,
+    // which panics if the self-handle weak ref was never installed.
+    kernel.set_self_handle();
+
+    kernel.model_catalog_update(|cat| {
+        cat.set_overrides(
+            "ollama:llama3.2".to_string(),
+            librefang_types::model_catalog::ModelOverrides {
+                top_p: Some(0.42),
+                ..Default::default()
+            },
+        );
+    });
+
+    let mut manifest = test_manifest("top-p-parity", "agent for #8112 parity check", vec![]);
+    manifest.model.provider = "ollama".to_string();
+    manifest.model.model = "llama3.2".to_string();
+    manifest.model.base_url = Some(backend.uri());
+    let agent_id = kernel.spawn_agent(manifest).expect("spawn should succeed");
+
+    (backend, kernel, agent_id, dir)
+}
+
+/// Every request the mock recorded must carry the catalog's `top_p`.
+///
+/// Native Ollama nests sampling knobs under `options` (#8112 — see the
+/// ollama.rs fix): a bare top-level `top_p` would mean the merge point
+/// regressed back to the pre-fix behaviour that Ollama silently ignores.
+/// `f32` widens to `f64` inside the resolved value, so compare with a
+/// tolerance rather than against the `f64` literal (same reasoning as
+/// `test_build_extra_body_merges_typed_sampling_fields` in agent_loop's tests).
+async fn assert_every_request_carries_catalog_top_p(
+    backend: &wiremock::MockServer,
+    expected: usize,
+    dispatcher: &str,
+) {
+    let requests = backend
+        .received_requests()
+        .await
+        .expect("requests recorded");
+    assert_eq!(
+        requests.len(),
+        expected,
+        "{dispatcher} must have reached the mock backend"
+    );
+    for req in &requests {
+        let body: serde_json::Value = req.body_json().expect("valid JSON body");
+        let observed_top_p = body["options"]["top_p"]
+            .as_f64()
+            .unwrap_or_else(|| panic!("options.top_p missing from wire body: {body}"));
+        assert!(
+            (observed_top_p - 0.42).abs() < 1e-6,
+            "{dispatcher} must resolve the model-catalog top_p override onto the \
+             wire request (#8112): {body}"
+        );
+    }
+}
+
+/// #8112: `resolve_inference_params` + `apply_to` used to run on only one of
+/// the dispatch paths (`execute_llm_agent`, reached by `send_message`). The
+/// ephemeral (`/btw`) path built its manifest from a bare `entry.manifest.clone()`
+/// with no resolution step, so a `top_p` set as a per-model catalog override —
+/// the agent itself leaves the field unset — reached the wire on the
+/// persistent path and reached nothing on the ephemeral one. Both paths now
+/// call the shared `manifest_helpers::apply_resolved_inference_params`, and
+/// this drives both all the way to a mocked Ollama backend and inspects the
+/// literal wire body each one sent, rather than trusting that calling the
+/// same function twice must produce the same result.
+#[tokio::test(flavor = "multi_thread")]
+async fn top_p_catalog_override_reaches_both_ephemeral_and_persistent_dispatch() {
+    let (backend, kernel, agent_id, _dir) = boot_kernel_with_catalog_top_p_override().await;
+
+    // Dispatcher #1: the ephemeral (`/btw`) path — `messaging::send_message_ephemeral`.
+    kernel
+        .send_message_ephemeral(agent_id, "ephemeral turn", None, None)
+        .await
+        .expect("ephemeral turn must not error");
+
+    // Dispatcher #2: the persistent-session path — `messaging::send_message`
+    // down to `agent_execution::execute_llm_agent`.
+    kernel
+        .send_message(agent_id, "persistent turn")
+        .await
+        .expect("persistent turn must not error");
+
+    assert_every_request_carries_catalog_top_p(
+        &backend,
+        2,
+        "the ephemeral (/btw) and persistent dispatch paths",
+    )
+    .await;
+
+    kernel.shutdown();
+}
+
+/// The third dispatcher: the **streaming** turn.
+///
+/// `send_message_streaming_with_sender_and_opts` (kernel::messaging) builds its
+/// own `entry.manifest.clone()` and is a wholly separate merge point from the
+/// two the test above drives — deleting its
+/// `apply_resolved_inference_params` call leaves every other test in this
+/// crate green while a streamed turn silently loses the catalog override.
+/// That is the injection site this test exists to hold, so it asserts on the
+/// literal wire body the streaming path produced rather than on the helper.
+#[tokio::test(flavor = "multi_thread")]
+async fn top_p_catalog_override_reaches_the_streaming_dispatch() {
+    let (backend, kernel, agent_id, _dir) = boot_kernel_with_catalog_top_p_override().await;
+
+    let (mut rx, join) = kernel
+        .send_message_streaming(agent_id, "streamed turn", None)
+        .expect("the streaming turn must start");
+    // Drain the fanout: the receiver is bounded, so an undrained stream can
+    // back-pressure the turn into a stall instead of completing.
+    let drain = tokio::spawn(async move { while rx.recv().await.is_some() {} });
+    join.await
+        .expect("the streaming task joins")
+        .expect("the streamed turn must not error");
+    drain.await.expect("the drain task joins");
+
+    assert_every_request_carries_catalog_top_p(&backend, 1, "the streaming dispatch path").await;
+
+    kernel.shutdown();
+}
+
+/// The fourth dispatcher: the **ephemeral worker spawn**.
+///
+/// `ephemeral_spawn::spawn_ephemeral_worker` derives the worker's manifest from
+/// `parent.manifest.clone()` — a third independent clone, reached by neither of
+/// the tests above — so it needs its own resolution call and its own guard.
+/// The worker inherits the parent's `base_url`, which is what puts it in front
+/// of the same mock.
+#[tokio::test(flavor = "multi_thread")]
+async fn top_p_catalog_override_reaches_the_ephemeral_worker_spawn() {
+    let (backend, kernel, agent_id, _dir) = boot_kernel_with_catalog_top_p_override().await;
+
+    kernel
+        .spawn_ephemeral_worker(librefang_types::ephemeral::EphemeralSpawnRequest::new(
+            agent_id,
+            "mission",
+            "do the thing",
+        ))
+        .await
+        .expect("the ephemeral worker must not error");
+
+    assert_every_request_carries_catalog_top_p(&backend, 1, "the ephemeral worker spawn path")
+        .await;
+
+    kernel.shutdown();
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn test_spawn_approval_sweep_task_is_idempotent() {
     let dir = tempfile::tempdir().unwrap();

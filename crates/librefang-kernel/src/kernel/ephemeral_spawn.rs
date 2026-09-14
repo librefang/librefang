@@ -273,6 +273,15 @@ impl LibreFangKernel {
                 manifest.model.model = model.to_string();
             }
         }
+        // #8112: same resolution `execute_llm_agent` runs — without it, a
+        // `top_p` / `frequency_penalty` / `presence_penalty` set as a
+        // per-model catalog override never reached an ephemeral worker's
+        // turn. Placed after the request-level model override above so it
+        // resolves against the model the worker will actually call.
+        super::manifest_helpers::apply_resolved_inference_params(
+            &self.llm.model_catalog.load(),
+            &mut manifest.model,
+        );
 
         // ── System prompt ───────────────────────────────────────────────────
         let (granted_tool_names, granted_tool_hints) =

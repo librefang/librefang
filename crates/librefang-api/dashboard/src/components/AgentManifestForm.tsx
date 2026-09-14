@@ -306,21 +306,25 @@ export function AgentManifestForm({
             param="temperature"
             value={value.model.temperature}
             onChange={(next) => updateModel({ temperature: next })}
+            invalid={invalidFields.has("model.temperature")}
           />
           <ModelParamField
             param="top_p"
             value={value.model.top_p}
             onChange={(next) => updateModel({ top_p: next })}
+            invalid={invalidFields.has("model.top_p")}
           />
           <ModelParamField
             param="frequency_penalty"
             value={value.model.frequency_penalty}
             onChange={(next) => updateModel({ frequency_penalty: next })}
+            invalid={invalidFields.has("model.frequency_penalty")}
           />
           <ModelParamField
             param="presence_penalty"
             value={value.model.presence_penalty}
             onChange={(next) => updateModel({ presence_penalty: next })}
+            invalid={invalidFields.has("model.presence_penalty")}
           />
         </div>
         <ModelParamField
