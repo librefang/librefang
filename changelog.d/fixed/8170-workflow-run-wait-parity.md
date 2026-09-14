@@ -1,4 +1,4 @@
 Running a workflow from the TUI now waits as long as running it from the CLI does.
 The two surfaces each held their own `WORKFLOW_RUN_WAIT_MS` — 90 s in `librefang workflow run`, 45 s in the Workflows screen — so a workflow that took 60 s completed from one and timed out from the other, with nothing on either screen to suggest the surface was the variable rather than the workflow.
 Each constant was correctly derived from its own caller's client timeout, which is why neither looked wrong in isolation: the TUI built that one request with a 60 s client, a local choice among the 5 s to 300 s timeouts it picks per call rather than a constraint.
-Both the client timeout and the wait now come from one place, tied together by a compile-time assertion, and both surfaces build the request from the same helper so the query cannot disagree again. (@houko)
+Both the client timeout and the wait now come from one place, tied together by a compile-time assertion, and both surfaces build the request from the same helper so the query cannot disagree again. (#8317) (@houko)
