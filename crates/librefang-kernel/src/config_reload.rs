@@ -1219,7 +1219,9 @@ pub fn classified_reload_fields() -> std::collections::BTreeMap<&'static str, &'
         ("thinking", "N"),
         ("triggers", "H/N"),
         ("notification", "N"),
-        ("tts", "N"),
+        // Restart-required since #8274 moved the branch out of the noop block: `TtsEngine` is built once at boot from `config.tts.clone()`.
+        // The `tts.enabled` / `tts.output_format` carve-outs stay noop and are documented as their own rows, which this table does not carry — the doc parser only reads top-level names.
+        ("tts", "R"),
         ("media", "R"),
         ("hands", "N"),
         ("links", "N"),
