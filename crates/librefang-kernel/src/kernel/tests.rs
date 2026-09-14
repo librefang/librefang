@@ -2998,6 +2998,68 @@ async fn resolved_exec_policy_survives_reload_and_update_manifest() {
     kernel.shutdown();
 }
 
+/// #7835: `update_manifest` used to route a tags change through
+/// `registry::update_tags` and then, on the next line, through
+/// `replace_manifest_and_retag` — which already reprojects `entry.tags` and
+/// the `tag_index` from `manifest.tags` as part of the same call (#7742).
+/// Both fired `notify_changed()`, so every `AgentRegistry` watcher (the
+/// dashboard WebSocket re-snapshot path, #3513) woke twice per PATCH that
+/// changed tags. `replace_manifest_and_retag_reprojects_entry_tags_and_index`
+/// only checks the final `tags` / `tag_index` state, which is identical
+/// either way, so it would not have caught a regression here.
+#[test]
+fn update_manifest_notifies_registry_watchers_exactly_once_per_tags_change() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().join("librefang-kernel-tags-notify-test");
+    std::fs::create_dir_all(&home_dir).unwrap();
+
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+
+    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+
+    let manifest = AgentManifest {
+        name: "tags-notify-agent".to_string(),
+        description: "agent used to count notify_changed calls".to_string(),
+        author: "test".to_string(),
+        module: "builtin:chat".to_string(),
+        tags: vec!["alpha".to_string()],
+        ..Default::default()
+    };
+
+    let agent_id = kernel.spawn_agent(manifest).expect("spawn should succeed");
+
+    // Subscribe after spawn so only the update below is under test.
+    let mut rx = kernel.agents.registry.subscribe_changes();
+
+    let mut replacement = kernel
+        .agents
+        .registry
+        .get(agent_id)
+        .expect("agent must be registered")
+        .manifest
+        .clone();
+    replacement.tags = vec!["beta".to_string()];
+
+    kernel
+        .update_manifest(agent_id, replacement)
+        .expect("manifest update should succeed");
+
+    assert!(
+        matches!(rx.try_recv(), Ok(())),
+        "update_manifest must notify registry watchers when tags change"
+    );
+    assert!(
+        rx.try_recv().is_err(),
+        "update_manifest must notify exactly once per tags-changing PATCH, not twice"
+    );
+
+    kernel.shutdown();
+}
+
 #[test]
 fn test_should_reuse_cached_route_for_brief_follow_up() {
     assert!(LibreFangKernel::should_reuse_cached_route("fix that"));

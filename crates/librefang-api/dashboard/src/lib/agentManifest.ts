@@ -51,6 +51,10 @@ export interface ManifestFormState {
     base_url: string;
   };
 
+  /** Tri-state: `null` = key absent (inherit global fallback_providers),
+   * `[]` = declared empty (disable all fallbacks for this agent), rows = the
+   * list. Collapsing `[]` to absent silently re-enables global fallbacks on
+   * an agent pinned to none (#7749 review). */
   fallback_models: Array<{
     _uid: string;
     provider: string;
@@ -61,7 +65,7 @@ export interface ManifestFormState {
     // params (e.g. Qwen's enable_memory). Hold them here so round-trips
     // through the form don't strip provider customisations.
     extras: TomlTable;
-  }>;
+  }> | null;
 
   resources: {
     max_llm_tokens_per_hour: string;
@@ -78,8 +82,12 @@ export interface ManifestFormState {
     network: string[];
     shell: string[];
     tools: string[];
-    memory_read: string[];
-    memory_write: string[];
+    /** Tri-state (#7605): `null` = key absent (unrestricted), `[]` = declared and grants
+     * nothing (deny), non-empty = allowlist. A plain `string[]` cannot carry the
+     * distinction, and a save that collapses `[]` to absent silently flips a
+     * deny to unrestricted (#7749 review). */
+    memory_read: string[] | null;
+    memory_write: string[] | null;
     agent_message: string[];
     ofp_connect: string[];
     agent_spawn: boolean;
@@ -197,7 +205,7 @@ export const emptyManifestForm = (): ManifestFormState => ({
     api_key_env: "",
     base_url: "",
   },
-  fallback_models: [],
+  fallback_models: null,
   resources: {
     max_llm_tokens_per_hour: "",
     max_tool_calls_per_minute: "",
@@ -212,8 +220,8 @@ export const emptyManifestForm = (): ManifestFormState => ({
     network: [],
     shell: [],
     tools: [],
-    memory_read: [],
-    memory_write: [],
+    memory_read: null,
+    memory_write: null,
     agent_message: [],
     ofp_connect: [],
     agent_spawn: false,
@@ -497,6 +505,20 @@ export const serializeManifestForm = (
   if (form.allowed_plugins.length) {
     lines.push(`allowed_plugins = ${tomlArray(form.allowed_plugins)}`);
   }
+  // `fallback_models = []` is a TOP-LEVEL key, so it has to be emitted here,
+  // with the other top-level arrays and before the first `[section]` header.
+  // `null` omits it (inherit the global fallback_providers); a declared `[]`
+  // must still emit — it is the disable-all statement, and dropping it would
+  // re-enable global fallbacks on an agent pinned to none (#7749).
+  // Emitting it after the section headers instead put the bare key inside
+  // whichever table was appended last (`[model]` on any manifest the daemon
+  // renders, since `toml::to_string_pretty` always writes a `[model]` table).
+  // Neither `AgentManifest` nor `ModelConfig` declares `deny_unknown_fields`,
+  // so the kernel dropped that `model.fallback_models` silently and the agent
+  // went back to inheriting the deployment-wide chain with no error surfaced.
+  if (form.fallback_models !== null && form.fallback_models.length === 0) {
+    lines.push("fallback_models = []");
+  }
 
   // Schedule — Reactive is the default and emits nothing; tagged variants
   // serialize as the externally-tagged TOML form `schedule = { variant = { … } }`.
@@ -619,8 +641,11 @@ export const serializeManifestForm = (
   if (form.capabilities.network.length) capabilityBody.push(`network = ${tomlArray(form.capabilities.network)}`);
   if (form.capabilities.shell.length) capabilityBody.push(`shell = ${tomlArray(form.capabilities.shell)}`);
   if (form.capabilities.tools.length) capabilityBody.push(`tools = ${tomlArray(form.capabilities.tools)}`);
-  if (form.capabilities.memory_read.length) capabilityBody.push(`memory_read = ${tomlArray(form.capabilities.memory_read)}`);
-  if (form.capabilities.memory_write.length) capabilityBody.push(`memory_write = ${tomlArray(form.capabilities.memory_write)}`);
+  // `null` omits the key (unrestricted); `[]` MUST still emit — the empty array is
+  // the deny-all declaration, and dropping it would flip the field to unrestricted
+  // on a save that never touched it (#7749 review).
+  if (form.capabilities.memory_read !== null) capabilityBody.push(`memory_read = ${tomlArray(form.capabilities.memory_read)}`);
+  if (form.capabilities.memory_write !== null) capabilityBody.push(`memory_write = ${tomlArray(form.capabilities.memory_write)}`);
   if (form.capabilities.agent_message.length) capabilityBody.push(`agent_message = ${tomlArray(form.capabilities.agent_message)}`);
   if (form.capabilities.ofp_connect.length) capabilityBody.push(`ofp_connect = ${tomlArray(form.capabilities.ofp_connect)}`);
   if (form.capabilities.agent_spawn) writeBoolScalar(capabilityBody, "agent_spawn", true);
@@ -663,7 +688,7 @@ export const serializeManifestForm = (
   }
 
   // [[fallback_models]]
-  for (const fb of form.fallback_models) {
+  for (const fb of form.fallback_models ?? []) {
     const body: string[] = [];
     writeStringScalar(body, "provider", fb.provider.trim());
     writeStringScalar(body, "model", fb.model.trim());
@@ -943,6 +968,16 @@ export const preservedWorkspaceNamesFromExtras = (extras: ManifestExtras): strin
 };
 
 // Form-validation errors. Returns an empty array when submittable.
+//
+// `model.provider` / `model.model` are deliberately NOT required here even
+// though the form marks them `required` visually: a blank value is the
+// documented way an agent inherits the daemon's configured default (the
+// `provider_hint` / hint text the form shows next to them says exactly
+// this), and `ModelConfig`'s own `""` is written through verbatim by both
+// `AgentTypeSpec::apply_to` and `into_new_manifest`. Treating blank as an
+// error here made Save silently no-op on every agent (type) that was ever
+// created without a pinned provider — there was no toast, just two red
+// borders that may be scrolled out of view.
 export const validateManifestForm = (
   form: ManifestFormState,
   // Names already present as preserved declarations (e.g. mount-based
@@ -951,8 +986,6 @@ export const validateManifestForm = (
 ): string[] => {
   const errors: string[] = [];
   if (!form.name.trim()) errors.push("name");
-  if (!form.model.provider.trim()) errors.push("model.provider");
-  if (!form.model.model.trim()) errors.push("model.model");
   if (form.schedule.mode === "periodic" && !form.schedule.cron.trim()) {
     errors.push("schedule.cron");
   }
@@ -1138,8 +1171,13 @@ export const parseManifestToml = (toml: string): ParseResult | ParseError => {
 
   // [[fallback_models]] — capture provider-specific flatten extras too,
   // so e.g. Qwen's enable_memory survives a TOML→Form→TOML round-trip.
-  if (Array.isArray(parsed.fallback_models)) {
-    form.fallback_models = parsed.fallback_models.filter(isTomlTable).map((fb) => ({
+  // `undefined` is the absent key (inherit the global fallback_providers → null);
+  // a declared empty array is the disable-all statement and must stay `[]` (#7749).
+  form.fallback_models = parsed.fallback_models === undefined
+    ? null
+    : (parsed.fallback_models as unknown[])
+        .filter(isTomlTable)
+        .map((fb) => ({
       _uid: generateParsedUid(),
       provider: asString(fb.provider),
       model: asString(fb.model),
@@ -1147,7 +1185,7 @@ export const parseManifestToml = (toml: string): ParseResult | ParseError => {
       base_url: asString(fb.base_url),
       extras: stripKnown(fb, FALLBACK_MODEL_KEYS),
     }));
-  }
+
 
   // [resources]
   const resourceTable = isTomlTable(parsed.resources) ? parsed.resources : {};
@@ -1166,8 +1204,10 @@ export const parseManifestToml = (toml: string): ParseResult | ParseError => {
   form.capabilities.network = asStringArray(capTable.network);
   form.capabilities.shell = asStringArray(capTable.shell);
   form.capabilities.tools = asStringArray(capTable.tools);
-  form.capabilities.memory_read = asStringArray(capTable.memory_read);
-  form.capabilities.memory_write = asStringArray(capTable.memory_write);
+  // `undefined` is the absent key (unrestricted → null); a declared `[]` stays
+  // `[]` — the deny survives the round trip instead of silently reopening (#7749).
+  form.capabilities.memory_read = capTable.memory_read === undefined ? null : asStringArray(capTable.memory_read);
+  form.capabilities.memory_write = capTable.memory_write === undefined ? null : asStringArray(capTable.memory_write);
   form.capabilities.agent_message = asStringArray(capTable.agent_message);
   form.capabilities.ofp_connect = asStringArray(capTable.ofp_connect);
   form.capabilities.agent_spawn = asBoolean(capTable.agent_spawn, false);
