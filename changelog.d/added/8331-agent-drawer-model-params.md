@@ -1,0 +1,6 @@
+Every model parameter an agent can carry is now editable on the agent itself, not only while creating one.
+The detail drawer offered `max_tokens` and `temperature` as bare number boxes; `top_p`, the two penalties, `context_window` and `max_output_tokens` had no control anywhere in the dashboard for an existing agent, even though the config route has accepted all of them as tri-state overrides for some time and the TUI already reached them.
+They render through the same `ModelParamField` ladder the create form and the model settings use, so a parameter looks and behaves the same wherever it appears — with the value it usually takes and the ceiling it cannot pass both stated, instead of an empty box that says neither.
+Clearing a field still means "this agent has no opinion" and hands the value back to the model's own setting, and it now survives being cleared in the same edit that switches provider — the client used to drop that one on the theory that the daemon resets these on a provider change, which it does not.
+A hand agent is offered only the two its write path can store, because `PATCH /hand-runtime-config` accepts the other five and returns 200 without keeping them.
+The current value of every parameter is shown on the panel itself, not only while editing, so a save that did not take is visible. (#8332, #8331) (@DaBlitzStein)

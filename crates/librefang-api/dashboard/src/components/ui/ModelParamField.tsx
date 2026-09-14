@@ -67,7 +67,10 @@ const PLACEHOLDER_KEYS: Record<ModelParamName, string> = {
  * A token count is a positive whole number; a sampling parameter is a decimal inside a range the
  * provider will accept, and `0` is a legitimate temperature rather than an unset field.
  */
-const RANGES: Record<ModelParamName, { min: number; max?: number; integer: boolean }> = {
+export const MODEL_PARAM_RANGES: Record<
+  ModelParamName,
+  { min: number; max?: number; integer: boolean }
+> = {
   context_window: { min: 1, integer: true },
   max_output_tokens: { min: 1, integer: true },
   max_tokens: { min: 1, integer: true },
@@ -76,6 +79,15 @@ const RANGES: Record<ModelParamName, { min: number; max?: number; integer: boole
   frequency_penalty: { min: -2, max: 2, integer: false },
   presence_penalty: { min: -2, max: 2, integer: false },
 };
+
+/**
+ * Every parameter this module governs, in a fixed order.
+ *
+ * Exported so a caller that has to iterate them — the agent patch-builder walks all seven to decide
+ * which changed — reads the set from here instead of restating it. A second list is a second thing
+ * to forget to extend.
+ */
+export const MODEL_PARAM_NAMES = Object.keys(MODEL_PARAM_RANGES) as ModelParamName[];
 
 /** Granularity of the custom field. A token count is whole; a sampling value is not. */
 const STEPS: Record<ModelParamName, number> = {
@@ -99,7 +111,7 @@ const STEPS: Record<ModelParamName, number> = {
 export function isValidParamValue(param: ModelParamName, raw: string): boolean {
   const parsed = Number(raw.trim());
   if (raw.trim() === "" || !Number.isFinite(parsed)) return false;
-  const range = RANGES[param];
+  const range = MODEL_PARAM_RANGES[param];
   if (range.integer && !Number.isInteger(parsed)) return false;
   if (parsed < range.min) return false;
   return range.max === undefined || parsed <= range.max;
@@ -161,8 +173,8 @@ export function ModelParamField({
         customLabel={t("model_param.custom")}
         customPlaceholder={t(PLACEHOLDER_KEYS[param])}
         warning={warning}
-        min={RANGES[param].min}
-        max={RANGES[param].max}
+        min={MODEL_PARAM_RANGES[param].min}
+        max={MODEL_PARAM_RANGES[param].max}
         step={STEPS[param]}
       />
       {hint && <p className="mt-1 text-[10px] text-text-dim/70 leading-snug">{hint}</p>}

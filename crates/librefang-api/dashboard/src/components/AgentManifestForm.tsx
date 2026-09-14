@@ -5,7 +5,11 @@ import { generateUid } from "../lib/agentManifest";
 import type { ManifestExtras, ManifestFormState } from "../lib/agentManifest";
 import { MultiSelectCmdk } from "./ui/MultiSelectCmdk";
 import { ModelParamField } from "./ui/ModelParamField";
-import { formatTokens } from "../lib/modelParamLadders";
+import {
+  overLimitWarning,
+  resolveMaxTokensLimit,
+  selectModelLimits,
+} from "../lib/modelLimits";
 
 /**
  * Catalog entry for the skill/tool finder (#5049). Both fields are
@@ -127,39 +131,20 @@ export function AgentManifestForm({
   );
 
   // Limits for the selected model, and only when the catalog vouches for them.
-  const selectedModelLimits = useMemo(() => {
-    const entry = models.find(
-      (m) => m.id === value.model.model && m.provider === value.model.provider,
-    );
-    if (!entry || entry.limits_known === false) return {};
-    return {
-      contextWindow: entry.context_window && entry.context_window > 0 ? entry.context_window : undefined,
-      maxOutputTokens:
-        entry.max_output_tokens && entry.max_output_tokens > 0 ? entry.max_output_tokens : undefined,
-    };
-  }, [models, value.model.model, value.model.provider]);
-
-  // Advisory, not a validation error: the field is not marked invalid and the
-  // value is saved as typed. If the catalog figure is the thing that is wrong,
-  // an explicit provider error beats a silent truncation.
-  const overLimit = (raw: string, limit?: number): string | undefined => {
-    const parsed = Number(raw.trim());
-    if (raw.trim() === "" || !Number.isFinite(parsed) || limit === undefined) return undefined;
-    return parsed > limit
-      ? t("agents.form.over_limit_warning", { limit: formatTokens(limit) })
-      : undefined;
-  };
-  const maxTokensWarning = overLimit(
-    value.model.max_tokens,
-    // An operator-set output cap describes this endpoint and outranks the
-    // catalog's figure for it.
-    value.model.max_output_tokens.trim() !== ""
-      ? Number(value.model.max_output_tokens)
-      : selectedModelLimits.maxOutputTokens,
+  // Shared with the agent detail drawer, which needs the same three answers and had none of them.
+  const selectedModelLimits = useMemo(
+    () => selectModelLimits(models, value.model.model, value.model.provider),
+    [models, value.model.model, value.model.provider],
   );
-  const contextWindowWarning = overLimit(
+  const maxTokensWarning = overLimitWarning(
+    value.model.max_tokens,
+    resolveMaxTokensLimit(value.model.max_output_tokens, selectedModelLimits.maxOutputTokens),
+    t,
+  );
+  const contextWindowWarning = overLimitWarning(
     value.model.context_window,
     selectedModelLimits.contextWindow,
+    t,
   );
 
   const jsonSchemaFormat =
