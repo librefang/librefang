@@ -533,9 +533,31 @@ impl App {
                 };
                 self.agents.sub = agents::AgentSubScreen::AgentDetail;
             }
+            AppEvent::AgentManifestHistoryLoaded { agent_id, versions } => {
+                // A response that outlived its request would otherwise render one
+                // agent's whole `agent.toml` under another's header.
+                if self.agents.manifest_history_is_for(&agent_id) {
+                    self.agents.set_manifest_history(versions);
+                }
+            }
+            AppEvent::AgentManifestHistoryFailed { agent_id, failure } => {
+                if self.agents.manifest_history_is_for(&agent_id) {
+                    self.agents.set_manifest_history_error(match failure {
+                        // Unreachable for this event: both backends read the
+                        // snapshots, so there is no arm that needs a daemon.
+                        event::FetchFailure::RequiresDaemon => {
+                            crate::i18n::t("tui-event-manifest-history-fetch-failed")
+                        }
+                        event::FetchFailure::Error(reason) => reason,
+                    });
+                }
+            }
             AppEvent::FetchError(err) => {
                 // Route to the active tab's status message
                 match self.active_tab {
+                    Tab::Agents => {
+                        self.agents.status_msg = err;
+                    }
                     Tab::Workflows => self.workflows.status_msg = err,
                     Tab::Triggers => self.triggers.status_msg = err,
                     Tab::Goals => self.goals.status_msg = err,
@@ -1991,6 +2013,24 @@ impl App {
                     event::spawn_fetch_agent_model_params(backend, id, self.event_tx.clone());
                 }
             }
+            agents::AgentAction::FetchManifestHistory(id) => {
+                match self.backend.to_ref() {
+                    Some(backend) => {
+                        event::spawn_fetch_agent_manifest_history(
+                            backend,
+                            id,
+                            self.event_tx.clone(),
+                        );
+                    }
+                    // Nothing will ever answer, so the pane is told now rather
+                    // than left on its loading line for the rest of the session.
+                    None => {
+                        self.agents.set_manifest_history_error(crate::i18n::t(
+                            "chat-runner-no-backend-connected",
+                        ));
+                    }
+                }
+            }
             agents::AgentAction::UpdateModelParams { id, changes } => {
                 if let Some(backend) = self.backend.to_ref() {
                     event::spawn_update_agent_model_params(
@@ -3331,4 +3371,102 @@ pub fn run(config: Option<PathBuf>) {
         ratatui::crossterm::event::DisableBracketedPaste
     );
     ratatui::restore();
+}
+
+#[cfg(test)]
+mod manifest_history_dispatch_tests {
+    use super::*;
+    use crate::tui::screens::agents::{AgentDetail, ManifestVersion};
+
+    fn app_showing(agent_id: &str) -> App {
+        let (tx, _rx) = mpsc::channel();
+        let mut app = App::new(None, tx);
+        app.active_tab = Tab::Agents;
+        app.agents.detail = Some(AgentDetail {
+            id: agent_id.to_string(),
+            ..Default::default()
+        });
+        app
+    }
+
+    fn snapshot(toml: &str) -> ManifestVersion {
+        ManifestVersion {
+            timestamp: "2026-09-08 10:00:00".to_string(),
+            change_source: "update".to_string(),
+            manifest_toml: toml.to_string(),
+        }
+    }
+
+    /// Press `h` on agent A over a slow link, `Esc`, select agent B, press `h`.
+    /// A's response arrives first and used to populate B's pane with A's entire
+    /// `agent.toml` — the payload where attributing it to the wrong agent
+    /// misleads rather than merely lags.
+    #[test]
+    fn a_late_response_for_another_agent_does_not_populate_this_ones_pane() {
+        let mut app = app_showing("agent-uuid-b");
+        app.agents.manifest_history_loading = true;
+
+        app.handle_event(AppEvent::AgentManifestHistoryLoaded {
+            agent_id: "agent-uuid-a".to_string(),
+            versions: vec![snapshot("name = \"agent-uuid-a\"")],
+        });
+
+        assert!(
+            app.agents.manifest_history.is_empty(),
+            "another agent's snapshots must not land in this agent's pane"
+        );
+        assert!(
+            app.agents.manifest_history_loading,
+            "the outstanding fetch for this agent is still in flight"
+        );
+
+        app.handle_event(AppEvent::AgentManifestHistoryLoaded {
+            agent_id: "agent-uuid-b".to_string(),
+            versions: vec![snapshot("name = \"agent-uuid-b\"")],
+        });
+
+        assert_eq!(app.agents.manifest_history.len(), 1);
+        assert_eq!(
+            app.agents.manifest_history[0].manifest_toml,
+            "name = \"agent-uuid-b\""
+        );
+        assert!(!app.agents.manifest_history_loading);
+    }
+
+    /// The same mismatch on the failure path: agent A's failure must not clear
+    /// agent B's spinner or supply B's pane with A's reason.
+    #[test]
+    fn a_failure_for_another_agent_does_not_clear_this_ones_loading_state() {
+        let mut app = app_showing("agent-uuid-b");
+        app.agents.manifest_history_loading = true;
+
+        app.handle_event(AppEvent::AgentManifestHistoryFailed {
+            agent_id: "agent-uuid-a".to_string(),
+            failure: event::FetchFailure::Error("agent A blew up".to_string()),
+        });
+
+        assert!(app.agents.manifest_history_loading);
+        assert_eq!(app.agents.manifest_history_error, None);
+    }
+
+    /// A skills save failure arriving while a history fetch is outstanding used
+    /// to clear the history pane's loading flag, so the pane stopped saying
+    /// "loading" and showed the skills error as this fetch's reason.
+    #[test]
+    fn an_unrelated_agent_tab_fetch_error_leaves_the_history_fetch_alone() {
+        let mut app = app_showing("agent-uuid-b");
+        app.agents.manifest_history_loading = true;
+
+        app.handle_event(AppEvent::FetchError("Failed to save skills".to_string()));
+
+        assert!(
+            app.agents.manifest_history_loading,
+            "an unrelated agent-tab failure must not end the history fetch"
+        );
+        assert_eq!(
+            app.agents.manifest_history_error, None,
+            "an unrelated agent-tab failure is not the history fetch's reason"
+        );
+        assert_eq!(app.agents.status_msg, "Failed to save skills");
+    }
 }

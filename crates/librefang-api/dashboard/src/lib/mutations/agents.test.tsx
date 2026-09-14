@@ -134,6 +134,12 @@ describe("usePatchAgent", () => {
     expect(invalidateSpy).toHaveBeenCalledWith({
       queryKey: agentKeys.detail("agent-1"),
     });
+    // #8041: a rename can accompany other manifest edits recorded on the
+    // same persist, and the History tab must not show stale data right
+    // after the request that produced the newest snapshot.
+    expect(invalidateSpy).toHaveBeenCalledWith({
+      queryKey: agentKeys.manifestHistory("agent-1"),
+    });
   });
 });
 
@@ -166,6 +172,10 @@ describe("usePatchAgentRuntimeConfig", () => {
     });
     expect(invalidateSpy).toHaveBeenCalledWith({
       queryKey: agentKeys.detail("agent-1"),
+    });
+    // #8041: model/runtime config changes are recorded to manifest history too.
+    expect(invalidateSpy).toHaveBeenCalledWith({
+      queryKey: agentKeys.manifestHistory("agent-1"),
     });
     // Non-hand mutations MUST NOT dirty hand-detail caches — asserting this
     // guards against regressions that widen invalidation unnecessarily.
