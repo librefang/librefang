@@ -89,6 +89,7 @@ fn context_compaction_updates_working_and_persistent_messages() {
     let mut session = Session {
         id: librefang_types::agent::SessionId::new(),
         agent_id: librefang_types::agent::AgentId::new(),
+        parent_session_id: None,
         messages: original.clone(),
         context_window_tokens: 0,
         label: None,
@@ -140,6 +141,7 @@ fn context_compaction_preserves_current_turn_when_engine_omits_it() {
     let mut session = Session {
         id: librefang_types::agent::SessionId::new(),
         agent_id: librefang_types::agent::AgentId::new(),
+        parent_session_id: None,
         messages: vec![
             Message::user("old user"),
             current_user.clone(),
@@ -181,6 +183,7 @@ fn context_compaction_uses_last_duplicate_as_current_turn_boundary() {
     let mut session = Session {
         id: librefang_types::agent::SessionId::new(),
         agent_id: librefang_types::agent::AgentId::new(),
+        parent_session_id: None,
         messages: original.clone(),
         context_window_tokens: 0,
         label: None,
@@ -216,6 +219,7 @@ fn context_compaction_keeps_full_current_turn_when_first_message_repeats() {
     let mut session = Session {
         id: librefang_types::agent::SessionId::new(),
         agent_id: librefang_types::agent::AgentId::new(),
+        parent_session_id: None,
         messages: original.clone(),
         context_window_tokens: 0,
         label: None,

@@ -591,9 +591,17 @@ impl MemorySubstrate {
         self.sessions.agents_stats_24h_bulk()
     }
 
-    /// Delete a session by ID.
-    pub fn delete_session(&self, session_id: SessionId) -> LibreFangResult<()> {
+    /// Delete a session by ID, cascading to every descendant session.
+    /// Returns every id actually removed. See
+    /// [`crate::session::SessionStore::delete_session`].
+    pub fn delete_session(&self, session_id: SessionId) -> LibreFangResult<Vec<SessionId>> {
         self.sessions.delete_session(session_id)
+    }
+
+    /// Delete exactly one session by ID — no cascade. See
+    /// [`crate::session::SessionStore::delete_session_only`].
+    pub fn delete_session_only(&self, session_id: SessionId) -> LibreFangResult<()> {
+        self.sessions.delete_session_only(session_id)
     }
 
     /// Return all session IDs belonging to an agent.

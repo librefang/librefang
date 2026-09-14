@@ -11476,6 +11476,7 @@
           "sessions"
         ],
         "summary": "DELETE /api/sessions/:id — Delete a session.",
+        "description": "Cascades to every descendant session (#7752) — deleting a session that\nspawned sub-agent runs takes the whole delegated subtree with it. The\nresponse body reports what actually came down rather than a bare 204, so\na caller who only asked to delete one id can tell a subtree was removed\n(#7991 review).",
         "operationId": "delete_session",
         "parameters": [
           {
@@ -11490,7 +11491,14 @@
         ],
         "responses": {
           "200": {
-            "description": "Session deleted"
+            "description": "Session deleted, cascading to descendants",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
           }
         }
       }
