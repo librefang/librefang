@@ -108,18 +108,38 @@ pub(crate) fn cmd_workflow_create(file: PathBuf) {
     }
 }
 
+/// The client timeout every surface builds its workflow-run request with.
+///
+/// Shared rather than chosen per surface because the wait below is derived from it, and the same workflow taking a different length of time to fail depending on which screen started it is not a difference an operator can attribute to anything (#8170).
+/// The TUI used to build this request with 60 s — a local choice among the 5 s–300 s timeouts that file picks per call, not a constraint — and derived a 45 s wait from it, so a 60 s workflow completed from `librefang workflow run` and timed out in the Workflows screen.
+/// This value matches `daemon_client()`, which is where the 120 s came from originally.
+pub(crate) const WORKFLOW_RUN_CLIENT_TIMEOUT_SECS: u64 = 120;
+
 /// How long the daemon may hold `POST /api/workflows/{id}/run` open before it hands the run back as a background task.
 ///
-/// `?wait=true` on its own selects the fully synchronous branch of `run_workflow`, whose own comment records that the run is owned by the request: the CLI's client gives up after 120 s (`daemon_client`) and a step defaults to a 120 s timeout of its own, so any multi-step workflow would disconnect mid-run and take the run with it.
+/// `?wait=true` on its own selects the fully synchronous branch of `run_workflow`, whose own comment records that the run is owned by the request: the client gives up after [`WORKFLOW_RUN_CLIENT_TIMEOUT_SECS`] and a step defaults to a 120 s timeout of its own, so any multi-step workflow would disconnect mid-run and take the run with it.
 /// Passing `timeout_ms` selects the branch that spawns the run as its own task, so a workflow that outlives the wait keeps going and we report its id instead.
-/// 90 s leaves 30 s of the client budget for the response itself.
-const WORKFLOW_RUN_WAIT_MS: u64 = 90_000;
+pub(crate) const WORKFLOW_RUN_WAIT_MS: u64 = 90_000;
+
+/// What the wait deliberately leaves of the client budget for the response itself.
+const WORKFLOW_RUN_RESPONSE_HEADROOM_MS: u64 = 30_000;
 
 /// The wait we ask the daemon for has to expire before our own client gives up, or the 202-with-`run_id` path is unreachable and a slow run comes back as a disconnect that the operator reads as a failure.
+///
+/// Written against the constants rather than against literals so that changing either one on its own fails the build, which is the property the two divergent copies of this reasoning did not have.
 const _: () = assert!(
-    WORKFLOW_RUN_WAIT_MS < 120_000,
-    "daemon_client() times out at 120 s; a longer wait can never return 202"
+    WORKFLOW_RUN_WAIT_MS + WORKFLOW_RUN_RESPONSE_HEADROOM_MS
+        <= WORKFLOW_RUN_CLIENT_TIMEOUT_SECS * 1_000,
+    "the wait plus the response headroom must fit inside the client timeout, or a slow run \
+     can never come back as a 202"
 );
+
+/// The path and query for one workflow-run request, shared by `librefang workflow run` and the TUI's Workflows screen.
+///
+/// A function rather than two format strings: the divergence in #8170 was two constants with the same name in two files, and the only way for the query to disagree again is for someone to stop calling this.
+pub(crate) fn workflow_run_path(workflow_id: &str) -> String {
+    format!("api/workflows/{workflow_id}/run?wait=true&timeout_ms={WORKFLOW_RUN_WAIT_MS}")
+}
 
 /// What `librefang workflow run` should report for one response from `POST /api/workflows/{id}/run`.
 ///
@@ -177,12 +197,14 @@ pub(crate) fn classify_workflow_run(
 
 pub(crate) fn cmd_workflow_run(workflow_id: &str, input: &str) {
     let base = require_daemon("workflow run");
-    let client = daemon_client();
+    // Named explicitly rather than taken from `daemon_client()`'s default, so that the compile-time assertion above is about the timeout this request actually uses instead of about one it happens to match (#8170).
+    let client = crate::commands::common::daemon_client_with_api_key_and_timeout(
+        crate::commands::common::read_api_key().as_deref(),
+        std::time::Duration::from_secs(WORKFLOW_RUN_CLIENT_TIMEOUT_SECS),
+    );
     let (status, body) = daemon_json_checked(
         client
-            .post(format!(
-                "{base}/api/workflows/{workflow_id}/run?wait=true&timeout_ms={WORKFLOW_RUN_WAIT_MS}"
-            ))
+            .post(format!("{base}/{}", workflow_run_path(workflow_id)))
             .json(&serde_json::json!({"input": input}))
             .send(),
     );
@@ -883,6 +905,39 @@ mod tests {
         assert_eq!(
             classify_workflow_run(StatusCode::INTERNAL_SERVER_ERROR, &body),
             WorkflowRunOutcome::Failed { error: "" }
+        );
+    }
+    /// #8170: both surfaces must ask the daemon for the same deadline.
+    ///
+    /// The `workflow run` command and the TUI's Workflows screen each held a `WORKFLOW_RUN_WAIT_MS` of their own — 90 s and 45 s — so a workflow that took 60 s completed from one and timed out from the other, with nothing on either screen to suggest the surface was the variable.
+    /// Reading either constant in isolation gave no hint the other existed, which is why this pins the query the request is built from rather than the number: a second copy of the reasoning cannot come back without someone deleting a call to `workflow_run_path`.
+    #[test]
+    fn workflow_run_path_carries_the_shared_wait_8170() {
+        let path = workflow_run_path("wf-1");
+        assert_eq!(
+            path,
+            format!("api/workflows/wf-1/run?wait=true&timeout_ms={WORKFLOW_RUN_WAIT_MS}")
+        );
+        assert!(
+            path.contains("wait=true"),
+            "dropping `wait=true` selects the fire-and-forget branch, and the operator stops seeing output at all"
+        );
+    }
+
+    /// The wait is only meaningful relative to the client timeout it is asked under, so this pins the relationship the compile-time assertion enforces.
+    ///
+    /// It exists as a runtime test as well because the `const _: () = assert!(..)` is easy to relax by editing the same line as the constant, and because the reason for the headroom belongs somewhere a reader will find it.
+    #[test]
+    fn the_wait_expires_before_the_client_does_8170() {
+        let client_budget_ms = WORKFLOW_RUN_CLIENT_TIMEOUT_SECS * 1_000;
+        assert!(
+            WORKFLOW_RUN_WAIT_MS < client_budget_ms,
+            "a wait at or past the client timeout makes the 202-with-run_id path unreachable: a slow run comes back as a disconnect, which reads as a failed workflow"
+        );
+        assert_eq!(
+            client_budget_ms - WORKFLOW_RUN_WAIT_MS,
+            WORKFLOW_RUN_RESPONSE_HEADROOM_MS,
+            "the leftover budget is what the response itself gets; if these drift apart the headroom constant is no longer describing anything"
         );
     }
 }
