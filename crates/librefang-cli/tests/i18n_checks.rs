@@ -744,7 +744,8 @@ fn scan_file_for_untranslated_strings(content: &str) -> Vec<(usize, String, Stri
                     || collapsed.ends_with("alias=")
                     || collapsed.ends_with("short=")
                     || collapsed.ends_with("long=")
-                    || collapsed.ends_with("constAFTER_HELP:&str=");
+                    || collapsed.ends_with("constAFTER_HELP:&str=")
+                    || is_static_assertion_message(&collapsed);
                 if !is_byte_string
                     && !is_localized
                     && is_potential_untranslated_literal(&current_literal)
@@ -777,6 +778,21 @@ fn scan_file_for_untranslated_strings(content: &str) -> Vec<(usize, String, Stri
         }
     }
     violations
+}
+/// Whether the literal that follows `collapsed` is the message of a `const _: () = assert!(…)`.
+///
+/// A static assertion's message is a compiler diagnostic, not output: it is emitted by rustc at build time, into a build log, and no operator ever sees it through the CLI.
+/// Translating it would mean shipping a locale string that cannot be reached, and the alternative the lint leaves open — dropping the message — costs the next person the explanation of what the assertion is protecting.
+///
+/// Scoped to the statement the literal is in rather than searched for anywhere in the file: `collapsed` is every non-whitespace character before the literal, so an unscoped `contains` would exempt every literal after the first static assertion in the file.
+/// Statements end at `;` or a brace, none of which appear inside the assertion's condition expression, and the assertion's own `);` terminator keeps one static assertion from reaching the next.
+///
+/// `contains` rather than `starts_with` within that window because `collapsed` is built from the raw source: the doc comment that explains what the assertion protects sits between the previous `;` and the `const`, and is part of the window.
+fn is_static_assertion_message(collapsed: &str) -> bool {
+    let statement = collapsed
+        .rfind([';', '{', '}'])
+        .map_or(collapsed, |end| &collapsed[end + 1..]);
+    statement.contains("const_:()=assert!(") || statement.contains("const_:()=debug_assert!(")
 }
 
 fn get_line_at_index(content: &str, index: usize) -> String {
