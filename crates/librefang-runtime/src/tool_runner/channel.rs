@@ -73,7 +73,11 @@ async fn mirror_channel_send_to_session(
         }
     };
 
-    let session_id = SessionId::for_sender_scope(owner, channel, Some(recipient));
+    // `channel` is whatever the agent passed to `channel_send`, so it is external by definition and a reserved name has to be renamed before it reaches the derivation (#8243).
+    // Without this the mirror of a send to a channel called `cron` lands in the kernel's own cron session while every other path — dispatch, execution, the bridge's `/new` — resolves `ext-cron`, so the message is missing from the chat that should show it and present in one that should never carry channel traffic.
+    // Only the derivation is sanitized: `resolve_channel_owner` above looks the operator's channel up by the name they configured, which is the raw one.
+    let scope_channel = librefang_channels::types::resolve_scope_channel(channel, false);
+    let session_id = SessionId::for_sender_scope(owner, &scope_channel, Some(recipient));
 
     let from = match caller_agent_id {
         Some(id) => id,
