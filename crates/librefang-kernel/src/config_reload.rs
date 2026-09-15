@@ -1272,12 +1272,8 @@ pub fn classified_reload_fields() -> std::collections::BTreeMap<&'static str, &'
         ("cron_session_compaction_mode", "N"),
         ("cron_session_compaction_keep_recent", "N"),
         // -- sub-keys `build_reload_plan` classifies apart from their section --
-        // A section row above describes the section minus these keys; each one here is
-        // the carve-out, named exactly as the planner names it in its reason string so
-        // the doc, this table and the plan all describe the same granularity (#8342).
-        // `every_dotted_carve_out_letter_is_derived_from_the_plan` re-derives each letter
-        // from a real mutation, so a carve-out that changes class fails here rather than
-        // in an operator's reload.
+        // A section row above describes the section minus these keys; each one here is the carve-out, named exactly as the planner names it in its reason string so the doc, this table and the plan all describe the same granularity (#8342).
+        // `every_dotted_carve_out_letter_is_derived_from_the_plan` re-derives each letter from a real mutation, so a carve-out that changes class fails here rather than in an operator's reload.
         ("tts.enabled", "N"),
         ("tts.output_format", "N"),
         ("registry.auto_sync", "N"),
@@ -2596,10 +2592,7 @@ mod tests {
         // Only the names matter here; the class each one carries is what
         // `doc_reload_table_matches_classified_reload_fields` checks.
         //
-        // Dotted keys name a sub-field of a section (`tts.enabled`), not a
-        // `KernelConfig` field, so they take part in neither direction of the
-        // comparison against the struct — they are checked below against their
-        // parent instead.
+        // Dotted keys name a sub-field of a section (`tts.enabled`), not a `KernelConfig` field, so they take part in neither direction of the comparison against the struct — they are checked below against their parent instead.
         let all_covered: std::collections::BTreeSet<&str> =
             super::classified_reload_fields().into_keys().collect();
         let covered: std::collections::BTreeSet<&str> = all_covered
@@ -2635,11 +2628,8 @@ mod tests {
              KernelConfig fields (renamed/removed?): {stale:?}"
         );
 
-        // A dotted key is only meaningful as a carve-out from a section that is
-        // itself classified: `tts.enabled` says "everything in `tts` except this
-        // key", which is nonsense if `tts` has no row. A dotted key whose parent
-        // was renamed away would otherwise sit in both the table and the doc,
-        // agreeing with each other and describing nothing.
+        // A dotted key is only meaningful as a carve-out from a section that is itself classified: `tts.enabled` says "everything in `tts` except this key", which is nonsense if `tts` has no row.
+        // A dotted key whose parent was renamed away would otherwise sit in both the table and the doc, agreeing with each other and describing nothing.
         let orphaned: Vec<&str> = all_covered
             .iter()
             .copied()
@@ -2683,14 +2673,9 @@ mod tests {
             let Some(rest) = line.strip_prefix("| `") else {
                 continue;
             };
-            // Token runs until the closing backtick. Field names are
-            // `[a-z0-9_]+`, optionally dotted for a sub-key carve-out
-            // (`tts.enabled`); anything else (legend rows, prose) won't match.
+            // Token runs until the closing backtick. Field names are `[a-z0-9_]+`, optionally dotted for a sub-key carve-out (`tts.enabled`); anything else (legend rows, prose) won't match.
             //
-            // `.` is accepted since #8342. While it was not, a dotted row was
-            // skipped on the doc side and had no counterpart on the code side,
-            // so the two agreed by both saying nothing — which is how a row
-            // could promise `N` for a key that had become restart-required.
+            // `.` is accepted since #8342. While it was not, a dotted row was skipped on the doc side and had no counterpart on the code side, so the two agreed by both saying nothing — which is how a row could promise `N` for a key that had become restart-required.
             let Some(end) = rest.find('`') else { continue };
             let token = &rest[..end];
             if token.is_empty()
@@ -2849,9 +2834,8 @@ mod tests {
             let noop = plan.noop_changes.iter().any(|r| r.starts_with(&prefix));
             let hot = !plan.hot_actions.is_empty();
 
-            // A carve-out is only a carve-out if the section's own branch stays
-            // quiet. `tts.enabled` flipping must not also report `tts changed`,
-            // or the sub-key is restart-required in practice whatever its row says.
+            // A carve-out is only a carve-out if the section's own branch stays quiet.
+            // `tts.enabled` flipping must not also report `tts changed`, or the sub-key is restart-required in practice whatever its row says.
             let parent = name.split('.').next().unwrap_or_default();
             let parent_prefix = format!("{parent} changed");
             assert!(

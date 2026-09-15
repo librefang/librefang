@@ -77,11 +77,8 @@ Ignore/noop (effective on next message/request via ArcSwap swap). A field
 may carry more than one class (e.g. **R/H**) when its sub-fields are
 classified differently — the row note spells out which is which.
 
-A sub-field the planner classifies on its own also gets its own
-`section.sub_key` row (`tts.enabled`, `registry.auto_sync`); the section's
-row then describes the section minus those keys. Dotted rows take part in
-the drift guard exactly as top-level rows do, so a carve-out that changes
-class fails the build here as well as in the code.
+A sub-field the planner classifies on its own also gets its own `section.sub_key` row (`tts.enabled`, `registry.auto_sync`); the section's row then describes the section minus those keys.
+Dotted rows take part in the drift guard exactly as top-level rows do, so a carve-out that changes class fails the build here as well as in the code.
 
 ### Server / network / bind
 
