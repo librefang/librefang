@@ -565,25 +565,17 @@ impl LibreFangKernel {
 
         // `[queue] task_ttl_secs` — expire tasks nobody claimed.
         //
-        // The knob was declared, documented as "Unprocessed tasks expire after this many seconds"
-        // and read by nothing (#8219): `task_prune_finished` only deletes terminal rows, so a
-        // pending task nobody claimed stayed pending for the life of the install.
+        // The knob was declared, documented as "Unprocessed tasks expire after this many seconds" and read by nothing (#8219): `task_prune_finished` only deletes terminal rows, so a pending task nobody claimed stayed pending for the life of the install.
         //
-        // Its own task rather than a fourth step of the daily retention sweep above, because the
-        // shipped default is 3600s and a TTL swept once a day is a TTL of up to 24 hours. The
-        // cadence is a quarter of the TTL so an expiry is at most 25% late, floored at 60s so a
-        // small TTL cannot turn the sweep into a busy loop against SQLite.
+        // Its own task rather than a fourth step of the daily retention sweep above, because the shipped default is 3600s and a TTL swept once a day is a TTL of up to 24 hours.
+        // The cadence is a quarter of the TTL so an expiry is at most 25% late, floored at 60s so a small TTL cannot turn the sweep into a busy loop against SQLite.
         //
-        // The task is spawned unconditionally and re-reads the TTL — and the cadence it implies —
-        // on every iteration, which is what makes the field honestly hot-reloadable. Spawning only
-        // when the boot-time value is non-zero would have made `0 -> 3600` the one edit in this
-        // section that silently needs a restart, and `docs/operations/config-reload.md` would have
-        // had to carry that asterisk.
+        // The task is spawned unconditionally and re-reads the TTL — and the cadence it implies — on every iteration, which is what makes the field honestly hot-reloadable.
+        // Spawning only when the boot-time value is non-zero would have made `0 -> 3600` the one edit in this section that silently needs a restart, and `docs/operations/config-reload.md` would have had to carry that asterisk.
         {
             let kernel = Arc::clone(self);
             spawn_logged("task_queue_ttl_sweep", async move {
-                // How often to look again while the TTL is disabled — the delay before a sweep
-                // turned on through `POST /api/config/reload` starts running.
+                // How often to look again while the TTL is disabled — the delay before a sweep turned on through `POST /api/config/reload` starts running.
                 const IDLE_POLL_SECS: u64 = 300;
                 loop {
                     let period = match kernel.config_ref().queue.task_ttl_secs {

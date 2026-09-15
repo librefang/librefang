@@ -46,8 +46,8 @@ async fn boot_router(customize: impl FnOnce(&mut KernelConfig)) -> RouterHarness
         },
         ..KernelConfig::default()
     };
-    // The shipped default is 3600s, and the sweep it drives is spawned at boot. Off unless a test
-    // asks for it, so an expiry cannot race a test that is asserting about depth.
+    // The shipped default is 3600s, and the sweep it drives is spawned at boot.
+    // Off unless a test asks for it, so an expiry cannot race a test that is asserting about depth.
     config.queue.task_ttl_secs = 0;
     customize(&mut config);
 
@@ -283,8 +283,7 @@ async fn an_expired_task_leaves_the_pending_count_and_is_visible_as_cancelled() 
         "posted task should be pending: {before}"
     );
 
-    // `PATCH /api/tasks/{id}` with `cancelled` is the same terminal transition the TTL sweep
-    // performs, so this asserts the shape the sweep produces without reaching into the substrate.
+    // `PATCH /api/tasks/{id}` with `cancelled` is the same terminal transition the TTL sweep performs, so this asserts the shape the sweep produces without reaching into the substrate.
     let req = Request::builder()
         .method(Method::PATCH)
         .uri(format!("/api/tasks/{task_id}"))

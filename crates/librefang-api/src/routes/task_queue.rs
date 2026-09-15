@@ -261,9 +261,8 @@ pub async fn task_queue_list_root(
 
 /// Parse a `?limit=` / `?offset=` value, ignoring one that is not a non-negative integer.
 ///
-/// An unparseable value means "no window" rather than an error, which is what the previous
-/// `truncate_task_page` did with `parse::<usize>().ok()` — the endpoint has always treated a
-/// malformed page param as absent, and a 400 here would break clients that rely on that.
+/// An unparseable value means "no window" rather than an error, which is what the previous `truncate_task_page` did with `parse::<usize>().ok()`.
+/// The endpoint has always treated a malformed page param as absent, and a 400 here would break clients that rely on that.
 fn parse_page_param(value: Option<&String>) -> Option<u32> {
     value.and_then(|value| value.parse::<u32>().ok())
 }
@@ -387,9 +386,8 @@ mod tests {
     use axum::http::StatusCode;
     use librefang_types::agent::UserId;
 
-    /// A malformed `?limit=` / `?offset=` has always meant "no window", because the previous
-    /// `truncate_task_page` parsed with `.ok()` and ignored a failure. Pushing the window into SQL
-    /// must not turn that into a 400 for a client that has been sending `?limit=all` for years.
+    /// A malformed `?limit=` / `?offset=` has always meant "no window", because the previous `truncate_task_page` parsed with `.ok()` and ignored a failure.
+    /// Pushing the window into SQL must not turn that into a 400 for a client that has been sending `?limit=all` for years.
     #[test]
     fn a_page_param_that_is_not_a_number_is_ignored_rather_than_rejected() {
         assert_eq!(parse_page_param(Some(&"10".to_string())), Some(10));

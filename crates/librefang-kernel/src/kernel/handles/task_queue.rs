@@ -20,17 +20,15 @@ impl kernel_handle::TaskQueue for LibreFangKernel {
     ) -> Result<String, kernel_handle::KernelOpError> {
         use kernel_handle::KernelOpError;
         // The one place `[queue] max_depth_per_agent` / `max_depth_global` reach the enqueue.
-        // Read per post rather than captured at boot so `POST /api/config/reload` moves the cap
-        // without a restart, which is how the section's other knobs already behave.
+        // Read per post rather than captured at boot so `POST /api/config/reload` moves the cap without a restart, which is how the section's other knobs already behave.
         let caps = librefang_memory::TaskQueueCaps::from(&self.config_ref().queue);
         let task_id = self
             .memory
             .substrate
             .task_post(title, description, assigned_to, created_by, caps)
             .await
-            // A depth cap being reached is the caller's answer, not a kernel fault: flattening it
-            // into `Internal` would reach the client as a scrubbed 500 and invite the retry the cap
-            // just refused. `QuotaExceeded` maps to 429 in `ApiErrorResponse`.
+            // A depth cap being reached is the caller's answer, not a kernel fault: flattening it into `Internal` would reach the client as a scrubbed 500 and invite the retry the cap just refused.
+            // `QuotaExceeded` maps to 429 in `ApiErrorResponse`.
             .map_err(|e| match e {
                 quota @ KernelOpError::QuotaExceeded(_) => quota,
                 other => KernelOpError::Internal(format!("Task post failed: {other}")),

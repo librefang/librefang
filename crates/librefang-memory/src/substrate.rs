@@ -1166,10 +1166,7 @@ impl MemorySubstrate {
                 }
             }
 
-            // An unassigned task belongs to the shared pool, not to an agent: `assigned_to` is
-            // stored as `''` for it, so counting those under the per-agent cap would put every
-            // unassigned task in one bucket keyed on the empty string and reject the pool at the
-            // limit meant for a single agent.
+            // An unassigned task belongs to the shared pool, not to an agent: `assigned_to` is stored as `''` for it, so counting those under the per-agent cap would put every unassigned task in one bucket keyed on the empty string and reject the pool at the limit meant for a single agent.
             if caps.max_depth_per_agent > 0 && !assigned_to.is_empty() {
                 let depth: i64 = tx
                     .query_row(
@@ -1449,8 +1446,7 @@ impl MemorySubstrate {
                 )
                 .map_err(LibreFangError::memory)?;
 
-            // `LIMIT -1` is SQLite's "no limit", which is what lets an offset-only
-            // request stay a single statement shape.
+            // `LIMIT -1` is SQLite's "no limit", which is what lets an offset-only request stay a single statement shape.
             let window = match (limit, offset) {
                 (None, None) => String::new(),
                 (limit, offset) => format!(
@@ -3317,10 +3313,8 @@ mod tests {
     // -----------------------------------------------------------------
     // `[queue]` backpressure (#8219)
     //
-    // The three knobs were declared, documented as enforced and echoed by the
-    // config API for their whole life with no enforcement site. These tests are
-    // written against the SQL rather than through the kernel because the caps
-    // have to hold under concurrency, which only the statement shape decides.
+    // The three knobs were declared, documented as enforced and echoed by the config API for their whole life with no enforcement site.
+    // These tests are written against the SQL rather than through the kernel because the caps have to hold under concurrency, which only the statement shape decides.
     // -----------------------------------------------------------------
 
     /// `max_depth_global` refuses the post that would exceed it, and refuses it as a quota rather than an internal fault.
