@@ -30,8 +30,7 @@ vi.mock("motion/react", () => ({
   ),
 }));
 
-/// A `ConfirmDialog` stacked on a `Modal`, the arrangement 19 dashboard files
-/// build and the one #8336 is about.
+/// A `ConfirmDialog` stacked on a `Modal`, the arrangement 19 dashboard files build and the one #8336 is about.
 function ModalWithNestedConfirm({ onConfirm }: { onConfirm?: () => void }) {
   const [modalOpen, setModalOpen] = useState(true);
   const [confirmOpen, setConfirmOpen] = useState(true);
@@ -64,10 +63,8 @@ describe("Escape across stacked dismissable layers (#8336)", () => {
 
     // The dialog is gone...
     expect(screen.queryByText("Restore this version?")).toBeNull();
-    // ...and the modal it was opened from is not. Before the shared stack,
-    // `Modal`'s handler ran first, called `stopImmediatePropagation`, and closed
-    // the layer *underneath* — taking the dialog with it and dropping the user
-    // out of the context they were working in.
+    // ...and the modal it was opened from is not.
+    // Before the shared stack, `Modal`'s handler ran first, called `stopImmediatePropagation`, and closed the layer *underneath* — taking the dialog with it and dropping the user out of the context they were working in.
     expect(screen.queryByTestId("modal-open-marker")).not.toBeNull();
   });
 
@@ -107,9 +104,8 @@ describe("Escape across stacked dismissable layers (#8336)", () => {
     render(<ConfirmUnderModal />);
     await user.keyboard("{Enter}");
 
-    // Enter belongs to whatever is on top, the same as Escape. Reaching through
-    // to confirm a dialog the user cannot even see is the same defect one key
-    // over — and on a non-destructive dialog it would have fired the mutation.
+    // Enter belongs to whatever is on top, the same as Escape.
+    // Reaching through to confirm a dialog the user cannot even see is the same defect one key over — and on a non-destructive dialog it would have fired the mutation.
     expect(onConfirm).not.toHaveBeenCalled();
   });
 

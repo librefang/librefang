@@ -8,9 +8,8 @@ import { fadeInScale, APPLE_EASE } from "../../lib/motion";
 
 /// The dialog's stacking context, and its rank in `Modal`'s shared Escape stack.
 ///
-/// Must equal the `z-[150]` literal on the backdrop below. That one is spelled
-/// out rather than interpolated because Tailwind resolves arbitrary values by
-/// scanning source text, so a computed class name yields no rule at all.
+/// Must equal the `z-[150]` literal on the backdrop below.
+/// That one is spelled out rather than interpolated because Tailwind resolves arbitrary values by scanning source text, so a computed class name yields no rule at all.
 const CONFIRM_DIALOG_Z_INDEX = 150;
 
 interface ConfirmDialogProps {
@@ -98,18 +97,13 @@ export const ConfirmDialog = React.memo(function ConfirmDialog({
     };
   }, [isOpen]);
 
-  // Escape goes through `Modal`'s shared stack rather than through a listener
-  // of this component's own.
+  // Escape goes through `Modal`'s shared stack rather than through a listener of this component's own.
   //
-  // Both used to be `window` `keydown` handlers, and `handleModalEscape` calls
-  // `stopImmediatePropagation`, so the one registered first won the key
-  // outright. A dialog opened over a modal therefore closed the modal — the
-  // layer underneath — and unmounted the dialog with it, dropping the user out
-  // of the context they were working in (#8336). Registering here means the
-  // topmost layer wins by z-index, not by mount order.
+  // Both used to be `window` `keydown` handlers, and `handleModalEscape` calls `stopImmediatePropagation`, so the one registered first won the key outright.
+  // A dialog opened over a modal therefore closed the modal — the layer underneath — and unmounted the dialog with it, dropping the user out of the context they were working in (#8336).
+  // Registering here means the topmost layer wins by z-index, not by mount order.
   //
-  // `z-[150]` on the backdrop below is the number this must agree with;
-  // `Modal`'s default is 50.
+  // `z-[150]` on the backdrop below is the number this must agree with; `Modal`'s default is 50.
   useEffect(() => {
     if (!isOpen) return;
     const token = Symbol("confirm-dialog");
@@ -138,13 +132,9 @@ export const ConfirmDialog = React.memo(function ConfirmDialog({
       return false;
     };
     const handleKey = (e: KeyboardEvent) => {
-      // Enter confirms — safer on non-destructive dialogs; for destructive
-      // we still require a click so users can't accidentally nuke data.
+      // Enter confirms — safer on non-destructive dialogs; for destructive we still require a click so users can't accidentally nuke data.
       //
-      // Gated on being the topmost layer for the same reason Escape is: a
-      // dialog with something stacked above it is not the thing the user is
-      // typing into, and confirming it from underneath is the same reach-through
-      // bug one key over.
+      // Gated on being the topmost layer for the same reason Escape is: a dialog with something stacked above it is not the thing the user is typing into, and confirming it from underneath is the same reach-through bug one key over.
       if (e.key === "Enter" && tone !== "destructive" && !isEditableTarget(e.target)) {
         const token = escapeTokenRef.current;
         if (!token || !isTopEscapeLayer(token)) return;
@@ -165,10 +155,8 @@ export const ConfirmDialog = React.memo(function ConfirmDialog({
     <AnimatePresence>
       {isOpen && (
         <motion.div
-          // Keep the literal in step with `CONFIRM_DIALOG_Z_INDEX` above. It cannot be
-          // interpolated: Tailwind's scanner reads class strings statically, so a template
-          // literal would produce no `z-index` rule at all and the dialog would render under
-          // the modal it is supposed to sit on.
+          // Keep the literal in step with `CONFIRM_DIALOG_Z_INDEX` above.
+          // It cannot be interpolated: Tailwind's scanner reads class strings statically, so a template literal would produce no `z-index` rule at all and the dialog would render under the modal it is supposed to sit on.
           className="fixed inset-0 z-[150] flex items-end sm:items-center justify-center bg-black/60 backdrop-blur-sm p-0 sm:p-4"
           onClick={requestClose}
           initial={{ opacity: 0 }}
