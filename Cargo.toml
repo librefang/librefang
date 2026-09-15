@@ -199,7 +199,7 @@ tower = "0.5"
 tower-http = { version = "0.7", features = ["cors", "trace", "compression-gzip", "compression-br", "limit"] }
 
 # Home directory resolution
-dirs = "6"
+dirs = "7"
 
 # OS keyring access — libsecret on Linux, Keychain on macOS, Credential Manager
 # on Windows. Falls back to the file-based AES-256-GCM keyring in vault.rs if

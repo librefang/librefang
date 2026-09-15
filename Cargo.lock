@@ -2113,6 +2113,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "dirs"
+version = "7.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8d57d423b3c82e89b9a24ca3091fee61f456a26edbd28d26c65906f4bc1dcd8f"
+dependencies = [
+ "dirs-sys 0.5.0",
+]
+
+[[package]]
 name = "dirs-sys"
 version = "0.3.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4441,7 +4450,7 @@ dependencies = [
  "chrono",
  "chrono-tz",
  "dashmap",
- "dirs 6.0.0",
+ "dirs 7.0.0",
  "flate2",
  "futures",
  "governor",
@@ -4564,7 +4573,7 @@ dependencies = [
  "clap",
  "clap_complete",
  "colored",
- "dirs 6.0.0",
+ "dirs 7.0.0",
  "fluent",
  "libc",
  "librefang-acp",
@@ -4644,7 +4653,7 @@ dependencies = [
  "base64 0.23.1",
  "chrono",
  "dashmap",
- "dirs 6.0.0",
+ "dirs 7.0.0",
  "hmac 0.12.1",
  "keyring",
  "librefang-runtime",
@@ -4710,7 +4719,7 @@ name = "librefang-import"
 version = "2026.9.14"
 dependencies = [
  "chrono",
- "dirs 6.0.0",
+ "dirs 7.0.0",
  "json5",
  "librefang-types",
  "serde",
@@ -4735,7 +4744,7 @@ dependencies = [
  "chrono-tz",
  "cron",
  "dashmap",
- "dirs 6.0.0",
+ "dirs 7.0.0",
  "futures",
  "hex",
  "libc",
@@ -4814,7 +4823,7 @@ dependencies = [
 name = "librefang-kernel-router"
 version = "2026.9.14"
 dependencies = [
- "dirs 6.0.0",
+ "dirs 7.0.0",
  "librefang-hands",
  "librefang-runtime",
  "librefang-types",
@@ -4848,7 +4857,7 @@ dependencies = [
  "base64 0.23.1",
  "chrono",
  "dashmap",
- "dirs 6.0.0",
+ "dirs 7.0.0",
  "futures",
  "hex",
  "jsonwebtoken",
@@ -4946,7 +4955,7 @@ dependencies = [
  "bytes",
  "chrono",
  "dashmap",
- "dirs 6.0.0",
+ "dirs 7.0.0",
  "ed25519-dalek 2.2.0",
  "encoding_rs",
  "flate2",
@@ -5164,7 +5173,7 @@ version = "2026.9.14"
 dependencies = [
  "async-trait",
  "chrono",
- "dirs 6.0.0",
+ "dirs 7.0.0",
  "ed25519-dalek 2.2.0",
  "fluent",
  "hex",
