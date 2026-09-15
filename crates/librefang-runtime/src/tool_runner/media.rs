@@ -1002,6 +1002,40 @@ pub(super) async fn tool_music_generate(
 // TTS / STT tools
 // ---------------------------------------------------------------------------
 
+/// Resolve `[tts] provider` to a driver, degrading to capability detection when the pinned provider cannot serve the request.
+///
+/// `MediaDriverCache::get_or_create` builds a driver for any known provider id whether or not it has credentials, so a pin alone is not evidence the provider can synthesise anything.
+/// Before #8296 the pin was read off the `TtsEngine` handle and therefore never reached an `enabled = false` deployment at all; making it reach one without this screen would have converted a working auto-detection into a hard failure for every operator who had named a provider they had no key for.
+///
+/// The shape is the one `detect_for_capability` already uses for an unusable `[capabilities]` nomination: warn once at the point of the miss, then fall back to the registry preference order.
+fn pinned_tts_driver_or_detect(
+    cache: &crate::media::MediaDriverCache,
+    provider: &str,
+) -> Result<
+    std::sync::Arc<dyn librefang_runtime_media::MediaDriver>,
+    librefang_runtime_media::MediaError,
+> {
+    use librefang_types::media::MediaCapability;
+    match cache.get_or_create(provider, None) {
+        Ok(driver)
+            if driver.is_configured()
+                && driver
+                    .capabilities()
+                    .contains(&MediaCapability::TextToSpeech) =>
+        {
+            Ok(driver)
+        }
+        _ => {
+            tracing::warn!(
+                provider = %provider,
+                "[tts] provider names a provider that is not configured for text-to-speech; \
+                 falling back to capability detection"
+            );
+            cache.detect_for_capability(MediaCapability::TextToSpeech)
+        }
+    }
+}
+
 pub(super) async fn tool_text_to_speech(
     input: &serde_json::Value,
     media_drivers: Option<&crate::media::MediaDriverCache>,
@@ -1029,89 +1063,82 @@ pub(super) async fn tool_text_to_speech(
     let output_format =
         crate::tts::resolve_tts_output_format(input["output_format"].as_str(), tts_config);
 
-    // Only `output_format` is resolved from the live `[tts]`. The three reads
-    // below stay on `tts_engine` deliberately, even though the handle is
-    // withheld when `[tts] enabled = false`:
+    // Every `[tts]` read on this path resolves through `live_tts`, not through the engine handle.
     //
-    // * `provider` pins the driver through `get_or_create`, which — unlike the
-    //   `detect_for_capability` fallback — does not check `is_configured()`. An
-    //   `enabled = false` deployment that names a provider it has no key for
-    //   currently auto-detects a working one; routing it through the live
-    //   config would break synthesis outright.
-    // * the `[tts.google]` overrides are unconditional, so serving them from
-    //   the live config would start replacing an explicit per-call voice /
-    //   language / rate on deployments that never configured the block.
-    // * `elevenlabs.output_format` is the #6116 provider query parameter. It is
-    //   already guarded by `format.is_none()`, so it is the least harmful of
-    //   the three, but it moves with them rather than being split off alone.
+    // The agent loop lends `tts_engine` only when `[tts] enabled = true`, while this tool is registered unconditionally and reaches providers through `MediaDriverCache` regardless — so reading the section off the handle meant that on the shipped default configuration the tool ran while most of its own configuration was silently inert (#8296).
+    // An operator who set `[tts.google] language_code` and left `enabled = false` — reading it as "enable the TTS feature", which was already true for them — got `en-US` with nothing in the log.
     //
-    // Both are real bugs — `[tts]` genuinely should apply with `enabled =
-    // false` — but each is a behaviour change with its own blast radius, and
-    // neither is what #8272 is about. Making them live would also move them out
-    // of the restart-required half of the `[tts]` reload classification, which
-    // is a second decision again. Left for a follow-up rather than smuggled in
-    // behind an output-format fix.
+    // `tts_config` is the turn's live section; the engine's boot-time clone is the fallback for call paths that have no `LoopOptions` to carry one, which is still better than reading nothing.
+    let live_tts = tts_config.or_else(|| tts_engine.map(|e| e.tts_config()));
 
     if let Some(cache) = media_drivers {
-        let resolved_provider =
-            provider.or_else(|| tts_engine.and_then(|e| e.tts_config().provider.as_deref()));
+        let configured_provider = live_tts.and_then(|c| c.provider.as_deref());
 
-        let driver_result = if let Some(p) = resolved_provider {
-            cache.get_or_create(p, None)
-        } else {
-            cache.detect_for_capability(librefang_types::media::MediaCapability::TextToSpeech)
-        };
-
-        // Provider-specific config overrides: inject the operator's configured
-        // defaults when the tool call omitted an explicit value, so the driver
-        // gets the chosen settings rather than its own hard-coded fallback.
-        let (
-            effective_voice,
-            effective_language,
-            effective_speed,
-            effective_pitch,
-            effective_format,
-        ) = if resolved_provider == Some("google_tts") {
-            // Google TTS: override LLM-provided voice (e.g. "alloy") with the
-            // configured one — Google doesn't recognise OpenAI voice names.
-            if let Some(engine) = tts_engine {
-                let cfg = &engine.tts_config().google;
-                (
-                    Some(cfg.voice.clone()),
-                    Some(cfg.language_code.clone()),
-                    Some(cfg.speaking_rate),
-                    Some(cfg.pitch),
-                    None, // Google format handled by its own driver
-                )
-            } else {
-                (None, None, None, None, None)
+        let driver_result = match (provider, configured_provider) {
+            // A provider named by the tool call keeps its pre-existing contract: straight to `get_or_create`, with no `is_configured` screen.
+            // Changing that is a different decision about a different input.
+            (Some(p), _) => cache.get_or_create(p, None),
+            // `[tts] provider` is operator configuration, and `get_or_create` — unlike `detect_for_capability` — does not check `is_configured()`.
+            // Honouring the pin without a fallback would turn "names a provider it has no key for, so a working one is auto-detected" into "fails outright", which is a regression handed to exactly the deployments this fix is for.
+            // Degrading mirrors what `[capabilities]` already does with an unusable nomination.
+            (None, Some(p)) => pinned_tts_driver_or_detect(cache, p),
+            (None, None) => {
+                cache.detect_for_capability(librefang_types::media::MediaCapability::TextToSpeech)
             }
-        } else if resolved_provider == Some("elevenlabs") {
-            // ElevenLabs: when the tool call omits `format`, inject the config's
-            // `output_format` (default `opus_48000_32`) so the media-driver path
-            // also produces Ogg/Opus for WhatsApp PTT (#6116).
-            let el_format = if format.is_none() {
-                tts_engine.map(|e| e.tts_config().elevenlabs.output_format.clone())
-            } else {
-                None
-            };
-            (None, None, None, None, el_format)
-        } else {
-            (None, None, None, None, None)
-        };
-
-        let request = librefang_types::media::MediaTtsRequest {
-            text: text.to_string(),
-            provider: resolved_provider.map(String::from),
-            model: input["model"].as_str().map(String::from),
-            voice: effective_voice.or_else(|| voice.map(String::from)),
-            format: format.map(String::from).or(effective_format),
-            speed: effective_speed.or_else(|| input["speed"].as_f64().map(|v| v as f32)),
-            language: effective_language.or_else(|| input["language"].as_str().map(String::from)),
-            pitch: effective_pitch.or_else(|| input["pitch"].as_f64().map(|v| v as f32)),
         };
 
         if let Ok(driver) = driver_result {
+            // The provider-specific overrides key off the driver that will actually serve the request, not off the name that was asked for.
+            // Those differ whenever the pin above degraded, and they already differed on the detection path, where an auto-detected Google driver never received the `[tts.google]` block at all.
+            let target = driver.provider_name();
+
+            // Provider-specific config overrides: inject the operator's configured defaults when the tool call omitted an explicit value, so the driver gets the chosen settings rather than its own hard-coded fallback.
+            let (
+                effective_voice,
+                effective_language,
+                effective_speed,
+                effective_pitch,
+                effective_format,
+            ) = if target == "google_tts" {
+                // Google TTS: override an LLM-provided voice (e.g. "alloy") with the configured one — Google doesn't recognise OpenAI voice names.
+                //
+                // Deliberately still unconditional, rather than gaining the `is_none()` guard the ElevenLabs arm beside it has.
+                // Making it conditional would take that safety net away from the `enabled = true` deployments that have it today, which is a larger regression than the one it would prevent: the model is the only caller that supplies `voice`, and for Google an OpenAI-style name is not a preference to respect but a request that fails.
+                // Whether a genuine per-call Google voice should win is a separate decision from making the two paths agree.
+                match live_tts {
+                    Some(cfg) => (
+                        Some(cfg.google.voice.clone()),
+                        Some(cfg.google.language_code.clone()),
+                        Some(cfg.google.speaking_rate),
+                        Some(cfg.google.pitch),
+                        None, // Google format handled by its own driver
+                    ),
+                    None => (None, None, None, None, None),
+                }
+            } else if target == "elevenlabs" {
+                // ElevenLabs: when the tool call omits `format`, inject the config's `output_format` (default `opus_48000_32`) so the media-driver path also asks the provider for Ogg/Opus rather than transcoding MP3 afterwards (#6116).
+                let el_format = if format.is_none() {
+                    live_tts.map(|c| c.elevenlabs.output_format.clone())
+                } else {
+                    None
+                };
+                (None, None, None, None, el_format)
+            } else {
+                (None, None, None, None, None)
+            };
+
+            let request = librefang_types::media::MediaTtsRequest {
+                text: text.to_string(),
+                provider: Some(target.to_string()),
+                model: input["model"].as_str().map(String::from),
+                voice: effective_voice.or_else(|| voice.map(String::from)),
+                format: format.map(String::from).or(effective_format),
+                speed: effective_speed.or_else(|| input["speed"].as_f64().map(|v| v as f32)),
+                language: effective_language
+                    .or_else(|| input["language"].as_str().map(String::from)),
+                pitch: effective_pitch.or_else(|| input["pitch"].as_f64().map(|v| v as f32)),
+            };
+
             let result = driver
                 .synthesize_speech(&request)
                 .await
@@ -1838,5 +1865,291 @@ mod text_to_speech_output_format_tests {
             warning.is_empty(),
             "no conversion was asked for: {warning:?}"
         );
+    }
+}
+
+/// The `tts_engine: None` shape: `text_to_speech` running entirely on the media-driver path, which is what the shipped `[tts] enabled = false` default produces.
+///
+/// This shape had no coverage at all before #8296, which is how three `[tts]` reads sat behind a handle that is never lent in the default configuration.
+/// The driver is a stub seeded into `MediaDriverCache`, so every assertion here is about what the tool *asks the provider for* — the only observable that distinguishes "the config was read" from "the config was ignored".
+#[cfg(test)]
+mod tts_media_driver_path_tests {
+    use super::*;
+    use librefang_runtime_media::{MediaDriver, MediaDriverCache, MediaError};
+    use librefang_types::config::{TtsConfig, TtsGoogleConfig};
+    use librefang_types::media::{MediaCapability, MediaTtsRequest, MediaTtsResult};
+    use std::sync::{Arc, Mutex};
+
+    /// Records the request it was asked to synthesise and returns a fixed byte string.
+    struct RecordingTtsDriver {
+        name: &'static str,
+        configured: bool,
+        last: Arc<Mutex<Option<MediaTtsRequest>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl MediaDriver for RecordingTtsDriver {
+        fn capabilities(&self) -> Vec<MediaCapability> {
+            vec![MediaCapability::TextToSpeech]
+        }
+        fn is_configured(&self) -> bool {
+            self.configured
+        }
+        fn provider_name(&self) -> &str {
+            self.name
+        }
+        async fn synthesize_speech(
+            &self,
+            request: &MediaTtsRequest,
+        ) -> Result<MediaTtsResult, MediaError> {
+            *self.last.lock().expect("recorder") = Some(request.clone());
+            Ok(MediaTtsResult {
+                audio_data: b"ID3\x04\x00fake".to_vec(),
+                format: "mp3".to_string(),
+                provider: self.name.to_string(),
+                model: "stub".to_string(),
+                duration_ms: Some(1),
+                sample_rate: None,
+            })
+        }
+    }
+
+    /// A cache carrying one stub for `name`, plus the recorder that observes what it was asked for.
+    fn cache_with_driver(
+        name: &'static str,
+        configured: bool,
+    ) -> (MediaDriverCache, Arc<Mutex<Option<MediaTtsRequest>>>) {
+        let last = Arc::new(Mutex::new(None));
+        let cache = MediaDriverCache::new();
+        cache.seed_driver_for_tests(
+            name,
+            Arc::new(RecordingTtsDriver {
+                name,
+                configured,
+                last: Arc::clone(&last),
+            }),
+        );
+        (cache, last)
+    }
+
+    async fn synthesise(
+        cache: &MediaDriverCache,
+        input: serde_json::Value,
+        cfg: Option<&TtsConfig>,
+    ) -> ToolResult {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        tool_text_to_speech(&input, Some(cache), None, cfg, Some(workspace.path())).await
+    }
+
+    /// `[tts] provider` pins the driver even though `enabled = false` withholds the `TtsEngine` handle.
+    ///
+    /// Before #8296 the pin was read off that handle, so a deployment naming a provider was auto-detected onto a different one — silently billing and synthesising somewhere it had not chosen.
+    #[tokio::test]
+    async fn configured_provider_pins_the_driver_without_an_engine() {
+        let (cache, last) = cache_with_driver("elevenlabs", true);
+        let cfg = TtsConfig {
+            enabled: false,
+            provider: Some("elevenlabs".to_string()),
+            ..Default::default()
+        };
+
+        synthesise(&cache, serde_json::json!({ "text": "hello" }), Some(&cfg))
+            .await
+            .expect("the seeded driver must serve the request");
+
+        let request = last.lock().expect("recorder").clone().expect("a request");
+        assert_eq!(request.provider.as_deref(), Some("elevenlabs"));
+    }
+
+    /// A pinned provider that is not configured degrades to capability detection rather than failing the call.
+    ///
+    /// `get_or_create` does not screen on `is_configured()`, so honouring the pin without this would have turned a working auto-detection into a hard failure for exactly the deployments the fix is for.
+    #[tokio::test]
+    async fn an_unconfigured_pin_falls_back_to_detection_instead_of_failing() {
+        let last = Arc::new(Mutex::new(None));
+        let cache = MediaDriverCache::new();
+        // The pin: present in the cache, but with no credentials.
+        cache.seed_driver_for_tests(
+            "elevenlabs",
+            Arc::new(RecordingTtsDriver {
+                name: "elevenlabs",
+                configured: false,
+                last: Arc::new(Mutex::new(None)),
+            }),
+        );
+        // What detection should find instead — a configured builtin.
+        cache.seed_driver_for_tests(
+            "openai",
+            Arc::new(RecordingTtsDriver {
+                name: "openai",
+                configured: true,
+                last: Arc::clone(&last),
+            }),
+        );
+        let cfg = TtsConfig {
+            enabled: false,
+            provider: Some("elevenlabs".to_string()),
+            ..Default::default()
+        };
+
+        synthesise(&cache, serde_json::json!({ "text": "hello" }), Some(&cfg))
+            .await
+            .expect("detection must serve the request the pin could not");
+
+        let request = last.lock().expect("recorder").clone().expect("a request");
+        assert_eq!(
+            request.provider.as_deref(),
+            Some("openai"),
+            "the request must name the driver that actually served it, not the pin that failed"
+        );
+    }
+
+    /// A provider named by the tool call still wins over `[tts] provider`.
+    #[tokio::test]
+    async fn a_call_supplied_provider_still_beats_the_configured_one() {
+        let (cache, last) = cache_with_driver("openai", true);
+        let cfg = TtsConfig {
+            enabled: false,
+            provider: Some("elevenlabs".to_string()),
+            ..Default::default()
+        };
+
+        synthesise(
+            &cache,
+            serde_json::json!({ "text": "hello", "provider": "openai" }),
+            Some(&cfg),
+        )
+        .await
+        .expect("the call's provider must be honoured");
+
+        let request = last.lock().expect("recorder").clone().expect("a request");
+        assert_eq!(request.provider.as_deref(), Some("openai"));
+    }
+
+    /// `[tts.google]` reaches the Google driver without an engine.
+    ///
+    /// The `language_code` in this test is the whole point of the issue: an operator who set it and left `enabled = false` got `en-US` with nothing in the log.
+    #[tokio::test]
+    async fn google_overrides_reach_the_driver_without_an_engine() {
+        let (cache, last) = cache_with_driver("google_tts", true);
+        let cfg = TtsConfig {
+            enabled: false,
+            provider: Some("google_tts".to_string()),
+            google: TtsGoogleConfig {
+                voice: "pl-PL-Wavenet-A".to_string(),
+                language_code: "pl-PL".to_string(),
+                speaking_rate: 1.25,
+                pitch: -2.0,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        synthesise(
+            &cache,
+            serde_json::json!({ "text": "dzien dobry" }),
+            Some(&cfg),
+        )
+        .await
+        .expect("the seeded driver must serve the request");
+
+        let request = last.lock().expect("recorder").clone().expect("a request");
+        assert_eq!(request.voice.as_deref(), Some("pl-PL-Wavenet-A"));
+        assert_eq!(request.language.as_deref(), Some("pl-PL"));
+        assert_eq!(request.speed, Some(1.25));
+        assert_eq!(request.pitch, Some(-2.0));
+    }
+
+    /// The Google voice override stays unconditional: a model-supplied OpenAI voice name must not reach Google.
+    ///
+    /// This is deliberately *not* given the `is_none()` guard the ElevenLabs arm has. For Google an OpenAI-style name is not a preference to respect but a request that fails, and the guard would have removed that safety net from every deployment that has it today.
+    #[tokio::test]
+    async fn a_model_supplied_openai_voice_does_not_reach_google() {
+        let (cache, last) = cache_with_driver("google_tts", true);
+        let cfg = TtsConfig {
+            enabled: false,
+            provider: Some("google_tts".to_string()),
+            ..Default::default()
+        };
+
+        synthesise(
+            &cache,
+            serde_json::json!({ "text": "hello", "voice": "alloy" }),
+            Some(&cfg),
+        )
+        .await
+        .expect("the seeded driver must serve the request");
+
+        let request = last.lock().expect("recorder").clone().expect("a request");
+        assert_eq!(
+            request.voice.as_deref(),
+            Some(TtsGoogleConfig::default().voice.as_str()),
+            "`alloy` is an OpenAI voice name; Google must receive the configured one"
+        );
+    }
+
+    /// `[tts.elevenlabs] output_format` reaches the provider without an engine, so the container is asked for rather than transcoded afterwards (#6116).
+    #[tokio::test]
+    async fn elevenlabs_output_format_reaches_the_driver_without_an_engine() {
+        let (cache, last) = cache_with_driver("elevenlabs", true);
+        let mut cfg = TtsConfig {
+            enabled: false,
+            provider: Some("elevenlabs".to_string()),
+            ..Default::default()
+        };
+        cfg.elevenlabs.output_format = "opus_48000_32".to_string();
+
+        synthesise(&cache, serde_json::json!({ "text": "hello" }), Some(&cfg))
+            .await
+            .expect("the seeded driver must serve the request");
+
+        let request = last.lock().expect("recorder").clone().expect("a request");
+        assert_eq!(request.format.as_deref(), Some("opus_48000_32"));
+    }
+
+    /// An explicit `format` on the call still wins over `[tts.elevenlabs] output_format`.
+    #[tokio::test]
+    async fn a_call_supplied_format_beats_the_elevenlabs_default() {
+        let (cache, last) = cache_with_driver("elevenlabs", true);
+        let mut cfg = TtsConfig {
+            enabled: false,
+            provider: Some("elevenlabs".to_string()),
+            ..Default::default()
+        };
+        cfg.elevenlabs.output_format = "opus_48000_32".to_string();
+
+        synthesise(
+            &cache,
+            serde_json::json!({ "text": "hello", "format": "mp3_44100_128" }),
+            Some(&cfg),
+        )
+        .await
+        .expect("the seeded driver must serve the request");
+
+        let request = last.lock().expect("recorder").clone().expect("a request");
+        assert_eq!(request.format.as_deref(), Some("mp3_44100_128"));
+    }
+
+    /// A deployment that has never touched `[tts]` keeps its previous behaviour: nothing pinned, nothing injected.
+    ///
+    /// This is the half that makes the change safe to ship — the fix must reach operators who configured something, and be invisible to everyone else.
+    #[tokio::test]
+    async fn an_unconfigured_section_injects_nothing() {
+        let (cache, last) = cache_with_driver("openai", true);
+
+        synthesise(
+            &cache,
+            serde_json::json!({ "text": "hello" }),
+            Some(&TtsConfig::default()),
+        )
+        .await
+        .expect("detection must serve the request");
+
+        let request = last.lock().expect("recorder").clone().expect("a request");
+        assert_eq!(request.voice, None);
+        assert_eq!(request.language, None);
+        assert_eq!(request.speed, None);
+        assert_eq!(request.pitch, None);
+        assert_eq!(request.format, None);
     }
 }

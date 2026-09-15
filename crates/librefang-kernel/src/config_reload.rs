@@ -828,21 +828,18 @@ pub fn build_reload_plan_with_caps(
         );
         restart_if_changed(field_changed(&old.heartbeat, &new.heartbeat), "heartbeat");
         restart_if_changed(field_changed(&old.plugins, &new.plugins), "plugins");
-        // `tts` minus `enabled` / `output_format`: everything else in the section
-        // reaches the tool through `TtsEngine`, which `boot.rs` builds once from
-        // `config.tts.clone()` with no rebuild path — the same shape as
-        // `MediaEngine` and `BrowserManager` above, and classifying it NOOP made
-        // `POST /api/config/reload` answer "effective on next message" for a
-        // change that does nothing until the daemon restarts.
-        // The two exceptions are read per turn from the config snapshot:
-        // `enabled` at the call sites that decide whether to lend the engine,
-        // `output_format` through `LoopOptions.tts_config` (#8272). They stay in
-        // the NOOP block below — which is also what lets `should_store_config`
-        // accept the swap at all.
+        // `tts` minus the keys the runtime re-reads per turn: everything else in the section reaches the tool through `TtsEngine`, which `boot.rs` builds once from `config.tts.clone()` with no rebuild path — the same shape as `MediaEngine` and `BrowserManager` above, and classifying it NOOP made `POST /api/config/reload` answer "effective on next message" for a change that does nothing until the daemon restarts.
+        // The live keys are `enabled` (at the call sites that decide whether to lend the engine), `output_format` (through `LoopOptions.tts_config`, #8272), and — since #8296 — `provider`, the whole `[tts.google]` block and `[tts.elevenlabs] output_format`, all of which `tool_text_to_speech` now reads off the turn's live section rather than off the engine handle.
+        // They stay in the NOOP block below, which is also what lets `should_store_config` accept the swap at all.
+        //
+        // `[tts.elevenlabs]` is masked one field deep rather than wholesale: `voice_id`, `model_id`, `stability` and `similarity_boost` still only reach a provider through the engine, so a change to them is genuinely restart-required and masking the block would have promised otherwise.
         let tts_except_live_keys_changed = {
             let mut old_rest = old.tts.clone();
             old_rest.enabled = new.tts.enabled;
             old_rest.output_format = new.tts.output_format.clone();
+            old_rest.provider = new.tts.provider.clone();
+            old_rest.google = new.tts.google.clone();
+            old_rest.elevenlabs.output_format = new.tts.elevenlabs.output_format.clone();
             field_changed(&old_rest, &new.tts)
         };
         restart_if_changed(tts_except_live_keys_changed, "tts");
@@ -993,12 +990,21 @@ pub fn build_reload_plan_with_caps(
             field_changed(&old.notification, &new.notification),
             "notification",
         );
-        // Only the two keys the runtime re-reads per turn; the rest of `[tts]` is
-        // restart-required above because it is captured in `TtsEngine` at boot.
+        // Only the keys the runtime re-reads per turn; the rest of `[tts]` is restart-required above because it is captured in `TtsEngine` at boot.
         noop_if_changed(old.tts.enabled != new.tts.enabled, "tts.enabled");
         noop_if_changed(
             old.tts.output_format != new.tts.output_format,
             "tts.output_format",
+        );
+        // #8296 moved these three off the `TtsEngine` handle and onto the turn's live `[tts]`, which is what makes them reach a deployment running on the shipped `enabled = false` default at all — and, having done so, makes them reloadable.
+        noop_if_changed(old.tts.provider != new.tts.provider, "tts.provider");
+        noop_if_changed(
+            field_changed(&old.tts.google, &new.tts.google),
+            "tts.google",
+        );
+        noop_if_changed(
+            old.tts.elevenlabs.output_format != new.tts.elevenlabs.output_format,
+            "tts.elevenlabs.output_format",
         );
         // The hands marketplace install handler reads `hands.registry_allowed_hosts`
         // live from `config_snapshot()` on every request, so a swap is effective
@@ -1276,6 +1282,9 @@ pub fn classified_reload_fields() -> std::collections::BTreeMap<&'static str, &'
         // `every_dotted_carve_out_letter_is_derived_from_the_plan` re-derives each letter from a real mutation, so a carve-out that changes class fails here rather than in an operator's reload.
         ("tts.enabled", "N"),
         ("tts.output_format", "N"),
+        ("tts.provider", "N"),
+        ("tts.google", "N"),
+        ("tts.elevenlabs.output_format", "N"),
         ("registry.auto_sync", "N"),
     ]
     .into_iter()
@@ -1543,6 +1552,23 @@ mod tests {
                 Box::new(|c: &mut KernelConfig| c.tts.output_format = Some("ogg_opus".to_string()))
                     as Box<dyn Fn(&mut KernelConfig)>,
             ),
+            // #8296: read per call by `tool_text_to_speech` off the turn's live `[tts]` rather than off the `TtsEngine` handle the agent loop withholds when `enabled = false`.
+            (
+                "tts.provider",
+                Box::new(|c: &mut KernelConfig| c.tts.provider = Some("elevenlabs".to_string()))
+                    as Box<dyn Fn(&mut KernelConfig)>,
+            ),
+            (
+                "tts.google",
+                Box::new(|c: &mut KernelConfig| c.tts.google.language_code = "pl-PL".to_string())
+                    as Box<dyn Fn(&mut KernelConfig)>,
+            ),
+            (
+                "tts.elevenlabs.output_format",
+                Box::new(|c: &mut KernelConfig| {
+                    c.tts.elevenlabs.output_format = "mp3_44100_128".to_string()
+                }) as Box<dyn Fn(&mut KernelConfig)>,
+            ),
         ] {
             let a = default_cfg();
             let mut b = default_cfg();
@@ -1574,12 +1600,15 @@ mod tests {
     /// config swap does nothing for these, so the reload report must say so
     /// rather than claim "effective on next message" — the same honesty fix
     /// `browser` got when its hot action turned out to be a no-op.
+    ///
+    /// `provider` and `elevenlabs.output_format` left this list in #8296, which moved them onto the turn's live `[tts]` — the same move `output_format` made in #8272.
+    /// `elevenlabs.voice_id` is here in their place, because the section is masked one field deep: the rest of `[tts.elevenlabs]` still only reaches a provider through the engine, and masking the whole block would have promised a reload it cannot deliver.
     #[test]
     fn tts_fields_other_than_the_live_keys_still_require_restart() {
         for (label, mutate) in [
             (
-                "provider",
-                Box::new(|c: &mut KernelConfig| c.tts.provider = Some("elevenlabs".to_string()))
+                "max_text_length",
+                Box::new(|c: &mut KernelConfig| c.tts.max_text_length = 123)
                     as Box<dyn Fn(&mut KernelConfig)>,
             ),
             (
@@ -1588,9 +1617,9 @@ mod tests {
                     as Box<dyn Fn(&mut KernelConfig)>,
             ),
             (
-                "elevenlabs.output_format",
+                "elevenlabs.voice_id",
                 Box::new(|c: &mut KernelConfig| {
-                    c.tts.elevenlabs.output_format = "mp3_44100_128".to_string()
+                    c.tts.elevenlabs.voice_id = "not-the-default-voice".to_string()
                 }) as Box<dyn Fn(&mut KernelConfig)>,
             ),
             (
@@ -2786,6 +2815,20 @@ mod tests {
             (
                 "tts.output_format",
                 Box::new(|c: &mut KernelConfig| c.tts.output_format = Some("ogg_opus".to_string())),
+            ),
+            (
+                "tts.provider",
+                Box::new(|c: &mut KernelConfig| c.tts.provider = Some("elevenlabs".to_string())),
+            ),
+            (
+                "tts.google",
+                Box::new(|c: &mut KernelConfig| c.tts.google.language_code = "pl-PL".to_string()),
+            ),
+            (
+                "tts.elevenlabs.output_format",
+                Box::new(|c: &mut KernelConfig| {
+                    c.tts.elevenlabs.output_format = "mp3_44100_128".to_string()
+                }),
             ),
             (
                 "registry.auto_sync",

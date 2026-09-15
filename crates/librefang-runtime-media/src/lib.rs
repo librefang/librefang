@@ -341,7 +341,7 @@ impl MediaDriverCache {
         });
         let url_ref = resolved_url.as_deref();
 
-        let key = format!("{}|{}", provider, url_ref.unwrap_or("default"));
+        let key = Self::cache_key(provider, url_ref);
 
         if let Some(driver) = self.cache.get(&key) {
             return Ok(Arc::clone(driver.value()));
@@ -350,6 +350,24 @@ impl MediaDriverCache {
         let driver = create_media_driver(provider, url_ref)?;
         self.cache.insert(key, Arc::clone(&driver));
         Ok(driver)
+    }
+
+    /// The cache key a `(provider, base_url)` pair resolves to.
+    ///
+    /// Shared by [`get_or_create`](Self::get_or_create) and [`seed_driver_for_tests`](Self::seed_driver_for_tests) so a seeded driver is found by exactly the lookup production code performs, rather than by a second spelling of the same format string.
+    fn cache_key(provider: &str, base_url: Option<&str>) -> String {
+        format!("{}|{}", provider, base_url.unwrap_or("default"))
+    }
+
+    /// Install `driver` as the cached driver for `provider`, so a test can exercise a code path that resolves a media driver without reaching a real provider.
+    ///
+    /// Both entry points go through the cache — [`get_or_create`](Self::get_or_create) looks the key up directly, and [`detect_for_capability`](Self::detect_for_capability) reaches it by calling `get_or_create` for each id in `media_provider_ids` — so seeding one stub makes both reachable.
+    ///
+    /// This exists because the `tts_engine: None` shape, where `text_to_speech` runs entirely on the media-driver path, had no test coverage at all, and it is precisely the shape #8272 and #8296 both live in.
+    /// Marked `#[doc(hidden)]` rather than `#[cfg(test)]` because the callers are integration and unit tests in *other* crates, which a `cfg(test)` item is invisible to.
+    #[doc(hidden)]
+    pub fn seed_driver_for_tests(&self, provider: &str, driver: Arc<dyn MediaDriver>) {
+        self.cache.insert(Self::cache_key(provider, None), driver);
     }
 
     /// Install the operator-nominated provider per capability from a

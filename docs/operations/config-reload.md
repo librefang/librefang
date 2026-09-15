@@ -242,6 +242,9 @@ Dotted rows take part in the drift guard exactly as top-level rows do, so a carv
 | `tts` | R | Text-to-speech config — captured in `TtsEngine`, which `boot.rs` builds once from `config.tts.clone()` with no rebuild path, the same shape as `media` and `browser` above. Covers `provider`, `max_text_length`, `timeout_secs` and the `[tts.openai]` / `[tts.elevenlabs]` / `[tts.google]` / `[tts.custom]` blocks. |
 | `tts.enabled` | N | Re-read per turn by the agent loop, at the call sites that decide whether to lend the `TtsEngine`. |
 | `tts.output_format` | N | Re-read per turn by `tool_text_to_speech`, through `LoopOptions.tts_config`. Carved out of the restart-required half deliberately: `should_store_config` only accepts a plan carrying a hot action or a noop change, so classifying the whole section R would have discarded the swap and left the value resolving to its boot-time value (#8272). |
+| `tts.provider` | N | Read per call by `tool_text_to_speech` off the turn's live `[tts]`, which is also what makes it apply at all on a deployment running the shipped `enabled = false` default (#8296). A pinned provider that turns out not to be configured for text-to-speech degrades to capability detection rather than failing the call. |
+| `tts.google` | N | `voice` / `language_code` / `speaking_rate` / `pitch`, read per call on the media-driver path whenever the driver that will serve the request is Google. Same move as `tts.provider`: off the engine handle, onto the live section. |
+| `tts.elevenlabs.output_format` | N | The #6116 provider query parameter, read per call when the tool omits `format`. The rest of `[tts.elevenlabs]` — `voice_id`, `model_id`, `stability`, `similarity_boost` — still only reaches a provider through `TtsEngine` and stays part of the section's **R** half. |
 
 ### Notifications / inbox / observability
 
