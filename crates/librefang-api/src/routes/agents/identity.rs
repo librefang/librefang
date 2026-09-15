@@ -32,7 +32,8 @@ pub(crate) struct UpdateIdentityRequest {
         description = "Identity fields to update. PATCH semantics: an omitted or `null` field preserves the stored value, and a partial body never nulls the fields it does not mention. A field cannot be set back to `null`, because `null` already means \"not provided\"; sending an empty string stores an empty string, which is the closest thing to clearing one. Identical in behaviour to the six identity fields of `PATCH /api/agents/{id}/config`."
     ),
     responses(
-        (status = 200, description = "Update an agent's visual identity", body = crate::types::JsonObject)
+        (status = 200, description = "Update an agent's visual identity", body = crate::types::JsonObject),
+        (status = 423, description = "This agent is provisioned by the deployment; its manifest cannot be changed through the API", body = crate::types::JsonObject)
     )
 )]
 #[allow(private_interfaces)]

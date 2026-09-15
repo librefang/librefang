@@ -1247,7 +1247,19 @@ async fn dashboard_snapshot_compute(state: &Arc<AppState>) -> serde_json::Value 
             .iter()
             // `e` here is &&Arc<AgentEntry>; deref through the ref + Arc to
             // hand `enrich_agent_json` the `&AgentEntry` it expects.
-            .map(|e| super::agents::enrich_agent_json(e.as_ref(), &dm, catalog, None))
+            .map(|e| {
+                let provisioned = state.kernel.provisioned_resource(
+                    librefang_kernel::provisioning::ResourceKind::Agent,
+                    &e.name,
+                );
+                super::agents::enrich_agent_json(
+                    e.as_ref(),
+                    &dm,
+                    catalog,
+                    None,
+                    provisioned.as_ref(),
+                )
+            })
             .collect()
     };
 

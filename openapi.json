@@ -791,6 +791,16 @@
           },
           "409": {
             "description": "Confirmation required, or agent is hand-owned"
+          },
+          "423": {
+            "description": "This agent is provisioned by the deployment; its manifest cannot be changed through the API",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
           }
         }
       },
@@ -824,6 +834,16 @@
         "responses": {
           "200": {
             "description": "Partially update an agent (name, description, model, system prompt)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "423": {
+            "description": "This agent is provisioned by the deployment; its manifest cannot be changed through the API",
             "content": {
               "application/json": {
                 "schema": {
@@ -915,6 +935,16 @@
                 }
               }
             }
+          },
+          "423": {
+            "description": "This agent is provisioned by the deployment; its manifest cannot be changed through the API",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
           }
         }
       }
@@ -994,6 +1024,16 @@
         "responses": {
           "200": {
             "description": "Hot-update agent name, description, system prompt, identity, and model",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "423": {
+            "description": "This agent is provisioned by the deployment; its manifest cannot be changed through the API",
             "content": {
               "application/json": {
                 "schema": {
@@ -1524,6 +1564,16 @@
                 }
               }
             }
+          },
+          "423": {
+            "description": "This agent is provisioned by the deployment; its manifest cannot be changed through the API",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
           }
         }
       }
@@ -1722,6 +1772,16 @@
           },
           "400": {
             "description": "Malformed request body",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "423": {
+            "description": "This agent is provisioned by the deployment; its manifest cannot be changed through the API",
             "content": {
               "application/json": {
                 "schema": {
@@ -2010,6 +2070,16 @@
         "responses": {
           "200": {
             "description": "Change an agent's LLM model",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "423": {
+            "description": "This agent is provisioned by the deployment; its manifest cannot be changed through the API",
             "content": {
               "application/json": {
                 "schema": {
@@ -2922,6 +2992,16 @@
                 }
               }
             }
+          },
+          "423": {
+            "description": "This agent is provisioned by the deployment; its manifest cannot be changed through the API",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
           }
         }
       }
@@ -3081,6 +3161,16 @@
         "responses": {
           "200": {
             "description": "Updated tool configuration, echoing the stored `capabilities_tools`, `tool_allowlist`, `tool_blocklist` and `disabled` values. Carries an additional `warnings` array of strings naming each stored `tool_allowlist` entry that provably cannot admit any tool; the key is absent when there is nothing to report. The check runs whenever the request submits `tool_allowlist` or `capabilities_tools` — narrowing the grant surface is itself a way to render a stored entry inert — and is skipped for a request that submits only `tool_blocklist` or only `disabled`, and for an agent left with `tools_disabled = true`, where no allowlist entry can admit anything anyway.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "423": {
+            "description": "This agent is provisioned by the deployment; its manifest cannot be changed through the API",
             "content": {
               "application/json": {
                 "schema": {

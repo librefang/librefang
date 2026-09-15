@@ -24,7 +24,8 @@ fn read_agent_skills_registry(
     params(("id" = String, Path, description = "Agent ID")),
     request_body(content = crate::types::JsonObject, description = "Model name and optional provider"),
     responses(
-        (status = 200, description = "Change an agent's LLM model", body = crate::types::JsonObject)
+        (status = 200, description = "Change an agent's LLM model", body = crate::types::JsonObject),
+        (status = 423, description = "This agent is provisioned by the deployment; its manifest cannot be changed through the API", body = crate::types::JsonObject)
     )
 )]
 pub async fn set_model(
@@ -243,7 +244,8 @@ pub struct SetAgentToolsRequest {
         description = "Tool configuration fields. `capabilities_tools` is the grant surface; `tool_allowlist` and `tool_blocklist` only ever narrow what it already admits, because the kernel applies them afterwards as a retain. An allowlist entry naming a builtin or skill tool that `capabilities_tools` excludes therefore grants nothing — add it to `capabilities_tools` instead. MCP tools are the exception: they are not filtered by `capabilities_tools`, so an `mcp_*` allowlist entry does select among them (#6609). `disabled` is the `tools_disabled` master switch, evaluated before all three filters. Every field is a tri-state: omit it to leave the stored value alone, send it to write exactly what it says (#7742)."
     ),
     responses(
-        (status = 200, description = "Updated tool configuration, echoing the stored `capabilities_tools`, `tool_allowlist`, `tool_blocklist` and `disabled` values. Carries an additional `warnings` array of strings naming each stored `tool_allowlist` entry that provably cannot admit any tool; the key is absent when there is nothing to report. The check runs whenever the request submits `tool_allowlist` or `capabilities_tools` — narrowing the grant surface is itself a way to render a stored entry inert — and is skipped for a request that submits only `tool_blocklist` or only `disabled`, and for an agent left with `tools_disabled = true`, where no allowlist entry can admit anything anyway.", body = crate::types::JsonObject)
+        (status = 200, description = "Updated tool configuration, echoing the stored `capabilities_tools`, `tool_allowlist`, `tool_blocklist` and `disabled` values. Carries an additional `warnings` array of strings naming each stored `tool_allowlist` entry that provably cannot admit any tool; the key is absent when there is nothing to report. The check runs whenever the request submits `tool_allowlist` or `capabilities_tools` — narrowing the grant surface is itself a way to render a stored entry inert — and is skipped for a request that submits only `tool_blocklist` or only `disabled`, and for an agent left with `tools_disabled = true`, where no allowlist entry can admit anything anyway.", body = crate::types::JsonObject),
+        (status = 423, description = "This agent is provisioned by the deployment; its manifest cannot be changed through the API", body = crate::types::JsonObject)
     )
 )]
 pub async fn set_agent_tools(
@@ -421,7 +423,8 @@ pub async fn get_agent_skills(
     params(("id" = String, Path, description = "Agent ID")),
     request_body(content = crate::types::JsonArray, description = "Array of skill names"),
     responses(
-        (status = 200, description = "Update an agent's skill allowlist", body = crate::types::JsonObject)
+        (status = 200, description = "Update an agent's skill allowlist", body = crate::types::JsonObject),
+        (status = 423, description = "This agent is provisioned by the deployment; its manifest cannot be changed through the API", body = crate::types::JsonObject)
     )
 )]
 pub async fn set_agent_skills(
@@ -565,7 +568,8 @@ pub struct SetAgentMcpServersRequest {
     request_body(content = SetAgentMcpServersRequest, description = "Object containing the MCP server allowlist"),
     responses(
         (status = 200, description = "Update an agent's MCP server allowlist", body = crate::types::JsonObject),
-        (status = 400, description = "Malformed request body", body = crate::types::JsonObject)
+        (status = 400, description = "Malformed request body", body = crate::types::JsonObject),
+        (status = 423, description = "This agent is provisioned by the deployment; its manifest cannot be changed through the API", body = crate::types::JsonObject)
     )
 )]
 pub async fn set_agent_mcp_servers(
@@ -748,7 +752,8 @@ pub struct SetAgentChannelsRequest {
     request_body(content = SetAgentChannelsRequest, description = "Object containing the channel allowlist"),
     responses(
         (status = 200, description = "Update an agent's channel allowlist", body = crate::types::JsonObject),
-        (status = 400, description = "Malformed request body", body = crate::types::JsonObject)
+        (status = 400, description = "Malformed request body", body = crate::types::JsonObject),
+        (status = 423, description = "This agent is provisioned by the deployment; its manifest cannot be changed through the API", body = crate::types::JsonObject)
     )
 )]
 pub async fn set_agent_channels(
@@ -1208,7 +1213,8 @@ pub struct PatchAgentConfigRequest {
     params(("id" = String, Path, description = "Agent ID")),
     request_body(content = PatchAgentConfigRequest, description = "Agent config fields to update"),
     responses(
-        (status = 200, description = "Hot-update agent name, description, system prompt, identity, and model", body = crate::types::JsonObject)
+        (status = 200, description = "Hot-update agent name, description, system prompt, identity, and model", body = crate::types::JsonObject),
+        (status = 423, description = "This agent is provisioned by the deployment; its manifest cannot be changed through the API", body = crate::types::JsonObject)
     )
 )]
 #[allow(private_interfaces)]

@@ -347,9 +347,28 @@ export type SessionResetReason =
   | "suspended"
   | "manual";
 
+/**
+ * Where the deployment's provisioning tree declares this agent, or `null` when
+ * it is the operator's own.
+ *
+ * Present on both `GET /api/agents` and `GET /api/agents/{id}`. Eleven
+ * manifest-writing routes answer `423 Locked` on an agent that has it, so a
+ * surface offering those controls should disable them and say why rather than
+ * let the operator find out by pressing (#8354) — `source` is the file to go
+ * and change instead.
+ *
+ * `null`, never absent, including when provisioning is switched off entirely.
+ */
+export interface AgentProvenance {
+  /** Absolute path of the declaring file, as it was at apply time. */
+  source: string;
+}
+
 export interface AgentItem {
   id: string;
   name: string;
+  /** See {@link AgentProvenance}. `null` for an operator-created agent. */
+  provisioned?: AgentProvenance | null;
   state?: string;
   mode?: string;
   created_at?: string;
@@ -1437,6 +1456,8 @@ export interface AgentModelDetail {
 export interface AgentDetail {
   id: string;
   name: string;
+  /** See {@link AgentProvenance}. `null` for an operator-created agent. */
+  provisioned?: AgentProvenance | null;
   model?: AgentModelDetail;
   system_prompt?: string;
   capabilities?: { tools?: boolean; network?: boolean };

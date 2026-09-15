@@ -729,3 +729,114 @@ async fn a_provisioned_agent_deleted_out_of_band_is_recreated_on_the_next_boot()
     assert_eq!(v["report"]["created"], 1, "{v}");
     assert!(agent_id(&h.app, "researcher").await.is_some());
 }
+
+/// The agent payload says whether the deployment declares the agent, and where — on both the list and the detail route.
+///
+/// `guard_provisioned_agent` refuses eleven manifest-writing routes with `423 Locked`, and the kernel has always known which agents those are, but the payload never carried it (#8354). A client therefore could not tell before trying: an operator would type an emoji and save, or pick an image and upload the whole thing, only to be refused at the end by something that was never going to work.
+///
+/// `source` is asserted against the real declaring path rather than merely for presence, because it is the one thing a client needs beyond "you cannot": it says where to go and change it instead.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_agent_payload_carries_its_provisioning_provenance() {
+    let tree = tempfile::tempdir().expect("tempdir");
+    let source = declare_agent(tree.path(), "researcher.toml", RESEARCHER);
+    let _env = ProvisioningEnv::set(Some(tree.path()), None).await;
+    let home = tempfile::tempdir().expect("tempdir");
+
+    let h = boot_router(home.path()).await;
+
+    let (status, body) = send(h.app.clone(), auth_get("/api/agents")).await;
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    let list: serde_json::Value = serde_json::from_slice(&body).expect("agents body is JSON");
+    let row = list["items"]
+        .as_array()
+        .expect("items")
+        .iter()
+        .find(|a| a["name"] == "researcher")
+        .expect("the declared agent must be listed");
+    assert_eq!(
+        row["provisioned"]["source"],
+        source.display().to_string(),
+        "GET /api/agents must name the declaring file: {row}"
+    );
+
+    let id = row["id"].as_str().expect("id");
+    let (status, body) = send(h.app.clone(), auth_get(&format!("/api/agents/{id}"))).await;
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    let detail: serde_json::Value = serde_json::from_slice(&body).expect("agent body is JSON");
+    assert_eq!(
+        detail["provisioned"]["source"],
+        source.display().to_string(),
+        "GET /api/agents/{{id}} must name it too — the detail drawer is the surface that offers the controls the guard refuses: {detail}"
+    );
+}
+
+/// An agent the operator created carries `provisioned: null`, on both routes.
+///
+/// The null half is what makes the field usable: a client that disables its write controls on truthiness needs the absent case to be unambiguous, and needs it while a provisioned agent sits beside it in the same list.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_runtime_created_agent_reports_no_provenance() {
+    let tree = tempfile::tempdir().expect("tempdir");
+    declare_agent(tree.path(), "researcher.toml", RESEARCHER);
+    let _env = ProvisioningEnv::set(Some(tree.path()), None).await;
+    let home = tempfile::tempdir().expect("tempdir");
+
+    let h = boot_router(home.path()).await;
+    let own_id = spawn_agent(
+        &h.app,
+        "name = \"operator_owned\"\ndescription = \"mine\"\nmodule = \"builtin:chat\"\n",
+    )
+    .await;
+
+    let (status, body) = send(h.app.clone(), auth_get("/api/agents")).await;
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    let list: serde_json::Value = serde_json::from_slice(&body).expect("agents body is JSON");
+    let items = list["items"].as_array().expect("items");
+
+    let own = items
+        .iter()
+        .find(|a| a["name"] == "operator_owned")
+        .expect("the runtime-created agent must be listed");
+    assert!(
+        own["provisioned"].is_null(),
+        "an agent the operator created is not declared by the deployment: {own}"
+    );
+
+    // The provisioned one is still in the same response, so the two are distinguishable by this
+    // field alone — which is the whole point of emitting it.
+    let declared = items
+        .iter()
+        .find(|a| a["name"] == "researcher")
+        .expect("the declared agent must be listed alongside it");
+    assert!(!declared["provisioned"].is_null(), "{declared}");
+
+    let (status, body) = send(h.app.clone(), auth_get(&format!("/api/agents/{own_id}"))).await;
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    let detail: serde_json::Value = serde_json::from_slice(&body).expect("agent body is JSON");
+    assert!(detail["provisioned"].is_null(), "{detail}");
+}
+
+/// With provisioning off — every installation that has not opted in — the field is present and null rather than missing.
+///
+/// A field that disappears when the feature is off forces every client to distinguish "absent" from "null", and the two would mean the same thing. Asserting the key exists is what keeps that from drifting.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_field_is_present_and_null_when_provisioning_is_off() {
+    let _env = ProvisioningEnv::set(None, None).await;
+    let home = tempfile::tempdir().expect("tempdir");
+
+    let h = boot_router(home.path()).await;
+    let id = spawn_agent(
+        &h.app,
+        "name = \"plain\"\ndescription = \"mine\"\nmodule = \"builtin:chat\"\n",
+    )
+    .await;
+
+    let (status, body) = send(h.app.clone(), auth_get(&format!("/api/agents/{id}"))).await;
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    let detail: serde_json::Value = serde_json::from_slice(&body).expect("agent body is JSON");
+    let obj = detail.as_object().expect("object");
+    assert!(
+        obj.contains_key("provisioned"),
+        "the key must be present even with provisioning off: {detail}"
+    );
+    assert!(obj["provisioned"].is_null(), "{detail}");
+}

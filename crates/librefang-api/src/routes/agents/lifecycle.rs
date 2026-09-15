@@ -725,9 +725,23 @@ pub async fn list_agents(
 
     // `e` is &Arc<AgentEntry>; `as_ref()` on Arc yields the &AgentEntry the
     // helper expects without forcing a manifest deep-clone (#3569).
+    // Resolved per row rather than once for the page: the provisioning state is an `ArcSwap`
+    // load behind a map lookup, and it is empty on every installation that has not opted in, so
+    // the alternative — a second pre-pass building a name index — would cost more than it saves.
     let items: Vec<serde_json::Value> = agents
         .iter()
-        .map(|e| enrich_agent_json(e.as_ref(), &dm, catalog, bulk_stats.as_ref()))
+        .map(|e| {
+            let provisioned = state
+                .kernel
+                .provisioned_resource(librefang_kernel::provisioning::ResourceKind::Agent, &e.name);
+            enrich_agent_json(
+                e.as_ref(),
+                &dm,
+                catalog,
+                bulk_stats.as_ref(),
+                provisioned.as_ref(),
+            )
+        })
         .collect();
 
     Json(PaginatedResponse {
@@ -790,7 +804,8 @@ const DELETE_AGENT_WARNING: &str = "Deleting this agent will permanently remove 
     responses(
         (status = 200, description = "Agent killed and canonical UUID purged"),
         (status = 400, description = "Malformed agent ID"),
-        (status = 409, description = "Confirmation required, or agent is hand-owned")
+        (status = 409, description = "Confirmation required, or agent is hand-owned"),
+        (status = 423, description = "This agent is provisioned by the deployment; its manifest cannot be changed through the API", body = crate::types::JsonObject)
     )
 )]
 pub async fn kill_agent(
@@ -1116,6 +1131,16 @@ pub async fn get_agent(
             "description": entry.manifest.description,
             "source_template": entry.manifest.source_template,
             "tags": entry.manifest.tags,
+            // Whether the deployment declares this agent, and where. `null` when it is the operator's own.
+            //
+            // This payload is hand-built rather than going through `enrich_agent_json`, so the field has to be spelled here as well — and the detail drawer is where it matters most, since that is the surface offering the identity and avatar controls the guard refuses (#8354).
+            "provisioned": state
+                .kernel
+                .provisioned_resource(
+                    librefang_kernel::provisioning::ResourceKind::Agent,
+                    &entry.name,
+                )
+                .map(|p| serde_json::json!({ "source": p.source })),
             "identity": {
                 "emoji": entry.identity.emoji,
                 "avatar_url": entry.identity.avatar_url,
@@ -1238,7 +1263,8 @@ pub async fn list_agent_runtime(
     params(("id" = String, Path, description = "Agent ID")),
     request_body(content = crate::types::JsonObject, description = "Partial agent fields to update"),
     responses(
-        (status = 200, description = "Partially update an agent (name, description, model, system prompt)", body = crate::types::JsonObject)
+        (status = 200, description = "Partially update an agent (name, description, model, system prompt)", body = crate::types::JsonObject),
+        (status = 423, description = "This agent is provisioned by the deployment; its manifest cannot be changed through the API", body = crate::types::JsonObject)
     )
 )]
 pub async fn patch_agent(
