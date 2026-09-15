@@ -83,23 +83,50 @@ function lockBodyScroll(): () => void {
   };
 }
 
-interface OpenModal {
+/// One dismissable layer participating in the shared Escape stack.
+///
+/// Anything that closes on Escape and can be stacked belongs here rather than
+/// owning a `keydown` listener of its own. Two competing listeners cannot agree
+/// on who is on top: `handleModalEscape` calls `stopImmediatePropagation`, so
+/// whichever registered first silently wins the key and the other's handler
+/// never runs. That is how Escape on a `ConfirmDialog` opened over a `Modal`
+/// used to close both (#8336).
+export interface EscapeLayer {
+  /// Identity for deregistration. A fresh `Symbol` per mount.
   token: symbol;
+  /// The layer's stacking context. Higher wins; ties break on mount order.
   zIndex: number;
-  sequence: number;
+  /// Invoked when Escape reaches this layer as the topmost one.
   close: () => void;
+}
+
+interface OpenModal extends EscapeLayer {
+  sequence: number;
 }
 
 const openModals: OpenModal[] = [];
 let nextModalSequence = 0;
 
-function handleModalEscape(event: KeyboardEvent) {
-  if (event.defaultPrevented || event.key !== "Escape") return;
-  const topModal = openModals.reduce<OpenModal | undefined>((top, modal) => {
+function topEscapeLayer(): OpenModal | undefined {
+  return openModals.reduce<OpenModal | undefined>((top, modal) => {
     if (!top || modal.zIndex > top.zIndex) return modal;
     if (modal.zIndex === top.zIndex && modal.sequence > top.sequence) return modal;
     return top;
   }, undefined);
+}
+
+/// Whether `token` is the layer Escape would currently close.
+///
+/// Exported so a layer can gate its *other* key handling on being on top —
+/// `ConfirmDialog`'s Enter-confirms shortcut must not fire while something is
+/// stacked above it, for the same reason Escape must not reach through.
+export function isTopEscapeLayer(token: symbol): boolean {
+  return topEscapeLayer()?.token === token;
+}
+
+function handleModalEscape(event: KeyboardEvent) {
+  if (event.defaultPrevented || event.key !== "Escape") return;
+  const topModal = topEscapeLayer();
   if (!topModal) return;
 
   event.preventDefault();
@@ -107,7 +134,12 @@ function handleModalEscape(event: KeyboardEvent) {
   topModal.close();
 }
 
-function registerOpenModal(modal: Omit<OpenModal, "sequence">): () => void {
+/// Add a layer to the shared Escape stack; the returned function removes it.
+///
+/// The single `keydown` listener is attached while the stack is non-empty and
+/// removed when it drains, so exactly one handler ever sees the key and the
+/// topmost layer always wins regardless of mount order.
+export function registerEscapeLayer(modal: EscapeLayer): () => void {
   if (openModals.length === 0) {
     window.addEventListener("keydown", handleModalEscape);
   }
@@ -228,7 +260,7 @@ export const Modal = memo(function Modal({
   useEffect(() => {
     if (!isOpen) return;
     const token = Symbol("modal");
-    return registerOpenModal({
+    return registerEscapeLayer({
       token,
       zIndex,
       close: () => onCloseRef.current(),
