@@ -4,6 +4,9 @@
 //! - `ValidatedJson<T>` extractor that enforces common validation rules
 //! - Request body size limiting via tower `RequestBodyLimitLayer`
 //! - Consistent JSON error responses for all validation failures
+//! - [`filename_guard`], the one check for a client-supplied filename or path segment
+
+pub mod filename_guard;
 
 use axum::extract::rejection::JsonRejection;
 use axum::extract::FromRequest;
