@@ -397,14 +397,10 @@ pub(crate) fn enrich_agent_json(
         "has_processed_message": e.has_processed_message,
         // Whether the deployment declares this agent, and where.
         //
-        // `guard_provisioned_agent` refuses twelve manifest-writing routes with `423 Locked` on a
-        // provisioned agent, and the kernel has known which agents those are all along — but the
-        // payload never said, so a client could not tell before trying (#8354). An operator would
-        // type an emoji and save, or pick an image and upload the whole thing, only to be refused
-        // at the end by something that was never going to work.
+        // `guard_provisioned_agent` refuses eleven manifest-writing routes with `423 Locked` on a provisioned agent, and the kernel has known which agents those are all along — but the payload never said, so a client could not tell before trying (#8354).
+        // An operator would type an emoji and save, or pick an image and upload the whole thing, only to be refused at the end by something that was never going to work.
         //
-        // `source` is the declaring file, which is the one thing a client needs beyond "you
-        // cannot": it says where to go and change it instead.
+        // `source` is the declaring file, which is the one thing a client needs beyond "you cannot": it says where to go and change it instead.
         "provisioned": provisioned.map(|p| serde_json::json!({ "source": p.source })),
     })
 }
