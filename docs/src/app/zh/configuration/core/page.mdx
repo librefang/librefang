@@ -837,7 +837,7 @@ max_retries = 0             # 0 = 无限重试
 
 | 字段 | 类型 | 默认值 | 说明 |
 |---|---|---|---|
-| `claim_ttl_secs` | u64 | `600` | `in_progress` 任务最多被认领多久,sweeper 之后重置。`0` 完全关闭 sweep。 |
+| `claim_ttl_secs` | u64 | `600` | `in_progress` 任务最多被认领多久,之后 sweeper 重置。`0` 只关闭*全局*时钟——声明了自己 `timeout_secs` 的任务仍会过期。 |
 | `sweep_interval_secs` | u64 | `30` | sweeper 扫描卡住任务的频率。 |
 | `max_retries` | u32 | `0` | 卡住任务被自动重置多少次后标 `failed`。`0` = 无限重试(幂等任务的安全默认;有副作用的任务调低)。 |
 
