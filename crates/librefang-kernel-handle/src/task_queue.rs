@@ -34,6 +34,34 @@ pub trait TaskQueue: Send + Sync {
         status: Option<&str>,
     ) -> Result<Vec<serde_json::Value>, KernelOpError>;
 
+    /// List one page of tasks, plus the number of rows the filters match before the window is applied.
+    ///
+    /// Separate from [`Self::task_list`] because the API's `?limit=` and `?assigned_to=` were both applied to a fully materialised `Vec`, so a request for ten tasks allocated one `serde_json::Value` per row in the table first (#8219) — and `task_prune_finished` only removes terminal rows, so that table grows for the life of the install.
+    ///
+    /// The default implementation does exactly that filtering in Rust, so a stub implementing this trait keeps working unchanged.
+    /// The kernel overrides it with `WHERE` / `LIMIT` / `OFFSET`.
+    async fn task_list_page(
+        &self,
+        status: Option<&str>,
+        assigned_to: Option<&str>,
+        limit: Option<u32>,
+        offset: Option<u32>,
+    ) -> Result<(Vec<serde_json::Value>, u64), KernelOpError> {
+        let mut tasks = self.task_list(status).await?;
+        if let Some(assignee) = assigned_to {
+            tasks.retain(|t| t["assigned_to"].as_str().unwrap_or("") == assignee);
+        }
+        let total = tasks.len() as u64;
+        let offset = offset.unwrap_or(0) as usize;
+        if offset > 0 {
+            tasks.drain(..offset.min(tasks.len()));
+        }
+        if let Some(limit) = limit {
+            tasks.truncate(limit as usize);
+        }
+        Ok((tasks, total))
+    }
+
     /// Count of tasks per status, as `(status, count)` pairs.
     ///
     /// Separate from [`Self::task_list`] because the summary a caller wants four integers for should not cost one materialised row per task: `task_list` has no `LIMIT`, `task_prune_finished` only deletes terminal rows, and `GET /api/tasks/status` — which the dashboard polls — was deriving its counts that way (#8219).

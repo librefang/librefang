@@ -31,6 +31,37 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
+/// The `[queue]` depth caps applied to an enqueue, resolved from `KernelConfig` by the caller.
+///
+/// Passed in rather than read from a config the substrate holds, because the count and the INSERT have to happen inside one write transaction and only this layer has the connection.
+/// Every field is `0 = unlimited`, matching the config's own contract.
+///
+/// The caps were declared, documented and echoed by the config API for the whole of their life without a single enforcement site (#8219), so an operator who set them got a queue that still grew without bound.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TaskQueueCaps {
+    /// `[queue] max_depth_per_agent` — pending tasks assigned to one agent.
+    pub max_depth_per_agent: u32,
+    /// `[queue] max_depth_global` — pending tasks across every agent and the unassigned pool.
+    pub max_depth_global: u32,
+}
+
+impl TaskQueueCaps {
+    /// Both caps off. The shipped default, and what a caller with no config to consult passes.
+    pub const UNLIMITED: Self = Self {
+        max_depth_per_agent: 0,
+        max_depth_global: 0,
+    };
+}
+
+impl From<&librefang_types::config::QueueConfig> for TaskQueueCaps {
+    fn from(cfg: &librefang_types::config::QueueConfig) -> Self {
+        Self {
+            max_depth_per_agent: cfg.max_depth_per_agent,
+            max_depth_global: cfg.max_depth_global,
+        }
+    }
+}
+
 /// The unified memory substrate. Implements the `Memory` trait by delegating
 /// to specialized stores backed by a shared SQLite connection pool.
 pub struct MemorySubstrate {
@@ -1090,13 +1121,20 @@ impl MemorySubstrate {
     // Task queue operations
     // -----------------------------------------------------------------
 
-    /// Post a new task to the shared queue. Returns the task ID.
+    /// Post a new task to the shared queue, subject to `caps`. Returns the task ID.
+    ///
+    /// Returns [`LibreFangError::QuotaExceeded`] — HTTP 429 — when a non-zero cap is already reached, which is what makes `[queue] max_depth_per_agent` / `max_depth_global` mean anything (#8219).
+    /// Before that the two knobs were declared, documented as "New tasks are rejected when full", echoed back by `GET /api/queue/status`, and read by nothing: an agent looping on the `task_post` tool filled the table for the life of the install.
+    ///
+    /// The counts and the INSERT run in one `IMMEDIATE` transaction.
+    /// Counting outside it would let two concurrent posts against a cap of N both read N-1 and both insert, which is the failure a depth cap exists to prevent and the one a loop reaches first.
     pub async fn task_post(
         &self,
         title: &str,
         description: &str,
         assigned_to: Option<&str>,
         created_by: Option<&str>,
+        caps: TaskQueueCaps,
     ) -> LibreFangResult<String> {
         let conn = self.pool.clone();
         let title = title.to_string();
@@ -1107,13 +1145,54 @@ impl MemorySubstrate {
         tokio::task::spawn_blocking(move || {
             let id = uuid::Uuid::new_v4().to_string();
             let now = chrono::Utc::now().to_rfc3339();
-            let db = conn.get().map_err(LibreFangError::memory)?;
-            db.execute(
+            let mut db = conn.get().map_err(LibreFangError::memory)?;
+            let tx = db
+                .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                .map_err(LibreFangError::memory)?;
+
+            if caps.max_depth_global > 0 {
+                let depth: i64 = tx
+                    .query_row(
+                        "SELECT COUNT(*) FROM task_queue WHERE status = 'pending'",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .map_err(LibreFangError::memory)?;
+                if depth >= i64::from(caps.max_depth_global) {
+                    return Err(LibreFangError::QuotaExceeded(format!(
+                        "task queue is full: {depth} pending tasks, [queue] max_depth_global = {}",
+                        caps.max_depth_global
+                    )));
+                }
+            }
+
+            // An unassigned task belongs to the shared pool, not to an agent: `assigned_to` is
+            // stored as `''` for it, so counting those under the per-agent cap would put every
+            // unassigned task in one bucket keyed on the empty string and reject the pool at the
+            // limit meant for a single agent.
+            if caps.max_depth_per_agent > 0 && !assigned_to.is_empty() {
+                let depth: i64 = tx
+                    .query_row(
+                        "SELECT COUNT(*) FROM task_queue WHERE status = 'pending' AND assigned_to = ?1",
+                        rusqlite::params![assigned_to],
+                        |row| row.get(0),
+                    )
+                    .map_err(LibreFangError::memory)?;
+                if depth >= i64::from(caps.max_depth_per_agent) {
+                    return Err(LibreFangError::QuotaExceeded(format!(
+                        "queue for '{assigned_to}' is full: {depth} pending tasks, [queue] max_depth_per_agent = {}",
+                        caps.max_depth_per_agent
+                    )));
+                }
+            }
+
+            tx.execute(
                 "INSERT INTO task_queue (id, agent_id, task_type, payload, status, priority, created_at, title, description, assigned_to, created_by)
                  VALUES (?1, ?2, ?3, ?4, 'pending', 0, ?5, ?6, ?7, ?8, ?9)",
                 rusqlite::params![id, &created_by, &title, b"", now, title, description, assigned_to, created_by],
             )
             .map_err(LibreFangError::memory)?;
+            tx.commit().map_err(LibreFangError::memory)?;
             Ok(id)
         })
         .await
@@ -1315,26 +1394,76 @@ impl MemorySubstrate {
         .map_err(|e| LibreFangError::Internal(e.to_string()))?
     }
 
-    /// List tasks, optionally filtered by status.
+    /// List tasks, optionally filtered by status, with no bound on the result size.
+    ///
+    /// Prefer [`Self::task_list_page`] anywhere a caller has a page size: this materialises one `serde_json::Value` per row in the table, and only terminal rows are ever pruned.
     pub async fn task_list(&self, status: Option<&str>) -> LibreFangResult<Vec<serde_json::Value>> {
+        self.task_list_page(status, None, None, None)
+            .await
+            .map(|(tasks, _total)| tasks)
+    }
+
+    /// List one page of tasks and the number of rows the filters match, bounded in SQL.
+    ///
+    /// Every argument is a filter or a window the statement carries, because doing any of it in Rust means materialising the rows first — the API's `?limit=` used to truncate a fully built `Vec`, so a request for ten tasks allocated one JSON object per row in the table and threw all but ten away (#8219), and `?assigned_to=` still retained over that same `Vec`.
+    ///
+    /// `total` is the count matching `status` / `assigned_to` *before* the window, so a paging client can tell how many more there are; it is a `COUNT(*)`, not the page's length.
+    /// `offset` without `limit` uses SQLite's `LIMIT -1`, so a caller can skip without also having to cap.
+    pub async fn task_list_page(
+        &self,
+        status: Option<&str>,
+        assigned_to: Option<&str>,
+        limit: Option<u32>,
+        offset: Option<u32>,
+    ) -> LibreFangResult<(Vec<serde_json::Value>, u64)> {
         let conn = self.pool.clone();
         let status = status.map(|s| s.to_string());
+        let assigned_to = assigned_to.map(|s| s.to_string());
 
         tokio::task::spawn_blocking(move || {
             let db = conn.get().map_err(LibreFangError::memory)?;
-            let (sql, params): (&str, Vec<Box<dyn rusqlite::types::ToSql>>) = match &status {
-                Some(s) => (
-                    "SELECT id, title, description, status, assigned_to, created_by, created_at, completed_at, result, claimed_at FROM task_queue WHERE status = ?1 ORDER BY created_at DESC",
-                    vec![Box::new(s.clone())],
-                ),
-                None => (
-                    "SELECT id, title, description, status, assigned_to, created_by, created_at, completed_at, result, claimed_at FROM task_queue ORDER BY created_at DESC",
-                    vec![],
+
+            let mut clauses: Vec<&str> = Vec::new();
+            let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+            if let Some(s) = &status {
+                params.push(Box::new(s.clone()));
+                clauses.push("status = ?");
+            }
+            if let Some(a) = &assigned_to {
+                params.push(Box::new(a.clone()));
+                clauses.push("assigned_to = ?");
+            }
+            let where_sql = if clauses.is_empty() {
+                String::new()
+            } else {
+                format!(" WHERE {}", clauses.join(" AND "))
+            };
+            let params_refs: Vec<&dyn rusqlite::types::ToSql> =
+                params.iter().map(|p| p.as_ref()).collect();
+
+            let total: i64 = db
+                .query_row(
+                    &format!("SELECT COUNT(*) FROM task_queue{where_sql}"),
+                    params_refs.as_slice(),
+                    |row| row.get(0),
+                )
+                .map_err(LibreFangError::memory)?;
+
+            // `LIMIT -1` is SQLite's "no limit", which is what lets an offset-only
+            // request stay a single statement shape.
+            let window = match (limit, offset) {
+                (None, None) => String::new(),
+                (limit, offset) => format!(
+                    " LIMIT {} OFFSET {}",
+                    limit.map(i64::from).unwrap_or(-1),
+                    offset.unwrap_or(0)
                 ),
             };
+            let sql = format!(
+                "SELECT id, title, description, status, assigned_to, created_by, created_at, completed_at, result, claimed_at FROM task_queue{where_sql} ORDER BY created_at DESC{window}"
+            );
 
-            let mut stmt = db.prepare(sql).map_err(LibreFangError::memory)?;
-            let params_refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+            let mut stmt = db.prepare(&sql).map_err(LibreFangError::memory)?;
             let rows = stmt.query_map(params_refs.as_slice(), |row| {
                 Ok(serde_json::json!({
                     "id": row.get::<_, String>(0)?,
@@ -1354,7 +1483,7 @@ impl MemorySubstrate {
             for row in rows {
                 tasks.push(row.map_err(LibreFangError::memory)?);
             }
-            Ok(tasks)
+            Ok((tasks, total as u64))
         })
         .await
         .map_err(|e| LibreFangError::Internal(e.to_string()))?
@@ -1528,6 +1657,37 @@ impl MemorySubstrate {
             }
             .map_err(LibreFangError::memory)?;
             Ok(rows > 0)
+        })
+        .await
+        .map_err(|e| LibreFangError::Internal(e.to_string()))?
+    }
+
+    /// Expire `pending` tasks created more than `ttl_secs` ago (`[queue] task_ttl_secs`), returning the number expired. A `ttl_secs` of `0` disables expiry and is a no-op.
+    ///
+    /// The row is moved to `cancelled` with a `finished_at` stamp and a `result` naming the TTL, not deleted.
+    /// Deleting would make a task an operator queued and has not yet staffed vanish with no record, which is a worse answer than the unbounded growth #8219 is about; `cancelled` is the terminal status the dashboard, the status counts and `task_prune_finished` already understand, so reclamation happens on the existing `task_queue_retention_days` horizon and the operator can see what happened in between.
+    ///
+    /// `created_at` is RFC 3339 text written by `Utc::now().to_rfc3339()` at every insert site, so the fixed-offset strings compare lexically in the order they compare chronologically.
+    pub async fn task_expire_stale(&self, ttl_secs: u64) -> LibreFangResult<usize> {
+        if ttl_secs == 0 {
+            return Ok(0);
+        }
+        let conn = self.pool.clone();
+        tokio::task::spawn_blocking(move || {
+            let db = conn.get().map_err(LibreFangError::memory)?;
+            let now = chrono::Utc::now();
+            let cutoff = (now - chrono::Duration::seconds(ttl_secs as i64)).to_rfc3339();
+            let reason =
+                format!("expired: unclaimed for more than [queue] task_ttl_secs ({ttl_secs}s)");
+            let rows = db
+                .execute(
+                    "UPDATE task_queue \
+                     SET status = 'cancelled', finished_at = ?1, result = ?2 \
+                     WHERE status = 'pending' AND created_at < ?3",
+                    rusqlite::params![now.timestamp(), reason, cutoff],
+                )
+                .map_err(LibreFangError::memory)?;
+            Ok(rows)
         })
         .await
         .map_err(|e| LibreFangError::Internal(e.to_string()))?
@@ -1892,7 +2052,13 @@ mod tests {
 
         for (title, assignee) in [("a", "agent-1"), ("b", "agent-1"), ("c", "agent-2")] {
             substrate
-                .task_post(title, "body", Some(assignee), Some("boss"))
+                .task_post(
+                    title,
+                    "body",
+                    Some(assignee),
+                    Some("boss"),
+                    TaskQueueCaps::UNLIMITED,
+                )
                 .await
                 .expect("post");
         }
@@ -2078,6 +2244,7 @@ mod tests {
                 "Check the auth module for issues",
                 Some("auditor"),
                 Some("orchestrator"),
+                TaskQueueCaps::UNLIMITED,
             )
             .await
             .unwrap();
@@ -2099,6 +2266,7 @@ mod tests {
                 "Security audit the /api/login endpoint",
                 Some("auditor"),
                 None,
+                TaskQueueCaps::UNLIMITED,
             )
             .await
             .unwrap();
@@ -2154,7 +2322,13 @@ mod tests {
 
         // Exactly one pending task assigned to "worker".
         substrate
-            .task_post("Race target", "Claim me exactly once", Some("worker"), None)
+            .task_post(
+                "Race target",
+                "Claim me exactly once",
+                Some("worker"),
+                None,
+                TaskQueueCaps::UNLIMITED,
+            )
             .await
             .unwrap();
 
@@ -2211,7 +2385,13 @@ mod tests {
         const N: usize = 8;
         for i in 0..N {
             substrate
-                .task_post(&format!("task-{i}"), "claim me", Some("worker"), None)
+                .task_post(
+                    &format!("task-{i}"),
+                    "claim me",
+                    Some("worker"),
+                    None,
+                    TaskQueueCaps::UNLIMITED,
+                )
                 .await
                 .unwrap();
         }
@@ -2267,6 +2447,7 @@ mod tests {
                 "Check for anomalies",
                 Some("researcher"),
                 None,
+                TaskQueueCaps::UNLIMITED,
             )
             .await
             .unwrap();
@@ -2303,7 +2484,13 @@ mod tests {
     async fn test_task_reset_stuck_expires_in_progress() {
         let substrate = MemorySubstrate::open_in_memory(0.1).unwrap();
         let task_id = substrate
-            .task_post("Long task", "Takes forever", Some("worker"), None)
+            .task_post(
+                "Long task",
+                "Takes forever",
+                Some("worker"),
+                None,
+                TaskQueueCaps::UNLIMITED,
+            )
             .await
             .unwrap();
 
@@ -2360,7 +2547,13 @@ mod tests {
     async fn task_reset_stuck_surfaces_corrupt_retry_count() {
         let substrate = MemorySubstrate::open_in_memory(0.1).unwrap();
         let task_id = substrate
-            .task_post("Corrupt task", "Must not be skipped", Some("worker"), None)
+            .task_post(
+                "Corrupt task",
+                "Must not be skipped",
+                Some("worker"),
+                None,
+                TaskQueueCaps::UNLIMITED,
+            )
             .await
             .unwrap();
         substrate
@@ -2539,7 +2732,7 @@ mod tests {
     async fn test_task_complete_stamps_finished_at() {
         let substrate = MemorySubstrate::open_in_memory(0.1).unwrap();
         let task_id = substrate
-            .task_post("t", "d", Some("worker"), None)
+            .task_post("t", "d", Some("worker"), None, TaskQueueCaps::UNLIMITED)
             .await
             .unwrap();
         let _ = substrate
@@ -2566,7 +2759,7 @@ mod tests {
     async fn test_task_complete_cannot_revive_cancelled_claim() {
         let substrate = MemorySubstrate::open_in_memory(0.1).unwrap();
         let task_id = substrate
-            .task_post("t", "d", Some("worker"), None)
+            .task_post("t", "d", Some("worker"), None, TaskQueueCaps::UNLIMITED)
             .await
             .unwrap();
         substrate
@@ -2650,7 +2843,7 @@ mod tests {
     async fn test_task_cancel_stamps_finished_at() {
         let substrate = MemorySubstrate::open_in_memory(0.1).unwrap();
         let task_id = substrate
-            .task_post("t", "d", Some("worker"), None)
+            .task_post("t", "d", Some("worker"), None, TaskQueueCaps::UNLIMITED)
             .await
             .unwrap();
 
@@ -2685,7 +2878,7 @@ mod tests {
     async fn test_task_reset_to_pending_clears_finished_at() {
         let substrate = MemorySubstrate::open_in_memory(0.1).unwrap();
         let task_id = substrate
-            .task_post("t", "d", Some("worker"), None)
+            .task_post("t", "d", Some("worker"), None, TaskQueueCaps::UNLIMITED)
             .await
             .unwrap();
 
@@ -2724,7 +2917,7 @@ mod tests {
     async fn test_task_reset_rejects_in_progress_to_prevent_duplicate_execution() {
         let substrate = MemorySubstrate::open_in_memory(0.1).unwrap();
         let task_id = substrate
-            .task_post("t", "d", Some("worker"), None)
+            .task_post("t", "d", Some("worker"), None, TaskQueueCaps::UNLIMITED)
             .await
             .unwrap();
         {
@@ -3119,5 +3312,310 @@ mod tests {
                 );
             }
         }
+    }
+
+    // -----------------------------------------------------------------
+    // `[queue]` backpressure (#8219)
+    //
+    // The three knobs were declared, documented as enforced and echoed by the
+    // config API for their whole life with no enforcement site. These tests are
+    // written against the SQL rather than through the kernel because the caps
+    // have to hold under concurrency, which only the statement shape decides.
+    // -----------------------------------------------------------------
+
+    /// `max_depth_global` refuses the post that would exceed it, and refuses it as a quota rather than an internal fault.
+    #[tokio::test]
+    async fn global_depth_cap_refuses_the_post_that_would_exceed_it() {
+        let substrate = MemorySubstrate::open_in_memory(0.1).unwrap();
+        let caps = TaskQueueCaps {
+            max_depth_per_agent: 0,
+            max_depth_global: 2,
+        };
+
+        for i in 0..2 {
+            substrate
+                .task_post(&format!("t{i}"), "d", None, None, caps)
+                .await
+                .unwrap_or_else(|e| panic!("post {i} should be accepted: {e}"));
+        }
+
+        let err = substrate
+            .task_post("over", "d", None, None, caps)
+            .await
+            .expect_err("the third post exceeds the cap");
+        assert!(
+            matches!(err, LibreFangError::QuotaExceeded(_)),
+            "a full queue is the caller's answer, not a kernel fault: {err:?}"
+        );
+        assert_eq!(substrate.task_list(Some("pending")).await.unwrap().len(), 2);
+    }
+
+    /// The per-agent cap counts only the assignee's own pending rows, so one agent filling its share leaves another's alone.
+    #[tokio::test]
+    async fn per_agent_depth_cap_counts_only_that_agent() {
+        let substrate = MemorySubstrate::open_in_memory(0.1).unwrap();
+        let caps = TaskQueueCaps {
+            max_depth_per_agent: 1,
+            max_depth_global: 0,
+        };
+
+        substrate
+            .task_post("alice-1", "d", Some("alice"), None, caps)
+            .await
+            .unwrap();
+        let err = substrate
+            .task_post("alice-2", "d", Some("alice"), None, caps)
+            .await
+            .expect_err("alice is at her cap");
+        assert!(matches!(err, LibreFangError::QuotaExceeded(_)), "{err:?}");
+
+        substrate
+            .task_post("bob-1", "d", Some("bob"), None, caps)
+            .await
+            .expect("bob's own queue is empty");
+    }
+
+    /// An unassigned task is in the shared pool, and `assigned_to` is stored as `''` for it — counting those under the per-agent cap would cap the whole pool at one agent's limit.
+    #[tokio::test]
+    async fn per_agent_depth_cap_skips_the_unassigned_pool() {
+        let substrate = MemorySubstrate::open_in_memory(0.1).unwrap();
+        let caps = TaskQueueCaps {
+            max_depth_per_agent: 1,
+            max_depth_global: 0,
+        };
+
+        for i in 0..5 {
+            substrate
+                .task_post(&format!("pool-{i}"), "d", None, None, caps)
+                .await
+                .unwrap_or_else(|e| panic!("unassigned post {i}: {e}"));
+        }
+        assert_eq!(substrate.task_list(Some("pending")).await.unwrap().len(), 5);
+    }
+
+    /// Only `pending` rows count towards a cap: a task that has been claimed or finished has left the queue, and counting it would make the cap unreachable after enough traffic.
+    #[tokio::test]
+    async fn a_claimed_task_no_longer_counts_towards_the_cap() {
+        let substrate = MemorySubstrate::open_in_memory(0.1).unwrap();
+        let caps = TaskQueueCaps {
+            max_depth_per_agent: 0,
+            max_depth_global: 1,
+        };
+
+        substrate
+            .task_post("first", "d", Some("worker"), None, caps)
+            .await
+            .unwrap();
+        substrate
+            .task_post("second", "d", Some("worker"), None, caps)
+            .await
+            .expect_err("the queue is full while the first is pending");
+
+        substrate
+            .task_claim("worker", Some("worker"))
+            .await
+            .unwrap()
+            .expect("a pending task to claim");
+
+        substrate
+            .task_post("second", "d", Some("worker"), None, caps)
+            .await
+            .expect("the claimed task has left the pending set");
+    }
+
+    /// Concurrent posts against a cap of N must not both land.
+    ///
+    /// Counting outside the write transaction is the obvious way to write this check and the wrong one: two posts would each read N-1 and each insert. An agent looping on the `task_post` tool — the case #8219 is about — reaches that race immediately.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_posts_cannot_both_win_the_last_slot() {
+        let substrate = std::sync::Arc::new(MemorySubstrate::open_in_memory(0.1).unwrap());
+        let caps = TaskQueueCaps {
+            max_depth_per_agent: 0,
+            max_depth_global: 1,
+        };
+
+        let mut handles = Vec::new();
+        for i in 0..8 {
+            let substrate = std::sync::Arc::clone(&substrate);
+            handles.push(tokio::spawn(async move {
+                substrate
+                    .task_post(&format!("racer-{i}"), "d", None, None, caps)
+                    .await
+                    .is_ok()
+            }));
+        }
+        let mut accepted = 0;
+        for handle in handles {
+            if handle.await.unwrap() {
+                accepted += 1;
+            }
+        }
+
+        assert_eq!(accepted, 1, "exactly one post may take the single slot");
+        assert_eq!(substrate.task_list(Some("pending")).await.unwrap().len(), 1);
+    }
+
+    /// `0` means unlimited, which is the shipped default and the contract every other `0` in `[queue]` already has.
+    #[tokio::test]
+    async fn a_zero_cap_does_not_limit_anything() {
+        let substrate = MemorySubstrate::open_in_memory(0.1).unwrap();
+        for i in 0..30 {
+            substrate
+                .task_post(
+                    &format!("t{i}"),
+                    "d",
+                    Some("worker"),
+                    None,
+                    TaskQueueCaps::UNLIMITED,
+                )
+                .await
+                .unwrap_or_else(|e| panic!("post {i} with no cap: {e}"));
+        }
+        assert_eq!(
+            substrate.task_list(Some("pending")).await.unwrap().len(),
+            30
+        );
+    }
+
+    /// `task_expire_stale` cancels an unclaimed task rather than deleting it, stamps `finished_at`, and records why.
+    ///
+    /// The stamp is not decoration: `task_prune_finished` filters on `finished_at IS NOT NULL`, so an expiry that skipped it would move the row to a terminal status that the retention sweep then refuses to reclaim forever — trading one unbounded-growth bug for another.
+    #[tokio::test]
+    async fn ttl_expiry_cancels_the_row_and_leaves_it_prunable() {
+        let substrate = MemorySubstrate::open_in_memory(0.1).unwrap();
+        let id = substrate
+            .task_post("unclaimed", "d", None, None, TaskQueueCaps::UNLIMITED)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            substrate.task_expire_stale(3600).await.unwrap(),
+            0,
+            "a task posted a moment ago is not stale"
+        );
+
+        tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+        assert_eq!(substrate.task_expire_stale(1).await.unwrap(), 1);
+
+        let task = substrate.task_get(&id).await.unwrap().expect("row kept");
+        assert_eq!(task["status"], "cancelled", "expired, not deleted");
+        assert!(
+            task["result"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("task_ttl_secs"),
+            "the row must say why: {task}"
+        );
+        assert_eq!(
+            substrate.task_prune_finished(0).await.unwrap(),
+            0,
+            "retention of 0 days still disables pruning"
+        );
+    }
+
+    /// A TTL of `0` disables expiry.
+    #[tokio::test]
+    async fn a_zero_ttl_expires_nothing() {
+        let substrate = MemorySubstrate::open_in_memory(0.1).unwrap();
+        substrate
+            .task_post("keep", "d", None, None, TaskQueueCaps::UNLIMITED)
+            .await
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        assert_eq!(substrate.task_expire_stale(0).await.unwrap(), 0);
+        assert_eq!(substrate.task_list(Some("pending")).await.unwrap().len(), 1);
+    }
+
+    /// The TTL is about work nobody picked up. A claimed task is in flight, and `task_reset_stuck` is the separate mechanism for a worker that stalled after claiming — cancelling here would kill running work.
+    #[tokio::test]
+    async fn ttl_expiry_leaves_an_in_progress_task_alone() {
+        let substrate = MemorySubstrate::open_in_memory(0.1).unwrap();
+        substrate
+            .task_post(
+                "claim me",
+                "d",
+                Some("worker"),
+                None,
+                TaskQueueCaps::UNLIMITED,
+            )
+            .await
+            .unwrap();
+        substrate
+            .task_claim("worker", Some("worker"))
+            .await
+            .unwrap()
+            .expect("claimable");
+
+        tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+        assert_eq!(
+            substrate.task_expire_stale(1).await.unwrap(),
+            0,
+            "an in-progress task is not an unclaimed one"
+        );
+    }
+
+    /// `task_list_page` windows in SQL and still reports the full match count, because a paging client needs both.
+    #[tokio::test]
+    async fn task_list_page_windows_in_sql_and_reports_the_match_count() {
+        let substrate = MemorySubstrate::open_in_memory(0.1).unwrap();
+        for i in 0..7 {
+            substrate
+                .task_post(&format!("t{i}"), "d", None, None, TaskQueueCaps::UNLIMITED)
+                .await
+                .unwrap();
+        }
+
+        let (page, total) = substrate
+            .task_list_page(None, None, Some(3), None)
+            .await
+            .unwrap();
+        assert_eq!(page.len(), 3);
+        assert_eq!(total, 7, "total is the match count, not the page length");
+
+        let (all, _) = substrate
+            .task_list_page(None, None, None, None)
+            .await
+            .unwrap();
+        let all_ids: Vec<&str> = all.iter().map(|t| t["id"].as_str().unwrap()).collect();
+        let (second, _) = substrate
+            .task_list_page(None, None, Some(3), Some(3))
+            .await
+            .unwrap();
+        let second_ids: Vec<&str> = second.iter().map(|t| t["id"].as_str().unwrap()).collect();
+        assert_eq!(
+            second_ids,
+            all_ids[3..6].to_vec(),
+            "offset must walk the same ordering the unpaged list returns"
+        );
+    }
+
+    /// The assignee filter is a `WHERE` clause, so both the page and the count follow it.
+    #[tokio::test]
+    async fn task_list_page_filters_by_assignee_in_sql() {
+        let substrate = MemorySubstrate::open_in_memory(0.1).unwrap();
+        for i in 0..3 {
+            substrate
+                .task_post(
+                    &format!("a{i}"),
+                    "d",
+                    Some("alice"),
+                    None,
+                    TaskQueueCaps::UNLIMITED,
+                )
+                .await
+                .unwrap();
+        }
+        substrate
+            .task_post("b0", "d", Some("bob"), None, TaskQueueCaps::UNLIMITED)
+            .await
+            .unwrap();
+
+        let (page, total) = substrate
+            .task_list_page(Some("pending"), Some("alice"), None, None)
+            .await
+            .unwrap();
+        assert_eq!(page.len(), 3);
+        assert_eq!(total, 3, "the count must follow the filter too");
+        assert!(page.iter().all(|t| t["assigned_to"] == "alice"));
     }
 }

@@ -19,12 +19,22 @@ impl kernel_handle::TaskQueue for LibreFangKernel {
         created_by: Option<&str>,
     ) -> Result<String, kernel_handle::KernelOpError> {
         use kernel_handle::KernelOpError;
+        // The one place `[queue] max_depth_per_agent` / `max_depth_global` reach the enqueue.
+        // Read per post rather than captured at boot so `POST /api/config/reload` moves the cap
+        // without a restart, which is how the section's other knobs already behave.
+        let caps = librefang_memory::TaskQueueCaps::from(&self.config_ref().queue);
         let task_id = self
             .memory
             .substrate
-            .task_post(title, description, assigned_to, created_by)
+            .task_post(title, description, assigned_to, created_by, caps)
             .await
-            .map_err(|e| KernelOpError::Internal(format!("Task post failed: {e}")))?;
+            // A depth cap being reached is the caller's answer, not a kernel fault: flattening it
+            // into `Internal` would reach the client as a scrubbed 500 and invite the retry the cap
+            // just refused. `QuotaExceeded` maps to 429 in `ApiErrorResponse`.
+            .map_err(|e| match e {
+                quota @ KernelOpError::QuotaExceeded(_) => quota,
+                other => KernelOpError::Internal(format!("Task post failed: {other}")),
+            })?;
 
         let event = librefang_types::event::Event::new(
             AgentId::new(), // system-originated
@@ -164,6 +174,21 @@ impl kernel_handle::TaskQueue for LibreFangKernel {
         self.memory
             .substrate
             .task_list(status)
+            .await
+            .map_err(|e| kernel_handle::KernelOpError::Internal(format!("Task list failed: {e}")))
+    }
+
+    /// Overrides the trait's filter-and-truncate default by pushing `WHERE` / `LIMIT` / `OFFSET` into the statement, so a paged request costs one materialised row per row returned rather than one per row in the table (#8219).
+    async fn task_list_page(
+        &self,
+        status: Option<&str>,
+        assigned_to: Option<&str>,
+        limit: Option<u32>,
+        offset: Option<u32>,
+    ) -> Result<(Vec<serde_json::Value>, u64), kernel_handle::KernelOpError> {
+        self.memory
+            .substrate
+            .task_list_page(status, assigned_to, limit, offset)
             .await
             .map_err(|e| kernel_handle::KernelOpError::Internal(format!("Task list failed: {e}")))
     }

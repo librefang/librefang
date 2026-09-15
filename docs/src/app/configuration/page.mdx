@@ -2187,9 +2187,9 @@ subagent_lane = 3
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `max_depth_per_agent` | u32 | `0` | Maximum queued tasks per agent. New tasks are rejected when full. `0` = unlimited. |
-| `max_depth_global` | u32 | `0` | Maximum total queued tasks across all agents. `0` = unlimited. |
-| `task_ttl_secs` | u64 | `3600` | Unprocessed tasks expire after this many seconds. `0` = unlimited. |
+| `max_depth_per_agent` | u32 | `0` | Maximum *pending* tasks assigned to one agent. A post that would exceed it is refused with `429 Too Many Requests`. Counted per assignee, so one agent filling its share does not block another; tasks with no assignee are in the shared pool and are not counted here. `0` = unlimited. |
+| `max_depth_global` | u32 | `0` | Maximum pending tasks across every agent and the unassigned pool. A post that would exceed it is refused with `429 Too Many Requests`. `0` = unlimited. |
+| `task_ttl_secs` | u64 | `3600` | A task still `pending` this many seconds after it was posted is moved to `cancelled`, with a `result` naming this setting. It is not deleted: the row stays visible until `task_queue_retention_days` reclaims it, so an expiry can be seen rather than inferred from a task that vanished. A task that has been claimed is in flight and is never expired here — `task_reset_stuck` is the separate mechanism for a worker that stalled after claiming. `0` = unlimited. |
 
 **`[queue.concurrency]` fields:**
 

@@ -129,21 +129,29 @@ pub async fn task_queue_status(
     }
 }
 
-/// GET /api/tasks/list — List tasks, optionally filtered by ?status=pending|in_progress|completed|failed.
+/// GET /api/tasks/list — List tasks, optionally filtered by ?status=pending|in_progress|completed|failed and windowed by ?limit= / ?offset=.
+///
+/// `total` is the number of rows matching the filter, not the length of the page, so a client that passes `?limit=` can tell how many more there are.
 pub async fn task_queue_list(
     State(state): State<Arc<AppState>>,
     _lang: Option<axum::Extension<RequestLanguage>>,
     Query(params): Query<HashMap<String, String>>,
 ) -> impl IntoResponse {
     let status_filter = params.get("status").map(|s| s.as_str());
-    match state.kernel.task_list(status_filter).await {
-        Ok(tasks) => {
-            let total = tasks.len();
-            (
-                StatusCode::OK,
-                Json(serde_json::json!({"tasks": tasks, "total": total})),
-            )
-        }
+    match state
+        .kernel
+        .task_list_page(
+            status_filter,
+            None,
+            parse_page_param(params.get("limit")),
+            parse_page_param(params.get("offset")),
+        )
+        .await
+    {
+        Ok((tasks, total)) => (
+            StatusCode::OK,
+            Json(serde_json::json!({"tasks": tasks, "total": total})),
+        ),
         Err(e) => map_kernel_op_err(e).into_json_tuple(),
     }
 }
@@ -219,38 +227,45 @@ fn resolve_task_creator(
         .or_else(|| supplied.map(str::to_string))
 }
 
-/// GET /api/tasks — List tasks with optional ?status=, ?assigned_to=, ?limit= filters.
+/// GET /api/tasks — List tasks with optional ?status=, ?assigned_to=, ?limit=, ?offset= filters.
 ///
 /// This is the primary RESTful list endpoint. The legacy /api/tasks/list endpoint
 /// remains for backwards compatibility.
+///
+/// Every filter and the window go into the SQL statement. They used to be applied to the fully materialised list — `?assigned_to=` by `retain`, `?limit=` by `truncate` — so asking for ten tasks assigned to one agent still built one `serde_json::Value` for every row in the table first, and `task_queue` only ever loses terminal rows (#8219).
+/// `total` keeps its meaning: rows matching the filters before the window, not the page length.
 pub async fn task_queue_list_root(
     State(state): State<Arc<AppState>>,
     _lang: Option<axum::Extension<RequestLanguage>>,
     Query(params): Query<HashMap<String, String>>,
 ) -> impl IntoResponse {
     let status_filter = params.get("status").map(|s| s.as_str());
-    match state.kernel.task_list(status_filter).await {
-        Ok(mut tasks) => {
-            // Filter by assigned_to if provided
-            if let Some(assignee) = params.get("assigned_to") {
-                tasks.retain(|t| t["assigned_to"].as_str().unwrap_or("") == assignee.as_str());
-            }
-            let total = truncate_task_page(&mut tasks, params.get("limit").map(String::as_str));
-            (
-                StatusCode::OK,
-                Json(serde_json::json!({"tasks": tasks, "total": total})),
-            )
-        }
+    let assignee_filter = params.get("assigned_to").map(|s| s.as_str());
+    match state
+        .kernel
+        .task_list_page(
+            status_filter,
+            assignee_filter,
+            parse_page_param(params.get("limit")),
+            parse_page_param(params.get("offset")),
+        )
+        .await
+    {
+        Ok((tasks, total)) => (
+            StatusCode::OK,
+            Json(serde_json::json!({"tasks": tasks, "total": total})),
+        ),
         Err(e) => map_kernel_op_err(e).into_json_tuple(),
     }
 }
 
-fn truncate_task_page(tasks: &mut Vec<serde_json::Value>, limit: Option<&str>) -> usize {
-    let total = tasks.len();
-    if let Some(limit) = limit.and_then(|value| value.parse::<usize>().ok()) {
-        tasks.truncate(limit);
-    }
-    total
+/// Parse a `?limit=` / `?offset=` value, ignoring one that is not a non-negative integer.
+///
+/// An unparseable value means "no window" rather than an error, which is what the previous
+/// `truncate_task_page` did with `parse::<usize>().ok()` — the endpoint has always treated a
+/// malformed page param as absent, and a 400 here would break clients that rely on that.
+fn parse_page_param(value: Option<&String>) -> Option<u32> {
+    value.and_then(|value| value.parse::<u32>().ok())
 }
 
 /// POST /api/tasks — Enqueue a task on behalf of an external caller.
@@ -367,19 +382,21 @@ pub async fn task_queue_patch(
 
 #[cfg(test)]
 mod tests {
-    use super::{resolve_task_creator, retry_not_applied_response, truncate_task_page};
+    use super::{parse_page_param, resolve_task_creator, retry_not_applied_response};
     use crate::middleware::{AuthenticatedApiUser, UserRole};
     use axum::http::StatusCode;
     use librefang_types::agent::UserId;
 
+    /// A malformed `?limit=` / `?offset=` has always meant "no window", because the previous
+    /// `truncate_task_page` parsed with `.ok()` and ignored a failure. Pushing the window into SQL
+    /// must not turn that into a 400 for a client that has been sending `?limit=all` for years.
     #[test]
-    fn limited_task_page_preserves_matching_total() {
-        let mut tasks = vec![serde_json::json!({}); 42];
-
-        let total = truncate_task_page(&mut tasks, Some("10"));
-
-        assert_eq!(total, 42);
-        assert_eq!(tasks.len(), 10);
+    fn a_page_param_that_is_not_a_number_is_ignored_rather_than_rejected() {
+        assert_eq!(parse_page_param(Some(&"10".to_string())), Some(10));
+        assert_eq!(parse_page_param(Some(&"0".to_string())), Some(0));
+        assert_eq!(parse_page_param(Some(&"all".to_string())), None);
+        assert_eq!(parse_page_param(Some(&"-1".to_string())), None);
+        assert_eq!(parse_page_param(None), None);
     }
 
     #[test]

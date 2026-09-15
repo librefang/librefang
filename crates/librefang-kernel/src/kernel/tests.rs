@@ -3542,7 +3542,13 @@ async fn test_task_board_sweep_resets_stuck_in_progress_task() {
 
     // Post and claim a task so status = in_progress.
     let task_id = mem
-        .task_post("Stuck work", "Worker will stall", Some("worker"), None)
+        .task_post(
+            "Stuck work",
+            "Worker will stall",
+            Some("worker"),
+            None,
+            librefang_memory::TaskQueueCaps::UNLIMITED,
+        )
         .await
         .expect("post");
     let claimed = mem
@@ -3581,6 +3587,87 @@ async fn test_task_board_sweep_resets_stuck_in_progress_task() {
     assert_eq!(pending.len(), 1);
     assert_eq!(pending[0]["id"], task_id);
     assert_eq!(pending[0]["assigned_to"], "");
+
+    kernel.shutdown();
+}
+
+/// `[queue] max_depth_global` reaches the kernel's enqueue, and reaching it answers `QuotaExceeded` rather than `Internal`.
+///
+/// The distinction is the whole point of wiring it: `Internal` reaches an HTTP client as a scrubbed 500, which says "the daemon broke" and invites an immediate retry of the request the cap just declined. `QuotaExceeded` maps to 429 (#8219).
+#[tokio::test(flavor = "multi_thread")]
+async fn queue_depth_cap_reaches_task_post_and_answers_as_a_quota() {
+    use librefang_runtime::kernel_handle::TaskQueue;
+
+    let dir = tempfile::tempdir().unwrap();
+    let home_dir = dir.path().to_path_buf();
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+
+    let mut config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    config.queue.max_depth_global = 1;
+    // The shipped 3600s default spawns a sweep at boot; off so it cannot race the assertions.
+    config.queue.task_ttl_secs = 0;
+    let kernel = Arc::new(LibreFangKernel::boot_with_config(config).expect("Kernel should boot"));
+    kernel.clone().set_self_handle();
+
+    kernel
+        .task_post("first", "body", None, None)
+        .await
+        .expect("the first post fits the cap");
+
+    let err = kernel
+        .task_post("second", "body", None, None)
+        .await
+        .expect_err("the second post exceeds max_depth_global = 1");
+    assert!(
+        matches!(
+            err,
+            librefang_runtime::kernel_handle::KernelOpError::QuotaExceeded(_)
+        ),
+        "a full queue must not be flattened into Internal: {err:?}"
+    );
+
+    kernel.shutdown();
+}
+
+/// The cap is read from the live config on every post, so `POST /api/config/reload` moves it without a restart.
+///
+/// Capturing it at boot would have made a knob in a section whose other fields hot-reload quietly restart-required, which is the class of bug `docs/operations/config-reload.md` exists to prevent.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_reloaded_queue_depth_cap_takes_effect_without_a_restart() {
+    use librefang_runtime::kernel_handle::TaskQueue;
+
+    let dir = tempfile::tempdir().unwrap();
+    let home_dir = dir.path().to_path_buf();
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+
+    let mut config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    config.queue.max_depth_global = 1;
+    config.queue.task_ttl_secs = 0;
+    let kernel = Arc::new(LibreFangKernel::boot_with_config(config).expect("Kernel should boot"));
+    kernel.clone().set_self_handle();
+
+    kernel.task_post("first", "body", None, None).await.unwrap();
+    kernel
+        .task_post("second", "body", None, None)
+        .await
+        .expect_err("at the cap");
+
+    let mut raised = (*kernel.config.load_full()).clone();
+    raised.queue.max_depth_global = 10;
+    kernel.config.store(Arc::new(raised));
+
+    kernel
+        .task_post("second", "body", None, None)
+        .await
+        .expect("the raised cap is in force on the next post");
 
     kernel.shutdown();
 }

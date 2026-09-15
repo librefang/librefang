@@ -1,0 +1,9 @@
+`[queue] max_depth_per_agent`, `max_depth_global` and `task_ttl_secs` now do what they have always been documented to do, instead of being three settings an operator could configure, read back from the API, and get nothing from.
+None of the three had an enforcement site anywhere in the codebase: every insert succeeded whatever the depth, no pending task ever expired, and because only terminal rows are pruned, `task_queue` grew for the life of the install — which then made every unpaged task-list request allocate one JSON object per row in the table.
+A post that would exceed a non-zero depth cap is refused with `429 Too Many Requests` and a message naming the cap it hit, counted in the same write transaction as the insert so two concurrent posts cannot both take the last slot.
+The per-agent cap is scoped to the assignee, and tasks with no assignee belong to the shared pool rather than to one bucket keyed on the empty string.
+A task still unclaimed after `task_ttl_secs` is moved to `cancelled` with a `result` naming the setting, not deleted: a task an operator queued and has not yet staffed should not vanish without a record, and `cancelled` is the terminal status the dashboard, the status counts and `task_queue_retention_days` already understand, so the row is reclaimed on the existing horizon and visible until then.
+A claimed task is in flight and is never expired this way.
+Note that `task_ttl_secs` ships as `3600`, so an install that has never set it will start seeing hour-old unclaimed tasks cancelled; set it to `0` to keep the previous behaviour of never expiring anything.
+`?limit=`, `?offset=` and `?assigned_to=` on `GET /api/tasks` and `GET /api/tasks/list` are now `WHERE` and `LIMIT` clauses rather than a `retain` and a `truncate` over a fully materialised list, so asking for ten tasks costs ten rows instead of the whole table.
+`total` keeps its meaning — rows matching the filters, not the length of the page (#8373) (@houko)
