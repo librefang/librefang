@@ -6,7 +6,7 @@ See `CLAUDE.md` for the full agent contract (worktree rules, hooks, integration 
 
 ## Stack
 
-- Language: Rust, edition 2021, MSRV 1.94.1
+- Language: Rust, edition 2021, MSRV 1.95.0
 - Async: tokio
 - Web: axum 0.8 (HTTP + WebSocket)
 - DB: SQLite via bundled rusqlite

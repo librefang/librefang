@@ -7,6 +7,6 @@
 # `rustup component add rust-docs` if you want offline std docs.
 
 [toolchain]
-channel = "1.94.1"
+channel = "1.95.0"
 profile = "minimal"
 components = ["rustfmt", "clippy"]

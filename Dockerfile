@@ -31,8 +31,8 @@ RUN npm install --global corepack@0.34.6 \
 # Stage 2: Build Rust binary
 # Pinned to a specific minor (not floating `rust:1-slim-bookworm`). Tracks the
 # workspace MSRV declared in Cargo.toml's [workspace.package].rust-version
-# (currently 1.94.1) so the build image is guaranteed to satisfy it.
-FROM rust:1.94-slim-bookworm AS builder
+# (currently 1.95.0) so the build image is guaranteed to satisfy it.
+FROM rust:1.95-slim-bookworm AS builder
 WORKDIR /build
 # libdbus-1-dev is required by libdbus-sys (transitive dep of keyring's
 # sync-secret-service feature, added in #3180). Without it the cargo build

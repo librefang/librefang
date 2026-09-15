@@ -1626,10 +1626,14 @@ fn fragment_matches_filter(frag: &MemoryFragment, f: &MemoryFilter) -> bool {
             continue;
         }
         match want {
-            serde_json::Value::String(_) | serde_json::Value::Bool(_) => {
-                if frag.metadata.get(key) != Some(want) {
-                    return false;
-                }
+            // Exact equality for strings and booleans, as a guard rather than a nested `if`:
+            // clippy's `collapsible_if` learned to see through a match arm in 1.95, and the
+            // workspace denies its warnings. An arm whose guard is false falls through to `_`,
+            // which is the same no-op the nested `if`'s else-branch was.
+            serde_json::Value::String(_) | serde_json::Value::Bool(_)
+                if frag.metadata.get(key) != Some(want) =>
+            {
+                return false;
             }
             serde_json::Value::Number(n) => {
                 // SQLite compares json_extract's numeric result under type

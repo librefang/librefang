@@ -31,7 +31,7 @@
 # package list grows, so should this image.
 
 # Base image: Debian **trixie** (not bookworm). The runtime Dockerfile
-# at the repo root uses `rust:1.94-slim-bookworm` because it links a
+# at the repo root uses `rust:1.95-slim-bookworm` because it links a
 # specific toolchain at build time and never invokes rustup later. The
 # *dev* image is different: `rust-toolchain.toml` pins
 # `channel = "stable"`, so rustup downloads whatever the current stable
