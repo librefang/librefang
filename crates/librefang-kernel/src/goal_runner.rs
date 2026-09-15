@@ -3981,6 +3981,66 @@ mod tests {
         assert_eq!(second["learnings"][0].as_str(), Some("second run lesson"));
     }
 
+    /// The dedup at the `GOAL_LEARNED:` fold-in must cover `initial_learnings`
+    /// too, not just what the current execution captures: `learnings` is
+    /// seeded from `initial_learnings` before the loop starts, and the two
+    /// live in the same vector from that point on.
+    /// A resumed run whose agent re-emits a lesson it already knows about —
+    /// entirely plausible, since the prompt has no memory of what a prior
+    /// segment already learned — must not duplicate it in the persisted
+    /// document, because `structured_set` replaces rather than appends.
+    #[tokio::test]
+    async fn resumed_run_does_not_duplicate_a_seeded_learning() {
+        let substrate = Arc::new(MemorySubstrate::open_in_memory(0.01).unwrap());
+        let agent_id = AgentId::new();
+        let goal = test_goal(agent_id);
+        seed_goal(&substrate, &goal);
+        let (_tx, rx) = watch::channel(false);
+        let state = mk_state(goal.id, agent_id, 1);
+
+        // The agent re-emits the same lesson the run was seeded with, then
+        // signals completion so the loop exits after a single tick.
+        let send = |_a: AgentId, _p: String| async move {
+            Ok("GOAL_LEARNED: already known\nGOAL_DONE".to_string())
+        };
+        run_loop(
+            goal.id,
+            agent_id,
+            1,
+            substrate.clone(),
+            send,
+            no_learnings_hook,
+            no_evaluator,
+            true,
+            state.clone(),
+            Arc::new(StopFlag::default()),
+            Arc::new(AtomicBool::new(false)),
+            rx,
+            None,
+            vec!["already known".to_string()],
+        )
+        .await;
+
+        let stored = substrate
+            .structured_get(goals_storage_agent_id(), &learnings_key_for(&state))
+            .unwrap()
+            .expect("learnings must be persisted");
+        let learnings: Vec<String> = stored["learnings"]
+            .as_array()
+            .expect("learnings must be an array")
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(
+            learnings
+                .iter()
+                .filter(|l| l.as_str() == "already known")
+                .count(),
+            1,
+            "a lesson already present in the seeded list must not be duplicated: {learnings:?}"
+        );
+    }
+
     /// A permanently broken condition — deleted agent, revoked key, network
     /// down — fails identically on every tick. Without a breaker the loop
     /// spends its whole iteration budget rediscovering that.
