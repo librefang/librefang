@@ -2681,15 +2681,29 @@ mod tests {
 
         // The write is spawned so the request never waits on the filesystem;
         // poll for the file rather than assuming a fixed delay is enough.
+        //
+        // The budget is a scheduling allowance, not a deadline the daemon is
+        // held to: it was two seconds, which this test lost under a loaded
+        // `cargo nextest` run and reported as a hint that never arrived. The
+        // loop breaks on the first 20 ms tick that finds the file, so a
+        // generous ceiling costs nothing when the write lands promptly — it
+        // only decides how long a genuine absence is given before it is called
+        // one.
+        const BUDGET: std::time::Duration = std::time::Duration::from_secs(30);
+        const TICK: std::time::Duration = std::time::Duration::from_millis(20);
         let hint_path = tmp.path().join(API_KEY_HINT_FILE);
-        for _ in 0..100 {
-            if hint_path.exists() {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        let mut waited = std::time::Duration::ZERO;
+        while !hint_path.exists() && waited < BUDGET {
+            tokio::time::sleep(TICK).await;
+            waited += TICK;
         }
-        let body = std::fs::read_to_string(&hint_path)
-            .expect("authenticating with a plaintext master key must leave a hint");
+        let body = std::fs::read_to_string(&hint_path).unwrap_or_else(|error| {
+            panic!(
+                "authenticating with a plaintext master key must leave a hint at {} \
+                 within {BUDGET:?}; gave up after {waited:?}: {error}",
+                hint_path.display()
+            )
+        });
         assert!(body.contains("api_key_hash"));
     }
 
