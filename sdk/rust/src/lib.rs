@@ -1003,6 +1003,18 @@ impl AgentsResource {
         .await
     }
 
+    pub async fn save_agent_as_agent_type(&self, id: &str, data: Value) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::POST,
+            &["api", "agents", id, "save-as-agent-type"],
+            Some(data),
+            &[],
+        )
+        .await
+    }
+
     pub async fn get_agent_session(&self, id: &str, session_id: Option<&str>) -> Result<Value> {
         do_req(
             &self.client,

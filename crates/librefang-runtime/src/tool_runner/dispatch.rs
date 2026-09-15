@@ -2004,6 +2004,38 @@ pub async fn execute_tool_with_sender_account(
     }
 
     debug!(tool_name, "Executing tool");
+
+    // #7744: structured identity record so integration tests can assert that the
+    // authenticated owner survived all the way to dispatch.
+    //
+    // `debug!` and not `info!`, on volume: this fires once per tool call.
+    //
+    // Recorded plainly because it is a real cost and not only a tidy-up: the
+    // audit log does **not** carry this attribution. A successful turn writes
+    // `AuditAction::AgentMessage` through `record(...)`, which passes
+    // `user_id: None`, and `AuditAction::ToolInvoke` is never written on the
+    // agent-loop path at all. With the daemon's default `log_level = "info"`
+    // this line was the only place `(tool, owner, sender_id)` appeared together
+    // for a turn that worked, and at `debug` it stops being emitted by default.
+    //
+    // An operator who needs it can raise `librefang::tool_identity` on the hot
+    // log filter without a restart, which is why the level is acceptable where
+    // the comment that used to sit here — claiming ownership was the audit log's
+    // job — was not: it described a mechanism that does not exist.
+    //
+    // The test is unaffected either way: it installs a bare
+    // `tracing_subscriber::registry()` with no level filter.
+    {
+        let owner = acting_principal.and_then(|p| p.as_user_id()).map(|u| u.0);
+        debug!(
+            target: "librefang::tool_identity",
+            tool = tool_name,
+            owner = ?owner,
+            sender_id = ?sender_id,
+            "tool dispatch identity"
+        );
+    }
+
     // `parsed_session_id` is computed once at the top of this fn so
     // both the deferred-approval payload (v36 H1 fix) and this
     // ToolExecContext below see the same SessionId.

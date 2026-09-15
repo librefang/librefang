@@ -1,4 +1,5 @@
 use super::*;
+use librefang_types::agent_type_store;
 
 // ---------------------------------------------------------------------------
 // Shared manifest resolution helper
@@ -40,26 +41,39 @@ async fn resolve_manifest(
                     message: t.t("api-error-template-invalid-name"),
                 });
             }
-            let tmpl_path = state
-                .kernel
-                .config_ref()
-                .home_dir
+            let home = &state.kernel.config_ref().home_dir;
+            // The real agent-type store comes first — `agent_type_path_in` is
+            // the same resolver `save-as-agent-type` writes through below, so
+            // a template this endpoint can spawn from is exactly the set
+            // `GET /api/agent-types` lists. The workspace path is kept as a
+            // fallback for backward compatibility with callers that pass an
+            // existing agent's own name as `template` expecting its live
+            // `agent.toml` to be read directly.
+            let agent_type_path = agent_type_store::agent_type_path_in(home, &safe_name);
+            let workspace_path = home
                 .join("workspaces")
                 .join("agents")
                 .join(&safe_name)
                 .join("agent.toml");
             // Use tokio::fs to avoid blocking in an async context
-            match tokio::fs::read_to_string(&tmpl_path).await {
+            match tokio::fs::read_to_string(&agent_type_path).await {
                 Ok(content) => {
                     used_template = Some(safe_name.clone());
                     content
                 }
-                Err(_) => {
-                    let t = ErrorTranslator::new(lang);
-                    return Err(ManifestError {
-                        message: t.t_args("api-error-template-not-found", &[("name", &safe_name)]),
-                    });
-                }
+                Err(_) => match tokio::fs::read_to_string(&workspace_path).await {
+                    Ok(content) => {
+                        used_template = Some(safe_name.clone());
+                        content
+                    }
+                    Err(_) => {
+                        let t = ErrorTranslator::new(lang);
+                        return Err(ManifestError {
+                            message: t
+                                .t_args("api-error-template-not-found", &[("name", &safe_name)]),
+                        });
+                    }
+                },
             }
         } else {
             let t = ErrorTranslator::new(lang);
@@ -1521,6 +1535,126 @@ pub async fn reload_agent_manifest(
             (
                 status,
                 Json(serde_json::json!({"error": kernel_err_body(status, &e, &t)})),
+            )
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Save agent as agent type
+// ---------------------------------------------------------------------------
+
+#[derive(serde::Deserialize)]
+pub struct SaveAsAgentTypeRequest {
+    pub template_name: String,
+}
+
+/// POST /api/agents/{id}/save-as-agent-type — snapshot a live agent's manifest
+/// into a reusable agent-type template file.
+///
+/// Not gated by [`super::guard_provisioned_agent`]: that guard refuses writes
+/// that would change the *definition* of a provisioned agent, and this
+/// handler never touches the source agent's own manifest — it only reads it
+/// and writes a new, separate `agent-types/<name>.toml`. The closest sibling,
+/// [`super::clone_agent`], follows the same "read source, write something
+/// new" shape and carries no such guard either.
+///
+/// Not exposed to the `User` role: `save-as-agent-type` is absent from the
+/// `User`-tier POST allowlist in `middleware::user_role_allows_request`, so
+/// only Admin+ callers reach this handler at all — unlike `/clone`, which
+/// deliberately carves out `User` access and therefore needs its own
+/// `can_access_agent` ownership check to stop a non-owner from cloning an
+/// arbitrary agent by id. An Admin+ caller already has access to every
+/// agent's manifest through other routes, so no equivalent check is needed
+/// here; widening this endpoint to `User` later would need that check added
+/// alongside it.
+#[utoipa::path(
+    post,
+    path = "/api/agents/{id}/save-as-agent-type",
+    tag = "agents",
+    params(("id" = String, Path, description = "Agent ID")),
+    request_body(content = crate::types::JsonObject, description = "template_name to save as"),
+    responses(
+        (status = 201, description = "Agent type created from live agent"),
+        (status = 400, description = "Malformed agent id, or a template_name outside [A-Za-z0-9_-]{1,64}"),
+        (status = 404, description = "Agent not found"),
+        (status = 409, description = "Template name already taken, or it belongs to a different live agent"),
+        (status = 500, description = "The agent type could not be rendered or written")
+    )
+)]
+pub async fn save_agent_as_agent_type(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    lang: Option<axum::Extension<RequestLanguage>>,
+    Json(req): Json<SaveAsAgentTypeRequest>,
+) -> impl IntoResponse {
+    let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
+    let agent_id: AgentId = match id.parse() {
+        Ok(id) => id,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": t.t("api-error-agent-invalid-id")})),
+            );
+        }
+    };
+
+    let entry = match state.kernel.agent_registry().get(agent_id) {
+        Some(e) => e,
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
+            );
+        }
+    };
+
+    let template_name = req.template_name.trim().to_string();
+
+    let mut manifest = entry.manifest.clone();
+    manifest.name = template_name.clone();
+    // Cleared for the same reason `clone_agent` clears it on the destination
+    // side: a template spawned from later must get a fresh workspace, not
+    // point new agents at the SOURCE agent's own workspace directory.
+    manifest.workspace = None;
+
+    let home = &state.kernel.config_ref().home_dir;
+    // The source agent's own name is the one this save is allowed to collide
+    // with; every other live agent's name would shadow it in the catalog.
+    match agent_type_store::create_agent_type_from_manifest_in(
+        home,
+        &template_name,
+        &manifest,
+        &entry.manifest.name,
+    ) {
+        Ok(_rendered) => (
+            StatusCode::CREATED,
+            Json(serde_json::json!({
+                "name": template_name,
+                "description": manifest.description,
+            })),
+        ),
+        Err(librefang_types::agent_type_store::CreateAgentTypeError::InvalidName) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": t.t("api-error-template-invalid-name")})),
+        ),
+        Err(librefang_types::agent_type_store::CreateAgentTypeError::NameTaken) => (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({
+                "error": t.t_args("api-error-agent-type-exists", &[("name", &template_name)])
+            })),
+        ),
+        Err(librefang_types::agent_type_store::CreateAgentTypeError::ShadowsLiveAgent) => (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({
+                "error": t.t_args("api-error-agent-type-name-taken", &[("name", &template_name)])
+            })),
+        ),
+        Err(librefang_types::agent_type_store::CreateAgentTypeError::Io(e)) => {
+            tracing::error!("failed to save agent as agent type: {e}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": t.t("api-error-internal")})),
             )
         }
     }

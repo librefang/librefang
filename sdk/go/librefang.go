@@ -475,6 +475,10 @@ func (r *AgentsResource) ListAgentRuntime(id string) (interface{}, error) {
 	return r.client.request("GET", fmt.Sprintf("/api/agents/%s/runtime", id), nil, nil)
 }
 
+func (r *AgentsResource) SaveAgentAsAgentType(id string, data map[string]interface{}) (interface{}, error) {
+	return r.client.request("POST", fmt.Sprintf("/api/agents/%s/save-as-agent-type", id), data, nil)
+}
+
 func (r *AgentsResource) GetAgentSession(id string, query map[string]string) (interface{}, error) {
 	return r.client.request("GET", fmt.Sprintf("/api/agents/%s/session", id), nil, query)
 }

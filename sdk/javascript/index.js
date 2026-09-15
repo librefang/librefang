@@ -328,6 +328,10 @@ class AgentsResource {
     return this._c._request("GET", `/api/agents/${id}/runtime`);
   }
 
+  async saveAgentAsAgentType(id, data) {
+    return this._c._request("POST", `/api/agents/${id}/save-as-agent-type`, data, undefined);
+  }
+
   async getAgentSession(id, query) {
     return this._c._request("GET", `/api/agents/${id}/session`, undefined, query);
   }

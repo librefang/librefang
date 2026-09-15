@@ -334,6 +334,9 @@ class _AgentsResource(_Resource):
     def list_agent_runtime(self, id: str):
         return self._c._request("GET", f"/api/agents/{id}/runtime")
 
+    def save_agent_as_agent_type(self, id: str, **data):
+        return self._c._request("POST", f"/api/agents/{id}/save-as-agent-type", data)
+
     def get_agent_session(self, id: str, session_id: Any = None):
         return self._c._request("GET", f"/api/agents/{id}/session", None, query={"session_id": session_id})
 

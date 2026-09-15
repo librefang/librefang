@@ -53,12 +53,26 @@ pub fn agent_type_path_in(home_dir: &std::path::Path, name: &str) -> PathBuf {
 
 /// Live agent workspaces — the second, read-only source of the agent-type catalog.
 pub fn workspace_agents_dir() -> PathBuf {
-    librefang_home().join("workspaces").join("agents")
+    workspace_agents_dir_in(&librefang_home())
+}
+
+/// Live agent workspaces under an explicitly supplied home directory.
+pub fn workspace_agents_dir_in(home_dir: &std::path::Path) -> PathBuf {
+    home_dir.join("workspaces").join("agents")
 }
 
 /// The `agent.toml` of a live agent, which the catalog lists but this store never writes.
 pub fn workspace_agent_manifest_path(name: &str) -> PathBuf {
-    workspace_agents_dir().join(name).join("agent.toml")
+    workspace_agent_manifest_path_in(&librefang_home(), name)
+}
+
+/// The `agent.toml` of a live agent under an explicitly supplied home directory.
+///
+/// Added for the same reason [`agent_type_path_in`] exists (#6699): a caller holding a `KernelConfig::home_dir` must be able to ask this question without the answer detouring through `LIBREFANG_HOME`, or the shadow check below would consult a different tree than the write it is guarding.
+pub fn workspace_agent_manifest_path_in(home_dir: &std::path::Path, name: &str) -> PathBuf {
+    workspace_agents_dir_in(home_dir)
+        .join(name)
+        .join("agent.toml")
 }
 
 /// Validate an agent-type name before it is joined onto the store directory.
@@ -177,6 +191,59 @@ pub fn create_agent_type(
         manifest,
         manifest_toml: rendered,
     })
+}
+
+/// Create a new agent type from an already-complete manifest, refusing to overwrite anything, resolved against an explicit `home_dir` rather than `LIBREFANG_HOME`.
+///
+/// This is `save-as-agent-type`'s landing: the caller already has a full `AgentManifest` in hand — a live agent's own, snapshotted — rather than a flat [`AgentTypeSpec`] to expand through [`AgentTypeSpec::into_new_manifest`], so it skips straight to the same claim-then-write discipline [`create_agent_type`] uses instead of duplicating it inline in the API handler.
+///
+/// The `_in` spelling matches [`agent_type_path_in`] and [`agent_types_dir_in`]: the API layer already holds `state.kernel.config_ref().home_dir` by the time it calls this, and resolving through `LIBREFANG_HOME` a second time here would let the two diverge for any caller that built its `KernelConfig` with an explicit `home_dir` — an embedder, or a test harness pinning both independently.
+///
+/// `snapshot_of` is the name of the live agent being snapshotted, and it is the one name exempt from the [`CreateAgentTypeError::ShadowsLiveAgent`] check [`create_agent_type`] applies.
+///
+/// Saving an agent under its own name is the case `save-as-agent-type` exists for, and that name necessarily already has a workspace on disk, so an unconditional check would reject the feature's main path. Every OTHER live agent's name stays refused, for the reason [`CreateAgentTypeError::ShadowsLiveAgent`] documents: the type wins subsequent catalog reads and leaves that agent unreachable. Since `resolve_manifest` now prefers this store over the workspace directory, it wins outright rather than merely usually.
+pub fn create_agent_type_from_manifest_in(
+    home_dir: &std::path::Path,
+    name: &str,
+    manifest: &AgentManifest,
+    snapshot_of: &str,
+) -> Result<String, CreateAgentTypeError> {
+    validate_agent_type_name(name).map_err(|_| CreateAgentTypeError::InvalidName)?;
+    if name != snapshot_of && workspace_agent_manifest_path_in(home_dir, name).exists() {
+        return Err(CreateAgentTypeError::ShadowsLiveAgent);
+    }
+
+    let rendered = toml::to_string_pretty(manifest).map_err(|e| {
+        CreateAgentTypeError::Io(format!("failed to render agent type '{name}': {e}"))
+    })?;
+
+    let dir = agent_types_dir_in(home_dir);
+    std::fs::create_dir_all(&dir).map_err(|e| {
+        CreateAgentTypeError::Io(format!("failed to create {}: {e}", dir.display()))
+    })?;
+
+    let path = agent_type_path_in(home_dir, name);
+    // Same TOCTOU concern `create_agent_type` documents: claim the path atomically before writing, so two concurrent saves of the same name never let the second silently replace the first.
+    match std::fs::File::create_new(&path) {
+        Ok(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            return Err(CreateAgentTypeError::NameTaken)
+        }
+        Err(e) => {
+            return Err(CreateAgentTypeError::Io(format!(
+                "failed to claim agent type '{name}': {e}"
+            )))
+        }
+    }
+
+    if let Err(e) = atomic_write(&path, rendered.as_bytes()) {
+        let _ = std::fs::remove_file(&path);
+        return Err(CreateAgentTypeError::Io(format!(
+            "failed to write agent type '{name}': {e}"
+        )));
+    }
+
+    Ok(rendered)
 }
 
 /// Serialize a manifest over an agent type that already exists, in one atomic rename.
