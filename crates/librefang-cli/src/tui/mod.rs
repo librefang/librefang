@@ -796,6 +796,58 @@ impl App {
                     );
                 }
             },
+            AppEvent::RegistryRestoreResult { name, ok, message } => {
+                self.templates.status_msg = if ok {
+                    crate::i18n::t_args(
+                        "tui-templates-restore-ok",
+                        &[("name", &name), ("message", &message)],
+                    )
+                } else {
+                    crate::i18n::t_args(
+                        "tui-templates-restore-fail",
+                        &[("name", &name), ("message", &message)],
+                    )
+                };
+                if ok {
+                    self.refresh_templates();
+                }
+            }
+            AppEvent::TemplateHistoryLoaded { name, result } => {
+                self.templates.history_name = name;
+                self.templates.version_history.clear();
+                self.templates.history_error = None;
+                match result {
+                    Ok(rows) => {
+                        self.templates.version_history = rows;
+                    }
+                    Err(message) => {
+                        self.templates.history_error = Some(message);
+                    }
+                }
+                self.templates.showing_history = true;
+                self.templates.history_list = ratatui::widgets::ListState::default();
+                if !self.templates.version_history.is_empty() {
+                    self.templates.history_list.select(Some(0));
+                }
+                self.templates.loading = false;
+            }
+            AppEvent::TemplateVersionRestoreResult { name, ok, message } => {
+                self.templates.status_msg = if ok {
+                    crate::i18n::t_args(
+                        "tui-templates-restore-ok",
+                        &[("name", &name), ("message", &message)],
+                    )
+                } else {
+                    crate::i18n::t_args(
+                        "tui-templates-restore-fail",
+                        &[("name", &name), ("message", &message)],
+                    )
+                };
+                if ok {
+                    self.templates.showing_history = false;
+                    self.refresh_templates();
+                }
+            }
             AppEvent::TemplateProvidersLoaded(providers) => {
                 self.templates.providers = providers;
             }
@@ -1514,7 +1566,13 @@ impl App {
             Tab::Skills => self.refresh_skills(),
             Tab::Hands => self.refresh_hands(),
             Tab::Extensions => self.refresh_extensions(),
-            Tab::Templates => self.refresh_templates(),
+            Tab::Templates => {
+                // The history overlay is a plain field that outlives the tab, same as
+                // Settings' sub-tab below — Esc is not the only way out of it.
+                self.templates.showing_history = false;
+                self.templates.history_error = None;
+                self.refresh_templates();
+            }
             Tab::Security => self.refresh_security(),
             Tab::Audit => self.refresh_audit(),
             Tab::Usage => self.refresh_usage(),
@@ -2403,6 +2461,39 @@ impl App {
                     crate::i18n::t_args("tui-templates-promoting", &[("name", &name)]);
                 if let Some(backend) = self.backend.to_ref() {
                     event::spawn_promote_agent_type(backend, name, self.event_tx.clone());
+                }
+            }
+            templates::TemplatesAction::RestoreFromRegistry { name } => {
+                if let Some(backend) = self.backend.to_ref() {
+                    self.templates.status_msg =
+                        crate::i18n::t_args("tui-templates-restoring", &[("name", &name)]);
+                    event::spawn_restore_from_registry(backend, name, self.event_tx.clone());
+                } else {
+                    self.templates.status_msg = crate::i18n::t("tui-templates-restore-daemon-only");
+                }
+            }
+            templates::TemplatesAction::ShowVersionHistory { name } => {
+                if let Some(backend) = self.backend.to_ref() {
+                    self.templates.status_msg =
+                        crate::i18n::t_args("tui-templates-history-loading", &[("name", &name)]);
+                    self.templates.loading = true;
+                    event::spawn_fetch_template_history(backend, name, self.event_tx.clone());
+                } else {
+                    self.templates.status_msg = crate::i18n::t("tui-templates-history-daemon-only");
+                }
+            }
+            templates::TemplatesAction::RestoreTemplateVersion { name, version_id } => {
+                if let Some(backend) = self.backend.to_ref() {
+                    self.templates.status_msg =
+                        crate::i18n::t_args("tui-templates-version-restoring", &[("name", &name)]);
+                    event::spawn_restore_template_version(
+                        backend,
+                        name,
+                        version_id,
+                        self.event_tx.clone(),
+                    );
+                } else {
+                    self.templates.status_msg = crate::i18n::t("tui-templates-restore-daemon-only");
                 }
             }
         }
