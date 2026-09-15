@@ -4,14 +4,13 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { QueryClientProvider } from "@tanstack/react-query";
 import { AgentTypesPage } from "./AgentTypesPage";
 import { useAgentType, useAgentTypes, useAgentTypeHistory } from "../lib/queries/agentTypes";
-import { useAgents, useTools } from "../lib/queries/agents";
+import { useTools } from "../lib/queries/agents";
 import { useSkills } from "../lib/queries/skills";
 import {
   useCreateAgentType,
   useDeleteAgentType,
   usePromoteAgentType,
   useRestoreTemplateVersion,
-  useSpawnEphemeral,
 } from "../lib/mutations/agentTypes";
 import * as agentTypeMutations from "../lib/mutations/agentTypes";
 import { ApiError } from "../lib/http/errors";
@@ -31,7 +30,6 @@ vi.mock("../lib/queries/agentTypes", () => ({
 }));
 
 vi.mock("../lib/queries/agents", () => ({
-  useAgents: vi.fn(),
   useTools: vi.fn(),
 }));
 
@@ -48,15 +46,20 @@ vi.mock("../lib/mutations/agentTypes", () => ({
   useDeleteAgentType: vi.fn(),
   usePromoteAgentType: vi.fn(),
   useRestoreTemplateVersion: vi.fn(),
-  useSpawnEphemeral: vi.fn(),
   useUpdateAgentType: vi.fn(),
   useUpdateAgentTypeToml: vi.fn(),
 }));
+
+// `useNavigate` is hoisted out of the factory because `vi.mock` is hoisted
+// above the imports: the component calls it on every row press, so the stub has
+// to exist before the factory runs.
+const { navigateSpy } = vi.hoisted(() => ({ navigateSpy: vi.fn() }));
 
 vi.mock("@tanstack/react-router", () => ({
   Link: ({ children, ...rest }: { children: React.ReactNode } & Record<string, unknown>) => (
     <a {...(rest as Record<string, unknown>)}>{children}</a>
   ),
+  useNavigate: () => navigateSpy,
 }));
 
 // motion/react drives Modal and ConfirmDialog through async animation hooks
@@ -120,6 +123,16 @@ const TYPE: AgentTemplate = {
   editable: true,
 };
 
+/** A second row, only ever rendered when a test needs two of them at once. */
+const OTHER_TYPE: AgentTemplate = {
+  name: "analyst",
+  description: "Sifts numbers",
+  provider: "anthropic",
+  model: "claude-sonnet-5",
+  source: "agent-type",
+  editable: true,
+};
+
 const DETAIL: AgentTypeDetail = {
   name: "researcher",
   source: "agent-type",
@@ -154,9 +167,12 @@ function mockQuery<T>(data: T) {
 }
 
 /** The promote mutation is the only one a test ever varies. */
-function renderPage(promote: { mutateAsync: ReturnType<typeof vi.fn>; isPending: boolean }) {
+function renderPage(
+  promote: { mutateAsync: ReturnType<typeof vi.fn>; isPending: boolean },
+  types: AgentTemplate[] = [TYPE],
+) {
   vi.mocked(useAgentTypes).mockReturnValue(
-    mockQuery([TYPE]) as unknown as ReturnType<typeof useAgentTypes>,
+    mockQuery(types) as unknown as ReturnType<typeof useAgentTypes>,
   );
   vi.mocked(useAgentType).mockReturnValue(
     mockQuery(DETAIL) as unknown as ReturnType<typeof useAgentType>,
@@ -164,7 +180,6 @@ function renderPage(promote: { mutateAsync: ReturnType<typeof vi.fn>; isPending:
   vi.mocked(useAgentTypeHistory).mockReturnValue(
     mockQuery({ versions: [] }) as unknown as ReturnType<typeof useAgentTypeHistory>,
   );
-  vi.mocked(useAgents).mockReturnValue(mockQuery([]) as unknown as ReturnType<typeof useAgents>);
   vi.mocked(useTools).mockReturnValue(mockQuery([]) as unknown as ReturnType<typeof useTools>);
   vi.mocked(useSkills).mockReturnValue(mockQuery([]) as unknown as ReturnType<typeof useSkills>);
   // Stub both spellings of the manifest-write hook rather than picking one:
@@ -175,7 +190,6 @@ function renderPage(promote: { mutateAsync: ReturnType<typeof vi.fn>; isPending:
     useCreateAgentType,
     useDeleteAgentType,
     useRestoreTemplateVersion,
-    useSpawnEphemeral,
     mutations.useUpdateAgentType,
     mutations.useUpdateAgentTypeToml,
   ]) {
@@ -206,6 +220,44 @@ function previewButton() {
 function promoteButton() {
   return screen.getByRole("button", { name: PROMOTE_LABEL });
 }
+
+const RUN_LABEL = "Create Agent";
+
+// Run on a type instantiates it. It used to open a modal asking which existing
+// agent to fork (#6699), which answers a different question than the button
+// asks: the operator pressed play on a *type*, and the flow that turns a type
+// into an agent is the create drawer. Landing anywhere else makes them pick the
+// same type a second time, from a dropdown, on the next page.
+describe("AgentTypesPage run", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    useUIStore.setState({ toasts: [] });
+  });
+
+  it("opens the create flow with this type already selected", () => {
+    renderPage(idle);
+    // The accessible name carries the row's own type, not just the verb, so
+    // this also pins that the control is distinguishable per row.
+    fireEvent.click(screen.getByRole("button", { name: `${RUN_LABEL}: ${TYPE.name}` }));
+    expect(navigateSpy).toHaveBeenCalledWith({
+      to: "/agents",
+      search: { template: TYPE.name },
+    });
+  });
+
+  // With one row on screen the test above cannot tell a name taken from the row
+  // apart from one taken from the list it happens to be the first of. Putting
+  // the wanted row second closes that: a name read off the list, or off the
+  // first row, now sends `analyst` and fails here.
+  it("takes the name from the row it was pressed on", () => {
+    renderPage(idle, [OTHER_TYPE, TYPE]);
+    fireEvent.click(screen.getByRole("button", { name: `${RUN_LABEL}: ${TYPE.name}` }));
+    expect(navigateSpy).toHaveBeenCalledWith({
+      to: "/agents",
+      search: { template: TYPE.name },
+    });
+  });
+});
 
 describe("AgentTypesPage promotion", () => {
   beforeEach(() => {

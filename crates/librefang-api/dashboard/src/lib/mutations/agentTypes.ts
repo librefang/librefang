@@ -5,10 +5,9 @@ import {
   deleteAgentType,
   promoteAgentType,
   restoreTemplateVersion,
-  spawnEphemeral,
 } from "../http/client";
-import type { AgentTypeSpec, SpawnEphemeralRequest } from "../../api";
-import { agentTypeKeys, budgetKeys, usageKeys } from "../queries/keys";
+import type { AgentTypeSpec } from "../../api";
+import { agentTypeKeys } from "../queries/keys";
 
 export function useCreateAgentType() {
   const qc = useQueryClient();
@@ -78,23 +77,14 @@ export function useRestoreTemplateVersion() {
   });
 }
 
-/**
- * Run one ephemeral worker and return what it produced (#6699).
- *
- * The worker leaves nothing behind — no registry entry, no session, no
- * workspace — so there is no agent list to refresh afterwards. What it does
- * leave is spend on the *parent's* ledger, which is why usage and budget are
- * the two domains invalidated here: a Quick Run that silently cost money and
- * left the budget widget showing the pre-run figure is the exact surprise this
- * feature must not produce.
- */
-export function useSpawnEphemeral() {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: (body: SpawnEphemeralRequest) => spawnEphemeral(body),
-    onSettled: () => {
-      qc.invalidateQueries({ queryKey: usageKeys.all });
-      qc.invalidateQueries({ queryKey: budgetKeys.all });
-    },
-  });
-}
+// The `useSpawnEphemeral` hook lived here. Its only caller was the agent-types
+// page's Quick Run modal, and #8384 replaced that control with one that
+// instantiates the type instead, so the hook had no consumer left.
+//
+// The endpoint it wrapped (`POST /api/agents/spawn-ephemeral`) is untouched and
+// still reachable — over HTTP directly, and in-turn through the `agent_spawn`
+// tool with `ephemeral: true`. The CLI is not on that list: no subcommand
+// forwards to it.
+//
+// `spawnEphemeral` itself stays in `api.ts`, which is the client for the
+// daemon's published endpoints rather than UI glue. It has no caller today.
