@@ -960,18 +960,12 @@ fn cron_emit_warn_threshold(
 
 #[cfg(test)]
 mod tests {
-    //! Structural tests for the `cron_prune_session` lock-release pattern
-    //! introduced by the cron-prune-lock-across-llm-await fix. These tests
-    //! do not construct a full `LibreFangKernel`; instead they reproduce
-    //! the exact mutex + generation-CAS shape used in the helper above
-    //! and assert the two load-bearing invariants:
+    //! Structural tests for the `cron_prune_session` lock-release pattern introduced by the cron-prune-lock-across-llm-await fix.
+    //! These tests do not construct a full `LibreFangKernel`; instead they reproduce the exact mutex + generation-CAS shape used in the helper above and assert the two load-bearing invariants:
     //!
-    //!   1. Two concurrent prune fires whose "LLM summary" step takes
-    //!      ~200ms must finish in ~200ms wall-clock, not ~400ms — i.e.
-    //!      the lock is **not** held across the slow await.
-    //!   2. When a concurrent writer bumps `messages_generation` during
-    //!      the lock-free window, the loser's CAS check fires and its
-    //!      trimmed result is dropped instead of overwriting the winner.
+    //!   1. Two concurrent prune fires must be able to stand inside the summarize await at the same moment, which is what proves the lock is **not** held across it.
+    //!      A `tokio::sync::Barrier` states that structurally, so real serialization deadlocks and is reported rather than being inferred from a wall-clock budget.
+    //!   2. When a concurrent writer bumps `messages_generation` during the lock-free window, the loser's CAS check fires and its trimmed result is dropped instead of overwriting the winner.
     //!
     //! Full end-to-end coverage against a real kernel + LLM driver lives
     //! in `crates/librefang-kernel/tests/cron_compaction_test.rs` and the
