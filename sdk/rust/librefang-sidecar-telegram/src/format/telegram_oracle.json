@@ -1,0 +1,2564 @@
+[
+ {
+  "source": "||базовый||",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": {
+     "type": "spoiler",
+     "text": "базовый"
+    }
+   }
+  ]
+ },
+ {
+  "source": "x||без пробелов||y",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": [
+     "x",
+     {
+      "type": "spoiler",
+      "text": "без пробелов"
+     },
+     "y"
+    ]
+   }
+  ]
+ },
+ {
+  "source": "==подсветка==",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": {
+     "type": "marked",
+     "text": "подсветка"
+    }
+   }
+  ]
+ },
+ {
+  "source": "||мульти слово тут||",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": {
+     "type": "spoiler",
+     "text": "мульти слово тут"
+    }
+   }
+  ]
+ },
+ {
+  "source": "|| пробел после||",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": "|| пробел после||"
+   }
+  ]
+ },
+ {
+  "source": "||пробел перед ||",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": "||пробел перед ||"
+   }
+  ]
+ },
+ {
+  "source": "|| оба ||",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": "|| оба ||"
+   }
+  ]
+ },
+ {
+  "source": "||||",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": "||||"
+   }
+  ]
+ },
+ {
+  "source": "====",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": "===="
+   }
+  ]
+ },
+ {
+  "source": "||незакрытый",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": "||незакрытый"
+   }
+  ]
+ },
+ {
+  "source": "выбери: да || нет || может",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": "выбери: да || нет || может"
+   }
+  ]
+ },
+ {
+  "source": "SQL: WHERE a == 1 AND b == 2",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": "SQL: WHERE a == 1 AND b == 2"
+   }
+  ]
+ },
+ {
+  "source": "||a ==b== c||",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": {
+     "type": "spoiler",
+     "text": [
+      "a ",
+      {
+       "type": "marked",
+       "text": "b"
+      },
+      " c"
+     ]
+    }
+   }
+  ]
+ },
+ {
+  "source": "==a ||b|| c==",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": {
+     "type": "marked",
+     "text": [
+      "a ",
+      {
+       "type": "spoiler",
+       "text": "b"
+      },
+      " c"
+     ]
+    }
+   }
+  ]
+ },
+ {
+  "source": "**жирный ||секрет||**",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": {
+     "type": "bold",
+     "text": [
+      "жирный ",
+      {
+       "type": "spoiler",
+       "text": "секрет"
+      }
+     ]
+    }
+   }
+  ]
+ },
+ {
+  "source": "`||в коде||`",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": {
+     "type": "code",
+     "text": "||в коде||"
+    }
+   }
+  ]
+ },
+ {
+  "source": "===",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": "==="
+   }
+  ]
+ },
+ {
+  "source": "=====",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": {
+     "type": "marked",
+     "text": "="
+    }
+   }
+  ]
+ },
+ {
+  "source": "======",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": [
+     {
+      "type": "marked",
+      "text": "="
+     },
+     "="
+    ]
+   }
+  ]
+ },
+ {
+  "source": "=======",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": [
+     {
+      "type": "marked",
+      "text": "="
+     },
+     "=="
+    ]
+   }
+  ]
+ },
+ {
+  "source": "========",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": [
+     {
+      "type": "marked",
+      "text": "="
+     },
+     "==="
+    ]
+   }
+  ]
+ },
+ {
+  "source": "====================",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": {
+     "type": "marked",
+     "text": [
+      "=",
+      "=",
+      "=",
+      "="
+     ]
+    }
+   }
+  ]
+ },
+ {
+  "source": "=====================",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": [
+     {
+      "type": "marked",
+      "text": [
+       "=",
+       "=",
+       "=",
+       "="
+      ]
+     },
+     "="
+    ]
+   }
+  ]
+ },
+ {
+  "source": "|||",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": "|||"
+   }
+  ]
+ },
+ {
+  "source": "|||||",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": {
+     "type": "spoiler",
+     "text": "|"
+    }
+   }
+  ]
+ },
+ {
+  "source": "||||||",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": [
+     {
+      "type": "spoiler",
+      "text": "|"
+     },
+     "|"
+    ]
+   }
+  ]
+ },
+ {
+  "source": "||||||||||||||||||||",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": {
+     "type": "spoiler",
+     "text": [
+      "|",
+      "|",
+      "|",
+      "|"
+     ]
+    }
+   }
+  ]
+ },
+ {
+  "source": "==a===b==",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": [
+     {
+      "type": "marked",
+      "text": "a"
+     },
+     "=b=="
+    ]
+   }
+  ]
+ },
+ {
+  "source": "=====a=====",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": [
+     {
+      "type": "marked",
+      "text": "="
+     },
+     "a",
+     {
+      "type": "marked",
+      "text": "="
+     }
+    ]
+   }
+  ]
+ },
+ {
+  "source": "||a||||b||",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": {
+     "type": "spoiler",
+     "text": [
+      "a",
+      "b"
+     ]
+    }
+   }
+  ]
+ },
+ {
+  "source": "x||a||||b||y",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": [
+     "x",
+     {
+      "type": "spoiler",
+      "text": [
+       "a",
+       "b"
+      ]
+     },
+     "y"
+    ]
+   }
+  ]
+ },
+ {
+  "source": "||||a||||",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": [
+     {
+      "type": "spoiler",
+      "text": "||a"
+     },
+     "||"
+    ]
+   }
+  ]
+ },
+ {
+  "source": "==|==|==",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": [
+     {
+      "type": "marked",
+      "text": "|"
+     },
+     "|=="
+    ]
+   }
+  ]
+ },
+ {
+  "source": "===a===",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": [
+     {
+      "type": "marked",
+      "text": "=a"
+     },
+     "="
+    ]
+   }
+  ]
+ },
+ {
+  "source": "====a====",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": [
+     {
+      "type": "marked",
+      "text": "==a"
+     },
+     "=="
+    ]
+   }
+  ]
+ },
+ {
+  "source": "=a=",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": "=a="
+   }
+  ]
+ },
+ {
+  "source": "== ==",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": "== =="
+   }
+  ]
+ },
+ {
+  "source": "||секрет ||",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": {
+     "type": "spoiler",
+     "text": "секрет "
+    }
+   }
+  ]
+ },
+ {
+  "source": "|| секрет||",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": {
+     "type": "spoiler",
+     "text": " секрет"
+    }
+   }
+  ]
+ },
+ {
+  "source": "||секрет ||",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": {
+     "type": "spoiler",
+     "text": "секрет "
+    }
+   }
+  ]
+ },
+ {
+  "source": "||секрет ||",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": {
+     "type": "spoiler",
+     "text": "секрет "
+    }
+   }
+  ]
+ },
+ {
+  "source": "||секрет ||",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": {
+     "type": "spoiler",
+     "text": "секрет "
+    }
+   }
+  ]
+ },
+ {
+  "source": "||секрет　||",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": {
+     "type": "spoiler",
+     "text": "секрет　"
+    }
+   }
+  ]
+ },
+ {
+  "source": "||секрет\t||",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": "||секрет ||"
+   }
+  ]
+ },
+ {
+  "source": "||\tсекрет||",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": "|| секрет||"
+   }
+  ]
+ },
+ {
+  "source": "== a==",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": {
+     "type": "marked",
+     "text": " a"
+    }
+   }
+  ]
+ },
+ {
+  "source": "==a ==",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": {
+     "type": "marked",
+     "text": "a "
+    }
+   }
+  ]
+ },
+ {
+  "source": "||a\nb||",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": "||a b||"
+   }
+  ]
+ },
+ {
+  "source": "||a\n\nb||",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": "||a"
+   },
+   {
+    "type": "paragraph",
+    "text": "b||"
+   }
+  ]
+ },
+ {
+  "source": "||\na||",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": "|| a||"
+   }
+  ]
+ },
+ {
+  "source": "||a\n||",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": "||a ||"
+   }
+  ]
+ },
+ {
+  "source": "Это ||длинный секрет,\nперенесённый||.",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": "Это ||длинный секрет, перенесённый||."
+   }
+  ]
+ },
+ {
+  "source": "- ||a\n- b||",
+  "blocks": [
+   {
+    "type": "list",
+    "items": [
+     {
+      "label": "•",
+      "blocks": [
+       {
+        "type": "paragraph",
+        "text": "||a"
+       }
+      ]
+     },
+     {
+      "label": "•",
+      "blocks": [
+       {
+        "type": "paragraph",
+        "text": "b||"
+       }
+      ]
+     }
+    ]
+   }
+  ]
+ },
+ {
+  "source": "==a ==b== c",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": [
+     {
+      "type": "marked",
+      "text": "a ==b"
+     },
+     " c"
+    ]
+   }
+  ]
+ },
+ {
+  "source": "||a ||b|| c",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": [
+     {
+      "type": "spoiler",
+      "text": "a ||b"
+     },
+     " c"
+    ]
+   }
+  ]
+ },
+ {
+  "source": "||x|| ||y||",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": [
+     {
+      "type": "spoiler",
+      "text": "x"
+     },
+     " ",
+     {
+      "type": "spoiler",
+      "text": "y"
+     }
+    ]
+   }
+  ]
+ },
+ {
+  "source": "||a||b||",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": [
+     {
+      "type": "spoiler",
+      "text": "a"
+     },
+     "b||"
+    ]
+   }
+  ]
+ },
+ {
+  "source": "==a==b==",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": [
+     {
+      "type": "marked",
+      "text": "a"
+     },
+     "b=="
+    ]
+   }
+  ]
+ },
+ {
+  "source": "||a ==b|| c==",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": [
+     {
+      "type": "spoiler",
+      "text": "a ==b"
+     },
+     " c=="
+    ]
+   }
+  ]
+ },
+ {
+  "source": "==a ||b== c||",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": [
+     {
+      "type": "marked",
+      "text": "a ||b"
+     },
+     " c||"
+    ]
+   }
+  ]
+ },
+ {
+  "source": "|| a|| ||b||",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": [
+     "|| a|| ",
+     {
+      "type": "spoiler",
+      "text": "b"
+     }
+    ]
+   }
+  ]
+ },
+ {
+  "source": "a|| b ||c||d||",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": [
+     "a|| b ",
+     {
+      "type": "spoiler",
+      "text": "c"
+     },
+     "d||"
+    ]
+   }
+  ]
+ },
+ {
+  "source": "**==важно==**",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": {
+     "type": "marked",
+     "text": {
+      "type": "bold",
+      "text": "важно"
+     }
+    }
+   }
+  ]
+ },
+ {
+  "source": "~~||s||~~",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": {
+     "type": "spoiler",
+     "text": {
+      "type": "strikethrough",
+      "text": "s"
+     }
+    }
+   }
+  ]
+ },
+ {
+  "source": "==||a||==",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": {
+     "type": "spoiler",
+     "text": {
+      "type": "marked",
+      "text": "a"
+     }
+    }
+   }
+  ]
+ },
+ {
+  "source": "||==a==||",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": {
+     "type": "spoiler",
+     "text": {
+      "type": "marked",
+      "text": "a"
+     }
+    }
+   }
+  ]
+ },
+ {
+  "source": "||[ссылка](https://ya.ru)||",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": {
+     "type": "url",
+     "text": {
+      "type": "spoiler",
+      "text": "ссылка"
+     },
+     "url": "https://ya.ru/"
+    }
+   }
+  ]
+ },
+ {
+  "source": "||**a**||",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": {
+     "type": "spoiler",
+     "text": {
+      "type": "bold",
+      "text": "a"
+     }
+    }
+   }
+  ]
+ },
+ {
+  "source": "**||a||**",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": {
+     "type": "spoiler",
+     "text": {
+      "type": "bold",
+      "text": "a"
+     }
+    }
+   }
+  ]
+ },
+ {
+  "source": "*==a==*",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": {
+     "type": "marked",
+     "text": {
+      "type": "italic",
+      "text": "a"
+     }
+    }
+   }
+  ]
+ },
+ {
+  "source": "==*a*==",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": {
+     "type": "marked",
+     "text": {
+      "type": "italic",
+      "text": "a"
+     }
+    }
+   }
+  ]
+ },
+ {
+  "source": "||@durov||",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": {
+     "type": "mention",
+     "text": {
+      "type": "spoiler",
+      "text": "@durov"
+     },
+     "username": "durov"
+    }
+   }
+  ]
+ },
+ {
+  "source": "||https://ya.ru||",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": {
+     "type": "url",
+     "text": {
+      "type": "spoiler",
+      "text": "https://ya.ru"
+     },
+     "url": "https://ya.ru"
+    }
+   }
+  ]
+ },
+ {
+  "source": "a==[b](https://ya.ru)==c",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": [
+     "a",
+     {
+      "type": "url",
+      "text": {
+       "type": "marked",
+       "text": "b"
+      },
+      "url": "https://ya.ru/"
+     },
+     "c"
+    ]
+   }
+  ]
+ },
+ {
+  "source": "[==a==](https://ya.ru)",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": {
+     "type": "url",
+     "text": {
+      "type": "marked",
+      "text": "a"
+     },
+     "url": "https://ya.ru/"
+    }
+   }
+  ]
+ },
+ {
+  "source": "||#хэштег||",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": {
+     "type": "hashtag",
+     "text": {
+      "type": "spoiler",
+      "text": "#хэштег"
+     },
+     "hashtag": "хэштег"
+    }
+   }
+  ]
+ },
+ {
+  "source": "a==[==](/d)b",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": [
+     "a",
+     {
+      "type": "marked",
+      "text": "["
+     },
+     "](",
+     {
+      "type": "bot_command",
+      "text": "/d",
+      "bot_command": "d"
+     },
+     ")b"
+    ]
+   }
+  ]
+ },
+ {
+  "source": "[спойлер ||тут||](https://ya.ru)",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": {
+     "type": "url",
+     "text": [
+      "спойлер ",
+      {
+       "type": "spoiler",
+       "text": "тут"
+      }
+     ],
+     "url": "https://ya.ru/"
+    }
+   }
+  ]
+ },
+ {
+  "source": "(\"||a||\")",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": [
+     "(\"",
+     {
+      "type": "spoiler",
+      "text": "a"
+     },
+     "\")"
+    ]
+   }
+  ]
+ },
+ {
+  "source": "«||a||»",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": [
+     "«",
+     {
+      "type": "spoiler",
+      "text": "a"
+     },
+     "»"
+    ]
+   }
+  ]
+ },
+ {
+  "source": "a||b||c",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": [
+     "a",
+     {
+      "type": "spoiler",
+      "text": "b"
+     },
+     "c"
+    ]
+   }
+  ]
+ },
+ {
+  "source": "||a.||",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": {
+     "type": "spoiler",
+     "text": "a."
+    }
+   }
+  ]
+ },
+ {
+  "source": "||.a||",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": {
+     "type": "spoiler",
+     "text": ".a"
+    }
+   }
+  ]
+ },
+ {
+  "source": "||a,||",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": {
+     "type": "spoiler",
+     "text": "a,"
+    }
+   }
+  ]
+ },
+ {
+  "source": "!||a||!",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": [
+     "!",
+     {
+      "type": "spoiler",
+      "text": "a"
+     },
+     "!"
+    ]
+   }
+  ]
+ },
+ {
+  "source": "-||a||-",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": [
+     "-",
+     {
+      "type": "spoiler",
+      "text": "a"
+     },
+     "-"
+    ]
+   }
+  ]
+ },
+ {
+  "source": "```\n||a||\n```",
+  "blocks": [
+   {
+    "type": "pre",
+    "text": "||a||"
+   }
+  ]
+ },
+ {
+  "source": "`==a==`",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": {
+     "type": "code",
+     "text": "==a=="
+    }
+   }
+  ]
+ },
+ {
+  "source": "``a||b||c``",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": {
+     "type": "code",
+     "text": "a||b||c"
+    }
+   }
+  ]
+ },
+ {
+  "source": "||🙂||",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": {
+     "type": "spoiler",
+     "text": "🙂"
+    }
+   }
+  ]
+ },
+ {
+  "source": "==🙂==",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": {
+     "type": "marked",
+     "text": "🙂"
+    }
+   }
+  ]
+ },
+ {
+  "source": "||абв🙂гд||",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": {
+     "type": "spoiler",
+     "text": "абв🙂гд"
+    }
+   }
+  ]
+ },
+ {
+  "source": "||a||🙂||b||",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": [
+     {
+      "type": "spoiler",
+      "text": "a"
+     },
+     "🙂",
+     {
+      "type": "spoiler",
+      "text": "b"
+     }
+    ]
+   }
+  ]
+ },
+ {
+  "source": "||==a||==",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": [
+     {
+      "type": "spoiler",
+      "text": "==a"
+     },
+     "=="
+    ]
+   }
+  ]
+ },
+ {
+  "source": "==||a==||",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": [
+     {
+      "type": "marked",
+      "text": "||a"
+     },
+     "||"
+    ]
+   }
+  ]
+ },
+ {
+  "source": "||a==b||c==",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": [
+     {
+      "type": "spoiler",
+      "text": "a==b"
+     },
+     "c=="
+    ]
+   }
+  ]
+ },
+ {
+  "source": "==a||b==c||",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": [
+     {
+      "type": "marked",
+      "text": "a||b"
+     },
+     "c||"
+    ]
+   }
+  ]
+ },
+ {
+  "source": "||a  \n b||",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": "||a\nb||"
+   }
+  ]
+ },
+ {
+  "source": "a  \nb",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": "a\nb"
+   }
+  ]
+ },
+ {
+  "source": "==a  \nb==",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": "==a\nb=="
+   }
+  ]
+ },
+ {
+  "source": "||a||  \n||b||",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": [
+     {
+      "type": "spoiler",
+      "text": "a"
+     },
+     "\n",
+     {
+      "type": "spoiler",
+      "text": "b"
+     }
+    ]
+   }
+  ]
+ },
+ {
+  "source": "||a  \nb||",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": "||a\nb||"
+   }
+  ]
+ },
+ {
+  "source": "`a || b`",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": {
+     "type": "code",
+     "text": "a || b"
+    }
+   }
+  ]
+ },
+ {
+  "source": "||секрет `код` конец||",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": {
+     "type": "spoiler",
+     "text": [
+      "секрет ",
+      {
+       "type": "code",
+       "text": "код"
+      },
+      " конец"
+     ]
+    }
+   }
+  ]
+ },
+ {
+  "source": "    ||a||",
+  "blocks": [
+   {
+    "type": "pre",
+    "text": "||a||"
+   }
+  ]
+ },
+ {
+  "source": "```\n==x==\n||y||\n```",
+  "blocks": [
+   {
+    "type": "pre",
+    "text": "==x==\n||y||"
+   }
+  ]
+ },
+ {
+  "source": "`==x==` и ==снаружи==",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": [
+     {
+      "type": "code",
+      "text": "==x=="
+     },
+     " и ",
+     {
+      "type": "marked",
+      "text": "снаружи"
+     }
+    ]
+   }
+  ]
+ },
+ {
+  "source": "**==a==**",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": {
+     "type": "marked",
+     "text": {
+      "type": "bold",
+      "text": "a"
+     }
+    }
+   }
+  ]
+ },
+ {
+  "source": "==**a**==",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": {
+     "type": "bold",
+     "text": {
+      "type": "marked",
+      "text": "a"
+     }
+    }
+   }
+  ]
+ },
+ {
+  "source": "~~==a~~==",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": [
+     {
+      "type": "strikethrough",
+      "text": "==a"
+     },
+     "=="
+    ]
+   }
+  ]
+ },
+ {
+  "source": "==~~a~~==",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": {
+     "type": "marked",
+     "text": {
+      "type": "strikethrough",
+      "text": "a"
+     }
+    }
+   }
+  ]
+ },
+ {
+  "source": "*||a||*",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": {
+     "type": "spoiler",
+     "text": {
+      "type": "italic",
+      "text": "a"
+     }
+    }
+   }
+  ]
+ },
+ {
+  "source": "||*a*||",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": {
+     "type": "spoiler",
+     "text": {
+      "type": "italic",
+      "text": "a"
+     }
+    }
+   }
+  ]
+ },
+ {
+  "source": "~~||a||~~",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": {
+     "type": "spoiler",
+     "text": {
+      "type": "strikethrough",
+      "text": "a"
+     }
+    }
+   }
+  ]
+ },
+ {
+  "source": "||~~a~~||",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": {
+     "type": "spoiler",
+     "text": {
+      "type": "strikethrough",
+      "text": "a"
+     }
+    }
+   }
+  ]
+ },
+ {
+  "source": "`c`",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": {
+     "type": "code",
+     "text": "c"
+    }
+   }
+  ]
+ },
+ {
+  "source": "||`c`||",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": {
+     "type": "code",
+     "text": {
+      "type": "spoiler",
+      "text": "c"
+     }
+    }
+   }
+  ]
+ },
+ {
+  "source": "==`c`==",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": {
+     "type": "code",
+     "text": {
+      "type": "marked",
+      "text": "c"
+     }
+    }
+   }
+  ]
+ },
+ {
+  "source": "**`c`**",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": {
+     "type": "code",
+     "text": {
+      "type": "bold",
+      "text": "c"
+     }
+    }
+   }
+  ]
+ },
+ {
+  "source": "*`c`*",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": {
+     "type": "code",
+     "text": {
+      "type": "italic",
+      "text": "c"
+     }
+    }
+   }
+  ]
+ },
+ {
+  "source": "~~`c`~~",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": {
+     "type": "code",
+     "text": {
+      "type": "strikethrough",
+      "text": "c"
+     }
+    }
+   }
+  ]
+ },
+ {
+  "source": "[`c`](https://ya.ru)",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": {
+     "type": "code",
+     "text": {
+      "type": "url",
+      "text": "c",
+      "url": "https://ya.ru/"
+     }
+    }
+   }
+  ]
+ },
+ {
+  "source": "[**a**](https://ya.ru)",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": {
+     "type": "url",
+     "text": {
+      "type": "bold",
+      "text": "a"
+     },
+     "url": "https://ya.ru/"
+    }
+   }
+  ]
+ },
+ {
+  "source": "**[a](https://ya.ru)**",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": {
+     "type": "url",
+     "text": {
+      "type": "bold",
+      "text": "a"
+     },
+     "url": "https://ya.ru/"
+    }
+   }
+  ]
+ },
+ {
+  "source": "[||a||](https://ya.ru)",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": {
+     "type": "url",
+     "text": {
+      "type": "spoiler",
+      "text": "a"
+     },
+     "url": "https://ya.ru/"
+    }
+   }
+  ]
+ },
+ {
+  "source": "||[a](https://ya.ru)||",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": {
+     "type": "url",
+     "text": {
+      "type": "spoiler",
+      "text": "a"
+     },
+     "url": "https://ya.ru/"
+    }
+   }
+  ]
+ },
+ {
+  "source": "||==`c`==||",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": {
+     "type": "code",
+     "text": {
+      "type": "spoiler",
+      "text": {
+       "type": "marked",
+       "text": "c"
+      }
+     }
+    }
+   }
+  ]
+ },
+ {
+  "source": "**==||a||==**",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": {
+     "type": "spoiler",
+     "text": {
+      "type": "marked",
+      "text": {
+       "type": "bold",
+       "text": "a"
+      }
+     }
+    }
+   }
+  ]
+ },
+ {
+  "source": "\\|\\|a\\|\\|",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": "||a||"
+   }
+  ]
+ },
+ {
+  "source": "\\==a\\==",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": "==a=="
+   }
+  ]
+ },
+ {
+  "source": "\\|\\|a||",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": "||a||"
+   }
+  ]
+ },
+ {
+  "source": "||a\\|\\|",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": "||a||"
+   }
+  ]
+ },
+ {
+  "source": "a \\| b",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": "a | b"
+   }
+  ]
+ },
+ {
+  "source": "\\*не жирный\\*",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": "*не жирный*"
+   }
+  ]
+ },
+ {
+  "source": "| a | b |\n| --- | --- |\n| ||c|| | d |",
+  "blocks": [
+   {
+    "type": "table",
+    "cells": [
+     [
+      {
+       "text": "a",
+       "is_header": true,
+       "align": "center",
+       "valign": "middle"
+      },
+      {
+       "text": "b",
+       "is_header": true,
+       "align": "center",
+       "valign": "middle"
+      }
+     ],
+     [
+      {
+       "align": "left",
+       "valign": "middle"
+      },
+      {
+       "text": "c",
+       "align": "left",
+       "valign": "middle"
+      }
+     ]
+    ],
+    "is_bordered": true,
+    "is_striped": true
+   }
+  ]
+ },
+ {
+  "source": "| a | b |\n| --- | --- |\n| ==c== | d |",
+  "blocks": [
+   {
+    "type": "table",
+    "cells": [
+     [
+      {
+       "text": "a",
+       "is_header": true,
+       "align": "center",
+       "valign": "middle"
+      },
+      {
+       "text": "b",
+       "is_header": true,
+       "align": "center",
+       "valign": "middle"
+      }
+     ],
+     [
+      {
+       "text": {
+        "type": "marked",
+        "text": "c"
+       },
+       "align": "left",
+       "valign": "middle"
+      },
+      {
+       "text": "d",
+       "align": "left",
+       "valign": "middle"
+      }
+     ]
+    ],
+    "is_bordered": true,
+    "is_striped": true
+   }
+  ]
+ },
+ {
+  "source": "| a | b |\n| --- | --- |\n| c\\|d | e |",
+  "blocks": [
+   {
+    "type": "table",
+    "cells": [
+     [
+      {
+       "text": "a",
+       "is_header": true,
+       "align": "center",
+       "valign": "middle"
+      },
+      {
+       "text": "b",
+       "is_header": true,
+       "align": "center",
+       "valign": "middle"
+      }
+     ],
+     [
+      {
+       "text": "c|d",
+       "align": "left",
+       "valign": "middle"
+      },
+      {
+       "text": "e",
+       "align": "left",
+       "valign": "middle"
+      }
+     ]
+    ],
+    "is_bordered": true,
+    "is_striped": true
+   }
+  ]
+ },
+ {
+  "source": "||секрет|| и ==важно==",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": [
+     {
+      "type": "spoiler",
+      "text": "секрет"
+     },
+     " и ",
+     {
+      "type": "marked",
+      "text": "важно"
+     }
+    ]
+   }
+  ]
+ },
+ {
+  "source": "||a|| ==b==",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": [
+     {
+      "type": "spoiler",
+      "text": "a"
+     },
+     " ",
+     {
+      "type": "marked",
+      "text": "b"
+     }
+    ]
+   }
+  ]
+ },
+ {
+  "source": "==a== ||b||",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": [
+     {
+      "type": "marked",
+      "text": "a"
+     },
+     " ",
+     {
+      "type": "spoiler",
+      "text": "b"
+     }
+    ]
+   }
+  ]
+ },
+ {
+  "source": "||a||==a==",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": [
+     {
+      "type": "spoiler",
+      "text": "a"
+     },
+     {
+      "type": "marked",
+      "text": "a"
+     }
+    ]
+   }
+  ]
+ },
+ {
+  "source": "x||a||==b==||c||y",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": [
+     "x",
+     {
+      "type": "spoiler",
+      "text": "a"
+     },
+     {
+      "type": "marked",
+      "text": "b"
+     },
+     {
+      "type": "spoiler",
+      "text": "c"
+     },
+     "y"
+    ]
+   }
+  ]
+ },
+ {
+  "source": "# ==a== и ||b||",
+  "blocks": [
+   {
+    "type": "heading",
+    "text": [
+     {
+      "type": "marked",
+      "text": "a"
+     },
+     " и ",
+     {
+      "type": "spoiler",
+      "text": "b"
+     }
+    ],
+    "size": 1
+   }
+  ]
+ },
+ {
+  "source": "- ||a|| и ==b==",
+  "blocks": [
+   {
+    "type": "list",
+    "items": [
+     {
+      "label": "•",
+      "blocks": [
+       {
+        "type": "paragraph",
+        "text": [
+         {
+          "type": "spoiler",
+          "text": "a"
+         },
+         " и ",
+         {
+          "type": "marked",
+          "text": "b"
+         }
+        ]
+       }
+      ]
+     }
+    ]
+   }
+  ]
+ },
+ {
+  "source": "> ||a|| и ==b==",
+  "blocks": [
+   {
+    "type": "blockquote",
+    "blocks": [
+     {
+      "type": "paragraph",
+      "text": [
+       {
+        "type": "spoiler",
+        "text": "a"
+       },
+       " и ",
+       {
+        "type": "marked",
+        "text": "b"
+       }
+      ]
+     }
+    ]
+   }
+  ]
+ },
+ {
+  "source": "==a== ==b==",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": [
+     {
+      "type": "marked",
+      "text": "a"
+     },
+     " ",
+     {
+      "type": "marked",
+      "text": "b"
+     }
+    ]
+   }
+  ]
+ },
+ {
+  "source": "||a|| ||b||",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": [
+     {
+      "type": "spoiler",
+      "text": "a"
+     },
+     " ",
+     {
+      "type": "spoiler",
+      "text": "b"
+     }
+    ]
+   }
+  ]
+ },
+ {
+  "source": "||a|| ==b== ||c|| ==d==",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": [
+     {
+      "type": "spoiler",
+      "text": "a"
+     },
+     " ",
+     {
+      "type": "marked",
+      "text": "b"
+     },
+     " ",
+     {
+      "type": "spoiler",
+      "text": "c"
+     },
+     " ",
+     {
+      "type": "marked",
+      "text": "d"
+     }
+    ]
+   }
+  ]
+ },
+ {
+  "source": "==a== и ||b|| и ==c==",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": [
+     {
+      "type": "marked",
+      "text": "a"
+     },
+     " и ",
+     {
+      "type": "spoiler",
+      "text": "b"
+     },
+     " и ",
+     {
+      "type": "marked",
+      "text": "c"
+     }
+    ]
+   }
+  ]
+ },
+ {
+  "source": "\\||секрет||",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": "||секрет||"
+   }
+  ]
+ },
+ {
+  "source": "\\==важно==",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": "==важно=="
+   }
+  ]
+ },
+ {
+  "source": "\\\\||a||",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": [
+     "\\",
+     {
+      "type": "spoiler",
+      "text": "a"
+     }
+    ]
+   }
+  ]
+ },
+ {
+  "source": "a&amp;||секрет||",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": [
+     "a&",
+     {
+      "type": "spoiler",
+      "text": "секрет"
+     }
+    ]
+   }
+  ]
+ },
+ {
+  "source": "||a&amp;||",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": {
+     "type": "spoiler",
+     "text": "a&"
+    }
+   }
+  ]
+ },
+ {
+  "source": "||текст &lt;tag&gt;||",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": {
+     "type": "spoiler",
+     "text": "текст <tag>"
+    }
+   }
+  ]
+ },
+ {
+  "source": "==a&gt;==",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": {
+     "type": "marked",
+     "text": "a>"
+    }
+   }
+  ]
+ },
+ {
+  "source": "||a[^1]||",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": {
+     "type": "spoiler",
+     "text": "a[^1]"
+    }
+   }
+  ]
+ },
+ {
+  "source": "||a*b||",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": {
+     "type": "spoiler",
+     "text": "a*b"
+    }
+   }
+  ]
+ },
+ {
+  "source": "||a`b||",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": {
+     "type": "spoiler",
+     "text": "a`b"
+    }
+   }
+  ]
+ },
+ {
+  "source": "\\|\\|a\\|\\| и ||b||",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": [
+     "||a|| и ",
+     {
+      "type": "spoiler",
+      "text": "b"
+     }
+    ]
+   }
+  ]
+ },
+ {
+  "source": "|\\|секрет||",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": "||секрет||"
+   }
+  ]
+ },
+ {
+  "source": "a\\===b==",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": [
+     "a=",
+     {
+      "type": "marked",
+      "text": "b"
+     }
+    ]
+   }
+  ]
+ },
+ {
+  "source": "||секрет\\||b||",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": [
+     {
+      "type": "spoiler",
+      "text": "секрет\\"
+     },
+     "b||"
+    ]
+   }
+  ]
+ },
+ {
+  "source": "\\\\\\||a||",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": "\\||a||"
+   }
+  ]
+ },
+ {
+  "source": "a\\\\||b||",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": [
+     "a\\",
+     {
+      "type": "spoiler",
+      "text": "b"
+     }
+    ]
+   }
+  ]
+ },
+ {
+  "source": "таблица: &#124;&#124;значение&#124;&#124; конец",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": "таблица: ||значение|| конец"
+   }
+  ]
+ },
+ {
+  "source": "||a&#124;&#124;b||",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": {
+     "type": "spoiler",
+     "text": "a||b"
+    }
+   }
+  ]
+ },
+ {
+  "source": "&#61;&#61;a&#61;&#61;",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": "==a=="
+   }
+  ]
+ },
+ {
+  "source": "&#124;&#124;секрет&#124;&#124;",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": "||секрет||"
+   }
+  ]
+ },
+ {
+  "source": "&vert;&vert;a&vert;&vert;",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": "&vert;&vert;a&vert;&vert;"
+   }
+  ]
+ },
+ {
+  "source": "a&#124;&#124;b||c||",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": [
+     "a||b",
+     {
+      "type": "spoiler",
+      "text": "c"
+     }
+    ]
+   }
+  ]
+ },
+ {
+  "source": "&#61;&#61;a== b",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": "==a== b"
+   }
+  ]
+ },
+ {
+  "source": "||a|| &#124;&#124;b&#124;&#124;",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": [
+     {
+      "type": "spoiler",
+      "text": "a"
+     },
+     " ||b||"
+    ]
+   }
+  ]
+ },
+ {
+  "source": "\\\\&#124;|a||",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": "\\||a||"
+   }
+  ]
+ },
+ {
+  "source": "\\\\&#61;=a==",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": "\\==a=="
+   }
+  ]
+ },
+ {
+  "source": "&amp;#124;&#124;a||",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": "&#124;|a||"
+   }
+  ]
+ },
+ {
+  "source": "||a&nbsp;||",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": {
+     "type": "spoiler",
+     "text": "a "
+    }
+   }
+  ]
+ },
+ {
+  "source": "&#42;&#42;жирный&#42;&#42;",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": "**жирный**"
+   }
+  ]
+ }
+]

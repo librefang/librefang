@@ -19,10 +19,22 @@
 //! # Scope
 //!
 //! What an agent actually writes: paragraphs, headings, lists, tables, code, emphasis,
-//! links, block quotes, dividers. Media blocks, collages, maps and `<details>` are out of
+//! links, block quotes, dividers, spoilers and highlights. The last two follow Telegram's
+//! own pairing rules, read off the live parser rather than guessed — see `scan_delimiters`. Media blocks, collages, maps and `<details>` are out of
 //! scope (#8015) and degrade to their text. Footnotes and math are not parsed at all —
 //! their `pulldown-cmark` options are off — so `[^1]` is an ordinary shortcut reference and
 //! `$x$` is ordinary text; neither is "degraded", both are simply never recognised.
+//!
+//! One divergence from Telegram is known and left alone: a *single* tilde, `~x~`, becomes
+//! strikethrough here and is literal text to Telegram. `pulldown-cmark` reads one tilde as
+//! strikethrough whenever `ENABLE_STRIKETHROUGH` is on and `ENABLE_SUBSCRIPT` is not, and
+//! offers no way to require the doubled form. Cosmetic — emphasis the author did not ask
+//! for — and recorded here so it is not rediscovered as a bug (#8347).
+//!
+//! Subscript and superscript are deliberately *not* enabled although the parser offers them
+//! and Telegram accepts the types: Telegram's own Markdown leaves `~x~` and `^x^` as plain
+//! text, so emitting them would invent formatting from syntax the author's target parser
+//! ignores.
 //!
 //! "Degrade to their text" is the property to hold on to, and it is the one that broke:
 //! block-level HTML was routed through `push_inline`, which does nothing when no inline run
@@ -111,6 +123,10 @@ pub enum Styled {
     Code { text: Box<RichText> },
     #[serde(rename = "url")]
     Url { text: Box<RichText>, url: String },
+    #[serde(rename = "spoiler")]
+    Spoiler { text: Box<RichText> },
+    #[serde(rename = "marked")]
+    Marked { text: Box<RichText> },
 }
 
 impl RichText {
@@ -145,6 +161,417 @@ impl RichText {
     }
 }
 
+/// Telegram's own Rich Markdown understands `||spoiler||` and `==highlight==`; CommonMark
+/// does not, so `pulldown-cmark` hands them through as ordinary characters and they were
+/// lost when this path replaced the Markdown one. Both worked before, because the sanitiser
+/// had no reason to touch `|` or `=`.
+///
+/// # Matching Telegram rather than guessing
+///
+/// The rules below are read off the live parser, which echoes its own parse back in
+/// `sendRichMessage`'s response. Every one of them is a measurement; the recording they come
+/// from is `telegram_oracle.json` and `pairing_matches_telegram` is the diff against it.
+///
+/// ```text
+/// ||a||        -> spoiler      || a||     -> literal (opener followed by a space)
+/// x||a||y      -> spoiler      ||a ||     -> literal (closer preceded by a space)
+/// ||a\u{a0}||  -> spoiler      ||a\t||    -> literal (only ASCII counts as space)
+/// ||a\nb||     -> literal      ||||       -> literal (the content may not be empty)
+/// =====        -> marked "="   \|\|a\|\|  -> literal (nobody wrote a delimiter)
+/// ```
+///
+/// Four of these cost a round of review each, so they are worth stating plainly:
+///
+/// * **The space is ASCII.** `char::is_whitespace` is the Unicode property, and Telegram
+///   does not use it: NBSP, thin space and the rest are content, so `||секрет\u{a0}||` is
+///   a spoiler there. NBSP is common in Russian text and in model output.
+/// * **A pair does not cross a line break.** Not because a newline is whitespace — it is a
+///   barrier: `||a\nb||` is literal even though `a` and `b` flank the delimiters. This is
+///   the form agents write most, a long phrase wrapped by source width.
+/// * **Rejecting a closer shifts by one character, not by two.** `=====` is `marked` over a
+///   single `=`, and a rule line of twenty `=` is four of them. A version that stepped by a
+///   whole delimiter mangled every long run differently and pinned the result in a test as
+///   a known divergence, which is how a bug gets to look like a decision.
+/// * **A delimiter that was not written as one is text.** `\|\|a\|\|` and
+///   `&#124;&#124;a&#124;&#124;` are both literal for Telegram. `pulldown-cmark` hands over a
+///   decoded `|` either way, so the builder compares each text event with the source it came
+///   from and records the characters nobody typed; `Flat::seams` holds them, and a delimiter
+///   touching one is not a delimiter.
+///
+/// # What is deliberately not modelled
+///
+/// Telegram serialises styles that cover exactly the same characters in an order of its own,
+/// and that order is not a property of the styles: `**==a==**` comes back with `marked`
+/// outside `bold` while `==**a**==` comes back the other way round. The rendering is
+/// identical either way and the set of styles is the same, so this converter emits them in
+/// source order and `styles_match_telegram_up_to_order` pins exactly that — the same styles
+/// over the same text, in whatever order. A previous version invented a fixed ranking,
+/// wrote it into the docs as Telegram's, and was wrong on four of the six forms it covered.
+///
+/// # Shape
+///
+/// The run is flattened once into a byte string — `Plain` text verbatim, one `OPAQUE`
+/// placeholder per node the scan must not look inside — and all positions are offsets into
+/// it. That single coordinate system is what makes "the content is not empty" a subtraction:
+/// an earlier version compared `(node, offset)` tuples, and the end of node `i` and the start
+/// of node `i + 1` are the same point written two ways, so a pair straddling a node boundary
+/// passed the check and produced an empty span with the text inside it gone.
+///
+/// Work is linear in the length of the run, and the reason is that **every pointer only moves
+/// forward**: the next opener, the next valid closer, and the cursor. Two earlier versions
+/// were quadratic — 12 s, then 16.8 s, then 56 s on a megabyte — and each time the cause was
+/// a search that started over: first from the beginning, then from the cursor, then from the
+/// cursor whenever the *other* delimiter had consumed the last candidate. A closer is now
+/// found once and kept until it is used or passed, which is sound because a later opener's
+/// content starts later: a closer rejected for landing at or before the content start is
+/// rejected for every later opener too, and the "not preceded by a space" test does not
+/// depend on the opener at all.
+///
+/// Recursion goes only *into* matched content, never along the tail: 4 500 pairs — a 22 KB
+/// message, well inside the 32 768 limit — overflowed a 2 MiB tokio worker stack and aborted
+/// the sidecar process, taking the whole channel down rather than one message.
+fn scan_delimiters(parts: Vec<RichText>) -> Vec<RichText> {
+    let flat = Flat::new(&parts);
+    let mut out = Vec::new();
+    let mut line = 0;
+    // A pair never crosses a line break, so each line is paired on its own. This is also what
+    // makes "this delimiter has no closer left" sound: it is a statement about one line.
+    for (at, byte) in flat.text.bytes().enumerate() {
+        if byte == b'\n' {
+            out.extend(flat.pair(line, at));
+            // A soft break renders as the space it stood for; a hard one stays a newline.
+            out.push(RichText::Plain(
+                if flat.soft.binary_search(&at).is_ok() {
+                    " "
+                } else {
+                    "\n"
+                }
+                .to_string(),
+            ));
+            line = at + 1;
+        }
+    }
+    out.extend(flat.pair(line, flat.text.len()));
+    out
+}
+
+const SPOILER: &str = "||";
+const MARKED: &str = "==";
+
+/// Stands in for a node the scan must not look inside — a link, a code span, anything
+/// already styled. It is one byte, is not a delimiter character and is not ASCII whitespace,
+/// which is how Telegram treats such a span: content that cannot be split. A real U+0001 in
+/// text is treated the same way, so the collision is harmless — nothing maps back through the
+/// character, only through recorded offsets. The previous version used U+0000 as a second
+/// sentinel on the claim that `pulldown-cmark` cannot emit one; it can, and does, so the soft
+/// break is now marked by a node variant instead of by a character.
+const OPAQUE: char = '\u{1}';
+
+/// What the builder leaves in a run for the scan to find, in the two places where the shape
+/// of the run does not carry the information by itself.
+///
+/// Both are sequences, which is a variant `from_parts` never builds — it collapses an empty
+/// run to `Plain("")` and a single part to that part — and which no text can spell. The
+/// previous marker was the character U+0000, chosen on the claim that `pulldown-cmark`
+/// replaces it with U+FFFD as CommonMark requires. It does not, so a NUL in a message was
+/// read as a line break and came out as a space.
+fn soft_break_marker() -> RichText {
+    RichText::Seq(Vec::new())
+}
+
+/// Stands immediately before a text node whose first character was not written as itself —
+/// an escape or a character reference.
+fn escape_marker() -> RichText {
+    RichText::Seq(vec![RichText::Plain(String::new())])
+}
+
+/// A run flattened into bytes, with everything the scan needs to know about where the bytes
+/// came from recorded by offset.
+struct Flat<'a> {
+    text: String,
+    /// `(offset of the placeholder, the node it stands for)`, in order.
+    opaque: Vec<(usize, &'a RichText)>,
+    /// Where a character sits that was not written as itself — an escape (`\|`) or a
+    /// character reference (`&#124;`). A delimiter touching one of these is text, because
+    /// nobody wrote a delimiter; the builder marks them from the source offsets as it reads
+    /// the events. Adjacency in the finished run says nothing about this: a link whose scheme
+    /// was rejected also leaves two `Plain` nodes side by side, and `||[a](/d)||` is a
+    /// spoiler.
+    seams: Vec<usize>,
+    /// Offsets of soft line breaks, which are barriers here and spaces on the screen.
+    soft: Vec<usize>,
+}
+
+/// A matched delimiter pair, as offsets into `Flat::text`.
+#[derive(Clone, Copy)]
+struct Pair {
+    delim: &'static str,
+    open: usize,
+    close: usize,
+}
+
+/// One delimiter's place in a line. Every field only ever moves forward, which is the whole
+/// of the linearity argument.
+struct Scan {
+    /// Where to look for the next opener.
+    opener_from: usize,
+    /// Where to look for the next closer.
+    closer_from: usize,
+    /// The first valid closer at or after `closer_from`, once it has been found. Kept across
+    /// openers: a closer is valid or not on its own terms, so the search never restarts.
+    ///
+    /// There is deliberately no "this delimiter is finished" flag beside these. An earlier
+    /// version had one and it was the third attempt at making the scan linear; with the
+    /// closer search itself moving only forward the flag became unreachable state — no
+    /// mutation of it could change an output or a timing — and unreachable state is what the
+    /// last four reviews of this file kept finding.
+    closer: Option<usize>,
+}
+
+impl Scan {
+    fn new(from: usize) -> Self {
+        Self {
+            opener_from: from,
+            closer_from: from,
+            closer: None,
+        }
+    }
+}
+
+impl<'a> Flat<'a> {
+    fn new(parts: &'a [RichText]) -> Self {
+        let mut text = String::new();
+        let mut opaque = Vec::new();
+        let mut seams = Vec::new();
+        let mut soft = Vec::new();
+        for part in parts {
+            match part {
+                _ if part == &soft_break_marker() => {
+                    soft.push(text.len());
+                    text.push('\n');
+                }
+                _ if part == &escape_marker() => seams.push(text.len()),
+                RichText::Plain(s) => text.push_str(s),
+                node => {
+                    opaque.push((text.len(), node));
+                    text.push(OPAQUE);
+                }
+            }
+        }
+        Self {
+            text,
+            opaque,
+            seams,
+            soft,
+        }
+    }
+
+    /// Pair delimiters in `from..to`, which holds no line break.
+    fn pair(&self, from: usize, to: usize) -> Vec<RichText> {
+        let mut out = Vec::new();
+        let mut cursor = from;
+        // Both delimiters are tracked at once and the earliest pair wins, because Telegram
+        // nests them in either order: `||a ==b== c||` and `==a ||b|| c==` alike.
+        let mut scans = [Scan::new(from), Scan::new(from)];
+        loop {
+            let mut best: Option<Pair> = None;
+            for (slot, delim) in [SPOILER, MARKED].into_iter().enumerate() {
+                let found = self.next_pair(delim, &mut scans[slot], cursor, to);
+                if let Some(pair) = found {
+                    if best.is_none_or(|b| pair.open < b.open) {
+                        best = Some(pair);
+                    }
+                }
+            }
+            let Some(found) = best else { break };
+            out.extend(self.slice(cursor, found.open));
+            let inner = self.pair(found.open + found.delim.len(), found.close);
+            let text = Box::new(RichText::from_parts(inner));
+            out.push(RichText::Styled(match found.delim {
+                SPOILER => Styled::Spoiler { text },
+                _ => Styled::Marked { text },
+            }));
+            cursor = found.close + found.delim.len();
+            // Nothing is reset here on purpose. Neither delimiter may pair across the span
+            // just built, and both pointers already say so: `next_pair` holds its opener at
+            // the cursor, and a cached closer behind the cursor is behind every later content
+            // start too, so `closer_after` drops it on the test it already makes.
+        }
+        out.extend(self.slice(cursor, to));
+        merge_adjacent(out)
+    }
+
+    /// The earliest pair of `delim` with its opener at or after `cursor`, or `None` — and
+    /// `None` means there is none later in the line either, not just none from here.
+    fn next_pair(
+        &self,
+        delim: &'static str,
+        scan: &mut Scan,
+        cursor: usize,
+        to: usize,
+    ) -> Option<Pair> {
+        scan.opener_from = scan.opener_from.max(cursor);
+        loop {
+            let Some(open) = self.occurrence(delim, scan.opener_from, to) else {
+                // Nothing of this delimiter left in the line. Parking the pointer at the end
+                // is what makes the next call free: a text with a million `|` and no `=` was
+                // re-reading the whole tail for the `=` once per pair it found.
+                scan.opener_from = to;
+                return None;
+            };
+            // An opener may not be followed by a space, and the end of the line counts as
+            // one. Rejecting it is final: nothing about a later cursor changes the character
+            // after it, so the pointer moves past it for good.
+            let content = open + delim.len();
+            let rejected = content >= to || self.text.as_bytes()[content].is_ascii_whitespace();
+            if rejected {
+                scan.opener_from = open + 1;
+                continue;
+            }
+            // No closer for this opener means none for any later one either: a later opener's
+            // content starts later, so its candidates are a subset of the ones just rejected.
+            // The pointer is parked at the end rather than left on this opener, or the next
+            // call would walk the tail again to re-find it — which is exactly how the second
+            // version of this scan spent 16 s on a megabyte of `||a||` that ended in `==a`.
+            let Some(close) = self.closer_after(delim, scan, content, to) else {
+                scan.opener_from = to;
+                return None;
+            };
+            // Not `open + 1`: the caller asks both delimiters for a pair and keeps the
+            // earlier one, so this pair may lose and be needed again. Stepping past its
+            // opener here dropped it for good, and `||секрет|| и ==важно==` — two pairs of
+            // different delimiters in one line, which is ordinary prose — lost the second.
+            // Leaving the pointer on the opener re-derives the same pair in O(1) if it is
+            // asked for again, and the cursor moves it on once the pair is consumed.
+            scan.opener_from = open;
+            return Some(Pair { delim, open, close });
+        }
+    }
+
+    /// The first valid closer strictly after `content`, remembered between openers.
+    fn closer_after(
+        &self,
+        delim: &str,
+        scan: &mut Scan,
+        content: usize,
+        to: usize,
+    ) -> Option<usize> {
+        loop {
+            if let Some(at) = scan.closer {
+                if at > content {
+                    return Some(at);
+                }
+                // Landing at or before the content start makes the span empty, and it will
+                // be at or before every later content start too, so it is gone for good.
+                scan.closer = None;
+                scan.closer_from = at + 1;
+            }
+            scan.closer_from = scan.closer_from.max(content);
+            // `occurrence` searches inside `to`, so a closer found here always fits.
+            let at = self.occurrence(delim, scan.closer_from, to)?;
+            scan.closer_from = at + 1;
+            // A closer may not be preceded by a space. That test does not mention the
+            // opener, which is why one forward pass over the line is enough for all of them.
+            if !self.text.as_bytes()[at - 1].is_ascii_whitespace() {
+                scan.closer = Some(at);
+            }
+        }
+    }
+
+    /// The next `delim` at or after `from` and inside `to`, skipping one that is written with
+    /// an escape — an escaped delimiter is text, not markup, and either half of it counts.
+    fn occurrence(&self, delim: &str, from: usize, to: usize) -> Option<usize> {
+        let mut from = from;
+        loop {
+            let offset = self.text.get(from..to)?.find(delim)?;
+            let at = from + offset;
+            let escaped =
+                (at..at + delim.len()).any(|byte| self.seams.binary_search(&byte).is_ok());
+            if !escaped {
+                return Some(at);
+            }
+            from = at + 1;
+        }
+    }
+
+    /// Copy `from..to` of the flat text back into nodes.
+    fn slice(&self, from: usize, to: usize) -> Vec<RichText> {
+        let mut out = Vec::new();
+        let mut at = from;
+        let first = self.opaque.partition_point(|(offset, _)| *offset < from);
+        for (offset, node) in &self.opaque[first..] {
+            if *offset >= to {
+                break;
+            }
+            if *offset > at {
+                out.push(RichText::Plain(self.text[at..*offset].to_string()));
+            }
+            out.push((*node).clone());
+            at = offset + OPAQUE.len_utf8();
+        }
+        if at < to {
+            out.push(RichText::Plain(self.text[at..to].to_string()));
+        }
+        out
+    }
+}
+
+/// Telegram merges two spans of the same kind that end up next to each other, so
+/// `x||a||||b||y` comes back as one spoiler holding `a` and `b` rather than two spoilers.
+/// The pieces stay separate inside it, which is what the live parser returns.
+fn merge_adjacent(parts: Vec<RichText>) -> Vec<RichText> {
+    let mut out: Vec<RichText> = Vec::with_capacity(parts.len());
+    for part in parts {
+        match (out.last(), part) {
+            (Some(RichText::Styled(prev)), RichText::Styled(next)) if mergeable(prev, &next) => {
+                let Some(RichText::Styled(prev)) = out.pop() else {
+                    unreachable!("just matched a styled span")
+                };
+                let spoiler = matches!(next, Styled::Spoiler { .. });
+                let mut pieces = pieces_of(into_inner(prev));
+                pieces.extend(pieces_of(into_inner(next)));
+                let text = Box::new(RichText::Seq(pieces));
+                out.push(RichText::Styled(if spoiler {
+                    Styled::Spoiler { text }
+                } else {
+                    Styled::Marked { text }
+                }));
+            }
+            (_, part) => out.push(part),
+        }
+    }
+    out
+}
+
+/// Only the two kinds this scan builds merge; `**a****b**` is `pulldown-cmark`'s business
+/// and arrives already shaped.
+fn mergeable(left: &Styled, right: &Styled) -> bool {
+    matches!(
+        (left, right),
+        (Styled::Spoiler { .. }, Styled::Spoiler { .. })
+            | (Styled::Marked { .. }, Styled::Marked { .. })
+    )
+}
+
+fn into_inner(style: Styled) -> RichText {
+    match style {
+        Styled::Bold { text }
+        | Styled::Italic { text }
+        | Styled::Strikethrough { text }
+        | Styled::Code { text }
+        | Styled::Url { text, .. }
+        | Styled::Spoiler { text }
+        | Styled::Marked { text } => *text,
+    }
+}
+
+fn pieces_of(text: RichText) -> Vec<RichText> {
+    match text {
+        RichText::Seq(parts) => parts,
+        other => vec![other],
+    }
+}
+
 /// Convert an agent's Markdown into rich blocks.
 ///
 /// Never fails. Anything the converter does not model becomes the text it was written as,
@@ -175,10 +602,42 @@ pub fn markdown_to_blocks(markdown: &str) -> Vec<Block> {
         frames: vec![Frame::Blocks(Vec::new())],
         ..Builder::default()
     };
-    for event in Parser::new_ext(markdown, options) {
-        state.push(event);
+    // A delimiter is markup only if it was *written* as one. Two ways of putting the
+    // character on the screen without writing it are an escape (`\|`) and a character
+    // reference (`&#124;`), and Telegram honours both: `\||секрет||` and
+    // `&#124;&#124;секрет&#124;&#124;` are text there. Neither is visible in the event —
+    // `pulldown-cmark` hands over a bare `|` in all three cases — so the source range is
+    // compared with the text it produced, which separates them without guessing.
+    for (event, range) in Parser::new_ext(markdown, options).into_offset_iter() {
+        let written_literally = match &event {
+            Event::Text(text) => {
+                markdown.get(range.clone()) == Some(text.as_ref())
+                    && !starts_escaped(markdown, range.start)
+            }
+            _ => true,
+        };
+        state.push(event, !written_literally);
     }
     state.finish()
+}
+
+/// Whether the character at `at` was escaped by the backslash in front of it.
+///
+/// The run is counted because that is what escaping means: an even one escapes the
+/// backslashes and leaves the next character alone. It is redundancy rather than a rule that
+/// carries weight — with the reference check beside it, a sweep of 21 864 inputs over
+/// backslashes, delimiters and numeric references finds none that tells this apart from
+/// looking at a single byte. It stays because the version that dropped it justified the drop
+/// by saying no input could tell the difference, a reviewer found one (`\\&#124;|a||`, back
+/// when references went unchecked), and one line is a cheap way not to owe that claim again.
+fn starts_escaped(markdown: &str, at: usize) -> bool {
+    markdown.as_bytes()[..at]
+        .iter()
+        .rev()
+        .take_while(|byte| **byte == b'\\')
+        .count()
+        % 2
+        == 1
 }
 
 /// A container being filled. Blocks nest (a list item holds blocks, a quote holds blocks),
@@ -267,7 +726,19 @@ impl Builder {
         self.inlines.push(Vec::new());
     }
 
+    /// Close the open inline run, applying the delimiter scans.
     fn take_inline(&mut self) -> RichText {
+        RichText::from_parts(scan_delimiters(self.inlines.pop().unwrap_or_default()))
+    }
+
+    /// Close the run without scanning. A fenced block's content is literal — `||` inside a
+    /// code sample is two pipes, not a spoiler — and it is the one caller that reaches here
+    /// with text the author did not intend as markup.
+    fn take_inline_literal(&mut self) -> RichText {
+        // No markers can be here: an escape is not processed inside code, so the builder
+        // never marks one, and a soft break inside a fence is a newline in the text rather
+        // than an event. A `retain` stood here while markers were inferred from the event
+        // stream, where a fence's lines did produce them.
         RichText::from_parts(self.inlines.pop().unwrap_or_default())
     }
 
@@ -305,14 +776,18 @@ impl Builder {
             return;
         }
         self.implicit_run = false;
-        let text = RichText::from_parts(self.inlines.pop().unwrap_or_default());
+        // Scanned like any other run. A *tight* list item closes here rather than through
+        // `take_inline`, and missing that meant `- ||секрет||` kept its pipes while the same
+        // text in a loose list became a spoiler — one construct rendering two ways depending
+        // on a blank line, in the form agents write most.
+        let text = RichText::from_parts(scan_delimiters(self.inlines.pop().unwrap_or_default()));
         if !text.is_empty() {
             let block = Block::Paragraph { text };
             self.blocks_mut().push(block);
         }
     }
 
-    fn push(&mut self, event: Event<'_>) {
+    fn push(&mut self, event: Event<'_>, escaped_start: bool) {
         // Any event other than more block HTML ends the run of it.
         if !matches!(event, Event::Html(_)) {
             self.flush_html_block();
@@ -320,11 +795,21 @@ impl Builder {
         match event {
             Event::Start(tag) => self.start(tag),
             Event::End(tag) => self.end(tag),
-            Event::Text(text) => self.push_inline(RichText::Plain(text.into_string())),
+            Event::Text(text) => {
+                // The character arrives decoded and looks like any other, so the fact that it
+                // was written as an escape or a reference is recorded here for the scan.
+                if escaped_start {
+                    self.push_inline(escape_marker());
+                }
+                self.push_inline(RichText::Plain(text.into_string()));
+            }
             Event::Code(text) => self.push_inline(RichText::Styled(Styled::Code {
                 text: Box::new(RichText::Plain(text.into_string())),
             })),
-            Event::SoftBreak => self.push_inline(RichText::Plain(" ".into())),
+            // Not the space it renders as: the scan has to see that a line ended, because
+            // Telegram does not pair a delimiter across one. `scan_delimiters` turns it back
+            // into a space.
+            Event::SoftBreak => self.push_inline(soft_break_marker()),
             Event::HardBreak => self.push_inline(RichText::Plain("\n".into())),
             Event::Rule => self.push_block(Block::Divider),
             // Raw HTML is text, not markup: this is the whole point of `blocks`. A quoted
@@ -420,7 +905,7 @@ impl Builder {
                 });
             }
             TagEnd::CodeBlock => {
-                let text = self.take_inline();
+                let text = self.take_inline_literal();
                 let language = self.code_language.take().flatten();
                 self.push_block(Block::Pre {
                     text: trim_trailing_newline(text),
@@ -541,7 +1026,7 @@ impl Builder {
             return;
         };
         let start = start.min(run.len());
-        let inner = RichText::from_parts(run.split_off(start));
+        let inner = RichText::from_parts(scan_delimiters(run.split_off(start)));
         let text = Box::new(inner);
         run.push(RichText::Styled(match kind {
             StyleKind::Bold => Styled::Bold { text },
@@ -622,7 +1107,9 @@ fn rich_text_len(text: &RichText) -> usize {
             | Styled::Italic { text }
             | Styled::Strikethrough { text }
             | Styled::Code { text }
-            | Styled::Url { text, .. } => text,
+            | Styled::Url { text, .. }
+            | Styled::Spoiler { text }
+            | Styled::Marked { text } => text,
         }),
     }
 }
@@ -1040,6 +1527,661 @@ mod tests {
             ]}])
         );
     }
+
+    /// The battery is a recording, not a table of expectations: every case in
+    /// `telegram_oracle.json` was sent to a live bot as `rich_message.markdown` and the parse
+    /// `sendRichMessage` echoes back was written down verbatim. This test is the diff.
+    ///
+    /// Of 178 recorded forms, 140 match byte for byte. The other 38 are named in
+    /// `DIVERGENCES`, and for the 29 that are not content-level the difference is *checked*
+    /// rather than described: same characters, same multiset of styles, written down
+    /// differently. That check is the point. An earlier version of this test listed 23
+    /// hand-picked shapes and "22 of 23 match" went into the architecture docs as a property
+    /// of the converter; a wider battery then found five classes it had missed, and a later
+    /// one found that a "known divergence" pinned in a test was a stepping bug in disguise.
+    #[test]
+    fn pairing_matches_telegram() {
+        let cases = oracle();
+        assert!(
+            cases.len() >= 130,
+            "the battery lost cases: {}",
+            cases.len()
+        );
+        let mut diverged = Vec::new();
+        for (source, blocks) in &cases {
+            let ours = json(source);
+            if ours == *blocks {
+                continue;
+            }
+            diverged.push(source.clone());
+            if CONTENT_DIVERGENCES.contains(&source.as_str()) {
+                continue;
+            }
+            assert_eq!(
+                visible(&ours),
+                visible(blocks),
+                "{source:?} обещано расхождением только в записи, а текст другой"
+            );
+            let (mut ours_styles, mut their_styles) = (style_kinds(&ours), style_kinds(blocks));
+            ours_styles.sort();
+            their_styles.sort();
+            assert_eq!(
+                ours_styles, their_styles,
+                "{source:?} обещано расхождением только в записи, а стили другие"
+            );
+        }
+        let mut expected: Vec<String> = DIVERGENCES.iter().map(|(s, _)| (*s).into()).collect();
+        expected.sort();
+        diverged.sort();
+        assert_eq!(diverged, expected, "diff against the live parser moved");
+    }
+
+    /// Every character a reader would see, in order.
+    fn visible(value: &serde_json::Value) -> String {
+        match value {
+            serde_json::Value::String(s) => s.clone(),
+            serde_json::Value::Array(parts) => parts.iter().map(visible).collect(),
+            serde_json::Value::Object(fields) => fields
+                .iter()
+                .filter(|(key, _)| matches!(key.as_str(), "text" | "blocks" | "items" | "cells"))
+                .map(|(_, value)| visible(value))
+                .collect(),
+            _ => String::new(),
+        }
+    }
+
+    /// Every styled span in the tree, by kind.
+    fn style_kinds(value: &serde_json::Value) -> Vec<String> {
+        let mut out = Vec::new();
+        fn walk(value: &serde_json::Value, out: &mut Vec<String>) {
+            match value {
+                serde_json::Value::Array(parts) => parts.iter().for_each(|p| walk(p, out)),
+                serde_json::Value::Object(fields) => {
+                    if let Some(serde_json::Value::String(kind)) = fields.get("type") {
+                        if matches!(
+                            kind.as_str(),
+                            "bold"
+                                | "italic"
+                                | "strikethrough"
+                                | "code"
+                                | "url"
+                                | "spoiler"
+                                | "marked"
+                                | "mention"
+                                | "hashtag"
+                                | "bot_command"
+                        ) {
+                            out.push(kind.clone());
+                        }
+                    }
+                    for (key, value) in fields {
+                        if matches!(key.as_str(), "text" | "blocks" | "items" | "cells") {
+                            walk(value, out);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        walk(value, &mut out);
+        out
+    }
+
+    /// The recorded parses, as `(source, blocks)`.
+    fn oracle() -> Vec<(String, serde_json::Value)> {
+        let raw = include_str!("telegram_oracle.json");
+        let cases: Vec<serde_json::Value> = serde_json::from_str(raw).expect("oracle parses");
+        cases
+            .into_iter()
+            .map(|case| {
+                (
+                    case["source"].as_str().expect("source").to_string(),
+                    case["blocks"].clone(),
+                )
+            })
+            .collect()
+    }
+
+    /// A delimiter nobody wrote is text, and there are two ways to put the character on the
+    /// screen without writing it: an escape (`\|`) and a character reference (`&#124;`).
+    /// Telegram honours both, and `pulldown-cmark` hands over a decoded `|` for all three
+    /// spellings, so the builder tells them apart by comparing each text event with the
+    /// source range it came from.
+    ///
+    /// The rule before it — "two text events in a row mean an escape" — was false in both
+    /// directions and, by accident, covered references: a reference always makes its own
+    /// event. Replacing it with a rule about escapes alone therefore *removed* protection
+    /// nobody had noticed was there, and `&#124;&#124;значение&#124;&#124;` became a spoiler
+    /// hiding the text. Both classes are in the recording now.
+    #[test]
+    fn an_escaped_delimiter_is_text() {
+        for source in [
+            r"\|\|a\|\|",
+            r"\==a\==",
+            r"\|\|a||",
+            r"||a\|\|",
+            // An escape at the very start of a run: `pulldown-cmark` emits one text event for
+            // the whole thing, so a rule that read escapes off the event stream saw nothing
+            // here and made a spoiler where Telegram shows text.
+            r"\||секрет||",
+            r"\==важно==",
+            // Character references, the class the escape-only rule dropped.
+            "&#124;&#124;секрет&#124;&#124;",
+            "&#61;&#61;важно&#61;&#61;",
+            "таблица: &#124;&#124;значение&#124;&#124; конец",
+        ] {
+            let rendered = json(source);
+            assert!(
+                style_kinds(&rendered).is_empty(),
+                "{source:?} дал разметку: {rendered}"
+            );
+        }
+        // An even run of backslashes escapes the backslashes, not what follows them.
+        assert_eq!(
+            json(r"\\||a||"),
+            serde_json::json!([{"type": "paragraph", "text": [
+                "\\", {"type": "spoiler", "text": "a"},
+            ]}])
+        );
+        // Everything else that splits a text event — an entity, an unresolved `[`, a `*`, a
+        // stray backtick, a styled span before it — is not an escape, and the pair around it
+        // is real. Reading escapes off the event stream broke every one of these.
+        for (source, text) in [
+            ("a&amp;||секрет||", "секрет"),
+            ("||a&amp;||", "a&"),
+            ("||a[^1]||", "a[^1]"),
+            ("||a*b||", "a*b"),
+            ("||a`b||", "a`b"),
+        ] {
+            let rendered = json(source).to_string();
+            assert!(
+                rendered.contains(&format!(r#"{{"text":"{text}","type":"spoiler"}}"#)),
+                "{source:?} потерял пару: {rendered}"
+            );
+        }
+        assert_eq!(
+            json("`c`||a||"),
+            serde_json::json!([{"type": "paragraph", "text": [
+                {"type": "code", "text": "c"},
+                {"type": "spoiler", "text": "a"},
+            ]}])
+        );
+    }
+
+    /// Two pairs of *different* delimiters in one line — ordinary prose, and broken for a
+    /// day by the fix that made the scan linear. Both delimiters are asked for a pair and the
+    /// earlier one wins; the loser's opener pointer had already stepped past its own opener,
+    /// so the second pair was gone for good.
+    ///
+    /// The differential test missed it because the shortest witness is ten characters
+    /// (`||a||==a==`) and it stopped at eight; the recorded battery missed it because all
+    /// thirteen of its two-delimiter forms were nested or interleaved, never sequential. Both
+    /// have been widened, and these are here by name as well.
+    #[test]
+    fn two_pairs_of_different_delimiters_both_survive() {
+        let spoiler = |t: &str| serde_json::json!({"type": "spoiler", "text": t});
+        let marked = |t: &str| serde_json::json!({"type": "marked", "text": t});
+        for (source, expected) in [
+            (
+                "||секрет|| и ==важно==",
+                serde_json::json!([spoiler("секрет"), " и ", marked("важно")]),
+            ),
+            ("||a||==a==", serde_json::json!([spoiler("a"), marked("a")])),
+            (
+                "==a== ||b||",
+                serde_json::json!([marked("a"), " ", spoiler("b")]),
+            ),
+            (
+                "||a|| ==b== ||c|| ==d==",
+                serde_json::json!([
+                    spoiler("a"),
+                    " ",
+                    marked("b"),
+                    " ",
+                    spoiler("c"),
+                    " ",
+                    marked("d"),
+                ]),
+            ),
+        ] {
+            assert_eq!(
+                json(source),
+                serde_json::json!([{"type": "paragraph", "text": expected}]),
+                "{source:?}"
+            );
+        }
+    }
+
+    /// A tight list item closes its run through `flush_implicit_run`, not `take_inline`.
+    /// The first version scanned only the latter, so `- ||секрет||` kept its pipes while the
+    /// same text in a *loose* list became a spoiler — one construct rendering two ways
+    /// depending on a blank line, in the form agents write most. Telegram makes a spoiler in
+    /// both, as do these.
+    #[test]
+    fn pairs_work_in_every_container() {
+        for source in [
+            "- ||секрет||",
+            "- [x] ||секрет||",
+            "1. ||секрет||",
+            "> ||секрет||",
+            "# ||секрет||",
+            "- ||секрет||\n\n- второй",
+            "| a | b |\n| --- | --- |\n| ==c== | d |",
+        ] {
+            let rendered = json(source).to_string();
+            assert!(
+                rendered.contains(r#""type":"spoiler""#) || rendered.contains(r#""type":"marked""#),
+                "{source:?} не дал пару: {rendered}"
+            );
+        }
+    }
+
+    /// A pair straddling a node boundary used to pass the "content is not empty" check,
+    /// because the end of one node and the start of the next are the same point written as
+    /// two different `(node, offset)` tuples. The result was an empty span with the text
+    /// between the delimiters *gone* — the sixth content-loss defect in this module, and the
+    /// reason the scan now works in one coordinate system.
+    ///
+    /// A link with a relative destination is what splits the run in practice: its scheme is
+    /// rejected, the text stays, and the run gains a boundary exactly where the delimiters
+    /// meet. Agents write relative links constantly.
+    #[test]
+    fn a_pair_across_a_node_boundary_keeps_its_text() {
+        assert_eq!(
+            json("a==[==](/d)b"),
+            serde_json::json!([{"type": "paragraph", "text": "a====b"}])
+        );
+        assert_eq!(
+            json("||[a](/d)||"),
+            serde_json::json!([{"type": "paragraph", "text": {"type": "spoiler", "text": "a"}}])
+        );
+        // The same shape with a *kept* link: the node is opaque, so it is content — the pair
+        // is real and the link survives inside it.
+        assert_eq!(
+            json("==[a](https://ya.ru)=="),
+            serde_json::json!([{"type": "paragraph", "text": {
+                "type": "marked",
+                "text": {"type": "url", "url": "https://ya.ru", "text": "a"},
+            }}])
+        );
+    }
+
+    /// Code is never scanned, pinned as a test rather than as a comment: a `||` inside a code
+    /// span turning into a spoiler would not be a formatting bug but a content one, silently
+    /// eating the literal text someone was quoting. Raised as a question on the pull request,
+    /// and a question about an invariant is a missing test.
+    ///
+    /// Two separate mechanisms carry it, so both are checked: an inline span is already a
+    /// `Styled::Code` node before the run is assembled, which makes it opaque to the scan, and
+    /// a fenced or indented block closes its run through `take_inline_literal`, which does not
+    /// scan at all.
+    #[test]
+    fn code_is_never_scanned() {
+        for (source, code) in [
+            ("`a || b`", "a || b"),
+            ("`||в коде||`", "||в коде||"),
+            ("`==x==`", "==x=="),
+        ] {
+            assert_eq!(
+                json(source),
+                serde_json::json!([{"type": "paragraph", "text": {"type": "code", "text": code}}]),
+                "{source:?}"
+            );
+        }
+        // The span is opaque *content*: the pair around it is real, the code inside is
+        // untouched, and the boundary it creates in the run is the one that used to produce
+        // empty spans.
+        assert_eq!(
+            json("||секрет `код` конец||"),
+            serde_json::json!([{"type": "paragraph", "text": {"type": "spoiler", "text": [
+                "секрет ", {"type": "code", "text": "код"}, " конец",
+            ]}}])
+        );
+        assert_eq!(
+            json("```\n==x==\n||y||\n```"),
+            serde_json::json!([{"type": "pre", "text": "==x==\n||y||"}])
+        );
+        assert_eq!(
+            json("    ||a||"),
+            serde_json::json!([{"type": "pre", "text": "||a||"}])
+        );
+        // An *indented* block arrives one text event per line, so the builder marks every
+        // line boundary as an escape — there is no way to tell the two apart at that point.
+        // Nothing consumes those markers on this path, so it strips them itself; a marker in
+        // a payload is a `Seq` where Telegram expects a string.
+        assert_eq!(
+            json("    один\n    два"),
+            serde_json::json!([{"type": "pre", "text": "один\nдва"}])
+        );
+    }
+
+    /// A soft break reaches the scan as a marker rather than as the space it renders as,
+    /// because Telegram does not pair a delimiter across a line break. The marker is a node
+    /// variant no text can spell: the previous one was U+0000, chosen on the claim that
+    /// `pulldown-cmark` cannot emit that character — it can, so a NUL in a message would have
+    /// been read as a line break and rewritten as a space.
+    #[test]
+    fn a_soft_break_renders_as_a_space_and_never_leaks() {
+        assert_eq!(
+            json("a\nb"),
+            serde_json::json!([{"type": "paragraph", "text": "a b"}])
+        );
+        assert_eq!(
+            json("a\u{0}b"),
+            serde_json::json!([{"type": "paragraph", "text": "a\u{0}b"}])
+        );
+        for source in [
+            "a\nb",
+            "||a\nb||",
+            "- a\nb",
+            "- ||a\nb||",
+            "> a\nb",
+            "# a\nb",
+            "| a\nb | c |\n| --- | --- |\n| d | e |",
+            "**a\nb**",
+            "[a\nb](https://ya.ru)",
+            "a\n\nb",
+            "a  \nb",
+        ] {
+            let rendered = json(source).to_string();
+            assert!(
+                !rendered.contains('\u{1}'),
+                "{source:?} протёк маркером: {rendered}"
+            );
+        }
+    }
+
+    /// The optimised scan against an obviously-correct one: same rules, no cache, no
+    /// exhaustion flags, every opener tried against every later closer. Exhaustive over the
+    /// delimiters, a letter and a space up to eight characters — 87 380 runs — and again with
+    /// every one-cut split into two text nodes, which is how an escape reaches the scan.
+    ///
+    /// This is the test the module was missing. Three versions in a row were quadratic, and
+    /// each fix was a new piece of state carrying a claim about what could be skipped: "no
+    /// occurrence left", "no pair left", "the closer is still ahead". A differential against
+    /// brute force checks the claims instead of restating them.
+    #[test]
+    fn pairing_matches_a_naive_reference() {
+        let alphabet = ['|', '=', 'a', ' '];
+        let mut inputs = vec![String::new()];
+        let mut all = Vec::new();
+        for _ in 0..9 {
+            inputs = inputs
+                .iter()
+                .flat_map(|prefix| {
+                    alphabet.iter().map(move |c| {
+                        let mut next = prefix.clone();
+                        next.push(*c);
+                        next
+                    })
+                })
+                .collect();
+            all.extend(inputs.iter().cloned());
+        }
+        for input in &all {
+            let parts = vec![RichText::Plain(input.clone())];
+            let flat = Flat::new(&parts);
+            let end = flat.text.len();
+            assert_eq!(
+                RichText::from_parts(flat.pair(0, end)),
+                RichText::from_parts(naive_pair(&flat, 0, end)),
+                "быстрый скан разошёлся с эталоном на {input:?}"
+            );
+        }
+        // Two pairs of different delimiters need ten characters — `||a||==a==` is the
+        // shortest — and the version of this test that stopped at eight passed while that
+        // exact shape was broken. The alphabet drops the space here to keep the count sane;
+        // the run above covers spaces at shorter lengths.
+        let mut inputs = vec![String::new()];
+        let mut long = Vec::new();
+        for _ in 0..10 {
+            inputs = inputs
+                .iter()
+                .flat_map(|prefix| {
+                    ['|', '=', 'a'].iter().map(move |c| {
+                        let mut next = prefix.clone();
+                        next.push(*c);
+                        next
+                    })
+                })
+                .collect();
+            long.extend(inputs.iter().cloned());
+        }
+        for input in &long {
+            let parts = vec![RichText::Plain(input.clone())];
+            let flat = Flat::new(&parts);
+            let end = flat.text.len();
+            assert_eq!(
+                RichText::from_parts(flat.pair(0, end)),
+                RichText::from_parts(naive_pair(&flat, 0, end)),
+                "быстрый скан разошёлся с эталоном на {input:?}"
+            );
+        }
+        // Splitting a run into two `Plain` nodes proves nothing: `Flat` concatenates them and
+        // comes out byte-identical, so the loop that did that compared a thing with itself.
+        // A seam is what an escape or a character reference leaves behind, and it is put here
+        // the same way the builder puts it — with a marker between the parts.
+        for input in all.iter().filter(|s| s.len() <= 6) {
+            for cut in 1..input.len() {
+                let parts = vec![
+                    RichText::Plain(input[..cut].to_string()),
+                    escape_marker(),
+                    RichText::Plain(input[cut..].to_string()),
+                ];
+                let flat = Flat::new(&parts);
+                let end = flat.text.len();
+                assert!(
+                    !flat.seams.is_empty(),
+                    "шов не записан, тест сравнивает сам с собой"
+                );
+                assert_eq!(
+                    RichText::from_parts(flat.pair(0, end)),
+                    RichText::from_parts(naive_pair(&flat, 0, end)),
+                    "быстрый скан разошёлся с эталоном на {input:?} со швом в {cut}"
+                );
+            }
+        }
+    }
+
+    /// The rules, written without a single piece of state that remembers anything.
+    fn naive_pair(flat: &Flat, from: usize, to: usize) -> Vec<RichText> {
+        let bytes = flat.text.as_bytes();
+        let is = |at: usize, delim: &str| {
+            at + delim.len() <= to
+                && bytes[at..at + delim.len()] == *delim.as_bytes()
+                && !(at..at + delim.len()).any(|b| flat.seams.binary_search(&b).is_ok())
+        };
+        let mut out = Vec::new();
+        let mut cursor = from;
+        loop {
+            let mut best: Option<Pair> = None;
+            for delim in [SPOILER, MARKED] {
+                for open in cursor..to {
+                    if !is(open, delim) {
+                        continue;
+                    }
+                    let content = open + delim.len();
+                    if content >= to || bytes[content].is_ascii_whitespace() {
+                        continue;
+                    }
+                    let close = (content + 1..to)
+                        .find(|&at| is(at, delim) && !bytes[at - 1].is_ascii_whitespace());
+                    if let Some(close) = close {
+                        if best.is_none_or(|b| open < b.open) {
+                            best = Some(Pair { delim, open, close });
+                        }
+                    }
+                    break;
+                }
+            }
+            let Some(found) = best else { break };
+            out.extend(flat.slice(cursor, found.open));
+            let inner = naive_pair(flat, found.open + found.delim.len(), found.close);
+            let text = Box::new(RichText::from_parts(inner));
+            out.push(RichText::Styled(match found.delim {
+                SPOILER => Styled::Spoiler { text },
+                _ => Styled::Marked { text },
+            }));
+            cursor = found.close + found.delim.len();
+        }
+        out.extend(flat.slice(cursor, to));
+        merge_adjacent(out)
+    }
+
+    /// Exhaustive over every string of up to six characters drawn from the delimiters, two
+    /// letters and a space — 19 530 inputs — checking that nothing *except* the delimiters is
+    /// lost or moved, and that no span comes out empty.
+    ///
+    /// The delimiters themselves are excluded from the comparison because a paired one is
+    /// consumed by design, so what happens to them is checked by
+    /// `pairing_matches_a_naive_reference` instead. An earlier version of this docblock — and
+    /// the commit message under it — claimed this compared every character, which it never
+    /// did; the letters-only version before that hid a lost space as well.
+    #[test]
+    fn no_input_loses_or_reorders_its_text() {
+        let alphabet = ['|', '=', 'a', 'b', ' '];
+        let mut inputs = vec![String::new()];
+        let mut all = Vec::new();
+        for _ in 0..6 {
+            inputs = inputs
+                .iter()
+                .flat_map(|prefix| {
+                    alphabet.iter().map(move |c| {
+                        let mut next = prefix.clone();
+                        next.push(*c);
+                        next
+                    })
+                })
+                .collect();
+            all.extend(inputs.iter().cloned());
+        }
+        for input in &all {
+            let rendered = json(input);
+            let kept: String = visible(&rendered)
+                .chars()
+                .filter(|c| *c != '|' && *c != '=')
+                .collect();
+            let expected: String = input.chars().filter(|c| *c != '|' && *c != '=').collect();
+            assert_eq!(
+                kept.trim(),
+                expected.trim(),
+                "текст изменился на входе {input:?}: {rendered}"
+            );
+            assert!(
+                !rendered.to_string().contains(r#""text":"""#),
+                "пустой спан на входе {input:?}: {rendered}"
+            );
+        }
+    }
+
+    /// Scanning is linear in the length of the run. Three versions in a row were not, and each
+    /// time the test missed it by a handful of characters:
+    ///
+    /// * v1 re-scanned from the beginning — 12 s on a megabyte;
+    /// * v2 gave up on a delimiter only when the tail held no occurrence of it, so three
+    ///   characters of `==` after a megabyte of `||a||` cost 16.8 s;
+    /// * v3 cached a *pair*, and the cache died whenever the other delimiter consumed its
+    ///   opener, so `"==a ||b== ".repeat(n) + "x||"` — the previous test's own input plus
+    ///   three characters — cost 56 s.
+    ///
+    /// The last two entries are that third input in both orientations. The budget matches
+    /// `rich_sanitize`'s equivalent test: a megabyte under two seconds.
+    #[test]
+    fn delimiter_scanning_is_linear() {
+        for input in [
+            "||a||".repeat(200_000),
+            "|".repeat(1_000_000),
+            "=".repeat(1_000_000),
+            "||аб|| ".repeat(100_000),
+            "|| a|| ".repeat(100_000),
+            format!("{}==a", "||a|| ".repeat(200_000)),
+            format!("{}||a", "==a== ".repeat(200_000)),
+            // The same shapes with the tail delimiter *paired*. Without the closer the pair
+            // is never returned, so nothing exercises the pointer that holds the opener in
+            // place — and two mutations of it survived the whole suite while costing 26 s.
+            format!("{}==a==", "||a|| ".repeat(200_000)),
+            format!("{}||a||", "==a== ".repeat(200_000)),
+            format!("||a{}", " ||".repeat(300_000)),
+            format!("==a{}", " ==".repeat(300_000)),
+            "||a ==b|| ".repeat(100_000),
+            "a\n||b|| ".repeat(100_000),
+            format!("{}x==", "||a ==b|| ".repeat(100_000)),
+            format!("{}x||", "==a ||b== ".repeat(100_000)),
+            // Many valid openers, no valid closer anywhere: without giving up on a delimiter
+            // after the first failed search, this is one full scan of the tail per opener.
+            "||a ".repeat(300_000),
+            "==a ".repeat(300_000),
+        ] {
+            let start = std::time::Instant::now();
+            let _ = markdown_to_blocks(&input);
+            assert!(
+                start.elapsed() < std::time::Duration::from_secs(2),
+                "{:?} на входе {} байт",
+                start.elapsed(),
+                input.len()
+            );
+        }
+    }
+
+    /// The forms we knowingly do not reproduce, each with the reason. Every one is asserted
+    /// to *still* differ, so closing one of these gaps fails the diff rather than passing
+    /// unnoticed, and every one outside `CONTENT_DIVERGENCES` is additionally checked to
+    /// carry Telegram's own text and Telegram's own set of styles.
+    const DIVERGENCES: &[(&str, &str)] = &[
+        ("&vert;&vert;a&vert;&vert;", "Telegram decodes numeric character references and leaves named ones alone, so it shows `&vert;` as written; CommonMark decodes both. Neither side makes markup of it — the difference is the text, and it is `pulldown-cmark`'s, not the scan's"),
+        ("a==[==](/d)b", "a relative link: Telegram keeps the raw text and finds a bot command in `/d`, while this converter drops the link and keeps its text (the policy on `close_style`). Before the scan was rewritten this input produced an empty `marked` span with the link text destroyed, so it is the regression case too"),
+        ("| a | b |\n| --- | --- |\n| ||c|| | d |", "GFM reads the pipes of `||c||` as cell separators, and a row with more cells than the header is truncated per the spec; Telegram is not a GFM parser and keeps the text"),
+        ("||\tсекрет||", "same"),
+        ("||#хэштег||", "same, for a hashtag"),
+        ("||@durov||", "Telegram detects a mention inside the spoiler; this converter detects no entities at all"),
+        ("||https://ya.ru||", "same, for a bare URL"),
+        ("||секрет\t||", "Telegram folds the tab into a space; both sides agree the pair is literal"),
+        ("||секрет\\||b||", "Telegram's own handling of a backslash before a delimiter is not CommonMark's and is not self-consistent either: it drops the backslash in `\\||секрет||` and keeps it here, closing the pair on the escaped delimiter. This converter follows CommonMark, which `pulldown-cmark` has already applied by the time the scan runs"),
+        ("**==a==**", "equal-range styles, serialised in Telegram's order rather than the source's"),
+        ("**==||a||==**", "equal-range styles, serialised in Telegram's order rather than the source's"),
+        ("**==важно==**", "equal-range styles, serialised in Telegram's order rather than the source's"),
+        ("**[a](https://ya.ru)**", "Telegram normalises the host with a trailing slash, and orders equal-range styles its own way"),
+        ("**`c`**", "equal-range styles, serialised in Telegram's order rather than the source's"),
+        ("**||a||**", "equal-range styles, serialised in Telegram's order rather than the source's"),
+        ("*==a==*", "equal-range styles, serialised in Telegram's order rather than the source's"),
+        ("*`c`*", "equal-range styles, serialised in Telegram's order rather than the source's"),
+        ("*||a||*", "equal-range styles, serialised in Telegram's order rather than the source's"),
+        ("- ||a\n- b||", "Telegram labels list items with a bullet; `Block::List` carries no label"),
+        ("- ||a|| и ==b==", "Telegram labels list items with a bullet; `Block::List` carries no label"),
+        ("==**a**==", "equal-range styles, serialised in Telegram's order rather than the source's"),
+        ("==`c`==", "equal-range styles, serialised in Telegram's order rather than the source's"),
+        ("==||a||==", "equal-range styles, serialised in Telegram's order rather than the source's"),
+        ("[**a**](https://ya.ru)", "Telegram normalises the host with a trailing slash, and orders equal-range styles its own way"),
+        ("[==a==](https://ya.ru)", "Telegram normalises the host with a trailing slash, and orders equal-range styles its own way"),
+        ("[`c`](https://ya.ru)", "Telegram normalises the host with a trailing slash, and orders equal-range styles its own way"),
+        ("[||a||](https://ya.ru)", "Telegram normalises the host with a trailing slash, and orders equal-range styles its own way"),
+        ("[спойлер ||тут||](https://ya.ru)", "Telegram normalises the host with a trailing slash, and orders equal-range styles its own way"),
+        ("a==[b](https://ya.ru)==c", "Telegram normalises the host with a trailing slash, and orders equal-range styles its own way"),
+        ("| a | b |\n| --- | --- |\n| ==c== | d |", "Telegram fills in table chrome this converter leaves out (alignment, borders, stripes)"),
+        ("| a | b |\n| --- | --- |\n| c\\|d | e |", "Telegram fills in table chrome this converter leaves out (alignment, borders, stripes)"),
+        ("||==`c`==||", "equal-range styles, serialised in Telegram's order rather than the source's"),
+        ("||[a](https://ya.ru)||", "Telegram normalises the host with a trailing slash, and orders equal-range styles its own way"),
+        ("||[ссылка](https://ya.ru)||", "Telegram normalises the host with a trailing slash, and orders equal-range styles its own way"),
+        ("||`c`||", "equal-range styles, serialised in Telegram's order rather than the source's"),
+        ("~~`c`~~", "equal-range styles, serialised in Telegram's order rather than the source's"),
+        ("~~||a||~~", "equal-range styles, serialised in Telegram's order rather than the source's"),
+        ("~~||s||~~", "equal-range styles, serialised in Telegram's order rather than the source's"),
+    ];
+
+    /// The divergences that reach the text or the styles themselves rather than how they are
+    /// written down. Everything not in here is checked to carry the same characters and the
+    /// same set of styles as Telegram's own parse.
+    const CONTENT_DIVERGENCES: &[&str] = &[
+        "&vert;&vert;a&vert;&vert;",
+        "a==[==](/d)b",
+        "| a | b |\n| --- | --- |\n| ||c|| | d |",
+        "||\tсекрет||",
+        "||#хэштег||",
+        "||@durov||",
+        "||https://ya.ru||",
+        "||секрет\t||",
+        "||секрет\\||b||",
+    ];
 
     #[test]
     fn edge_inputs_do_not_panic() {
