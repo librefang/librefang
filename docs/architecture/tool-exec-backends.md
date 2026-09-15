@@ -21,6 +21,8 @@ Concretely: configuring `tool_exec.kind = "ssh"` (or `"daytona"`) in `config.tom
 Both are `warn!` and neither rejects: the configuration is a missing feature, not a broken config, and deployments carrying the setting in anticipation should keep starting.
 The single source of truth for which backends are still unwired is `BackendKind::is_wired_into_dispatch`; whoever migrates the call sites updates that method, and `only_the_local_backend_is_wired_into_dispatch_8221` fails until they do.
 
+`[docker] mode` is the same gap reached through a different section (#8220): `off` / `non_main` / `all` is matched on by nothing, so it too is configuration that changes where no tool call runs. It carries its own `DockerSandboxMode::is_wired_into_dispatch`, its own boot warning, and `no_docker_sandbox_mode_is_wired_into_dispatch_8220`. An operator reaching for OS-level isolation can land on either knob, so the two are worth wiring — or retiring — together.
+
 Operators experimenting with the SSH or Daytona backend should expect the override to take effect only after the follow-up PR migrates the call sites; until then, set `kind` to preview the resolver and feature-flag plumbing.
 
 ## Why a trait

@@ -334,6 +334,28 @@ impl LibreFangKernel {
             );
         }
 
+        // `[docker] mode` is the same defect one section over (#8220): declared, documented with a
+        // table of values, exposed in the JSON schema, and matched on by nothing. An operator who
+        // set `mode = "all"` believing they had moved every agent into a container moved nothing,
+        // and `shell_exec` / `process_start` kept running on the daemon host.
+        //
+        // The rest of `[docker]` is live and governs the `docker_exec` tool's containers, which is
+        // exactly what makes this one dangerous to leave quiet: the section visibly works, so the
+        // one field in it that does nothing looks like it works too.
+        //
+        // A `warn!` rather than a boot failure, for the same reason as the `[tool_exec]` warning
+        // above: this is a missing feature, not a broken config, and refusing to start would break
+        // deployments carrying the setting in anticipation.
+        if !config.docker.mode.is_wired_into_dispatch() {
+            warn!(
+                configured_mode = config.docker.mode.as_str(),
+                "[docker] mode is set, but agent tool calls still execute on the daemon host — \
+                 the mode is not wired into tool dispatch yet (#8220). shell_exec and process_start \
+                 ignore this setting; it is not a sandbox. The `docker_exec` tool, which the model \
+                 chooses for itself, is the only path into a container today."
+            );
+        }
+
         // Check TOTP configuration consistency
         if config.approval.second_factor == librefang_types::approval::SecondFactor::Totp {
             let vault_path = config.home_dir.join("vault.enc");

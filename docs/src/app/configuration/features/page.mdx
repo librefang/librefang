@@ -593,7 +593,7 @@ blocked_mounts = []
 | `cpu_limit` | f64 | `1.0` | CPU limit (e.g., `0.5`, `1.0`, `2.0`). |
 | `timeout_secs` | u64 | `60` | Maximum execution time per command in seconds. |
 | `read_only_root` | bool | `true` | Mount the root filesystem as read-only. |
-| `mode` | string | `"off"` | Activation mode. See below. |
+| `mode` | string | `"off"` | Activation mode. **Not implemented — see below.** No execution path reads this field; the daemon warns at boot when it is set to anything but `off`. |
 | `scope` | string | `"session"` | Container lifecycle scope. See below. |
 | `reuse_cool_secs` | u64 | `300` | Settling time in seconds before a container released by one agent may be handed to a *different* agent. Applies to `scope = "shared"` only — `session` / `agent` scope pin the container to the one workload that released it, and even under `shared` an agent re-acquiring the container it just released does not wait. |
 | `idle_timeout_secs` | u64 | `86400` | Destroy pooled containers after this many seconds of inactivity (24 hours default). `0` disables idle reaping. Together with `max_age_secs` this is the only thing that shrinks the pool — see the note on accumulation below. |
@@ -605,11 +605,21 @@ blocked_mounts = []
 
 **`mode` values:**
 
+<Note>
+`mode` is **not wired into tool dispatch** ([#8220](https://github.com/librefang/librefang/issues/8220)). Nothing in the daemon matches on it: `shell_exec` and `process_start` run as subprocesses on the daemon host whatever it is set to, and the only path into a container is the separate `docker_exec` tool, which the model chooses for itself.
+
+Setting `non_main` or `all` is not a sandbox and changes nothing. The daemon emits a `WARN` at boot when it is set, so the gap is visible rather than silent.
+
+Everything else in `[docker]` — `enabled`, `scope`, `reuse_cool_secs`, `idle_timeout_secs`, `max_age_secs`, the image and the resource limits — is live and governs the containers `docker_exec` creates. That is what makes this one field easy to mistake for working.
+
+`[tool_exec] kind` has the same gap for the same reason ([#8221](https://github.com/librefang/librefang/issues/8221)); neither is a way to move agent tool calls off this machine today.
+</Note>
+
 | Value | Description |
 |-------|-------------|
-| `off` | Docker sandbox disabled (default). |
-| `non_main` | Use Docker only for non-main (sub) agents. |
-| `all` | Use Docker for all agents. |
+| `off` | Docker sandbox disabled (default). The only value that is honoured, in the sense that it asks for nothing. |
+| `non_main` | *Intended*: use Docker only for non-main (sub) agents. Currently does nothing. |
+| `all` | *Intended*: use Docker for all agents. Currently does nothing. |
 
 **`scope` values:**
 

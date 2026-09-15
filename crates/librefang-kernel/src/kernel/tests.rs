@@ -18954,6 +18954,80 @@ fn boot_warns_that_a_non_local_tool_exec_backend_does_not_route_tool_calls_8221(
     kernel.shutdown();
 }
 
+/// #8220: booting with `[docker] mode = "all"` must say out loud that agent tool calls still run on the daemon host.
+///
+/// Nothing in the daemon matches on `[docker] mode`, so an operator who set it believing they had moved every agent into a container moved nothing — `shell_exec` and `process_start` kept running as subprocesses, and the only path into a container stayed the `docker_exec` tool the model chooses for itself.
+/// The rest of `[docker]` is live and governs those containers, which is what made the gap so easy to miss: the section visibly works.
+///
+/// `enabled` is left `false` deliberately. The mode is meaningless either way, and warning only when Docker is enabled would have hidden it from exactly the operator most likely to be wrong — the one who set `mode` and expected it to be the switch.
+#[test]
+fn boot_warns_that_a_docker_sandbox_mode_does_not_route_tool_calls_8220() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().join("librefang-docker-mode-warning-test");
+    std::fs::create_dir_all(&home_dir).unwrap();
+    let mut config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    config.docker.mode = librefang_types::config::DockerSandboxMode::All;
+
+    let logs = CapturedLogs::new();
+    let kernel = {
+        let _g = logs.install();
+        LibreFangKernel::boot_with_config(config).expect(
+            "an unimplemented mode is a missing feature, not a broken config; boot must succeed",
+        )
+    };
+
+    let captured = logs.text();
+    assert!(
+        captured.contains("#8220"),
+        "warning must cite the tracking issue so the operator can find the status; captured: {captured:?}"
+    );
+    assert!(
+        captured.contains("all"),
+        "warning must name the mode that was configured and ignored; captured: {captured:?}"
+    );
+    assert!(
+        captured.contains("not a sandbox"),
+        "warning must deny the security property an operator most plausibly assumed; captured: {captured:?}"
+    );
+
+    kernel.shutdown();
+}
+
+/// The default config must boot silent: a warning that fires for everyone is one nobody reads.
+#[test]
+fn boot_does_not_warn_about_docker_mode_when_it_is_off_8220() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().join("librefang-docker-mode-quiet-test");
+    std::fs::create_dir_all(&home_dir).unwrap();
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    assert_eq!(
+        config.docker.mode,
+        librefang_types::config::DockerSandboxMode::Off,
+        "the shipped default is what this test is about"
+    );
+
+    let logs = CapturedLogs::new();
+    let kernel = {
+        let _g = logs.install();
+        LibreFangKernel::boot_with_config(config).expect("boot")
+    };
+    assert!(
+        !logs.text().contains("#8220"),
+        "the default configuration must not produce the warning; captured: {:?}",
+        logs.text()
+    );
+
+    kernel.shutdown();
+}
+
 /// #8221, per-agent half: the same gap reached through `agent.toml`'s `tool_exec_backend`.
 ///
 /// Warned per spawn rather than at boot because a manifest can be written long after the daemon started, so a boot-time sweep would never see it.
