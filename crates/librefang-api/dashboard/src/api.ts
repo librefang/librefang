@@ -4776,6 +4776,16 @@ export async function stopGoalRun(
   );
 }
 
+/** Pause a running autonomous goal run so it can be resumed later. */
+export async function pauseGoalRun(goalId: string): Promise<ApiActionResponse> {
+  return post<ApiActionResponse>(`/api/goals/${encodeURIComponent(goalId)}/pause`, {});
+}
+
+/** Resume a paused autonomous goal run from its checkpoint. */
+export async function resumeGoalRun(goalId: string): Promise<ApiActionResponse> {
+  return post<ApiActionResponse>(`/api/goals/${encodeURIComponent(goalId)}/resume`, {});
+}
+
 /** Observe the autonomous run state for a goal. */
 export async function getGoalRun(
   goalId: string

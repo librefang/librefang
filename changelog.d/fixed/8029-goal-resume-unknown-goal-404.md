@@ -1,0 +1,2 @@
+`POST /api/goals/{id}/resume` reports `404 Goal not found` for a goal id that does not exist, exactly as `POST /api/goals/{id}/start` already did, instead of `409 Conflict`.
+The precondition that refuses a resume when there is no paused run ran before the goal was looked up, so an operator who mistyped an id was told the goal had nothing to resume and pointed at `/start` — the same handler, which would itself have answered 404 (#8029) (@DaBlitzStein)

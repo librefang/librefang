@@ -9,6 +9,8 @@ import {
   useDeleteGoal,
   useStartGoalRun,
   useStopGoalRun,
+  usePauseGoalRun,
+  useResumeGoalRun,
 } from "../lib/mutations/goals";
 import { PageHeader } from "../components/ui/PageHeader";
 import { ListSkeleton } from "../components/ui/Skeleton";
@@ -194,9 +196,12 @@ function GoalRunControl({ goal }: { goal: GoalItem }) {
   const runQuery = useGoalRun(goal.id, { enabled: hasAgent });
   const startMutation = useStartGoalRun();
   const stopMutation = useStopGoalRun();
+  const pauseMutation = usePauseGoalRun();
+  const resumeMutation = useResumeGoalRun();
 
   const run = runQuery.data?.run;
   const isRunning = runQuery.data?.running === true && run?.phase === "running";
+  const isPaused = run?.phase === "paused";
 
   if (!hasAgent) {
     return (
@@ -225,23 +230,85 @@ function GoalRunControl({ goal }: { goal: GoalItem }) {
       addToast(toastErr(err, t("common.error")), "error");
     }
   };
+  const onPause = async () => {
+    try {
+      await pauseMutation.mutateAsync(goal.id);
+    } catch (err) {
+      addToast(toastErr(err, t("common.error")), "error");
+    }
+  };
+  const onResume = async () => {
+    try {
+      await resumeMutation.mutateAsync(goal.id);
+    } catch (err) {
+      addToast(toastErr(err, t("common.error")), "error");
+    }
+  };
 
   // No `&& run` guard: `isRunning` already requires `run?.phase === "running"`, and the daemon computes `running` as `run.phase == GoalRunPhase::Running` with no `run` field at all when there is no run, so the two cannot disagree. Written as a guard it would have rendered the *start* button for a live run — the opposite of safe for a state it implied it was handling.
   if (isRunning) {
     return (
-      <button
-        type="button"
-        onClick={() => void onStop()}
-        disabled={stopMutation.isPending}
-        className="p-1.5 rounded-lg hover:bg-warning/10 text-warning transition-colors"
-        title={t("goals.run_stop")}
-      >
-        {stopMutation.isPending ? (
-          <Loader2 className="h-3.5 w-3.5 animate-spin" />
-        ) : (
-          <Square className="h-3.5 w-3.5" />
-        )}
-      </button>
+      <div className="flex items-center gap-0.5">
+        <button
+          type="button"
+          onClick={() => void onPause()}
+          disabled={pauseMutation.isPending}
+          className="p-1.5 rounded-lg hover:bg-brand/10 text-text-dim hover:text-brand transition-colors"
+          title={t("goals.run_pause")}
+        >
+          {pauseMutation.isPending ? (
+            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+          ) : (
+            <Pause className="h-3.5 w-3.5" />
+          )}
+        </button>
+        <button
+          type="button"
+          onClick={() => void onStop()}
+          disabled={stopMutation.isPending}
+          className="p-1.5 rounded-lg hover:bg-warning/10 text-warning transition-colors"
+          title={t("goals.run_stop")}
+        >
+          {stopMutation.isPending ? (
+            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+          ) : (
+            <Square className="h-3.5 w-3.5" />
+          )}
+        </button>
+      </div>
+    );
+  }
+
+  if (isPaused) {
+    return (
+      <div className="flex items-center gap-0.5">
+        <button
+          type="button"
+          onClick={() => void onResume()}
+          disabled={resumeMutation.isPending}
+          className="p-1.5 rounded-lg hover:bg-success/10 text-text-dim hover:text-success transition-colors"
+          title={t("goals.run_resume")}
+        >
+          {resumeMutation.isPending ? (
+            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+          ) : (
+            <Play className="h-3.5 w-3.5" />
+          )}
+        </button>
+        <button
+          type="button"
+          onClick={() => void onStop()}
+          disabled={stopMutation.isPending}
+          className="p-1.5 rounded-lg hover:bg-warning/10 text-warning transition-colors"
+          title={t("goals.run_stop")}
+        >
+          {stopMutation.isPending ? (
+            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+          ) : (
+            <Square className="h-3.5 w-3.5" />
+          )}
+        </button>
+      </div>
     );
   }
 

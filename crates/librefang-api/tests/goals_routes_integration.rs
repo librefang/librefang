@@ -1627,6 +1627,48 @@ async fn goal_run_resume_without_a_paused_run_is_a_conflict() {
     assert!(body["error"].as_str().unwrap_or_default().contains("start"));
 }
 
+/// A goal that does not exist is a 404 on `/resume`, exactly as it is on
+/// `/start` — not the 409 the precondition answers for a goal that exists but
+/// has nothing paused.
+///
+/// The `require_paused` check used to run before the goal lookup, so a
+/// well-formed but unknown id got `409 Conflict` telling the operator to "use
+/// POST /api/goals/{id}/start to begin a new run" — advice that would itself
+/// 404. Someone who mistypes an id was told the wrong thing, and told to fix it
+/// in a way that could not work.
+///
+/// `/start` is the route this is pinned against because it is literally the
+/// same handler body with `require_paused: false`. `/stop`, `/pause` and `/run`
+/// are deliberately NOT: none of them looks the goal up, and all three answer
+/// `200` with a `false` flag for an id that does not exist.
+#[tokio::test(flavor = "multi_thread")]
+async fn goal_run_resume_on_an_unknown_goal_is_a_404_not_a_conflict() {
+    let h = boot().await;
+
+    for route in ["resume", "start"] {
+        let (status, body) = json_request(
+            &h,
+            Method::POST,
+            &format!("/api/goals/{UNKNOWN_GOAL_ID}/{route}"),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "route {route}: {body:?}");
+        // The lookup failure, not the precondition. `ApiErrorResponse` nests the
+        // text under `error.message`, while the 409 this used to return puts a
+        // plain string in `error` — so this assertion distinguishes the two
+        // rather than merely restating the status code.
+        assert!(
+            body["error"]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("not found"),
+            "route {route}: an unknown goal must report the lookup failure, \
+             not the resume precondition: {body:?}"
+        );
+    }
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn goal_run_pause_and_resume_reject_a_malformed_id() {
     let h = boot().await;

@@ -2987,7 +2987,9 @@
     "verifier_agent": "验证代理",
     "no_verifier_selected": "无验证代理（不设关卡）",
     "evaluator_model": "评估模型",
-    "evaluator_model_placeholder": "评估模型（可选）"
+    "evaluator_model_placeholder": "评估模型（可选）",
+    "run_pause": "暂停自主执行",
+    "run_resume": "恢复自主执行"
   },
   "sessions": {
     "title": "会话",
@@ -4259,7 +4261,8 @@
     "status_failed": "失败",
     "assignee_none": "未分配 — 任何智能体都可认领",
     "no_agents_hint": "尚未注册任何智能体。请先创建智能体再分配任务。",
-    "field_description_hint": "智能体会逐字读取此内容。请写明目标、约束以及完成标准。"
+    "field_description_hint": "智能体会逐字读取此内容。请写明目标、约束以及完成标准。",
+    "field_assignee_placeholder": "智能体名称或 ID"
   },
   "prompts": {
     "title": "提示词",
