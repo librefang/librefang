@@ -322,6 +322,7 @@ pub enum AppEvent {
         phase: Option<String>,
         iteration: Option<u32>,
         max_iterations: Option<u32>,
+        verify_max_retries: Option<u32>,
     },
     /// Goal created.
     GoalCreated(String),
@@ -331,6 +332,10 @@ pub enum AppEvent {
     GoalRunStarted(String),
     /// Goal run stopped.
     GoalRunStopped(String),
+    /// A goal run was checkpointed and paused.
+    GoalRunPaused(String),
+    /// A paused goal run was resumed from its checkpoint.
+    GoalRunResumed(String),
     /// Hand definitions loaded (marketplace).
     HandsLoaded(Vec<HandInfo>),
     /// Active hand instances loaded.
@@ -4810,9 +4815,24 @@ fn goal_from_json(g: &serde_json::Value) -> GoalInfo {
             .as_str()
             .filter(|s| !s.is_empty())
             .map(str::to_string),
+        // Absent on every goal written before loop engineering existed, which
+        // is the same thing as opted out.
+        loop_engineering: g["loop_engineering"].as_bool().unwrap_or(false),
+        verify_agent_id: g["verify_agent_id"]
+            .as_str()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string),
+        evaluator_model: g["evaluator_model"]
+            .as_str()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string),
+        tick_interval_secs: g["tick_interval_secs"].as_u64(),
         run_phase: None,
         run_iteration: None,
         run_max_iterations: None,
+        run_verify_max_retries: None,
     }
 }
 
@@ -4864,26 +4884,47 @@ pub fn spawn_fetch_goal_run(backend: BackendRef, goal_id: String, tx: mpsc::Send
             phase: run["phase"].as_str().map(str::to_string),
             iteration: run["iteration"].as_u64().map(|v| v as u32),
             max_iterations: run["max_iterations"].as_u64().map(|v| v as u32),
+            verify_max_retries: run["verify_max_retries"].as_u64().map(|v| v as u32),
         });
     });
 }
 
 /// Create a goal.
+#[allow(clippy::too_many_arguments)]
 pub fn spawn_create_goal(
     backend: BackendRef,
     title: String,
     description: String,
     agent_id: String,
+    loop_engineering: bool,
+    verify_agent_id: String,
+    evaluator_model: String,
+    tick_interval_secs: Option<u64>,
     tx: mpsc::Sender<AppEvent>,
 ) {
     std::thread::spawn(move || match backend {
         BackendRef::Daemon { base_url, api_key } => {
             let client = make_daemon_client(api_key.as_deref());
-            let body = serde_json::json!({
+            let mut body = serde_json::json!({
                 "title": title,
                 "description": description,
                 "agent_id": agent_id,
+                "loop_engineering": loop_engineering,
             });
+            // Omitted rather than sent blank: the daemon rejects a
+            // `verify_agent_id` that is not a UUID outright, so an empty
+            // string would turn "no verifier" into a 400.
+            if !verify_agent_id.is_empty() {
+                body["verify_agent_id"] = serde_json::Value::String(verify_agent_id);
+            }
+            if !evaluator_model.is_empty() {
+                body["evaluator_model"] = serde_json::Value::String(evaluator_model);
+            }
+            // Omitted rather than sent as null: the goal document only carries
+            // the field when it overrides the default cadence.
+            if let Some(secs) = tick_interval_secs {
+                body["tick_interval_secs"] = serde_json::json!(secs);
+            }
             match client
                 .post(format!("{base_url}/api/goals"))
                 .json(&body)
@@ -4950,14 +4991,24 @@ pub fn spawn_delete_goal(backend: BackendRef, goal_id: String, tx: mpsc::Sender<
 }
 
 /// Start a goal run.
-pub fn spawn_start_goal_run(backend: BackendRef, goal_id: String, tx: mpsc::Sender<AppEvent>) {
+pub fn spawn_start_goal_run(
+    backend: BackendRef,
+    goal_id: String,
+    verify_max_retries: Option<u32>,
+    tx: mpsc::Sender<AppEvent>,
+) {
     std::thread::spawn(move || match backend {
         BackendRef::Daemon { base_url, api_key } => {
             let client = make_daemon_client(api_key.as_deref());
-            match client
-                .post(format!("{base_url}/api/goals/{goal_id}/start"))
-                .send()
-            {
+            let request = client.post(format!("{base_url}/api/goals/{goal_id}/start"));
+            // The body is optional on this route, and the run's verification
+            // configuration otherwise comes from the goal document, so a start
+            // with no budget to state stays a bodyless POST.
+            let request = match verify_max_retries {
+                Some(rounds) => request.json(&serde_json::json!({ "verify_max_retries": rounds })),
+                None => request,
+            };
+            match request.send() {
                 Ok(resp) if resp.status().is_success() => {
                     let _ = tx.send(AppEvent::GoalRunStarted(goal_id));
                 }
@@ -5005,6 +5056,82 @@ pub fn spawn_stop_goal_run(backend: BackendRef, goal_id: String, tx: mpsc::Sende
                 }
                 Err(_) => {
                     let _ = tx.send(AppEvent::FetchError(crate::i18n::t("tui-goal-stop-failed")));
+                }
+            }
+        }
+        BackendRef::InProcess(_) => {
+            let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
+                "tui-goal-inproc-unavailable",
+            )));
+        }
+    });
+}
+
+/// Pause a running goal, checkpointing its iteration count and progress.
+///
+/// `POST /api/goals/{id}/pause`. The daemon signals the loop rather than
+/// aborting it, so success here means "the pause was accepted", not "the loop
+/// has already stopped" — the phase the detail pane shows afterwards comes from
+/// the refresh, not from this response.
+pub fn spawn_pause_goal_run(backend: BackendRef, goal_id: String, tx: mpsc::Sender<AppEvent>) {
+    std::thread::spawn(move || match backend {
+        BackendRef::Daemon { base_url, api_key } => {
+            let client = make_daemon_client(api_key.as_deref());
+            match client
+                .post(format!("{base_url}/api/goals/{goal_id}/pause"))
+                .send()
+            {
+                Ok(resp) if resp.status().is_success() => {
+                    let _ = tx.send(AppEvent::GoalRunPaused(goal_id));
+                }
+                Ok(resp) => {
+                    let _ = tx.send(AppEvent::FetchError(api_error_text(
+                        resp,
+                        "tui-goal-pause-failed",
+                    )));
+                }
+                Err(_) => {
+                    let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
+                        "tui-goal-pause-failed",
+                    )));
+                }
+            }
+        }
+        BackendRef::InProcess(_) => {
+            let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
+                "tui-goal-inproc-unavailable",
+            )));
+        }
+    });
+}
+
+/// Resume a paused goal from its checkpoint.
+///
+/// `POST /api/goals/{id}/resume` with no body, which is the daemon's "keep the
+/// cap the paused run was already under" path. Re-budgeting a resumed run is a
+/// deliberate act and belongs to a surface that can ask for the number, not to
+/// a single keypress.
+pub fn spawn_resume_goal_run(backend: BackendRef, goal_id: String, tx: mpsc::Sender<AppEvent>) {
+    std::thread::spawn(move || match backend {
+        BackendRef::Daemon { base_url, api_key } => {
+            let client = make_daemon_client(api_key.as_deref());
+            match client
+                .post(format!("{base_url}/api/goals/{goal_id}/resume"))
+                .send()
+            {
+                Ok(resp) if resp.status().is_success() => {
+                    let _ = tx.send(AppEvent::GoalRunResumed(goal_id));
+                }
+                Ok(resp) => {
+                    let _ = tx.send(AppEvent::FetchError(api_error_text(
+                        resp,
+                        "tui-goal-resume-failed",
+                    )));
+                }
+                Err(_) => {
+                    let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
+                        "tui-goal-resume-failed",
+                    )));
                 }
             }
         }

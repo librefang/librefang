@@ -268,6 +268,8 @@ export {
   deleteGoal,
   startGoalRun,
   stopGoalRun,
+  pauseGoalRun,
+  resumeGoalRun,
   // hands
   activateHand,
   deactivateHand,

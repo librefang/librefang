@@ -4,15 +4,47 @@
 //! A goal document carries only its own fields; the live run state (phase, iteration, cap) lives in the kernel's run registry and is served separately by `GET /api/goals/{id}/run`, so the detail pane fetches it on open rather than expecting it inside the list payload.
 
 use crate::tui::{theme, widgets};
+use librefang_types::goal::{
+    DEFAULT_GOAL_TICK_INTERVAL_SECS, MAX_GOAL_TICK_INTERVAL_SECS, MIN_GOAL_TICK_INTERVAL_SECS,
+};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Gauge, ListItem, Paragraph};
 use ratatui::Frame;
+use std::collections::BTreeMap;
 
-/// Number of fields in the create wizard: title, description, agent.
-pub const CREATE_STEPS: usize = 3;
+/// Create-wizard steps, in the order they are walked.
+///
+/// The cadence step sits before the loop-engineering toggle because it applies
+/// to every goal: everything after the toggle is skipped when loop engineering
+/// is off, and the pause between iterations is not part of that gate.
+/// The verifier and evaluator steps come last for the opposite reason — they
+/// only configure loop engineering, so a draft that leaves it off never sees
+/// them. See [`GoalsState::create_visible_steps`].
+const STEP_TITLE: usize = 0;
+const STEP_DESCRIPTION: usize = 1;
+const STEP_AGENT: usize = 2;
+const STEP_TICK_INTERVAL: usize = 3;
+const STEP_LOOP_ENGINEERING: usize = 4;
+const STEP_VERIFIER: usize = 5;
+const STEP_EVALUATOR: usize = 6;
+
+/// Number of fields in the create wizard: title, description, agent, tick
+/// interval, loop engineering, verifier agent, evaluator model.
+pub const CREATE_STEPS: usize = 7;
+
+/// Steps walked when loop engineering is off: everything up to and including
+/// the loop-engineering toggle itself.
+const CREATE_STEPS_PLAIN: usize = STEP_LOOP_ENGINEERING + 1;
+
+/// Upper bound the `+` key stops at for the verification-round budget.
+///
+/// Each round is a verifier turn plus a generator turn, so the cost of the
+/// budget is two LLM calls per unit; a keyboard incrementer that runs to
+/// `u32::MAX` only makes an expensive mistake easy to reach.
+const MAX_VERIFY_MAX_RETRIES: u32 = 20;
 
 // ── Data types ──────────────────────────────────────────────────────────────
 
@@ -25,10 +57,27 @@ pub struct GoalInfo {
     pub status: String,
     pub progress: u8,
     pub agent_id: Option<String>,
+    /// Pause between the runner's loop iterations, in seconds.
+    /// `None` is the goal document omitting the field, which leaves the run on
+    /// [`DEFAULT_GOAL_TICK_INTERVAL_SECS`] — not "no pause".
+    pub tick_interval_secs: Option<u64>,
+    /// Whether the goal opts into the verifier gate and the optional
+    /// evaluator model. `false` reproduces the plain goal loop exactly.
+    pub loop_engineering: bool,
+    /// Agent that grades the assigned agent's output. Only consulted when
+    /// [`Self::loop_engineering`] is set.
+    pub verify_agent_id: Option<String>,
+    /// Model that judges the goal condition independently of the agent's own
+    /// `GOAL_DONE` marker. Only consulted when [`Self::loop_engineering`] is set.
+    pub evaluator_model: Option<String>,
     /// Live run phase, populated by [`GoalsAction::ShowDetail`]; `None` until then.
     pub run_phase: Option<String>,
     pub run_iteration: Option<u32>,
     pub run_max_iterations: Option<u32>,
+    /// Verification-round budget the live run was started with, from the run
+    /// registry. The kernel stores `0` for a run that is not using loop
+    /// engineering, so a `0` here means "no budget in force", not "zero rounds".
+    pub run_verify_max_retries: Option<u32>,
 }
 
 impl GoalInfo {
@@ -37,6 +86,15 @@ impl GoalInfo {
     /// Drives the start/stop toggle, so it keys off the run registry's phase rather than the goal document's `status` — `status` is flipped to `in_progress` when a run starts but is never flipped back when the loop ends, so it would keep offering "stop" for a finished run.
     pub fn is_running(&self) -> bool {
         self.run_phase.as_deref() == Some("running")
+    }
+
+    /// Whether the run registry reports this goal as paused.
+    ///
+    /// Kept separate from [`Self::is_running`] rather than folded into it: a
+    /// paused run is neither running nor absent, and the pause key has to tell
+    /// the two apart to know whether it should pause or resume.
+    pub fn is_paused(&self) -> bool {
+        self.run_phase.as_deref() == Some("paused")
     }
 }
 
@@ -57,6 +115,32 @@ pub struct GoalsState {
     pub create_title: String,
     pub create_desc: String,
     pub create_agent_id: String,
+    /// Raw digits typed into the cadence step; empty means "use the default".
+    pub create_tick_interval: String,
+    pub create_loop_engineering: bool,
+    pub create_verify_agent_id: String,
+    pub create_evaluator_model: String,
+    /// Verification-round budgets the `+` / `-` keys have set, by goal id.
+    ///
+    /// It is a property of the run request, not of the stored goal — the API
+    /// takes it in the `POST /goals/{id}/start` body and the goal document has
+    /// no field for it — so it lives here rather than on [`GoalInfo`].
+    ///
+    /// Keyed by goal because the detail pane renders it among per-goal fields:
+    /// one screen-global number showed a budget edited on goal A as if it were
+    /// goal B's configuration, and then started B with it.
+    ///
+    /// An absent entry means the operator has not chosen a budget, and is the
+    /// reason this is a map of `u32` rather than a `u32` with a default: a
+    /// start with no entry sends no `verify_max_retries` at all and lets the
+    /// daemon apply its own default. Seeding it with the CLI's compiled
+    /// constant would pin every run to whatever value *this* binary was built
+    /// with, which is the wrong one whenever the CLI and the daemon differ in
+    /// version — and they are separate binaries talking over HTTP.
+    ///
+    /// Nothing resets this: it survives every refresh for the life of the
+    /// process, because only [`Self::adjust_verify_max_retries`] writes it.
+    pub pending_verify_max_retries: BTreeMap<String, u32>,
     pub status_msg: String,
     pub confirm_delete: bool,
 }
@@ -69,11 +153,28 @@ pub enum GoalsAction {
         title: String,
         description: String,
         agent_id: String,
+        loop_engineering: bool,
+        verify_agent_id: String,
+        evaluator_model: String,
+        /// `None` omits the field so the goal keeps the compiled default cadence.
+        tick_interval_secs: Option<u64>,
     },
     StartRun {
         goal_id: String,
+        /// Per-run verification budget, sent only for a goal that uses loop
+        /// engineering — the kernel zeroes it for any other run, so sending it
+        /// there would read as a gate the loop does not have.
+        verify_max_retries: Option<u32>,
     },
     StopRun {
+        goal_id: String,
+    },
+    /// Checkpoint a running goal so it can be resumed from where it stopped.
+    PauseRun {
+        goal_id: String,
+    },
+    /// Continue a paused goal from its checkpoint.
+    ResumeRun {
         goal_id: String,
     },
     DeleteGoal {
@@ -108,6 +209,11 @@ impl GoalsState {
             create_title: String::new(),
             create_desc: String::new(),
             create_agent_id: String::new(),
+            create_loop_engineering: false,
+            create_verify_agent_id: String::new(),
+            create_evaluator_model: String::new(),
+            pending_verify_max_retries: BTreeMap::new(),
+            create_tick_interval: String::new(),
             status_msg: String::new(),
             confirm_delete: false,
         }
@@ -117,6 +223,33 @@ impl GoalsState {
         self.tick = self.tick.wrapping_add(1);
     }
 
+    /// Replace the list, carrying forward run state already fetched for the goals still in it.
+    ///
+    /// `GET /api/goals` answers with stored goal documents, which never carry run state, so every row it produces has `run_phase: None`.
+    /// Assigning the vector wholesale therefore erased whatever [`Self::apply_run_state`] had written — and pause, resume, start and stop each fire a list refresh and a run-state refresh on independent threads, so whenever the list response landed second it wiped the phase the other had just fetched.
+    /// That left `p` reading `None` and going inert, which is precisely the state a paused run cannot be resumed from.
+    ///
+    /// A goal absent from the incoming list keeps nothing: its run state goes away with it rather than being re-attached to a later goal that happens to reuse the id.
+    pub fn replace_goals(&mut self, mut list: Vec<GoalInfo>) {
+        for fresh in &mut list {
+            if let Some(known) = self.goals.iter().find(|g| g.id == fresh.id) {
+                fresh.run_phase = known.run_phase.clone();
+                fresh.run_iteration = known.run_iteration;
+                fresh.run_max_iterations = known.run_max_iterations;
+                // Carried for the same reason as the three above, and added
+                // when #8224's refresh fix met this branch's budget control:
+                // `apply_run_state` writes this field too, so leaving it out
+                // let a list refresh landing second blank it — and then
+                // `adjust_verify_max_retries` fell back to the compiled
+                // default instead of the budget the live run is actually
+                // under, moving a number the operator was not looking at.
+                fresh.run_verify_max_retries = known.run_verify_max_retries;
+            }
+        }
+        self.goals = list;
+        self.refilter();
+    }
+
     /// Merge a freshly fetched run state into the matching goal.
     pub fn apply_run_state(
         &mut self,
@@ -124,11 +257,13 @@ impl GoalsState {
         phase: Option<String>,
         iteration: Option<u32>,
         max_iterations: Option<u32>,
+        verify_max_retries: Option<u32>,
     ) {
         if let Some(g) = self.goals.iter_mut().find(|g| g.id == goal_id) {
             g.run_phase = phase;
             g.run_iteration = iteration;
             g.run_max_iterations = max_iterations;
+            g.run_verify_max_retries = verify_max_retries;
         }
     }
 
@@ -167,7 +302,7 @@ impl GoalsState {
     }
 
     /// Start or stop `goal`, whichever its live phase calls for.
-    fn toggle_run(goal: &GoalInfo) -> GoalsAction {
+    fn toggle_run(&self, goal: &GoalInfo) -> GoalsAction {
         if goal.is_running() {
             GoalsAction::StopRun {
                 goal_id: goal.id.clone(),
@@ -175,7 +310,59 @@ impl GoalsState {
         } else {
             GoalsAction::StartRun {
                 goal_id: goal.id.clone(),
+                // Only a budget the operator actually chose goes on the wire.
+                // With no entry the request body is omitted entirely and the
+                // daemon applies its own default, which is the only value that
+                // is right when the CLI and the daemon are different versions.
+                verify_max_retries: goal
+                    .loop_engineering
+                    .then(|| self.pending_verify_max_retries.get(&goal.id).copied())
+                    .flatten(),
             }
+        }
+    }
+
+    /// Move the open goal's pending verification-round budget by `delta`,
+    /// staying inside `1..=MAX_VERIFY_MAX_RETRIES`.
+    ///
+    /// The first press has to start somewhere. It starts from the budget the
+    /// pane is showing — the live run's, when there is one — so the number the
+    /// operator sees move is the number they were looking at. Only when there
+    /// is neither a pending edit nor a run does it fall back to this binary's
+    /// compiled default, and by then the operator is choosing the value
+    /// explicitly and can see it before `s` commits to it.
+    fn adjust_verify_max_retries(&mut self, delta: i32) {
+        let Some(goal) = self.selected_goal.and_then(|idx| self.goals.get(idx)) else {
+            return;
+        };
+        let id = goal.id.clone();
+        let base = self
+            .pending_verify_max_retries
+            .get(&id)
+            .copied()
+            .or(goal.run_verify_max_retries.filter(|&n| n > 0))
+            .unwrap_or(librefang_kernel::goal_runner::DEFAULT_VERIFY_MAX_RETRIES);
+        let next = (base as i32 + delta).clamp(1, MAX_VERIFY_MAX_RETRIES as i32) as u32;
+        self.pending_verify_max_retries.insert(id, next);
+    }
+
+    /// Pause or resume `goal`, whichever its live phase calls for.
+    ///
+    /// A goal that is neither running nor paused has nothing to toggle, so the
+    /// key is inert rather than guessing — starting a run is what `s` is for,
+    /// and silently starting one from a pause key would be a surprise on a
+    /// screen where the two states look similar.
+    fn toggle_pause(goal: &GoalInfo) -> GoalsAction {
+        if goal.is_running() {
+            GoalsAction::PauseRun {
+                goal_id: goal.id.clone(),
+            }
+        } else if goal.is_paused() {
+            GoalsAction::ResumeRun {
+                goal_id: goal.id.clone(),
+            }
+        } else {
+            GoalsAction::Continue
         }
     }
 
@@ -256,13 +443,22 @@ impl GoalsState {
                 self.create_title.clear();
                 self.create_desc.clear();
                 self.create_agent_id.clear();
+                self.create_loop_engineering = false;
+                self.create_verify_agent_id.clear();
+                self.create_evaluator_model.clear();
+                self.create_tick_interval.clear();
             }
             KeyCode::Char('d') if self.list_state.selected().is_some() => {
                 self.confirm_delete = true;
             }
             KeyCode::Char('s') => {
                 if let Some(g) = self.selected_in_list() {
-                    return Self::toggle_run(g);
+                    return self.toggle_run(g);
+                }
+            }
+            KeyCode::Char('p') => {
+                if let Some(g) = self.selected_in_list() {
+                    return Self::toggle_pause(g);
                 }
             }
             KeyCode::Char('/') => {
@@ -283,7 +479,24 @@ impl GoalsState {
             KeyCode::Char('s') => {
                 if let Some(idx) = self.selected_goal {
                     if let Some(g) = self.goals.get(idx) {
-                        return Self::toggle_run(g);
+                        return self.toggle_run(g);
+                    }
+                }
+            }
+            // The budget only reaches a run that uses loop engineering, so the
+            // keys stay inert on a goal where the number would change nothing.
+            KeyCode::Char('+') | KeyCode::Char('-') if self.selected_uses_loop_engineering() => {
+                let delta = if key.code == KeyCode::Char('+') {
+                    1
+                } else {
+                    -1
+                };
+                self.adjust_verify_max_retries(delta);
+            }
+            KeyCode::Char('p') => {
+                if let Some(idx) = self.selected_goal {
+                    if let Some(g) = self.goals.get(idx) {
+                        return Self::toggle_pause(g);
                     }
                 }
             }
@@ -293,11 +506,53 @@ impl GoalsState {
         GoalsAction::Continue
     }
 
+    /// Whether the goal open in the detail pane uses loop engineering.
+    fn selected_uses_loop_engineering(&self) -> bool {
+        self.selected_goal
+            .and_then(|idx| self.goals.get(idx))
+            .is_some_and(|g| g.loop_engineering)
+    }
+
     /// Whether the create wizard can be submitted: title and agent are both required.
     ///
     /// The daemon refuses to start a run on a goal with no agent assigned, so submitting without one would create a goal that can never run.
     pub fn create_is_submittable(&self) -> bool {
         !self.create_title.trim().is_empty() && !self.create_agent_id.trim().is_empty()
+    }
+
+    /// Parse the wizard's cadence field into the value the create call sends.
+    ///
+    /// An empty field is not an error: it means "leave this goal on the
+    /// compiled default", which the API expresses by omitting the field.
+    /// A number outside the accepted band is refused here rather than posted,
+    /// so the operator is told at the keyboard instead of reading back a 400.
+    pub fn parsed_create_tick_interval(&self) -> Result<Option<u64>, ()> {
+        let trimmed = self.create_tick_interval.trim();
+        if trimmed.is_empty() {
+            return Ok(None);
+        }
+        match trimmed.parse::<u64>() {
+            Ok(secs)
+                if (MIN_GOAL_TICK_INTERVAL_SECS..=MAX_GOAL_TICK_INTERVAL_SECS).contains(&secs) =>
+            {
+                Ok(Some(secs))
+            }
+            _ => Err(()),
+        }
+    }
+
+    /// How many steps the wizard actually walks for the current draft.
+    ///
+    /// The verifier and evaluator only mean anything under loop engineering,
+    /// so a draft that leaves it off never sees them — the same shape the
+    /// dashboard form has, where the two controls appear only once the
+    /// checkbox is ticked.
+    pub fn create_visible_steps(&self) -> usize {
+        if self.create_loop_engineering {
+            CREATE_STEPS
+        } else {
+            CREATE_STEPS_PLAIN
+        }
     }
 
     fn handle_create_key(&mut self, key: KeyEvent) -> GoalsAction {
@@ -310,38 +565,101 @@ impl GoalsState {
                 }
             }
             KeyCode::Enter => {
-                if self.create_step + 1 < CREATE_STEPS {
+                if self.create_step + 1 < self.create_visible_steps() {
                     self.create_step += 1;
-                } else if self.create_is_submittable() {
-                    let action = GoalsAction::CreateGoal {
-                        title: self.create_title.trim().to_string(),
-                        description: self.create_desc.trim().to_string(),
-                        agent_id: self.create_agent_id.trim().to_string(),
-                    };
-                    self.create_open = false;
-                    return action;
-                } else {
+                } else if !self.create_is_submittable() {
                     self.status_msg = crate::i18n::t("tui-goals-create-incomplete");
+                } else {
+                    match self.parsed_create_tick_interval() {
+                        Ok(tick_interval_secs) => {
+                            // A verifier / evaluator typed before the toggle was
+                            // turned back off is not sent: the operator's last
+                            // word on the toggle is the one that decides, and the
+                            // daemon would otherwise store a gate the loop never
+                            // consults.
+                            let configured = self.create_loop_engineering;
+                            let action = GoalsAction::CreateGoal {
+                                title: self.create_title.trim().to_string(),
+                                description: self.create_desc.trim().to_string(),
+                                agent_id: self.create_agent_id.trim().to_string(),
+                                loop_engineering: configured,
+                                verify_agent_id: if configured {
+                                    self.create_verify_agent_id.trim().to_string()
+                                } else {
+                                    String::new()
+                                },
+                                evaluator_model: if configured {
+                                    self.create_evaluator_model.trim().to_string()
+                                } else {
+                                    String::new()
+                                },
+                                tick_interval_secs,
+                            };
+                            self.create_open = false;
+                            return action;
+                        }
+                        Err(()) => {
+                            self.status_msg = crate::i18n::t_args(
+                                "tui-goals-tick-out-of-range",
+                                &[
+                                    ("min", &MIN_GOAL_TICK_INTERVAL_SECS.to_string()),
+                                    ("max", &MAX_GOAL_TICK_INTERVAL_SECS.to_string()),
+                                ],
+                            );
+                        }
+                    }
                 }
             }
-            KeyCode::Char(c) => match self.create_step {
-                0 => self.create_title.push(c),
-                1 => self.create_desc.push(c),
-                2 => self.create_agent_id.push(c),
-                _ => {}
-            },
-            KeyCode::Backspace => match self.create_step {
-                0 => {
-                    self.create_title.pop();
+            // The cadence step takes digits only: silently dropping a letter
+            // beats accepting one and failing the parse at submit time.
+            //
+            // Editing any field also clears the rejection message: it names a
+            // value that is no longer the one in the box, and a stale error
+            // sitting under a corrected number reads as a second rejection.
+            KeyCode::Char(c) => {
+                self.status_msg.clear();
+                match self.create_step {
+                    STEP_TITLE => self.create_title.push(c),
+                    STEP_DESCRIPTION => self.create_desc.push(c),
+                    STEP_AGENT => self.create_agent_id.push(c),
+                    STEP_TICK_INTERVAL if c.is_ascii_digit() => self.create_tick_interval.push(c),
+                    // A boolean field has no text to type into, so the same keys
+                    // that read as "yes" / "no" set it and space flips it.
+                    STEP_LOOP_ENGINEERING => match c {
+                        ' ' => self.create_loop_engineering = !self.create_loop_engineering,
+                        'y' | 'Y' => self.create_loop_engineering = true,
+                        'n' | 'N' => self.create_loop_engineering = false,
+                        _ => {}
+                    },
+                    STEP_VERIFIER => self.create_verify_agent_id.push(c),
+                    STEP_EVALUATOR => self.create_evaluator_model.push(c),
+                    _ => {}
                 }
-                1 => {
-                    self.create_desc.pop();
+            }
+            KeyCode::Backspace => {
+                self.status_msg.clear();
+                match self.create_step {
+                    STEP_TITLE => {
+                        self.create_title.pop();
+                    }
+                    STEP_DESCRIPTION => {
+                        self.create_desc.pop();
+                    }
+                    STEP_AGENT => {
+                        self.create_agent_id.pop();
+                    }
+                    STEP_TICK_INTERVAL => {
+                        self.create_tick_interval.pop();
+                    }
+                    STEP_VERIFIER => {
+                        self.create_verify_agent_id.pop();
+                    }
+                    STEP_EVALUATOR => {
+                        self.create_evaluator_model.pop();
+                    }
+                    _ => {}
                 }
-                2 => {
-                    self.create_agent_id.pop();
-                }
-                _ => {}
-            },
+            }
             _ => {}
         }
         GoalsAction::Continue
@@ -373,6 +691,37 @@ fn draw_split(f: &mut Frame, area: Rect, state: &mut GoalsState) {
 /// locale can punctuate it its own way; only the indent is added here.
 fn label_span(key: &str) -> Span<'static> {
     Span::styled(format!("  {} ", crate::i18n::t(key)), theme::dim_style())
+}
+
+/// How the verification-round budget reads in the detail pane.
+///
+/// The live run's own budget leads, because that is what is actually in force.
+/// A pending edit is shown next to it rather than instead of it: preferring
+/// the run's number outright left `+` / `-` looking inert on any goal that had
+/// ever run — the registry keeps a finished run, including the boot-recovery
+/// placeholder, so the number on screen never moved — and the next `s` then
+/// started with a budget the operator had no way to see beforehand.
+///
+/// With no run and no edit there is no number to report: the daemon picks the
+/// budget, and naming this binary's compiled constant here would claim a value
+/// the run may not use.
+///
+/// A stored `0` is the kernel's encoding for a run that is not using loop
+/// engineering at all, not a budget of zero rounds, so it is not a budget in
+/// force.
+fn displayed_verify_max_retries(goal: &GoalInfo, pending: Option<u32>) -> String {
+    match (goal.run_verify_max_retries.filter(|&n| n > 0), pending) {
+        (Some(in_force), Some(next)) if in_force != next => crate::i18n::t_args(
+            "tui-goals-verify-rounds-next",
+            &[
+                ("current", &in_force.to_string()),
+                ("next", &next.to_string()),
+            ],
+        ),
+        (Some(in_force), _) => in_force.to_string(),
+        (None, Some(next)) => next.to_string(),
+        (None, None) => crate::i18n::t("tui-goals-verify-rounds-default"),
+    }
 }
 
 fn draw_list_panel(f: &mut Frame, area: Rect, state: &mut GoalsState) {
@@ -464,12 +813,14 @@ fn draw_detail(f: &mut Frame, area: Rect, state: &mut GoalsState) {
         }
     };
     let g = &state.goals[idx];
+    let pending_rounds = state.pending_verify_max_retries.get(&g.id).copied();
 
     let chunks = Layout::vertical([
         Constraint::Length(2), // title
         Constraint::Length(1), // separator
         Constraint::Min(3),    // body
-        Constraint::Length(1), // hints
+        // Two rows when the round-budget hint is shown, one otherwise.
+        Constraint::Length(if g.loop_engineering { 2 } else { 1 }), // hints
     ])
     .split(area);
 
@@ -508,8 +859,77 @@ fn draw_detail(f: &mut Frame, area: Rect, state: &mut GoalsState) {
             label_span("tui-goals-label-agent"),
             Span::styled(agent.to_string(), Style::default().fg(theme::CYAN)),
         ]),
-        Line::from(vec![label_span("tui-goals-label-progress")]),
+        Line::from(vec![
+            label_span("tui-goals-label-tick"),
+            Span::styled(
+                describe_tick_interval(g.tick_interval_secs),
+                Style::default().fg(theme::TEXT_SECONDARY),
+            ),
+        ]),
+        Line::from(vec![
+            label_span("tui-goals-label-loop-engineering"),
+            if g.loop_engineering {
+                Span::styled(
+                    crate::i18n::t("tui-goals-loop-engineering-on"),
+                    Style::default().fg(theme::GREEN),
+                )
+            } else {
+                // The compiled default, spelled out: a blank cell here reads as
+                // "unknown" for a flag whose whole point is that off is the
+                // plain goal loop.
+                Span::styled(
+                    crate::i18n::t("tui-goals-loop-engineering-off"),
+                    theme::dim_style(),
+                )
+            },
+        ]),
     ];
+
+    // The verifier, the evaluator and the round budget are only ever consulted
+    // under loop engineering, so showing them on a plain goal would advertise
+    // configuration the run ignores.
+    if g.loop_engineering {
+        let no_verifier = crate::i18n::t("tui-goals-verifier-none");
+        let no_evaluator = crate::i18n::t("tui-goals-evaluator-none");
+        // A model id or a translated "none" phrase is easily longer than the
+        // half-screen this pane gets, and a `Span` past the edge is clipped
+        // mid-word with nothing to say it was cut — `title` and `description`
+        // above are budgeted for exactly this reason. Measure against the
+        // label actually in front of the value so a longer translated label
+        // does not push the value off on its own.
+        let value_width = |label_key: &str| {
+            (chunks[2].width as usize).saturating_sub(crate::i18n::t(label_key).chars().count() + 3)
+        };
+        lines.push(Line::from(vec![
+            label_span("tui-goals-label-verifier"),
+            Span::styled(
+                widgets::truncate(
+                    g.verify_agent_id.as_deref().unwrap_or(&no_verifier),
+                    value_width("tui-goals-label-verifier"),
+                ),
+                Style::default().fg(theme::CYAN),
+            ),
+        ]));
+        lines.push(Line::from(vec![
+            label_span("tui-goals-label-evaluator"),
+            Span::styled(
+                widgets::truncate(
+                    g.evaluator_model.as_deref().unwrap_or(&no_evaluator),
+                    value_width("tui-goals-label-evaluator"),
+                ),
+                Style::default().fg(theme::CYAN),
+            ),
+        ]));
+        lines.push(Line::from(vec![
+            label_span("tui-goals-label-verify-rounds"),
+            Span::styled(
+                displayed_verify_max_retries(g, pending_rounds),
+                Style::default().fg(theme::TEXT_SECONDARY),
+            ),
+        ]));
+    }
+
+    lines.push(Line::from(vec![label_span("tui-goals-label-progress")]));
 
     if let Some(ref phase) = g.run_phase {
         let phase_style = match phase.as_str() {
@@ -561,8 +981,23 @@ fn draw_detail(f: &mut Frame, area: Rect, state: &mut GoalsState) {
     } else {
         crate::i18n::t("tui-goals-hint-start")
     };
-    let hint = crate::i18n::t_args("tui-goals-detail-hints", &[("run_hint", &run_hint)]);
-    f.render_widget(widgets::hint_bar(&hint), chunks[3]);
+    let mut hint_rows = vec![Line::from(Span::styled(
+        crate::i18n::t_args("tui-goals-detail-hints", &[("run_hint", &run_hint)]),
+        theme::hint_style(),
+    ))];
+    // Only advertised where the keys do something — see `handle_detail_key`,
+    // and on its own row rather than appended to the bar above: `hint_bar` is
+    // a bare `Paragraph` with no wrapping, and this pane is half the screen —
+    // 39 columns on an 80-column terminal — so an appended hint lands past the
+    // right edge and is clipped rather than wrapped. The one affordance this
+    // screen adds was never on screen at all.
+    if g.loop_engineering {
+        hint_rows.push(Line::from(Span::styled(
+            crate::i18n::t("tui-goals-hint-rounds"),
+            theme::hint_style(),
+        )));
+    }
+    f.render_widget(Paragraph::new(hint_rows), chunks[3]);
 }
 
 fn draw_create(f: &mut Frame, area: Rect, state: &GoalsState) {
@@ -574,7 +1009,8 @@ fn draw_create(f: &mut Frame, area: Rect, state: &GoalsState) {
         Constraint::Length(1), // field label
         Constraint::Length(1), // input
         Constraint::Length(1), // info hint
-        Constraint::Min(0),
+        Constraint::Min(0),    // spacer
+        Constraint::Length(1), // status
         Constraint::Length(1), // nav hints
     ])
     .split(area);
@@ -594,7 +1030,8 @@ fn draw_create(f: &mut Frame, area: Rect, state: &GoalsState) {
 
     f.render_widget(widgets::separator(chunks[1].width), chunks[1]);
 
-    let dots: Vec<Span> = (0..CREATE_STEPS)
+    let visible_steps = state.create_visible_steps();
+    let dots: Vec<Span> = (0..visible_steps)
         .map(|i| {
             if i < state.create_step {
                 Span::styled("\u{25cf} ", Style::default().fg(theme::GREEN))
@@ -612,7 +1049,7 @@ fn draw_create(f: &mut Frame, area: Rect, state: &GoalsState) {
             "tui-goals-step",
             &[
                 ("n", &(state.create_step + 1).to_string()),
-                ("total", &CREATE_STEPS.to_string()),
+                ("total", &visible_steps.to_string()),
             ],
         ),
         Style::default().fg(theme::TEXT_SECONDARY),
@@ -620,19 +1057,49 @@ fn draw_create(f: &mut Frame, area: Rect, state: &GoalsState) {
     f.render_widget(Paragraph::new(Line::from(step_line)), chunks[2]);
 
     let (label_key, value, hint_key) = match state.create_step {
-        0 => (
+        STEP_TITLE => (
             "tui-goals-label-title",
-            &state.create_title,
+            state.create_title.clone(),
             "tui-goals-title-hint",
         ),
-        1 => (
+        STEP_DESCRIPTION => (
             "tui-goals-label-description",
-            &state.create_desc,
+            state.create_desc.clone(),
             "tui-goals-description-hint",
         ),
+        STEP_TICK_INTERVAL => (
+            "tui-goals-label-tick",
+            state.create_tick_interval.clone(),
+            "tui-goals-tick-hint",
+        ),
+        STEP_LOOP_ENGINEERING => (
+            "tui-goals-label-loop-engineering",
+            // A boolean field renders its value as prose either way, so the
+            // step never shows the empty-input caret for a field that always
+            // has an answer.
+            crate::i18n::t(if state.create_loop_engineering {
+                "tui-goals-loop-engineering-on"
+            } else {
+                "tui-goals-loop-engineering-off"
+            }),
+            "tui-goals-loop-engineering-hint",
+        ),
+        STEP_VERIFIER => (
+            "tui-goals-label-verifier",
+            state.create_verify_agent_id.clone(),
+            "tui-goals-verifier-hint",
+        ),
+        STEP_EVALUATOR => (
+            "tui-goals-label-evaluator",
+            state.create_evaluator_model.clone(),
+            "tui-goals-evaluator-hint",
+        ),
+        // `STEP_AGENT`, and any index a future step count leaves unmapped —
+        // a wizard that renders the wrong known field beats one that renders
+        // nothing at all.
         _ => (
             "tui-goals-label-agent",
-            &state.create_agent_id,
+            state.create_agent_id.clone(),
             "tui-goals-agent-hint",
         ),
     };
@@ -656,23 +1123,39 @@ fn draw_create(f: &mut Frame, area: Rect, state: &GoalsState) {
     f.render_widget(Paragraph::new(Line::from(vec![display])), chunks[5]);
 
     // Info hint: the variable-shaped detail lives here, never in the label.
+    // The cadence bounds are passed to every step; a message without those
+    // placeholders simply ignores them, which keeps this one call site.
     f.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled("  \u{24d8} ", Style::default().fg(theme::ACCENT)),
             Span::styled(
-                crate::i18n::t(hint_key),
+                crate::i18n::t_args(
+                    hint_key,
+                    &[
+                        ("min", &MIN_GOAL_TICK_INTERVAL_SECS.to_string()),
+                        ("max", &MAX_GOAL_TICK_INTERVAL_SECS.to_string()),
+                        ("default", &DEFAULT_GOAL_TICK_INTERVAL_SECS.to_string()),
+                    ],
+                ),
                 Style::default().fg(theme::TEXT_SECONDARY),
             ),
         ])),
         chunks[6],
     );
 
-    let nav_key = if state.create_step + 1 < CREATE_STEPS {
+    // The wizard owns the whole screen while it is open, so `draw_list_panel`
+    // — the only other place that renders `status_msg` — is not running. Until
+    // this line existed, an out-of-range cadence set a message that reached no
+    // surface at all: Enter simply appeared to do nothing, on the one step
+    // whose whole point is telling the operator the number was refused.
+    f.render_widget(widgets::status_or_hint(&state.status_msg, ""), chunks[8]);
+
+    let nav_key = if state.create_step + 1 < visible_steps {
         "tui-goals-nav-next"
     } else {
         "tui-goals-nav-submit"
     };
-    f.render_widget(widgets::hint_bar(&crate::i18n::t(nav_key)), chunks[8]);
+    f.render_widget(widgets::hint_bar(&crate::i18n::t(nav_key)), chunks[9]);
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
@@ -725,6 +1208,21 @@ pub fn goal_status_badge(status: &str) -> (String, Style) {
     }
 }
 
+/// Render a goal's cadence for the detail pane.
+///
+/// An unset override is shown as the default it resolves to, marked as such:
+/// a blank cell would read as "no pause between iterations", which is the one
+/// thing the field can never mean.
+pub fn describe_tick_interval(secs: Option<u64>) -> String {
+    match secs {
+        Some(s) => crate::i18n::t_args("tui-goals-tick-value", &[("secs", &s.to_string())]),
+        None => crate::i18n::t_args(
+            "tui-goals-tick-default",
+            &[("secs", &DEFAULT_GOAL_TICK_INTERVAL_SECS.to_string())],
+        ),
+    }
+}
+
 /// Locale key for a `GoalRunPhase` wire value, or `None` if unrecognised.
 fn phase_message_key(phase: &str) -> Option<&'static str> {
     match phase {
@@ -772,6 +1270,109 @@ mod tests {
         s.goals = goals;
         s.refilter();
         s
+    }
+
+    /// `p` has to read the live phase, not the goal document: a running goal
+    /// pauses, a paused one resumes, and one that is doing neither is left
+    /// alone rather than being started — `s` is the key that starts a run, and
+    /// a pause key that silently launched one would be a surprise on a screen
+    /// where "stopped" and "paused" sit next to each other.
+    #[test]
+    fn pause_key_pauses_a_running_goal_and_resumes_a_paused_one() {
+        let mut running = goal("1", "Ship the report", None);
+        running.run_phase = Some("running".to_string());
+        let mut s = state_with(vec![running]);
+        assert!(matches!(
+            s.handle_key(key(KeyCode::Char('p'))),
+            GoalsAction::PauseRun { ref goal_id } if goal_id == "1"
+        ));
+
+        let mut paused = goal("2", "Ship the report", None);
+        paused.run_phase = Some("paused".to_string());
+        let mut s = state_with(vec![paused]);
+        assert!(matches!(
+            s.handle_key(key(KeyCode::Char('p'))),
+            GoalsAction::ResumeRun { ref goal_id } if goal_id == "2"
+        ));
+    }
+
+    /// A goal with no live run, and one whose run already finished, both leave
+    /// the key inert. `run_phase` is `None` until the detail pane fetches it,
+    /// so this is also the state the list is in before anything is opened.
+    #[test]
+    fn pause_key_is_inert_when_there_is_no_run_to_pause() {
+        for phase in [None, Some("completed"), Some("stopped"), Some("failed")] {
+            let mut g = goal("1", "Ship the report", None);
+            g.run_phase = phase.map(str::to_string);
+            let mut s = state_with(vec![g]);
+            assert!(
+                matches!(s.handle_key(key(KeyCode::Char('p'))), GoalsAction::Continue),
+                "phase {phase:?} must not produce a pause or resume"
+            );
+        }
+    }
+
+    /// Pause, resume, start and stop each fire a list refresh alongside the
+    /// run-state refresh, on independent threads. The list payload carries no
+    /// run state, so if it lands second it used to wipe the phase the other
+    /// fetch had just written — and `p` reading `None` is inert, which is the
+    /// one state a paused run cannot be resumed from. `r` did the same.
+    #[test]
+    fn a_list_reload_keeps_run_state_already_fetched_so_pause_stays_live() {
+        let mut s = state_with(vec![goal("1", "Ship the report", None)]);
+        s.apply_run_state("1", Some("paused".to_string()), Some(3), Some(25), Some(4));
+
+        // Exactly what `spawn_fetch_goals` builds: every row `run_phase: None`.
+        s.replace_goals(vec![
+            goal("1", "Ship the report", None),
+            goal("2", "File the return", None),
+        ]);
+
+        assert_eq!(s.goals[0].run_phase.as_deref(), Some("paused"));
+        assert_eq!(s.goals[0].run_iteration, Some(3));
+        assert_eq!(s.goals[0].run_max_iterations, Some(25));
+        // The budget this branch adds is written by the same `apply_run_state`
+        // and has to survive the same reload: without it `+`/`-` would start
+        // from the compiled default rather than the run's own budget.
+        assert_eq!(s.goals[0].run_verify_max_retries, Some(4));
+        // A goal the reload brought in for the first time has nothing to carry.
+        assert!(s.goals[1].run_phase.is_none());
+        assert!(s.goals[1].run_verify_max_retries.is_none());
+
+        assert!(matches!(
+            s.handle_key(key(KeyCode::Char('p'))),
+            GoalsAction::ResumeRun { ref goal_id } if goal_id == "1"
+        ));
+    }
+
+    /// A goal that has left the list takes its run state with it, rather than
+    /// having it re-attached to whatever later occupies the same position.
+    #[test]
+    fn a_goal_absent_from_the_reload_does_not_carry_its_run_state_over() {
+        let mut s = state_with(vec![goal("1", "Ship the report", None)]);
+        s.apply_run_state("1", Some("running".to_string()), Some(2), Some(10), Some(4));
+
+        s.replace_goals(vec![goal("2", "File the return", None)]);
+
+        assert_eq!(s.goals.len(), 1);
+        assert_eq!(s.goals[0].id, "2");
+        assert!(s.goals[0].run_phase.is_none());
+        assert!(s.goals[0].run_verify_max_retries.is_none());
+    }
+
+    /// The detail pane binds the same key against the goal it has open, which
+    /// is a different selection path from the list's.
+    #[test]
+    fn pause_key_works_from_the_detail_pane_too() {
+        let mut running = goal("7", "Ship the report", None);
+        running.run_phase = Some("running".to_string());
+        let mut s = state_with(vec![running]);
+        s.detail_open = true;
+        s.selected_goal = Some(0);
+        assert!(matches!(
+            s.handle_key(key(KeyCode::Char('p'))),
+            GoalsAction::PauseRun { ref goal_id } if goal_id == "7"
+        ));
     }
 
     #[test]
@@ -864,12 +1465,206 @@ mod tests {
     #[test]
     fn apply_run_state_populates_only_the_matching_goal() {
         let mut s = state_with(vec![goal("1", "a b", None), goal("2", "c d", None)]);
-        s.apply_run_state("2", Some("running".to_string()), Some(3), Some(25));
+        s.apply_run_state("2", Some("running".to_string()), Some(3), Some(25), Some(2));
 
         assert!(s.goals[0].run_phase.is_none());
         assert!(s.goals[1].is_running());
         assert_eq!(s.goals[1].run_iteration, Some(3));
         assert_eq!(s.goals[1].run_max_iterations, Some(25));
+        assert_eq!(s.goals[1].run_verify_max_retries, Some(2));
+    }
+
+    #[test]
+    fn start_carries_the_verification_budget_only_for_a_loop_engineered_goal() {
+        let mut plain = goal("1", "a b", None);
+        plain.loop_engineering = false;
+        let mut engineered = goal("2", "c d", None);
+        engineered.loop_engineering = true;
+        let mut s = state_with(vec![plain, engineered]);
+
+        match s.handle_key(key(KeyCode::Char('s'))) {
+            GoalsAction::StartRun {
+                goal_id,
+                verify_max_retries,
+            } => {
+                assert_eq!(goal_id, "1");
+                assert_eq!(
+                    verify_max_retries, None,
+                    "a run the kernel zeroes the budget for must not state one"
+                );
+            }
+            _ => panic!("s must start the run"),
+        }
+
+        s.list_state.select(Some(1));
+        match s.handle_key(key(KeyCode::Char('s'))) {
+            GoalsAction::StartRun {
+                verify_max_retries, ..
+            } => assert_eq!(
+                verify_max_retries, None,
+                "an untouched budget sends no field at all, so the daemon applies its own default \
+                 — stating this binary's compiled constant would pin the run to the CLI's version"
+            ),
+            _ => panic!("s must start the run"),
+        }
+    }
+
+    /// The CLI and the daemon are separate binaries over HTTP and routinely
+    /// differ in version. Only a budget the operator actually chose may go on
+    /// the wire; anything else silently pins the run to the constant this
+    /// binary happened to be built with.
+    #[test]
+    fn start_states_a_budget_only_after_the_operator_sets_one() {
+        let mut engineered = goal("1", "a b", None);
+        engineered.loop_engineering = true;
+        let mut s = state_with(vec![engineered]);
+        s.selected_goal = Some(0);
+        s.detail_open = true;
+
+        s.handle_key(key(KeyCode::Char('+')));
+        let chosen = librefang_kernel::goal_runner::DEFAULT_VERIFY_MAX_RETRIES + 1;
+        match s.handle_key(key(KeyCode::Char('s'))) {
+            GoalsAction::StartRun {
+                verify_max_retries, ..
+            } => assert_eq!(verify_max_retries, Some(chosen)),
+            _ => panic!("s must start the run"),
+        }
+    }
+
+    /// The pane renders the budget among per-goal fields, so the value behind
+    /// it has to be per-goal too: one screen-global number showed an edit made
+    /// on A as if it were B's configuration, and then started B with it.
+    #[test]
+    fn a_budget_edited_on_one_goal_does_not_leak_into_another() {
+        let mut a = goal("1", "a b", None);
+        a.loop_engineering = true;
+        let mut b = goal("2", "c d", None);
+        b.loop_engineering = true;
+        let mut s = state_with(vec![a, b]);
+
+        s.detail_open = true;
+        s.selected_goal = Some(0);
+        s.handle_key(key(KeyCode::Char('+')));
+        s.handle_key(key(KeyCode::Char('+')));
+
+        // B has never been touched, so its pane shows no number of its own and
+        // its start states nothing.
+        s.selected_goal = Some(1);
+        assert_eq!(
+            displayed_verify_max_retries(
+                &s.goals[1],
+                s.pending_verify_max_retries.get("2").copied()
+            ),
+            crate::i18n::t("tui-goals-verify-rounds-default")
+        );
+        s.list_state.select(Some(1));
+        match s.handle_key(key(KeyCode::Char('s'))) {
+            GoalsAction::StartRun {
+                goal_id,
+                verify_max_retries,
+            } => {
+                assert_eq!(goal_id, "2");
+                assert_eq!(verify_max_retries, None, "B must not inherit A's budget");
+            }
+            _ => panic!("s must start the run"),
+        }
+    }
+
+    #[test]
+    fn plus_and_minus_move_the_budget_only_where_the_run_would_use_it() {
+        let mut engineered = goal("1", "a b", None);
+        engineered.loop_engineering = true;
+        let mut s = state_with(vec![engineered, goal("2", "c d", None)]);
+        let base = librefang_kernel::goal_runner::DEFAULT_VERIFY_MAX_RETRIES;
+
+        // Detail pane on the loop-engineered goal.
+        s.selected_goal = Some(0);
+        s.detail_open = true;
+        s.handle_key(key(KeyCode::Char('+')));
+        assert_eq!(s.pending_verify_max_retries.get("1"), Some(&(base + 1)));
+        s.handle_key(key(KeyCode::Char('-')));
+        s.handle_key(key(KeyCode::Char('-')));
+        assert_eq!(s.pending_verify_max_retries.get("1"), Some(&(base - 1)));
+
+        // Same keys on a plain goal change nothing.
+        s.selected_goal = Some(1);
+        s.handle_key(key(KeyCode::Char('+')));
+        assert!(
+            !s.pending_verify_max_retries.contains_key("2"),
+            "a goal the budget never reaches must not gain one"
+        );
+    }
+
+    #[test]
+    fn the_budget_never_leaves_its_bounds() {
+        let mut engineered = goal("1", "a b", None);
+        engineered.loop_engineering = true;
+        let mut s = state_with(vec![engineered]);
+        s.selected_goal = Some(0);
+        s.detail_open = true;
+
+        for _ in 0..MAX_VERIFY_MAX_RETRIES + 5 {
+            s.handle_key(key(KeyCode::Char('+')));
+        }
+        assert_eq!(
+            s.pending_verify_max_retries.get("1"),
+            Some(&MAX_VERIFY_MAX_RETRIES)
+        );
+
+        for _ in 0..MAX_VERIFY_MAX_RETRIES + 5 {
+            s.handle_key(key(KeyCode::Char('-')));
+        }
+        assert_eq!(
+            s.pending_verify_max_retries.get("1"),
+            Some(&1),
+            "a run gets at least one round"
+        );
+    }
+
+    /// Preferring the run's own budget outright made `+` / `-` look inert on
+    /// every goal that had ever run — the registry keeps a finished run, so
+    /// the number on screen never moved while the next start used the edited
+    /// one. Both have to be visible for the keys to be honest.
+    #[test]
+    fn the_displayed_budget_shows_the_live_run_and_the_pending_edit_together() {
+        let mut g = goal("1", "a b", None);
+        g.loop_engineering = true;
+
+        assert_eq!(
+            displayed_verify_max_retries(&g, None),
+            crate::i18n::t("tui-goals-verify-rounds-default"),
+            "with neither a run nor an edit, the daemon picks and the pane may not claim a number"
+        );
+        assert_eq!(
+            displayed_verify_max_retries(&g, Some(7)),
+            "7",
+            "with no run, the pending setting is what the next start will send"
+        );
+
+        g.run_verify_max_retries = Some(2);
+        assert_eq!(
+            displayed_verify_max_retries(&g, None),
+            "2",
+            "a live run's own budget is what is actually in force"
+        );
+        assert_eq!(
+            displayed_verify_max_retries(&g, Some(8)),
+            crate::i18n::t_args(
+                "tui-goals-verify-rounds-next",
+                &[("current", "2"), ("next", "8")]
+            ),
+            "an edit against a live run must show what the next start will use"
+        );
+        assert_eq!(
+            displayed_verify_max_retries(&g, Some(2)),
+            "2",
+            "an edit back to the run's own budget is not a pending change"
+        );
+
+        // `0` is the kernel's "this run is not using loop engineering", not a
+        // budget of zero rounds.
+        g.run_verify_max_retries = Some(0);
+        assert_eq!(displayed_verify_max_retries(&g, Some(7)), "7");
     }
 
     #[test]
@@ -912,20 +1707,283 @@ mod tests {
         for c in "agent-7".chars() {
             s.handle_key(key(KeyCode::Char(c)));
         }
+        s.handle_key(key(KeyCode::Enter));
+        assert_eq!(s.create_step, STEP_TICK_INTERVAL);
+        for c in "900".chars() {
+            s.handle_key(key(KeyCode::Char(c)));
+        }
+        // Loop engineering is the last step of a plain draft; leaving it off
+        // must not walk the operator through the verifier and evaluator.
+        s.handle_key(key(KeyCode::Enter));
+        assert_eq!(s.create_step, STEP_LOOP_ENGINEERING);
+        assert_eq!(s.create_visible_steps(), CREATE_STEPS_PLAIN);
 
         match s.handle_key(key(KeyCode::Enter)) {
             GoalsAction::CreateGoal {
                 title,
                 description,
                 agent_id,
+                loop_engineering,
+                verify_agent_id,
+                evaluator_model,
+                tick_interval_secs,
             } => {
                 assert_eq!(title, "Ship");
                 assert_eq!(description, "Do it");
                 assert_eq!(agent_id, "agent-7");
+                assert!(!loop_engineering);
+                assert_eq!(verify_agent_id, "");
+                assert_eq!(evaluator_model, "");
+                assert_eq!(tick_interval_secs, Some(900));
             }
             _ => panic!("the final Enter must submit"),
         }
         assert!(!s.create_open);
+    }
+
+    #[test]
+    fn loop_engineering_step_toggles_and_opens_the_verifier_steps() {
+        let mut s = state_with(vec![]);
+        s.handle_key(key(KeyCode::Char('n')));
+        s.create_step = STEP_LOOP_ENGINEERING;
+        assert!(!s.create_loop_engineering);
+        assert_eq!(s.create_visible_steps(), CREATE_STEPS_PLAIN);
+
+        s.handle_key(key(KeyCode::Char(' ')));
+        assert!(s.create_loop_engineering, "space flips the toggle");
+        assert_eq!(
+            s.create_visible_steps(),
+            CREATE_STEPS,
+            "turning it on adds the verifier and evaluator steps"
+        );
+
+        s.handle_key(key(KeyCode::Char('n')));
+        assert!(!s.create_loop_engineering, "n sets it off");
+        s.handle_key(key(KeyCode::Char('y')));
+        assert!(s.create_loop_engineering, "y sets it on");
+    }
+
+    #[test]
+    fn create_wizard_submits_the_verifier_and_evaluator_when_configured() {
+        let mut s = state_with(vec![]);
+        s.handle_key(key(KeyCode::Char('n')));
+        s.create_title = "Ship".to_string();
+        s.create_agent_id = "agent-7".to_string();
+        s.create_step = STEP_LOOP_ENGINEERING;
+        s.handle_key(key(KeyCode::Char('y')));
+
+        s.handle_key(key(KeyCode::Enter));
+        assert_eq!(s.create_step, STEP_VERIFIER);
+        for c in "verifier-1".chars() {
+            s.handle_key(key(KeyCode::Char(c)));
+        }
+        s.handle_key(key(KeyCode::Enter));
+        assert_eq!(s.create_step, STEP_EVALUATOR);
+        for c in "haiku".chars() {
+            s.handle_key(key(KeyCode::Char(c)));
+        }
+
+        match s.handle_key(key(KeyCode::Enter)) {
+            GoalsAction::CreateGoal {
+                loop_engineering,
+                verify_agent_id,
+                evaluator_model,
+                ..
+            } => {
+                assert!(loop_engineering);
+                assert_eq!(verify_agent_id, "verifier-1");
+                assert_eq!(evaluator_model, "haiku");
+            }
+            _ => panic!("the final Enter must submit"),
+        }
+    }
+
+    #[test]
+    fn turning_loop_engineering_back_off_drops_the_verifier_and_evaluator() {
+        // The toggle is the operator's last word: a gate the loop will never
+        // consult must not be stored as if it were live.
+        let mut s = state_with(vec![]);
+        s.handle_key(key(KeyCode::Char('n')));
+        s.create_title = "Ship".to_string();
+        s.create_agent_id = "agent-7".to_string();
+        s.create_loop_engineering = true;
+        s.create_verify_agent_id = "verifier-1".to_string();
+        s.create_evaluator_model = "haiku".to_string();
+
+        s.create_step = STEP_LOOP_ENGINEERING;
+        s.handle_key(key(KeyCode::Char('n')));
+
+        match s.handle_key(key(KeyCode::Enter)) {
+            GoalsAction::CreateGoal {
+                loop_engineering,
+                verify_agent_id,
+                evaluator_model,
+                ..
+            } => {
+                assert!(!loop_engineering);
+                assert_eq!(verify_agent_id, "");
+                assert_eq!(evaluator_model, "");
+            }
+            _ => panic!("Enter on the last visible step must submit"),
+        }
+    }
+
+    #[test]
+    fn tick_interval_step_takes_digits_and_drops_anything_else() {
+        let mut s = state_with(vec![]);
+        s.handle_key(key(KeyCode::Char('n')));
+        s.create_step = STEP_TICK_INTERVAL;
+
+        for c in "9a0b0".chars() {
+            s.handle_key(key(KeyCode::Char(c)));
+        }
+        assert_eq!(
+            s.create_tick_interval, "900",
+            "letters must not reach a numeric field"
+        );
+
+        s.handle_key(key(KeyCode::Backspace));
+        assert_eq!(s.create_tick_interval, "90");
+    }
+
+    #[test]
+    fn an_empty_tick_interval_submits_as_no_override() {
+        // Empty means "keep the compiled default", which the API expresses by
+        // omitting the field — not by sending zero.
+        let mut s = state_with(vec![]);
+        s.handle_key(key(KeyCode::Char('n')));
+        for c in "Ship".chars() {
+            s.handle_key(key(KeyCode::Char(c)));
+        }
+        s.create_step = STEP_AGENT;
+        for c in "agent-7".chars() {
+            s.handle_key(key(KeyCode::Char(c)));
+        }
+        s.create_step = STEP_LOOP_ENGINEERING;
+
+        match s.handle_key(key(KeyCode::Enter)) {
+            GoalsAction::CreateGoal {
+                tick_interval_secs, ..
+            } => assert_eq!(tick_interval_secs, None),
+            _ => panic!("an empty cadence must still submit"),
+        }
+    }
+
+    #[test]
+    fn an_out_of_range_tick_interval_blocks_submission_and_explains() {
+        let mut s = state_with(vec![]);
+        s.handle_key(key(KeyCode::Char('n')));
+        for c in "Ship".chars() {
+            s.handle_key(key(KeyCode::Char(c)));
+        }
+        s.create_step = STEP_AGENT;
+        for c in "agent-7".chars() {
+            s.handle_key(key(KeyCode::Char(c)));
+        }
+        s.create_step = STEP_TICK_INTERVAL;
+        // One second past the ceiling the API accepts.
+        for c in (MAX_GOAL_TICK_INTERVAL_SECS + 1).to_string().chars() {
+            s.handle_key(key(KeyCode::Char(c)));
+        }
+        // The cadence is no longer the last step, so walk on to the one that
+        // submits: the value is refused at submit time, not on leaving its own
+        // field.
+        s.handle_key(key(KeyCode::Enter));
+        assert_eq!(s.create_step, STEP_LOOP_ENGINEERING);
+
+        assert!(matches!(
+            s.handle_key(key(KeyCode::Enter)),
+            GoalsAction::Continue
+        ));
+        assert!(
+            s.create_open,
+            "the wizard stays open rather than posting a value the API refuses"
+        );
+        assert!(!s.status_msg.is_empty(), "and says what the bounds are");
+
+        // Setting the field is not telling the operator. `draw_list_panel` is
+        // the only other place that renders `status_msg`, and it does not run
+        // while the wizard owns the screen — so this message reached no
+        // surface at all and Enter simply looked inert, on the one step whose
+        // whole point is saying the number was refused.
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+        terminal
+            .draw(|f| draw_create(f, f.area(), &s))
+            .expect("the create wizard must render");
+        let rendered: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(
+            rendered.contains(&s.status_msg),
+            "the wizard must show the rejection, not just store it.\nlooked for: {}\nrendered:\n{rendered}",
+            s.status_msg
+        );
+    }
+
+    /// A rejection describes the number that was in the box. Once the operator
+    /// starts correcting it, the message is about a value that is no longer
+    /// there, and leaving it up reads as a second refusal.
+    #[test]
+    fn editing_a_refused_cadence_clears_the_message() {
+        let mut s = state_with(vec![]);
+        s.create_open = true;
+        s.create_step = STEP_TICK_INTERVAL;
+        s.status_msg = "Tick interval must be between 1 and 86400 seconds.".to_string();
+
+        s.handle_key(key(KeyCode::Backspace));
+        assert!(
+            s.status_msg.is_empty(),
+            "backspace clears the stale message"
+        );
+
+        s.status_msg = "Tick interval must be between 1 and 86400 seconds.".to_string();
+        s.handle_key(key(KeyCode::Char('9')));
+        assert!(s.status_msg.is_empty(), "typing clears the stale message");
+    }
+
+    #[test]
+    fn tick_interval_accepts_both_ends_of_the_range() {
+        let mut s = GoalsState::new();
+
+        s.create_tick_interval = MIN_GOAL_TICK_INTERVAL_SECS.to_string();
+        assert_eq!(
+            s.parsed_create_tick_interval(),
+            Ok(Some(MIN_GOAL_TICK_INTERVAL_SECS))
+        );
+
+        s.create_tick_interval = MAX_GOAL_TICK_INTERVAL_SECS.to_string();
+        assert_eq!(
+            s.parsed_create_tick_interval(),
+            Ok(Some(MAX_GOAL_TICK_INTERVAL_SECS))
+        );
+
+        // Zero is below the floor: it would remove the only gap between
+        // consecutive provider calls.
+        s.create_tick_interval = "0".to_string();
+        assert_eq!(s.parsed_create_tick_interval(), Err(()));
+    }
+
+    #[test]
+    fn detail_pane_shows_the_default_cadence_when_no_override_is_set() {
+        // A blank cell would read as "no pause between iterations", which is
+        // the one thing an absent override cannot mean.
+        let unset = describe_tick_interval(None);
+        assert!(!unset.is_empty());
+        assert!(
+            unset.contains(&DEFAULT_GOAL_TICK_INTERVAL_SECS.to_string()),
+            "an unset cadence must name the default it resolves to, got {unset:?}"
+        );
+
+        let overridden = describe_tick_interval(Some(900));
+        assert!(
+            overridden.contains("900"),
+            "an override must show its own value, got {overridden:?}"
+        );
     }
 
     #[test]
@@ -937,7 +1995,7 @@ mod tests {
         for c in "Ship".chars() {
             s.handle_key(key(KeyCode::Char(c)));
         }
-        s.create_step = CREATE_STEPS - 1;
+        s.create_step = s.create_visible_steps() - 1;
 
         assert!(matches!(
             s.handle_key(key(KeyCode::Enter)),

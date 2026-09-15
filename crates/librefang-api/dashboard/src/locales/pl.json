@@ -3030,7 +3030,12 @@
     "verifier_agent": "Agent weryfikujący",
     "no_verifier_selected": "Bez weryfikatora (bez kontroli)",
     "evaluator_model": "Model oceniający",
-    "evaluator_model_placeholder": "Model oceniający (opcjonalnie)"
+    "evaluator_model_placeholder": "Model oceniający (opcjonalnie)",
+    "run_pause": "Wstrzymaj autonomiczne uruchomienie",
+    "run_resume": "Wznów autonomiczne uruchomienie",
+    "tick_interval": "Odstęp między iteracjami",
+    "tick_interval_placeholder": "Sekundy między iteracjami pętli (domyślnie {{defaultSecs}})",
+    "tick_interval_out_of_range": "Odstęp między iteracjami musi być liczbą całkowitą od {{min}} do {{max}} sekund."
   },
   "sessions": {
     "title": "Sesje",
@@ -4272,7 +4277,8 @@
     "status_failed": "Nieudane",
     "assignee_none": "Nieprzypisane — dowolny agent może pobrać",
     "no_agents_hint": "Nie zarejestrowano jeszcze żadnych agentów. Utwórz agenta przed przypisywaniem zadań.",
-    "field_description_hint": "Agent czyta to dosłownie. Podaj cel, ograniczenia i kryteria ukończenia."
+    "field_description_hint": "Agent czyta to dosłownie. Podaj cel, ograniczenia i kryteria ukończenia.",
+    "field_assignee_placeholder": "Nazwa lub ID agenta"
   },
   "prompts": {
     "title": "Prompty",

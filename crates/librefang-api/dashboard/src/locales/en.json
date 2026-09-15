@@ -3022,7 +3022,12 @@
     "verifier_agent": "Verifier agent",
     "no_verifier_selected": "No verifier (run ungated)",
     "evaluator_model": "Evaluator model",
-    "evaluator_model_placeholder": "Evaluator model (optional)"
+    "evaluator_model_placeholder": "Evaluator model (optional)",
+    "run_pause": "Pause autonomous run",
+    "run_resume": "Resume autonomous run",
+    "tick_interval": "Tick interval",
+    "tick_interval_placeholder": "Seconds between loop iterations (default {{defaultSecs}})",
+    "tick_interval_out_of_range": "Tick interval must be an integer between {{min}} and {{max}} seconds."
   },
   "sessions": {
     "title": "Sessions",
@@ -4260,7 +4265,8 @@
     "status_failed": "Failed",
     "assignee_none": "Unassigned — any agent may claim it",
     "no_agents_hint": "No agents registered yet. Create an agent before assigning tasks.",
-    "field_description_hint": "The agent reads this verbatim. Include the goal, the constraints, and what \"done\" looks like."
+    "field_description_hint": "The agent reads this verbatim. Include the goal, the constraints, and what \"done\" looks like.",
+    "field_assignee_placeholder": "Agent name or ID"
   },
   "prompts": {
     "title": "Prompts",
