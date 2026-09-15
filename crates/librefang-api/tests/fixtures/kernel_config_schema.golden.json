@@ -3702,7 +3702,7 @@
       }
     },
     "DockerSandboxMode": {
-      "description": "Docker sandbox activation mode.",
+      "description": "Docker sandbox activation mode.\n\n**Not wired into tool dispatch.** Nothing in the daemon matches on this value: `shell_exec` and `process_start` run as subprocesses on the daemon host whatever it is set to, and the only way into a container remains the separate `docker_exec` tool the model chooses for itself (#8220). The rest of `[docker]` — `enabled`, `scope`, `reuse_cool_secs`, `idle_timeout_secs`, `max_age_secs`, and the image / limits — is live and governs `docker_exec`'s containers. [`Self::is_wired_into_dispatch`] is the single source of truth for that, and the kernel warns at boot when a mode that does nothing is configured.",
       "oneOf": [
         {
           "description": "Docker sandbox disabled.",
