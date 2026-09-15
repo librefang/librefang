@@ -77,6 +77,12 @@ Ignore/noop (effective on next message/request via ArcSwap swap). A field
 may carry more than one class (e.g. **R/H**) when its sub-fields are
 classified differently — the row note spells out which is which.
 
+A sub-field the planner classifies on its own also gets its own
+`section.sub_key` row (`tts.enabled`, `registry.auto_sync`); the section's
+row then describes the section minus those keys. Dotted rows take part in
+the drift guard exactly as top-level rows do, so a carve-out that changes
+class fails the build here as well as in the code.
+
 ### Server / network / bind
 
 | Field | Class | Meaning |
@@ -203,6 +209,7 @@ classified differently — the row note spells out which is which.
 | `skills` | H | Skills config (bundled + user-installed) — reloads registry. The `registry_repo` and `[skills.promotion]` sub-section are effectively **N** within that: both promotion handlers read them from `config_snapshot()` per request, so a change is live on the next promotion regardless of the registry reload the section triggers. They are left inside the section's single hot action deliberately — the reload is cheap and one classification per section is easier to keep honest than a carve-out that has to be re-argued every time a field is added. |
 | `plugins` | R | Plugin registry config. |
 | `registry` | R/N | Registry sync config. `cache_ttl_secs` / `registry_mirror` / `registry_host` are **R**: they are read when the checkout is set up. `auto_sync` is **N**: the 24 h catalog task calls `config_snapshot()` at the top of each tick and passes the value into `sync_catalog_to`, so flipping it off freezes `~/.librefang/registry/` from the next tick on, with no restart. Splitting the section this way is what makes that true — while the whole section was classified R, a registry-only reload produced neither a hot action nor a noop change, so `should_store_config` discarded the new config and the task kept reading the old value until the daemon restarted. Boot's own sync pass has of course already run by reload time, so `auto_sync = false` written *before* a start is still what prevents the boot-time fast-forward. |
+| `registry.auto_sync` | N | The **N** half of the row above, carried as its own row because that is the name `build_reload_plan` gives the change and the granularity the drift guard compares at. |
 | `hands` | N | Hands marketplace SSRF allowlist (`registry_allowed_hosts`) — read live by the install handler per request. |
 | `bindings` | R | Agent bindings for multi-account routing. |
 

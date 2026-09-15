@@ -1111,6 +1111,10 @@ pub const KERNEL_CONFIG_FIELD_ALIASES: &[&str] = &[
 /// A `/`-joined value is a section that splits across classes by sub-field, as `queue` (`H/N/R`) and `external_auth` (`H/N`) do; the doc row's Meaning column says which sub-field falls where.
 /// `H*` is a class conditional on runtime state, which only `log_level` has.
 ///
+/// A key may also be listed as `section.sub_key`, for a sub-field `build_reload_plan` classifies apart from the rest of its section and names that way in its reason string (`tts.enabled`, `registry.auto_sync`).
+/// The section's own row then describes the section *minus* those keys.
+/// Dotted keys are not `KernelConfig` fields, so `every_config_field_is_reload_classified` compares only the top-level names against the struct and instead requires that each dotted key's parent is itself classified here.
+///
 /// This is a literal mirror of every field touched in `build_reload_plan_with_caps`.
 /// The `every_config_field_is_reload_classified` test asserts that its keys are a superset of every real `KernelConfig` field, so a newly-added field that is not also wired into `build_reload_plan` fails the build instead of silently no-op-ing on `POST /api/config/reload`.
 ///
@@ -1118,6 +1122,7 @@ pub const KERNEL_CONFIG_FIELD_ALIASES: &[&str] = &[
 /// With the letter mirrored, the two must agree — an edit to either side that forgets the other fails `doc_reload_table_matches_classified_reload_fields`.
 ///
 /// **When you add a field to `KernelConfig`:** add a branch to `build_reload_plan_with_caps`, its name and class here, AND a row to `docs/operations/config-reload.md`.
+/// **When you carve a sub-key out of a section's classification:** add the dotted name here and to the doc, and a mutator to `dotted_carve_out_mutators` in the tests so its letter keeps being re-derived from a real plan.
 /// The tests will remind you if you forget any of the three.
 pub fn classified_reload_fields() -> std::collections::BTreeMap<&'static str, &'static str> {
     [
@@ -1242,7 +1247,7 @@ pub fn classified_reload_fields() -> std::collections::BTreeMap<&'static str, &'
         ("triggers", "H/N"),
         ("notification", "N"),
         // Restart-required since #8274 moved the branch out of the noop block: `TtsEngine` is built once at boot from `config.tts.clone()`.
-        // The `tts.enabled` / `tts.output_format` carve-outs stay noop and are documented as their own rows, which this table does not carry — the doc parser only reads top-level names.
+        // The `tts.enabled` / `tts.output_format` carve-outs stay noop and are carried below as their own dotted rows, at the granularity the doc already used (#8342).
         ("tts", "R"),
         ("media", "R"),
         ("capabilities", "R"),
@@ -1266,6 +1271,16 @@ pub fn classified_reload_fields() -> std::collections::BTreeMap<&'static str, &'
         ("cron_session_warn_total_tokens", "N"),
         ("cron_session_compaction_mode", "N"),
         ("cron_session_compaction_keep_recent", "N"),
+        // -- sub-keys `build_reload_plan` classifies apart from their section --
+        // A section row above describes the section minus these keys; each one here is
+        // the carve-out, named exactly as the planner names it in its reason string so
+        // the doc, this table and the plan all describe the same granularity (#8342).
+        // `every_dotted_carve_out_letter_is_derived_from_the_plan` re-derives each letter
+        // from a real mutation, so a carve-out that changes class fails here rather than
+        // in an operator's reload.
+        ("tts.enabled", "N"),
+        ("tts.output_format", "N"),
+        ("registry.auto_sync", "N"),
     ]
     .into_iter()
     .collect()
@@ -2580,8 +2595,18 @@ mod tests {
 
         // Only the names matter here; the class each one carries is what
         // `doc_reload_table_matches_classified_reload_fields` checks.
-        let covered: std::collections::BTreeSet<&str> =
+        //
+        // Dotted keys name a sub-field of a section (`tts.enabled`), not a
+        // `KernelConfig` field, so they take part in neither direction of the
+        // comparison against the struct — they are checked below against their
+        // parent instead.
+        let all_covered: std::collections::BTreeSet<&str> =
             super::classified_reload_fields().into_keys().collect();
+        let covered: std::collections::BTreeSet<&str> = all_covered
+            .iter()
+            .copied()
+            .filter(|f| !f.contains('.'))
+            .collect();
 
         let missing: Vec<&str> = fields.difference(&covered).copied().collect();
         assert!(
@@ -2608,6 +2633,28 @@ mod tests {
             stale.is_empty(),
             "`classified_reload_fields()` lists names that are not \
              KernelConfig fields (renamed/removed?): {stale:?}"
+        );
+
+        // A dotted key is only meaningful as a carve-out from a section that is
+        // itself classified: `tts.enabled` says "everything in `tts` except this
+        // key", which is nonsense if `tts` has no row. A dotted key whose parent
+        // was renamed away would otherwise sit in both the table and the doc,
+        // agreeing with each other and describing nothing.
+        let orphaned: Vec<&str> = all_covered
+            .iter()
+            .copied()
+            .filter(|f| f.contains('.'))
+            .filter(|f| {
+                let parent = f.split('.').next().unwrap_or_default();
+                !covered.contains(parent) || !known.contains(parent)
+            })
+            .collect();
+        assert!(
+            orphaned.is_empty(),
+            "`classified_reload_fields()` lists dotted sub-keys whose parent \
+             section is not itself a classified KernelConfig field: {orphaned:?}\n\
+             A carve-out is defined relative to its section; classify the \
+             section too, or drop the sub-key."
         );
     }
 
@@ -2637,13 +2684,22 @@ mod tests {
                 continue;
             };
             // Token runs until the closing backtick. Field names are
-            // `[a-z0-9_]+`; anything else (legend rows, prose) won't match.
+            // `[a-z0-9_]+`, optionally dotted for a sub-key carve-out
+            // (`tts.enabled`); anything else (legend rows, prose) won't match.
+            //
+            // `.` is accepted since #8342. While it was not, a dotted row was
+            // skipped on the doc side and had no counterpart on the code side,
+            // so the two agreed by both saying nothing — which is how a row
+            // could promise `N` for a key that had become restart-required.
             let Some(end) = rest.find('`') else { continue };
             let token = &rest[..end];
             if token.is_empty()
+                || token.starts_with('.')
+                || token.ends_with('.')
+                || token.contains("..")
                 || !token
                     .chars()
-                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '.')
             {
                 continue;
             }
@@ -2729,5 +2785,132 @@ mod tests {
              Known spellings are {KNOWN:?}. A new combination needs adding here \
              and explaining in the doc's legend."
         );
+    }
+
+    /// One mutation per dotted carve-out in [`super::classified_reload_fields`], touching that sub-key and nothing else.
+    ///
+    /// The mutation is what makes the letter derivable: the table and the doc are both hand-written, so comparing them to each other can only catch one of the two being edited alone — it cannot catch both being wrong, which is what happens when a section's classification changes underneath a carve-out that nobody re-read.
+    /// Running the planner over a real change closes that, because the third opinion comes from the code that actually answers `POST /api/config/reload`.
+    #[allow(clippy::type_complexity)]
+    fn dotted_carve_out_mutators() -> Vec<(&'static str, Box<dyn Fn(&mut KernelConfig)>)> {
+        vec![
+            (
+                "tts.enabled",
+                Box::new(|c: &mut KernelConfig| c.tts.enabled = !c.tts.enabled),
+            ),
+            (
+                "tts.output_format",
+                Box::new(|c: &mut KernelConfig| c.tts.output_format = Some("ogg_opus".to_string())),
+            ),
+            (
+                "registry.auto_sync",
+                Box::new(|c: &mut KernelConfig| c.registry.auto_sync = !c.registry.auto_sync),
+            ),
+        ]
+    }
+
+    /// A dotted key's class letter must be the one `build_reload_plan` actually produces for a change to that sub-key, and the change must not trip its section's branch.
+    ///
+    /// This is the half of #8342 that a doc-versus-table comparison cannot reach.
+    /// #8274 moved `[tts]` from wholly-noop to restart-required-except-two-keys; had the carve-out been forgotten in that move, `tts.enabled` would have started requiring a restart while every name-based check stayed green and the doc kept promising `N`.
+    /// Deriving the letter from the plan means the next such move fails here instead of in an operator's reload.
+    #[test]
+    fn every_dotted_carve_out_letter_is_derived_from_the_plan() {
+        let classified = super::classified_reload_fields();
+        let mutators = dotted_carve_out_mutators();
+
+        let dotted: std::collections::BTreeSet<&str> = classified
+            .keys()
+            .copied()
+            .filter(|k| k.contains('.'))
+            .collect();
+        let with_mutator: std::collections::BTreeSet<&str> =
+            mutators.iter().map(|(name, _)| *name).collect();
+        assert_eq!(
+            dotted, with_mutator,
+            "every dotted key in `classified_reload_fields()` needs a mutator in \
+             `dotted_carve_out_mutators`, and vice-versa — a carve-out with no \
+             mutator has its letter checked only against a hand-written doc row"
+        );
+
+        for (name, mutate) in &mutators {
+            let a = default_cfg();
+            let mut b = default_cfg();
+            mutate(&mut b);
+            let plan = build_reload_plan(&a, &b);
+
+            assert!(
+                plan.has_changes(),
+                "{name}: the mutator did not change anything the planner can see"
+            );
+
+            let prefix = format!("{name} changed");
+            let restart = plan.restart_reasons.iter().any(|r| r.starts_with(&prefix));
+            let noop = plan.noop_changes.iter().any(|r| r.starts_with(&prefix));
+            let hot = !plan.hot_actions.is_empty();
+
+            // A carve-out is only a carve-out if the section's own branch stays
+            // quiet. `tts.enabled` flipping must not also report `tts changed`,
+            // or the sub-key is restart-required in practice whatever its row says.
+            let parent = name.split('.').next().unwrap_or_default();
+            let parent_prefix = format!("{parent} changed");
+            assert!(
+                !plan
+                    .restart_reasons
+                    .iter()
+                    .any(|r| r.starts_with(&parent_prefix)),
+                "{name}: changing only this sub-key also tripped the `{parent}` \
+                 restart branch, so the carve-out does not hold: {:?}",
+                plan.restart_reasons
+            );
+
+            let derived = match (restart, hot, noop) {
+                (true, false, false) => "R",
+                (false, true, false) => "H",
+                (false, false, true) => "N",
+                other => panic!(
+                    "{name}: the plan does not classify this sub-key unambiguously \
+                     (restart/hot/noop = {other:?}); restart_reasons={:?}, \
+                     hot_actions={:?}, noop_changes={:?}",
+                    plan.restart_reasons, plan.hot_actions, plan.noop_changes
+                ),
+            };
+
+            let recorded = classified
+                .get(name)
+                .unwrap_or_else(|| panic!("{name} is not in classified_reload_fields()"));
+            assert_eq!(
+                &derived, recorded,
+                "{name}: `build_reload_plan` classifies a change to this sub-key as \
+                 `{derived}`, but `classified_reload_fields()` records `{recorded}`. \
+                 Fix the table and docs/operations/config-reload.md together — the \
+                 planner is the source of truth."
+            );
+        }
+    }
+
+    /// The doc-side parser must read a dotted row, which is the gap #8342 is about.
+    ///
+    /// Asserting it through `classified_reload_fields()` would be circular — both sides could stop carrying dotted names at once and the comparison would still pass over two empty sets.
+    /// Reading the doc directly is what makes the assertion mean "the table an operator reads contains this row".
+    #[test]
+    fn the_doc_table_carries_dotted_sub_key_rows() {
+        let doc_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../docs/operations/config-reload.md");
+        let doc = std::fs::read_to_string(&doc_path).unwrap_or_else(|e| {
+            panic!("failed to read {}: {e}", doc_path.display());
+        });
+
+        for name in super::classified_reload_fields()
+            .keys()
+            .filter(|k| k.contains('.'))
+        {
+            assert!(
+                doc.lines()
+                    .any(|line| line.trim_start().starts_with(&format!("| `{name}` | "))),
+                "docs/operations/config-reload.md has no table row for the \
+                 carve-out `{name}`"
+            );
+        }
     }
 }
