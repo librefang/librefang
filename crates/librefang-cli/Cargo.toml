@@ -59,6 +59,8 @@ serde_json = { workspace = true }
 toml = { workspace = true }
 dirs = { workspace = true }
 reqwest = { workspace = true, features = ["blocking"] }
+# Percent-encoding for vault key path segments (#8164): the allowlist namespace can hold `mcp-oauth:{url}:…`-shaped names, which must not be interpolated into a URL raw.
+urlencoding = { workspace = true }
 chrono = { workspace = true }
 walkdir = { workspace = true }
 base64 = { workspace = true }

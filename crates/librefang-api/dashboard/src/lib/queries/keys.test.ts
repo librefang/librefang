@@ -28,6 +28,7 @@ import {
   pluginKeys,
   registryKeys,
   telemetryKeys,
+  vaultKeys,
   terminalKeys,
   commsKeys,
   skillKeys,
@@ -470,6 +471,15 @@ describe("query key factories", () => {
     });
   });
 
+  describe("vaultKeys", () => {
+    it("lists and list are prefixed with vaultKeys.all", () => {
+      const prefix = vaultKeys.all;
+      expect(vaultKeys.lists().slice(0, prefix.length)).toEqual(prefix);
+      expect(vaultKeys.list().slice(0, prefix.length)).toEqual(prefix);
+      expect(vaultKeys.list()).toEqual(["vault", "list"]);
+    });
+  });
+
   describe("all factories exist", () => {
     const factories = [
       agentKeys,
@@ -506,6 +516,7 @@ describe("query key factories", () => {
       configKeys,
       registryKeys,
       telemetryKeys,
+      vaultKeys,
       terminalKeys,
       userKeys,
       userBudgetKeys,
