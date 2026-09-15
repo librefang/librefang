@@ -95,6 +95,7 @@ export { default as MessageSquare } from "lucide-react/dist/esm/icons/message-sq
 export { default as Mic } from "lucide-react/dist/esm/icons/mic.mjs";
 export { default as MicOff } from "lucide-react/dist/esm/icons/mic-off.mjs";
 export { default as Minimize2 } from "lucide-react/dist/esm/icons/minimize-2.mjs";
+export { default as Minus } from "lucide-react/dist/esm/icons/minus.mjs";
 export { default as Monitor } from "lucide-react/dist/esm/icons/monitor.mjs";
 export { default as Moon } from "lucide-react/dist/esm/icons/moon.mjs";
 export { default as MoreHorizontal } from "lucide-react/dist/esm/icons/ellipsis.mjs";
