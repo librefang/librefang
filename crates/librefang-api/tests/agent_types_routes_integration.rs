@@ -460,16 +460,19 @@ async fn create_refuses_a_name_that_belongs_to_a_live_agent() {
 
 /// A name held by both sources lists once, as the writable copy (#8016).
 ///
-/// `create_refuses_a_name_that_belongs_to_a_live_agent` above closes the door going forward, but it cannot close it behind: `read_agent_type` says outright that a collision "can still arise after the fact — an agent spawned under a name an agent type already uses". Nothing in the suite covered that state, so the `dedup_by` in `list_agent_templates` was load-bearing and unguarded, and dropping it would have shipped two rows with the same name to the Agent Types page — which is what #8016 reports.
+/// `create_refuses_a_name_that_belongs_to_a_live_agent` above closes the door going forward, but it cannot close it behind: `read_agent_type` says outright that a collision "can still arise after the fact — an agent spawned under a name an agent type already uses".
+/// Nothing in the suite covered that state, so the `dedup_by` in `list_agent_templates` was load-bearing and unguarded, and dropping it would have shipped two rows with the same name to the Agent Types page — which is what #8016 reports.
 ///
-/// The source matters as much as the count: `editable` has to agree with what a `PUT` to that name would actually do, so the surviving row must be the agent-type one. A dedup that kept the workspace row instead would still show one entry and would still be wrong, offering a control that cannot work (#7731).
+/// The source matters as much as the count: `editable` has to agree with what a `PUT` to that name would actually do, so the surviving row must be the agent-type one.
+/// A dedup that kept the workspace row instead would still show one entry and would still be wrong, offering a control that cannot work (#7731).
 #[tokio::test(flavor = "multi_thread")]
 async fn a_name_held_by_both_sources_lists_once_as_the_writable_copy() {
     let _g = lock().lock().await;
     let name = "at_collision";
     cleanup(name);
 
-    // Both sources hold the name. The descriptions differ so the assertion can tell which row survived, rather than only that one did.
+    // Both sources hold the name.
+    // The descriptions differ so the assertion can tell which row survived, rather than only that one did.
     write_agent_type(
         name,
         &manifest_with_non_form_fields(name).replace(
@@ -512,8 +515,7 @@ async fn a_name_held_by_both_sources_lists_once_as_the_writable_copy() {
         "the surviving row must carry the agent type's own content, not the live agent's: {row}"
     );
 
-    // `total` is derived from the same deduplicated vector, so a regression that reintroduced the
-    // duplicate would otherwise be visible in the array while the count still looked right.
+    // `total` is derived from the same deduplicated vector, so a regression that reintroduced the duplicate would otherwise be visible in the array while the count still looked right.
     assert_eq!(
         list["total"].as_u64().unwrap_or_default() as usize,
         list["templates"].as_array().expect("templates array").len(),
