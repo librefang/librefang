@@ -59,6 +59,16 @@ pub struct DiscoveredModelInfo {
     /// `None` carries the same meaning as for [`Self::supports_vision`].
     #[serde(skip_serializing_if = "Option::is_none")]
     pub supports_function_calling: Option<bool>,
+    /// Input cost in USD per **million** tokens, as declared by the gateway.
+    ///
+    /// Only LiteLLM's `/model/info` extension declares per-token costs, and it states them in USD per *token*; the conversion to the catalog's per-million convention happens in [`parse_litellm_model_info`] so nothing downstream has to know which unit the gateway used.
+    /// `None` means the gateway said nothing (or is not LiteLLM), never "free" — the two are different claims and only one of them is a fact.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub input_cost_per_m: Option<f64>,
+    /// Output cost in USD per million tokens, as declared by the gateway.
+    /// `None` carries the same meaning as for [`Self::input_cost_per_m`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output_cost_per_m: Option<f64>,
 }
 
 impl DiscoveredModelInfo {
@@ -79,6 +89,8 @@ impl DiscoveredModelInfo {
             max_output_tokens: None,
             supports_vision: None,
             supports_function_calling: None,
+            input_cost_per_m: None,
+            output_cost_per_m: None,
         }
     }
 }
@@ -396,7 +408,18 @@ pub async fn probe_provider(provider: &str, base_url: &str, api_key: Option<&str
                 )
                 .await
                 {
-                    EndpointOutcome::Ok { models, model_info } => {
+                    EndpointOutcome::Ok {
+                        models,
+                        mut model_info,
+                    } => {
+                        enrich_with_declared_model_info(
+                            provider,
+                            base_url,
+                            api_key,
+                            is_loopback,
+                            &mut model_info,
+                        )
+                        .await;
                         return ProbeResult {
                             reachable: true,
                             latency_ms: start.elapsed().as_millis() as u64,
@@ -446,14 +469,27 @@ pub async fn probe_provider(provider: &str, base_url: &str, api_key: Option<&str
     };
     let probe_url = format!("{}{}", base_url.trim_end_matches('/'), probe_path);
     match try_probe_endpoint(&probe_url, shape, api_key, is_loopback).await {
-        EndpointOutcome::Ok { models, model_info } => ProbeResult {
-            reachable: true,
-            latency_ms: start.elapsed().as_millis() as u64,
-            discovered_models: models,
-            discovered_model_info: model_info,
-            error: None,
-            ..Default::default()
-        },
+        EndpointOutcome::Ok {
+            models,
+            mut model_info,
+        } => {
+            enrich_with_declared_model_info(
+                provider,
+                base_url,
+                api_key,
+                is_loopback,
+                &mut model_info,
+            )
+            .await;
+            ProbeResult {
+                reachable: true,
+                latency_ms: start.elapsed().as_millis() as u64,
+                discovered_models: models,
+                discovered_model_info: model_info,
+                error: None,
+                ..Default::default()
+            }
+        }
         EndpointOutcome::Failed { error } => ProbeResult {
             latency_ms: start.elapsed().as_millis() as u64,
             error: Some(error),
@@ -659,6 +695,9 @@ fn parse_ollama_tags(body: &serde_json::Value) -> EndpointOutcome {
                 // `resolve_discovered_capabilities` reads tool support out of it directly. There is
                 // no separate OpenAI-style boolean to report here.
                 supports_function_calling: None,
+                // `/api/tags` carries no price at all — a locally served model has no per-token cost to state.
+                input_cost_per_m: None,
+                output_cost_per_m: None,
             })
         })
         .collect();
@@ -666,6 +705,137 @@ fn parse_ollama_tags(body: &serde_json::Value) -> EndpointOutcome {
     EndpointOutcome::Ok {
         models: names,
         model_info: info,
+    }
+}
+
+/// The figures one LiteLLM `/model/info` row declares about a model.
+///
+/// Every field is optional because `/model/info` is an optional extension: a non-LiteLLM OpenAI-compatible server does not serve it at all, and LiteLLM itself reports `null` for a model whose limits the operator never registered.
+/// A `null` is "the gateway did not say", which is why it is carried as `None` rather than collapsed to zero — zero is the catalog's "unknown" encoding, and writing it here would erase the distinction the rest of this module works to preserve.
+#[derive(Debug, Clone, Copy, Default)]
+struct DeclaredModelFigures {
+    context_window: Option<u64>,
+    max_output_tokens: Option<u64>,
+    input_cost_per_m: Option<f64>,
+    output_cost_per_m: Option<f64>,
+}
+
+/// Parse LiteLLM's `GET {base}/model/info` extension into a lookup table keyed by lowercased model name.
+///
+/// This is the only source of a gateway's own capacity and price figures that the `/v1/models` listing does not carry: LiteLLM's listing returns the bare OpenAI shape (`id` / `object` / `created` / `owned_by`), so a gateway fronting the operator's own deployments would otherwise have every model registered at the catalog's "unknown" sentinel with no price at all.
+///
+/// Costs are USD per *token* in this payload and USD per **million** tokens in [`librefang_types::model_catalog::ModelCatalogEntry`], so the conversion happens here rather than at each consumer.
+/// `max_input_tokens` is preferred over `max_tokens` because the latter is ambiguous on a gateway that conflates the full window with the output ceiling, matching [`crate::model_metadata::parse_openai_model`]'s key priority.
+fn parse_litellm_model_info(
+    body: &serde_json::Value,
+) -> std::collections::HashMap<String, DeclaredModelFigures> {
+    let mut out = std::collections::HashMap::new();
+    let Some(items) = body.get("data").and_then(|v| v.as_array()) else {
+        return out;
+    };
+    for item in items {
+        let Some(name) = item
+            .get("model_name")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+        else {
+            continue;
+        };
+        let info = item.get("model_info");
+        let context_window = info
+            .and_then(|i| i.get("max_input_tokens"))
+            .and_then(serde_json::Value::as_u64)
+            .or_else(|| {
+                info.and_then(|i| i.get("max_tokens"))
+                    .and_then(serde_json::Value::as_u64)
+            })
+            .filter(|n| *n > 0);
+        let max_output_tokens = info
+            .and_then(|i| i.get("max_output_tokens"))
+            .and_then(serde_json::Value::as_u64)
+            .filter(|n| *n > 0);
+        let per_token_to_per_million = |key: &str| {
+            info.and_then(|i| i.get(key))
+                .and_then(serde_json::Value::as_f64)
+                .filter(|cost| cost.is_finite() && *cost >= 0.0)
+                .map(|cost| cost * 1_000_000.0)
+        };
+        out.insert(
+            name.to_lowercase(),
+            DeclaredModelFigures {
+                context_window,
+                max_output_tokens,
+                input_cost_per_m: per_token_to_per_million("input_cost_per_token"),
+                output_cost_per_m: per_token_to_per_million("output_cost_per_token"),
+            },
+        );
+    }
+    out
+}
+
+/// Whether the id belongs to the built-in driver registry rather than to an operator-defined gateway.
+///
+/// [`librefang_llm_drivers::drivers::provider_api_format`] returns `None` exactly for the ids nobody curated — the convention its own doc comment states, and the same one the provider-test handler leans on when it picks `/models` + `Authorization: Bearer` for an unrecognized name.
+fn is_operator_defined_gateway(provider: &str) -> bool {
+    librefang_llm_drivers::drivers::provider_api_format(provider).is_none()
+}
+
+/// Fetch LiteLLM's optional `/model/info` extension and fold what it declares into `model_info`.
+///
+/// Best-effort by construction: a gateway that does not implement the endpoint (every OpenAI-compatible server that is not LiteLLM, and LiteLLM deployments with the extension disabled) answers 404 or a non-JSON body, and both of those leave `model_info` exactly as the listing left it rather than failing the probe.
+/// The listing is the authoritative roster; this only ever fills in what the roster did not carry, so a gateway that stops serving the extension cannot erase a limit an earlier probe learned — [`ModelCatalog::merge_discovered_models`](crate::model_catalog::ModelCatalog::merge_discovered_models) owns that never-downgrade rule.
+///
+/// The extra round trip is spent only on an operator-defined gateway id: a curated provider's listing shape is known and none of them serve this extension, so probing them for it would be a request that fails on every probe forever.
+async fn enrich_with_declared_model_info(
+    provider: &str,
+    base_url: &str,
+    api_key: Option<&str>,
+    is_loopback: bool,
+    model_info: &mut [DiscoveredModelInfo],
+) {
+    if model_info.is_empty() || !is_operator_defined_gateway(provider) {
+        return;
+    }
+    let url = format!("{}/model/info", base_url.trim_end_matches('/'));
+    let mut req = probe_client().get(&url);
+    if is_loopback {
+        req = req.timeout(Duration::from_secs(PROBE_TIMEOUT_SECS));
+    }
+    if let Some(key) = api_key.map(str::trim).filter(|key| !key.is_empty()) {
+        req = req.header("Authorization", format!("Bearer {key}"));
+    }
+    let declared = match req.send().await {
+        Ok(resp) if resp.status().is_success() => match resp.json::<serde_json::Value>().await {
+            Ok(body) => parse_litellm_model_info(&body),
+            Err(_) => return,
+        },
+        _ => return,
+    };
+    apply_declared_model_info(model_info, &declared);
+}
+
+/// Fold one parsed `/model/info` table into the entries the listing produced.
+///
+/// Capacity is filled only where the listing was silent: the listing describes the model the gateway is actually serving right now, and `/model/info` is a registration table that can lag it.
+/// Price has no counterpart in the listing at all, so it is taken as declared — but only as a pair, because one figure without the other is not a price the catalog can record without inventing a counterpart.
+fn apply_declared_model_info(
+    model_info: &mut [DiscoveredModelInfo],
+    declared: &std::collections::HashMap<String, DeclaredModelFigures>,
+) {
+    if declared.is_empty() {
+        return;
+    }
+    for entry in model_info.iter_mut() {
+        let Some(figures) = declared.get(&entry.name.to_lowercase()).copied() else {
+            continue;
+        };
+        entry.context_window = entry.context_window.or(figures.context_window);
+        entry.max_output_tokens = entry.max_output_tokens.or(figures.max_output_tokens);
+        if figures.input_cost_per_m.is_some() && figures.output_cost_per_m.is_some() {
+            entry.input_cost_per_m = figures.input_cost_per_m;
+            entry.output_cost_per_m = figures.output_cost_per_m;
+        }
     }
 }
 
@@ -1076,6 +1246,8 @@ mod tests {
             max_output_tokens: None,
             supports_vision: None,
             supports_function_calling: None,
+            input_cost_per_m: None,
+            output_cost_per_m: None,
         };
         let json = serde_json::to_value(&info).unwrap();
         assert_eq!(json["name"], "llama3.2:latest");
@@ -1329,6 +1501,243 @@ mod tests {
         let body = serde_json::json!({"models": []}); // Ollama shape, no "data"
         let err = fail_or_panic(parse_openai_models(&body));
         assert!(err.contains("data"));
+    }
+
+    // -- LiteLLM `/model/info` extension ------------------------------------
+
+    /// The exact shape reported against a real LiteLLM instance in #7775: the
+    /// operator never registered limits, so LiteLLM answers with literal
+    /// `null`s. A `null` must stay "the gateway did not say" rather than
+    /// becoming a `0` the catalog would present as a fact.
+    #[test]
+    fn test_parse_litellm_model_info_treats_a_null_limit_as_unknown() {
+        let body = serde_json::json!({"data": [
+            {"model_name": "pakllm", "model_info": {
+                "max_tokens": null, "max_input_tokens": null,
+                "max_output_tokens": null, "input_cost_per_token": null
+            }},
+        ]});
+        let declared = parse_litellm_model_info(&body);
+        let figures = declared.get("pakllm").expect("row present");
+        assert_eq!(figures.context_window, None);
+        assert_eq!(figures.max_output_tokens, None);
+        assert_eq!(figures.input_cost_per_m, None);
+        assert_eq!(figures.output_cost_per_m, None);
+    }
+
+    /// LiteLLM states cost in USD per *token*; the catalog stores USD per
+    /// **million**. Getting this conversion wrong understates every price by
+    /// six orders of magnitude, which is why it is asserted rather than
+    /// assumed.
+    #[test]
+    fn test_parse_litellm_model_info_converts_per_token_cost_to_per_million() {
+        let body = serde_json::json!({"data": [
+            {"model_name": "team-default", "model_info": {
+                "max_input_tokens": 128_000u64, "max_output_tokens": 8_192u64,
+                "input_cost_per_token": 0.000003, "output_cost_per_token": 0.000015
+            }},
+        ]});
+        let declared = parse_litellm_model_info(&body);
+        let figures = declared.get("team-default").expect("row present");
+        assert_eq!(figures.context_window, Some(128_000));
+        assert_eq!(figures.max_output_tokens, Some(8_192));
+        assert!((figures.input_cost_per_m.unwrap() - 3.0).abs() < 1e-9);
+        assert!((figures.output_cost_per_m.unwrap() - 15.0).abs() < 1e-9);
+    }
+
+    /// `max_tokens` is LiteLLM's ambiguous fallback (a gateway that conflates
+    /// the full window with the output ceiling reports it), so an explicit
+    /// `max_input_tokens` must win when both are present.
+    #[test]
+    fn test_parse_litellm_model_info_prefers_max_input_tokens_over_max_tokens() {
+        let body = serde_json::json!({"data": [
+            {"model_name": "m", "model_info": {
+                "max_tokens": 4_096u64, "max_input_tokens": 128_000u64
+            }},
+        ]});
+        let declared = parse_litellm_model_info(&body);
+        assert_eq!(declared.get("m").unwrap().context_window, Some(128_000));
+    }
+
+    /// A server that is not LiteLLM does not serve the extension at all, so
+    /// anything without the `data` array is "nothing declared" rather than an
+    /// error that would fail the probe.
+    #[test]
+    fn test_parse_litellm_model_info_ignores_a_non_litellm_body() {
+        assert!(parse_litellm_model_info(&serde_json::json!({"success": false})).is_empty());
+        assert!(parse_litellm_model_info(&serde_json::json!({"data": []})).is_empty());
+        // A row with no usable name cannot be joined to a listing entry.
+        assert!(
+            parse_litellm_model_info(&serde_json::json!({"data": [{"model_name": "  "}]}))
+                .is_empty()
+        );
+    }
+
+    /// The listing describes the model the gateway is serving right now and
+    /// `/model/info` is a registration table that can lag it, so a figure the
+    /// listing already reported must survive the fold.
+    #[test]
+    fn test_apply_declared_model_info_leaves_what_the_listing_already_reported() {
+        let mut info = vec![DiscoveredModelInfo {
+            context_window: Some(32_768),
+            ..DiscoveredModelInfo::bare("m")
+        }];
+        let declared = parse_litellm_model_info(&serde_json::json!({"data": [
+            {"model_name": "m", "model_info": {
+                "max_input_tokens": 128_000u64, "max_output_tokens": 8_192u64
+            }},
+        ]}));
+        apply_declared_model_info(&mut info, &declared);
+        assert_eq!(info[0].context_window, Some(32_768));
+        // The field the listing was silent about is the one that gets filled.
+        assert_eq!(info[0].max_output_tokens, Some(8_192));
+    }
+
+    /// One cost without its counterpart is not a price the catalog can record
+    /// without inventing the other half, so neither is written.
+    #[test]
+    fn test_apply_declared_model_info_records_a_price_only_as_a_pair() {
+        let mut info = vec![DiscoveredModelInfo::bare("m")];
+        let declared = parse_litellm_model_info(&serde_json::json!({"data": [
+            {"model_name": "m", "model_info": {"input_cost_per_token": 0.000003}},
+        ]}));
+        apply_declared_model_info(&mut info, &declared);
+        assert_eq!(info[0].input_cost_per_m, None);
+        assert_eq!(info[0].output_cost_per_m, None);
+    }
+
+    /// The extension is a LiteLLM deployment detail. Spending a request on
+    /// every curated provider's probe would be a request that fails forever.
+    #[test]
+    fn test_only_an_operator_defined_gateway_is_probed_for_model_info() {
+        for curated in [
+            "openai",
+            "anthropic",
+            "groq",
+            "openrouter",
+            "ollama",
+            "vllm",
+        ] {
+            assert!(
+                !is_operator_defined_gateway(curated),
+                "{curated} is registry-known and must not be probed for /model/info"
+            );
+        }
+        assert!(is_operator_defined_gateway("litellm"));
+        assert!(is_operator_defined_gateway("my-vllm-proxy"));
+    }
+
+    /// A canned gateway server that stops listening when the test ends.
+    ///
+    /// The listener must not outlive the test: it sits on an ephemeral port, and a server task left
+    /// looping in `accept()` keeps that port out of the pool every other test in the binary draws
+    /// from — which is how an unrelated test ends up failing with `AddrInUse` on a port it never
+    /// chose.
+    struct CannedGateway {
+        base_url: String,
+        task: tokio::task::JoinHandle<()>,
+    }
+
+    impl Drop for CannedGateway {
+        fn drop(&mut self) {
+            self.task.abort();
+        }
+    }
+
+    /// Serve canned JSON per request path on a loopback port, for as many
+    /// connections as the test makes. An unrouted path answers 404, which is how
+    /// the "extension absent" case is expressed.
+    async fn serve_canned(routes: Vec<(&'static str, String)>) -> CannedGateway {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let task = tokio::spawn(async move {
+            loop {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    return;
+                };
+                let routes = routes.clone();
+                tokio::spawn(async move {
+                    let mut buf = vec![0u8; 4096];
+                    let read = stream.read(&mut buf).await.unwrap_or(0);
+                    let head = String::from_utf8_lossy(&buf[..read]).to_string();
+                    let path = head.split_whitespace().nth(1).unwrap_or("/").to_string();
+                    let response = match routes.iter().find(|(p, _)| path == *p) {
+                        Some((_, body)) => format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                            body.len()
+                        ),
+                        None => "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_string(),
+                    };
+                    let _ = stream.write_all(response.as_bytes()).await;
+                    let _ = stream.shutdown().await;
+                });
+            }
+        });
+        CannedGateway {
+            base_url: format!("http://{addr}"),
+            task,
+        }
+    }
+
+    /// End to end through the probe: a LiteLLM gateway answers the bare OpenAI
+    /// listing (no capacity, no price) and declares both on the optional
+    /// `/model/info` extension, so the discovered entry must carry them.
+    /// Before the fold was wired, every model discovered here was registered at
+    /// the catalog's "unknown" sentinel with no price at all, even though the
+    /// gateway had answered the question.
+    #[tokio::test]
+    async fn test_probe_provider_folds_the_model_info_extension_into_the_listing() {
+        let listing = serde_json::json!({
+            "object": "list",
+            "data": [{"id": "team-default", "object": "model", "owned_by": "openai"}]
+        })
+        .to_string();
+        let info = serde_json::json!({"data": [
+            {"model_name": "team-default", "model_info": {
+                "max_input_tokens": 128_000u64, "max_output_tokens": 8_192u64,
+                "input_cost_per_token": 0.000003, "output_cost_per_token": 0.000015
+            }},
+        ]})
+        .to_string();
+        let gateway = serve_canned(vec![("/models", listing), ("/model/info", info)]).await;
+
+        let result = probe_provider("litellm", &gateway.base_url, None).await;
+
+        assert!(result.reachable, "error: {:?}", result.error);
+        let entry = result
+            .discovered_model_info
+            .iter()
+            .find(|m| m.name == "team-default")
+            .expect("the gateway's model must be discovered");
+        assert_eq!(entry.context_window, Some(128_000));
+        assert_eq!(entry.max_output_tokens, Some(8_192));
+        assert!((entry.input_cost_per_m.unwrap() - 3.0).abs() < 1e-9);
+        assert!((entry.output_cost_per_m.unwrap() - 15.0).abs() < 1e-9);
+    }
+
+    /// The extension is optional: a gateway that does not serve it must still
+    /// report its models, with the unreported fields left unknown. The 404 here
+    /// is the ordinary case for every OpenAI-compatible server that is not
+    /// LiteLLM.
+    #[tokio::test]
+    async fn test_probe_provider_leaves_limits_unknown_without_a_model_info_endpoint() {
+        let listing = serde_json::json!({
+            "object": "list",
+            "data": [{"id": "plain-model", "object": "model"}]
+        })
+        .to_string();
+        let gateway = serve_canned(vec![("/models", listing)]).await;
+
+        let result = probe_provider("litellm", &gateway.base_url, None).await;
+
+        assert!(result.reachable, "error: {:?}", result.error);
+        assert_eq!(result.discovered_models, vec!["plain-model".to_string()]);
+        let entry = &result.discovered_model_info[0];
+        assert_eq!(entry.context_window, None);
+        assert_eq!(entry.max_output_tokens, None);
+        assert_eq!(entry.input_cost_per_m, None);
     }
 
     #[tokio::test]

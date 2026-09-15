@@ -1687,6 +1687,14 @@ impl ModelCatalog {
             let reported_context = info.context_window.filter(|v| *v > 0);
             let reported_max_output = info.max_output_tokens.filter(|v| *v > 0);
             let limits_known = reported_context.is_some() || reported_max_output.is_some();
+            // Price arrives as a pair or not at all: the two figures come from the same gateway row, so a payload that states one and not the other is not a price the catalog can record without inventing its counterpart.
+            let reported_price = info
+                .input_cost_per_m
+                .filter(|cost| cost.is_finite() && *cost >= 0.0)
+                .zip(
+                    info.output_cost_per_m
+                        .filter(|cost| cost.is_finite() && *cost >= 0.0),
+                );
             // Upgrade the previously-discovered Local entry in place when the
             // current probe reports stronger capabilities. An *inferred* capability never
             // downgrades: a transient probe that drops the `capabilities` array (e.g. an
@@ -1728,6 +1736,13 @@ impl ModelCatalog {
                 if limits_known {
                     entry.limits_known = true;
                 }
+                // Price follows the same declared-wins rule the capability flags above use, and for the same reason: the gateway is stating a fact about its own model, so it replaces whatever a previous probe recorded.
+                // Silence changes nothing.
+                if let Some((input, output)) = reported_price {
+                    entry.input_cost_per_m = input;
+                    entry.output_cost_per_m = output;
+                    entry.pricing_known = true;
+                }
                 continue;
             }
             let display = format!("{} ({})", info.name, provider);
@@ -1741,8 +1756,8 @@ impl ModelCatalog {
                 context_window: reported_context.unwrap_or(0),
                 max_output_tokens: reported_max_output.unwrap_or(0),
                 limits_known,
-                input_cost_per_m: 0.0,
-                output_cost_per_m: 0.0,
+                input_cost_per_m: reported_price.map_or(0.0, |(input, _)| input),
+                output_cost_per_m: reported_price.map_or(0.0, |(_, output)| output),
                 supports_tools,
                 supports_vision,
                 // The whole point of #7957: a freshly discovered gateway model records *whether*
