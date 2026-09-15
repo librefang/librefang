@@ -458,6 +458,71 @@ async fn create_refuses_a_name_that_belongs_to_a_live_agent() {
     cleanup(name);
 }
 
+/// A name held by both sources lists once, as the writable copy (#8016).
+///
+/// `create_refuses_a_name_that_belongs_to_a_live_agent` above closes the door going forward, but it cannot close it behind: `read_agent_type` says outright that a collision "can still arise after the fact — an agent spawned under a name an agent type already uses". Nothing in the suite covered that state, so the `dedup_by` in `list_agent_templates` was load-bearing and unguarded, and dropping it would have shipped two rows with the same name to the Agent Types page — which is what #8016 reports.
+///
+/// The source matters as much as the count: `editable` has to agree with what a `PUT` to that name would actually do, so the surviving row must be the agent-type one. A dedup that kept the workspace row instead would still show one entry and would still be wrong, offering a control that cannot work (#7731).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_name_held_by_both_sources_lists_once_as_the_writable_copy() {
+    let _g = lock().lock().await;
+    let name = "at_collision";
+    cleanup(name);
+
+    // Both sources hold the name. The descriptions differ so the assertion can tell which row survived, rather than only that one did.
+    write_agent_type(
+        name,
+        &manifest_with_non_form_fields(name).replace(
+            r#"description = "seeded""#,
+            r#"description = "the operator-authored agent type""#,
+        ),
+    );
+    write_workspace_agent(
+        name,
+        &manifest_with_non_form_fields(name).replace(
+            r#"description = "seeded""#,
+            r#"description = "a live agent's own manifest""#,
+        ),
+    );
+
+    let h = boot().await;
+    let (status, list) = get(&h, "/api/templates").await;
+    assert_eq!(status, StatusCode::OK, "{list}");
+
+    let rows: Vec<&Json> = list["templates"]
+        .as_array()
+        .expect("templates array")
+        .iter()
+        .filter(|r| r["name"] == name)
+        .collect();
+    assert_eq!(
+        rows.len(),
+        1,
+        "a name held by both sources must list once, not once per source: {list}"
+    );
+
+    let row = rows[0];
+    assert_eq!(
+        row["source"], "agent-type",
+        "the writable copy must be the one that survives: {row}"
+    );
+    assert_eq!(row["editable"], true, "{row}");
+    assert_eq!(
+        row["description"], "the operator-authored agent type",
+        "the surviving row must carry the agent type's own content, not the live agent's: {row}"
+    );
+
+    // `total` is derived from the same deduplicated vector, so a regression that reintroduced the
+    // duplicate would otherwise be visible in the array while the count still looked right.
+    assert_eq!(
+        list["total"].as_u64().unwrap_or_default() as usize,
+        list["templates"].as_array().expect("templates array").len(),
+        "total must count the rows actually served: {list}"
+    );
+
+    cleanup(name);
+}
+
 // ---------------------------------------------------------------------------
 // CRUD lifecycle and validation
 // ---------------------------------------------------------------------------
