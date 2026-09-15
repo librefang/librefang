@@ -975,8 +975,12 @@ describe("ProvidersPage", () => {
   it("keeps an active context-window override from deleting itself (#7774)", async () => {
     // The row's `context_window` is the *effective* value, so it equals the
     // override. Reverting against it instead of `limits_catalog` would make the
-    // seeded field look identical to the catalog default and clear the override
-    // on the next save.
+    // seeded field show a number the override no longer distinguishes.
+    //
+    // What this guards today is the seeding and the hint, not the write: the save
+    // path no longer reads the revert target at all (see `modelOverrideDraft.ts`),
+    // so the class of defect the assertion was written for is no longer
+    // expressible here. Kept because those two halves still discriminate.
     seedDiscoveredModel({ context_window: 16384, limitsCatalogWindow: 131072 });
     useModelOverridesMock.mockReturnValue({
       data: { context_window: 16384 },
@@ -1000,6 +1004,55 @@ describe("ProvidersPage", () => {
     expect(
       within(drawer).getByText("providers.context_window_hint_override"),
     ).toBeInTheDocument();
+  });
+
+  it("leaves Save disabled while the max_tokens field is untouched", async () => {
+    // The other half of the rule, and the one that catches an over-correction.
+    //
+    // The field seeds from a *display* value — with no override stored that is
+    // the catalog figure, 16384 here — while the state it would be compared
+    // against is "no override". Read as a difference, that makes simply opening
+    // the drawer dirty, and one click writes `max_tokens: 16384` for every agent
+    // that never set one, moving its request from the kernel default of 4096 to
+    // 16384. An untouched field has nothing to save.
+    seedDiscoveredModel();
+    const drawer = await openConfigureDrawer(LITELLM);
+
+    expect(updateOverridesMutateAsync).not.toHaveBeenCalled();
+    expect(
+      within(drawer).getByRole("button", { name: /providers\.max_tokens/ }),
+    ).toBeDisabled();
+  });
+
+  it("saves a max_tokens that equals the model's catalog output capacity", async () => {
+    // The reported defect. The catalog reports `max_output_tokens: 16384`, and
+    // the old rule read a typed 16384 as "same as the default, so clear it".
+    // It is not the default: an absent override falls through to
+    // `DEFAULT_MODEL_MAX_TOKENS` (4096), so the number meant something else.
+    //
+    // Measured against the old rule, this fails with `Number of calls: 0` —
+    // the field resolved to "not dirty", so Save never enabled and the value
+    // could not be stored at all. The operator saw a box reading 16384 that
+    // silently refused to save 16384.
+    seedDiscoveredModel();
+    const drawer = await openConfigureDrawer(LITELLM);
+
+    const ladder = within(drawer).getByRole("group", { name: "providers.max_tokens" });
+    fireEvent.click(within(ladder).getByRole("button", { name: "model_param.custom" }));
+    fireEvent.change(
+      within(drawer).getByLabelText("providers.max_tokens — model_param.custom"),
+      { target: { value: "16384" } },
+    );
+    fireEvent.click(
+      within(drawer).getByRole("button", {
+        name: /providers\.max_tokens/,
+      }),
+    );
+
+    expect(updateOverridesMutateAsync).toHaveBeenCalledWith({
+      modelKey: "litellm:sensor-model-generic-high",
+      overrides: { max_tokens: 16384 },
+    });
   });
 
   it("clearing the field drops the context_window override (#7774)", async () => {

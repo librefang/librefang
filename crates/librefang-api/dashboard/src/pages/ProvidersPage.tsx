@@ -10,6 +10,7 @@ import { useCredentialPools, useProviders, useProviderStatus } from "../lib/quer
 import type { CredentialPoolStatus, CredentialPoolKeySnapshot, ModelOverrides } from "../api";
 import { useModels, useModelOverrides } from "../lib/queries/models";
 import { useUpdateModelOverrides } from "../lib/mutations/models";
+import { resolveLimitDraft } from "../lib/modelOverrideDraft";
 import { useTestProvider, useSetProviderKey, useDeleteProviderKey, useEnableProvider, useSetProviderUrl, useSetProviderDiscovery, useSetDefaultProvider, useCreateRegistryContent, useConnectEveryApi, EVERYAPI_PROVIDER } from "../lib/mutations/providers";
 import { PageHeader } from "../components/ui/PageHeader";
 import { CardSkeleton } from "../components/ui/Skeleton";
@@ -190,7 +191,12 @@ function ModelLimitEditor({ overrideKey, overrides, overridesLoading, field, cat
   overridesLoading: boolean;
   /** Which `ModelOverrides` field this editor writes. */
   field: "max_tokens" | "context_window";
-  /** The catalog value this field reverts to, or undefined when unknown. */
+  /**
+   * The value this field displays when there is no override, or undefined when unknown.
+   *
+   * For `context_window` that is also what clearing the field reverts to.
+   * For `max_tokens` it is the catalog capacity, which is **not** the revert target — clearing falls through to the daemon's own default — so the hints below say different things about the same prop.
+   */
   catalogValue?: number;
   label: string;
   savedMessage: string;
@@ -208,22 +214,38 @@ function ModelLimitEditor({ overrideKey, overrides, overridesLoading, field, cat
   // re-seeded when the caller switches models (the key changes).
   const [input, setInput] = useState("");
   const [seededFor, setSeededFor] = useState("");
+  // Whether the operator has actually touched the field since it was seeded.
+  //
+  // The seed is a *display* value (`effective`), which for an unset override is
+  // the catalog figure rather than the length the runtime would ask for. So
+  // "input differs from what is stored" is not the same question as "there is
+  // something to save": on an untouched field it is true purely because the two
+  // sources differ, and treating it as a change turns opening the drawer into a
+  // one-click write of the catalog capacity. This flag is what separates the
+  // two, and it has to be a flag rather than a comparison against the seed —
+  // typing the number the field already shows is a deliberate act that a
+  // seed-comparison would read as "nothing happened".
+  const [edited, setEdited] = useState(false);
   useEffect(() => {
     if (overrideKey && overrideKey !== seededFor && !overridesLoading) {
       setInput(effective != null ? String(effective) : "");
+      setEdited(false);
       setSeededFor(overrideKey);
     }
   }, [overrideKey, seededFor, overridesLoading, effective]);
 
   const [saving, setSaving] = useState(false);
 
-  const parsed = input.trim() === "" ? null : Number(input);
-  const invalid = parsed != null && (!Number.isInteger(parsed) || parsed <= 0);
-  // The override the value would resolve to once saved: an explicit number
-  // that already equals the catalog value needs no override row, so treat it as
-  // "clear". A blank input also clears.
-  const targetOverride = parsed != null && parsed !== catalogValue ? parsed : null;
-  const dirty = targetOverride !== (overrideValue ?? null);
+  // Blank clears the override; any positive whole number sets it. Extracted so
+  // the save payload and the Save-button gate cannot drift apart — see
+  // `modelOverrideDraft.ts` for why the model's catalog figure is not consulted.
+  //
+  // `catalogValue` above is still the revert target for *display* (`effective`),
+  // which is a different question: what to show when there is no override. It
+  // has no say in what gets saved, because an absent override falls through to
+  // the kernel default rather than to the catalog figure.
+  const { value: targetOverride, invalid, dirty: changesStored } = resolveLimitDraft(input, overrideValue);
+  const dirty = edited && changesStored;
 
   const handleSave = async () => {
     if (!overrideKey || invalid) return;
@@ -259,7 +281,10 @@ function ModelLimitEditor({ overrideKey, overrides, overridesLoading, field, cat
             param={field === "context_window" ? "context_window" : "max_tokens"}
             label={label}
             value={input}
-            onChange={setInput}
+            onChange={(next) => {
+              setInput(next);
+              setEdited(true);
+            }}
             cap={undefined}
             warning={invalid ? t("providers.limit_invalid") : undefined}
           />
@@ -371,7 +396,12 @@ function ProviderModelLimitsSection({ providerId, addToast }: {
             label={t("providers.max_tokens")}
             savedMessage={t("providers.max_tokens_saved")}
             hintDefault={t("providers.max_tokens_hint_default")}
-            hintOverride={t("providers.max_tokens_hint_override", { value: catalogMaxOut != null ? formatNumber(catalogMaxOut) : "-" })}
+            // No number here, unlike `context_window` above: clearing this field
+            // reverts to the daemon's own default, which is a kernel constant the
+            // dashboard is not told and must not invent. Printing the catalog
+            // figure claimed reverting lands there, which is what the old text
+            // got wrong.
+            hintOverride={t("providers.max_tokens_hint_override")}
             addToast={addToast}
           />
         </>
