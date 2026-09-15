@@ -979,7 +979,7 @@ mod tests {
 
     use super::acquire_cron_prune_write_locks;
     use std::sync::Arc;
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
     use tokio::sync::Mutex;
 
     /// Mirror of the production three-phase pattern, with an injected slow
@@ -1018,52 +1018,46 @@ mod tests {
         (true, snapshot_generation)
     }
 
-    /// Two concurrent fires whose summarize step takes 200ms each must
-    /// finish in ~200ms wall-clock (parallel), not ~400ms (serial). If
-    /// the prune lock were held across the await, the second fire would
-    /// block on the first's lock until its summarize completed.
+    /// Two concurrent fires must be able to stand inside the summarize await at the same moment.
+    ///
+    /// That is the whole property: phase 2 runs lock-free, so the second fire's phase 1 cannot be blocked by the first fire still summarizing.
+    /// The barrier states it structurally — it releases only once both fires have arrived, so if the lock were ever held across the await the second could never arrive, the first would wait forever, and the timeout below turns that deadlock into a named failure.
+    ///
+    /// An earlier version measured wall-clock instead, asserting two 200ms fires finished in under 350ms.
+    /// That reads as the same claim but is not: it also fails when a loaded runner simply delays a sleep, which is what it did on CI at 432ms with nothing wrong with the lock.
+    /// A timing bound cannot separate "serialized" from "descheduled", and on a shared two-core runner executing the whole suite in parallel the two are indistinguishable.
+    /// The timeout here is generous precisely because it is no longer measuring anything — it only has to outlast scheduling noise, since real serialization never completes at all.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn cron_prune_release_lock_across_summarize_concurrent() {
         let lock = Arc::new(Mutex::new(()));
         let gen_counter = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let inside_summarize = Arc::new(tokio::sync::Barrier::new(2));
 
-        let lock_a = lock.clone();
-        let gen_a = gen_counter.clone();
-        let task_a = tokio::spawn(async move {
-            prune_with_seam(lock_a, gen_a, |snap| async move {
-                tokio::time::sleep(Duration::from_millis(200)).await;
-                snap
+        let spawn_fire = |barrier: Arc<tokio::sync::Barrier>| {
+            let lock = lock.clone();
+            let gen = gen_counter.clone();
+            tokio::spawn(async move {
+                prune_with_seam(lock, gen, move |snap| async move {
+                    barrier.wait().await;
+                    snap
+                })
+                .await
             })
-            .await
-        });
+        };
 
-        let lock_b = lock.clone();
-        let gen_b = gen_counter.clone();
-        let task_b = tokio::spawn(async move {
-            prune_with_seam(lock_b, gen_b, |snap| async move {
-                tokio::time::sleep(Duration::from_millis(200)).await;
-                snap
-            })
-            .await
-        });
+        let task_a = spawn_fire(inside_summarize.clone());
+        let task_b = spawn_fire(inside_summarize.clone());
 
-        let start = Instant::now();
-        let (res_a, res_b) = tokio::join!(task_a, task_b);
-        let elapsed = start.elapsed();
+        let (res_a, res_b) = tokio::time::timeout(Duration::from_secs(10), async {
+            tokio::join!(task_a, task_b)
+        })
+        .await
+        .expect(
+            "the two fires never stood inside summarize together, so the prune lock is being held across the await",
+        );
 
-        // Both tasks completed.
         res_a.expect("task A panicked");
         res_b.expect("task B panicked");
-
-        // Wall-clock budget: 200ms ideal parallel, 400ms is fully
-        // serialized. Set the bound at 350ms to allow generous CI
-        // jitter while still failing loudly if the lock is re-introduced
-        // across the await.
-        assert!(
-            elapsed < Duration::from_millis(350),
-            "concurrent prune fires ran serially (elapsed={elapsed:?}); \
-             the prune lock is being held across the summarize await"
-        );
     }
 
     /// When the generation counter is bumped during the lock-free window
