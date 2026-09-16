@@ -55,14 +55,9 @@ jobs:
     permissions:
       contents: read
       pull-requests: write
-    # Keyed per PR, not repository-wide. A fixed group made every push in the repo
-    # contend for one slot, and with `cancel-in-progress: false` GitHub cancels the
-    # older pending run when a newer one queues behind the one in flight — so during
-    # any busy window most of these were cancelled, `gh pr checks` rendered the
-    # cancellation as `fail`, and unrelated PRs sat at `UNSTABLE` for a reason that
-    # had nothing to do with them.
-    # The scheduled reconciliation still serializes against itself: `github.ref` is
-    # the default branch for a `schedule` run, so every cron firing shares one key.
+    # Keyed per PR, not repository-wide.
+    # A fixed group made every push in the repo contend for one slot, and with `cancel-in-progress: false` GitHub cancels the older pending run when a newer one queues behind the one in flight — so during any busy window most of these were cancelled, `gh pr checks` rendered the cancellation as `fail`, and unrelated PRs sat at `UNSTABLE` for a reason that had nothing to do with them.
+    # The scheduled reconciliation still serializes against itself: `github.ref` is the default branch for a `schedule` run, so every cron firing shares one key.
     concurrency:
       group: stale-pr-reconciliation-${{ github.event.pull_request.number || github.ref }}
       cancel-in-progress: false
