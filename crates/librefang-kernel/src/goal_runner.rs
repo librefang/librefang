@@ -5395,6 +5395,65 @@ mod tests {
         assert!(runner.stop(goal_id));
     }
 
+    /// `state()` reports `None` for a run that is alive and well, whenever the loop happens to hold the state mutex.
+    ///
+    /// It reads the live run under `try_lock`, deliberately — `state()` is sync, so it cannot await a tokio mutex, and blocking here would let a slow reader stall the loop.
+    /// The cost is that "no state" and "could not read the state right now" are the same answer, and a caller that reads the second as the first will report a healthy run as a failure.
+    /// `POST /api/goals/{id}/start` did exactly that and took `main` red twice on the macOS lane (#8388, #8391), which is why it now retries instead of believing the first empty read.
+    ///
+    /// Holding the lock explicitly is what makes this deterministic: the real contention window is a few instructions wide and cannot be hit on purpose.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn state_is_empty_while_the_run_loop_holds_the_state_lock() {
+        let substrate = Arc::new(MemorySubstrate::open_in_memory(0.01).unwrap());
+        let store = store_from(&substrate);
+        let agent_id = AgentId::new();
+        let goal = test_goal(agent_id);
+        seed_goal(&substrate, &goal);
+        let goal_id = goal.id;
+
+        let (_tx, rx) = watch::channel(false);
+        let runner = GoalRunner::new_with_store(rx, store, substrate.clone());
+        // The turn never resolves, so the run stays `Running` for the whole test and
+        // any empty read below is the lock, not the run having ended.
+        runner.start(
+            goal_id,
+            agent_id,
+            Some(25),
+            substrate,
+            |_agent_id, _message| async move { std::future::pending::<Result<String, String>>().await },
+            no_learnings_hook,
+            no_evaluator,
+            false,
+            None,
+            None,
+            None,
+        );
+
+        let live = runner
+            .state(goal_id)
+            .expect("a started run must be readable");
+        assert_eq!(live.phase, GoalRunPhase::Running);
+
+        let handle_state = runner
+            .runs
+            .get(&goal_id)
+            .expect("the run must be registered")
+            .state
+            .clone();
+        let held = handle_state.lock().await;
+        assert!(
+            runner.state(goal_id).is_none(),
+            "state() cannot read a locked run, so callers must not read its None as `did not start`"
+        );
+        drop(held);
+
+        assert!(
+            runner.state(goal_id).is_some(),
+            "the same run must be readable again once the lock is released"
+        );
+        assert!(runner.stop(goal_id));
+    }
+
     /// A paused run's readout must report the retry budget its own resume will use.
     ///
     /// `state()` reconstructs a paused run from its checkpoint once the loop task has exited and self-cleaned its registry slot, and the checkpoint carries `verify_max_retries` for exactly this reason — see [`ResumePoint::verify_max_retries`], whose stated justification is that without it `GET /api/goals/{id}/run` reports the compiled default.
