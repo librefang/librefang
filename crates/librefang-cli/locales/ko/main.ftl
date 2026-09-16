@@ -2549,6 +2549,7 @@ purge-removed-workspace =   - 작업 공간 디렉터리
 purge-workspace-unresolved =   - 참고: 작업 공간 디렉터리를 찾을 수 없습니다. 이 에이전트의 매니페스트가 남아 있지 않아 사용자 지정 작업 공간 경로는 찾을 수 없습니다. 작업 공간 디렉터리를 직접 확인하세요.
 purge-workspace-shared =   - 참고: 작업 공간 디렉터리를 그대로 두었습니다. 작업 공간 루트 자체이거나, 다른 등록된 에이전트의 매니페스트도 가리키는 디렉터리로 해석되어 삭제하면 이 에이전트의 데이터를 넘어서는 범위가 사라집니다. 작업 공간 디렉터리를 직접 확인하세요.
 purge-removed-agent-type =   - 에이전트 유형 템플릿
+purge-removed-avatar =   - 아바타 이미지
 purge-removed-cron-jobs =   - 크론 작업
 purge-removed-trigger-jobs =   - 이벤트 트리거
 purge-removed-channel-bindings =   - 채널/대화 라우팅 바인딩
