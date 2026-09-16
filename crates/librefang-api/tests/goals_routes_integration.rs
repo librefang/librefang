@@ -2156,6 +2156,23 @@ async fn updating_a_verified_goal_to_completed_stops_its_active_run() {
 /// wired unconditionally: a non-terminal update is an edit, not an operator
 /// ending the run. Without this the three tests above all pass against a
 /// `stop_goal_run` called on every `PUT`.
+///
+/// What it asserts is the *registry entry's survival*, not `running`, and the
+/// difference is the whole reason this test is stable. The run is started with
+/// an agent id that resolves to nothing, so the runner's first turn fails and
+/// the run reaches a terminal phase on its own — on an idle machine after the
+/// assertions, on a loaded CI shard before them. Asserting `running == true`
+/// made the test a race against that turn, and it lost on `main` (#8362:
+/// `left: Bool(false), right: true`).
+///
+/// The entry is the right signal because the two outcomes are distinguishable
+/// through it and only through it: a run stopped by `stop_goal_run` is
+/// *removed* from the registry — which is exactly what
+/// `assert_terminal_status_stops_the_run` pins next door, asserting that a
+/// follow-up `POST /stop` reports `stopped: false` because there is nothing
+/// left — while a run that ends by itself stays, carrying a terminal phase.
+/// So this still fails, as it must, against a `stop_goal_run` wired onto every
+/// `PUT`; it just no longer fails against a scheduler.
 #[tokio::test(flavor = "multi_thread")]
 async fn updating_a_goal_without_a_terminal_status_leaves_its_run_alone() {
     let h = boot().await;
@@ -2178,13 +2195,15 @@ async fn updating_a_goal_without_a_terminal_status_leaves_its_run_alone() {
         serde_json::json!({"title": "Renamed mid-run"}),
         serde_json::json!({"status": "in_progress"}),
     ] {
+        let edit = payload.to_string();
         let (put_status, body) =
             json_request(&h, Method::PUT, &format!("/api/goals/{id}"), Some(payload)).await;
         assert_eq!(put_status, StatusCode::OK, "got: {body:?}");
         let (_, run) = json_request(&h, Method::GET, &format!("/api/goals/{id}/run"), None).await;
-        assert_eq!(
-            run["running"], true,
-            "an ordinary edit must not stop the run"
+        assert!(
+            run.get("run").is_some_and(|r| !r.is_null()),
+            "an ordinary edit must not stop the run: the registry entry is gone after {edit}, \
+             which is what stopping it does. Got: {run:?}"
         );
     }
 }
