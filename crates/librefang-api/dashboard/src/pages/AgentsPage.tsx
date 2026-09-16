@@ -3,7 +3,10 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useNavigate } from "@tanstack/react-router";
 import {
+  ALLOWED_AGENT_AVATAR_TYPES,
+  MAX_AGENT_AVATAR_BYTES,
   type AgentDetail,
+  type AgentIdentity,
   type AgentItem,
   type CloneAgentResult,
   type PromptVersion,
@@ -75,6 +78,7 @@ import {
   useAgentTools,
   useAgentSkills,
   useAgentMcpServers,
+  useAgentAvatarUrl,
   usePromptVersions,
   useTools,
 } from "../lib/queries/agents";
@@ -82,7 +86,10 @@ import {
   useAgentTemplateToml,
   useCloneAgent,
   useDeleteAgent,
+  useDeleteAgentAvatar,
   usePatchAgent,
+  useUpdateAgentIdentity,
+  useUploadAgentAvatar,
   usePatchAgentRuntimeConfig,
   useResetAgentSession,
   useResumeAgent,
@@ -118,6 +125,10 @@ type AgentCronSummary = {
 type AgentView = AgentDetail & {
   state?: string;
   description?: string;
+  /** Emoji, colour and avatar reference. `GET /api/agents/{id}` emits these
+   *  (`lifecycle.rs: get_agent`) but `AgentDetail` never declared them, which
+   *  is the whole reason the drawer rendered initials for everyone (#8339). */
+  identity?: AgentIdentity;
   profile?: string;
   model_name?: string;
   model_provider?: string;
@@ -175,6 +186,225 @@ function DetailRow({ label, children }: { label: React.ReactNode; children: Reac
       <span className="text-text-dim text-sm">{label}</span>
       <span className="text-sm text-right min-w-0">{children}</span>
     </div>
+  );
+}
+
+/**
+ * The agent's visual identity, editable: emoji, and the avatar image (#8339).
+ *
+ * There is deliberately no field for `avatar_url`. It may only ever hold this
+ * agent's own avatar path — #8349 closed it to that — so the upload and remove
+ * buttons are the only two things that write it. A free-text URL box would be a
+ * way to make the dashboard fetch from wherever the text said, which is the one
+ * thing the backend change exists to prevent.
+ *
+ * `onChanged` fires after a successful write so the drawer can re-read the
+ * agent: the identity lives in the page's local `detailAgent` state, which a
+ * query invalidation alone does not reach.
+ */
+export function AgentAppearanceSection({
+  agentId,
+  identity,
+  onChanged,
+}: {
+  agentId: string;
+  identity?: AgentIdentity;
+  onChanged: () => void;
+}) {
+  const { t } = useTranslation();
+  const addToast = useUIStore((s) => s.addToast);
+  const updateIdentityMutation = useUpdateAgentIdentity();
+  const uploadAvatarMutation = useUploadAgentAvatar();
+  const deleteAvatarMutation = useDeleteAgentAvatar();
+  const storedEmoji = identity?.emoji ?? "";
+  const hasAvatar = !!identity?.avatar_url;
+  const [emojiDraft, setEmojiDraft] = useState(storedEmoji);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // Re-seed on the agent, not on the stored emoji: the drawer stays mounted
+  // while the user clicks through the list, and keying this on the value would
+  // wipe a half-typed emoji the moment an unrelated poll refreshed the agent.
+  useEffect(() => {
+    setEmojiDraft(identity?.emoji ?? "");
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- keyed on the agent, deliberately not on the stored emoji
+  }, [agentId]);
+
+  /** PATCH the emoji. Colour is left alone — the body omits it, and #6608 made
+   *  an omitted field preserve its stored value rather than null it. */
+  function saveEmoji() {
+    if (updateIdentityMutation.isPending) return;
+    const next = emojiDraft.trim();
+    if (next === storedEmoji) return;
+    updateIdentityMutation.mutate(
+      // The empty string, never `undefined`: omitting a field is how a PATCH
+      // says "leave it", so clearing an emoji has to be spelled out.
+      { agentId, identity: { emoji: next } },
+      {
+        onSuccess: () => {
+          onChanged();
+          addToast(
+            next
+              ? t("agents.identity.emoji_saved", { defaultValue: "Emoji updated" })
+              : t("agents.identity.emoji_cleared", { defaultValue: "Emoji cleared" }),
+            "success",
+          );
+        },
+        onError: (e: Error) =>
+          addToast(
+            e?.message || t("agents.identity.emoji_failed", { defaultValue: "Failed to update the emoji" }),
+            "error",
+          ),
+      },
+    );
+  }
+
+  /** Validate the picked file, then send its bytes.
+   *
+   *  Both checks mirror the server's and neither replaces it: the daemon
+   *  decides the format by sniffing the bytes, so a `.png` that is really
+   *  something else is refused there whatever the browser said here. Checking
+   *  first only avoids spending an upload that was never going to be accepted,
+   *  and lets the message name the actual problem. */
+  function handleFileChange(event: React.ChangeEvent<HTMLInputElement>) {
+    const input = event.target;
+    const file = input.files?.[0];
+    // Cleared before any early return, so picking the same file twice in a row
+    // still fires `change` — the value is what the browser compares against.
+    input.value = "";
+    if (!file) return;
+
+    if (!(ALLOWED_AGENT_AVATAR_TYPES as readonly string[]).includes(file.type)) {
+      addToast(
+        t("agents.identity.avatar_type_rejected", {
+          defaultValue: "An avatar must be a PNG, JPEG, GIF or WebP image. SVG is not accepted.",
+        }),
+        "error",
+      );
+      return;
+    }
+    if (file.size > MAX_AGENT_AVATAR_BYTES) {
+      addToast(
+        t("agents.identity.avatar_too_large", {
+          defaultValue: "That image is {{size}} MB; the limit is {{limit}} MB.",
+          size: (file.size / (1024 * 1024)).toFixed(1),
+          limit: (MAX_AGENT_AVATAR_BYTES / (1024 * 1024)).toFixed(0),
+        }),
+        "error",
+      );
+      return;
+    }
+
+    uploadAvatarMutation.mutate(
+      { agentId, file },
+      {
+        onSuccess: () => {
+          onChanged();
+          addToast(t("agents.identity.avatar_saved", { defaultValue: "Avatar updated" }), "success");
+        },
+        onError: (e: Error) =>
+          addToast(
+            e?.message || t("agents.identity.avatar_failed", { defaultValue: "Failed to upload the avatar" }),
+            "error",
+          ),
+      },
+    );
+  }
+
+  function removeAvatar() {
+    if (deleteAvatarMutation.isPending) return;
+    deleteAvatarMutation.mutate(agentId, {
+      onSuccess: () => {
+        onChanged();
+        addToast(t("agents.identity.avatar_removed", { defaultValue: "Avatar removed" }), "success");
+      },
+      onError: (e: Error) =>
+        addToast(
+          e?.message || t("agents.identity.avatar_remove_failed", { defaultValue: "Failed to remove the avatar" }),
+          "error",
+        ),
+    });
+  }
+
+  return (
+    <section>
+      <h4 className="text-sm font-semibold flex items-center gap-2 mb-2">
+        <Sparkles className="w-3.5 h-3.5 text-brand" />
+        {t("agents.identity.title", { defaultValue: "Appearance" })}
+      </h4>
+      <div className="rounded-lg bg-main border border-border-subtle p-4 space-y-2">
+        <DetailRow label={t("agents.identity.emoji", { defaultValue: "Emoji" })}>
+          <div className="flex items-center gap-2 justify-end">
+            <input
+              type="text"
+              value={emojiDraft}
+              onChange={e => setEmojiDraft(e.target.value)}
+              onKeyDown={e => {
+                // Same `isComposing` guard as the rename field: in a CJK IME
+                // Enter confirms the candidate, and submitting on it would
+                // hijack the composition.
+                if (e.key === "Enter" && !e.nativeEvent.isComposing) saveEmoji();
+              }}
+              // 16, not 1 or 2: a single emoji is not a single character. A
+              // family with ZWJ joiners (👨‍👩‍👧‍👦) is eleven UTF-16 units,
+              // and a cap that counted "characters" would truncate it into a
+              // different picture.
+              maxLength={16}
+              placeholder={t("agents.identity.emoji_placeholder", { defaultValue: "None" })}
+              aria-label={t("agents.identity.emoji", { defaultValue: "Emoji" })}
+              className="w-24 px-2 py-1 rounded-md border border-border-subtle bg-surface text-lg text-center outline-none focus:border-brand"
+            />
+            <button
+              type="button"
+              onClick={saveEmoji}
+              disabled={updateIdentityMutation.isPending || emojiDraft.trim() === storedEmoji}
+              className="px-3 py-1 rounded-lg text-xs font-semibold bg-brand text-white hover:bg-brand/90 disabled:opacity-50 disabled:cursor-not-allowed shrink-0"
+            >
+              {updateIdentityMutation.isPending ? t("common.saving") : t("common.save")}
+            </button>
+          </div>
+        </DetailRow>
+        <DetailRow label={t("agents.identity.avatar", { defaultValue: "Avatar image" })}>
+          <div className="flex items-center gap-2 justify-end">
+            <input
+              type="file"
+              ref={fileInputRef}
+              accept={ALLOWED_AGENT_AVATAR_TYPES.join(",")}
+              onChange={handleFileChange}
+              className="hidden"
+              data-testid="agent-avatar-file-input"
+              aria-label={t("agents.identity.avatar", { defaultValue: "Avatar image" })}
+            />
+            <button
+              type="button"
+              onClick={() => fileInputRef.current?.click()}
+              disabled={uploadAvatarMutation.isPending}
+              className="px-3 py-1 rounded-lg text-xs font-semibold bg-main hover:bg-main/80 text-text-dim border border-border-subtle disabled:opacity-50 disabled:cursor-not-allowed shrink-0"
+            >
+              {uploadAvatarMutation.isPending
+                ? t("common.saving")
+                : hasAvatar
+                  ? t("agents.identity.avatar_replace", { defaultValue: "Replace" })
+                  : t("agents.identity.avatar_upload", { defaultValue: "Upload" })}
+            </button>
+            {hasAvatar && (
+              <button
+                type="button"
+                onClick={removeAvatar}
+                disabled={deleteAvatarMutation.isPending}
+                className="px-3 py-1 rounded-lg text-xs font-semibold text-error border border-error/30 hover:bg-error/10 disabled:opacity-50 disabled:cursor-not-allowed shrink-0"
+              >
+                {t("common.remove", { defaultValue: "Remove" })}
+              </button>
+            )}
+          </div>
+        </DetailRow>
+        <p className="text-[11px] text-text-dim leading-relaxed">
+          {t("agents.identity.avatar_hint", {
+            defaultValue: "PNG, JPEG, GIF or WebP, up to 2 MB. SVG is not accepted. The image is stored by the daemon and served only to signed-in callers.",
+          })}
+        </p>
+      </div>
+    </section>
   );
 }
 
@@ -429,6 +659,13 @@ export function AgentsPage() {
   const updateToolsMutation = useUpdateAgentTools();
   const templateTomlMutation = useAgentTemplateToml();
   const qc = useQueryClient();
+
+  // --- Visual identity of the agent in the drawer (#8339) ------------------
+  const detailIdentity = (detailAgent as AgentView | null)?.identity;
+  // Gated on "this agent has one" so an agent without an avatar costs no
+  // request at all; `undefined` while loading or absent, which is what `Avatar`
+  // wants — it falls back to the initials on its own.
+  const detailAvatarSrc = useAgentAvatarUrl(detailAgent?.id ?? "", !!detailIdentity?.avatar_url);
 
   const rawDeleteMutation = useDeleteAgent();
   const handleDeleteSuccess = (agentId: string) => {
@@ -2585,7 +2822,12 @@ export function AgentsPage() {
               <div className="flex items-start justify-between gap-3">
                 <div className="flex items-start gap-3 min-w-0 flex-1">
                   <div className="relative shrink-0">
-                    <Avatar fallback={detailAgent.name} size="lg" />
+                    <Avatar
+                      fallback={detailAgent.name}
+                      size="lg"
+                      src={detailAvatarSrc}
+                      emoji={detailIdentity?.emoji}
+                    />
                     <span
                       className={`absolute -bottom-0.5 -right-0.5 w-3 h-3 rounded-full ${drawerStatusColor} border-2 border-surface ${!isDetailDrawerSuspended && !isDetailDrawerCrashed ? "animate-pulse" : ""}`}
                       role="img"
@@ -2675,6 +2917,17 @@ export function AgentsPage() {
             </div>
             {/* Body — scrollable inspectable sections. */}
             <div className="px-6 py-5 space-y-5">
+
+              {/* Appearance — the emoji and the avatar image (#8339).
+                  Its own component, and exported, for the reason the file header
+                  gives for `SystemPromptSection`: `AgentsPage` has ~20 hooks and no
+                  render harness, so anything that has to be tested has to be
+                  reachable without mounting the page. */}
+              <AgentAppearanceSection
+                agentId={detailAgent.id}
+                identity={detailIdentity}
+                onChanged={() => { void refreshDetailAgent(detailAgent.id); }}
+              />
 
               {/* Model */}
               {detailAgent.model && (

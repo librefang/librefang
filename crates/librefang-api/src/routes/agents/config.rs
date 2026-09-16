@@ -1276,26 +1276,25 @@ pub async fn patch_agent_config(
         }
     }
 
-    // Validate color format if provided
+    // The same two checks `PATCH /api/agents/{id}/identity` applies, because
+    // this handler writes the same six identity fields. Both were asking for
+    // `api-error-agent-{color,avatar}-invalid`, keys no locale defines, so the
+    // response body carried the identifier rather than a sentence (#8339).
     if let Some(ref color) = req.color {
         if !color.is_empty() && !color.starts_with('#') {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": t.t("api-error-agent-color-invalid")})),
+                Json(serde_json::json!({"error": t.t("api-error-validation-color-invalid")})),
             );
         }
     }
 
-    // Validate avatar_url if provided
+    // `avatar_url` is no longer free text — see `is_own_avatar_reference`.
     if let Some(ref url) = req.avatar_url {
-        if !url.is_empty()
-            && !url.starts_with("http://")
-            && !url.starts_with("https://")
-            && !url.starts_with("data:")
-        {
+        if !super::is_own_avatar_reference(agent_id, url) {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": t.t("api-error-agent-avatar-invalid")})),
+                Json(serde_json::json!({"error": t.t("api-error-validation-avatar-url-invalid")})),
             );
         }
     }

@@ -308,7 +308,7 @@ api-error-tool-requires-agent = ツール '{ $name }' は承認が必要であ�
 api-error-validation-content-empty = 内容は空にできません
 api-error-validation-name-empty = new_name は空にできません
 api-error-validation-title-required = タイトルは必須です
-api-error-validation-avatar-url-invalid = アバター URL は http/https または data URI である必要があります
+api-error-validation-avatar-url-invalid = アバター URL は、このデーモンがこのエージェント用に提供するアバターのルートか、空である必要があります。リンクではなく画像をアップロードしてください。
 api-error-validation-color-invalid = 色は '#' で始まる 16 進コードである必要があります
 
 # 一般エラー

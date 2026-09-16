@@ -632,6 +632,48 @@ impl AgentsResource {
         .await
     }
 
+    pub async fn serve_agent_avatar(&self, id: &str) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::GET,
+            &["api", "agents", id, "avatar"],
+            None,
+            &[],
+        )
+        .await
+    }
+
+    /// Sends a raw `application/octet-stream` body; `content_type` overrides that default.
+    pub async fn upload_agent_avatar(
+        &self,
+        id: &str,
+        body: Vec<u8>,
+        content_type: Option<&str>,
+    ) -> Result<Value> {
+        do_req_raw(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::POST,
+            &["api", "agents", id, "avatar"],
+            body,
+            content_type.unwrap_or("application/octet-stream"),
+        )
+        .await
+    }
+
+    pub async fn delete_agent_avatar(&self, id: &str) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::DELETE,
+            &["api", "agents", id, "avatar"],
+            None,
+            &[],
+        )
+        .await
+    }
+
     pub async fn get_agent_channels(&self, id: &str) -> Result<Value> {
         do_req(
             &self.client,

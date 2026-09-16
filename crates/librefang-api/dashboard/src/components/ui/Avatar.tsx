@@ -6,6 +6,17 @@ interface AvatarProps extends HTMLAttributes<HTMLDivElement> {
   fallback: string;
   size?: AvatarSize;
   src?: string;
+  /**
+   * Shown instead of the initials when there is no image (#8339).
+   *
+   * A separate prop rather than something passed through `fallback`, because
+   * `fallback` is fed to `getInitials`, which takes `n[0]` — the first UTF-16
+   * *code unit*. On an emoji that is a lone surrogate: `"🤖"[0]` is `"\ud83e"`,
+   * which renders as the replacement character. `fallback` also stays the
+   * `aria-label`, and an emoji is the wrong thing to announce for an agent
+   * whose name is right there.
+   */
+  emoji?: string;
 }
 
 const sizeStyles: Record<AvatarSize, string> = {
@@ -32,6 +43,7 @@ export const Avatar = memo(function Avatar({
   fallback,
   size = "md",
   src,
+  emoji,
   ...props
 }: AvatarProps) {
   const [imgError, setImgError] = useState(false);
@@ -50,6 +62,9 @@ export const Avatar = memo(function Avatar({
       `}
       {...props}
     >
+      {/* Image, then emoji, then initials — the order in which the identity
+          was deliberately set. An image that fails to load falls through to
+          the emoji for the same reason it falls through to the initials. */}
       {src && !imgError ? (
         <img
           src={src}
@@ -58,6 +73,11 @@ export const Avatar = memo(function Avatar({
           onError={() => setImgError(true)}
           className="h-full w-full object-cover"
         />
+      ) : emoji ? (
+        // `leading-none` so a tall emoji glyph does not push itself off the
+        // circle's vertical centre, and a size bump because an emoji drawn at
+        // the initials' font size reads as a speck inside the ring.
+        <span className="text-[1.4em] leading-none">{emoji}</span>
       ) : (
         getInitials(fallback)
       )}

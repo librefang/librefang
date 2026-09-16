@@ -7369,6 +7369,20 @@ impl KernelConfig {
         self.effective_workspaces_dir().join("hands")
     }
 
+    /// Resolved directory holding per-agent avatar images (#8339).
+    ///
+    /// Deliberately **not** under [`Self::effective_workspaces_dir`] and **not** under `home_dir/dashboard`, and each exclusion is a security requirement rather than a preference.
+    ///
+    /// An agent can list its own workspace with `file_list`, so an image stored there puts its filename in front of the model on any turn that looks at the directory.
+    /// Everything under `home_dir/dashboard` is reachable at `/dashboard/…`, and `/dashboard/assets/**` is an unauthenticated GET, so writing uploaded bytes there would turn the directory into a way to serve chosen content from the dashboard's own origin.
+    ///
+    /// It is also not the shared upload directory: that one defaults to a subdirectory of the system temp dir and is swept by a 24-hour TTL reaper, which would delete an agent's avatar the day after it was set.
+    ///
+    /// Anchored to `home_dir` rather than to `workspaces_dir` because the latter is operator-overridable and may point anywhere, including into a tree an agent has been granted.
+    pub fn effective_avatars_dir(&self) -> PathBuf {
+        self.home_dir.join("avatars")
+    }
+
     /// Parse the TCP port number from `api_listen`.
     ///
     /// Returns `None` when the address string is malformed. Callers that rely
