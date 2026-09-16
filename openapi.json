@@ -855,6 +855,209 @@
         }
       }
     },
+    "/api/agents/{id}/avatar": {
+      "get": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "GET /api/agents/{id}/avatar — the stored image.",
+        "description": "Authenticated like every other `/api/` route, which is the point: the alternative placement under `~/.librefang/dashboard/` would have been an unauthenticated GET.",
+        "operationId": "serve_agent_avatar",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Agent ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The image",
+            "content": {
+              "image/png": {}
+            }
+          },
+          "304": {
+            "description": "Unchanged since the caller's `If-None-Match`"
+          },
+          "400": {
+            "description": "Invalid agent id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such agent, or no avatar set",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "POST /api/agents/{id}/avatar — store an image as this agent's avatar.",
+        "operationId": "upload_agent_avatar",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Agent ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "description": "The image, raw. PNG, JPEG, GIF or WebP, decided by the bytes — the request's `Content-Type` and any filename it carries are ignored.",
+          "content": {
+            "application/octet-stream": {
+              "schema": {
+                "type": "string"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Stored; the body carries the `avatar_url` to keep",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid agent id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such agent",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Image larger than the cap",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "Bytes are not a supported image",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "423": {
+            "description": "This agent is provisioned by the deployment; its manifest cannot be changed through the API",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "DELETE /api/agents/{id}/avatar — remove the image and the reference to it.",
+        "operationId": "delete_agent_avatar",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Agent ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Removed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid agent id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such agent",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "423": {
+            "description": "This agent is provisioned by the deployment; its manifest cannot be changed through the API",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/agents/{id}/channels": {
       "get": {
         "tags": [
