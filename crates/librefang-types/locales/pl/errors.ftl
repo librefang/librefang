@@ -307,7 +307,7 @@ api-error-tool-requires-agent = Narzędzie '{ $name }' wymaga zatwierdzenia prze
 api-error-validation-content-empty = Treść nie może być pusta
 api-error-validation-name-empty = new_name nie może być puste
 api-error-validation-title-required = Tytuł jest wymagany
-api-error-validation-avatar-url-invalid = Adres URL awatara musi być http/https lub identyfikatorem URI danych
+api-error-validation-avatar-url-invalid = Adres URL awatara musi być ścieżką awatara udostępnianą przez tego demona dla tego agenta albo pusty. Prześlij obraz zamiast podawać odnośnik.
 api-error-validation-color-invalid = Kolor musi być kodem szesnastkowym zaczynającym się od '#'
 
 # General errors

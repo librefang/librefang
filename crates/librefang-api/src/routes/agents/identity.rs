@@ -59,26 +59,28 @@ pub async fn update_agent_identity(
         return refusal;
     }
 
-    // Validate color format if provided
+    // Validate color format if provided.
+    //
+    // The key was `api-error-agent-color-invalid`, which no locale defines —
+    // `ErrorTranslator::t` returns the key verbatim when the message is
+    // missing, so the API answered with the identifier itself instead of a
+    // sentence. `api-error-validation-color-invalid` is the message that was
+    // sitting unused in all nine locales all along (#8339).
     if let Some(ref color) = req.color {
         if !color.is_empty() && !color.starts_with('#') {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": t.t("api-error-agent-color-invalid")})),
+                Json(serde_json::json!({"error": t.t("api-error-validation-color-invalid")})),
             );
         }
     }
 
-    // Validate avatar_url if provided
+    // `avatar_url` is no longer free text — see `is_own_avatar_reference`.
     if let Some(ref url) = req.avatar_url {
-        if !url.is_empty()
-            && !url.starts_with("http://")
-            && !url.starts_with("https://")
-            && !url.starts_with("data:")
-        {
+        if !super::is_own_avatar_reference(agent_id, url) {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": t.t("api-error-agent-avatar-invalid")})),
+                Json(serde_json::json!({"error": t.t("api-error-validation-avatar-url-invalid")})),
             );
         }
     }

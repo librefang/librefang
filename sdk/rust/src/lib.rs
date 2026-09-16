@@ -632,6 +632,48 @@ impl AgentsResource {
         .await
     }
 
+    pub async fn serve_agent_avatar(&self, id: &str) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::GET,
+            &["api", "agents", id, "avatar"],
+            None,
+            &[],
+        )
+        .await
+    }
+
+    /// Sends a raw `application/octet-stream` body; `content_type` overrides that default.
+    pub async fn upload_agent_avatar(
+        &self,
+        id: &str,
+        body: Vec<u8>,
+        content_type: Option<&str>,
+    ) -> Result<Value> {
+        do_req_raw(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::POST,
+            &["api", "agents", id, "avatar"],
+            body,
+            content_type.unwrap_or("application/octet-stream"),
+        )
+        .await
+    }
+
+    pub async fn delete_agent_avatar(&self, id: &str) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::DELETE,
+            &["api", "agents", id, "avatar"],
+            None,
+            &[],
+        )
+        .await
+    }
+
     pub async fn get_agent_channels(&self, id: &str) -> Result<Value> {
         do_req(
             &self.client,
@@ -5351,6 +5393,18 @@ impl UsersResource {
         .await
     }
 
+    pub async fn serve_my_avatar(&self) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::GET,
+            &["api", "users", "me", "avatar"],
+            None,
+            &[],
+        )
+        .await
+    }
+
     pub async fn get_user(&self, name: &str) -> Result<Value> {
         do_req(
             &self.client,
@@ -5382,6 +5436,60 @@ impl UsersResource {
             reqwest::Method::DELETE,
             &["api", "users", name],
             None,
+            &[],
+        )
+        .await
+    }
+
+    pub async fn serve_user_avatar(&self, name: &str) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::GET,
+            &["api", "users", name, "avatar"],
+            None,
+            &[],
+        )
+        .await
+    }
+
+    /// Sends a raw `application/octet-stream` body; `content_type` overrides that default.
+    pub async fn upload_user_avatar(
+        &self,
+        name: &str,
+        body: Vec<u8>,
+        content_type: Option<&str>,
+    ) -> Result<Value> {
+        do_req_raw(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::POST,
+            &["api", "users", name, "avatar"],
+            body,
+            content_type.unwrap_or("application/octet-stream"),
+        )
+        .await
+    }
+
+    pub async fn delete_user_avatar(&self, name: &str) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::DELETE,
+            &["api", "users", name, "avatar"],
+            None,
+            &[],
+        )
+        .await
+    }
+
+    pub async fn update_user_identity(&self, name: &str, data: Value) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::PATCH,
+            &["api", "users", name, "identity"],
+            Some(data),
             &[],
         )
         .await

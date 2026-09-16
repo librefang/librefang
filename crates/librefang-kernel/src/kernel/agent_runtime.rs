@@ -839,6 +839,23 @@ impl LibreFangKernel {
                     "Purged canonical UUID from agent_identities registry (#4614)"
                 );
             }
+            // The avatar goes with the identity, and it goes here rather than
+            // on every teardown precisely because `purge_identity` is already
+            // the flag that separates "the operator asked for this agent to
+            // stop existing" from "the runtime is recycling it" (#8339).
+            // Hand reactivation, provisioning prune, a tool-driven kill and
+            // the TUI all reach this function through `kill_agent`, which
+            // passes `false`; only the confirmed `DELETE /api/agents/{id}` and
+            // `librefang agent delete` pass `true`. Deleting on the former
+            // would make an agent silently lose its picture on an internal
+            // restart it never asked for.
+            let removed = librefang_types::media::remove_avatars(
+                &self.config_ref().effective_avatars_dir(),
+                &agent_id.to_string(),
+            );
+            if removed > 0 {
+                info!(agent = %entry.name, id = %agent_id, removed, "Removed stored avatar (#8339)");
+            }
         }
 
         // SECURITY: Record agent kill in audit trail. The status field
