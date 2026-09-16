@@ -49,6 +49,9 @@ import { filterVisible } from "../lib/hiddenModels";
 import { useVoiceInput } from "../lib/useVoiceInput";
 import { Typewriter_v2 } from "../components/Typewriter_v2";
 import { AuthenticatedImage } from "../components/AuthenticatedImage";
+import { AgentAvatar } from "../components/AgentAvatar";
+import { UserAvatar } from "../components/UserAvatar";
+import { useWhoami } from "../lib/queries/authz";
 import { useMathPlugins } from "../lib/hooks/useMathPlugins";
 import {
   useCreateAgentSession,
@@ -1391,6 +1394,28 @@ export function useChatMessages(
 interface MessageBubbleProps {
   message: ChatMessage;
   usageFooter: string;
+  /** The agent this session belongs to — what the bubble's avatar renders.
+   *  Undefined before the agent list resolves, in which case the bubble keeps
+   *  the generic bot icon it used to show.
+   *
+   *  The identity arrives as two primitives rather than as one `AgentIdentity`
+   *  object: this component is memoised against the streaming re-renders, and
+   *  the agent list it is read from is rebuilt every poll, so an object prop
+   *  would be a new reference every 30 s and drop the memo each time. */
+  agentId?: string;
+  agentName?: string;
+  agentAvatarUrl?: string;
+  agentEmoji?: string;
+  /** The signed-in user, for the other side of the same bubble. Undefined while
+   *  `whoami` is in flight, or in no-auth mode, where the bubble keeps the
+   *  generic person icon it used to show.
+   *
+   *  Primitives for the reason the agent's are: this component is memoised. */
+  userName?: string;
+  userEmoji?: string;
+  /** `whoami.has_avatar`, which decides whether the picture is worth fetching.
+   *  Undefined means the daemon did not say, which is not the same as "no". */
+  userHasAvatar?: boolean;
   onCopy?: (messageId: string, content: string) => void;
   copied?: boolean;
   onSpeak?: (messageId: string, content: string) => void;
@@ -1399,7 +1424,10 @@ interface MessageBubbleProps {
   ttsAvailable?: boolean;
 }
 
-const MessageBubble = memo(function MessageBubble({ message, usageFooter, onCopy, copied, onSpeak, isSpeaking, ttsStatus, ttsAvailable }: MessageBubbleProps) {
+/** Exported for its test, like `AgentAppearanceSection` on the users page:
+ *  mounting `ChatPage` to reach it would mean standing up a session, a selected
+ *  agent and a streaming transcript to assert two lines of avatar selection. */
+export const MessageBubble = memo(function MessageBubble({ message, usageFooter, agentId, agentName, agentAvatarUrl, agentEmoji, userName, userEmoji, userHasAvatar, onCopy, copied, onSpeak, isSpeaking, ttsStatus, ttsAvailable }: MessageBubbleProps) {
   const { t } = useTranslation();
   const isUser = message.role === "user";
   const isSystem = message.role === "system";
@@ -1443,11 +1471,37 @@ const MessageBubble = memo(function MessageBubble({ message, usageFooter, onCopy
       <div className={`flex flex-col min-w-0 w-fit max-w-[90%] sm:max-w-[min(75%,70ch)] ${isUser ? "items-end" : "items-start"}`}>
         {/* Avatar + name */}
         <div className={`flex items-center gap-2 mb-1.5 ${isUser ? "self-end flex-row-reverse" : "self-start"}`}>
-          <div className={`h-7 w-7 rounded-lg flex items-center justify-center ${
-            isUser ? "bg-brand text-white shadow-sm" : "bg-surface border border-border-subtle"
-          }`}>
-            {isUser ? <User className="h-3.5 w-3.5" /> : <Bot className="h-3.5 w-3.5 text-brand" />}
-          </div>
+          {/* Both sides are real. The user's keeps the generic person icon only
+              when there is nobody to name — no-auth mode, or `whoami` still in
+              flight; otherwise `UserAvatar` draws their image, then their
+              emoji, then their initials. The agent's draws its own, from the
+              same three-step chain. */}
+          {isUser ? (
+            userName ? (
+              <UserAvatar
+                name={userName}
+                emoji={userEmoji}
+                hasAvatar={userHasAvatar}
+                size="sm"
+              />
+            ) : (
+              <div className="h-8 w-8 shrink-0 grid place-items-center rounded-full bg-brand text-white shadow-sm">
+                <User className="h-3.5 w-3.5" />
+              </div>
+            )
+          ) : agentId ? (
+            <AgentAvatar
+              agentId={agentId}
+              avatarUrl={agentAvatarUrl}
+              emoji={agentEmoji}
+              fallback={agentName ?? t("chat.bot")}
+              size="sm"
+            />
+          ) : (
+            <div className="h-8 w-8 shrink-0 grid place-items-center rounded-full bg-surface border border-border-subtle">
+              <Bot className="h-3.5 w-3.5 text-brand" />
+            </div>
+          )}
           <span className={`text-[11px] font-bold uppercase tracking-wider ${isUser ? "text-brand" : "text-text-dim"}`}>
             {isUser ? t("chat.you") : t("chat.bot")}
           </span>
@@ -3241,6 +3295,10 @@ export function ChatPage() {
   }, [showHandAgents]);
 
   const agentsQuery = useAgents({ includeHands: showHandAgents });
+  // The signed-in user, for the other side of every message bubble. Resolved
+  // here rather than inside `MessageBubble` because that component is memoised
+  // and the name is the same for all of them.
+  const whoami = useWhoami();
   // Check if web search is available (any search API key configured)
   const webSearchAvailable = ((configQuery.data as Record<string, unknown>)?.web as Record<string, unknown> | undefined)?.search_available === true;
   const handsQuery = useActiveHandsWhen(showHandAgents);
@@ -3555,12 +3613,27 @@ export function ChatPage() {
           : "hover:bg-surface-hover"
       }`}
     >
-      <div className={`relative h-10 w-10 rounded-xl flex items-center justify-center font-black text-lg ${
-        selectedAgentId === agent.id ? "bg-white/20"
-        : (agent.state || "").toLowerCase() === "running" ? "bg-linear-to-br from-brand/20 to-accent/20 text-brand"
-        : "bg-main text-text-dim/40"
-      }`}>
-        {displayName.charAt(0).toUpperCase()}
+      {/* The slot the first letter used to sit in. `size="md"` is the same
+          `h-10 w-10` the chip used, but two things do shift: the silhouette
+          becomes `rounded-full` — identity is a circle everywhere else in the
+          SPA — and the fallback initial drops from `text-lg` to `text-sm`.
+          The three background states are restated because the avatar's own
+          `bg-brand/10 text-brand` is invisible on the `bg-brand` selected row. */}
+      <div className="relative shrink-0">
+        <AgentAvatar
+          agentId={agent.id}
+          avatarUrl={agent.identity?.avatar_url}
+          emoji={agent.identity?.emoji}
+          fallback={displayName}
+          size="md"
+          className={
+            selectedAgentId === agent.id
+              ? "bg-white/20 text-white"
+              : (agent.state || "").toLowerCase() === "running"
+                ? "bg-transparent bg-linear-to-br from-brand/20 to-accent/20 text-brand"
+                : "bg-main text-text-dim/40"
+          }
+        />
         {(agent.state || "").toLowerCase() === "running" ? (
           <span className="absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 rounded-full bg-success border-2 border-white dark:border-surface animate-pulse" />
         ) : (
@@ -3865,6 +3938,13 @@ export function ChatPage() {
                     key={msg.id}
                     message={msg}
                     usageFooter={usageFooter}
+                    agentId={selectedAgent?.id}
+                    agentName={selectedAgent?.name}
+                    agentAvatarUrl={selectedAgent?.identity?.avatar_url}
+                    agentEmoji={selectedAgent?.identity?.emoji}
+                    userName={whoami.data?.name}
+                    userEmoji={whoami.data?.emoji}
+                    userHasAvatar={whoami.data?.has_avatar}
                     onCopy={handleCopy}
                     copied={copiedMessageId === msg.id}
                     onSpeak={ttsAvailable ? tts.toggle : undefined}

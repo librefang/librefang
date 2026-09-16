@@ -79,6 +79,13 @@ export const agentKeys = {
     [...agentKeys.all, "mcpServers", agentId] as const,
   channels: (agentId: string) =>
     [...agentKeys.all, "channels", agentId] as const,
+  // The avatar image itself (#8339), cached as a Blob because
+  // `GET /api/agents/{id}/avatar` is authenticated and an `<img src>` carries
+  // no bearer token. Its own subtree rather than a leaf under `detail(id)`:
+  // the agent detail is refetched on a timer and re-downloading an image on
+  // every poll is the one thing this key exists to avoid.
+  avatar: (agentId: string) =>
+    [...agentKeys.all, "avatar", agentId] as const,
 };
 
 // Central prompt repository (#6160). The fleet-wide overview
@@ -461,6 +468,17 @@ export const userKeys = {
     [...userKeys.lists(), filters] as const,
   details: () => [...userKeys.all, "detail"] as const,
   detail: (name: string) => [...userKeys.details(), name] as const,
+  // The signed-in user's avatar image (#8339), cached as a Blob because
+  // `GET /api/users/me/avatar` is authenticated and an `<img src>` carries no
+  // bearer token. Its own subtree for the reason the agent one has: the user
+  // detail is refetched on a timer and re-downloading an image on every poll is
+  // what this key exists to avoid.
+  //
+  // Keyed by the *name* even though the path says `me`. The path is literal so
+  // that a name never becomes a path segment, but the cache entry still has to
+  // change when the name does — otherwise signing in as somebody else on the
+  // same page would go on serving the previous user's picture from cache.
+  avatar: (name: string) => [...userKeys.all, "avatar", name] as const,
 };
 
 // #7745 — user groups. `memberships(user)` hangs off the same root so a
@@ -504,6 +522,16 @@ export const authzKeys = {
   all: ["authz"] as const,
   effectives: () => [...authzKeys.all, "effective"] as const,
   effective: (name: string) => [...authzKeys.effectives(), name] as const,
+  // The calling credential's own identity. A sibling of `effectives()` rather
+  // than a member of it: every `effective` key is one per named subject, and
+  // "who am I" takes no subject argument.
+  //
+  // The user mutations invalidate this one — the emoji patch, both image
+  // writes, and the bulk import through `authzKeys.all` — because `emoji` and
+  // `has_avatar` are answers only this read carries. It is also `gcTime: 0` (see
+  // `authzQueries.whoami`), which keeps a stale copy from outliving the page
+  // that read it.
+  whoami: () => [...authzKeys.all, "whoami"] as const,
 };
 
 export const mediaKeys = {

@@ -118,7 +118,7 @@ describe("DashboardApp authed bootstrap", () => {
     // `/api/auth/dashboard-check` never echoes the username to a caller
     // either — the daemon's identity comes from the authenticated
     // `/api/authz/whoami` instead.
-    vi.mocked(getWhoami).mockResolvedValue({ name: "daemon-user" });
+    vi.mocked(getWhoami).mockResolvedValue({ name: "daemon-user", role: "owner" });
   });
 
   it("shows the daemon's username in the avatar after logging in", async () => {
