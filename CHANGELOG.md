@@ -11,6 +11,16 @@ and this project uses [Calendar Versioning](https://calver.org/) (YYYY.M.DD).
 
 _56 PRs from 3 contributors since v2026.9.14._
 
+### Highlights
+
+- **Pause and resume autonomous goal runs** — a long-horizon run can now be suspended and picked up later from the API (`POST /api/goals/{id}/pause` / `resume`), the Goals page, or the TUI's Goals screen with `p`, and a resumed run continues from its checkpointed iteration with its retry budget and captured lessons intact.
+- **Per-turn model routing and spawn profiles** — an agent can pick a model per turn by task complexity instead of being pinned to one in its manifest, `agent_spawn` gains a `profile` parameter that pins a spawned agent onto a named profile, and complexity keywords now match whole words so a task is no longer misrouted on a substring.
+- **Goal runs got a lot more honest** — a refused start is reported as a failure instead of success, a throttled verifier is no longer read as a missing one, work the verifier just rejected can no longer close out the goal, and a second run stops deleting the first run's captured `GOAL_LEARNED:` lessons.
+- **Workflow run timeline in the dashboard** — the Workflows page surfaces each run's live step progress and outcome as it executes, and the chat transcript gains a size control that spends less of the window on chrome.
+- **Registry promotion is configurable and safer** — a new `[skills.promotion]` section replaces values that were hardcoded on the GitHub side, `api_base_url` no longer accepts a plain `http://` origin outside loopback, and proposing to the registry refuses to push to a same-named repository under the fork owner without an explicit opt-in.
+
+Building from source now requires Rust 1.95.0 (up from 1.94.1).
+
 ### Added
 
 - `agent_spawn` gains a `profile` parameter that pins the spawned agent onto a named model profile.
@@ -385,7 +395,6 @@ _56 PRs from 3 contributors since v2026.9.14._
 ### Fixed
 
 - Classify `tts` as restart-required in the reload table (#8351) (@houko)
-- Type the error boundary prop from the router, not from Error (#8406) (@DaBlitzStein)
 - Point the dangling bitflags 2.13.1 references at 2.13.2 (#8421) (@DaBlitzStein)
 
 <details>
