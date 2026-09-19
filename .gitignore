@@ -69,6 +69,12 @@ message_journal.jsonl
 # Node.js (packages/)
 node_modules/
 
+# Python bytecode cache. Any `python3 scripts/tests/*.py` leaves one of these
+# next to the source it imported, so without this every checkout that runs a
+# test goes dirty with an untracked directory and no change to show for it.
+__pycache__/
+*.py[cod]
+
 # OS
 .DS_Store
 Thumbs.db

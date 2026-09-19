@@ -1,5 +1,5 @@
 import { lazy, Suspense, useEffect, useMemo, useState, type ComponentType } from "react";
-import { Link, Navigate, createRootRoute, createRoute, createRouter } from "@tanstack/react-router";
+import { Link, Navigate, createRootRoute, createRoute, createRouter, type ErrorComponentProps } from "@tanstack/react-router";
 import { useTranslation } from "react-i18next";
 import { App } from "./App";
 
@@ -555,10 +555,15 @@ const routeTree = rootRoute.addChildren([
   tasksRoute,
 ]);
 
-function ChunkErrorBoundary({ error }: { error: Error }) {
+function ChunkErrorBoundary({ error }: ErrorComponentProps) {
   const { t } = useTranslation();
   const errorKind = useMemo(() => classifyRouteError(error), [error]);
   const [showStack, setShowStack] = useState(false);
+  // The router hands the boundary whatever was thrown, which is typed `unknown`
+  // (not `Error`) since @tanstack/react-router 1.170.36 — a thrown value need not
+  // be an Error. Narrow once here rather than assuming an Error shape.
+  const errorMessage = error instanceof Error ? error.message : String(error);
+  const errorStack = error instanceof Error ? error.stack : undefined;
 
   // Auto-reload once per session for known-transient failures (chunk misses,
   // React dispatcher-null after HMR). If the reload fires we never render
@@ -575,7 +580,7 @@ function ChunkErrorBoundary({ error }: { error: Error }) {
   }
   const detail = errorKind === "chunk"
     ? t("errors.new_version_available", "A new version is available. Reload to get the latest.")
-    : error.message;
+    : errorMessage;
 
   return (
     <div className="flex h-[60vh] items-center justify-center">
@@ -599,7 +604,7 @@ function ChunkErrorBoundary({ error }: { error: Error }) {
           >
             {t("errors.force_reload", "Force reload")}
           </button>
-          {error.stack && (
+          {errorStack && (
             <button
               onClick={() => setShowStack(v => !v)}
               className="rounded-xl border border-gray-300 px-6 py-2.5 text-sm font-medium text-gray-700 hover:bg-gray-50 transition-colors"
@@ -608,9 +613,9 @@ function ChunkErrorBoundary({ error }: { error: Error }) {
             </button>
           )}
         </div>
-        {showStack && error.stack && (
+        {showStack && errorStack && (
           <pre className="mt-4 max-h-64 overflow-auto rounded-lg bg-gray-900 p-3 text-left text-xs text-gray-100 whitespace-pre-wrap break-all">
-            {error.stack}
+            {errorStack}
           </pre>
         )}
       </div>
