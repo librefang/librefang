@@ -1,4 +1,0 @@
-Restore a paused goal run's reported `verify_max_retries` to the checkpoint's value instead of the compiled default.
-`GoalRunner::state()` reconstructs a paused run from its checkpoint, and the retry budget is the one loop-engineering value the goal document never holds — it is a per-run number the operator sets on the start body, so the checkpoint is its only record.
-Reading it from the goal document instead meant a run started with `{"verify_max_retries": 8}` reported the compiled default once paused, and the bodyless `/resume` that follows a readout resolves its own budget the same way `state()` does, so the operator's number silently disappeared on resume.
-This fix and its regression tests shipped once already, in the pull request that introduced pause/resume for loop-engineered goals, but a squash merge on a long-lived branch left them out of the squashed commit that reached `main` (#8359) (@DaBlitzStein)

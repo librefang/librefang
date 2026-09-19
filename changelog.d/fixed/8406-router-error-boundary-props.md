@@ -1,3 +1,0 @@
-`ChunkErrorBoundary` takes its props from the router's own `ErrorComponentProps` instead of restating the signature by hand.
-`@tanstack/react-router` 1.170.36 widened the value handed to `defaultErrorComponent` from `Error` to `unknown`, because a thrown value need not be an Error, and the boundary's hand-written `{ error: Error }` no longer satisfied it — which failed the dashboard typecheck on every dashboard dependency bump, so the bump could not land.
-The error is narrowed back to `Error` at the two places it is read, `message` and `stack`, so the component is correct against both the widened signature and the one that preceded it (#PR) (@DaBlitzStein)

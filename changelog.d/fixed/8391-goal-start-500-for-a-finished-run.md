@@ -1,4 +1,0 @@
-Starting or resuming a goal run no longer answers `500 Failed to start goal run` for a run that started and is running perfectly well.
-The handler reported from a read that returns nothing whenever the run loop happens to hold the run's state mutex — `GoalRunner::state()` is synchronous, so it takes that lock with `try_lock` and cannot wait — and it read "could not read this right now" as "did not start".
-An operator was told a start failed that had not, and whether it happened at all came down to machine load: it took `main` red twice on the macOS lane, which runs the whole suite in one process, while the four-way Linux shards kept winning the race (#8388, #8391).
-The read is retried across a yield now, which is enough because the loop's own contract is never to hold that lock across I/O; a run that has genuinely ended in the meantime reports a null run with a 200, the same thing `GET /api/goals/{id}/run` says for that state (#8392) (@houko)

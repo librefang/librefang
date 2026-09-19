@@ -7,6 +7,412 @@ and this project uses [Calendar Versioning](https://calver.org/) (YYYY.M.DD).
 
 ## [Unreleased]
 
+## [2026.9.19] - 2026-09-19
+
+_56 PRs from 3 contributors since v2026.9.14._
+
+### Added
+
+- `agent_spawn` gains a `profile` parameter that pins the spawned agent onto a named model profile.
+  This is the case model profiles were built for: the goal loop auto-spawns helpers, and without it a verifier whose only job is to answer "is this done?" inherits its parent's expensive model.
+  Passing `profile = "quick"` now writes that profile's provider and model onto the child's manifest instead of letting it inherit the default.
+  Naming a profile that does not exist fails with the list of profiles that do, rather than spawning an agent on the wrong model.
+  The parameter is honoured whether or not `[model_router] enabled` is set: that switch governs the automatic per-turn router, while naming a profile here is an explicit choice, so a cheap sub-agent does not require turning on routing for every agent (#7757) (@DaBlitzStein)
+- Add complexity-based model routing so an agent can pick a model per turn instead of being pinned to one in its manifest.
+  The common deployment reality is a cheap model that handles most turns and an expensive one that should only see the hard ones; until now that choice was static per agent, so operators either overpaid on every trivial turn or underserved the hard ones.
+  A `ModelProfile` binds task tags to a provider/model pair, a cost tier and a complexity ceiling; the kernel scores each turn from its text and picks the best profile the agent is permitted to use.
+  Builtin profiles ship as an asset and are overridden per-name from `~/.librefang/model_profiles.toml`, which is re-read when its mtime moves so an edit needs no restart.
+  Off by default: set `[model_router] enabled = true` in `config.toml` and `mode = "flexible"` in an agent's `[model]` block.
+  Per-agent constraints live in `[model.router_override]` — `allowed_profiles` limits the choice, `cost_budget` caps the tier, `default_profile` is the fallback, and `fixed = true` opts the agent out entirely.
+  A fallback profile is re-checked against those same constraints, so a `default_profile` can never spend past an agent's cost budget.
+  Configurable from all four surfaces: `GET`/`PUT /api/agents/{id}/model_routing` and `GET /api/model-router/profiles` on the API, a Routing tab on the dashboard's agent detail, an `r` editor on the TUI agent detail screen, and `librefang agent routing` / `routing-set` / `routing-profiles` on the CLI (#7757) (@DaBlitzStein)
+- Loop engineering for autonomous goal runs, opt-in per goal.
+  A run ended the moment the agent wrote `GOAL_DONE`, which left the worker as the sole judge of its own work — the one check a long-horizon loop most needs, and the one it did not have.
+  Setting `loop_engineering` on a goal adds two judges that are not the worker.
+  A verifier agent (`verify_agent_id`) reads each iteration's output and returns `VERDICT: PASS|FAIL|NEEDS_REWORK`; a rejection goes back to the generator carrying the verifier's stated reason, up to `verify_max_retries` rework rounds, and until the verifier passes the work `GOAL_DONE` does not end the run.
+  An evaluator model (`evaluator_model`) makes one cheap yes/no read of the goal against the latest output, and can conclude the goal is met even when the agent never claimed it.
+  Because the verifier now stands between the agent and the end of the run, `GOAL_DONE` changes meaning: it is a request to finish, granted once the verifier passes the work it is attached to, rather than the finish itself.
+  The agent can also record a reusable lesson with `GOAL_LEARNED: <one sentence>`; captured lessons are replayed into later iterations' prompts, persisted to the shared store, and filed as a draft skill in the workshop's `pending/` queue.
+  Turning a run's lessons into a skill an agent actually loads still takes a human `librefang skill pending approve` — an autonomous loop proposes, it does not grant itself authorship.
+  All three are inert unless the goal opts in, so a goal that does not ask for them sends the same prompt and makes the same single LLM call per iteration it always did.
+  Sub-agents are delegated rather than provisioned: the prompt directs the agent to its own `agent_spawn` / `agent_send` tools, which run under the capabilities its operator granted it, and neither the runner nor the API ever creates an agent on a caller's behalf.
+  First of the five PRs splitting the closed #6505 (#7785) (@DaBlitzStein)
+- Suspend a long-horizon goal run and pick it up later with `POST /api/goals/{id}/pause` and `POST /api/goals/{id}/resume`.
+  Until now `stop` was the only way to halt a run and it discarded the run's state, so an operator who wanted to free an agent for an hour could only express that as "throw away the last forty iterations and start over".
+  A pause lets the loop finish the turn it is on, then checkpoints its iteration count, progress and start time, so the run stays visible in `GET /api/goals/{id}/run` in the new `paused` phase while nothing is being spent on it, and a resume continues the same run under the same iteration budget rather than beginning a new one (#7973) (@DaBlitzStein)
+- Set how often a goal run prompts its agent with `tick_interval_secs` on the goal itself, accepted by `POST /api/goals` and `PUT /api/goals/{id}`.
+  Every goal previously ticked at the same hard-wired cadence, which is the wrong rate at both ends: a goal whose progress depends on something outside the daemon burned turns re-reading an unchanged world, and one that needs to react quickly could not be told to.
+  An out-of-range value is refused rather than clamped, so an operator who types a cadence learns their number was rejected instead of discovering later that the loop runs at a rate they never chose (#7973) (@DaBlitzStein)
+- Add a workflow run timeline to the dashboard's Workflows page, surfacing each run's live step progress and outcome as it executes.
+  The page now polls a selected run every 3 seconds while it is active — including while paused at an operator gate — and stops once it reaches a terminal state, so an operator watching a run does not need to reload to see it advance past an approval or finish. (#7997) (@DaBlitzStein)
+- The Goals page gains pause and resume controls for the autonomous goal run: a pause button next to stop while the run is active, and a resume button (with stop) while the run sits at its checkpoint.
+  The controls call the new `POST /api/goals/{id}/pause` and `/api/goals/{id}/resume` endpoints, pause stays a run-level phase rather than a goal status, and the badge and progress display keep deriving from the run phase (#8029) (@DaBlitzStein)
+- A `[skills.promotion]` config section for the registry promotion flow, which previously had almost every GitHub-side value hardcoded or derived at runtime.
+  `api_base_url` makes "Propose to Registry" usable on GitHub Enterprise at all, where a compiled-in `api.github.com` left it with no workaround.
+  `commit_author_name` / `commit_author_email` fix the attribution of the pushed commits, which GitHub otherwise credits to whoever owns the token — wrong for a shared or service token, and not something an operator could correct.
+  `fork_owner`, `base_branch`, `head_branch_prefix` and a `mode` of `fork` or `direct_push` cover the organisation-owned fork, the non-default target branch, the branch-naming convention and the internal registry nobody is meant to fork.
+  Every field is optional and reproduces the previous behaviour when unset, so an installation that configures nothing sees no change. (#8179, #8163) (@DaBlitzStein)
+- The TUI's Goals screen can now pause and resume a run with `p`, which it could already show but not act on.
+  `main` already colours a paused run yellow and ships `tui-goals-phase-paused` and `tui-goals-run-paused`, so before this an operator watching from a terminal saw a run somebody had paused from the dashboard, correctly labelled, with no key that touched it.
+  The key reads the live run phase rather than the goal document: a running goal pauses, a paused one resumes, and one doing neither is left alone rather than being started, because `s` is the key that starts a run and a pause key that quietly launched one would be a surprise on a screen where "stopped" and "paused" sit next to each other.
+  Resume sends no body, which is the daemon's "keep the cap the paused run was already under" path — re-budgeting a resumed run is a deliberate act and belongs to a surface that can ask for the number, not to a single keypress.
+  (#8224) (@DaBlitzStein)
+- The chat transcript has a size control now, and spends less of the window on chrome.
+  A three-line answer used to take most of a laptop viewport: 24 px of padding on every side of a scrolling column, and type sized for a phone.
+  The padding and the header type come down, and a control in the conversation header scales the whole transcript between 75% and 125%, remembered between sessions.
+  Readable type is a per-person, per-display setting — the size that reads well on a 27" panel wastes a 13" one — so the point is the control rather than the new default; a better default only moves whose display it is wrong for.
+  The scale reaches the transcript only, so making the text smaller never makes the composer or the controls harder to hit. (#8299) (@DaBlitzStein)
+- A test now fails the build if any CLI locale file defines the same Fluent message key twice.
+  The `union` git merge driver concatenates text instead of detecting conflicts, so two branches that each add a key to the same `.ftl` file merge cleanly and leave both copies behind.
+  Fluent rejects the whole resource for that language when that happens: a duplicate in the default English pack panics `i18n::init` and takes down every test that touches it, while a duplicate in another pack fails silently and falls back to English for that entire language.
+  Both failure modes have already happened once each, discovered only after the fact (#8353) (@DaBlitzStein)
+- `GET /api/agents` and `GET /api/agents/{id}` now carry `provisioned`, naming the deployment file that declares the agent, or `null` when it is the operator's own.
+  Eleven manifest-writing routes answer `423 Locked` on a provisioned agent and the kernel has always known which agents those are, but the payload never said, so a client could not tell before trying: an operator would type an emoji and save, or pick an image and upload the whole thing, only to be refused at the end by something that was never going to work.
+  `source` is the declaring file, which is the one thing a surface needs beyond "you cannot" — it says where to go and change it instead.
+  The field is present and `null` rather than absent when provisioning is switched off, so a client never has to distinguish two spellings of the same answer.
+  The ten of those eleven routes whose OpenAPI said nothing about the refusal now document the `423`, so a generated client stops treating it as an unmodelled failure (#8379) (@houko)
+- The migration ladder now fails the build when a step is duplicated, skipped, renamed away from its own version, or left behind by `SCHEMA_VERSION`.
+  A duplicate number used to be invisible: `run_step!` fires on `current_version < N`, so a second step claiming a taken `N` never runs on an installation already past it, while a fresh database — which is the only kind CI ever creates — runs every step and shows nothing wrong.
+  The feature would then return 500 on upgraded installations and work perfectly on new ones.
+  The convention the guard enforces is written down in `docs/development/database-migrations.md`, along with why the existing gap check reports the symptom under a message about audit rows.
+  (#8355) (@DaBlitzStein)
+
+### Fixed
+
+- A daemon restart no longer nulls a per-agent `context_window`, `max_output_tokens` or `[model.extra_params]` on an agent that inherits the global model.
+  The boot restore shares `clear_stale_provider_overrides` with the model picker and the router, but called it under a branch whose first condition is true for a row *already* on the `default` sentinel — where the two assignments above it restate what is there and no endpoint moves.
+  Clearing there is not repointing hygiene: the branch runs on every boot, so a deliberate override disappeared on the next restart and the following `save_agent` made the loss permanent, with the dashboard showing the field blank as if the save had failed.
+  The call is now gated on an actual repoint, which is what both sibling call sites already do (#7781) (@DaBlitzStein)
+- Switching an agent to a different provider's model — from the dashboard's model picker, the CLI, or anywhere else that goes through `set_agent_model` — now drops the previous endpoint's `context_window` and `max_output_tokens` along with its credentials, instead of carrying them onto the new provider.
+  The credential half has been cleared on a provider switch since #2380; the limits were not, so moving an agent from a large-window endpoint to a smaller one left the old window attached to the new model and every turn was built against a capacity the new provider does not have.
+  Both halves are one shared list now, the same one the model router uses and the same one the boot-time restore of a legacy agent to the `default` provider uses, so a limit added later cannot be cleared on one path and forgotten on the other two.
+  That list also drops `extra_params`, which is flattened verbatim into the request body and only means anything to the provider it was set for — carrying a key like Qwen's `enable_memory` onto Anthropic sends a parameter it rejects rather than ignores.
+  A model swap within the same provider still leaves both alone: on one endpoint they are a deliberate per-agent override, not a leftover (#7781) (@DaBlitzStein)
+- A profile without `max_output_tokens` now clears the previous model's output cap the same way it already cleared `context_window`, instead of leaving a routed model capped at the endpoint it just switched away from.
+  `PUT /api/agents/{id}/model_routing` now 404s for an agent id that does not exist or that the caller cannot see, matching the GET side of the same endpoint, instead of falling through to a 400 that reads like a malformed request body.
+  The TUI's embedded (in-process) model routing editor no longer wipes an agent's `default_profile` fallback on every save — it was never loaded into the editor to begin with, so any edit through an embedded TUI silently cleared it.
+  The same editor also no longer wipes `fixed`, the per-agent opt-out that keeps the router from touching an agent at all — every save through an embedded TUI was silently re-enabling routing on an agent an operator had explicitly excluded from it.
+  The tier router (the older `[routing]` / `[default_routing]` model-selection path, separate from the profile router above) now also drops the previous provider's `api_key_env`, `base_url`, `context_window` and `max_output_tokens` when it switches an agent to a model hosted by a different provider, instead of sending the routed request out under the old provider's credentials and endpoint limits (#7781) (@DaBlitzStein)
+- The agent detail dashboard, and `librefang agent routing-set --json` / `routing-show`, now surface an agent's `fixed` router opt-out — it was readable through the API but invisible on every client, so a routing panel showing a fully configured allowlist and budget could still route nothing and nowhere would say why.
+  Routing a profile onto the exact provider and model an agent already has no longer clears a manually-set `context_window` or `max_output_tokens` for an endpoint that did not change; only a profile that actually switches the model, or one that supplies its own limit, updates them now.
+  `librefang agent routing-set` no longer clears the cost budget when only `--profiles` is passed, or the allowlist when only `--budget` is passed — each flag now writes only the field it names, the same "don't touch what you didn't edit" contract the PUT endpoint and the TUI already follow; passing an explicit empty string is still how each one is cleared on purpose.
+  A profile tag differing only in case from another (`"Review"` next to `"review"`) no longer double-counts as two tag hits and outranks a correctly written, higher-priority profile that matched the same single word — tags are normalized once when the profile catalog loads instead of on every comparison.
+  The model-routing catalog gate no longer treats "this provider's models haven't synced yet" the same as "nobody has ever described this provider" — a declared-but-unsynced provider (the fresh-offline-install case the gate exists for) still declines an unresolvable model id instead of letting it through, and a model id shared with a different provider's catalog entry no longer resolves as a match for the wrong one (#7781) (@DaBlitzStein)
+- The model router's complexity keywords and profile tags now match whole words instead of substrings, so a task is no longer routed on a word it never used.
+  Both matchers tested the lowercased task text with `contains`, which meant `ping` — a simple-complexity keyword and a tag on the cheap `quick` profile — fired on *helping*, *shipping*, *mapping*, *grouping* and *developing*, while `format` fired on *information*, `list` on *specialist*, and `count` on *account*.
+  The effect was not a near miss: "Investigate why grouping fails" lost 0.05 of complexity to the phantom `ping` hit, scored below the threshold, was capped at the cheapest tier, and then matched `quick` on that same phantom hit — an investigation task sent to the cheapest model and reported in the logs and the routing UI as a deliberate tag match.
+  Matching on words routes it through the explicit fallback chain instead, so with no `default_profile` configured the agent simply keeps its own model.
+  Tasks whose wording only ever contained a keyword inside a longer word will now score differently and may select a different profile; that is the point, but check `default_profile` is set if you were relying on the accidental matches (#7781) (@DaBlitzStein)
+- Creating a goal with a blank `evaluator_model` no longer stores an empty string where updating the same goal would have removed the field.
+  Update treats a blank value as the signal to clear the key, and the goal runner filters it again on read, so nothing downstream misbehaved — but a created goal round-tripped differently from an updated one and `GET /api/goals` handed the dashboard a value no update would ever have written.
+  Create now drops a blank one the way its siblings do (#7785) (@DaBlitzStein)
+- The completion judge for a `loop_engineering` goal graded an empty statement for a title-only goal, since the dashboard's create form leaves the description optional and the evaluator prompt only ever carried the description.
+  One plausible-looking iteration was enough to draw a YES with nothing to judge it against, closing the goal on iteration one.
+  The judge now falls back to the title when the description is empty, matching the worker's own prompt, and skips the call entirely when both are empty rather than asking a model to grade nothing (#7785) (@DaBlitzStein)
+- A throttled verifier on a `loop_engineering` goal is no longer reported as a missing one, and a rework turn that fails every time no longer burns the whole iteration budget in silence.
+  Verifier dispatch failures were all funnelled into a single "unreachable" counter without ever being classified, so a verifier whose provider was merely rate-limiting — a different provider, key or quota bucket than the generator's — ended the run as `Stopped` with `verifier unreachable` on `last_error` after five iterations that each paid for a full generator turn first.
+  The operator was sent looking for a deleted agent, and `RateLimited`, the phase the dashboard renders as the retry-later signal, never fired for that leg.
+  Rate limits now keep their own shorter streak there, matching what the generator leg has always done.
+  The rework turn was the third leg and had no breaker at all: a run of "generator turn fine, verdict FAIL, rework dispatch fails" repeated to the iteration cap and reported the cap as the reason it stopped, with no cause attributed.
+  It does not take an exotic failure to reach — the rework prompt goes into a session one turn longer than the opening one that just succeeded, so a context-length limit surfaces there first and then repeats every iteration.
+  Each leg counts its own consecutive failures, because a healthy dispatch on one leg is no evidence at all about the other (#7785) (@DaBlitzStein)
+- A lesson an agent restates while reworking rejected output is now kept once instead of once per rework round.
+  Captured `GOAL_LEARNED:` lessons were appended before the verifier ran and again for every reworked reply, and nothing downstream collapsed them — the skill workshop's own de-duplication compares whole candidates, not the entries within one.
+  An iteration that recorded a lesson, drew a `FAIL`, and repeated the lesson in its corrected reply therefore stored it twice or more, and those copies crowded genuinely distinct earlier lessons out of the small window replayed into later prompts, out of the stored document, and out of the numbered list a human reads before approving the draft skill.
+  A reworked reply already replaces the rejected one everywhere else, so its lessons now replace them too, and the run refuses a lesson whose text it already holds.
+  Lessons from an iteration the verifier rejected are still kept, deliberately: unlike `GOAL_DONE` they close nothing and make no claim about the work being graded, and what an attempt that did not land taught is exactly what a human reviewing the draft wants to see (#7785) (@DaBlitzStein)
+- Running the same goal a second time deleted the first run's captured `GOAL_LEARNED:` lessons, because they were stored under a key scoped to the goal rather than to the run.
+  Lessons are now keyed by the run's own start time as well as the goal id, so re-running a goal no longer costs the operator lessons they may never have read (#7785) (@DaBlitzStein)
+- Starting an autonomous goal run always reported success even when the runner itself refused, because the kernel discarded `GoalRunner::start`'s return value and hardcoded `true`.
+  A goal that vanished between the API handler's read and the runner's own load — a delete racing a start — made `/goal` from the dashboard chat, a channel bridge or the TUI print "Goal created and started" for a run that never started, and left the API's own `started` check on that path permanently dead.
+  The refusal now reaches the caller (#7785) (@DaBlitzStein)
+- A goal run no longer burns its whole iteration budget rediscovering a deleted agent.
+  Every failing tick was retried until the iteration cap, so a run pointed at an agent that had been removed, or at a provider whose key had been revoked, spent its full budget failing identically each time and then reported the cap as the reason it stopped.
+  Five consecutive failures that are not rate limits now end the run in `Stopped`, with the underlying error left on the run's `last_error` — the operator gets the fault instead of a healthy-looking exhausted budget.
+  Rate limits keep their own separate streak, so a provider throttling a run still ends it as `RateLimited` (#7785) (@DaBlitzStein)
+- A goal can no longer be configured with the same agent as both worker and verifier, which made the verifier gate decorative in a single click.
+  The dashboard's verifier picker offered the goal's own assigned agent and neither goal endpoint compared the two ids, so the pair could be saved and looked entirely healthy afterwards.
+  With both ids equal the verdict prompt lands in the same persistent session that produced the work one turn earlier, so the agent grades itself with its own output still in context and `VERDICT: PASS` is the expected answer — while the run API reports a configured verifier and the dashboard shows the loop-engineering badge, giving the operator positive confirmation of a check that is not checking.
+  Every iteration also left the verification exchange and its own verdict in the worker's history for later iterations to build on.
+  Both endpoints now reject the pair, update comparing the ids the write would actually leave on the goal rather than only the ones in the payload, and the picker no longer offers the assigned agent in the first place (#7785) (@DaBlitzStein)
+- `verify_max_retries` and `verify_agent_id` on the goal endpoints skipped the boundary validation their siblings already had.
+  A `verify_max_retries` above `u32::MAX` silently truncated to a small number instead of being rejected, and a negative or fractional value was indistinguishable from an absent field, unlike `max_iterations`, which already rejected both.
+  A non-string `verify_agent_id` was silently dropped instead of rejected, and update's hand-rolled check had the same gap, unlike `agent_id`, which already goes through the shared boundary helper.
+  Both fields now validate the same way their siblings do, and `verify_agent_id` is canonicalised the same way on write (#7785) (@DaBlitzStein)
+- Marking a goal completed or cancelled through `PUT /api/goals/{id}` now actually stops its autonomous run, instead of being silently undone by the run itself.
+  Deleting a goal has always stopped its run; updating one never did, and nothing else connected an operator's decision to the run's lifecycle — the runner only ever noticed by re-reading the goal document on its next tick.
+  That read cannot tell an operator apart from the `goal_update` tool the agent's own prompt tells it to call, so once a verifier was configured the runner correctly stopped treating a bare `status: completed` as a reason to finish, and the operator's path went with it.
+  An operator who pressed the dashboard's status button on a verified goal therefore watched it flip straight back to `in_progress`, keep the incoherent `progress: 100` that came with it, and spend the rest of its iteration budget on paid turns nobody had asked for.
+  The two writers are now separated by which channel they use rather than by guessing from the stored value: an operator gets the run's real stop control, and an agent asserting completion in a document still has to get past the verifier.
+  The run also no longer writes its own status and progress over a goal that the same request has just written, so the choice an operator made mid-iteration survives the iteration already in flight.
+  A plain `POST /api/goals/{id}/stop` is unaffected and still lands the interrupted iteration's progress, because it writes nothing to the goal there is anything to protect (#7785) (@DaBlitzStein)
+- A goal under `loop_engineering` with a verifier configured could still finish on work the verifier had just rejected, because completion was read off `goal.progress` / `goal.status` directly instead of off the verifier's own decision, and both fields have a second writer — the `goal_update` tool, which the agent's system prompt tells it to call independently of the text markers the verifier gate inspects.
+  The runner now treats bare progress and a bare `status: completed`, from either writer, as a completion signal only when no verifier is configured; a verified run requires the gate's own `GOAL_DONE`-after-PASS branch to have actually run.
+  Unrelated to that gate: an unreachable verifier — a deleted agent, a revoked key — fed no circuit breaker of its own, so a permanently dead one burned the whole iteration budget dispatching to it every round before reporting the cap as the reason it stopped, the exact waste the tick-failure breaker exists to prevent on the generator leg.
+  Five consecutive verifier failures now stop the run in `Stopped` with the cause on `last_error` (#7785) (@DaBlitzStein)
+- `agent_spawn { profile }` now checks the requested profile against the spawning agent's own `[model.router_override]`.
+  The same `allowed_profiles` and `cost_budget` the per-turn router applies now also bind a named profile at spawn time, and a parent pinned with `fixed = true` is refused outright — delegation was otherwise a way around every per-agent constraint the profile layer introduces, letting an agent budgeted at `cheap` spawn a helper on the most expensive profile in the catalog, billed to the same operator, with the parent's cap never applied.
+  The refusal lists the profiles the spawning agent is permitted to use, so the calling agent can retry with a name that passes instead of guessing.
+  The override is also copied onto the agent that gets spawned, so the cap binds the whole delegation chain rather than only its first hop: a budgeted parent could otherwise spend its budget on a permitted child, hand that child `agent_spawn`, and let it — born with no override, which every caller reads as unconstrained — spawn on the most expensive profile in the catalog for the same operator's bill.
+  That also makes `fixed = true` bind the subtree instead of merely refusing the pinned agent a profile of its own while it produces unpinned children that route freely.
+  Failing to look the spawning agent's constraints up refuses the spawn only when a profile was actually requested, because a spawn that names no profile has no cap on this hop to enforce and would otherwise hard-fail against a caller-supplied agent id that never resolves, such as the REST tool endpoint's `agent_id` or a deferred approval resumed after the requesting agent left the registry.
+  The profile's model is now resolved through the live model-catalog alias table before being written to the child's manifest, matching what the per-turn router already does, because every builtin profile names an alias like `haiku` rather than a concrete model id and an unresolved alias would otherwise reach the provider verbatim and fail authentication on the agent's first turn.
+  The same profile check, alias resolution and router-override guard now also apply to an ephemeral (`ephemeral: true`) worker, which previously ignored `profile` entirely and ran on the default model with no indication the parameter had been dropped; an explicit `model` override on that path is refused when the parent is `fixed` or budgeted, since there is no `profile` gate to check an arbitrary model id against.
+  A profile whose provider has no configured credentials is refused before the agent is spawned, naming the missing environment variable, instead of being born and failing authentication on every turn thereafter.
+  A `profile` value of the wrong JSON type — an object or array instead of a string — is now refused with an explanation rather than silently treated as absent.
+  A profile refusal or an unknown-profile-name error is now reported as an invalid parameter or a permission denial instead of a generic upstream failure, so retry logic on the REST bridge does not treat an operator's own cost cap as a transient 5xx outage.
+  An agent whose router-override permits no catalog profile at all is now told so explicitly instead of getting an empty "Permitted profiles: ." list.
+  Pinning an ephemeral worker no longer leaves it running under the parent's context window, API key and base URL: those three describe the parent's own model, and an ephemeral worker inherits the parent's manifest wholesale, so a parent pinned to a million-token profile budgeted its Haiku worker at a million tokens — never compacting, and rejected by the provider — while a parent pinned to a custom OpenAI-compatible endpoint sent its worker's Anthropic requests to that endpoint with that key, moments after the spawn had verified that Anthropic's own credentials were present (#7789) (@DaBlitzStein)
+- An ephemeral worker pinned to a cheap model profile no longer inherits the spawning agent's fallback chain, its output-token cap or its provider extension parameters.
+  Clearing the parent's endpoint, key and context window off the primary model closed the obvious half of the inheritance, but `fallback_models` is a sibling of `model` on the manifest rather than a field inside it, and every entry in it carries its own `api_key_env` and `base_url`.
+  `resolve_effective_fallbacks` treats an agent's own list as the exclusive chain, so a parent whose chain falls back to its expensive model under a private proxy credential handed that entry straight to the worker: the first rate-limit on the cheap model promoted the worker onto the parent's model with the parent's key, past both `allowed_profiles` and the cost budget the rest of the feature exists to enforce.
+  It only fired on the second request of a run, which is why the first-request checks all looked correct.
+  `max_tokens` and `extra_params` went the same way for the same reason — the first reaches the wire with no clamp against the model's real ceiling, producing exactly the oversized-request rejection the context-window clear was added to prevent, and the second is flattened into the request body verbatim, so a parent on Qwen or OpenAI posted that provider's keys to Anthropic.
+  `max_output_tokens` is deliberately left alone: it belongs to the same conceptual group but has no reader anywhere on the request path (#7789) (@DaBlitzStein)
+- Cancelling a goal run now discards its pause checkpoint even when that checkpoint cannot be read back.
+  `load_pause_checkpoint` reports `None` both for "there is no checkpoint" and for "there is a row I could not parse" — a substrate read error is swallowed by its `.ok().flatten()`, and so is a row whose `agent_id` is missing or malformed — and cancel used that `None` to decide whether to delete anything.
+  So a transient storage failure at cancel time left the checkpoint in place, and the next start silently resumed the run the operator had just cancelled, which is precisely the outcome the cancel path exists to prevent.
+  The delete is now unconditional and the read only decides what the call reports, which costs nothing because deleting an absent key was already a no-op. (#7973) (@DaBlitzStein)
+- `POST /api/goals` now treats a blank `verify_agent_id` as "not set" instead of 400ing as an invalid UUID, matching the existing blank-means-absent rule for `parent_id` and `agent_id` (#6562).
+  A blank `evaluator_model` is now filtered the same way `parent_id` / `agent_id` already are on update, instead of being stored verbatim as an empty string that the field's own documentation says should read as "no evaluator configured". (#7973) (@DaBlitzStein)
+- Pausing a goal run no longer waits out the whole configured tick interval, and no longer discards the lessons the run had already captured.
+  The pause/stop flags were only checked at the top of the run loop, so a `tick_interval_secs` set close to its 24-hour maximum meant a requested pause could sit unobserved for up to a day; the inter-tick sleep now wakes every second to re-check them.
+  The `GOAL_LEARNED:` lessons a run collects before pausing are now carried into its resume checkpoint and threaded back into the resumed run's own accumulator, instead of resetting to nothing on every pause. (#7973) (@DaBlitzStein)
+- `POST /api/goals/{id}/resume` (and `/start` on a paused goal, which auto-resumes the same way) now rejects an explicit `max_iterations` at or below the paused run's already-completed iteration count.
+  Resuming with a cap that low used to immediately trip the iteration-cap check with no turn run and discard the checkpoint on the way out — including the learnings it carried — for a request that could never have advanced the run in the first place. (#7973) (@DaBlitzStein)
+- Resuming a paused goal run now actually continues from the checkpointed iteration instead of silently restarting at 0.
+  `GoalRunner::start` already resolved the resumed iteration count into the run's observable state, but the run loop itself kept its own separate counter hardcoded to 0, so the loop's iteration cap and every progress write after the first tick counted from scratch — a run paused at iteration 30 under a cap of 100 got a fresh 100-iteration budget instead of the 70 remaining. (#7973) (@DaBlitzStein)
+- A goal run's `verify_max_retries` now survives a pause the same way `max_iterations` already does.
+  A run started with an explicit retry budget reported the compiled default instead once paused, and a bodyless `/resume` re-budgeted it to that default rather than restoring the operator's own number — the checkpoint never carried the field. (#7973) (@DaBlitzStein)
+- A goal run's captured `GOAL_LEARNED:` lessons are no longer queued as a pending skill draft for an agent that never opted into the skill workshop.
+  The workshop is default-off and opted into per agent (`agent.toml: [skill_workshop] enabled = true`), but the goal runner's learnings hook queued a draft regardless, because nothing in that path read the setting.
+  It now checks `enabled` and `auto_capture`, the same gate every other automatic capture path in the workshop already applies. (#7973) (@DaBlitzStein)
+- `POST /api/goals/{id}/start` and `/resume` now validate `verify_max_retries` the same way they already validate `max_iterations`: an out-of-range or wrongly-typed value gets a 400 naming the field, instead of a bare `as u32` cast that silently wrapped a value like `u32::MAX + 1` down to something else entirely. (#7973) (@DaBlitzStein)
+- A goal with loop engineering enabled could still be closed out through the worker's own progress claim even after the verifier rejected every attempt.
+  The top-of-loop completion check read bare `goal.progress >= 100` / `status == Completed` regardless of whether a verifier was configured, and `goal_update` (a tool the agent's own system prompt tells it to call) writes those same fields directly, bypassing the marker parser the verifier gate actually inspects.
+  The completion check now only accepts bare progress/status as done when no verifier is configured; a rejected iteration's progress is additionally clamped below the completion threshold as defense in depth.
+  Converges with the equivalent fix in PR #7785, which found and closed the same second-writer bypass first. (#7973) (@DaBlitzStein)
+- `librefang goal --watch` now recognizes a `paused` run instead of treating it as unclassified state.
+  The daemon can report a goal's run as `paused` (an operator-triggered pause, resumable later), but the CLI's terminal-phase table had no entry for it, so `--watch` burned its bounded unobservable-poll retry budget and exited with a generic "gave up observing the run" message instead of reporting that the run was paused. (#7973) (@DaBlitzStein)
+- A streaming turn killed by a provider failure no longer vanishes from the chat without a trace.
+  Until now the operator's message was the last thing in the session: the turn returned an error to its caller, the history recorded nothing, and neither the open chat nor a reload explained where the answer went — the shape observed live when the provider circuit breaker opened mid-stream.
+  The session now keeps a short note saying the provider failed and that no response was produced.
+  The note is deliberately opaque and carries none of the driver's error text, which goes to the daemon log instead, because a provider error's `Display` routinely drags along the endpoint URL, the model id and the upstream response body.
+  The streaming path also persists the inbound message before it calls the provider at all, which is what the non-streaming path already did; a restart or a hang between the two used to lose the operator's message outright, and that is the path the dashboard takes. (#7989) (@DaBlitzStein)
+- The generated SDKs can now call the two endpoints that take a raw request body instead of JSON: `POST /api/media/transcribe` and `POST /api/agents/{id}/upload`.
+  Every SDK method was emitted through the same path, which serialises its argument with a JSON encoder and sends `Content-Type: application/json`; both handlers read the body as bytes and reject anything that is not the content type they declare, so the shipped `transcribeAudio` / `uploadFile` methods returned 400 in every language, unconditionally.
+  They now take the bytes and an optional content type, defaulting to the one the OpenAPI operation declares, and the generator derives that from the spec rather than from a list of special cases — an endpoint added later with a non-JSON body gets a working method without anyone remembering this. (#7989) (@DaBlitzStein)
+- `POST /api/goals/{id}/resume` reports `404 Goal not found` for a goal id that does not exist, exactly as `POST /api/goals/{id}/start` already did, instead of `409 Conflict`.
+  The precondition that refuses a resume when there is no paused run ran before the goal was looked up, so an operator who mistyped an id was told the goal had nothing to resume and pointed at `/start` — the same handler, which would itself have answered 404 (#8029) (@DaBlitzStein)
+- The instructions an agent receives about `channel_send` on the kernel-internal channels `webui`, `cron` and `autonomous` are now held in place by regression tests, after two branches rewrote the same block from different starting points and landed on opposite advice.
+  The behaviour itself shipped with #7995; what lands here are the seven tests that keep it from drifting back — that `webui` is never told its generated media reaches the browser on its own when the browser only ever sees what the reply text embeds, and that a background run is never told not to use `channel_send` at all when the only thing genuinely impossible there is replying *into* a sentinel channel that has no adapter.
+  Each test names the sentence it pins, so a future edit to that wording fails with the reason rather than with a diff. (#8149) (@DaBlitzStein)
+- `librefang skill publish` now resolves its GitHub token the same way the HTTP routes do — the environment first, then the credential vault.
+  It previously read `GITHUB_TOKEN` / `GH_TOKEN` from the environment only and exited with status 1, so the same daemon could promote a skill through the API and fail to publish one from the CLI on the same machine with the same token in the vault.
+  The "no token" message now names both places a token can live instead of only the environment variables. (#8179, #8163) (@DaBlitzStein)
+- Running a workflow from the TUI now waits as long as running it from the CLI does.
+  The two surfaces each held their own `WORKFLOW_RUN_WAIT_MS` — 90 s in `librefang workflow run`, 45 s in the Workflows screen — so a workflow that took 60 s completed from one and timed out from the other, with nothing on either screen to suggest the surface was the variable rather than the workflow.
+  Each constant was correctly derived from its own caller's client timeout, which is why neither looked wrong in isolation: the TUI built that one request with a 60 s client, a local choice among the 5 s to 300 s timeouts it picks per call rather than a constraint.
+  Both the client timeout and the wait now come from one place, tied together by a compile-time assertion, and both surfaces build the request from the same helper so the query cannot disagree again. (#8317) (@houko)
+- The CLI locale guard now fails when a translation is a copy of the English text, and the 42 values that were already copies have been translated.
+  Coverage was the only thing checked, so a key carried over with its English value passed exactly as well as a real translation — that is how eight Auxiliary-tab strings reached Ukrainian and Chinese in English and stayed green.
+  The failure is invisible in a way a missing key is not: a missing key renders as `[key]` and looks broken, while English inside an otherwise translated screen reads as a deliberate choice, so nobody reports it.
+  Values that are supposed to match English — brand names, shell commands a user copies verbatim, column headers that name an API field — are listed in a table with a written reason for each, and a second test fails when an entry there stops describing anything, so the exemption list cannot quietly become a rubber stamp. (#8313) (@houko)
+- `[queue] max_depth_per_agent`, `max_depth_global` and `task_ttl_secs` now do what they have always been documented to do, instead of being three settings an operator could configure, read back from the API, and get nothing from.
+  None of the three had an enforcement site anywhere in the codebase: every insert succeeded whatever the depth, no pending task ever expired, and because only terminal rows are pruned, `task_queue` grew for the life of the install — which then made every unpaged task-list request allocate one JSON object per row in the table.
+  A post that would exceed a non-zero depth cap is refused with `429 Too Many Requests` and a message naming the cap it hit, counted in the same write transaction as the insert so two concurrent posts cannot both take the last slot.
+  The per-agent cap is scoped to the assignee, and tasks with no assignee belong to the shared pool rather than to one bucket keyed on the empty string.
+  A task still unclaimed after `task_ttl_secs` is moved to `cancelled` with a `result` naming the setting, not deleted: a task an operator queued and has not yet staffed should not vanish without a record, and `cancelled` is the terminal status the dashboard, the status counts and `task_queue_retention_days` already understand, so the row is reclaimed on the existing horizon and visible until then.
+  A claimed task is in flight and is never expired this way.
+  Note that `task_ttl_secs` ships as `3600`, so an install that has never set it will start seeing hour-old unclaimed tasks cancelled; set it to `0` to keep the previous behaviour of never expiring anything.
+  `?limit=`, `?offset=` and `?assigned_to=` on `GET /api/tasks` and `GET /api/tasks/list` are now `WHERE` and `LIMIT` clauses rather than a `retain` and a `truncate` over a fully materialised list, so asking for ten tasks costs ten rows instead of the whole table.
+  `total` keeps its meaning — rows matching the filters, not the length of the page (#8373) (@houko)
+- The daemon now warns at boot when `[docker] mode` is set to `non_main` or `all`, and the documentation says the field is not implemented, instead of both presenting it as the switch that moves agents into containers.
+  No execution path matches on the value: `shell_exec` and `process_start` run as subprocesses on the daemon host whatever it says, and the only way into a container remains the separate `docker_exec` tool, which the model chooses for itself rather than the operator.
+  What made this worth a warning rather than a doc note alone is that the rest of `[docker]` is live — `enabled`, `scope`, `reuse_cool_secs`, `idle_timeout_secs`, `max_age_secs`, the image and the limits all govern the containers `docker_exec` creates — so the section visibly works and the one field in it that does nothing looks like it works too.
+  An operator who believed they had switched every agent onto OS-level isolation had switched nothing, with a clean boot and no log line anywhere.
+  `DockerSandboxMode::is_wired_into_dispatch` is the single source of truth, mirroring what #8221 established for `[tool_exec] kind` — the adjacent knob with the same gap — and a test fails if a mode flips to wired without the warning and the docs being revisited (#8374) (@houko)
+- The Goals page's Stop button says what it does.
+  Its tooltip used to report the run's status instead — "Running · iteration 3/10" — so the one control that stops an autonomous run described the run rather than the action, and the iteration counter it showed was already on the row beside it.
+  It now reads "Stop autonomous run" whether or not a run state has loaded, and the status-shaped `goals.run_active` key that fed it is gone from all five locales. (#8224) (@DaBlitzStein)
+- Refreshing the TUI's goal list no longer discards the run state the detail fetch just retrieved.
+  Starting, stopping, pausing or resuming a run fires two requests on independent threads — one for the list, one for that goal's run state — and the list payload is built from stored goal documents, which never carry a phase.
+  Whichever landed second won, so about half the time the freshly fetched phase was overwritten with nothing, and `r` did it every time.
+  The visible cost was on the pause key, which reads that phase to decide between pausing and resuming and does nothing at all when it is absent: a run could be paused and then not resumed, from the same screen that was still showing it as paused.
+  The list now merges by goal id and keeps a phase it already knows, rather than replacing the rows wholesale. (#8224) (@DaBlitzStein)
+- A `channel_send` to a channel named `cron`, `autonomous` or `webui` now mirrors into the conversation the operator is looking at instead of the kernel's own internal session.
+  Those three names are reserved because they are the kernel's system sessions, so every path that derives a channel-scoped session id renames an operator-supplied one to `ext-<name>` first — except the mirror, which called `SessionId::for_sender_scope` directly and so wrote the outbound message into the one session that must never carry channel traffic, while leaving it out of the chat that should show it.
+  The guard moved from a `pub(super)` helper on the kernel to `librefang_channels::types::resolve_scope_channel`, because being unreachable from `librefang-runtime` is what made it skippable in the first place. (#8316) (@houko)
+- Asking to export a session that does not exist now answers 404 instead of 500.
+  So does asking for one that exists under a different agent.
+  The kernel returned the miss as a string inside `LibreFangError::Internal`, and the route helper typed only the two agent-shaped errors, so every other kernel error — including a plain bad id — became a server fault whose reason was then scrubbed out of the body.
+  The scrub is right and stays, because the memory layer wraps every rusqlite error in that same variant and echoing one would leak SQL schema; what was wrong was calling a missing session an internal error in the first place.
+  A caller could not distinguish a typo from an outage, and a scripted client saw a retryable 5xx where the answer will never change.
+  The fix is typed rather than a match on the message text: `SessionNotFound` and `ResourceNotFound` already existed and the sibling helper for `KernelOpError` already mapped both to 404, so this brings the outlier into line for the fifteen handlers that share it.
+  That also fixes tool-level misses, which reach the same helper as `ResourceNotFound` and were 500 for the same reason.
+  A session belonging to another agent is reported as not found rather than as a distinct wrong-owner error, so the answer does not confirm the session exists to someone who cannot read it. (#8263) (@DaBlitzStein)
+- An MCP server that will not start now says why, and says it where an operator can already see it.
+  `POST /api/mcp/servers/{name}/reconnect` answered 500 with a generic body for a server that never completed its handshake — sending the operator to look for a fault inside this daemon when what failed was an external dependency that did not answer, and giving them nothing to act on.
+  The reason was in the daemon's journal the whole time, so learning it took an SSH session.
+  The answer is now 502 for a server that did not answer and 409 for one whose own stored configuration blocks the reconnect, and the body carries the failure class, the transport kind and the endpoint that was dialed with its arguments, path and query stripped — the parts that can hold a token.
+  Failed MCP connects are also recorded in the audit trail, which is what the dashboard's Logs page reads, so a server that will not start now leaves a trace on the screen an operator opens when something breaks instead of only in the system journal. (#8271) (@DaBlitzStein)
+- `text_to_speech` now takes its default `output_format` from a new `[tts] output_format`, so a deployment whose channel accepts only Ogg/Opus voice notes sets it once instead of depending on the model to pass an optional argument on every call (on the paths that write to a workspace — a caller with no workspace root still gets the provider's bytes back unconverted).
+  Only ElevenLabs had a configurable output format; every other provider was pinned to MP3, which a messaging channel rejects as a voice note — and because synthesis itself succeeded and wrote the file, the failure surfaced as a reply that never arrived, with nothing in the log naming the tool or the format.
+  The value is carried on the turn's `LoopOptions` rather than read off the `TtsEngine` handle, because that handle is withheld whenever `[tts] enabled = false` — a state in which the tool still runs, on the media-driver path — and holds a boot-time clone besides; reading through it would have left the new key unreachable in the shipped default configuration and stale after `POST /api/config/reload`.
+  `build_reload_plan` now classifies `[tts]` the way it classifies `registry`: `enabled` and `output_format` are re-read per turn, everything else is captured in `TtsEngine` at boot and is reported restart-required instead of being answered with a false "effective on next message".
+  The default is unchanged — unset still means `"mp3"` — and an unrecognised value is reported by `validate()` at config load, since at the point of use it is indistinguishable from the default (#8274) (@nevgenov)
+- Returning to a chat tab whose WebSocket died while it was hidden no longer swallows the next message (#8273).
+  A half-open socket never fires `onclose`, so the browser kept reporting `readyState === OPEN` and the frame was written into a connection whose bytes went nowhere: the turn spun forever, and reloading showed neither the question nor an answer, because nothing had reached the daemon to persist.
+  The `visibilitychange` wake-up added in #4063 could not help, since it was gated on the retries-exhausted flag that only a disconnect the browser actually noticed can set — leaving the one case the listener existed for as the one case it could not act on.
+  Coming back to the tab now probes the link with the `{"type":"ping"}` / `{"type":"pong"}` exchange the daemon has answered since the socket was first written and no client had ever sent, and hands a socket that does not answer to the reconnect path that already exists.
+  A probe is skipped while a turn is in flight, because the daemon stops reading the socket for the duration of a turn and could not answer one. (#8275) (@DaBlitzStein)
+- The daemon now pings a WebSocket peer it has heard nothing from, and disconnects one that stops answering (#8276).
+  None of the three endpoints ever sent a Ping, so the only thing that could discover a dead peer was a failing write — and a connection sitting idle between turns, which is where a chat socket spends most of its life, is never written to at all.
+  Ten daemon lifetimes on a production host recorded 55 `client_close` disconnects, one `send_error`, one `receive_error` and not a single `idle_timeout`: the one detection that existed worked, and only ever fired when there was outbound traffic.
+  A half-open socket left by a suspend, a wifi roam or an expired NAT mapping was therefore held until the idle timeout, which deployments routinely set to hours.
+  The terminal socket was the worst affected, because its idle timer is reset by PTY output as well as by client input — so a shell that keeps printing kept a dead peer's child process, tmux window and connection slot alive indefinitely.
+  Detection costs at most two intervals and is tuned with `rate_limit.ws_ping_interval_secs` (default 30 s, `0` disables); an answered Ping deliberately does not count as activity, so `ws_idle_timeout_secs` still fires on a genuinely idle browser tab. (#8278) (@DaBlitzStein)
+- `[tts] provider`, the `[tts.google]` block and `[tts.elevenlabs] output_format` now apply on the media-driver path, so they reach a deployment running the shipped `[tts] enabled = false` default instead of being silently inert on it.
+  `text_to_speech` is registered unconditionally and reaches providers through `MediaDriverCache`, but those three reads came off the `TtsEngine` handle, which the agent loop lends only when `enabled = true` — so on the default configuration the tool worked while most of its own configuration section did nothing.
+  An operator who set `[tts.google] language_code` and left `enabled = false`, reasonably reading it as "enable the TTS feature" since the tool already worked for them, got `en-US` with nothing in the log; one who named a provider was auto-detected onto a different one and billed there.
+  A pinned provider that turns out not to be configured for text-to-speech now degrades to capability detection with a warning, rather than failing the call: `get_or_create` does not screen on credentials the way `detect_for_capability` does, so honouring the pin without a fallback would have converted a working auto-detection into a hard failure for precisely the deployments this fixes.
+  The provider-specific overrides also key off the driver that will actually serve the request rather than the name that was asked for, which is what makes them apply when detection picks Google rather than only when Google is named.
+  The Google voice override stays unconditional rather than gaining the `is_none()` guard its ElevenLabs neighbour has: for Google an OpenAI-style voice name such as `alloy` is not a preference to respect but a request that fails, and adding the guard would have taken that safety net away from every deployment that has it today.
+  All three keys move to the reload-classification's live half as a result, and `MediaDriverCache` gains a test-only seeding point so the engine-less media-driver shape — which had no coverage at all, and is where this and #8272 both live — is now asserted against a stub driver that records what the tool asked the provider for (#8375) (@houko)
+- The Chinese `librefang doctor` output is readable again: 71 `zh-CN` values were generated from their own key names rather than translated, and have been rewritten.
+  `CLI is up to date` rendered as `cliuptodate`, `Database status: { $status }` as `db状态fail失败：{ $status }`, and the `Channel Integrations:` section heading as `doctorsection频道`.
+  Two of them changed behaviour rather than only readability — the `[Y/n]` was missing from both `doctor` confirmation prompts, so a Chinese user was asked a yes/no question with no indication of what to type or which answer was the default, and the `.env file not found` warning dropped the `librefang config set-key` command that resolves it.
+  Korean and Ukrainian were unaffected; the values trace to a single bulk import in #6253. (#8315) (@houko)
+- A daemon whose database was stamped by a pre-release build now starts instead of refusing to open it.
+  The rule that a binary will not touch a database newer than itself is the right one — it cannot know what a later step did, so writing over it would corrupt whatever that step added — but the effect was that a machine which had run an unreleased build was locked out of every release binary, with a boot loop and "Downgrade is not supported" as its only signal.
+  The two steps involved add nothing new: one is a column a later-numbered migration already creates, and the other is a table created only if it is missing, so a database that never saw those builds is unchanged.
+  A third step makes sure the table an agent's manifest history lives in is present, because two different pre-release builds numbered two different tables the same and a machine can be past that number without the one the deletion path expects — which would have turned removing an agent into an error.
+  An agent's manifest history is also purged with the agent now, which it was not: it holds whole manifest bodies, including system prompts, and nothing about it is an audit trail worth keeping past the agent it describes. (#8318) (@DaBlitzStein)
+- Typing a negative penalty into a model's settings no longer saves it positive.
+  Entering `-0.25` by hand stored `+0.25`: the drawer keeps the parsed number, and `-0` — a legitimate value on the way to `-0.25` — reads back as `0`, which rewrote the field and erased the minus sign mid-keystroke.
+  Every negative fraction between -1 and 0 was affected except the `-0.5` preset, and nothing about the interface suggested the value had changed. (#8319) (@DaBlitzStein)
+- A media provider no longer advertises functions it cannot actually perform, and one the registry already describes can be reached without editing config.toml.
+  Configuring such a provider used to *reduce* what it offered: the unconfigured entry repeated everything the registry said the service could do, and the moment it was wired up the answer narrowed to what the generic connector implements, so it vanished from the video section exactly when it started working.
+  Both states now report the same thing — what can actually be served.
+  Separately, a provider whose endpoint the registry states is now reachable from its API key alone; before, it stayed marked unconfigured with nothing to indicate that a hand-written endpoint override was the missing piece.
+  The list of media providers is also read fresh on each request rather than taken once at startup, so one added by a catalog update appears without a restart. (#8320) (@DaBlitzStein)
+- A provider that rejects a request outright is no longer asked the same question two more times before moving on.
+  The retry loop treated every ambiguous HTTP failure as worth another attempt, including the ones where the provider has already judged the request itself — those cannot come out differently, since the retry sends exactly the same bytes.
+  It mattered most where it was least visible: history compaction handed a summarizer more text than that model could read, and the resulting refusal was retried, failed over, retried again and then repeated per chunk, leaving an agent unresponsive with no error to show for it rather than failing once and plainly.
+  Server-side failures keep their retries, as does a request that never finished arriving. (#8322) (@DaBlitzStein)
+- The dashboard test suite no longer goes red at random on the prompt-experiments variant cap.
+  The test drove the production cap of a hundred variants literally — a hundred sequential clicks through a subtree the file's motion mock remounts on every state change — which cost two seconds of vitest's five-second budget on an idle machine and crossed it whenever the rest of the suite was competing for the same cores.
+  The cap was already mocked in that file, so it is now mocked low: the assertion is that selection stops at the cap and says so, which is the same behaviour at three variants as at a hundred, and it still fails if the comparison is off by one. (#8329, #8328) (@DaBlitzStein)
+- Restoring an agent-type version from the dashboard's history panel now asks for confirmation first, and the question names the version it is about to write by its timestamp and change source.
+  It was the one destructive action on that page that fired straight from its button, while Delete and Promote have always gone through a confirmation dialog.
+  Restore overwrites the template's `agent.toml` on disk, and the snapshot the daemon records afterwards holds the restored content rather than the content it replaced — so a mis-click was not undone by the history list it was launched from, and with the rows differing only by a timestamp a mis-click was easy. (#8335) (@DaBlitzStein)
+- Pressing Escape on a `ConfirmDialog` opened over a `Modal` now closes only the dialog, leaving the modal underneath open.
+  Both were `window` `keydown` handlers competing for the same event, and the modal's calls `stopImmediatePropagation`, so whichever registered first won outright — the modal closed, taking the dialog with it and dropping you out of the context you were working in.
+  Nothing was ever written, but the confirmation you were answering and the screen you were answering it from both vanished.
+  `ConfirmDialog` now joins the same Escape stack `Modal` already keeps, so the topmost layer wins by stacking order rather than by mount order, and this holds for all nineteen dashboard files that nest the two.
+  Enter is gated the same way: a non-destructive dialog with something stacked above it no longer confirms and fires its mutation from underneath (#8376) (@houko)
+- Register the dashboard service worker again, which the Content-Security-Policy header had been blocking on every route since the SPA shell gained its registration call.
+  `script-src` listed the hash of exactly one inline script, the login form's submit handler, because that is the page `/dashboard` serves without credentials — the shell's `navigator.serviceWorker.register` call carried a different hash that was never added, so the browser refused to evaluate it and the offline/PWA support sat inert behind a single console line nobody reads.
+  The script's own `.catch` could not report it either: a CSP violation happens when the script is evaluated, before any of its code runs.
+  The CSP test could not catch this because it only ever saw the login page, so the shell's missing hash was indistinguishable from a pass; it now walks every page the dashboard serves and hashes every inline script each one contains, which also makes a future third script fail loudly instead of silently losing a feature (#8338) (@DaBlitzStein)
+- The drift guard behind `docs/operations/config-reload.md` now reads the table's dotted rows and re-derives each carve-out's class letter from the planner, closing the hole that let the table promise `N` for a field the daemon had made restart-required.
+  `tts.enabled` and `tts.output_format` are sub-keys the planner classifies apart from the rest of `[tts]`, and the test's doc parser accepted only `[a-z0-9_]` in a field name, so both rows were skipped; `classified_reload_fields()` carried only the bare section name, so the two sides agreed by both saying nothing about the keys that matter.
+  The parser accepts `.`, the table carries `tts.enabled`, `tts.output_format` and `registry.auto_sync` at the same granularity the doc uses, and a new test mutates each carve-out, runs `build_reload_plan` over the result and asserts both that the letter matches and that the section's own restart branch stayed quiet.
+  That last part is what a doc-versus-table comparison cannot reach: #8274 moved `[tts]` from wholly-noop to restart-required-except-two-keys, and had the carve-out been dropped in that move every name-based check would have stayed green while an operator's reload silently did nothing (#8372) (@houko)
+- An agent's channel view now distinguishes a bot bound to a different agent from one bound to an agent that does not exist.
+  A `[[sidecar_channels]].agent` naming an agent that was never spawned, has since been deleted, or is simply misspelled delivers nowhere — the router resolves the name and skips the binding on a miss — but the instance list reported it exactly like a live binding to somebody else.
+  Each instance now carries `resolves`. (#8344) (@houko)
+- A media provider this daemon has no way to reach no longer appears in the provider list with an empty capability array.
+  It filed under no dashboard tab and read as "this provider can do nothing" rather than "we have no way to serve this yet" — reachable without a code change, since the provider registry is fetched rather than checked in.
+  The two `MediaDriverCache` constructors also stop spelling the built-in driver names inline, which is the duplication `BUILTIN_MEDIA_DRIVERS` was added to remove and which its doc comment already claimed was gone. (#8344) (@houko)
+- A database a pre-release build stamped past migration 58 now has its history tables repaired rather than merely detected.
+  `CREATE TABLE IF NOT EXISTS` is a no-op against a table that exists with a different column set, so a build that created `manifest_versions` or `template_versions` with its own shape left that shape in place — and for `template_versions` there was no second chance anywhere, because the step that creates it sits below the stamp and never runs again on those machines.
+  Step 60 now adds any column the code reads that the existing table lacks. (#8344) (@houko)
+- A rate limit the provider reported with a typed error code keeps its backoff retry again, whatever HTTP status carried it.
+  #8322 decided retryability by re-reading the status off the error, which overrode the classifier: a gateway that reports a rate limit as 403, or as 400 with `error.code = "rate_limit_exceeded"`, was failed over immediately instead of waiting and retrying — the one case the retry loop exists for.
+  The decision is back on the reason the classifier produced, so only the ambiguous-status catch-all consults the status. (#8344) (@houko)
+- Restore a paused goal run's reported `verify_max_retries` to the checkpoint's value instead of the compiled default.
+  `GoalRunner::state()` reconstructs a paused run from its checkpoint, and the retry budget is the one loop-engineering value the goal document never holds — it is a per-run number the operator sets on the start body, so the checkpoint is its only record.
+  Reading it from the goal document instead meant a run started with `{"verify_max_retries": 8}` reported the compiled default once paused, and the bodyless `/resume` that follows a readout resolves its own budget the same way `state()` does, so the operator's number silently disappeared on resume.
+  This fix and its regression tests shipped once already, in the pull request that introduced pause/resume for loop-engineered goals, but a squash merge on a long-lived branch left them out of the squashed commit that reached `main` (#8359) (@DaBlitzStein)
+- The test that guards the cron prune lock against being held across the summarize await now proves concurrency with a barrier instead of a wall-clock budget.
+  It asserted that two 200ms fires finish in under 350ms, which reads as the same claim but is not: it also fails when a loaded runner merely delays a sleep, and on CI it did exactly that at 432ms with nothing wrong with the lock, blocking an unrelated dependency PR.
+  A timing bound cannot separate "serialized" from "descheduled", and on a shared two-core runner executing the whole suite in parallel the two are indistinguishable.
+  The barrier releases only once both fires stand inside the await, so real serialization now deadlocks and is reported as such rather than being inferred from a stopwatch.
+  The test also stops sleeping, so it runs in 0.06s instead of 0.4s (#8383) (@houko)
+- The daily stale-PR reconciliation no longer makes unrelated pull requests look like they are failing.
+  Its concurrency group was the fixed string `stale-pr-reconciliation`, so every push in the repository contended for one slot; with `cancel-in-progress: false` GitHub cancels the older pending run when a newer one queues behind the one in flight, and `gh pr checks` renders a cancellation as `fail`.
+  During any busy window that left a spread of open PRs sitting at `UNSTABLE` over a housekeeping job that had never looked at them — eight of them at once while a dependency sweep was landing.
+  The group is keyed per pull request now, and the scheduled run still serializes against itself because `github.ref` is the default branch for a `schedule` event (#8390) (@houko)
+- Starting or resuming a goal run no longer answers `500 Failed to start goal run` for a run that started and is running perfectly well.
+  The handler reported from a read that returns nothing whenever the run loop happens to hold the run's state mutex — `GoalRunner::state()` is synchronous, so it takes that lock with `try_lock` and cannot wait — and it read "could not read this right now" as "did not start".
+  An operator was told a start failed that had not, and whether it happened at all came down to machine load: it took `main` red twice on the macOS lane, which runs the whole suite in one process, while the four-way Linux shards kept winning the race (#8388, #8391).
+  The read is retried across a yield now, which is enough because the loop's own contract is never to hold that lock across I/O; a run that has genuinely ended in the meantime reports a null run with a 200, the same thing `GET /api/goals/{id}/run` says for that state (#8392) (@houko)
+- `ChunkErrorBoundary` takes its props from the router's own `ErrorComponentProps` instead of restating the signature by hand.
+  `@tanstack/react-router` 1.170.36 widened the value handed to `defaultErrorComponent` from `Error` to `unknown`, because a thrown value need not be an Error, and the boundary's hand-written `{ error: Error }` no longer satisfied it — which failed the dashboard typecheck on every dashboard dependency bump, so the bump could not land.
+  The error is narrowed back to `Error` at the two places it is read, `message` and `stack`, so the component is correct against both the widened signature and the one that preceded it (#PR) (@DaBlitzStein)
+
+### Changed
+
+- Inbound images sent to an agent whose model has no vision support are now routed to the provider the `[capabilities]` block nominates for image understanding, instead of being replaced by an "image omitted" placeholder.
+  Before, a text-only model holding nothing but a file path was left to describe the picture from imagination and answer from that invented content.
+  Now the nominated vision provider describes the image once, on the inbound turn, and the description is inserted next to the image block that redaction leaves behind, so an existing agent starts receiving descriptions (or the explicit `[Image description unavailable]` marker when the vision provider fails) where it previously received nothing usable.
+  Note that this costs money on entry paths that previously spent none: description defaults to on, and when neither `[capabilities]` nor `[media]` nominates a provider the engine auto-detects one from whichever provider key is present in the daemon's environment, so a deployment that changes no configuration at all begins paying a third-party vision call per image uploaded through the API or the dashboard to a text-only agent.
+  A per-agent override that names only a provider (`image_understanding = "gemini"` over a global `"openai/gpt-4o"`) no longer inherits the previous provider's model id, which would have dispatched a model that provider does not serve.
+  Each description call is also bounded, matching the ceiling the Telegram bridge already applied, so one provider that never answers cannot hold a session open while an unread message waits.
+  Operators who want the old behaviour can turn it off with `[media] image_description = false`, which governs this path exactly as it governs the Telegram channel bridge. (#7989) (@DaBlitzStein)
+- `POST /api/skills/{name}/propose`, `POST /api/skills/pending/{id}/propose-to-registry` and `POST /api/templates/{name}/promote` now answer 500 instead of 400 when `skills.promotion` itself is misconfigured (an invalid `api_base_url`, `fork_owner`, or `base_branch`).
+  The request was well-formed; the daemon's own configuration was not, so a client that branches on 4xx-versus-5xx no longer sees an operator's config mistake reported as if the caller had sent bad input. (#8179) (@DaBlitzStein)
+- Proposing a skill or agent type to the registry now refuses to push to a same-named repository under the fork owner unless GitHub actually reports it as a fork of the configured upstream.
+  Previously any repository that merely resolved at that path was reused, so an unrelated repository with the same name silently received the pushed branch and files before the pull request failed for having no shared history.
+  An installation that relied on that silent reuse will see the promotion fail instead, with an error naming `skills.promotion.fork_owner` as the setting to point at the namespace where the real fork lives. (#8179) (@DaBlitzStein)
+- The workspace MSRV moves from 1.94.1 to 1.95.0, which is what building from source now requires.
+  The forcing function is wasmtime 48 (#8366): every crate in its dependency tree — 57 of them, all cranelift and wasmtime-internal — declares `rust-version = "1.95.0"`, and none declares anything higher, so 1.95.0 is exactly sufficient rather than a round number chosen for comfort.
+  Staying on wasmtime 47 to avoid a single minor toolchain step is the worse trade for a WASM sandbox, which is the isolation boundary plugins execute behind.
+  Rust 1.98.1 is current stable, so 1.95.0 still leaves three releases of headroom.
+  All five files the toolchain contract spans move together, `Dockerfile` included — its `FROM rust:1.94-slim-bookworm` was the one pin that a comment referred to but no script checked (#8380) (@houko)
+
+### Security
+
+- `skills.promotion.api_base_url` no longer accepts a plain `http://` origin unless the host is a loopback address, and `POST /api/config/set` now refuses to write `api_base_url`, `fork_owner`, or `base_branch` at all.
+  Every request the registry promotion flow makes attaches the repo-scoped GitHub token as an `Authorization: Bearer` header, so a writable, unencrypted, or attacker-chosen value in any of the three handed that credential — or the files it pushes — to a destination the caller picked rather than the operator.
+  The three fields now join `proxy.http_proxy`, `telemetry.otlp_endpoint` and `audit.anchor_path` as edit-on-disk destination fields instead of dashboard-tunable ones. (#8179) (@DaBlitzStein)
+- `rustls` moves to 0.23.45, closing RUSTSEC-2026-0285 — TLS 1.3 handshake messages accepted across encryption level boundaries (CVSS 5.3).
+  The advisory was published on 2026-09-14 and the audit job has failed on every open pull request since, which takes `CI Gate` down with it: a red gate that is red for everyone stops carrying information about the change it is gating.
+  Lockfile only.
+  `aws-lc-rs`, `aws-lc-sys` and `rustls-webpki` move with it because 0.23.45 requires them to; no `Cargo.toml` changes and no new dependencies (#8378) (@houko)
+
+### Fixed
+
+- Classify `tts` as restart-required in the reload table (#8351) (@houko)
+- Type the error boundary prop from the router, not from Error (#8406) (@DaBlitzStein)
+- Point the dangling bitflags 2.13.1 references at 2.13.2 (#8421) (@DaBlitzStein)
+
+<details>
+<summary>Documentation, maintenance, and other internal changes</summary>
+
+### Maintenance
+
+- Update model snapshot (#8361) (@houko)
+- Bump wasmtime from 47.0.4 to 48.0.2 (#8366) (@app/dependabot)
+- Bump dirs from 6.0.0 to 7.0.0 (#8367) (@app/dependabot)
+- Guard the agent-type catalog against duplicating a shared name (#8377) (@houko)
+- Bump the cargo-minor-patch group across 1 directory with 9 updates (#8381) (@app/dependabot)
+- Update model snapshot (#8382) (@houko)
+- Bump the actions-minor-patch group with 2 updates (#8389) (@app/dependabot)
+- Update model snapshot (#8395) (@houko)
+- Bump the web-minor-patch group in /web with 9 updates (#8398) (@app/dependabot)
+- Bump the dashboard-minor-patch group in /crates/librefang-api/dashboard with 12 updates (#8399) (@app/dependabot)
+- Update model snapshot (#8412) (@houko)
+- Ignore the Python bytecode cache (#8413) (@DaBlitzStein)
+- Lay the raw-body operation table out one entry per line (#8415) (@DaBlitzStein)
+- Bump the docs-minor-patch group in /docs with 12 updates (#8420) (@app/dependabot)
+- Update model snapshot (#8434) (@houko)
+- Update model snapshot (#8435) (@houko)
+
+</details>
+
+
 ## [2026.9.14] - 2026-09-14
 
 _203 PRs from 5 contributors since v2026.8.30._

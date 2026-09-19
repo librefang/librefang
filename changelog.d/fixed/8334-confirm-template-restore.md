@@ -1,3 +1,0 @@
-Restoring an agent-type version from the dashboard's history panel now asks for confirmation first, and the question names the version it is about to write by its timestamp and change source.
-  It was the one destructive action on that page that fired straight from its button, while Delete and Promote have always gone through a confirmation dialog.
-  Restore overwrites the template's `agent.toml` on disk, and the snapshot the daemon records afterwards holds the restored content rather than the content it replaced — so a mis-click was not undone by the history list it was launched from, and with the rows differing only by a timestamp a mis-click was easy. (#8335) (@DaBlitzStein)
