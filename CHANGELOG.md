@@ -350,7 +350,7 @@ _56 PRs from 3 contributors since v2026.9.14._
   The read is retried across a yield now, which is enough because the loop's own contract is never to hold that lock across I/O; a run that has genuinely ended in the meantime reports a null run with a 200, the same thing `GET /api/goals/{id}/run` says for that state (#8392) (@houko)
 - `ChunkErrorBoundary` takes its props from the router's own `ErrorComponentProps` instead of restating the signature by hand.
   `@tanstack/react-router` 1.170.36 widened the value handed to `defaultErrorComponent` from `Error` to `unknown`, because a thrown value need not be an Error, and the boundary's hand-written `{ error: Error }` no longer satisfied it — which failed the dashboard typecheck on every dashboard dependency bump, so the bump could not land.
-  The error is narrowed back to `Error` at the two places it is read, `message` and `stack`, so the component is correct against both the widened signature and the one that preceded it (#PR) (@DaBlitzStein)
+  The error is narrowed back to `Error` at the two places it is read, `message` and `stack`, so the component is correct against both the widened signature and the one that preceded it (#8406) (@DaBlitzStein)
 
 ### Changed
 
