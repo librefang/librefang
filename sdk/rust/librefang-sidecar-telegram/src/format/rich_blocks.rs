@@ -414,22 +414,33 @@ impl Builder {
             }
             TagEnd::Heading(level) => {
                 let text = self.take_inline();
-                self.push_block(Block::Heading {
-                    text,
-                    size: heading_size(level),
-                });
+                // `sendRichMessage` refuses a heading with no text — the whole payload comes
+                // back `RICH_MESSAGE_CONTENT_REQUIRED` — and Telegram's own parse of `## `
+                // emits nothing for it. A lone `## ` is something a model writes.
+                if !text.is_empty() {
+                    self.push_block(Block::Heading {
+                        text,
+                        size: heading_size(level),
+                    });
+                }
             }
             TagEnd::CodeBlock => {
                 let text = self.take_inline();
                 let language = self.code_language.take().flatten();
-                self.push_block(Block::Pre {
-                    text: trim_trailing_newline(text),
-                    language,
-                });
+                let text = trim_trailing_newline(text);
+                // Same refusal, and the same answer from Telegram's own parse: an empty fence
+                // is nothing. A model that opens a block and closes it without writing the
+                // sample produced one.
+                if !text.is_empty() {
+                    self.push_block(Block::Pre { text, language });
+                }
             }
             TagEnd::List(_) => {
                 if let Some(Frame::ListItems { items, .. }) = self.frames.pop() {
-                    self.push_block(Block::List { items });
+                    // `list must be non-empty` is a separate refusal with its own message.
+                    if !items.is_empty() {
+                        self.push_block(Block::List { items });
+                    }
                 }
             }
             TagEnd::Item => {
@@ -448,6 +459,17 @@ impl Builder {
                 };
                 if let Some(Frame::ListItems { items, next_value }) = self.frames.last_mut() {
                     let value = next_value.inspect(|v| *next_value = Some(v + 1));
+                    // An item that collected nothing is refused with the rest of the payload,
+                    // so it carries an empty paragraph instead — which is exactly what
+                    // Telegram's own parse of `- a\n- \n- b` puts there. Dropping the item
+                    // would renumber an ordered list and lose a line the reader can see.
+                    let blocks = if blocks.is_empty() {
+                        vec![Block::Paragraph {
+                            text: RichText::Plain(String::new()),
+                        }]
+                    } else {
+                        blocks
+                    };
                     items.push(ListItem {
                         blocks,
                         value,
@@ -461,7 +483,11 @@ impl Builder {
             }
             TagEnd::BlockQuote(_) => {
                 if let Some(Frame::Blocks(blocks)) = self.frames.pop() {
-                    self.push_block(Block::Quote { blocks });
+                    // A quote with nothing in it is refused as well, and `> ` on its own is
+                    // how a model starts a quote and then changes its mind.
+                    if !blocks.is_empty() {
+                        self.push_block(Block::Quote { blocks });
+                    }
                 }
             }
             TagEnd::Table => {
@@ -1032,13 +1058,83 @@ mod tests {
             let _ = markdown_to_blocks(input);
         }
         // Observable proxy for the invariant: a later span must still wrap the right text.
+        // The first item holds an empty paragraph rather than nothing — an item with no
+        // blocks is refused by `sendRichMessage` along with the whole message.
         assert_eq!(
             json("- ![](x)\n- **bold**"),
             serde_json::json!([{"type": "list", "items": [
-                {"blocks": []},
+                {"blocks": [{"type": "paragraph", "text": ""}]},
                 {"blocks": [{"type": "paragraph", "text": {"type": "bold", "text": "bold"}}]},
             ]}])
         );
+    }
+
+    /// Every block this converter emits has to be something `sendRichMessage` accepts, and
+    /// four shapes were not: a heading with no text, an empty fenced block, an empty
+    /// blockquote and a list item that collected nothing. Each makes the API refuse the
+    /// *whole* message with `RICH_MESSAGE_CONTENT_REQUIRED`, after which `send_text` falls
+    /// back to the legacy Markdown path — so the message arrives, the rich path is silently
+    /// skipped, and the log says the converter failed when it had not.
+    ///
+    /// All four sources below are ordinary model output. The expectations are Telegram's own
+    /// parse of the same Markdown: it drops the heading, the fence and the quote, and puts an
+    /// empty paragraph inside the empty item. Dropping the item instead would renumber an
+    /// ordered list and lose a line the reader can see.
+    ///
+    /// This was missed for three weeks because every check on this converter compared *our
+    /// parse with Telegram's parse of the same source*. That question never asks whether our
+    /// output is valid input.
+    #[test]
+    fn every_block_is_one_telegram_accepts() {
+        assert_eq!(
+            json("- a\n- \n- b"),
+            serde_json::json!([{"type": "list", "items": [
+                {"blocks": [{"type": "paragraph", "text": "a"}]},
+                {"blocks": [{"type": "paragraph", "text": ""}]},
+                {"blocks": [{"type": "paragraph", "text": "b"}]},
+            ]}])
+        );
+        assert_eq!(
+            json("## \n\nтекст"),
+            serde_json::json!([{"type": "paragraph", "text": "текст"}])
+        );
+        assert_eq!(
+            json("текст\n\n```\n```\n\nещё"),
+            serde_json::json!([
+                {"type": "paragraph", "text": "текст"},
+                {"type": "paragraph", "text": "ещё"},
+            ])
+        );
+        assert_eq!(
+            json("> \n\nтекст"),
+            serde_json::json!([{"type": "paragraph", "text": "текст"}])
+        );
+        // The rule, rather than the four examples: nothing empty reaches a payload.
+        for source in [
+            "- a\n- \n- b",
+            "## ",
+            "#\n\nтекст",
+            "```\n```",
+            "> ",
+            "- ![](x)",
+            "1. a\n2. \n3. b",
+            "- [ ] \n- [x] сделано",
+        ] {
+            let rendered = json(source).to_string();
+            assert!(
+                !rendered.contains(r#""blocks":[]"#) && !rendered.contains(r#""items":[]"#),
+                "{source:?} отдал пустой блок: {rendered}"
+            );
+            for empty in [
+                r#"{"text":"","type":"heading""#,
+                r#"{"text":"","type":"pre""#,
+            ] {
+                assert!(
+                    !rendered.contains(empty),
+                    "{source:?} отдал пустой блок: {rendered}"
+                );
+            }
+        }
     }
 
     #[test]
