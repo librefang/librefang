@@ -95,7 +95,7 @@ tracing-opentelemetry = "0.33"
 # note above). 0.32 aligns with `opentelemetry = "0.32"` and uses `http = 1`,
 # matching the workspace `reqwest = "0.13"` http stack — no second http/reqwest
 # tree is introduced.
-opentelemetry-http = "0.32"
+opentelemetry-http = "0.33"
 
 # Prometheus metrics
 metrics = "0.24"
