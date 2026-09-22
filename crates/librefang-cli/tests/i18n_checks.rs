@@ -244,6 +244,9 @@ fn is_potential_untranslated_literal(lit: &str) -> bool {
         // Technical format strings
         "%Y-%m-%d %H:%M",
         "{model:<20} {input}/{output}  ${cost:.4}",
+        // SQLite's `datetime('now')` shape, parsed and re-rendered by the
+        // manifest history pane. A strftime pattern is not prose.
+        "%Y-%m-%d %H:%M:%S",
         // Hand CLI command names for require_daemon
         "hand install",
         "hand list",

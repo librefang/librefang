@@ -1,0 +1,6 @@
+The TUI can now show an agent's configuration history, which until now existed only in the HTTP API and the dashboard.
+Press `h` on an agent's detail pane to list every recorded manifest snapshot newest-first, with the full TOML of the selected one beside it, so an operator working in a terminal can answer "what changed on this agent, and when" without opening a browser.
+This works whether the TUI is attached to a daemon or running an in-process kernel: the snapshots live in the same substrate either way, so a terminal-only operator is not told to go and start a daemon for data already on disk.
+The pane distinguishes the three answers that would otherwise all look like an empty box — a fetch still in flight, an agent whose manifest was never persisted, and a request that failed — and it reports only its own failures, so an unrelated error elsewhere on the agents tab is never shown as the reason this pane is empty.
+A response is matched to the agent it was requested for before being rendered, because a slow reply arriving after the operator moved on would otherwise display one agent's entire `agent.toml` under another agent's header.
+Timestamps are read as the UTC the store writes and shown in local time, matching what the dashboard already displays. (#8231) (@DaBlitzStein)
