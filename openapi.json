@@ -2358,6 +2358,55 @@
         }
       }
     },
+    "/api/agents/{id}/save-as-agent-type": {
+      "post": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "POST /api/agents/{id}/save-as-agent-type — snapshot a live agent's manifest\ninto a reusable agent-type template file.",
+        "description": "Not gated by [`super::guard_provisioned_agent`]: that guard refuses writes\nthat would change the *definition* of a provisioned agent, and this\nhandler never touches the source agent's own manifest — it only reads it\nand writes a new, separate `agent-types/<name>.toml`. The closest sibling,\n[`super::clone_agent`], follows the same \"read source, write something\nnew\" shape and carries no such guard either.\n\nNot exposed to the `User` role: `save-as-agent-type` is absent from the\n`User`-tier POST allowlist in `middleware::user_role_allows_request`, so\nonly Admin+ callers reach this handler at all — unlike `/clone`, which\ndeliberately carves out `User` access and therefore needs its own\n`can_access_agent` ownership check to stop a non-owner from cloning an\narbitrary agent by id. An Admin+ caller already has access to every\nagent's manifest through other routes, so no equivalent check is needed\nhere; widening this endpoint to `User` later would need that check added\nalongside it.",
+        "operationId": "save_agent_as_agent_type",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Agent ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "description": "template_name to save as",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Agent type created from live agent"
+          },
+          "400": {
+            "description": "Malformed agent id, or a template_name outside [A-Za-z0-9_-]{1,64}"
+          },
+          "404": {
+            "description": "Agent not found"
+          },
+          "409": {
+            "description": "Template name already taken, or it belongs to a different live agent"
+          },
+          "500": {
+            "description": "The agent type could not be rendered or written"
+          }
+        }
+      }
+    },
     "/api/agents/{id}/session": {
       "get": {
         "tags": [
