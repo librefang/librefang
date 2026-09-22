@@ -4425,6 +4425,7 @@
     "max_tokens_placeholder": "токени на запит",
     "penalty_placeholder": "від -2 до 2",
     "presence_penalty": "Штраф за присутність",
+    "sampling_provider_hint": "Лише провайдери, сумісні з OpenAI, та Ollama",
     "temperature": "Температура",
     "temperature_placeholder": "від 0 до 2",
     "top_p": "Top-p",

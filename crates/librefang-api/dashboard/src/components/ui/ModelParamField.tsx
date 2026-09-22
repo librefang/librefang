@@ -60,6 +60,21 @@ const PLACEHOLDER_KEYS: Record<ModelParamName, string> = {
 };
 
 /**
+ * The parameters whose reach depends on the provider, and the line saying which providers act on them.
+ *
+ * These three travel through `extra_body`, which an OpenAI-compatible provider flattens into the
+ * request body and Ollama lifts into its native `options` object — a typed-body driver (Anthropic,
+ * Gemini) never reads it, so the value is dropped there with nothing on screen to say so (#8112).
+ * The note lives on the parameter rather than on one editor's call site because every editor that
+ * renders these fields owes the operator the same warning.
+ */
+const HINT_KEYS: Partial<Record<ModelParamName, string>> = {
+  top_p: "model_param.sampling_provider_hint",
+  frequency_penalty: "model_param.sampling_provider_hint",
+  presence_penalty: "model_param.sampling_provider_hint",
+};
+
+/**
  * The values each parameter can actually hold.
  *
  * Kept next to the rungs because the two answer the same question from opposite ends: the ladder
@@ -141,6 +156,13 @@ interface ModelParamFieldProps {
    * parameter a different meaning — not to rename it for decoration.
    */
   label?: string;
+  /**
+   * The editor is refusing to save this value, e.g. `validateManifestForm`
+   * found it outside the range `PATCH /api/agents/{id}/model` accepts (#8112).
+   * Marks the control itself rather than leaving the operator to find which of
+   * the four fields the page's "cannot save" refers to.
+   */
+  invalid?: boolean;
 }
 
 /**
@@ -163,8 +185,12 @@ export function ModelParamField({
   warning,
   hint,
   label,
+  invalid,
 }: ModelParamFieldProps) {
   const { t } = useTranslation();
+  // A caller's own `hint` wins, so an editor with something more specific to say
+  // is not overruled by the parameter's general note.
+  const hintText = hint ?? (HINT_KEYS[param] ? t(HINT_KEYS[param]) : undefined);
   return (
     <div>
       <StepLadderInput
@@ -180,8 +206,9 @@ export function ModelParamField({
         min={MODEL_PARAM_RANGES[param].min}
         max={MODEL_PARAM_RANGES[param].max}
         step={STEPS[param]}
+        invalid={invalid}
       />
-      {hint && <p className="mt-1 text-[10px] text-text-dim/70 leading-snug">{hint}</p>}
+      {hintText && <p className="mt-1 text-[10px] text-text-dim/70 leading-snug">{hintText}</p>}
     </div>
   );
 }

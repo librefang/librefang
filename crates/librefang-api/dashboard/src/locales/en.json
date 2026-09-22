@@ -4411,6 +4411,7 @@
     "max_tokens_placeholder": "tokens per request",
     "penalty_placeholder": "-2 to 2",
     "presence_penalty": "Presence Penalty",
+    "sampling_provider_hint": "OpenAI-compatible providers and Ollama only",
     "temperature": "Temperature",
     "temperature_placeholder": "0 to 2",
     "top_p": "Top-p",

@@ -4409,6 +4409,7 @@
     "max_tokens_placeholder": "요청당 토큰",
     "penalty_placeholder": "-2 ~ 2",
     "presence_penalty": "존재 페널티",
+    "sampling_provider_hint": "OpenAI 호환 제공자와 Ollama에서만 적용됩니다",
     "temperature": "온도",
     "temperature_placeholder": "0 ~ 2",
     "top_p": "Top-p",

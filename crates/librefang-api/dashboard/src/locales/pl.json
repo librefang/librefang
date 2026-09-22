@@ -4425,6 +4425,7 @@
     "max_tokens_placeholder": "tokeny na żądanie",
     "penalty_placeholder": "od -2 do 2",
     "presence_penalty": "Kara za obecność",
+    "sampling_provider_hint": "Tylko dostawcy zgodni z OpenAI oraz Ollama",
     "temperature": "Temperatura",
     "temperature_placeholder": "od 0 do 2",
     "top_p": "Top-p",

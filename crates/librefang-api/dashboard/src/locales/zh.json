@@ -4410,6 +4410,7 @@
     "max_tokens_placeholder": "每次请求的令牌数",
     "penalty_placeholder": "-2 到 2",
     "presence_penalty": "存在惩罚",
+    "sampling_provider_hint": "仅适用于兼容 OpenAI 的提供商和 Ollama",
     "temperature": "温度",
     "temperature_placeholder": "0 到 2",
     "top_p": "Top-p",
