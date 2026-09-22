@@ -19,12 +19,14 @@ api-error-template-parse-failed = 解析模板失败：{ $error }
 api-error-template-required = 必须提供 'manifest_toml' 或 'template'
 api-error-template-invalid-manifest = 无效的模板清单
 api-error-template-read-failed = 读取模板失败
+api-error-template-snapshot-failed = 无法保存当前智能体类型的快照，因此已取消恢复，未覆盖任何内容。请重试。
 api-error-template-promote-no-token = 未配置 GitHub 令牌。请在设置中连接 GitHub，或设置 GITHUB_TOKEN。
 api-error-template-promote-review-required = 该模板仍包含发布前必须移除的私密信息。请检查发现项并编辑清单。
 api-error-template-promote-render-failed = 无法将清理后的清单渲染为 TOML：{ $error }
 api-error-agent-type-exists = 名为 '{ $name }' 的智能体类型已存在
 api-error-agent-type-name-taken = '{ $name }' 是某个运行中智能体的名称，请为智能体类型另选名称
 api-error-agent-type-not-editable = 智能体类型 '{ $name }' 来自运行中智能体的工作区，请通过 /api/agents 管理
+api-error-registry-type-not-found = 在注册表中未找到智能体类型 '{ $name }'
 
 # Manifest errors
 api-error-manifest-too-large = 清单文件过大（最大 1MB）
@@ -89,3 +91,6 @@ api-error-rate-limited = 请求频率超限，请稍后重试。
 # typed MemoryRouteError-style helper. Without this key, every `t_args("api-error-generic", …)`
 # call returns the literal key as the response body and `$error` interpolation never runs.
 api-error-generic = 错误: { $error }
+
+api-error-validation-avatar-url-invalid = 头像 URL 必须是此守护进程为该 agent 提供的头像路由，或留空。请上传图片，而不是链接到它。
+api-error-validation-color-invalid = 颜色必须是以 '#' 开头的十六进制代码

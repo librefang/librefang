@@ -7,7 +7,8 @@ use crate::MeteringSubsystemApi;
 use futures::stream;
 use librefang_channels::types::{ChannelAdapter, ChannelContent, ChannelType, ChannelUser};
 use librefang_types::approval::{
-    AgentNotificationRule, ApprovalRequest, NotificationConfig, NotificationTarget, RiskLevel,
+    AgentNotificationRule, ApprovalPolicy, ApprovalRequest, NotificationConfig, NotificationTarget,
+    RiskLevel, SecondFactor,
 };
 use librefang_types::config::DefaultModelConfig;
 use std::collections::HashMap;
@@ -644,6 +645,74 @@ async fn test_interactive_approval_notification_reaches_a_named_instance_8055() 
     assert!(
         sent[0].contains("[Approve]") && sent[0].contains("[Reject]"),
         "the interactive path must be taken, not the buttonless plain-text fallback: {sent:?}"
+    );
+
+    kernel.shutdown();
+}
+
+/// `SecondFactor::Both` requires a code on tool approvals exactly as `Totp`
+/// does, so the interactive notification must ask for it — and must not offer
+/// an Approve button.
+///
+/// The branch this exercises reads `ApprovalManager::requires_totp()`, which
+/// compared `second_factor` against `Totp` alone and therefore answered `false`
+/// for `Both`. The approver got the plain escalation text plus an `[Approve]`
+/// button, pressed it, and `resolve` then rejected the approval with "TOTP code
+/// required for approval (second_factor = totp)" — a button inviting an action
+/// that cannot succeed, on the one notification whose entire purpose is that
+/// decision.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_interactive_approval_notification_asks_for_a_code_when_second_factor_is_both() {
+    let dir = tempfile::tempdir().unwrap();
+    let home_dir = dir.path().to_path_buf();
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        approval: librefang_types::approval::ApprovalPolicy {
+            second_factor: librefang_types::approval::SecondFactor::Both,
+            ..Default::default()
+        },
+        ..KernelConfig::default()
+    };
+    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+
+    let adapter = Arc::new(RecordingChannelAdapter::new("slack"));
+    let sent = adapter.sent.clone();
+    kernel
+        .mesh
+        .channel_adapters
+        .insert("slack".to_string(), adapter);
+
+    kernel
+        .push_approval_interactive(
+            &NotificationTarget {
+                channel_type: "slack".to_string(),
+                recipient: "C0BN6UAQ75M".to_string(),
+                thread_id: None,
+            },
+            "agent wants to run `file_write`",
+            "abcdef1234",
+        )
+        .await;
+
+    let sent = sent.lock().unwrap().clone();
+    assert_eq!(
+        sent.len(),
+        1,
+        "the notification must be delivered exactly once: {sent:?}"
+    );
+    assert!(
+        sent[0].contains("TOTP required. Reply: /approve abcdef12 <6-digit-code>"),
+        "second_factor = both verifies a code on approvals, so the notification must ask for it: {sent:?}"
+    );
+    assert!(
+        !sent[0].contains("[Approve]"),
+        "no Approve button may be offered when the code has to be typed — `resolve` rejects that approval: {sent:?}"
+    );
+    assert!(
+        sent[0].contains("[Reject]"),
+        "the Reject button must still be offered: {sent:?}"
     );
 
     kernel.shutdown();
@@ -3221,6 +3290,68 @@ async fn resolved_exec_policy_survives_reload_and_update_manifest() {
     kernel.shutdown();
 }
 
+/// #7835: `update_manifest` used to route a tags change through
+/// `registry::update_tags` and then, on the next line, through
+/// `replace_manifest_and_retag` — which already reprojects `entry.tags` and
+/// the `tag_index` from `manifest.tags` as part of the same call (#7742).
+/// Both fired `notify_changed()`, so every `AgentRegistry` watcher (the
+/// dashboard WebSocket re-snapshot path, #3513) woke twice per PATCH that
+/// changed tags. `replace_manifest_and_retag_reprojects_entry_tags_and_index`
+/// only checks the final `tags` / `tag_index` state, which is identical
+/// either way, so it would not have caught a regression here.
+#[test]
+fn update_manifest_notifies_registry_watchers_exactly_once_per_tags_change() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().join("librefang-kernel-tags-notify-test");
+    std::fs::create_dir_all(&home_dir).unwrap();
+
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+
+    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+
+    let manifest = AgentManifest {
+        name: "tags-notify-agent".to_string(),
+        description: "agent used to count notify_changed calls".to_string(),
+        author: "test".to_string(),
+        module: "builtin:chat".to_string(),
+        tags: vec!["alpha".to_string()],
+        ..Default::default()
+    };
+
+    let agent_id = kernel.spawn_agent(manifest).expect("spawn should succeed");
+
+    // Subscribe after spawn so only the update below is under test.
+    let mut rx = kernel.agents.registry.subscribe_changes();
+
+    let mut replacement = kernel
+        .agents
+        .registry
+        .get(agent_id)
+        .expect("agent must be registered")
+        .manifest
+        .clone();
+    replacement.tags = vec!["beta".to_string()];
+
+    kernel
+        .update_manifest(agent_id, replacement)
+        .expect("manifest update should succeed");
+
+    assert!(
+        matches!(rx.try_recv(), Ok(())),
+        "update_manifest must notify registry watchers when tags change"
+    );
+    assert!(
+        rx.try_recv().is_err(),
+        "update_manifest must notify exactly once per tags-changing PATCH, not twice"
+    );
+
+    kernel.shutdown();
+}
+
 #[test]
 fn test_should_reuse_cached_route_for_brief_follow_up() {
     assert!(LibreFangKernel::should_reuse_cached_route("fix that"));
@@ -3445,6 +3576,213 @@ async fn test_send_message_ephemeral_does_not_modify_session() {
     kernel.shutdown();
 }
 
+/// Boot a kernel whose only agent talks to a mocked Ollama backend, with
+/// `top_p` present **only** as a per-model catalog override.
+///
+/// The agent's own `top_p` is left unset, so a value observed on the wire can
+/// only have come from the resolution step each dispatcher is supposed to run.
+/// The returned `TempDir` owns the kernel's home directory and must outlive it.
+async fn boot_kernel_with_catalog_top_p_override() -> (
+    wiremock::MockServer,
+    Arc<LibreFangKernel>,
+    AgentId,
+    tempfile::TempDir,
+) {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let backend = MockServer::start().await;
+    // Non-empty content and an explicit `done_reason: "stop"`: an empty-text
+    // `EndTurn` reply retries in-loop (agent_loop/mod.rs:212) rather than
+    // completing the turn, which against this deterministic mock would spin
+    // until `MaxIterationsExceeded` instead of returning after one call.
+    //
+    // `done: true` and the **trailing newline** are what make this one body
+    // serve the streaming dispatcher as well. Native Ollama streams NDJSON —
+    // one JSON object per line, the last carrying `done: true` — and the
+    // driver's reader only consumes a line once it finds a `\n`
+    // (drivers/ollama.rs: `while let Some(pos) = buffer.find('\n')`).
+    // A `set_body_json` body has no terminator, so the single chunk would sit
+    // unparsed in the buffer, the turn would come back empty, and the agent
+    // loop would retry it to `MaxIterationsExceeded(50)` instead of ending.
+    // `set_body_raw` keeps the `application/json` content type the
+    // non-streaming path expects while letting us append that newline.
+    Mock::given(method("POST"))
+        .and(path("/api/chat"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
+            format!(
+                "{}\n",
+                serde_json::json!({
+                    "message": {"content": "ok"},
+                    "done": true,
+                    "done_reason": "stop",
+                })
+            ),
+            "application/json",
+        ))
+        .mount(&backend)
+        .await;
+
+    let dir = tempfile::tempdir().unwrap();
+    let home_dir = dir.path().to_path_buf();
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        default_model: DefaultModelConfig::driverless(),
+        ..KernelConfig::default()
+    };
+    let kernel = Arc::new(LibreFangKernel::boot_with_config(config).expect("kernel should boot"));
+    // Every dispatcher here builds its kernel-handle arg via `kernel_handle()`,
+    // which panics if the self-handle weak ref was never installed.
+    kernel.set_self_handle();
+
+    kernel.model_catalog_update(|cat| {
+        cat.set_overrides(
+            "ollama:llama3.2".to_string(),
+            librefang_types::model_catalog::ModelOverrides {
+                top_p: Some(0.42),
+                ..Default::default()
+            },
+        );
+    });
+
+    let mut manifest = test_manifest("top-p-parity", "agent for #8112 parity check", vec![]);
+    manifest.model.provider = "ollama".to_string();
+    manifest.model.model = "llama3.2".to_string();
+    manifest.model.base_url = Some(backend.uri());
+    let agent_id = kernel.spawn_agent(manifest).expect("spawn should succeed");
+
+    (backend, kernel, agent_id, dir)
+}
+
+/// Every request the mock recorded must carry the catalog's `top_p`.
+///
+/// Native Ollama nests sampling knobs under `options` (#8112 — see the
+/// ollama.rs fix): a bare top-level `top_p` would mean the merge point
+/// regressed back to the pre-fix behaviour that Ollama silently ignores.
+/// `f32` widens to `f64` inside the resolved value, so compare with a
+/// tolerance rather than against the `f64` literal (same reasoning as
+/// `test_build_extra_body_merges_typed_sampling_fields` in agent_loop's tests).
+async fn assert_every_request_carries_catalog_top_p(
+    backend: &wiremock::MockServer,
+    expected: usize,
+    dispatcher: &str,
+) {
+    let requests = backend
+        .received_requests()
+        .await
+        .expect("requests recorded");
+    assert_eq!(
+        requests.len(),
+        expected,
+        "{dispatcher} must have reached the mock backend"
+    );
+    for req in &requests {
+        let body: serde_json::Value = req.body_json().expect("valid JSON body");
+        let observed_top_p = body["options"]["top_p"]
+            .as_f64()
+            .unwrap_or_else(|| panic!("options.top_p missing from wire body: {body}"));
+        assert!(
+            (observed_top_p - 0.42).abs() < 1e-6,
+            "{dispatcher} must resolve the model-catalog top_p override onto the \
+             wire request (#8112): {body}"
+        );
+    }
+}
+
+/// #8112: `resolve_inference_params` + `apply_to` used to run on only one of
+/// the dispatch paths (`execute_llm_agent`, reached by `send_message`). The
+/// ephemeral (`/btw`) path built its manifest from a bare `entry.manifest.clone()`
+/// with no resolution step, so a `top_p` set as a per-model catalog override —
+/// the agent itself leaves the field unset — reached the wire on the
+/// persistent path and reached nothing on the ephemeral one. Both paths now
+/// call the shared `manifest_helpers::apply_resolved_inference_params`, and
+/// this drives both all the way to a mocked Ollama backend and inspects the
+/// literal wire body each one sent, rather than trusting that calling the
+/// same function twice must produce the same result.
+#[tokio::test(flavor = "multi_thread")]
+async fn top_p_catalog_override_reaches_both_ephemeral_and_persistent_dispatch() {
+    let (backend, kernel, agent_id, _dir) = boot_kernel_with_catalog_top_p_override().await;
+
+    // Dispatcher #1: the ephemeral (`/btw`) path — `messaging::send_message_ephemeral`.
+    kernel
+        .send_message_ephemeral(agent_id, "ephemeral turn", None, None)
+        .await
+        .expect("ephemeral turn must not error");
+
+    // Dispatcher #2: the persistent-session path — `messaging::send_message`
+    // down to `agent_execution::execute_llm_agent`.
+    kernel
+        .send_message(agent_id, "persistent turn")
+        .await
+        .expect("persistent turn must not error");
+
+    assert_every_request_carries_catalog_top_p(
+        &backend,
+        2,
+        "the ephemeral (/btw) and persistent dispatch paths",
+    )
+    .await;
+
+    kernel.shutdown();
+}
+
+/// The third dispatcher: the **streaming** turn.
+///
+/// `send_message_streaming_with_sender_and_opts` (kernel::messaging) builds its
+/// own `entry.manifest.clone()` and is a wholly separate merge point from the
+/// two the test above drives — deleting its
+/// `apply_resolved_inference_params` call leaves every other test in this
+/// crate green while a streamed turn silently loses the catalog override.
+/// That is the injection site this test exists to hold, so it asserts on the
+/// literal wire body the streaming path produced rather than on the helper.
+#[tokio::test(flavor = "multi_thread")]
+async fn top_p_catalog_override_reaches_the_streaming_dispatch() {
+    let (backend, kernel, agent_id, _dir) = boot_kernel_with_catalog_top_p_override().await;
+
+    let (mut rx, join) = kernel
+        .send_message_streaming(agent_id, "streamed turn", None)
+        .expect("the streaming turn must start");
+    // Drain the fanout: the receiver is bounded, so an undrained stream can
+    // back-pressure the turn into a stall instead of completing.
+    let drain = tokio::spawn(async move { while rx.recv().await.is_some() {} });
+    join.await
+        .expect("the streaming task joins")
+        .expect("the streamed turn must not error");
+    drain.await.expect("the drain task joins");
+
+    assert_every_request_carries_catalog_top_p(&backend, 1, "the streaming dispatch path").await;
+
+    kernel.shutdown();
+}
+
+/// The fourth dispatcher: the **ephemeral worker spawn**.
+///
+/// `ephemeral_spawn::spawn_ephemeral_worker` derives the worker's manifest from
+/// `parent.manifest.clone()` — a third independent clone, reached by neither of
+/// the tests above — so it needs its own resolution call and its own guard.
+/// The worker inherits the parent's `base_url`, which is what puts it in front
+/// of the same mock.
+#[tokio::test(flavor = "multi_thread")]
+async fn top_p_catalog_override_reaches_the_ephemeral_worker_spawn() {
+    let (backend, kernel, agent_id, _dir) = boot_kernel_with_catalog_top_p_override().await;
+
+    kernel
+        .spawn_ephemeral_worker(librefang_types::ephemeral::EphemeralSpawnRequest::new(
+            agent_id,
+            "mission",
+            "do the thing",
+        ))
+        .await
+        .expect("the ephemeral worker must not error");
+
+    assert_every_request_carries_catalog_top_p(&backend, 1, "the ephemeral worker spawn path")
+        .await;
+
+    kernel.shutdown();
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn test_spawn_approval_sweep_task_is_idempotent() {
     let dir = tempfile::tempdir().unwrap();
@@ -3547,6 +3885,8 @@ async fn test_task_board_sweep_resets_stuck_in_progress_task() {
             "Worker will stall",
             Some("worker"),
             None,
+            0,
+            None,
             librefang_memory::TaskQueueCaps::UNLIMITED,
         )
         .await
@@ -3614,12 +3954,24 @@ async fn queue_depth_cap_reaches_task_post_and_answers_as_a_quota() {
     kernel.clone().set_self_handle();
 
     kernel
-        .task_post("first", "body", None, None)
+        .task_post(
+            "first",
+            "body",
+            None,
+            None,
+            &librefang_runtime::kernel_handle::TaskPostOptions::default(),
+        )
         .await
         .expect("the first post fits the cap");
 
     let err = kernel
-        .task_post("second", "body", None, None)
+        .task_post(
+            "second",
+            "body",
+            None,
+            None,
+            &librefang_runtime::kernel_handle::TaskPostOptions::default(),
+        )
         .await
         .expect_err("the second post exceeds max_depth_global = 1");
     assert!(
@@ -3654,9 +4006,24 @@ async fn a_reloaded_queue_depth_cap_takes_effect_without_a_restart() {
     let kernel = Arc::new(LibreFangKernel::boot_with_config(config).expect("Kernel should boot"));
     kernel.clone().set_self_handle();
 
-    kernel.task_post("first", "body", None, None).await.unwrap();
     kernel
-        .task_post("second", "body", None, None)
+        .task_post(
+            "first",
+            "body",
+            None,
+            None,
+            &librefang_runtime::kernel_handle::TaskPostOptions::default(),
+        )
+        .await
+        .unwrap();
+    kernel
+        .task_post(
+            "second",
+            "body",
+            None,
+            None,
+            &librefang_runtime::kernel_handle::TaskPostOptions::default(),
+        )
         .await
         .expect_err("at the cap");
 
@@ -3665,7 +4032,13 @@ async fn a_reloaded_queue_depth_cap_takes_effect_without_a_restart() {
     kernel.config.store(Arc::new(raised));
 
     kernel
-        .task_post("second", "body", None, None)
+        .task_post(
+            "second",
+            "body",
+            None,
+            None,
+            &librefang_runtime::kernel_handle::TaskPostOptions::default(),
+        )
         .await
         .expect("the raised cap is in force on the next post");
 
@@ -14976,6 +15349,7 @@ fn boot_canonical_recovery_advances_pointer_to_most_recently_active_session_5198
     let stale_session = librefang_memory::session::Session {
         id: stale_session_id,
         agent_id,
+        parent_session_id: None,
         messages: vec![],
         context_window_tokens: 0,
         label: None,
@@ -14999,6 +15373,7 @@ fn boot_canonical_recovery_advances_pointer_to_most_recently_active_session_5198
     let active_session = librefang_memory::session::Session {
         id: active_session_id,
         agent_id,
+        parent_session_id: None,
         messages: vec![
             librefang_types::message::Message::user("hello"),
             librefang_types::message::Message::assistant("world"),
@@ -15258,6 +15633,7 @@ async fn streaming_turn_on_non_canonical_session_survives_in_turn_auto_compactio
         .save_session(&MemSession {
             id: pinned_session_id,
             agent_id,
+            parent_session_id: None,
             messages: (0..SEEDED_MESSAGES)
                 .map(|i| Message::user(format!("seeded message {i}")))
                 .collect(),
@@ -15419,6 +15795,7 @@ async fn test_compact_gate_passes_when_tokens_above_threshold_but_messages_below
     let session = MemSession {
         id: session_id,
         agent_id,
+        parent_session_id: None,
         messages,
         context_window_tokens: 0,
         label: None,
@@ -15641,6 +16018,82 @@ fn suspend_resume_actually_transition_in_memory_state() {
         after_resume.state,
         AgentState::Running,
         "in-memory state must actually be Running after resume (#5137)"
+    );
+
+    kernel.shutdown();
+}
+
+/// #8041: suspend/resume rewrites `agent.toml` through `persist_agent_enabled`,
+/// a path that patches the `enabled` line directly instead of going through
+/// `persist_full_manifest_at`. Before this test's fix that write recorded no
+/// version-history snapshot at all, contradicting the changelog's "every
+/// config change is now recorded" — an operator toggling an agent off and
+/// back on would see the History tab unchanged.
+#[test]
+fn suspend_and_resume_each_record_a_manifest_version_snapshot() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp
+        .path()
+        .join("librefang-kernel-suspend-resume-history-8041");
+    std::fs::create_dir_all(&home_dir).unwrap();
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+
+    let agent_id = kernel
+        .spawn_agent_inner(
+            AgentManifest {
+                name: "suspend-resume-history-agent".to_string(),
+                source_template: None,
+                description: "exercises suspend/resume version history".to_string(),
+                author: "test".to_string(),
+                module: "builtin:chat".to_string(),
+                ..Default::default()
+            },
+            None,
+            None,
+            None,
+        )
+        .expect("agent should spawn");
+
+    let store = librefang_memory::ManifestVersionStore::new(kernel.memory.substrate.pool());
+
+    // `persist_agent_enabled` only patches `agent.toml` if it already exists on disk
+    // (`spawn_agent_inner` sets up the workspace but does not itself write the
+    // manifest file) — write the baseline first, matching a real agent that was
+    // loaded from an on-disk manifest before ever being suspended.
+    kernel.persist_manifest_to_disk(agent_id);
+
+    kernel
+        .suspend_agent(agent_id)
+        .expect("suspend should succeed");
+    let after_suspend = store
+        .list_for_agent(&agent_id.to_string(), 10)
+        .expect("history read should succeed");
+    assert_eq!(
+        after_suspend.first().map(|v| v.change_source.as_str()),
+        Some("suspend"),
+        "suspend must record its own version-history snapshot"
+    );
+
+    kernel
+        .resume_agent(agent_id)
+        .expect("resume should succeed");
+    let after_resume = store
+        .list_for_agent(&agent_id.to_string(), 10)
+        .expect("history read should succeed");
+    assert_eq!(
+        after_resume.first().map(|v| v.change_source.as_str()),
+        Some("resume"),
+        "resume must record its own version-history snapshot"
+    );
+    assert_eq!(
+        after_resume.len(),
+        3,
+        "the initial persist, the suspend snapshot, and the resume snapshot must all be present: {after_resume:?}"
     );
 
     kernel.shutdown();
@@ -19041,6 +19494,84 @@ fn boot_warns_that_a_non_local_tool_exec_backend_does_not_route_tool_calls_8221(
     kernel.shutdown();
 }
 
+/// Every `second_factor` other than `none` promises a TOTP code on some surface, and with nothing enrolled the daemon serves that surface without one — silently.
+///
+/// `Login` belongs in this list for the same reason as the other two, and it is the variant whose absence costs the most: it is the dashboard login that verifies the code (`server.rs`, under `requires_login_totp()`), and when no secret is confirmed the check is skipped outright, so an operator who set `second_factor = "login"` is back to a password-only login with a clean boot and no line anywhere saying so.
+/// `Both` covers that surface and the approval surface, and had the same silence.
+/// Only `Totp` ever produced the warning, because the check compared against that variant alone.
+#[test]
+fn boot_warns_for_every_second_factor_that_demands_a_code() {
+    // Each variant, and the surfaces the warning has to name for it.
+    // Asserting on the rendered text rather than on a predicate, for the reason
+    // the #8221 test above gives: the text is the deliverable, and a line that
+    // does not say which surface will run without a code leaves the operator to
+    // work out what they lost.
+    let cases = [
+        (SecondFactor::Totp, vec!["tool approvals"]),
+        (SecondFactor::Login, vec!["dashboard login"]),
+        (
+            SecondFactor::Both,
+            vec!["dashboard login", "tool approvals"],
+        ),
+    ];
+
+    let mut failures = Vec::new();
+
+    for (second_factor, expected_surfaces) in cases {
+        let tmp = tempfile::tempdir().unwrap();
+        let home_dir = tmp.path().join("librefang-second-factor-warning-test");
+        std::fs::create_dir_all(&home_dir).unwrap();
+        let config = KernelConfig {
+            home_dir: home_dir.clone(),
+            data_dir: home_dir.join("data"),
+            approval: ApprovalPolicy {
+                second_factor,
+                ..Default::default()
+            },
+            ..KernelConfig::default()
+        };
+
+        let logs = CapturedLogs::new();
+        let kernel = {
+            let _g = logs.install();
+            LibreFangKernel::boot_with_config(config).expect(
+                "a configured second factor with no enrollment is a misconfiguration to warn \
+                 about, not a boot failure",
+            )
+        };
+
+        let captured = logs.text();
+        if !captured.contains("not enrolled/confirmed") {
+            failures.push(format!("{second_factor:?}: boot said nothing at all"));
+            kernel.shutdown();
+            continue;
+        }
+        for surface in expected_surfaces {
+            if !captured.contains(surface) {
+                failures.push(format!(
+                    "{second_factor:?}: the warning never names {surface:?}"
+                ));
+            }
+        }
+        // The line has to echo the value as it is written in `config.toml`, not
+        // the Rust variant name — an operator greps their config for what the
+        // warning quotes.
+        let configured = format!("second_factor = \"{}\"", second_factor.as_str());
+        if !captured.contains(&configured) {
+            failures.push(format!(
+                "{second_factor:?}: the warning does not quote {configured:?}"
+            ));
+        }
+
+        kernel.shutdown();
+    }
+
+    assert!(
+        failures.is_empty(),
+        "boot did not explain what a configured second factor leaves unprotected: {failures:#?}"
+    );
+}
+
 /// #8220: booting with `[docker] mode = "all"` must say out loud that agent tool calls still run on the daemon host.
 ///
 /// Nothing in the daemon matches on `[docker] mode`, so an operator who set it believing they had moved every agent into a container moved nothing — `shell_exec` and `process_start` kept running as subprocesses, and the only path into a container stayed the `docker_exec` tool the model chooses for itself.
@@ -19191,4 +19722,139 @@ fn spawn_warns_that_a_per_agent_tool_exec_backend_does_not_route_tool_calls_8221
     );
 
     kernel.shutdown();
+}
+
+/// #8231: `set_agent_mcp_servers` reaches `persist_mcp_servers_to_disk`, which
+/// patches the `mcp_servers` array in the existing `agent.toml` with
+/// `patch_mcp_servers` + `atomic_write_toml` rather than going through
+/// `persist_full_manifest_at`. Snapshots are recorded only from the latter, so an
+/// operator changing an agent's MCP allowlist changed the file on disk while the
+/// History tab and the TUI pane kept showing the previous snapshot as the newest —
+/// "what changed on this agent, and when" answering wrong rather than incompletely.
+#[test]
+fn changing_the_mcp_allowlist_records_a_manifest_version_snapshot() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().join("librefang-kernel-mcp-history-8231");
+    std::fs::create_dir_all(&home_dir).unwrap();
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+
+    let agent_id = kernel
+        .spawn_agent_inner(
+            AgentManifest {
+                name: "mcp-history-agent".to_string(),
+                source_template: None,
+                description: "exercises MCP allowlist version history".to_string(),
+                author: "test".to_string(),
+                module: "builtin:chat".to_string(),
+                // Seeded so clearing the list is a real content change on disk and
+                // not a no-op write that would pass for the wrong reason.
+                mcp_servers: vec!["seeded-server".to_string()],
+                ..Default::default()
+            },
+            None,
+            None,
+            None,
+        )
+        .expect("agent should spawn");
+
+    let store = librefang_memory::ManifestVersionStore::new(kernel.memory.substrate.pool());
+
+    // `persist_mcp_servers_to_disk` patches `agent.toml` only when it already
+    // exists; the file-missing branch falls back to `persist_full_manifest_at`,
+    // which records anyway and would make this test pass without the fix.
+    kernel.persist_manifest_to_disk(agent_id);
+    let baseline = store
+        .list_for_agent(&agent_id.to_string(), 10)
+        .expect("history read should succeed");
+    assert_eq!(
+        baseline.first().map(|v| v.change_source.as_str()),
+        Some("update"),
+        "the baseline persist is the newest snapshot before the allowlist changes"
+    );
+
+    // An empty list skips name validation, so this exercises the persist path
+    // rather than the allowlist checks above it.
+    kernel
+        .set_agent_mcp_servers(agent_id, Vec::new())
+        .expect("clearing the MCP allowlist should succeed");
+
+    let after = store
+        .list_for_agent(&agent_id.to_string(), 10)
+        .expect("history read should succeed");
+    let newest = after.first().expect("a snapshot must exist");
+    assert_eq!(
+        newest.change_source, "mcp-servers",
+        "an MCP allowlist change must record its own snapshot, or the newest \
+         recorded version disagrees with what is on disk"
+    );
+    assert!(
+        !newest.manifest_toml.contains("seeded-server"),
+        "the snapshot must be the patched file, not a stale manifest: {}",
+        newest.manifest_toml
+    );
+
+    kernel.shutdown();
+}
+
+/// Regression for #7991 review: `reset_session` (and `reboot_session`, which
+/// shares the same `reset_one_session` implementation) used to delete the
+/// target session through the cascading `delete_session`, so resetting a
+/// session that had spawned sub-agent children silently deleted the whole
+/// descendant subtree with it — a "reset this one chat" call that took
+/// unrelated delegated audit trail down too, with nothing in the return
+/// value to say so.
+///
+/// Uses `reboot_session` (not `reset_session`) so the test doesn't need a
+/// working aux LLM client — `save_session_summary` only runs on the
+/// `reset_session` path, and its `>= 2 messages` gate is irrelevant here;
+/// the fix under test is about the delete primitive, not the summary.
+#[tokio::test(flavor = "multi_thread")]
+async fn resetting_a_session_does_not_cascade_delete_its_children() {
+    let kernel = cascade_test_kernel();
+    let agent_id = register_test_agent(&kernel, "reset-lineage-parent");
+
+    let parent = kernel.memory.substrate.create_session(agent_id).unwrap();
+    let child = librefang_memory::session::Session {
+        id: SessionId::new(),
+        agent_id,
+        parent_session_id: Some(parent.id),
+        messages: Vec::new(),
+        context_window_tokens: 0,
+        label: None,
+        model_override: None,
+        messages_generation: 0,
+        last_repaired_generation: None,
+        peer_id: None,
+    };
+    kernel.memory.substrate.save_session(&child).unwrap();
+
+    kernel
+        .reboot_session(agent_id, ResetScope::Session(parent.id))
+        .await
+        .expect("reboot must succeed");
+
+    assert!(
+        kernel
+            .memory
+            .substrate
+            .get_session(child.id)
+            .unwrap()
+            .is_some(),
+        "resetting the parent must not cascade-delete a child session — \
+         that is what the cascading `delete_session` is for, and \
+         `reset_session`/`reboot_session` must use the non-cascading \
+         `delete_session_only` instead"
+    );
+    let recreated_parent = kernel
+        .memory
+        .substrate
+        .get_session(parent.id)
+        .unwrap()
+        .expect("the parent sid must be recreated empty at the same id");
+    assert!(recreated_parent.messages.is_empty());
 }

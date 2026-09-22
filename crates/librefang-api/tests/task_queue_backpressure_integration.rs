@@ -9,6 +9,7 @@ use axum::body::{to_bytes, Body};
 use axum::http::{header, Method, Request, StatusCode};
 use librefang_api::server;
 use librefang_kernel::LibreFangKernel;
+use librefang_types::agent::AgentManifest;
 use librefang_types::config::{DefaultModelConfig, KernelConfig};
 use std::sync::Arc;
 use tower::ServiceExt;
@@ -24,6 +25,22 @@ struct RouterHarness {
 impl Drop for RouterHarness {
     fn drop(&mut self) {
         self.state.kernel.shutdown();
+    }
+}
+
+/// Manifest for one of the assignee labels these tests address tasks to.
+///
+/// `POST /api/tasks` refuses an `assigned_to` that names no registered agent, and the depth-cap and `?assigned_to=` assertions below compare tasks *across* assignees, so their labels have to resolve to real registry entries for those tasks to reach the queue at all.
+/// `alice` and `bob` are buckets the assertions compare against, not workers: nothing here asserts anything about the assignee, and addressing a task to an agent nobody meant to run a turn for is not a behaviour the queue tests are about.
+///
+/// `assignee_wake` is off for that reason.
+/// A default manifest can claim its own tasks, so leaving it on would start a turn for every task these tests post — 25 of them in the zero-cap test alone — against a provider that does not exist in CI (and, on a workstation running Ollama, against a real one).
+/// The cap, paging and filter assertions are unaffected by the wake either way; suppressing it keeps the harness doing what it did before these labels existed.
+fn assignee_label(name: &str) -> AgentManifest {
+    AgentManifest {
+        name: name.to_string(),
+        assignee_wake: Some(false),
+        ..AgentManifest::default()
     }
 }
 
@@ -53,6 +70,12 @@ async fn boot_router(customize: impl FnOnce(&mut KernelConfig)) -> RouterHarness
 
     let kernel = Arc::new(LibreFangKernel::boot_with_config(config).expect("kernel boot"));
     kernel.set_self_handle();
+    // Registered before the router is built, so the labels the cap and filter tests address their tasks to exist by the time the first `POST /api/tasks` lands.
+    for label in ["alice", "bob"] {
+        kernel
+            .spawn_agent(assignee_label(label))
+            .expect("assignee label must spawn");
+    }
     let (app, state) = server::build_router(kernel, "127.0.0.1:0".parse().expect("addr")).await;
 
     RouterHarness {

@@ -57,6 +57,7 @@ class LibreFang:
         self.groups = _GroupsResource(self)
         self.hands = _HandsResource(self)
         self.inbox = _InboxResource(self)
+        self.knowledge = _KnowledgeResource(self)
         self.mcp = _McpResource(self)
         self.media = _MediaResource(self)
         self.memory = _MemoryResource(self)
@@ -68,6 +69,7 @@ class LibreFang:
         self.sessions = _SessionsResource(self)
         self.skills = _SkillsResource(self)
         self.system = _SystemResource(self)
+        self.tasks = _TasksResource(self)
         self.tools = _ToolsResource(self)
         self.users = _UsersResource(self)
         self.vault = _VaultResource(self)
@@ -244,6 +246,15 @@ class _AgentsResource(_Resource):
     def patch_agent(self, id: str, **data):
         return self._c._request("PATCH", f"/api/agents/{id}", data)
 
+    def serve_agent_avatar(self, id: str):
+        return self._c._request("GET", f"/api/agents/{id}/avatar")
+
+    def upload_agent_avatar(self, id: str, body: bytes, content_type: str = "application/octet-stream"):
+        return self._c._request("POST", f"/api/agents/{id}/avatar", body, content_type=content_type)
+
+    def delete_agent_avatar(self, id: str):
+        return self._c._request("DELETE", f"/api/agents/{id}/avatar")
+
     def get_agent_channels(self, id: str):
         return self._c._request("GET", f"/api/agents/{id}/channels")
 
@@ -295,6 +306,12 @@ class _AgentsResource(_Resource):
     def agent_logs(self, id: str, n: Any = None, level: Any = None, offset: Any = None):
         return self._c._request("GET", f"/api/agents/{id}/logs", None, query={"n": n, "level": level, "offset": offset})
 
+    def get_agent_manifest_toml(self, id: str):
+        return self._c._request("GET", f"/api/agents/{id}/manifest")
+
+    def list_agent_manifest_history(self, id: str, limit: Any = None):
+        return self._c._request("GET", f"/api/agents/{id}/manifest-history", None, query={"limit": limit})
+
     def get_agent_mcp_servers(self, id: str):
         return self._c._request("GET", f"/api/agents/{id}/mcp_servers")
 
@@ -333,6 +350,9 @@ class _AgentsResource(_Resource):
 
     def list_agent_runtime(self, id: str):
         return self._c._request("GET", f"/api/agents/{id}/runtime")
+
+    def save_agent_as_agent_type(self, id: str, **data):
+        return self._c._request("POST", f"/api/agents/{id}/save-as-agent-type", data)
 
     def get_agent_session(self, id: str, session_id: Any = None):
         return self._c._request("GET", f"/api/agents/{id}/session", None, query={"session_id": session_id})
@@ -725,6 +745,32 @@ class _InboxResource(_Resource):
 
     def inbox_status(self):
         return self._c._request("GET", "/api/inbox/status")
+
+
+# ── Knowledge Resource ─────────────────────────────────────────
+
+class _KnowledgeResource(_Resource):
+
+    def list_bases(self):
+        return self._c._request("GET", "/api/knowledge")
+
+    def create_base(self, **data):
+        return self._c._request("POST", "/api/knowledge", data)
+
+    def delete_base(self, name: str):
+        return self._c._request("DELETE", f"/api/knowledge/{name}")
+
+    def set_holders(self, name: str, **data):
+        return self._c._request("PUT", f"/api/knowledge/{name}/agents", data)
+
+    def list_documents(self, name: str):
+        return self._c._request("GET", f"/api/knowledge/{name}/documents")
+
+    def put_document(self, name: str, filename: str, body: bytes, content_type: str = "application/octet-stream"):
+        return self._c._request("PUT", f"/api/knowledge/{name}/documents/{filename}", body, content_type=content_type)
+
+    def delete_document(self, name: str, filename: str):
+        return self._c._request("DELETE", f"/api/knowledge/{name}/documents/{filename}")
 
 
 # ── Mcp Resource ───────────────────────────────────────────────
@@ -1378,14 +1424,34 @@ class _SystemResource(_Resource):
     def promote_agent_type(self, name: str):
         return self._c._request("POST", f"/api/templates/{name}/promote")
 
+    def get_agent_type_registry_diff(self, name: str):
+        return self._c._request("GET", f"/api/templates/{name}/registry-diff")
+
+    def restore_agent_type_from_registry(self, name: str):
+        return self._c._request("POST", f"/api/templates/{name}/restore")
+
     def get_agent_template_toml(self, name: str):
         return self._c._request("GET", f"/api/templates/{name}/toml")
+
+    def put_agent_template_toml(self, name: str, body: bytes, content_type: str = "text/plain"):
+        return self._c._request("PUT", f"/api/templates/{name}/toml", body, content_type=content_type)
+
+    def post_agent_template_toml(self, name: str, body: bytes, content_type: str = "text/plain"):
+        return self._c._request("POST", f"/api/templates/{name}/toml", body, content_type=content_type)
 
     def version(self):
         return self._c._request("GET", "/api/version")
 
     def api_versions(self):
         return self._c._request("GET", "/api/versions")
+
+
+# ── Tasks Resource ─────────────────────────────────────────────
+
+class _TasksResource(_Resource):
+
+    def task_queue_post_root(self, **data):
+        return self._c._request("POST", "/api/tasks", data)
 
 
 # ── Tools Resource ─────────────────────────────────────────────
@@ -1409,6 +1475,9 @@ class _UsersResource(_Resource):
     def import_users(self, **data):
         return self._c._request("POST", "/api/users/import", data)
 
+    def serve_my_avatar(self):
+        return self._c._request("GET", "/api/users/me/avatar")
+
     def get_user(self, name: str):
         return self._c._request("GET", f"/api/users/{name}")
 
@@ -1417,6 +1486,18 @@ class _UsersResource(_Resource):
 
     def delete_user(self, name: str):
         return self._c._request("DELETE", f"/api/users/{name}")
+
+    def serve_user_avatar(self, name: str):
+        return self._c._request("GET", f"/api/users/{name}/avatar")
+
+    def upload_user_avatar(self, name: str, body: bytes, content_type: str = "application/octet-stream"):
+        return self._c._request("POST", f"/api/users/{name}/avatar", body, content_type=content_type)
+
+    def delete_user_avatar(self, name: str):
+        return self._c._request("DELETE", f"/api/users/{name}/avatar")
+
+    def update_user_identity(self, name: str, **data):
+        return self._c._request("PATCH", f"/api/users/{name}/identity", data)
 
     def get_user_policy(self, name: str):
         return self._c._request("GET", f"/api/users/{name}/policy")

@@ -19,12 +19,14 @@ api-error-template-parse-failed = Error al analizar la plantilla: { $error }
 api-error-template-required = Se requiere 'manifest_toml' o 'template'
 api-error-template-invalid-manifest = Manifiesto de plantilla no válido
 api-error-template-read-failed = Error al leer la plantilla
+api-error-template-snapshot-failed = No se pudo guardar una instantánea del tipo de agente actual, así que la restauración se canceló y no se sobrescribió nada. Inténtelo de nuevo.
 api-error-template-promote-no-token = No hay token de GitHub configurado. Conecte GitHub en Ajustes o defina GITHUB_TOKEN.
 api-error-template-promote-review-required = Esta plantilla todavía contiene datos privados que deben eliminarse antes de publicarla. Revise los hallazgos y edite el manifiesto.
 api-error-template-promote-render-failed = No se puede renderizar el manifiesto saneado como TOML: { $error }
 api-error-agent-type-exists = Ya existe un tipo de agente llamado '{ $name }'
 api-error-agent-type-name-taken = '{ $name }' es el nombre de un agente activo; elija otro nombre para el tipo de agente
 api-error-agent-type-not-editable = El tipo de agente '{ $name }' proviene del espacio de trabajo de un agente activo y se gestiona a través de /api/agents
+api-error-registry-type-not-found = Tipo de agente '{ $name }' no encontrado en el registro
 
 # Manifest errors
 api-error-manifest-too-large = Manifiesto demasiado grande (máx. 1 MB)
@@ -83,3 +85,6 @@ api-error-rate-limited = Límite de solicitudes excedido. Inténtelo de nuevo m�
 # typed MemoryRouteError-style helper. Without this key, every `t_args("api-error-generic", …)`
 # call returns the literal key as the response body and `$error` interpolation never runs.
 api-error-generic = Error: { $error }
+
+api-error-validation-avatar-url-invalid = La URL del avatar debe ser la ruta de avatar que este daemon sirve para el agente, o estar vacía. Sube la imagen en lugar de enlazarla.
+api-error-validation-color-invalid = El color debe ser un código hexadecimal que empiece por '#'

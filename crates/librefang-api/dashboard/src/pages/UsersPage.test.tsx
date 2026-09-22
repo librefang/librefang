@@ -5,12 +5,17 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { UsersPage } from "./UsersPage";
 import { useDrawerStore } from "../lib/drawerStore";
 import { useUsers } from "../lib/queries/users";
+import { useWhoami } from "../lib/queries/authz";
+import * as http from "../lib/http/client";
 import {
   useCreateUser,
   useUpdateUser,
   useDeleteUser,
   useImportUsers,
   useRotateUserKey,
+  useUpdateUserIdentity,
+  useUploadUserAvatar,
+  useDeleteUserAvatar,
 } from "../lib/mutations/users";
 import type { UserItem } from "../lib/http/client";
 
@@ -18,9 +23,34 @@ import type { UserItem } from "../lib/http/client";
 // Mocks (#3853 — UsersPage RBAC management page).
 // ---------------------------------------------------------------------------
 
-vi.mock("../lib/queries/users", () => ({
-  useUsers: vi.fn(),
+// `importActual` rather than a bare `{ useUsers: vi.fn() }`: the edit drawer
+// now mounts `UserAppearanceSection`, which reads `userQueries.avatar` and
+// renders `UserAvatar` through `useUserAvatarUrl` — both of which live in this
+// module, and a mock that omitted them would fail with a `TypeError` on the one
+// test that opens the drawer for the caller's own row.
+vi.mock("../lib/queries/users", async () => {
+  const actual = await vi.importActual<typeof import("../lib/queries/users")>(
+    "../lib/queries/users",
+  );
+  return { ...actual, useUsers: vi.fn() };
+});
+
+// The appearance editor asks who is signed in — that is what decides whether it
+// is drawn at all (#8339) — so the page test has to answer it. Left unmocked,
+// the drawer makes a real request to `/api/authz/whoami`.
+vi.mock("../lib/queries/authz", () => ({
+  useWhoami: vi.fn(),
 }));
+
+// The avatar probe fetches bytes behind the bearer token. Stubbed so the tests
+// that open the drawer do not reach for the network; the default below is the
+// 404 the daemon sends for a user with no picture.
+vi.mock("../lib/http/client", async () => {
+  const actual = await vi.importActual<typeof import("../lib/http/client")>(
+    "../lib/http/client",
+  );
+  return { ...actual, fetchAuthenticatedImage: vi.fn() };
+});
 
 vi.mock("../lib/mutations/users", () => ({
   useCreateUser: vi.fn(),
@@ -28,6 +58,9 @@ vi.mock("../lib/mutations/users", () => ({
   useDeleteUser: vi.fn(),
   useImportUsers: vi.fn(),
   useRotateUserKey: vi.fn(),
+  useUpdateUserIdentity: vi.fn(),
+  useUploadUserAvatar: vi.fn(),
+  useDeleteUserAvatar: vi.fn(),
 }));
 
 vi.mock("react-i18next", async () => {
@@ -92,6 +125,13 @@ const useUpdateUserMock = useUpdateUser as unknown as ReturnType<typeof vi.fn>;
 const useDeleteUserMock = useDeleteUser as unknown as ReturnType<typeof vi.fn>;
 const useImportUsersMock = useImportUsers as unknown as ReturnType<typeof vi.fn>;
 const useRotateUserKeyMock = useRotateUserKey as unknown as ReturnType<typeof vi.fn>;
+const useUpdateUserIdentityMock =
+  useUpdateUserIdentity as unknown as ReturnType<typeof vi.fn>;
+const useUploadUserAvatarMock =
+  useUploadUserAvatar as unknown as ReturnType<typeof vi.fn>;
+const useDeleteUserAvatarMock =
+  useDeleteUserAvatar as unknown as ReturnType<typeof vi.fn>;
+const useWhoamiMock = useWhoami as unknown as ReturnType<typeof vi.fn>;
 
 function makeUser(overrides: Partial<UserItem> = {}): UserItem {
   return {
@@ -143,6 +183,11 @@ function setMutationDefaults() {
   useUpdateUserMock.mockReturnValue(idleMut);
   useDeleteUserMock.mockReturnValue(idleMut);
   useImportUsersMock.mockReturnValue(idleMut);
+  // The appearance editor's three writes. Idle, and the tests here never fire
+  // them — the section's own file is where those paths are exercised.
+  useUpdateUserIdentityMock.mockReturnValue(idleMut);
+  useUploadUserAvatarMock.mockReturnValue(idleMut);
+  useDeleteUserAvatarMock.mockReturnValue(idleMut);
   useRotateUserKeyMock.mockReturnValue({
     ...idleMut,
     mutateAsync: vi.fn().mockResolvedValue({ plaintext: "rot-key-xyz" }),
@@ -181,6 +226,11 @@ describe("UsersPage", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     setMutationDefaults();
+    // The default answer is "nobody is signed in", which is what the pages
+    // under test here actually see: the drawable cases are the ones that opt in
+    // to a caller below.
+    useWhoamiMock.mockReturnValue({ data: undefined });
+    vi.mocked(http.fetchAuthenticatedImage).mockRejectedValue(new Error("404"));
     // Drawer state is a global zustand store — reset between tests so a
     // drawer left open by one test doesn't bleed into the next.
     useDrawerStore.setState({ isOpen: false, content: null });
@@ -281,5 +331,55 @@ describe("UsersPage", () => {
     // BulkImportModal body has an "Or paste CSV" label
     // (UsersPage.tsx:1340) — unique to the open import drawer.
     expect(await screen.findByText("Or paste CSV")).toBeInTheDocument();
+  });
+
+  // The appearance editor is drawn for the caller's own row and no other. That
+  // gate is not cosmetic: the only user-avatar path the dashboard may fetch is
+  // the literal `/api/users/me/avatar`, and `UserItem` carries no emoji, so
+  // over another user's row the editor would draw the *operator's* picture
+  // beside that user's name and seed the field from the operator's glyph.
+  it("offers the appearance editor when the edited row is the caller's own", async () => {
+    setUsers([makeUser({ name: "alice" })]);
+    useWhoamiMock.mockReturnValue({ data: { name: "alice", emoji: "🦊", role: "owner" } });
+    renderPage();
+
+    await userEvent.click(screen.getByRole("button", { name: "Edit" }));
+
+    // The hidden file input is unique to the section, and unlike its heading it
+    // does not depend on how this file's `t` stub renders a `defaultValue`.
+    expect(await screen.findByTestId("user-avatar-file-input")).toBeInTheDocument();
+    // Seeded from `whoami`, the one read that answers "what is this user's
+    // glyph" — and it only answers it for the caller.
+    expect(screen.getByLabelText("users.identity.emoji")).toHaveValue("🦊");
+  });
+
+  it("does not offer it over another user's row", async () => {
+    setUsers([makeUser({ name: "alice" })]);
+    useWhoamiMock.mockReturnValue({ data: { name: "bob", emoji: "🦊", role: "owner" } });
+    renderPage();
+
+    await userEvent.click(screen.getByRole("button", { name: "Edit" }));
+
+    // Prove the drawer actually opened before asserting what is missing from it
+    // — otherwise an "Edit" button that did nothing would pass this test.
+    expect(await screen.findByText("Channel bindings")).toBeInTheDocument();
+    expect(screen.queryByTestId("user-avatar-file-input")).not.toBeInTheDocument();
+  });
+
+  it("withholds it from a caller the daemon would refuse", async () => {
+    setUsers([makeUser({ name: "alice" })]);
+    // Own row, owner-not: every non-GET under `/api/users` is an Owner action
+    // on the daemon side, so an `admin` or `viewer` credential reaching these
+    // controls would be shown a button and given a 403.
+    useWhoamiMock.mockReturnValue({ data: { name: "alice", emoji: "🦊", role: "admin" } });
+    renderPage();
+
+    await userEvent.click(screen.getByRole("button", { name: "Edit" }));
+
+    expect(await screen.findByText("Channel bindings")).toBeInTheDocument();
+    expect(screen.queryByTestId("user-avatar-file-input")).not.toBeInTheDocument();
+    // The pair matters: the test above shows this same fixture DOES render the
+    // editor, so the absence here is the role and not a drawer that never opened.
+    expect(screen.getByDisplayValue("alice")).toBeInTheDocument();
   });
 });

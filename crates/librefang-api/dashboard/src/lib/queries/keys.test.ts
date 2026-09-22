@@ -28,6 +28,7 @@ import {
   pluginKeys,
   registryKeys,
   telemetryKeys,
+  vaultKeys,
   terminalKeys,
   commsKeys,
   skillKeys,
@@ -55,6 +56,21 @@ describe("query key factories", () => {
       expect(agentKeys.details()).toEqual(["agents", "detail"]);
       expect(agentKeys.detail("abc")).toEqual(["agents", "detail", "abc"]);
       expect(agentKeys.templates()).toEqual(["agents", "templates"]);
+      expect(agentKeys.mcpServers("abc")).toEqual([
+        "agents",
+        "mcpServers",
+        "abc",
+      ]);
+      expect(agentKeys.manifest("abc")).toEqual([
+        "agents",
+        "manifest",
+        "abc",
+      ]);
+      expect(agentKeys.channels("abc")).toEqual([
+        "agents",
+        "channels",
+        "abc",
+      ]);
       expect(agentKeys.sessions("abc")).toEqual([
         "agents",
         "sessions",
@@ -103,6 +119,30 @@ describe("query key factories", () => {
       const l = agentKeys.list({ includeHands: false });
       const ls = agentKeys.lists();
       expect(l.slice(0, ls.length)).toEqual(ls);
+    });
+
+    // #8041: `manifestHistory` used to be a sibling of `details()`, so every
+    // mutation that produced a snapshot had to remember a second explicit
+    // invalidation — and suspend/resume, which invalidate only `lists()`,
+    // could not reach it at all even though they now record a snapshot of
+    // their own. Nesting it under `detail(agentId)` makes one invalidation
+    // cover both.
+    it("nests manifestHistory under detail, so detail invalidation reaches it", () => {
+      expect(agentKeys.manifestHistory("abc")).toEqual([
+        ...agentKeys.detail("abc"),
+        "manifestHistory",
+      ]);
+      const prefix = agentKeys.detail("abc");
+      expect(agentKeys.manifestHistory("abc").slice(0, prefix.length)).toEqual(
+        prefix,
+      );
+    });
+
+    // The nesting must not make one agent's history invalidate another's.
+    it("scopes manifestHistory per agent", () => {
+      expect(agentKeys.manifestHistory("abc")).not.toEqual(
+        agentKeys.manifestHistory("xyz"),
+      );
     });
   });
 
@@ -350,6 +390,21 @@ describe("query key factories", () => {
     it("does not collide with agentKeys, which owns a different domain", () => {
       expect(agentTypeKeys.all).not.toEqual(agentKeys.all);
     });
+
+    // #8042: `registryDiff` used to be a sibling of `details()`, so
+    // invalidating `detail(name)` after a restore/save never reached it and
+    // the diff drawer could show a stale pre-restore comparison. Nesting it
+    // under `detail(name)` — the same pattern `history` already uses — means
+    // any prefix-matching `invalidateQueries({ queryKey: detail(name) })`
+    // reaches it too.
+    it("nests registryDiff under detail, like history, so detail invalidation reaches it", () => {
+      expect(agentTypeKeys.registryDiff("coder")).toEqual([
+        ...agentTypeKeys.detail("coder"),
+        "registry-diff",
+      ]);
+      const prefix = agentTypeKeys.detail("coder");
+      expect(agentTypeKeys.registryDiff("coder").slice(0, prefix.length)).toEqual(prefix);
+    });
   });
 
   describe("invalidation patterns", () => {
@@ -358,6 +413,11 @@ describe("query key factories", () => {
       expect(agentKeys.lists().slice(0, prefix.length)).toEqual(prefix);
       expect(agentKeys.details().slice(0, prefix.length)).toEqual(prefix);
       expect(agentKeys.templates().slice(0, prefix.length)).toEqual(prefix);
+      expect(agentKeys.mcpServers("x").slice(0, prefix.length)).toEqual(
+        prefix,
+      );
+      expect(agentKeys.manifest("x").slice(0, prefix.length)).toEqual(prefix);
+      expect(agentKeys.channels("x").slice(0, prefix.length)).toEqual(prefix);
       expect(agentKeys.sessions("x").slice(0, prefix.length)).toEqual(
         prefix,
       );
@@ -470,6 +530,15 @@ describe("query key factories", () => {
     });
   });
 
+  describe("vaultKeys", () => {
+    it("lists and list are prefixed with vaultKeys.all", () => {
+      const prefix = vaultKeys.all;
+      expect(vaultKeys.lists().slice(0, prefix.length)).toEqual(prefix);
+      expect(vaultKeys.list().slice(0, prefix.length)).toEqual(prefix);
+      expect(vaultKeys.list()).toEqual(["vault", "list"]);
+    });
+  });
+
   describe("all factories exist", () => {
     const factories = [
       agentKeys,
@@ -506,6 +575,7 @@ describe("query key factories", () => {
       configKeys,
       registryKeys,
       telemetryKeys,
+      vaultKeys,
       terminalKeys,
       userKeys,
       userBudgetKeys,

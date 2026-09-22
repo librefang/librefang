@@ -16,9 +16,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{
-    Arc, MutexGuard as StdMutexGuard, OnceLock, RwLock, RwLockReadGuard, RwLockWriteGuard,
-};
+use std::sync::{Arc, MutexGuard as StdMutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use tokio::io::BufReader;
 use tokio::process::Command;
 use tokio::sync::{mpsc, oneshot, watch, Mutex};
@@ -672,7 +670,6 @@ struct SpawnCtx {
     child: Arc<Mutex<Option<tokio::process::Child>>>,
     status: Arc<std::sync::Mutex<ChannelStatus>>,
     caps: Arc<RwLock<Caps>>,
-    account_id_cell: Arc<OnceLock<Option<String>>>,
     typing_tx: mpsc::Sender<TypingEvent>,
     tx: mpsc::Sender<ChannelMessage>,
     shutdown_rx: watch::Receiver<bool>,
@@ -1170,7 +1167,6 @@ async fn spawn_once(
     let adapter_name = ctx.name.clone();
     let status_clone = ctx.status.clone();
     let caps = ctx.caps.clone();
-    let account_id_cell = ctx.account_id_cell.clone();
     let reader_stdin = ctx.stdin_tx.clone();
     let typing_tx = ctx.typing_tx.clone();
     let tx = ctx.tx.clone();
@@ -1205,8 +1201,12 @@ async fn spawn_once(
                                             params.notification_recipients.clone();
                                         caps_guard.header_rules = params.header_rules.clone();
                                     }
-                                    let _ = account_id_cell
-                                        .set(params.account_id.clone());
+                                    // `params.account_id` is deliberately not
+                                    // retained: the routing identity of a
+                                    // sidecar is its config `name` (see
+                                    // `SidecarAdapter::account_id`), and the
+                                    // field stays on the wire only so adapters
+                                    // that report one keep parsing.
                                     match classify_protocol_version(params.protocol_version) {
                                         ProtocolSkew::Match => info!(
                                             adapter = %adapter_name,
@@ -1654,14 +1654,6 @@ pub struct SidecarAdapter {
     status: Arc<std::sync::Mutex<ChannelStatus>>,
     /// Capabilities declared by the adapter's `ready` event.
     caps: Arc<RwLock<Caps>>,
-    /// `account_id` from `ready` — set once, returned as `&str` by
-    /// `account_id()` (a sync `&str` return can't borrow a lock guard).
-    /// `OnceLock`: captured from the first `ready` only. A `ready` after
-    /// a supervised restart cannot change it (the `set` is a no-op once
-    /// initialized). This is intentional — `account_id` is stable
-    /// adapter identity; a restarted child reporting a different id
-    /// would indicate a misconfigured adapter, not a value to adopt.
-    account_id_cell: Arc<OnceLock<Option<String>>>,
     /// Sender half feeding `typing_events()`. The reader pushes inbound
     /// `Typing` events here best-effort.
     typing_tx: mpsc::Sender<TypingEvent>,
@@ -1797,7 +1789,6 @@ impl SidecarAdapter {
             supervisor: Mutex::new(None),
             status: Arc::new(std::sync::Mutex::new(ChannelStatus::default())),
             caps: Arc::new(RwLock::new(Caps::default())),
-            account_id_cell: Arc::new(OnceLock::new()),
             typing_tx,
             typing_rx: Arc::new(std::sync::Mutex::new(Some(typing_rx))),
             sup: SupCfg::from_config(config),
@@ -1857,7 +1848,6 @@ impl ChannelAdapter for SidecarAdapter {
             child: self.child.clone(),
             status: self.status.clone(),
             caps: self.caps.clone(),
-            account_id_cell: self.account_id_cell.clone(),
             typing_tx: self.typing_tx.clone(),
             tx: tx.clone(),
             shutdown_rx: self.shutdown_rx.clone(),
@@ -2317,8 +2307,34 @@ impl ChannelAdapter for SidecarAdapter {
             .clone()
     }
 
+    /// Instance identity for this adapter — the sidecar's config `name`.
+    ///
+    /// This value has to be the *same string* the router keys
+    /// `channel_defaults` under, because it is what every lookup builds
+    /// its account-qualified key from, and a key that no seed wrote is a
+    /// silent miss rather than a visible error (#8408):
+    ///
+    /// - the router-population loop in `channel_bridge.rs` seeds every
+    ///   sidecar under `"<channel_type>:<config name>"` — qualified,
+    ///   never bare, because a sidecar always has a name (#5955);
+    /// - the reader stamps inbound `metadata["account_id"]` from the same
+    ///   config name, which is what inbound routing hands to
+    ///   `resolve_with_context`;
+    /// - the approval listener looks the account up through *this*
+    ///   method, and matches `AgentBinding::match_rule.account_id`
+    ///   constraints through it as well.
+    ///
+    /// The `ready` event's own `account_id` is deliberately not used. It
+    /// is optional on the wire, and a sidecar that omits it used to send
+    /// this method to `None`, dropping the approval lookup to the bare
+    /// `"<channel_type>"` key that no sidecar is ever seeded under — so
+    /// every approval missed every adapter, stayed queued, and filled the
+    /// per-agent pending-approval cap until the agent could not call a
+    /// tool at all. When a sidecar does report one and it differs from
+    /// the config name, it names a key the router never stores, so it
+    /// cannot be a routing identity either.
     fn account_id(&self) -> Option<&str> {
-        self.account_id_cell.get().and_then(|o| o.as_deref())
+        Some(&self.name)
     }
 }
 
@@ -3720,7 +3736,11 @@ mod tests {
             .await
             .is_ok());
         assert!(!a.supports_streaming());
-        assert!(a.account_id().is_none());
+        // `account_id()` is NOT cap-gated: it is config identity, known
+        // before any `ready` arrives (the same name the router seeds and
+        // the reader stamps — #8408). Every other method here degrades to
+        // the pre-`ready` default.
+        assert_eq!(a.account_id(), Some("dummy"));
         assert!(a.notification_recipients().is_empty());
         assert!(!a.suppress_error_responses());
         assert!(a.fetch_headers_for("https://x/y").is_empty());
@@ -4174,7 +4194,73 @@ mod tests {
              preserved, not overwritten by the adapter name"
         );
 
+        // #8408 — the routing identity is that same config name, not the
+        // `ready`-event `account_id` the script reported (`"ready-acct"`).
+        // The router only ever seeds `"<channel_type>:<config name>"`, so
+        // answering the account lookup with the reported value is a key
+        // that cannot exist.
+        assert_eq!(
+            adapter.account_id(),
+            Some("bot-a"),
+            "the account the approval lookup builds its key from must be the \
+             config name, not the ready-event account_id"
+        );
+
         adapter.stop().await.unwrap();
+    }
+
+    /// #8408 — an approval lookup only finds an adapter when the account
+    /// it builds its key from is the account the router was seeded with.
+    /// A miss is silent: the approval stays queued, fills the per-agent
+    /// pending-approval cap, and the agent can no longer call a tool.
+    ///
+    /// Both keys are built here from their production sources rather than
+    /// restated, so the test cannot drift from either side. The seed form
+    /// is the router-population loop's (`channel_bridge.rs`:
+    /// `"<channel_type>:<config name>"`, always qualified because a
+    /// sidecar always has a name). The lookup form is the approval
+    /// listener's (`bridge.rs` `adapter_routing`: account-qualified when
+    /// `account_id()` is `Some`, bare otherwise). Before this fix a
+    /// sidecar that reported no account in `ready` produced the bare key,
+    /// which no sidecar is ever seeded under.
+    #[test]
+    fn account_id_is_the_key_the_router_is_seeded_with() {
+        use crate::router::{channel_type_to_str, AgentRouter};
+        use librefang_types::agent::AgentId;
+
+        // Pinned to Telegram so the two keys read exactly like the
+        // deployment in the report (`telegram:telegram` seeded, bare
+        // `telegram` looked up) rather than relying on the config
+        // default, which happens to name the channel after the instance.
+        let config: librefang_types::config::SidecarChannelConfig =
+            serde_json::from_value(serde_json::json!({
+                "name": "bot-a",
+                "command": "true",
+                "channel_type": "telegram",
+            }))
+            .expect("SidecarChannelConfig from minimal json");
+        let adapter = SidecarAdapter::new(&config, std::env::temp_dir());
+        let ct = adapter.channel_type();
+
+        // The seed side, exactly as `channel_bridge.rs` writes it.
+        let router = AgentRouter::new();
+        let seeded_key = format!("{}:{}", channel_type_to_str(&ct), config.name);
+        let agent = AgentId::new();
+        router.set_channel_default(seeded_key.clone(), agent);
+
+        // The lookup side, exactly as the approval fan-out builds it.
+        let looked_up_key = match adapter.account_id() {
+            Some(aid) => format!("{}:{}", channel_type_to_str(&ct), aid),
+            None => channel_type_to_str(&ct).to_string(),
+        };
+
+        assert_eq!(
+            router.channel_default(&looked_up_key),
+            Some(agent),
+            "the approval lookup key {looked_up_key:?} must be the key the \
+             seed wrote ({seeded_key:?}) — a mismatch is the silent miss that \
+             strands every approval (#8408)"
+        );
     }
 
     // ── build_spawn_env precedence tests ───────────────────────────

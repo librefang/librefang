@@ -6230,7 +6230,7 @@
           "minimum": 0.0
         },
         "auth_rate_limit_per_ip": {
-          "description": "Max login attempts per IP per 15-minute window on auth endpoints (`/api/auth/dashboard-login`, `/api/auth/login*`). Default: 10. Set to 0 to disable the per-IP auth rate limiter.",
+          "description": "Max login attempts per IP per 15-minute window on auth endpoints (`/api/auth/dashboard-login`, `/api/auth/login*`, `/api/auth/introspect`, `/api/auth/refresh`, the OAuth callback and the passkey ceremonies), plus two of the endpoints that verify a TOTP or recovery code: `/api/approvals/totp/confirm` always counts, and `/api/approvals/{id}/approve` counts only while the approval policy requires a code (`approval.second_factor` of `totp` or `both`) — with the default `none` an approval verifies nothing, and metering it would spend this login budget on approvals that already succeeded and lock a working operator out.\n\n`/api/approvals/totp/setup` (the `current_code` a re-enrollment sends) and `/api/approvals/totp/revoke` verify codes as well and are deliberately not counted here: each is an Owner-only write performed once, and each already fails closed on its own TOTP lockout — five failed codes, then a five-minute refusal — so this budget would only lengthen that brake.\n\nDefault: 10. Set to 0 to disable the per-IP auth rate limiter.",
           "default": 10,
           "type": "integer",
           "format": "uint32",
@@ -7421,7 +7421,7 @@
       ]
     },
     "TaskBoardConfig": {
-      "description": "Task-board (shared-task-queue) safety knobs.\n\nWhen a worker agent calls `task_claim` the task transitions to `in_progress` and `claimed_at` is stamped. If the worker's LLM stalls (empty response, crash, timeout) it will never call `task_complete` and the task would otherwise stay `in_progress` forever — no retry, no external signal, no way for the delegator to know something broke (issues #2923, #2926).\n\nThe sweeper runs in the kernel and flips stuck tasks back to `pending` so they can be reclaimed, clearing `assigned_to` in the process.\n\nConfigure in config.toml: ```toml [task_board] claim_ttl_secs = 600         # 10 minutes — auto-reset after this sweep_interval_secs = 30     # how often the sweeper runs assignee_wake = true         # wake the assignee even with no trigger declared ```\n\nSetting `claim_ttl_secs = 0` disables the sweeper entirely — useful for long-running human-in-the-loop tasks where a 10 minute reset would be wrong.\n\nEvery field is re-read live by its consumer — the sweeper re-reads its three knobs on each tick, and `assignee_wake` is read at the synthesis site on each `TaskPosted` — so the whole struct is hot-reloadable (`config_reload::build_reload_plan`).",
+      "description": "Task-board (shared-task-queue) safety knobs.\n\nWhen a worker agent calls `task_claim` the task transitions to `in_progress` and `claimed_at` is stamped. If the worker's LLM stalls (empty response, crash, timeout) it will never call `task_complete` and the task would otherwise stay `in_progress` forever — no retry, no external signal, no way for the delegator to know something broke (issues #2923, #2926).\n\nThe sweeper runs in the kernel and flips stuck tasks back to `pending` so they can be reclaimed, clearing `assigned_to` in the process.\n\nConfigure in config.toml: ```toml [task_board] claim_ttl_secs = 600         # 10 minutes — auto-reset after this sweep_interval_secs = 30     # how often the sweeper runs assignee_wake = true         # wake the assignee even with no trigger declared ```\n\nSetting `claim_ttl_secs = 0` disables the *global* clock, not a clock a task explicitly carries: a task that declared its own `timeout_secs` still expires, because that is a more specific statement than the global default. Useful for long-running human-in-the-loop tasks where a 10 minute reset would be wrong — as long as those tasks do not carry a per-task timeout.\n\nEvery field is re-read live by its consumer — the sweeper re-reads its three knobs on each tick, and `assignee_wake` is read at the synthesis site on each `TaskPosted` — so the whole struct is hot-reloadable (`config_reload::build_reload_plan`).",
       "type": "object",
       "properties": {
         "assignee_wake": {
@@ -7430,7 +7430,7 @@
           "type": "boolean"
         },
         "claim_ttl_secs": {
-          "description": "How long an `in_progress` task may stay claimed before the sweeper resets it to `pending`. Default: 600 s (10 minutes). 0 disables.",
+          "description": "How long an `in_progress` task may stay claimed before the sweeper resets it to `pending`. Default: 600 s (10 minutes). 0 disables the global clock only — a task that declared its own `timeout_secs` still expires.",
           "default": 600,
           "type": "integer",
           "format": "uint64",
@@ -8239,6 +8239,13 @@
           "additionalProperties": {
             "$ref": "#/definitions/ChannelToolPolicy"
           }
+        },
+        "emoji": {
+          "description": "A short glyph the operator picked to stand for this user in the dashboard (#8339).\n\nFree-form text rather than an enum or a validated emoji table: the set of glyphs a person may want is not something this daemon should have an opinion about, and the value only ever reaches a DOM text node. The write path bounds its length and refuses control characters — the two properties that matter for a value that is stored in `config.toml` and rendered — and nothing else.\n\n`None` (or an absent key) means \"no glyph chosen\", which the dashboard renders as the user's initial. The avatar *image* deliberately does not live here: it is a file on disk, and whether one exists is answered by probing the directory rather than by a second copy of the answer that can fall out of step with it.",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "memory_access": {
           "description": "Memory namespace ACL — controls reads/writes to memory scopes (`proactive`, `kv:*`, etc.) and PII redaction. `None` means \"use the role default ACL\".",

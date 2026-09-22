@@ -681,6 +681,15 @@ pub struct BulkCreateResult {
     pub name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// Machine-readable failure reason (`template_not_found`,
+    /// `template_read_failed`, `manifest_too_large`, `signature_invalid`,
+    /// `invalid_manifest`, `agent_already_exists`, `spawn_failed`, …), the
+    /// same codes `POST /api/agents` returns as the response `code` field.
+    /// `error` alone is already translated into nine locales, so a caller
+    /// cannot branch on it to tell "template missing" apart from "template
+    /// unreadable" without substring-matching localized prose (#8112).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub code: Option<&'static str>,
 }
 
 /// Request containing a list of agent IDs for bulk operations (delete/start/stop).
@@ -997,12 +1006,14 @@ mod tests {
             agent_id: Some("abc-123".into()),
             name: Some("test-agent".into()),
             error: None,
+            code: None,
         };
         let json = serde_json::to_value(&result).unwrap();
         assert_eq!(json["success"], true);
         assert_eq!(json["agent_id"], "abc-123");
-        // error field should be omitted (skip_serializing_if)
+        // error/code fields should be omitted (skip_serializing_if)
         assert!(json.get("error").is_none());
+        assert!(json.get("code").is_none());
     }
 
     #[test]
@@ -1013,10 +1024,15 @@ mod tests {
             agent_id: None,
             name: None,
             error: Some("Invalid manifest".into()),
+            code: Some("invalid_manifest"),
         };
         let json = serde_json::to_value(&result).unwrap();
         assert_eq!(json["success"], false);
         assert_eq!(json["error"], "Invalid manifest");
+        // #8112: `code` carries the machine-readable reason alongside the
+        // translated `error` prose, so a bulk caller can branch on it the
+        // same way a single `POST /api/agents` caller branches on its `code`.
+        assert_eq!(json["code"], "invalid_manifest");
         // agent_id and name should be omitted
         assert!(json.get("agent_id").is_none());
         assert!(json.get("name").is_none());

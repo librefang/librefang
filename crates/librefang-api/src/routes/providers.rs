@@ -2173,13 +2173,9 @@ pub async fn enable_provider(
 /// a built-in local one: the periodic probe loop, `POST .../test`, and the
 /// live-model filter applied to `/api/models`.
 ///
-/// The flag is persisted into the provider's own `providers/{name}.toml`
-/// `[provider]` table, which is where the catalog reads it back from on the
-/// next boot. Registry-managed files are rewritten by the boot-time registry
-/// sync when their content drifts from the upstream copy, so the flag is
-/// durable for the custom providers this endpoint exists to serve and
-/// intentionally best-effort for built-in ids — whose discovery behaviour is
-/// decided by the id branch of the predicate anyway.
+/// The preference is operator state, so it is stored where the operator's other provider preferences already live — `data/provider_discovery.json` — and applied over the catalog at boot.
+/// It deliberately does not go into the provider's own `providers/{name}.toml`: the boot-time registry sync rewrites those files from the registry, and no registry-shipped file carries `discover_models` at all, so a toggle written there was cleared by the next restart (#8407).
+/// The setting therefore survives restarts for every provider, built-in ids included.
 #[utoipa::path(
     put,
     path = "/api/providers/{name}/discovery",
@@ -2197,8 +2193,8 @@ pub async fn set_provider_discovery(
     Path(name): Path<String>,
     Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
-    // The name is joined into `providers/{name}.toml`, so gate its shape
-    // before it reaches `Path::join` — same boundary as `set_provider_key`.
+    // The name becomes a key in the preference file and is matched against
+    // provider ids, so gate its shape — same boundary as `set_provider_key`.
     if let Err(msg) = crate::validation::check_provider_name_shape(&name) {
         return ApiErrorResponse::bad_request(msg).into_json_tuple();
     }
@@ -2211,27 +2207,38 @@ pub async fn set_provider_discovery(
         }
     };
 
-    // Capture the updated record, not just a success flag: the file written
-    // below has to carry the provider's identity fields or the catalog loader
-    // cannot read it back (#7776).
-    let mut applied: Option<librefang_types::model_catalog::ProviderInfo> = None;
+    // `data/` is where the operator's other provider state lives
+    // (`model_overrides.json`, `suppressed_providers.json`) and a directory the
+    // registry sync never writes to, which is what makes the setting durable
+    // (#8407).
+    let prefs_path = state
+        .kernel
+        .home_dir()
+        .join("data")
+        .join("provider_discovery.json");
+    let mut applied = false;
+    let mut write_error: Option<String> = None;
     let sink = &mut applied;
+    let err_sink = &mut write_error;
     let name_for_closure = name.clone();
     state.kernel.model_catalog_update(&mut move |catalog| {
-        if catalog.set_provider_discover_models(&name_for_closure, discover) {
-            *sink = catalog.get_provider(&name_for_closure).cloned();
+        if catalog.set_provider_discover_preference(&name_for_closure, discover) {
+            // Surface a failed write instead of answering 200: the in-memory flip
+            // already happened, and a preference that never reached disk comes
+            // back as "off" on the next boot — the failure this endpoint exists to
+            // end (#7776, #8407).
+            match catalog.save_discover_prefs(&prefs_path) {
+                Ok(()) => *sink = true,
+                Err(e) => *err_sink = Some(e.to_string()),
+            }
         }
     });
-    let Some(provider) = applied else {
+    if let Some(e) = write_error {
+        return ApiErrorResponse::internal_scrub(e).into_json_tuple();
+    }
+    if !applied {
         return ApiErrorResponse::not_found(format!("Provider '{}' not found", name))
             .into_json_tuple();
-    };
-
-    let providers_dir = state.kernel.home_dir().join("providers");
-    if let Err(e) = upsert_provider_discover_models(&providers_dir, &provider, discover) {
-        // The in-memory flip already happened; report the failure rather than
-        // letting the setting silently revert on the next daemon boot.
-        return ApiErrorResponse::internal_scrub(e).into_json_tuple();
     }
 
     (
@@ -2242,63 +2249,6 @@ pub async fn set_provider_discovery(
             "discover_models": discover,
         })),
     )
-}
-
-/// Persist `discover_models` into `providers/{name}.toml`'s `[provider]` table.
-///
-/// Uses `toml_edit` so the rest of the file — the `[[models]]` array a custom
-/// provider carries, comments, key order — survives byte-for-byte. Creates a
-/// file only when none exists, which happens for entries that live solely in
-/// memory (a `[provider_urls]`-only custom provider).
-///
-/// The record written has to be one the catalog loader can read back. Writing
-/// `id` and the flag alone produced a file that failed to deserialize, so the
-/// loader discarded it whole and the setting silently reverted on every boot
-/// (#7776). Identity fields therefore come from the live `ProviderInfo` the
-/// caller just confirmed exists, and any of them already present in the file
-/// is left untouched — the operator's own value wins over the in-memory one,
-/// and an unrelated toggle never rewrites a hand-maintained catalog file.
-fn upsert_provider_discover_models(
-    providers_dir: &std::path::Path,
-    provider: &librefang_types::model_catalog::ProviderInfo,
-    discover: bool,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let name = provider.id.as_str();
-    let path = providers_dir.join(format!("{name}.toml"));
-    let mut doc: toml_edit::DocumentMut = match std::fs::read_to_string(&path) {
-        Ok(raw) => raw.parse()?,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => toml_edit::DocumentMut::new(),
-        Err(e) => return Err(e.into()),
-    };
-
-    // A file that somehow lacks the `[provider]` table (models-only catalog
-    // fragment) gets one, so the flag lands where `ProviderCatalogToml` reads it.
-    if !doc.get("provider").is_some_and(|item| item.is_table()) {
-        doc["provider"] = toml_edit::Item::Table(toml_edit::Table::new());
-    }
-    let table = &mut doc["provider"];
-    if !table.get("id").is_some_and(|v| v.is_str()) {
-        table["id"] = toml_edit::value(name);
-    }
-    if !table.get("display_name").is_some_and(|v| v.is_str()) {
-        table["display_name"] = toml_edit::value(provider.display_name.as_str());
-    }
-    if !table.get("api_key_env").is_some_and(|v| v.is_str()) {
-        table["api_key_env"] = toml_edit::value(provider.api_key_env.as_str());
-    }
-    if !table.get("base_url").is_some_and(|v| v.is_str()) {
-        table["base_url"] = toml_edit::value(provider.base_url.as_str());
-    }
-    // `key_required` deserializes to `true` when absent, so only a provider
-    // that genuinely needs no key has to say so.
-    if !provider.key_required && !table.get("key_required").is_some_and(|v| v.is_bool()) {
-        table["key_required"] = toml_edit::value(false);
-    }
-    table["discover_models"] = toml_edit::value(discover);
-
-    std::fs::create_dir_all(providers_dir)?;
-    crate::atomic_write(&path, doc.to_string().as_bytes())?;
-    Ok(())
 }
 
 /// POST /api/providers/{name}/test — Test a provider's connectivity.
@@ -3557,7 +3507,7 @@ mod tests {
     use super::{
         parse_claude_code_settings_model, parse_codex_configured_model,
         parse_gemini_style_settings_model, scrubbed_provider_error, synthesized_cli_model_row,
-        upsert_provider_discover_models, upsert_provider_urls,
+        upsert_provider_urls,
     };
     use crate::routes::agent_templates::{get_profile, list_profiles};
     use axum::body::Body;
@@ -3565,129 +3515,6 @@ mod tests {
     use axum::routing::get;
     use axum::{Json, Router};
     use tower::ServiceExt;
-
-    /// Build the live catalog record the discovery handler passes to the writer.
-    fn live_provider(id: &str) -> librefang_types::model_catalog::ProviderInfo {
-        librefang_types::model_catalog::ProviderInfo {
-            id: id.to_string(),
-            display_name: "LiteLLM Gateway".to_string(),
-            api_key_env: "LITELLM_API_KEY".to_string(),
-            base_url: "https://gateway.internal/v1".to_string(),
-            key_required: true,
-            ..Default::default()
-        }
-    }
-
-    /// #7776: the file created for a provider that lived only in memory has to
-    /// be one the catalog loader can read back. It used to carry `id` and the
-    /// flag alone, which failed deserialization, so the loader dropped the file
-    /// and the operator's opt-in reverted on the next boot.
-    #[test]
-    fn a_freshly_created_provider_file_round_trips_through_the_catalog_loader() {
-        let dir = tempfile::tempdir().unwrap();
-        let providers = dir.path().join("providers");
-        upsert_provider_discover_models(&providers, &live_provider("litellm"), true).unwrap();
-
-        let written = std::fs::read_to_string(providers.join("litellm.toml")).unwrap();
-        let catalog = librefang_runtime::model_catalog::ModelCatalog::new_from_dir(&providers);
-        let provider = catalog
-            .get_provider("litellm")
-            .unwrap_or_else(|| panic!("written file must load back; content:\n{written}"));
-
-        assert!(provider.discover_models, "content:\n{written}");
-        assert_eq!(provider.display_name, "LiteLLM Gateway");
-        assert_eq!(provider.api_key_env, "LITELLM_API_KEY");
-        assert_eq!(provider.base_url, "https://gateway.internal/v1");
-        assert!(provider.key_required);
-    }
-
-    /// A provider that needs no key has to say so explicitly, because
-    /// `key_required` deserializes to `true` when the key is absent.
-    #[test]
-    fn a_keyless_provider_records_key_required_false() {
-        let dir = tempfile::tempdir().unwrap();
-        let providers = dir.path().join("providers");
-        let mut info = live_provider("local-gateway");
-        info.key_required = false;
-        upsert_provider_discover_models(&providers, &info, true).unwrap();
-
-        let catalog = librefang_runtime::model_catalog::ModelCatalog::new_from_dir(&providers);
-        assert!(!catalog.get_provider("local-gateway").unwrap().key_required);
-    }
-
-    /// The writer's doc-comment promises the rest of the file survives
-    /// byte-for-byte. Adding the flag must not reflow the `[[models]]` array,
-    /// drop comments, or rewrite values the operator maintains by hand.
-    #[test]
-    fn upserting_the_flag_leaves_the_rest_of_the_file_byte_identical() {
-        let original = concat!(
-            "# Hand-maintained gateway catalog — do not regenerate.\n",
-            "[provider]\n",
-            "id = \"litellm\"\n",
-            "display_name = \"Operator's Own Name\"\n",
-            "api_key_env = \"OPS_TOKEN\"\n",
-            "base_url = \"https://ops.internal/v1\"\n",
-            "\n",
-            "# The five models this gateway actually fronts.\n",
-            "[[models]]\n",
-            "id = \"gpt-4o\"\n",
-            "display_name = \"GPT-4o\"\n",
-            "tier = \"smart\"\n",
-            "context_window = 128000\n",
-            "max_output_tokens = 16384\n",
-            "input_cost_per_m = 2.5\n",
-            "output_cost_per_m = 10.0\n",
-            "supports_tools = true\n",
-            "supports_vision = true\n",
-            "supports_streaming = true\n",
-        );
-        let dir = tempfile::tempdir().unwrap();
-        let providers = dir.path().join("providers");
-        std::fs::create_dir_all(&providers).unwrap();
-        let path = providers.join("litellm.toml");
-        std::fs::write(&path, original).unwrap();
-
-        upsert_provider_discover_models(&providers, &live_provider("litellm"), true).unwrap();
-        let persisted = std::fs::read_to_string(&path).unwrap();
-
-        assert_eq!(
-            persisted.replace("discover_models = true\n", ""),
-            original,
-            "adding the flag is the only edit; got:\n{persisted}"
-        );
-
-        // And the operator's values win over the live in-memory record.
-        let catalog = librefang_runtime::model_catalog::ModelCatalog::new_from_dir(&providers);
-        let provider = catalog.get_provider("litellm").unwrap();
-        assert_eq!(provider.display_name, "Operator's Own Name");
-        assert_eq!(provider.api_key_env, "OPS_TOKEN");
-        assert_eq!(provider.base_url, "https://ops.internal/v1");
-        assert!(provider.discover_models);
-        assert_eq!(provider.model_count, 1, "the models array is still parsed");
-    }
-
-    /// A file written by an older build carries the broken partial shape. The
-    /// next toggle has to heal it rather than rewrite the same unreadable file.
-    #[test]
-    fn upserting_over_a_legacy_partial_file_completes_the_record() {
-        let dir = tempfile::tempdir().unwrap();
-        let providers = dir.path().join("providers");
-        std::fs::create_dir_all(&providers).unwrap();
-        let path = providers.join("litellm.toml");
-        std::fs::write(
-            &path,
-            "[provider]\nid = \"litellm\"\ndiscover_models = true\n",
-        )
-        .unwrap();
-
-        upsert_provider_discover_models(&providers, &live_provider("litellm"), true).unwrap();
-
-        let catalog = librefang_runtime::model_catalog::ModelCatalog::new_from_dir(&providers);
-        let provider = catalog.get_provider("litellm").unwrap();
-        assert_eq!(provider.base_url, "https://gateway.internal/v1");
-        assert_eq!(provider.api_key_env, "LITELLM_API_KEY");
-        assert!(provider.discover_models);
-    }
 
     #[test]
     fn provider_internal_errors_do_not_expose_source_details() {

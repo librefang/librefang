@@ -8,6 +8,7 @@
 //! if the HTTP download fails, for users behind proxies that block GitHub
 //! archive downloads.
 
+use sha2::{Digest, Sha256};
 use std::path::Path;
 use std::process::Command;
 use std::sync::{Mutex, MutexGuard};
@@ -152,10 +153,8 @@ pub fn refresh_registry_checkout(
 
 /// Sync all content from the registry to the local librefang home directory.
 ///
-/// Downloads the registry tarball via HTTP, extracts it, then copies items
-/// that don't already exist on disk (preserves user customization).
-/// Tries git first (incremental pull, supports private forks), falls back to
-/// HTTP tarball download when git is unavailable (Docker, minimal VMs).
+/// Downloads the registry tarball via HTTP, extracts it, then installs content from it — leaving alone any file the operator has edited, which it keeps and reports (see the ownership rule on `ManagedManifest`).
+/// Tries git first (incremental pull, supports private forks), and falls back to the HTTP tarball when git is unavailable (Docker, minimal VMs) or blocked by a proxy that will not serve GitHub archive downloads.
 ///
 /// `cache_ttl_secs` controls how long the local cache is considered fresh
 /// before triggering a re-download. Pass [`DEFAULT_CACHE_TTL_SECS`] when
@@ -662,46 +661,82 @@ pub fn needs_sync(home_dir: &Path) -> bool {
     !home_dir.join("registry").join("providers").exists()
 }
 
-/// Name of the per-directory manifest recording which `.toml` files the
-/// registry sync installed. Pruning is gated on this set so user-created
-/// files (e.g. a custom provider added via the dashboard, #5823) are never
-/// deleted on restart — only files we previously synced *and* that upstream
-/// has since removed get cleaned up. The leading dot and lack of a `.toml`
-/// extension keep it out of both the sync and the catalog-load globs.
+/// Name of the per-directory manifest recording which `.toml` files the registry sync installed, and the content it left in each of them.
+///
+/// The manifest is what keeps pruning honest (user-created files, e.g. a custom provider added via the dashboard, are never deleted on restart — #5823) and it is also the only evidence that lets a later sync tell "upstream moved on" apart from "the operator edited this".
+/// The leading dot and lack of a `.toml` extension keep it out of both the sync and the catalog-load globs.
 const REGISTRY_MANAGED_MANIFEST: &str = ".registry-managed";
 
-/// Read the set of registry-managed `.toml` filenames recorded for `dest_dir`.
+/// What the sync recorded for one destination directory: managed filename → digest of the bytes the sync last wrote there.
 ///
-/// Returns an empty set when the manifest is absent (e.g. first run, or an
-/// install that predates the manifest) — which makes pruning a no-op until
-/// the next sync writes the manifest, erring on the side of keeping files.
-fn read_managed_manifest(dest_dir: &Path) -> std::collections::HashSet<String> {
+/// `Some(digest)` proves the file still holds content this sync wrote; `None` is an entry of unknown provenance — a bare name from a manifest written before digests existed, or a file whose write failed — which may be pruned but can never authorise an overwrite.
+///
+/// **Ownership rule: the sync overwrites or deletes a file only while the bytes on disk are still the ones it wrote.** An operator edit withdraws that claim, and the file is then left alone (with a WARN naming it) on every later sync.
+/// Without it, a `discover_models = true` the operator set — the flag that puts a provider on the live-discovery path — was silently reverted by the next boot, so reconfiguring survived no restart (#7776 is the same symptom one layer up).
+/// To hand a file back to the registry, delete it: the next sync finds no local copy and re-installs the registry's own verbatim.
+type ManagedManifest = std::collections::BTreeMap<String, Option<String>>;
+
+/// SHA-256 of a file body, lowercase hex — the form stored in the manifest.
+fn content_digest(bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(bytes))
+}
+
+/// Read the per-directory managed manifest for `dest_dir`.
+///
+/// Returns an empty manifest when the file is absent (first run, or an install that predates it) — which makes pruning a no-op until the next sync writes one, erring on the side of keeping files.
+fn read_managed_manifest(dest_dir: &Path) -> ManagedManifest {
     std::fs::read_to_string(dest_dir.join(REGISTRY_MANAGED_MANIFEST))
         .map(|s| {
             s.lines()
                 .map(str::trim)
                 .filter(|l| !l.is_empty())
-                .map(str::to_string)
+                .map(|line| match line.split_once('\t') {
+                    Some((name, digest)) if !digest.is_empty() => {
+                        (name.to_string(), Some(digest.to_string()))
+                    }
+                    // A bare filename: managed by an earlier release that did not
+                    // record content. Prunable, but of unknown authorship.
+                    _ => (line.to_string(), None),
+                })
                 .collect()
         })
         .unwrap_or_default()
 }
 
-/// Persist the set of registry-managed filenames for `dest_dir`.
-fn write_managed_manifest(dest_dir: &Path, names: &std::collections::BTreeSet<String>) {
-    let body = names.iter().cloned().collect::<Vec<_>>().join("\n");
+/// Persist the managed manifest for `dest_dir`.
+fn write_managed_manifest(dest_dir: &Path, manifest: &ManagedManifest) {
+    let body = manifest
+        .iter()
+        .map(|(name, digest)| match digest {
+            Some(digest) => format!("{name}\t{digest}"),
+            None => name.clone(),
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
     let _ = std::fs::write(dest_dir.join(REGISTRY_MANAGED_MANIFEST), body);
 }
 
 /// Sync flat .toml files (e.g. integrations/, providers/).
+///
+/// A file is (re)installed only while the sync can prove it owns what is on disk; see the ownership rule on [`ManagedManifest`].
 fn sync_flat_files(src_dir: &Path, dest_dir: &Path, label: &str) {
     let entries = match std::fs::read_dir(src_dir) {
         Ok(e) => e,
         Err(_) => return,
     };
 
-    // Filenames the registry currently ships — the new managed set.
-    let mut managed: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    // Read before the loop: the digests recorded here are the only way to tell
+    // a registry update from an operator edit below.
+    let previously_managed = read_managed_manifest(dest_dir);
+
+    // What this sync leaves managed: the filenames it installed or refreshed,
+    // with the digest of the bytes it left behind. Files the operator owns are
+    // deliberately absent — see [`ManagedManifest`].
+    let mut managed = ManagedManifest::new();
+    // Files this run found on disk but could not claim: the operator's, whatever
+    // the manifest used to say about them. Recorded so the prune pass below does
+    // not turn "left alone" into "deleted" for a name upstream has dropped.
+    let mut operator_owned: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     let mut synced = 0;
     let mut updated = 0;
     let mut skipped = 0;
@@ -714,27 +749,72 @@ fn sync_flat_files(src_dir: &Path, dest_dir: &Path, label: &str) {
             Some(n) if n.ends_with(".toml") => n.to_string(),
             _ => continue,
         };
-        managed.insert(name.clone());
+        // Skip rather than default to empty: blanking a destination because the
+        // source became unreadable destroys a provider file for nothing.
+        let src_content = match std::fs::read(&path) {
+            Ok(content) => content,
+            Err(_) => continue,
+        };
 
         let dest_file = dest_dir.join(&name);
         if dest_file.exists() {
-            // Update if content differs — keeps builtin provider metadata (e.g.
-            // supports_thinking, new model entries) in sync with the registry.
-            // User API key config lives in config.toml, not in these TOML files.
-            let src_content = std::fs::read(&path).unwrap_or_default();
             let dst_content = std::fs::read(&dest_file).unwrap_or_default();
             if src_content == dst_content {
                 skipped += 1;
-            } else if std::fs::create_dir_all(dest_dir).is_ok()
+                managed.insert(name, Some(content_digest(&src_content)));
+                continue;
+            }
+
+            // Differs from the registry. Update if content differs — keeps
+            // builtin provider metadata (e.g. supports_thinking, new model
+            // entries) in sync with the registry. User API key config lives in
+            // config.toml, not in these TOML files.
+            //
+            // But only when the bytes on disk are the ones this sync wrote:
+            // otherwise this is the operator's file, and reverting it is how
+            // `discover_models = true` was being lost on every restart.
+            let ours = previously_managed
+                .get(&name)
+                .and_then(|recorded| recorded.as_deref())
+                .is_some_and(|recorded| content_digest(&dst_content) == recorded);
+            if !ours {
+                // "kept local" on its own reads as "your edit is in force", and for
+                // `discover_models` that is not true: the preference store is applied
+                // after the catalog is loaded from these files, so an entry there
+                // outranks what the file says (#8407). The message has to say both.
+                let discovery_note = if label == "providers" {
+                    " `discover_models` is the exception: while data/provider_discovery.json has an entry for this provider, that store decides, not this file"
+                } else {
+                    ""
+                };
+                tracing::warn!(
+                    "{label}: kept local {name} — it differs from the registry copy and was not \
+                     written by the registry sync, so the registry will not overwrite it; delete \
+                     {} to restore the registry version.{discovery_note}",
+                    dest_file.display()
+                );
+                operator_owned.insert(name);
+                continue;
+            }
+
+            if std::fs::create_dir_all(dest_dir).is_ok()
                 && std::fs::write(&dest_file, &src_content).is_ok()
             {
                 updated += 1;
+                managed.insert(name, Some(content_digest(&src_content)));
+            } else if let Some(previous) = previously_managed.get(&name) {
+                // The write failed. Carry the old claim forward so the next sync
+                // retries the update instead of reading the stale copy as an edit.
+                managed.insert(name, previous.clone());
             }
             continue;
         }
 
-        if std::fs::create_dir_all(dest_dir).is_ok() && std::fs::copy(&path, &dest_file).is_ok() {
+        if std::fs::create_dir_all(dest_dir).is_ok()
+            && std::fs::write(&dest_file, &src_content).is_ok()
+        {
             synced += 1;
+            managed.insert(name, Some(content_digest(&src_content)));
         }
     }
 
@@ -745,21 +825,45 @@ fn sync_flat_files(src_dir: &Path, dest_dir: &Path, label: &str) {
     // left untouched. This is the #5823 fix: the old logic deleted every local
     // `.toml` absent from the source, wiping dashboard-created providers on
     // every restart.
-    let previously_managed = read_managed_manifest(dest_dir);
+    //
+    // Deleting is an edit by another name, so it obeys the same ownership rule:
+    // a file the operator has since changed is theirs whatever upstream did to
+    // the name. Entries with no digest predate that proof and keep the original
+    // behaviour, pruning on the manifest's word alone.
     let mut removed = 0usize;
-    for name in &previously_managed {
-        if !managed.contains(name) {
-            let path = dest_dir.join(name);
-            if path.is_file() && std::fs::remove_file(&path).is_ok() {
-                removed += 1;
-            }
+    for (name, recorded) in &previously_managed {
+        if managed.contains_key(name) || operator_owned.contains(name) {
+            continue;
+        }
+        let path = dest_dir.join(name);
+        if !path.is_file() {
+            continue;
+        }
+        let ours = match recorded {
+            // A bare name from a pre-digest manifest: managed, authorship unprovable.
+            // Kept prunable so providers the registry retires stop loading into the
+            // catalog, matching the behaviour that predates digests; the window is a
+            // single sync, because the manifest written below carries digests for
+            // everything that is still shipped. The one edit this can still lose is
+            // an operator's change to such a file in the same boot that upstream
+            // drops the name — a guess either way, and "keep forever" would mean
+            // retired providers never leave.
+            None => true,
+            Some(digest) => std::fs::read(&path)
+                .is_ok_and(|content| content_digest(&content) == digest.as_str()),
+        };
+        if ours && std::fs::remove_file(&path).is_ok() {
+            removed += 1;
         }
     }
 
     write_managed_manifest(dest_dir, &managed);
 
-    if synced > 0 || updated > 0 || removed > 0 || skipped > 0 {
-        tracing::info!("{label} synced ({synced} new, {updated} updated, {removed} removed, {skipped} unchanged)");
+    if synced > 0 || updated > 0 || removed > 0 || skipped > 0 || !operator_owned.is_empty() {
+        tracing::info!(
+            "{label} synced ({synced} new, {updated} updated, {removed} removed, {} kept local, {skipped} unchanged)",
+            operator_owned.len()
+        );
     }
 }
 
@@ -1218,6 +1322,289 @@ mod tests {
         assert!(
             dest.join("mine.toml").exists(),
             "never-managed user file is never pruned"
+        );
+    }
+
+    /// The reported bug: an operator turns on `discover_models` in a registry-shipped provider — that flag is the only thing putting the provider on the live model-discovery path — and the next boot's registry sync reverts the file, silently undoing the setting on every restart.
+    ///
+    /// The source below is the shape the registry actually ships: `librefang-registry/providers/deepseek.toml` carries a `base_url` and a `[[models]]` array and no `discover_models` key at all, so reverting the file is what used to clear a flag the operator had set.
+    ///
+    /// The sync may rewrite a managed file only while the bytes on disk are still the ones the sync itself wrote; anything else is an operator edit and belongs to the operator.
+    #[test]
+    fn sync_flat_files_preserves_operator_edits_across_restarts() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("src");
+        let dest = tmp.path().join("dest");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::create_dir_all(&dest).unwrap();
+
+        let registry_toml = "id = \"deepseek\"\nbase_url = \"https://api.deepseek.com/v1\"\n";
+        std::fs::write(src.join("deepseek.toml"), registry_toml).unwrap();
+
+        // First boot installs the registry copy verbatim.
+        sync_flat_files(&src, &dest, "providers");
+        assert_eq!(
+            std::fs::read_to_string(dest.join("deepseek.toml")).unwrap(),
+            registry_toml
+        );
+
+        // The operator turns live discovery on. This is byte-for-byte what `PUT /api/providers/{name}/discovery` writes.
+        let operator_toml = "id = \"deepseek\"\nbase_url = \"https://api.deepseek.com/v1\"\ndiscover_models = true\n";
+        std::fs::write(dest.join("deepseek.toml"), operator_toml).unwrap();
+
+        // Restart — twice, because the bug was "every restart", not "the first one".
+        sync_flat_files(&src, &dest, "providers");
+        assert_eq!(
+            std::fs::read_to_string(dest.join("deepseek.toml")).unwrap(),
+            operator_toml,
+            "the boot sync reverted the operator's discover_models edit"
+        );
+        sync_flat_files(&src, &dest, "providers");
+        assert_eq!(
+            std::fs::read_to_string(dest.join("deepseek.toml")).unwrap(),
+            operator_toml,
+            "the boot sync reverted the operator's discover_models edit on a later restart"
+        );
+    }
+
+    /// The operator preference is not the only local value in these files: a corrected `context_window` lives in the same `[[models]]` array the sync rewrites, and the same overwrite reverted it.
+    ///
+    /// This is the half the digest manifest exists for, and the case the reporter named next to `discover_models` — a per-model capacity the operator fixed because the registry's number is wrong for their endpoint.
+    #[test]
+    fn sync_flat_files_keeps_a_local_context_window_correction() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("src");
+        let dest = tmp.path().join("dest");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::create_dir_all(&dest).unwrap();
+
+        // Registry shape: the window is declared per model inside `[[models]]`.
+        let registry_toml = concat!(
+            "[provider]\n",
+            "id = \"deepseek\"\n",
+            "base_url = \"https://api.deepseek.com/v1\"\n",
+            "\n",
+            "[[models]]\n",
+            "id = \"deepseek-chat\"\n",
+            "context_window = 64000\n",
+        );
+        std::fs::write(src.join("deepseek.toml"), registry_toml).unwrap();
+        sync_flat_files(&src, &dest, "providers");
+
+        // The operator corrects it — a longer window their deployment actually serves.
+        let corrected_toml =
+            registry_toml.replace("context_window = 64000", "context_window = 128000");
+        std::fs::write(dest.join("deepseek.toml"), &corrected_toml).unwrap();
+
+        sync_flat_files(&src, &dest, "providers");
+
+        assert_eq!(
+            std::fs::read_to_string(dest.join("deepseek.toml")).unwrap(),
+            corrected_toml,
+            "the boot sync reverted the operator's context_window correction"
+        );
+    }
+
+    /// The same for an install that upgrades into the digest scheme: `~/.librefang/providers/*.toml` on disk today were installed under a manifest that recorded names without content digests, which is precisely the state in which the reporter's `discover_models` was being lost.
+    ///
+    /// A legacy entry cannot prove the bytes on disk are ours, so it must not authorise a rewrite.
+    #[test]
+    fn sync_flat_files_preserves_edits_under_a_pre_digest_manifest() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("src");
+        let dest = tmp.path().join("dest");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::create_dir_all(&dest).unwrap();
+
+        std::fs::write(
+            src.join("deepseek.toml"),
+            "id = \"deepseek\"\ndiscover_models = false\n",
+        )
+        .unwrap();
+        // The manifest an earlier release left behind: bare filenames, no digests.
+        std::fs::write(dest.join(REGISTRY_MANAGED_MANIFEST), "deepseek.toml").unwrap();
+        let operator_toml = "id = \"deepseek\"\ndiscover_models = true\n";
+        std::fs::write(dest.join("deepseek.toml"), operator_toml).unwrap();
+
+        sync_flat_files(&src, &dest, "providers");
+
+        assert_eq!(
+            std::fs::read_to_string(dest.join("deepseek.toml")).unwrap(),
+            operator_toml,
+            "a pre-digest manifest entry must not authorise reverting the operator's file"
+        );
+    }
+
+    /// The other half of the contract: a file the operator never touched is still the sync's to update, so registry fixes — new model entries, corrected base URLs — keep landing on upgrade.
+    ///
+    /// Without this, a "never overwrite anything" implementation would pass the test above while silently freezing every provider file.
+    #[test]
+    fn sync_flat_files_still_updates_files_the_operator_never_touched() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("src");
+        let dest = tmp.path().join("dest");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::create_dir_all(&dest).unwrap();
+
+        std::fs::write(
+            src.join("openai.toml"),
+            "id = \"openai\"\nmodels = [\"gpt-4\"]\n",
+        )
+        .unwrap();
+        sync_flat_files(&src, &dest, "providers");
+
+        // Upstream ships an updated copy; the operator has not touched theirs.
+        std::fs::write(
+            src.join("openai.toml"),
+            "id = \"openai\"\nmodels = [\"gpt-4\", \"gpt-5\"]\n",
+        )
+        .unwrap();
+        sync_flat_files(&src, &dest, "providers");
+
+        assert_eq!(
+            std::fs::read_to_string(dest.join("openai.toml")).unwrap(),
+            "id = \"openai\"\nmodels = [\"gpt-4\", \"gpt-5\"]\n",
+            "a registry update to an untouched file must still land"
+        );
+    }
+
+    /// Pruning obeys the same ownership boundary: upstream dropping a name is not licence to delete bytes the operator has since edited.
+    #[test]
+    fn sync_flat_files_does_not_prune_an_operator_edited_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("src");
+        let dest = tmp.path().join("dest");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::create_dir_all(&dest).unwrap();
+
+        std::fs::write(src.join("legacy.toml"), "id = \"legacy\"\n").unwrap();
+        sync_flat_files(&src, &dest, "providers");
+        std::fs::write(
+            dest.join("legacy.toml"),
+            "id = \"legacy\"\ndiscover_models = true\n",
+        )
+        .unwrap();
+
+        // Upstream drops the name entirely.
+        std::fs::remove_file(src.join("legacy.toml")).unwrap();
+        sync_flat_files(&src, &dest, "providers");
+
+        assert!(
+            dest.join("legacy.toml").exists(),
+            "an operator-edited file must outlive upstream dropping the name"
+        );
+    }
+
+    /// A source the sync cannot read does not authorise deleting a destination it cannot vouch for (#8407).
+    ///
+    /// An unreadable source is skipped before the destination is classified, so that name reaches the prune pass in neither the managed set nor the operator-owned one, and the prune decides on the manifest alone.
+    /// What it still requires is the digest: bytes it can prove it wrote are removed and reinstalled by the next sync, bytes it cannot are left alone — the same rule the digest exists for everywhere else.
+    #[test]
+    #[cfg(unix)]
+    fn an_unreadable_source_does_not_authorise_deleting_an_unprovable_file() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("src");
+        let dest = tmp.path().join("dest");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::create_dir_all(&dest).unwrap();
+
+        let source = src.join("alpha.toml");
+        std::fs::write(&source, "id = \"alpha\"\n").unwrap();
+        sync_flat_files(&src, &dest, "providers");
+
+        // The operator edits the installed copy, so the recorded digest no longer matches.
+        let edited = "id = \"alpha\"\ndiscover_models = true\n";
+        std::fs::write(dest.join("alpha.toml"), edited).unwrap();
+
+        std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o000)).unwrap();
+        assert!(
+            std::fs::read(&source).is_err(),
+            "precondition: this test needs the source unreadable, which a root user bypasses"
+        );
+
+        sync_flat_files(&src, &dest, "providers");
+
+        assert_eq!(
+            std::fs::read_to_string(dest.join("alpha.toml")).unwrap(),
+            edited,
+            "the prune may not delete bytes it cannot prove it wrote, however the source failed"
+        );
+
+        std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o644)).unwrap();
+    }
+
+    /// The residual the manifest cannot rule out, pinned so that changing it has to be a decision (#8407).
+    ///
+    /// A bare name from a pre-digest manifest carries no proof of authorship, and once upstream drops the name there is nothing left to compare against: the main loop never classifies the file, so it never reaches the operator-owned set, and the prune removes it on the manifest's word alone.
+    /// The file could have been the operator's — `None` means "unprovable", not "ours" — so a future combiner that keeps it belongs here, and this assertion is what will fail when someone makes that call.
+    #[test]
+    fn a_pre_digest_entry_is_pruned_after_an_upstream_removal() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("src");
+        let dest = tmp.path().join("dest");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::create_dir_all(&dest).unwrap();
+
+        // A manifest written before digests existed: names only.
+        std::fs::write(dest.join(REGISTRY_MANAGED_MANIFEST), "legacy.toml").unwrap();
+        std::fs::write(
+            dest.join("legacy.toml"),
+            "id = \"legacy\"\ndiscover_models = true\n",
+        )
+        .unwrap();
+
+        // Upstream dropped the name, so the source does not list it and the main loop cannot classify it.
+        sync_flat_files(&src, &dest, "providers");
+
+        assert!(
+            !dest.join("legacy.toml").exists(),
+            "today's rule: an entry with no digest is pruned once upstream drops the name, and an operator edit to such a file goes with it"
+        );
+    }
+
+    /// The way back to the registry copy — the one the WARN names: delete the file and the next sync re-installs it verbatim.
+    #[test]
+    fn sync_flat_files_reinstalls_after_the_operator_deletes_the_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("src");
+        let dest = tmp.path().join("dest");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::create_dir_all(&dest).unwrap();
+
+        let registry_toml = "id = \"deepseek\"\ndiscover_models = false\n";
+        std::fs::write(src.join("deepseek.toml"), registry_toml).unwrap();
+        sync_flat_files(&src, &dest, "providers");
+        std::fs::write(
+            dest.join("deepseek.toml"),
+            "id = \"deepseek\"\ndiscover_models = true\n",
+        )
+        .unwrap();
+        sync_flat_files(&src, &dest, "providers");
+
+        std::fs::remove_file(dest.join("deepseek.toml")).unwrap();
+        sync_flat_files(&src, &dest, "providers");
+
+        assert_eq!(
+            std::fs::read_to_string(dest.join("deepseek.toml")).unwrap(),
+            registry_toml,
+            "deleting the local file must re-install the registry copy"
+        );
+    }
+
+    /// The digest is written to disk and read back by a later process, so the scheme is a compatibility surface: swap it and every recorded entry stops matching, which reads as "the operator edited this" for files nobody touched.
+    ///
+    /// The vector below was produced independently of this code (`sha256sum`), not captured from a run of it.
+    #[test]
+    fn content_digest_is_pinned_to_lowercase_sha256_hex() {
+        assert_eq!(
+            content_digest(b"id = \"deepseek\"\ndiscover_models = false\n"),
+            "95ec18a9cca7eda2a16f308eb0489e3f5f6b2099406c1f0137ae38b3cf31bdbf"
+        );
+        assert_eq!(
+            content_digest(b""),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
         );
     }
 

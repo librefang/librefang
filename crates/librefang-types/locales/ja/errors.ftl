@@ -32,12 +32,14 @@ api-error-template-parse-failed = テンプレートの解析に失敗しまし�
 api-error-template-required = 'manifest_toml' または 'template' が必要です
 api-error-template-invalid-manifest = 無効なテンプレートマニフェスト
 api-error-template-read-failed = テンプレートの読み込みに失敗しました
+api-error-template-snapshot-failed = 現在のエージェントタイプのスナップショットを保存できなかったため、復元を中止し、何も上書きしていません。もう一度お試しください。
 api-error-template-promote-no-token = GitHubトークンが設定されていません。設定でGitHubを接続するか、GITHUB_TOKENを設定してください。
 api-error-template-promote-review-required = このテンプレートには、公開前に削除する必要があるプライベート情報がまだ含まれています。検出結果を確認してマニフェストを編集してください。
 api-error-template-promote-render-failed = サニタイズ済みマニフェストをTOMLとしてレンダリングできません: { $error }
 api-error-agent-type-exists = エージェントタイプ '{ $name }' はすでに存在します
 api-error-agent-type-name-taken = '{ $name }' は稼働中のエージェントの名前です。別の名前を指定してください
 api-error-agent-type-not-editable = エージェントタイプ '{ $name }' は稼働中のエージェントのワークスペース由来で、/api/agents で管理されます
+api-error-registry-type-not-found = エージェントタイプ '{ $name }' はレジストリに見つかりません
 
 # マニフェストエラー
 api-error-manifest-too-large = マニフェストが大きすぎます（最大 1MB）
@@ -308,7 +310,7 @@ api-error-tool-requires-agent = ツール '{ $name }' は承認が必要であ�
 api-error-validation-content-empty = 内容は空にできません
 api-error-validation-name-empty = new_name は空にできません
 api-error-validation-title-required = タイトルは必須です
-api-error-validation-avatar-url-invalid = アバター URL は http/https または data URI である必要があります
+api-error-validation-avatar-url-invalid = アバター URL は、このデーモンがこのエージェント用に提供するアバターのルートか、空である必要があります。リンクではなく画像をアップロードしてください。
 api-error-validation-color-invalid = 色は '#' で始まる 16 進コードである必要があります
 
 # 一般エラー

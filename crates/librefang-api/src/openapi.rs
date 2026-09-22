@@ -47,15 +47,20 @@ use crate::types;
         routes::list_agent_templates,
         routes::get_agent_template,
         routes::get_agent_template_toml,
+        routes::put_agent_template_toml,
+        routes::post_agent_template_toml,
         routes::create_agent_type,
         routes::update_agent_type,
         routes::delete_agent_type,
         routes::promote_agent_type,
+        routes::get_registry_diff,
+        routes::restore_from_registry,
         routes::list_template_history,
         routes::restore_template_version,
         routes::list_commands,
         routes::get_command,
         routes::queue_status,
+        routes::task_queue_post_root,
 
         // ── Agents ──
         routes::list_agents,
@@ -106,20 +111,26 @@ use crate::types;
         routes::patch_hand_agent_runtime_config,
         routes::delete_hand_agent_runtime_config,
         routes::clone_agent,
+        routes::save_agent_as_agent_type,
         routes::list_agent_files,
         routes::get_agent_file,
         routes::set_agent_file,
         routes::delete_agent_file,
         routes::upload_file,
         routes::serve_upload,
+        routes::upload_agent_avatar,
+        routes::serve_agent_avatar,
+        routes::delete_agent_avatar,
         routes::get_agent_deliveries,
         routes::inject_message,
         routes::push_message,
         routes::reload_agent_manifest,
+        routes::get_agent_manifest_toml,
         routes::suspend_agent,
         routes::resume_agent,
         routes::agent_metrics,
         routes::agent_logs,
+        routes::list_agent_manifest_history,
 
         // ── Bulk Operations ──
         routes::bulk_create_agents,
@@ -352,6 +363,11 @@ use crate::types;
         routes::users::set_user_provider_key,
         routes::users::delete_user_provider_key,
         routes::users::list_user_provider_keys,
+        routes::users::update_user_identity,
+        routes::users::upload_user_avatar,
+        routes::users::serve_user_avatar,
+        routes::users::serve_my_avatar,
+        routes::users::delete_user_avatar,
 
         // ── Authorization (RBAC checks) ──
         routes::check,
@@ -428,6 +444,15 @@ use crate::types;
 
         // ── Inbox ──
         routes::inbox_status,
+
+        // ── Knowledge bases ──
+        routes::knowledge::list_bases,
+        routes::knowledge::create_base,
+        routes::knowledge::delete_base,
+        routes::knowledge::list_documents,
+        routes::knowledge::put_document,
+        routes::knowledge::delete_document,
+        routes::knowledge::set_holders,
 
         // ── Webhooks ──
         routes::webhook_wake,
@@ -582,6 +607,7 @@ use crate::types;
         routes::users::SetProviderKeyRequest,
         routes::users::ProviderKeysResponse,
         routes::users::ProviderKeyMutationResponse,
+        routes::users::UserIdentityUpdate,
         routes::channels::ConfigureSidecarBody,
         routes::sidecar_describe::SidecarSchema,
         routes::sidecar_describe::SidecarSchemaField,

@@ -141,6 +141,23 @@ interface ModelParamFieldProps {
    * parameter a different meaning — not to rename it for decoration.
    */
   label?: string;
+  /**
+   * The editor is refusing to save this value, e.g. `validateManifestForm`
+   * found it outside the range `PATCH /api/agents/{id}/model` accepts (#8112).
+   * Marks the control itself rather than leaving the operator to find which of
+   * the four fields the page's "cannot save" refers to.
+   */
+  invalid?: boolean;
+  /**
+   * Overrides the range message the control renders for `invalid`.
+   *
+   * The default states the parameter's own min/max from the range table — the
+   * right words when the value is out of range. A parameter with no table max
+   * whose failure is the value's SHAPE (a negative, a non-integer) needs a
+   * different sentence, and interpolating `{{max}}: undefined` into the range
+   * message is not it.
+   */
+  error?: string;
 }
 
 /**
@@ -163,6 +180,8 @@ export function ModelParamField({
   warning,
   hint,
   label,
+  invalid,
+  error,
 }: ModelParamFieldProps) {
   const { t } = useTranslation();
   return (
@@ -180,6 +199,22 @@ export function ModelParamField({
         min={MODEL_PARAM_RANGES[param].min}
         max={MODEL_PARAM_RANGES[param].max}
         step={STEPS[param]}
+        invalid={invalid}
+        // The range is already here, so the message can state it. A red
+        // control with no reason tells the operator something is wrong and
+        // not what, which is the half that does not help. An explicit `error`
+        // prop wins: the caller knows the failure the range message cannot
+        // describe.
+        error={
+          invalid
+            ? (error ??
+              t("agents.form.param_range_error", {
+                defaultValue: "Enter a number between {{min}} and {{max}}.",
+                min: MODEL_PARAM_RANGES[param].min,
+                max: MODEL_PARAM_RANGES[param].max,
+              }))
+            : undefined
+        }
       />
       {hint && <p className="mt-1 text-[10px] text-text-dim/70 leading-snug">{hint}</p>}
     </div>

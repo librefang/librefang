@@ -244,6 +244,9 @@ fn is_potential_untranslated_literal(lit: &str) -> bool {
         // Technical format strings
         "%Y-%m-%d %H:%M",
         "{model:<20} {input}/{output}  ${cost:.4}",
+        // SQLite's `datetime('now')` shape, parsed and re-rendered by the
+        // manifest history pane. A strftime pattern is not prose.
+        "%Y-%m-%d %H:%M:%S",
         // Hand CLI command names for require_daemon
         "hand install",
         "hand list",
@@ -348,6 +351,10 @@ fn is_potential_untranslated_literal(lit: &str) -> bool {
     {
         return false;
     }
+    // `{path:<28}` was exempted for the workspace row's format string, which
+    // was later rewritten to positional args (`screens/agents.rs`) — nothing
+    // in the crate contains that literal anymore. `{name:<28}` is still live
+    // in `commands/mcp_cmds.rs`.
     if trimmed.contains("{name:<28}") {
         return false;
     }
@@ -1374,6 +1381,8 @@ const IDENTICAL_VALUE_EXEMPTIONS: &[IdenticalValueExemption] = &[
             "tui-event-promote-http-error",
             "tui-guide-warn-env",
             "tui-mod-error-symbol",
+            "tui-templates-restore-fail",
+            "tui-templates-restore-ok",
             "tui-triggers-placeholder-agent-id",
             "tui-triggers-placeholder-max-fires",
         ],

@@ -62,6 +62,7 @@ fn populated_session(sid: SessionId, agent_id: AgentId, n: usize) -> Session {
     Session {
         id: sid,
         agent_id,
+        parent_session_id: None,
         messages,
         context_window_tokens: 0,
         label: None,

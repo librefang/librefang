@@ -32,21 +32,28 @@ import {
   ChevronDown,
   ChevronUp,
   Trash2,
+  Sparkles,
 } from "lucide-react";
 
 import type { UserItem, UserUpsertPayload } from "../lib/http/client";
-import { useUsers } from "../lib/queries/users";
+import { ALLOWED_AVATAR_TYPES, MAX_AVATAR_BYTES } from "../api";
+import { useUserAvatarUrl, useUsers } from "../lib/queries/users";
+import { useWhoami } from "../lib/queries/authz";
 import {
   useCreateUser,
   useDeleteUser,
   useImportUsers,
   useRotateUserKey,
   useUpdateUser,
+  useUpdateUserIdentity,
+  useUploadUserAvatar,
+  useDeleteUserAvatar,
 } from "../lib/mutations/users";
 import { parseUsersCsv } from "../lib/csvParser";
 import { useUIStore } from "../lib/store";
 import { copyToClipboard } from "../lib/clipboard";
 
+import { UserAvatar } from "../components/UserAvatar";
 import { PageHeader } from "../components/ui/PageHeader";
 import { Card } from "../components/ui/Card";
 import { Badge } from "../components/ui/Badge";
@@ -780,6 +787,303 @@ function toUpsert(
 }
 
 // ---------------------------------------------------------------------------
+// Appearance — the caller's own emoji and avatar image (#8339)
+// ---------------------------------------------------------------------------
+
+/** Two-column row, mirroring the agent drawer's `DetailRow`. */
+function AppearanceRow({
+  label,
+  children,
+}: {
+  label: React.ReactNode;
+  children: React.ReactNode;
+}) {
+  return (
+    <div className="flex justify-between items-center gap-3 min-h-[28px]">
+      <span className="text-text-dim text-sm">{label}</span>
+      <span className="text-sm text-right min-w-0">{children}</span>
+    </div>
+  );
+}
+
+/**
+ * The caller's own visual identity, editable: an emoji, and an avatar image
+ * (#8339). The mirror of `AgentAppearanceSection`, and it keeps that section's
+ * shape deliberately — the same two controls and the same client-side
+ * pre-checks.
+ *
+ * It is drawn for the caller and **nobody else**, which is why `UserFormModal`
+ * mounts it only when the row being edited is the caller's own — and only when that caller's credential is `owner`, since every non-GET under `/api/users` is an Owner action on the daemon side and a lower role would be handed controls that answer 403.
+ * That is not a limitation of this component but of the reads underneath it, in two independent ways:
+ *
+ *   - `GET /api/users/me/avatar` is the only user-avatar path
+ *     `AUTHENTICATED_IMAGE_PATH_RE` admits, because a user name is
+ *     client-controlled and does not fit the allowlist's character class:
+ *     `encodeURIComponent("Juan Pérez")` carries a `%`, and widening the class
+ *     to accept `%XX` would readmit `%2F`, which decodes to the `/` that
+ *     allowlist exists to stop.
+ *   - `UserItem` is the only user-shaped type the dashboard declares without
+ *     `emoji` and `has_avatar` on it — the daemon's `UserView` carries both, on
+ *     the list and the detail alike. So there is no list-shaped read to seed a
+ *     draft from even if an admin wanted to set someone else's glyph.
+ *
+ * Offering the editor over another user would therefore mean drawing the
+ * *operator's* picture next to that user's name and seeding the field from the
+ * operator's glyph — a confident wrong answer rather than a missing one.
+ *
+ * None of that says anything about who may *read* an avatar, and it is worth
+ * being explicit because the two are easy to conflate. `GET
+ * /api/users/{name}/avatar` sits on the generic authenticated-GET rule, so any
+ * authenticated role — `Viewer` included — reads any user's picture; the daemon
+ * pins that in `non_owner_write_roles_are_refused_and_reads_are_not`. `me` is a
+ * path-shape convenience, not a visibility boundary. The dashboard's allowlist
+ * being limited to it is a guard against handing this origin's bearer token to
+ * a path somebody else chose, not a privacy property this surface may claim.
+ *
+ * There is no `onChanged`: every write here is followed by the query
+ * invalidations the mutations own, including the `whoami` key the chat bubble
+ * reads its emoji from. Nothing is left for a caller to re-read.
+ */
+export function UserAppearanceSection({
+  name,
+  emoji,
+  hasAvatar,
+}: {
+  name: string;
+  emoji?: string;
+  /** `whoami.has_avatar`. `undefined` means the daemon did not say, which the
+   *  preview reads as "fetch and find out" — see `hasPicture` below. */
+  hasAvatar?: boolean;
+}) {
+  const { t } = useTranslation();
+  const addToast = useUIStore((s) => s.addToast);
+  const updateIdentityMutation = useUpdateUserIdentity();
+  const uploadAvatarMutation = useUploadUserAvatar();
+  const deleteAvatarMutation = useDeleteUserAvatar();
+  const storedEmoji = emoji ?? "";
+  const [emojiDraft, setEmojiDraft] = useState(storedEmoji);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // The buttons and the preview have to agree about whether a picture exists.
+  // `hasAvatar` is `undefined` on a daemon that predates the field, and the
+  // preview deliberately reads that as "not told, so fetch" — which draws the
+  // image. Driving the buttons off the raw prop instead left them saying
+  // "Upload" with no Remove while that image was on screen, so they read the
+  // same answer the preview does: the prop, or failing it the blob it fetched.
+  // Same query key, so this shares the preview's request rather than adding one.
+  const avatarSrc = useUserAvatarUrl(name, hasAvatar !== false);
+  const hasPicture = Boolean(hasAvatar) || Boolean(avatarSrc);
+
+  // Re-seed on the user, not on the stored emoji: the drawer stays mounted
+  // while the operator clicks through the list, and keying this on the value
+  // would wipe a half-typed emoji the moment an unrelated poll refreshed it.
+  useEffect(() => {
+    setEmojiDraft(storedEmoji);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- keyed on the user, deliberately not on the stored emoji
+  }, [name]);
+
+  /** PATCH the emoji. There is no second identity field on a user — unlike an
+   *  agent there is no colour — so the body carries the emoji and nothing else,
+   *  and the daemon's partial-PATCH rule has nothing to preserve. */
+  function saveEmoji() {
+    if (updateIdentityMutation.isPending) return;
+    const next = emojiDraft.trim();
+    if (next === storedEmoji) return;
+    updateIdentityMutation.mutate(
+      // The empty string, never `undefined`: omitting the field is how a PATCH
+      // says "leave it", so clearing an emoji has to be spelled out.
+      { name, emoji: next },
+      {
+        onSuccess: () => {
+          addToast(
+            next
+              ? t("users.identity.emoji_saved", { defaultValue: "Emoji updated" })
+              : t("users.identity.emoji_cleared", { defaultValue: "Emoji cleared" }),
+            "success",
+          );
+        },
+        onError: (e: Error) =>
+          addToast(
+            e?.message ||
+              t("users.identity.emoji_failed", { defaultValue: "Failed to update the emoji" }),
+            "error",
+          ),
+      },
+    );
+  }
+
+  /** Validate the picked file, then send its bytes.
+   *
+   *  Both checks mirror the daemon's and neither replaces it: the server
+   *  decides the format by sniffing the bytes, so a `.png` that is really
+   *  something else is refused there whatever the browser said here. Checking
+   *  first only avoids spending an upload that was never going to be accepted,
+   *  and lets the message name the actual problem. */
+  function handleFileChange(event: React.ChangeEvent<HTMLInputElement>) {
+    const input = event.target;
+    const file = input.files?.[0];
+    // Cleared before any early return, so picking the same file twice in a row
+    // still fires `change` — the value is what the browser compares against.
+    input.value = "";
+    if (!file) return;
+
+    if (!(ALLOWED_AVATAR_TYPES as readonly string[]).includes(file.type)) {
+      addToast(
+        t("users.identity.avatar_type_rejected", {
+          defaultValue:
+            "An avatar must be a PNG, JPEG, GIF or WebP image. SVG is not accepted.",
+        }),
+        "error",
+      );
+      return;
+    }
+    if (file.size > MAX_AVATAR_BYTES) {
+      addToast(
+        t("users.identity.avatar_too_large", {
+          defaultValue: "That image is {{size}} MB; the limit is {{limit}} MB.",
+          size: (file.size / (1024 * 1024)).toFixed(1),
+          limit: (MAX_AVATAR_BYTES / (1024 * 1024)).toFixed(0),
+        }),
+        "error",
+      );
+      return;
+    }
+
+    uploadAvatarMutation.mutate(
+      { name, file },
+      {
+        onSuccess: () => {
+          addToast(
+            t("users.identity.avatar_saved", { defaultValue: "Avatar updated" }),
+            "success",
+          );
+        },
+        onError: (e: Error) =>
+          addToast(
+            e?.message ||
+              t("users.identity.avatar_failed", { defaultValue: "Failed to upload the avatar" }),
+            "error",
+          ),
+      },
+    );
+  }
+
+  function removeAvatar() {
+    if (deleteAvatarMutation.isPending) return;
+    deleteAvatarMutation.mutate(name, {
+      onSuccess: () => {
+        addToast(
+          t("users.identity.avatar_removed", { defaultValue: "Avatar removed" }),
+          "success",
+        );
+      },
+      onError: (e: Error) =>
+        addToast(
+          e?.message ||
+            t("users.identity.avatar_remove_failed", {
+              defaultValue: "Failed to remove the avatar",
+            }),
+          "error",
+        ),
+    });
+  }
+
+  return (
+    <section>
+      <h4 className="text-sm font-semibold flex items-center gap-2 mb-2">
+        <Sparkles className="w-3.5 h-3.5 text-brand" />
+        {t("users.identity.title", { defaultValue: "Appearance" })}
+      </h4>
+      <div className="rounded-lg bg-main border border-border-subtle p-4 space-y-2">
+        {/* The preview carries the draft emoji rather than the stored one, so
+            the circle answers before the PATCH does. The image underneath comes
+            from `UserAvatar`, which is the signed-in caller's own — correct
+            here precisely because this section only ever edits the caller. */}
+        <div className="flex items-center gap-3 pb-2 border-b border-border-subtle">
+          <UserAvatar name={name} emoji={emojiDraft} hasAvatar={hasAvatar} size="lg" />
+          <p className="text-sm font-semibold truncate">{name}</p>
+        </div>
+        <AppearanceRow label={t("users.identity.emoji", { defaultValue: "Emoji" })}>
+          <div className="flex items-center gap-2 justify-end">
+            <input
+              type="text"
+              value={emojiDraft}
+              onChange={(e) => setEmojiDraft(e.target.value)}
+              onKeyDown={(e) => {
+                // Same `isComposing` guard as the rename field: in a CJK IME
+                // Enter confirms the candidate, and submitting on it would
+                // hijack the composition.
+                if (e.key === "Enter" && !e.nativeEvent.isComposing) saveEmoji();
+              }}
+              // 32, matching the daemon's `MAX_EMOJI_CHARS` in value but **not**
+              // in unit: `maxLength` counts UTF-16 code units, the daemon counts
+              // `char`s, so this side is the stricter of the two. A family with
+              // ZWJ joiners (👨‍👩‍👧‍👦) is eleven code units and seven `char`s,
+              // so a long run of astral emoji is refused here that the daemon
+              // would have taken. Strict is the right direction for an input —
+              // but it is not parity, and saying it was parity was wrong.
+              maxLength={32}
+              placeholder={t("users.identity.emoji_placeholder", { defaultValue: "None" })}
+              aria-label={t("users.identity.emoji", { defaultValue: "Emoji" })}
+              className="w-24 px-2 py-1 rounded-md border border-border-subtle bg-surface text-lg text-center outline-none focus:border-brand"
+            />
+            <button
+              type="button"
+              onClick={saveEmoji}
+              disabled={updateIdentityMutation.isPending || emojiDraft.trim() === storedEmoji}
+              className="px-3 py-1 rounded-lg text-xs font-semibold bg-brand text-white hover:bg-brand/90 disabled:opacity-50 disabled:cursor-not-allowed shrink-0"
+            >
+              {updateIdentityMutation.isPending ? t("common.saving") : t("common.save")}
+            </button>
+          </div>
+        </AppearanceRow>
+        <AppearanceRow label={t("users.identity.avatar", { defaultValue: "Avatar image" })}>
+          <div className="flex items-center gap-2 justify-end">
+            <input
+              type="file"
+              ref={fileInputRef}
+              accept={ALLOWED_AVATAR_TYPES.join(",")}
+              onChange={handleFileChange}
+              className="hidden"
+              data-testid="user-avatar-file-input"
+              aria-label={t("users.identity.avatar", { defaultValue: "Avatar image" })}
+            />
+            <button
+              type="button"
+              onClick={() => fileInputRef.current?.click()}
+              disabled={uploadAvatarMutation.isPending}
+              className="px-3 py-1 rounded-lg text-xs font-semibold bg-main hover:bg-main/80 text-text-dim border border-border-subtle disabled:opacity-50 disabled:cursor-not-allowed shrink-0"
+            >
+              {uploadAvatarMutation.isPending
+                ? t("common.saving")
+                : hasPicture
+                  ? t("users.identity.avatar_replace", { defaultValue: "Replace" })
+                  : t("users.identity.avatar_upload", { defaultValue: "Upload" })}
+            </button>
+            {hasPicture && (
+              <button
+                type="button"
+                onClick={removeAvatar}
+                disabled={deleteAvatarMutation.isPending}
+                className="px-3 py-1 rounded-lg text-xs font-semibold text-error border border-error/30 hover:bg-error/10 disabled:opacity-50 disabled:cursor-not-allowed shrink-0"
+              >
+                {t("common.remove")}
+              </button>
+            )}
+          </div>
+        </AppearanceRow>
+        <p className="text-[11px] text-text-dim leading-relaxed">
+          {t("users.identity.avatar_hint", {
+            defaultValue:
+              "PNG, JPEG, GIF or WebP, up to 2 MB. SVG is not accepted. The daemon stores the image as a file and serves it over an authenticated route.",
+          })}
+        </p>
+      </div>
+    </section>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Create / edit modal
 // ---------------------------------------------------------------------------
 
@@ -801,6 +1105,26 @@ function UserFormModal({
   const [role, setRole] = useState<RoleName>("user");
   const [bindings, setBindings] = useState<Array<[string, string]>>([]);
   const [error, setError] = useState<string | null>(null);
+
+  // Whether the row being edited is the caller's own. The appearance editor is
+  // only honest for that row — see `UserAppearanceSection` for the two reads
+  // that make it so. `whoami` is also where the stored emoji comes from: it is
+  // the only place the dashboard can learn a user's glyph, and it describes the
+  // caller and no one else.
+  const whoami = useWhoami();
+  const isSelf = !!editing && editing.name === whoami.data?.name;
+
+  // ...and whether the caller may actually write to it. Every non-GET under
+  // `/api/users` is an Owner action on the daemon side — `is_owner_only_write`
+  // matches the whole prefix, avatar routes included — so a `user` or `viewer`
+  // credential reaching these controls would be shown a button and given a 403.
+  //
+  // `whoami.role` is the credential's own role, which is exactly what that
+  // check compares: `user_role_allows_request` reads the credential, and the
+  // group-derived roles `whoami` also reports live in `roles` without opening
+  // this door. Reading the wrong one of those two fields would show the editor
+  // to somebody the daemon refuses — the direction that produces the 403.
+  const canWriteOwnIdentity = isSelf && whoami.data?.role === "owner";
 
   // Reset form when modal toggles or `editing` changes.
   const lastInit = useRef<{ key: string; editing: UserItem | null }>({
@@ -943,6 +1267,13 @@ function UserFormModal({
         </div>
         {error ? (
           <p className="text-xs text-error">{error}</p>
+        ) : null}
+        {canWriteOwnIdentity && editing ? (
+          <UserAppearanceSection
+            name={editing.name}
+            emoji={whoami.data?.emoji}
+            hasAvatar={whoami.data?.has_avatar}
+          />
         ) : null}
         <div className="flex gap-2 justify-end pt-2 border-t border-border-subtle">
           <Button variant="secondary" onClick={onClose} disabled={busy}>

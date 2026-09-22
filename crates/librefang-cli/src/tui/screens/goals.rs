@@ -500,6 +500,16 @@ impl GoalsState {
                     }
                 }
             }
+            // The budget only reaches a run that uses loop engineering, so the
+            // keys stay inert on a goal where the number would change nothing.
+            KeyCode::Char('+') | KeyCode::Char('-') if self.selected_uses_loop_engineering() => {
+                let delta = if key.code == KeyCode::Char('+') {
+                    1
+                } else {
+                    -1
+                };
+                self.adjust_verify_max_retries(delta);
+            }
             KeyCode::Char('r') => return GoalsAction::Refresh,
             _ => {}
         }

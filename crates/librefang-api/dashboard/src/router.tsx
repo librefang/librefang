@@ -176,6 +176,7 @@ const McpServersPage = lazyWithReload(() => import("./pages/McpServersPage").the
 const ConfigPage = lazyWithReload(() => import("./pages/ConfigPage").then(m => ({ default: m.ConfigPage })));
 const UsersPage = lazyWithReload(() => import("./pages/UsersPage").then(m => ({ default: m.UsersPage })));
 const GroupsPage = lazyWithReload(() => import("./pages/GroupsPage").then(m => ({ default: m.GroupsPage })));
+const KnowledgePage = lazyWithReload(() => import("./pages/KnowledgePage").then(m => ({ default: m.KnowledgePage })));
 const PermissionSimulatorPage = lazyWithReload(() => import("./pages/PermissionSimulatorPage").then(m => ({ default: m.PermissionSimulatorPage })));
 const AuditPage = lazyWithReload(() => import("./pages/AuditPage").then(m => ({ default: m.AuditPage })));
 const UserBudgetPage = lazyWithReload(() => import("./pages/UserBudgetPage").then(m => ({ default: m.UserBudgetPage })));
@@ -230,6 +231,21 @@ const canvasRoute = createRoute({
 const agentsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/agents",
+  // `template` carries an agent-type name in from the agent-types page: its Run
+  // button instantiates the type, so the operator lands here with the type
+  // already chosen instead of picking it a second time from the drawer's
+  // dropdown. Modelled on `chatRoute` below, which carries `agentId` the same
+  // way from an agent row into the chat.
+  validateSearch: (search: Record<string, unknown>): { template?: string } => {
+    const out: { template?: string } = {};
+    // An empty value is dropped rather than carried: no agent type can be named
+    // "", and admitting it would open the drawer on an empty picker with Create
+    // disabled and no way back.
+    if (typeof search.template === "string" && search.template !== "") {
+      out.template = search.template;
+    }
+    return out;
+  },
   component: () => <LazyRouteBoundary><AgentsPage /></LazyRouteBoundary>
 });
 
@@ -424,6 +440,13 @@ const groupsRoute = createRoute({
   path: "/groups",
   component: () => <LazyRouteBoundary><GroupsPage /></LazyRouteBoundary>
 });
+// #8327 — shared knowledge bases. A base is a named workspace, so this route
+// edits agent manifests and a directory rather than a store of its own.
+const knowledgeRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/knowledge",
+  component: () => <LazyRouteBoundary><KnowledgePage /></LazyRouteBoundary>
+});
 const usersSimulatorRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/users/simulator",
@@ -546,6 +569,7 @@ const routeTree = rootRoute.addChildren([
   configInfraRoute,
   usersRoute,
   groupsRoute,
+  knowledgeRoute,
   usersSimulatorRoute,
   userBudgetRoute,
   userPolicyRoute,

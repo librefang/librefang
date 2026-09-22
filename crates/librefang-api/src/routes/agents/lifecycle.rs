@@ -1,10 +1,15 @@
 use super::*;
+use librefang_types::agent_type_store;
 
 // ---------------------------------------------------------------------------
 // Shared manifest resolution helper
 // ---------------------------------------------------------------------------
 /// Maximum manifest size (1MB) to prevent parser memory exhaustion.
-const MAX_MANIFEST_SIZE: usize = 1024 * 1024;
+///
+/// `pub(crate)` because every surface that accepts a whole agent manifest — the
+/// agent spawn path here and `PUT /api/templates/{name}/toml` in
+/// `agent_templates` — must enforce the same cap, not just this one.
+pub(crate) const MAX_MANIFEST_SIZE: usize = 1024 * 1024;
 
 /// Resolved manifest ready for spawning.
 struct ResolvedManifest {
@@ -15,6 +20,10 @@ struct ResolvedManifest {
 /// Error from manifest resolution — carries a user-facing message.
 struct ManifestError {
     message: String,
+    /// Machine-readable code, decided where the error is raised.
+    /// It is what `spawn_agent` maps to an HTTP status, so a new failure mode must set it — `None` falls back to `400 invalid_manifest`.
+    /// This exists because the status used to be recovered by matching substrings of `message`, which is already translated into nine locales: every such arm was true in English and false everywhere else, so the same failure answered 403 to one caller and 400 to another purely by `Accept-Language`.
+    code: Option<&'static str>,
 }
 
 /// Resolve a `SpawnRequest` into a parsed `AgentManifest`.
@@ -38,26 +47,35 @@ async fn resolve_manifest(
                 let t = ErrorTranslator::new(lang);
                 return Err(ManifestError {
                     message: t.t("api-error-template-invalid-name"),
+                    code: Some("invalid_template_name"),
                 });
             }
-            let tmpl_path = state
-                .kernel
-                .config_ref()
-                .home_dir
-                .join("workspaces")
-                .join("agents")
-                .join(&safe_name)
-                .join("agent.toml");
-            // Use tokio::fs to avoid blocking in an async context
-            match tokio::fs::read_to_string(&tmpl_path).await {
-                Ok(content) => {
+            // Same precedence as the template catalog (`read_agent_type`):
+            // `agent-types/` wins a collision because it is the source the
+            // write verbs act on, so the editor and the spawn path can never
+            // disagree about which document an operator is acting on.
+            let home_dir = state.kernel.config_ref().home_dir.clone();
+            match crate::routes::agent_templates::read_agent_type_in(&home_dir, &safe_name).await {
+                Ok(Some((_, content))) => {
                     used_template = Some(safe_name.clone());
                     content
                 }
-                Err(_) => {
+                Ok(None) => {
                     let t = ErrorTranslator::new(lang);
                     return Err(ManifestError {
                         message: t.t_args("api-error-template-not-found", &[("name", &safe_name)]),
+                        code: Some("template_not_found"),
+                    });
+                }
+                Err(e) => {
+                    tracing::warn!(name = %safe_name, error = %e, "failed to read template manifest");
+                    let t = ErrorTranslator::new(lang);
+                    // Not "not found": the template may well exist and be unreadable
+                    // (permissions, I/O), and reporting that as a 404 sends the operator
+                    // looking for a missing file instead of at the error in the log.
+                    return Err(ManifestError {
+                        message: t.t("api-error-template-read-failed"),
+                        code: Some("template_read_failed"),
                     });
                 }
             }
@@ -65,6 +83,7 @@ async fn resolve_manifest(
             let t = ErrorTranslator::new(lang);
             return Err(ManifestError {
                 message: t.t("api-error-template-required"),
+                code: Some("template_required"),
             });
         }
     } else {
@@ -76,6 +95,7 @@ async fn resolve_manifest(
         let t = ErrorTranslator::new(lang);
         return Err(ManifestError {
             message: t.t("api-error-manifest-too-large"),
+            code: Some("manifest_too_large"),
         });
     }
 
@@ -88,6 +108,7 @@ async fn resolve_manifest(
                     let t = ErrorTranslator::new(lang);
                     return Err(ManifestError {
                         message: t.t("api-error-manifest-signature-mismatch"),
+                        code: Some("signature_invalid"),
                     });
                 }
             }
@@ -102,6 +123,7 @@ async fn resolve_manifest(
                 let t = ErrorTranslator::new(lang);
                 return Err(ManifestError {
                     message: t.t("api-error-manifest-signature-failed"),
+                    code: Some("signature_invalid"),
                 });
             }
         }
@@ -115,6 +137,7 @@ async fn resolve_manifest(
             let t = ErrorTranslator::new(lang);
             return Err(ManifestError {
                 message: t.t("api-error-manifest-invalid-format"),
+                code: Some("invalid_manifest"),
             });
         }
     };
@@ -194,14 +217,20 @@ async fn spawn_agent_inner(
     let resolved = match resolve_manifest(&state, &req, l).await {
         Ok(r) => r,
         Err(e) => {
-            let (status, code) = if e.message.contains("too large") {
-                (StatusCode::PAYLOAD_TOO_LARGE, "manifest_too_large")
-            } else if e.message.contains("not found") && e.message.contains("Template") {
-                (StatusCode::NOT_FOUND, "template_not_found")
-            } else if e.message.contains("signature verification failed") {
-                (StatusCode::FORBIDDEN, "signature_invalid")
-            } else {
-                (StatusCode::BAD_REQUEST, "invalid_manifest")
+            // Every status comes from the code the raise site set. This used to
+            // match substrings of `e.message`, which is already translated — so
+            // `contains("signature verification failed")` was true in English and
+            // false in the other eight locales, and a rejected signature came back
+            // as 400 "malformed request" to anyone not reading English.
+            let (status, code) = match e.code {
+                // The template exists as far as we know; we could not read it.
+                // That is a server-side fault, not a malformed request.
+                Some(c @ "template_read_failed") => (StatusCode::INTERNAL_SERVER_ERROR, c),
+                Some(c @ "manifest_too_large") => (StatusCode::PAYLOAD_TOO_LARGE, c),
+                Some(c @ "template_not_found") => (StatusCode::NOT_FOUND, c),
+                Some(c @ "signature_invalid") => (StatusCode::FORBIDDEN, c),
+                Some(c) => (StatusCode::BAD_REQUEST, c),
+                None => (StatusCode::BAD_REQUEST, "invalid_manifest"),
             };
             return json_error(status, code, e.message);
         }
@@ -275,6 +304,7 @@ pub async fn bulk_create_agents(
                     agent_id: None,
                     name: None,
                     error: Some(e.message),
+                    code: e.code,
                 });
             }
             Ok(resolved) => {
@@ -287,10 +317,20 @@ pub async fn bulk_create_agents(
                             agent_id: Some(id.to_string()),
                             name: Some(name),
                             error: None,
+                            code: None,
                         });
                     }
                     Err(e) => {
                         let t = ErrorTranslator::new(l);
+                        // Same code/error split as the single-spawn path
+                        // (`spawn_agent_inner`) so a bulk caller can branch on
+                        // `code` identically to a single `POST /api/agents`.
+                        let code = match &e {
+                            crate::error::KernelError::LibreFang(
+                                librefang_types::error::LibreFangError::AgentAlreadyExists(_),
+                            ) => "agent_already_exists",
+                            _ => "spawn_failed",
+                        };
                         results.push(BulkCreateResult {
                             index,
                             success: false,
@@ -300,6 +340,7 @@ pub async fn bulk_create_agents(
                                 "api-error-agent-clone-spawn-failed",
                                 &[("error", &e.to_string())],
                             )),
+                            code: Some(code),
                         });
                     }
                 }
@@ -1256,6 +1297,14 @@ pub async fn list_agent_runtime(
 // The legacy `PUT /api/agents/{id}/update` endpoint was removed in #3748 —
 // callers should send `{"manifest_toml": "..."}` to `PATCH /api/agents/{id}`
 // instead, which now also handles full-manifest replacement.
+//
+// That replacement is whole-file and carries no version or ETag
+// precondition: a caller doing read-modify-write over `GET
+// /api/agents/{id}/manifest` + this PATCH (the TUI shared-folders editor,
+// #7835) can overwrite a manifest written between its read and write with a
+// stale base. Surfaces adopting the pattern inherit that limitation until
+// the endpoint grows a manifest generation counter (also the natural hook
+// for #8047's manifest history work).
 #[utoipa::path(
     patch,
     path = "/api/agents/{id}",
@@ -1548,6 +1597,202 @@ pub async fn reload_agent_manifest(
                 status,
                 Json(serde_json::json!({"error": kernel_err_body(status, &e, &t)})),
             )
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Save agent as agent type
+// ---------------------------------------------------------------------------
+
+#[derive(serde::Deserialize)]
+pub struct SaveAsAgentTypeRequest {
+    pub template_name: String,
+}
+
+/// POST /api/agents/{id}/save-as-agent-type — snapshot a live agent's manifest
+/// into a reusable agent-type template file.
+///
+/// Not gated by [`super::guard_provisioned_agent`]: that guard refuses writes
+/// that would change the *definition* of a provisioned agent, and this
+/// handler never touches the source agent's own manifest — it only reads it
+/// and writes a new, separate `agent-types/<name>.toml`. The closest sibling,
+/// [`super::clone_agent`], follows the same "read source, write something
+/// new" shape and carries no such guard either.
+///
+/// Not exposed to the `User` role: `save-as-agent-type` is absent from the
+/// `User`-tier POST allowlist in `middleware::user_role_allows_request`, so
+/// only Admin+ callers reach this handler at all — unlike `/clone`, which
+/// deliberately carves out `User` access and therefore needs its own
+/// `can_access_agent` ownership check to stop a non-owner from cloning an
+/// arbitrary agent by id. An Admin+ caller already has access to every
+/// agent's manifest through other routes, so no equivalent check is needed
+/// here; widening this endpoint to `User` later would need that check added
+/// alongside it.
+#[utoipa::path(
+    post,
+    path = "/api/agents/{id}/save-as-agent-type",
+    tag = "agents",
+    params(("id" = String, Path, description = "Agent ID")),
+    request_body(content = crate::types::JsonObject, description = "template_name to save as"),
+    responses(
+        (status = 201, description = "Agent type created from live agent"),
+        (status = 400, description = "Malformed agent id, or a template_name outside [A-Za-z0-9_-]{1,64}"),
+        (status = 404, description = "Agent not found"),
+        (status = 409, description = "Template name already taken, or it belongs to a different live agent"),
+        (status = 500, description = "The agent type could not be rendered or written")
+    )
+)]
+pub async fn save_agent_as_agent_type(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    lang: Option<axum::Extension<RequestLanguage>>,
+    Json(req): Json<SaveAsAgentTypeRequest>,
+) -> impl IntoResponse {
+    let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
+    let agent_id: AgentId = match id.parse() {
+        Ok(id) => id,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": t.t("api-error-agent-invalid-id")})),
+            );
+        }
+    };
+
+    let entry = match state.kernel.agent_registry().get(agent_id) {
+        Some(e) => e,
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
+            );
+        }
+    };
+
+    let template_name = req.template_name.trim().to_string();
+
+    let mut manifest = entry.manifest.clone();
+    manifest.name = template_name.clone();
+    // Cleared for the same reason `clone_agent` clears it on the destination
+    // side: a template spawned from later must get a fresh workspace, not
+    // point new agents at the SOURCE agent's own workspace directory.
+    manifest.workspace = None;
+
+    let home = &state.kernel.config_ref().home_dir;
+    // The source agent's own name is the one this save is allowed to collide
+    // with; every other live agent's name would shadow it in the catalog.
+    match agent_type_store::create_agent_type_from_manifest_in(
+        home,
+        &template_name,
+        &manifest,
+        Some(&entry.manifest.name),
+    ) {
+        Ok(_rendered) => (
+            StatusCode::CREATED,
+            Json(serde_json::json!({
+                "name": template_name,
+                "description": manifest.description,
+            })),
+        ),
+        Err(librefang_types::agent_type_store::CreateAgentTypeError::InvalidName) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": t.t("api-error-template-invalid-name")})),
+        ),
+        Err(librefang_types::agent_type_store::CreateAgentTypeError::NameTaken) => (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({
+                "error": t.t_args("api-error-agent-type-exists", &[("name", &template_name)])
+            })),
+        ),
+        Err(librefang_types::agent_type_store::CreateAgentTypeError::ShadowsLiveAgent) => (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({
+                "error": t.t_args("api-error-agent-type-name-taken", &[("name", &template_name)])
+            })),
+        ),
+        Err(librefang_types::agent_type_store::CreateAgentTypeError::Io(e)) => {
+            tracing::error!("failed to save agent as agent type: {e}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": t.t("api-error-internal")})),
+            )
+        }
+    }
+}
+
+/// GET /api/agents/{id}/manifest — Get the agent's full manifest as raw TOML.
+///
+/// Powers the dashboard's full manifest editor (#7742): the Configure
+/// drawer's quick-edit widgets only cover a handful of fields, so this
+/// endpoint hands back every field `AgentManifest` carries for
+/// `AgentManifestForm` to parse and pre-fill, with `PATCH /api/agents/{id}`
+/// (`manifest_toml`) as the matching write path. Renders the live
+/// in-memory manifest the same way `persist_manifest_to_disk` writes
+/// `agent.toml`, rather than re-reading the on-disk file, so the response
+/// always reflects the latest state even if a prior partial PATCH hasn't
+/// flushed to disk yet.
+#[utoipa::path(
+    get,
+    path = "/api/agents/{id}/manifest",
+    tag = "agents",
+    params(("id" = String, Path, description = "Agent ID")),
+    responses(
+        (status = 200, description = "Agent manifest as raw TOML", content_type = "application/toml"),
+        (status = 400, description = "Invalid agent ID"),
+        (status = 404, description = "Agent not found")
+    )
+)]
+pub async fn get_agent_manifest_toml(
+    State(state): State<Arc<AppState>>,
+    api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
+    Path(id): Path<String>,
+    lang: Option<axum::Extension<RequestLanguage>>,
+) -> impl IntoResponse {
+    use axum::body::Body;
+
+    let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
+    let agent_id: AgentId = match id.parse() {
+        Ok(id) => id,
+        Err(_) => {
+            return ApiErrorResponse::bad_request(t.t("api-error-agent-invalid-id"))
+                .with_code("invalid_agent_id")
+                .into_response();
+        }
+    };
+    let entry = match state.kernel.agent_registry().get(agent_id) {
+        Some(e) => e,
+        None => {
+            return ApiErrorResponse::not_found(t.t("api-error-agent-not-found"))
+                .with_code("agent_not_found")
+                .into_response();
+        }
+    };
+    if !super::super::can_access_agent(&state, agent_id, api_user.as_ref()) {
+        return ApiErrorResponse::not_found(t.t("api-error-agent-not-found"))
+            .with_code("agent_not_found")
+            .into_response();
+    }
+    // Localize before dropping the translator (`ErrorTranslator` is
+    // `!Send`) — the toml::to_string_pretty call below doesn't await, but
+    // matching the established pattern (see `patch_agent`) keeps this file
+    // consistent and future-proof against a refactor that adds one.
+    let internal_error_msg = t.t("api-error-internal");
+    drop(t);
+    match toml::to_string_pretty(&entry.manifest) {
+        Ok(text) => (
+            StatusCode::OK,
+            [(axum::http::header::CONTENT_TYPE, "application/toml")],
+            Body::from(text),
+        )
+            .into_response(),
+        Err(e) => {
+            tracing::error!(error = %e, "failed to serialize agent manifest to TOML");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": internal_error_msg})),
+            )
+                .into_response()
         }
     }
 }

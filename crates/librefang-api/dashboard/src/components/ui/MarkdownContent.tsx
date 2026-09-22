@@ -1,6 +1,16 @@
 import { memo, useMemo, type ComponentProps } from "react";
 import Markdown, { defaultUrlTransform, type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { MermaidDiagram } from "./MermaidDiagram";
+
+// remark tags a fenced block's language as `language-<id>` on the <code>.
+// Matched as a whole class token so `language-mermaidish` is not mistaken for
+// it, and case-insensitively because agents write ```Mermaid.
+const MERMAID_FENCE = /(?:^|\s)language-mermaid(?:\s|$)/i;
+
+function isMermaidFence(className?: string): boolean {
+  return !!className && MERMAID_FENCE.test(className);
+}
 
 // Extend react-markdown's URL allowlist with deep-link schemes for native
 // apps the agent commonly references. Schemes outside the default allowlist
@@ -28,7 +38,7 @@ export const urlTransform = (url: string): string => {
 // props instead so we don't have to add a top-level import.
 type PluggableList = NonNullable<ComponentProps<typeof Markdown>["remarkPlugins"]>;
 
-function buildComponents(overrides?: Components): Components {
+function buildComponents(overrides?: Components, diagrams = false): Components {
   const { pre: customPre, ...restOverrides } = overrides ?? {};
   const passThroughPre: Components["pre"] = ({ children }) => <>{children}</>;
 
@@ -40,15 +50,23 @@ function buildComponents(overrides?: Components): Components {
     ul: ({ children }) => <ul className="list-disc pl-4 mb-1.5 space-y-0.5">{children}</ul>,
     ol: ({ children }) => <ol className="list-decimal pl-4 mb-1.5 space-y-0.5">{children}</ol>,
     li: ({ children }) => <li className="text-xs">{children}</li>,
-    code: ({ node, children, ...props }) => {
+    code: ({ node, children, className: codeClassName, ...props }) => {
       const isBlock =
         node?.position
           ? node.position.start.line !== node.position.end.line
           : typeof children === "string" && children.includes("\n");
+      // A ```mermaid fence renders as a diagram. Checked before the generic
+      // block branch so a caller's `pre` override cannot swallow it, and
+      // before the inline branch because `language-*` only ever appears on a
+      // fenced block. `MermaidDiagram` falls back to this same `<pre>` shape
+      // when the source does not parse.
+      if (diagrams && isMermaidFence(codeClassName) && typeof children === "string") {
+        return <MermaidDiagram source={children.replace(/\n$/, "")} />;
+      }
       if (isBlock) {
         if (customPre) {
           const Pre = customPre;
-          return <Pre><code {...props}>{children}</code></Pre>;
+          return <Pre><code className={codeClassName} {...props}>{children}</code></Pre>;
         }
         return (
           <pre className="p-2 rounded-lg bg-main font-mono text-[11px] overflow-x-auto mb-1.5">
@@ -56,7 +74,11 @@ function buildComponents(overrides?: Components): Components {
           </pre>
         );
       }
-      return <code className="px-1 py-0.5 rounded bg-main font-mono text-[11px]" {...props}>{children}</code>;
+      return (
+        <code className={`px-1 py-0.5 rounded bg-main font-mono text-[11px] ${codeClassName ?? ""}`} {...props}>
+          {children}
+        </code>
+      );
     },
     pre: passThroughPre,
     table: ({ children }) => (
@@ -82,6 +104,15 @@ interface MarkdownContentProps {
   remarkPlugins?: PluggableList;
   rehypePlugins?: PluggableList;
   components?: Components;
+  /**
+   * Render a ```mermaid fence as a diagram instead of a code block.
+   *
+   * Opt-in, because this renderer is shared by surfaces a diagram has no
+   * business in: a memory record's 4rem preview box, an agent card, and the
+   * chat's thinking panel — which grows token by token while a turn streams,
+   * so a fence there would re-parse and re-layout on every frame.
+   */
+  diagrams?: boolean;
 }
 
 export const MarkdownContent = memo(function MarkdownContent({
@@ -90,10 +121,11 @@ export const MarkdownContent = memo(function MarkdownContent({
   remarkPlugins,
   rehypePlugins,
   components,
+  diagrams,
 }: MarkdownContentProps) {
   const merged = useMemo(
-    () => buildComponents(components),
-    [components],
+    () => buildComponents(components, diagrams),
+    [components, diagrams],
   );
   const plugins = useMemo(
     () => remarkPlugins ? [remarkGfm, ...remarkPlugins] : defaultPlugins,

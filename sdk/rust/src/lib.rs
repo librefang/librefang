@@ -301,6 +301,7 @@ pub struct LibreFang {
     pub groups: Arc<GroupsResource>,
     pub hands: Arc<HandsResource>,
     pub inbox: Arc<InboxResource>,
+    pub knowledge: Arc<KnowledgeResource>,
     pub mcp: Arc<McpResource>,
     pub media: Arc<MediaResource>,
     pub memory: Arc<MemoryResource>,
@@ -312,6 +313,7 @@ pub struct LibreFang {
     pub sessions: Arc<SessionsResource>,
     pub skills: Arc<SkillsResource>,
     pub system: Arc<SystemResource>,
+    pub tasks: Arc<TasksResource>,
     pub tools: Arc<ToolsResource>,
     pub users: Arc<UsersResource>,
     pub vault: Arc<VaultResource>,
@@ -349,6 +351,7 @@ impl LibreFang {
             groups: Arc::new(GroupsResource::new(base_url.clone(), client.clone())),
             hands: Arc::new(HandsResource::new(base_url.clone(), client.clone())),
             inbox: Arc::new(InboxResource::new(base_url.clone(), client.clone())),
+            knowledge: Arc::new(KnowledgeResource::new(base_url.clone(), client.clone())),
             mcp: Arc::new(McpResource::new(base_url.clone(), client.clone())),
             media: Arc::new(MediaResource::new(base_url.clone(), client.clone())),
             memory: Arc::new(MemoryResource::new(base_url.clone(), client.clone())),
@@ -363,6 +366,7 @@ impl LibreFang {
             sessions: Arc::new(SessionsResource::new(base_url.clone(), client.clone())),
             skills: Arc::new(SkillsResource::new(base_url.clone(), client.clone())),
             system: Arc::new(SystemResource::new(base_url.clone(), client.clone())),
+            tasks: Arc::new(TasksResource::new(base_url.clone(), client.clone())),
             tools: Arc::new(ToolsResource::new(base_url.clone(), client.clone())),
             users: Arc::new(UsersResource::new(base_url.clone(), client.clone())),
             vault: Arc::new(VaultResource::new(base_url.clone(), client.clone())),
@@ -632,6 +636,48 @@ impl AgentsResource {
         .await
     }
 
+    pub async fn serve_agent_avatar(&self, id: &str) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::GET,
+            &["api", "agents", id, "avatar"],
+            None,
+            &[],
+        )
+        .await
+    }
+
+    /// Sends a raw `application/octet-stream` body; `content_type` overrides that default.
+    pub async fn upload_agent_avatar(
+        &self,
+        id: &str,
+        body: Vec<u8>,
+        content_type: Option<&str>,
+    ) -> Result<Value> {
+        do_req_raw(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::POST,
+            &["api", "agents", id, "avatar"],
+            body,
+            content_type.unwrap_or("application/octet-stream"),
+        )
+        .await
+    }
+
+    pub async fn delete_agent_avatar(&self, id: &str) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::DELETE,
+            &["api", "agents", id, "avatar"],
+            None,
+            &[],
+        )
+        .await
+    }
+
     pub async fn get_agent_channels(&self, id: &str) -> Result<Value> {
         do_req(
             &self.client,
@@ -842,6 +888,34 @@ impl AgentsResource {
         .await
     }
 
+    pub async fn get_agent_manifest_toml(&self, id: &str) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::GET,
+            &["api", "agents", id, "manifest"],
+            None,
+            &[],
+        )
+        .await
+    }
+
+    pub async fn list_agent_manifest_history(
+        &self,
+        id: &str,
+        limit: Option<&str>,
+    ) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::GET,
+            &["api", "agents", id, "manifest-history"],
+            None,
+            &[("limit", limit)],
+        )
+        .await
+    }
+
     pub async fn get_agent_mcp_servers(&self, id: &str) -> Result<Value> {
         do_req(
             &self.client,
@@ -998,6 +1072,18 @@ impl AgentsResource {
             reqwest::Method::GET,
             &["api", "agents", id, "runtime"],
             None,
+            &[],
+        )
+        .await
+    }
+
+    pub async fn save_agent_as_agent_type(&self, id: &str, data: Value) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::POST,
+            &["api", "agents", id, "save-as-agent-type"],
+            Some(data),
             &[],
         )
         .await
@@ -2575,6 +2661,111 @@ impl InboxResource {
             &self.base_url,
             reqwest::Method::GET,
             &["api", "inbox", "status"],
+            None,
+            &[],
+        )
+        .await
+    }
+}
+
+// ── Knowledge ──
+
+#[derive(Debug, Clone)]
+pub struct KnowledgeResource {
+    base_url: String,
+    client: Client,
+}
+
+impl KnowledgeResource {
+    fn new(base_url: String, client: Client) -> Self {
+        Self { base_url, client }
+    }
+
+    pub async fn list_bases(&self) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::GET,
+            &["api", "knowledge"],
+            None,
+            &[],
+        )
+        .await
+    }
+
+    pub async fn create_base(&self, data: Value) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::POST,
+            &["api", "knowledge"],
+            Some(data),
+            &[],
+        )
+        .await
+    }
+
+    pub async fn delete_base(&self, name: &str) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::DELETE,
+            &["api", "knowledge", name],
+            None,
+            &[],
+        )
+        .await
+    }
+
+    pub async fn set_holders(&self, name: &str, data: Value) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::PUT,
+            &["api", "knowledge", name, "agents"],
+            Some(data),
+            &[],
+        )
+        .await
+    }
+
+    pub async fn list_documents(&self, name: &str) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::GET,
+            &["api", "knowledge", name, "documents"],
+            None,
+            &[],
+        )
+        .await
+    }
+
+    /// Sends a raw `application/octet-stream` body; `content_type` overrides that default.
+    pub async fn put_document(
+        &self,
+        name: &str,
+        filename: &str,
+        body: Vec<u8>,
+        content_type: Option<&str>,
+    ) -> Result<Value> {
+        do_req_raw(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::PUT,
+            &["api", "knowledge", name, "documents", filename],
+            body,
+            content_type.unwrap_or("application/octet-stream"),
+        )
+        .await
+    }
+
+    pub async fn delete_document(&self, name: &str, filename: &str) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::DELETE,
+            &["api", "knowledge", name, "documents", filename],
             None,
             &[],
         )
@@ -5234,6 +5425,30 @@ impl SystemResource {
         .await
     }
 
+    pub async fn get_agent_type_registry_diff(&self, name: &str) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::GET,
+            &["api", "templates", name, "registry-diff"],
+            None,
+            &[],
+        )
+        .await
+    }
+
+    pub async fn restore_agent_type_from_registry(&self, name: &str) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::POST,
+            &["api", "templates", name, "restore"],
+            None,
+            &[],
+        )
+        .await
+    }
+
     pub async fn get_agent_template_toml(&self, name: &str) -> Result<Value> {
         do_req(
             &self.client,
@@ -5242,6 +5457,42 @@ impl SystemResource {
             &["api", "templates", name, "toml"],
             None,
             &[],
+        )
+        .await
+    }
+
+    /// Sends a raw `text/plain` body; `content_type` overrides that default.
+    pub async fn put_agent_template_toml(
+        &self,
+        name: &str,
+        body: Vec<u8>,
+        content_type: Option<&str>,
+    ) -> Result<Value> {
+        do_req_raw(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::PUT,
+            &["api", "templates", name, "toml"],
+            body,
+            content_type.unwrap_or("text/plain"),
+        )
+        .await
+    }
+
+    /// Sends a raw `text/plain` body; `content_type` overrides that default.
+    pub async fn post_agent_template_toml(
+        &self,
+        name: &str,
+        body: Vec<u8>,
+        content_type: Option<&str>,
+    ) -> Result<Value> {
+        do_req_raw(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::POST,
+            &["api", "templates", name, "toml"],
+            body,
+            content_type.unwrap_or("text/plain"),
         )
         .await
     }
@@ -5265,6 +5516,32 @@ impl SystemResource {
             reqwest::Method::GET,
             &["api", "versions"],
             None,
+            &[],
+        )
+        .await
+    }
+}
+
+// ── Tasks ──
+
+#[derive(Debug, Clone)]
+pub struct TasksResource {
+    base_url: String,
+    client: Client,
+}
+
+impl TasksResource {
+    fn new(base_url: String, client: Client) -> Self {
+        Self { base_url, client }
+    }
+
+    pub async fn task_queue_post_root(&self, data: Value) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::POST,
+            &["api", "tasks"],
+            Some(data),
             &[],
         )
         .await
@@ -5351,6 +5628,18 @@ impl UsersResource {
         .await
     }
 
+    pub async fn serve_my_avatar(&self) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::GET,
+            &["api", "users", "me", "avatar"],
+            None,
+            &[],
+        )
+        .await
+    }
+
     pub async fn get_user(&self, name: &str) -> Result<Value> {
         do_req(
             &self.client,
@@ -5382,6 +5671,60 @@ impl UsersResource {
             reqwest::Method::DELETE,
             &["api", "users", name],
             None,
+            &[],
+        )
+        .await
+    }
+
+    pub async fn serve_user_avatar(&self, name: &str) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::GET,
+            &["api", "users", name, "avatar"],
+            None,
+            &[],
+        )
+        .await
+    }
+
+    /// Sends a raw `application/octet-stream` body; `content_type` overrides that default.
+    pub async fn upload_user_avatar(
+        &self,
+        name: &str,
+        body: Vec<u8>,
+        content_type: Option<&str>,
+    ) -> Result<Value> {
+        do_req_raw(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::POST,
+            &["api", "users", name, "avatar"],
+            body,
+            content_type.unwrap_or("application/octet-stream"),
+        )
+        .await
+    }
+
+    pub async fn delete_user_avatar(&self, name: &str) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::DELETE,
+            &["api", "users", name, "avatar"],
+            None,
+            &[],
+        )
+        .await
+    }
+
+    pub async fn update_user_identity(&self, name: &str, data: Value) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::PATCH,
+            &["api", "users", name, "identity"],
+            Some(data),
             &[],
         )
         .await

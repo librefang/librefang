@@ -1,38 +1,48 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import {
-  createAgentType,
-  updateAgentType,
+  createAgentTypeFromToml,
   deleteAgentType,
   promoteAgentType,
+  restoreAgentTypeFromRegistry,
   restoreTemplateVersion,
-  spawnEphemeral,
+  putAgentTemplateToml,
 } from "../http/client";
-import type { AgentTypeSpec, SpawnEphemeralRequest } from "../../api";
-import { agentTypeKeys, budgetKeys, usageKeys } from "../queries/keys";
+import type { AgentTypeDetail } from "../../api";
+import { agentTypeKeys } from "../queries/keys";
 
-export function useCreateAgentType() {
+/**
+ * Report a save's `unknown_keys` back to the caller (#8028).
+ *
+ * The server drops any top-level key the submitted TOML carried that
+ * `AgentManifest` doesn't recognize, and says so in the response body — but
+ * a mutation's `onSuccess` runs before the caller sees the result, so this
+ * is the one place shared by both write paths that can turn it into
+ * something the operator actually sees instead of a fact only the network
+ * tab knows.
+ */
+export const unknownKeysWarning = (detail: AgentTypeDetail): string | null =>
+  detail.unknown_keys && detail.unknown_keys.length > 0
+    ? detail.unknown_keys.join(", ")
+    : null;
+
+/** Create a new agent type from a complete manifest, in one atomic write (#8028). */
+export function useCreateAgentTypeFromToml() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (spec: AgentTypeSpec) => createAgentType(spec),
+    mutationFn: ({ name, toml }: { name: string; toml: string }) =>
+      createAgentTypeFromToml(name, toml),
     onSuccess: () => qc.invalidateQueries({ queryKey: agentTypeKeys.all }),
   });
 }
 
-/**
- * Save an edit to an existing agent type.
- *
- * `spec` is a patch: the server keeps every manifest field the object does not
- * mention (#7740). Callers should send only what the form actually edits rather
- * than reconstructing a full document, so an operator's `[[triggers]]`,
- * `tool_allowlist`, `[compaction]` and the rest survive the save.
- */
-export function useUpdateAgentType() {
+export function useUpdateAgentTypeToml() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: ({ name, spec }: { name: string; spec: AgentTypeSpec }) =>
-      updateAgentType(name, spec),
+    mutationFn: ({ name, toml }: { name: string; toml: string }) =>
+      putAgentTemplateToml(name, toml),
     onSuccess: (_data, { name }) => {
       qc.invalidateQueries({ queryKey: agentTypeKeys.detail(name) });
+      qc.invalidateQueries({ queryKey: agentTypeKeys.registryDiff(name) });
       qc.invalidateQueries({ queryKey: agentTypeKeys.lists() });
     },
   });
@@ -43,6 +53,19 @@ export function useDeleteAgentType() {
   return useMutation({
     mutationFn: (name: string) => deleteAgentType(name),
     onSuccess: () => qc.invalidateQueries({ queryKey: agentTypeKeys.all }),
+  });
+}
+
+/** Overwrite a local agent type with its registry original. */
+export function useRestoreAgentType() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (name: string) => restoreAgentTypeFromRegistry(name),
+    onSuccess: (_data, name) => {
+      qc.invalidateQueries({ queryKey: agentTypeKeys.detail(name) });
+      qc.invalidateQueries({ queryKey: agentTypeKeys.registryDiff(name) });
+      qc.invalidateQueries({ queryKey: agentTypeKeys.lists() });
+    },
   });
 }
 
@@ -74,27 +97,6 @@ export function useRestoreTemplateVersion() {
       qc.invalidateQueries({ queryKey: agentTypeKeys.detail(name) });
       qc.invalidateQueries({ queryKey: agentTypeKeys.history(name) });
       qc.invalidateQueries({ queryKey: agentTypeKeys.lists() });
-    },
-  });
-}
-
-/**
- * Run one ephemeral worker and return what it produced (#6699).
- *
- * The worker leaves nothing behind — no registry entry, no session, no
- * workspace — so there is no agent list to refresh afterwards. What it does
- * leave is spend on the *parent's* ledger, which is why usage and budget are
- * the two domains invalidated here: a Quick Run that silently cost money and
- * left the budget widget showing the pre-run figure is the exact surprise this
- * feature must not produce.
- */
-export function useSpawnEphemeral() {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: (body: SpawnEphemeralRequest) => spawnEphemeral(body),
-    onSettled: () => {
-      qc.invalidateQueries({ queryKey: usageKeys.all });
-      qc.invalidateQueries({ queryKey: budgetKeys.all });
     },
   });
 }

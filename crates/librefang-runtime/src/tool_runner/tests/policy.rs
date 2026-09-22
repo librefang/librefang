@@ -23,7 +23,7 @@ async fn tool_runner_rbac_user_deny_returns_hard_error() {
         None,
         None,
         None,
-        None, // allowed_skills
+        None, // web_ctx
         None,
         None,
         None,
@@ -90,7 +90,7 @@ async fn tool_runner_rbac_user_needs_approval_routes_through_approval_queue() {
         None,
         None,
         None,
-        None, // allowed_skills
+        None, // web_ctx
         None,
         None,
         Some(workspace.path()),
@@ -219,7 +219,7 @@ async fn tool_runner_rbac_user_allow_falls_through_to_existing_approval_logic() 
         None,
         None,
         None,
-        None, // allowed_skills
+        None, // web_ctx
         None,
         None,
         None,
@@ -277,7 +277,7 @@ async fn test_shell_exec_uses_exec_policy_allowed_env_vars() {
         None,
         None,
         None,
-        None, // allowed_skills
+        None, // mcp_connections
         None,
         None,
         None,
@@ -1265,7 +1265,7 @@ async fn agent_spawn_propagates_parent_cost_budget_to_the_child() {
         None,
         None,
         None,
-        None, // allowed_skills
+        None, // browser_ctx
         None,
         None,
         None, // media_engine
@@ -1357,7 +1357,7 @@ async fn agent_spawn_propagates_parent_fixed_pin_to_the_child() {
         None,
         None,
         None,
-        None, // allowed_skills
+        None, // browser_ctx
         None,
         None,
         None, // media_engine
@@ -1432,7 +1432,7 @@ async fn agent_spawn_refused_when_the_parent_override_cannot_be_looked_up() {
         None,
         None,
         None,
-        None, // allowed_skills
+        None, // browser_ctx
         None,
         None,
         None, // media_engine
@@ -1503,7 +1503,7 @@ async fn agent_spawn_without_profile_survives_an_unresolvable_parent() {
         None,
         None,
         None,
-        None, // allowed_skills
+        None, // browser_ctx
         None,
         None,
         None, // media_engine
@@ -1566,7 +1566,7 @@ async fn agent_spawn_profile_mistyped_value_is_refused() {
         None,
         None,
         None,
-        None, // allowed_skills
+        None, // browser_ctx
         None,
         None,
         None, // media_engine
@@ -1638,7 +1638,7 @@ async fn agent_spawn_profile_refused_when_the_provider_has_no_credentials() {
         None,
         None,
         None,
-        None, // allowed_skills
+        None, // browser_ctx
         None,
         None,
         None, // media_engine
@@ -1716,7 +1716,7 @@ async fn agent_spawn_ephemeral_profile_pins_the_worker_model() {
         None,
         None,
         None,
-        None, // allowed_skills
+        None, // browser_ctx
         None,
         None,
         None, // media_engine
@@ -1802,7 +1802,7 @@ async fn agent_spawn_ephemeral_profile_refused_over_parent_cost_budget() {
         None,
         None,
         None,
-        None, // allowed_skills
+        None, // browser_ctx
         None,
         None,
         None, // media_engine
@@ -1870,7 +1870,7 @@ async fn agent_spawn_ephemeral_model_override_refused_when_parent_capped() {
         None,
         None,
         None,
-        None, // allowed_skills
+        None, // browser_ctx
         None,
         None,
         None, // media_engine
@@ -1935,7 +1935,7 @@ async fn agent_spawn_ephemeral_model_override_honoured_when_parent_uncapped() {
         None,
         None,
         None,
-        None, // allowed_skills
+        None, // browser_ctx
         None,
         None,
         None, // media_engine
@@ -2010,7 +2010,7 @@ async fn agent_spawn_ephemeral_profile_and_model_are_mutually_exclusive() {
         None,
         None,
         None,
-        None, // allowed_skills
+        None, // browser_ctx
         None,
         None,
         None, // media_engine
@@ -2224,7 +2224,7 @@ async fn test_agent_spawn_capability_escalation_denied() {
         None,
         None,
         None,
-        None, // allowed_skills
+        None, // browser_ctx
         None,
         None,
         None, // media_engine
@@ -2286,7 +2286,7 @@ async fn test_agent_spawn_subset_capabilities_allowed() {
         None,
         None,
         None,
-        None, // allowed_skills
+        None, // browser_ctx
         None,
         None,
         None, // media_engine
@@ -2388,7 +2388,7 @@ async fn test_mcp_tool_blocked_by_allowed_tools() {
         None,
         None,
         None,
-        None, // allowed_skills
+        None, // mcp_connections
         None,
         None,
         None,
@@ -2435,7 +2435,7 @@ async fn test_mcp_tool_allowed_passes_check() {
         None,
         None,
         None,
-        None, // allowed_skills
+        None, // mcp_connections
         None,
         None,
         None,
@@ -2491,7 +2491,7 @@ async fn test_allowed_tools_wildcard_prefix_match() {
         None,
         None,
         None,
-        None, // allowed_skills
+        None, // mcp_connections
         None,
         None,
         None,
@@ -2537,7 +2537,7 @@ async fn test_allowed_tools_wildcard_blocks_non_matching() {
         None,
         None,
         None,
-        None, // allowed_skills
+        None, // mcp_connections
         None,
         None,
         None,
@@ -2583,7 +2583,7 @@ async fn test_allowed_tools_star_allows_everything() {
         None,
         None,
         None,
-        None, // allowed_skills
+        None, // mcp_connections
         None,
         None,
         None,
@@ -2628,7 +2628,7 @@ async fn test_allowed_tools_mixed_wildcard_and_exact() {
         None,
         None,
         None,
-        None, // allowed_skills
+        None, // mcp_connections
         None,
         None,
         None,
@@ -2673,7 +2673,7 @@ async fn test_mcp_tool_wildcard_allowed() {
         None,
         None,
         None,
-        None, // allowed_skills
+        None, // mcp_connections
         None,
         None,
         None,
@@ -2930,6 +2930,7 @@ impl TaskQueue for SpawnCheckKernel {
         _description: &str,
         _assigned_to: Option<&str>,
         _created_by: Option<&str>,
+        _opts: &librefang_kernel_handle::TaskPostOptions,
     ) -> Result<String, librefang_kernel_handle::KernelOpError> {
         Err("not used".into())
     }

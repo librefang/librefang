@@ -1,0 +1,3 @@
+The New Task dialog on the Tasks page now exposes `priority` and the per-task claim timeout (`timeout_secs`), both already accepted by `POST /api/tasks` but previously reachable only by hand-writing the request body.
+Priority orders the claim queue (higher is claimed first) and the timeout overrides the global `[task_board] claim_ttl_secs` for that one row; either field left blank keeps the previous default.
+A task card now shows its priority and timeout override when either is set, so an operator can see which rows deviate from the board's defaults without opening each one (#7974) (@DaBlitzStein)

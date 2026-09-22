@@ -855,6 +855,209 @@
         }
       }
     },
+    "/api/agents/{id}/avatar": {
+      "get": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "GET /api/agents/{id}/avatar — the stored image.",
+        "description": "Authenticated like every other `/api/` route, which is the point: the alternative placement under `~/.librefang/dashboard/` would have been an unauthenticated GET.",
+        "operationId": "serve_agent_avatar",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Agent ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The image",
+            "content": {
+              "image/png": {}
+            }
+          },
+          "304": {
+            "description": "Unchanged since the caller's `If-None-Match`"
+          },
+          "400": {
+            "description": "Invalid agent id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such agent, or no avatar set",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "POST /api/agents/{id}/avatar — store an image as this agent's avatar.",
+        "operationId": "upload_agent_avatar",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Agent ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "description": "The image, raw. PNG, JPEG, GIF or WebP, decided by the bytes — the request's `Content-Type` and any filename it carries are ignored.",
+          "content": {
+            "application/octet-stream": {
+              "schema": {
+                "type": "string"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Stored; the body carries the `avatar_url` to keep",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid agent id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such agent",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Image larger than the cap",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "Bytes are not a supported image",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "423": {
+            "description": "This agent is provisioned by the deployment; its manifest cannot be changed through the API",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "DELETE /api/agents/{id}/avatar — remove the image and the reference to it.",
+        "operationId": "delete_agent_avatar",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Agent ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Removed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid agent id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such agent",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "423": {
+            "description": "This agent is provisioned by the deployment; its manifest cannot be changed through the API",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/agents/{id}/channels": {
       "get": {
         "tags": [
@@ -1701,6 +1904,91 @@
         }
       }
     },
+    "/api/agents/{id}/manifest": {
+      "get": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "GET /api/agents/{id}/manifest — Get the agent's full manifest as raw TOML.",
+        "description": "Powers the dashboard's full manifest editor (#7742): the Configure\ndrawer's quick-edit widgets only cover a handful of fields, so this\nendpoint hands back every field `AgentManifest` carries for\n`AgentManifestForm` to parse and pre-fill, with `PATCH /api/agents/{id}`\n(`manifest_toml`) as the matching write path. Renders the live\nin-memory manifest the same way `persist_manifest_to_disk` writes\n`agent.toml`, rather than re-reading the on-disk file, so the response\nalways reflects the latest state even if a prior partial PATCH hasn't\nflushed to disk yet.",
+        "operationId": "get_agent_manifest_toml",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Agent ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Agent manifest as raw TOML",
+            "content": {
+              "application/toml": {}
+            }
+          },
+          "400": {
+            "description": "Invalid agent ID"
+          },
+          "404": {
+            "description": "Agent not found"
+          }
+        }
+      }
+    },
+    "/api/agents/{id}/manifest-history": {
+      "get": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "GET /api/agents/{id}/manifest-history — how this agent's config changed over time.",
+        "description": "Returns an array of manifest snapshots, newest first.\nEach entry carries the full TOML so the dashboard can render a diff between\nconsecutive versions. This endpoint is read-only: there is no restore.",
+        "operationId": "list_agent_manifest_history",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Agent UUID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Max entries to return (default 30, max 200)",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Manifest version history",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid agent id or limit"
+          },
+          "404": {
+            "description": "Agent not found"
+          }
+        }
+      }
+    },
     "/api/agents/{id}/mcp_servers": {
       "get": {
         "tags": [
@@ -2354,6 +2642,55 @@
                 }
               }
             }
+          }
+        }
+      }
+    },
+    "/api/agents/{id}/save-as-agent-type": {
+      "post": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "POST /api/agents/{id}/save-as-agent-type — snapshot a live agent's manifest\ninto a reusable agent-type template file.",
+        "description": "Not gated by [`super::guard_provisioned_agent`]: that guard refuses writes\nthat would change the *definition* of a provisioned agent, and this\nhandler never touches the source agent's own manifest — it only reads it\nand writes a new, separate `agent-types/<name>.toml`. The closest sibling,\n[`super::clone_agent`], follows the same \"read source, write something\nnew\" shape and carries no such guard either.\n\nNot exposed to the `User` role: `save-as-agent-type` is absent from the\n`User`-tier POST allowlist in `middleware::user_role_allows_request`, so\nonly Admin+ callers reach this handler at all — unlike `/clone`, which\ndeliberately carves out `User` access and therefore needs its own\n`can_access_agent` ownership check to stop a non-owner from cloning an\narbitrary agent by id. An Admin+ caller already has access to every\nagent's manifest through other routes, so no equivalent check is needed\nhere; widening this endpoint to `User` later would need that check added\nalongside it.",
+        "operationId": "save_agent_as_agent_type",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Agent ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "description": "template_name to save as",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Agent type created from live agent"
+          },
+          "400": {
+            "description": "Malformed agent id, or a template_name outside [A-Za-z0-9_-]{1,64}"
+          },
+          "404": {
+            "description": "Agent not found"
+          },
+          "409": {
+            "description": "Template name already taken, or it belongs to a different live agent"
+          },
+          "500": {
+            "description": "The agent type could not be rendered or written"
           }
         }
       }
@@ -6042,8 +6379,18 @@
           "required": true
         },
         "responses": {
-          "200": {
-            "description": "Post a task to the agent task queue",
+          "201": {
+            "description": "Task enqueued",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Missing title, or an unknown assignee",
             "content": {
               "application/json": {
                 "schema": {
@@ -7837,6 +8184,333 @@
         "responses": {
           "200": {
             "description": "Quick init result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/knowledge": {
+      "get": {
+        "tags": [
+          "knowledge"
+        ],
+        "summary": "GET /api/knowledge — every base with its documents' totals and its holders.",
+        "operationId": "list_bases",
+        "responses": {
+          "200": {
+            "description": "Shared knowledge bases",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "knowledge"
+        ],
+        "summary": "POST /api/knowledge — create an empty base.",
+        "operationId": "create_base",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateBaseRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid name",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "A base of that name already exists, or one that differs from it only by case",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/knowledge/{name}": {
+      "delete": {
+        "tags": [
+          "knowledge"
+        ],
+        "summary": "DELETE /api/knowledge/{name} — remove the base and revoke it everywhere.",
+        "operationId": "delete_base",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Knowledge base name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Deleted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such base",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/knowledge/{name}/agents": {
+      "put": {
+        "tags": [
+          "knowledge"
+        ],
+        "summary": "PUT /api/knowledge/{name}/agents — set exactly which agents hold this base.",
+        "operationId": "set_holders",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Knowledge base name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetHoldersRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Holders updated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such base",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/knowledge/{name}/documents": {
+      "get": {
+        "tags": [
+          "knowledge"
+        ],
+        "summary": "GET /api/knowledge/{name}/documents — list the documents in a base.",
+        "operationId": "list_documents",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Knowledge base name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Documents",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such base",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/knowledge/{name}/documents/{filename}": {
+      "put": {
+        "tags": [
+          "knowledge"
+        ],
+        "summary": "PUT /api/knowledge/{name}/documents/{filename} — write a document.",
+        "description": "The body is the file, raw. That is the convention `POST /api/agents/{id}/upload`\nalready set in this codebase, and it keeps `multipart` off the dependency list\nfor a payload that is one file.",
+        "operationId": "put_document",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Knowledge base name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "filename",
+            "in": "path",
+            "description": "Document filename",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/octet-stream": {
+              "schema": {
+                "type": "string"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Written",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such base",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Document too large",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "knowledge"
+        ],
+        "summary": "DELETE /api/knowledge/{name}/documents/{filename} — remove a document.",
+        "operationId": "delete_document",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Knowledge base name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "filename",
+            "in": "path",
+            "description": "Document filename",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Deleted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such base or document",
             "content": {
               "application/json": {
                 "schema": {
@@ -11496,7 +12170,7 @@
           "models"
         ],
         "summary": "PUT /api/providers/{name}/discovery — Toggle live model discovery (#6702).",
-        "description": "Body: `{ \"discover_models\": true }`.\n\nModel discovery used to be reachable only through the hard-coded local\nprovider ids, so a custom OpenAI-compatible endpoint registered under its\nown id stayed at `model_count: 0` forever with no UI action to change that.\nFlipping the flag here puts the provider on exactly the same probe path as\na built-in local one: the periodic probe loop, `POST .../test`, and the\nlive-model filter applied to `/api/models`.\n\nThe flag is persisted into the provider's own `providers/{name}.toml`\n`[provider]` table, which is where the catalog reads it back from on the\nnext boot. Registry-managed files are rewritten by the boot-time registry\nsync when their content drifts from the upstream copy, so the flag is\ndurable for the custom providers this endpoint exists to serve and\nintentionally best-effort for built-in ids — whose discovery behaviour is\ndecided by the id branch of the predicate anyway.",
+        "description": "Body: `{ \"discover_models\": true }`.\n\nModel discovery used to be reachable only through the hard-coded local\nprovider ids, so a custom OpenAI-compatible endpoint registered under its\nown id stayed at `model_count: 0` forever with no UI action to change that.\nFlipping the flag here puts the provider on exactly the same probe path as\na built-in local one: the periodic probe loop, `POST .../test`, and the\nlive-model filter applied to `/api/models`.\n\nThe preference is operator state, so it is stored where the operator's other provider preferences already live — `data/provider_discovery.json` — and applied over the catalog at boot.\nIt deliberately does not go into the provider's own `providers/{name}.toml`: the boot-time registry sync rewrites those files from the registry, and no registry-shipped file carries `discover_models` at all, so a toggle written there was cleared by the next restart (#8407).\nThe setting therefore survives restarts for every provider, built-in ids included.",
         "operationId": "set_provider_discovery",
         "parameters": [
           {
@@ -12197,6 +12871,7 @@
           "sessions"
         ],
         "summary": "DELETE /api/sessions/:id — Delete a session.",
+        "description": "Cascades to every descendant session (#7752) — deleting a session that\nspawned sub-agent runs takes the whole delegated subtree with it. The\nresponse body reports what actually came down rather than a bare 204, so\na caller who only asked to delete one id can tell a subtree was removed\n(#7991 review).",
         "operationId": "delete_session",
         "parameters": [
           {
@@ -12211,7 +12886,14 @@
         ],
         "responses": {
           "200": {
-            "description": "Session deleted"
+            "description": "Session deleted, cascading to descendants",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
           }
         }
       }
@@ -13125,6 +13807,48 @@
         }
       }
     },
+    "/api/tasks": {
+      "post": {
+        "tags": [
+          "tasks"
+        ],
+        "summary": "POST /api/tasks — Enqueue a task on behalf of an external caller.",
+        "description": "Body: `{\"title\": \"...\", \"description\": \"...\", \"assigned_to\": \"<agent-id|name>\"?, \"created_by\": \"<agent-id>\"?, \"priority\": <int>?, \"timeout_secs\": <uint>?}`\n\nWraps `KernelHandle::task_post` so HTTP clients (skill subprocesses,\ncron scripts, external integrations) can enqueue tasks without a\nruntime/agent context. The agent-side `task_post` tool keeps the\ncaller's agent id automatically.\nAuthenticated HTTP requests use the caller's stable user id for\nprovenance and ignore a body-supplied `created_by` value.\n\n`priority` orders the claim queue (higher first, ties by age) and\n`timeout_secs` overrides `[task_board] claim_ttl_secs` for this task —\nboth are enforced by the kernel, not merely recorded.\n\nAn `assigned_to` that names no known agent is rejected with 400 rather\nthan stored: `task_claim` refuses an unknown agent, so such a row would\nsit `pending` forever with nothing to say why.",
+        "operationId": "task_queue_post_root",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Task enqueued",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid title, description, priority, timeout_secs, or unknown assignee",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/templates": {
       "get": {
         "tags": [
@@ -13450,6 +14174,73 @@
         }
       }
     },
+    "/api/templates/{name}/registry-diff": {
+      "get": {
+        "tags": [
+          "system"
+        ],
+        "summary": "GET /api/templates/:name/registry-diff — Compare local agent type with its registry original.",
+        "description": "Scoped to `TemplateSource::AgentType` like `restore_from_registry` — a name that only resolves\nthrough a live agent's own workspace manifest has nothing `restore` can ever act on, so a diff\noffered for it is a comparison for a control that cannot succeed (#8042).",
+        "operationId": "get_agent_type_registry_diff",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Agent type name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Diff between local and registry versions"
+          },
+          "404": {
+            "description": "Agent type or registry version not found"
+          },
+          "409": {
+            "description": "The name belongs to a live agent"
+          }
+        }
+      }
+    },
+    "/api/templates/{name}/restore": {
+      "post": {
+        "tags": [
+          "system"
+        ],
+        "summary": "POST /api/templates/:name/restore — Overwrite local agent type with the registry version.",
+        "description": "Records two snapshots, because this write destroys the local copy by design.\nA manifest whose current content came from a hand-edit of the file has no snapshot anywhere, so the pre-restore content is recorded first (`pre-registry-restore`) — otherwise, after the overwrite, that content is gone from disk and was never in history either, leaving nothing to go back to.\nThat first snapshot is a precondition, not a courtesy: if it fails the route answers 500 and writes nothing, because proceeding would destroy the only copy of the content it just failed to save.\nThe post-restore content is then recorded too (`registry-restore`), so `GET /api/templates/{name}/history` reports the registry copy as current rather than the previous dashboard save.\nThat second one is best-effort — losing it costs a history row, not the manifest.",
+        "operationId": "restore_agent_type_from_registry",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Agent type name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Agent type restored from registry"
+          },
+          "404": {
+            "description": "Agent type or registry version not found"
+          },
+          "409": {
+            "description": "The name belongs to a live agent"
+          },
+          "500": {
+            "description": "The pre-restore snapshot could not be recorded; nothing was overwritten"
+          }
+        }
+      }
+    },
     "/api/templates/{name}/toml": {
       "get": {
         "tags": [
@@ -13478,6 +14269,103 @@
                 }
               }
             }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "system"
+        ],
+        "summary": "PUT /api/templates/:name/toml — Replace the template manifest with raw TOML.",
+        "description": "Accepts the full manifest as `text/plain` TOML. Parses, validates, and persists it.\nThis is the full-manifest counterpart of the flat-shape `PUT /templates/{name}`.\n\nThree contracts worth stating before touching this handler:\n\n- **Identity is pinned to the URL.** The document's `name` key is overwritten with the path segment, so an operator who edits `name = \"…\"` in the raw-TOML tab gets a 200 whose response carries the URL's name — the same deliberate pin the flat `PUT /templates/{name}` makes.\n  It is asserted by `toml_put_pins_the_name_to_the_url_rather_than_the_body`.\n- **Keys the manifest does not recognize are reported, not dropped in silence.**\n  `AgentManifest` is `#[serde(default)]` without `deny_unknown_fields` (forward compatibility with manifests written by a newer daemon), so a typo like `sesion_mode` would otherwise parse cleanly, persist, and vanish from the file.\n  The handler round-trips the submitted document through `AgentManifest` and reports any top-level key that did not survive as `unknown_keys` in the 200 response, with a `WARN` log naming the template.\n- **Every save is snapshotted into the version history**, with the change source `\"toml\"`, the same way create and the flat `PUT` snapshot theirs.\n  A write path that skips the snapshot makes `GET /api/templates/{name}/history` report the previous save as current while the file on disk is something else, and a history that is silently incomplete is worse than none because nothing distinguishes the two.",
+        "operationId": "put_agent_template_toml",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Template name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "text/plain": {
+              "schema": {
+                "type": "string"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Template updated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid TOML"
+          },
+          "404": {
+            "description": "No such agent type"
+          },
+          "409": {
+            "description": "Name belongs to a live agent"
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "system"
+        ],
+        "summary": "POST /api/templates/{name}/toml — Create a new agent type from raw TOML, in one write (#8028).",
+        "description": "The dashboard's original create flow was `POST /api/templates` (name + description over a\ndefault manifest) followed immediately by `PUT /api/templates/{name}/toml` (the manifest the\noperator actually authored). That leaves a half-built stub on disk if the second call fails —\nwith no way to retry it, since a repeated `POST /api/templates` now answers 409 — and records\ntwo version-history snapshots for the one document the operator meant to create.\n\nThis endpoint takes the full manifest up front and claims the name atomically, the same claim\n[`create_agent_type`] uses for the flat-shape create, so the type exists in exactly one form\nfrom the first successful write and history carries exactly one snapshot for it.",
+        "operationId": "post_agent_template_toml",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Template name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "text/plain": {
+              "schema": {
+                "type": "string"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Agent type created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid TOML or name"
+          },
+          "409": {
+            "description": "Name already taken by an agent type or a live agent"
           }
         }
       }
@@ -14264,6 +15152,37 @@
         }
       }
     },
+    "/api/users/me/avatar": {
+      "get": {
+        "tags": [
+          "users"
+        ],
+        "summary": "GET /api/users/me/avatar — the calling credential's own stored image.",
+        "description": "# Why this route exists at all\n\nThe dashboard attaches the bearer token by allowlist (`AUTHENTICATED_IMAGE_PATH_RE` in `dashboard/src/api.ts`), and that allowlist admits only `[A-Za-z0-9_-]+` per path segment — deliberately, so that `/` and `.` cannot appear where an id is expected.\nA **user name** is not such a segment: `encodeURIComponent(\"Juan Pérez\")` is `Juan%20P%C3%A9rez`, and `%` is not in the class, so the image would simply never load.\nWidening the class to admit `%XX` would readmit `%2F`, which decodes to `/` — the traversal the allowlist exists to prevent — so the fix belongs here rather than in the regex.\n\n`me` is a literal, so this path has **no client-controlled segment at all**: the subject comes from the credential, exactly as it does for [`crate::routes::authz::whoami`].\nThat is the same property [`librefang_types::media::avatar_path`] documents for the agent route — no part of the path comes from the request — restored for the one caller that cannot express it by name.\n\nThe `{name}` sibling stays, because an Admin legitimately reads someone else's picture.\n\n# A user literally named `me`\n\n`matchit` resolves the static segment first, so `/api/users/me/avatar` never reaches the `{name}` route — and because this node is `GET`-only it owns the whole path, which means the `POST` and `DELETE` registered on the sibling do not answer under it either.\nA `[[users]]` entry named `me` therefore cannot be fetched by an Admin, and cannot be *given* an avatar through the API at all.\n\nThey are not locked out of their own: this route resolves the credential and then calls the same handler, so a person named `me` still sees their own picture, and every non-avatar route on that name (`PATCH /api/users/me/identity`, `PUT /api/users/me`, the policy and provider-key siblings) is unaffected because none of them has a literal namesake.\n\nThe corner is the price of the read path having no client-controlled segment, and it is recorded here rather than papered over.\nWidening the literal node to carry the write verbs would remove it, at the cost of giving `/users/me/avatar` a second meaning — \"the caller's avatar\" for writes while `{name}` keeps it for everyone else — which is a larger change than this route needs.",
+        "operationId": "serve_my_avatar",
+        "responses": {
+          "200": {
+            "description": "The image",
+            "content": {
+              "image/png": {}
+            }
+          },
+          "304": {
+            "description": "Unchanged since the caller's `If-None-Match`"
+          },
+          "404": {
+            "description": "The credential names no user, or that user has no avatar set",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/users/{name}": {
       "get": {
         "tags": [
@@ -14368,6 +15287,160 @@
         }
       }
     },
+    "/api/users/{name}/avatar": {
+      "get": {
+        "tags": [
+          "users"
+        ],
+        "summary": "GET /api/users/{name}/avatar — the stored image.",
+        "description": "Authenticated like every other `/api/` route, which is the point: the alternative placement under `~/.librefang/dashboard/` would have been an unauthenticated GET.",
+        "operationId": "serve_user_avatar",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "User name (case-sensitive)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The image",
+            "content": {
+              "image/png": {}
+            }
+          },
+          "304": {
+            "description": "Unchanged since the caller's `If-None-Match`"
+          },
+          "404": {
+            "description": "No such user, or no avatar set",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "users"
+        ],
+        "summary": "POST /api/users/{name}/avatar — store an image as this user's avatar.",
+        "description": "`POST` rather than `PUT`, matching `POST /api/agents/{id}/avatar`: the two are one feature on two resources, and a caller reading one route should not have to discover that the other spells the same operation differently.\n\nNot reachable for a `[[users]]` entry named `me`, whose path is shadowed by the literal read route — see [`serve_my_avatar`].",
+        "operationId": "upload_user_avatar",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "User name (case-sensitive)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "description": "The image, raw. PNG, JPEG, GIF or WebP, decided by the bytes — the request's `Content-Type` and any filename it carries are ignored.",
+          "content": {
+            "application/octet-stream": {
+              "schema": {
+                "type": "string"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Stored",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such user",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Image larger than the cap",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "Bytes are not a supported image",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "users"
+        ],
+        "summary": "DELETE /api/users/{name}/avatar — remove the stored image.",
+        "operationId": "delete_user_avatar",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "User name (case-sensitive)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Removed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such user",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/users/{name}/groups": {
       "get": {
         "tags": [
@@ -14392,6 +15465,78 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/UserGroupsView"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/users/{name}/identity": {
+      "patch": {
+        "tags": [
+          "users"
+        ],
+        "summary": "PATCH /api/users/{name}/identity — store or clear this user's emoji.",
+        "operationId": "update_user_identity",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "User name (case-sensitive)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UserIdentityUpdate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Identity updated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserView"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Validation error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such user",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "423": {
+            "description": "The config file is deployment-managed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
                 }
               }
             }
@@ -15859,6 +17004,25 @@
           }
         }
       },
+      "BaseHolderRequest": {
+        "type": "object",
+        "required": [
+          "agent_id"
+        ],
+        "properties": {
+          "agent_id": {
+            "type": "string"
+          },
+          "mode": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`\"rw\"` or `\"r\"`. Defaults to read-only: a knowledge base is a thing to\nread, and an agent that can rewrite the documents every other agent\nreads is a decision the operator should have to make explicitly."
+          }
+        },
+        "additionalProperties": false
+      },
       "BulkActionResult": {
         "type": "object",
         "description": "Outcome of a single bulk action (delete/start/stop).",
@@ -15932,6 +17096,13 @@
               "string",
               "null"
             ]
+          },
+          "code": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Machine-readable failure reason (`template_not_found`,\n`template_read_failed`, `manifest_too_large`, `signature_invalid`,\n`invalid_manifest`, `agent_already_exists`, `spawn_failed`, …), the\nsame codes `POST /api/agents` returns as the response `code` field.\n`error` alone is already translated into nine locales, so a caller\ncannot branch on it to tell \"template missing\" apart from \"template\nunreadable\" without substring-matching localized prose (#8112)."
           },
           "error": {
             "type": [
@@ -16154,6 +17325,18 @@
             }
           }
         }
+      },
+      "CreateBaseRequest": {
+        "type": "object",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
       },
       "EphemeralRunRollupView": {
         "type": "object",
@@ -17130,6 +18313,22 @@
         },
         "additionalProperties": false
       },
+      "SetHoldersRequest": {
+        "type": "object",
+        "required": [
+          "agents"
+        ],
+        "properties": {
+          "agents": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/BaseHolderRequest"
+            },
+            "description": "The complete set of agents that should hold this base. Agents absent\nfrom the list have it revoked, which is what makes \"share with nobody\"\nexpressible as `[]` rather than needing a separate route."
+          }
+        },
+        "additionalProperties": false
+      },
       "SetModeRequest": {
         "type": "object",
         "description": "Request to change an agent's operational mode.",
@@ -17488,6 +18687,20 @@
           }
         }
       },
+      "UserIdentityUpdate": {
+        "type": "object",
+        "description": "`PATCH /api/users/{name}/identity` — the emoji that stands for this user.",
+        "properties": {
+          "emoji": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The glyph to store, or `null` to clear the one already stored. Absent is treated as `null`."
+          }
+        },
+        "additionalProperties": false
+      },
       "UserUpsert": {
         "type": "object",
         "description": "Payload for creating or replacing a user. `api_key_hash` is accepted\npre-hashed (Argon2 phc string) — the dashboard hashes locally before\nsending. `None` clears any existing hash on update; absent on create.",
@@ -17529,7 +18742,8 @@
           "has_api_key",
           "has_policy",
           "has_memory_access",
-          "has_budget"
+          "has_budget",
+          "has_avatar"
         ],
         "properties": {
           "channel_bindings": {
@@ -17541,8 +18755,19 @@
               "type": "string"
             }
           },
+          "emoji": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The glyph the operator chose to stand for this user, or `null` when none was chosen (#8339).\nStored on the `[[users]]` row, so it survives a rename and travels with the config file."
+          },
           "has_api_key": {
             "type": "boolean"
+          },
+          "has_avatar": {
+            "type": "boolean",
+            "description": "True when an avatar image for this user is on disk (#8339).\n\nDerived by probing the avatar directory rather than read from a stored flag, because the file is the only thing that can answer the question honestly: a copy on the `[[users]]` row would be a second answer, free to survive a restore that did not bring the image back."
           },
           "has_budget": {
             "type": "boolean",
@@ -17586,15 +18811,27 @@
           "role",
           "groups",
           "idp_groups",
-          "roles"
+          "roles",
+          "has_avatar"
         ],
         "properties": {
+          "emoji": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The glyph chosen for this caller's `[[users]]` row, or `null` when none was chosen or the credential names no row (#8339).\n\nCarried here so the WebUI can paint the signed-in identity — avatar, glyph, role — from the one response it already has to fetch before it can render anything.\nA second `GET /api/users/{name}` would be a round trip on every page load for a field the client already has the name for."
+          },
           "groups": {
             "type": "array",
             "items": {
               "type": "string"
             },
             "description": "Every `[[groups]]` entry the caller effectively belongs to: declared members unioned with the identity provider's mapped claims."
+          },
+          "has_avatar": {
+            "type": "boolean",
+            "description": "True when an avatar image for this caller is on disk (#8339), derived the same way and for the same reason as [`crate::routes::users::UserView::has_avatar`].\n\nThe route that serves it is `GET /api/users/me/avatar` — a literal, resolved from the same credential this response describes, so the client fetches it with no name-building and therefore no encoding question. This field answers *whether* there is something to fetch, not *where*.\n\nIt is what lets the dashboard gate that fetch instead of issuing it for every identity and reading the 404: a credential that names no `[[users]]` row has no image, and now says so before anything is requested."
           },
           "idp_groups": {
             "type": "array",

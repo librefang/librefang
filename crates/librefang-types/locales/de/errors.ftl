@@ -19,12 +19,14 @@ api-error-template-parse-failed = Vorlage konnte nicht analysiert werden: { $err
 api-error-template-required = 'manifest_toml' oder 'template' ist erforderlich
 api-error-template-invalid-manifest = Ungueltiges Vorlagenmanifest
 api-error-template-read-failed = Vorlage konnte nicht gelesen werden
+api-error-template-snapshot-failed = Es konnte kein Snapshot des aktuellen Agententyps gespeichert werden, daher wurde die Wiederherstellung abgebrochen und nichts überschrieben. Bitte erneut versuchen.
 api-error-template-promote-no-token = Kein GitHub-Token konfiguriert. Verbinden Sie GitHub in den Einstellungen oder setzen Sie GITHUB_TOKEN.
 api-error-template-promote-review-required = Diese Vorlage enthaelt noch private Details, die vor der Veroeffentlichung entfernt werden muessen. Pruefen Sie die Befunde und bearbeiten Sie das Manifest.
 api-error-template-promote-render-failed = Das bereinigte Manifest kann nicht als TOML gerendert werden: { $error }
 api-error-agent-type-exists = Ein Agententyp namens '{ $name }' existiert bereits
 api-error-agent-type-name-taken = '{ $name }' ist der Name eines laufenden Agenten; waehlen Sie einen anderen Namen fuer den Agententyp
 api-error-agent-type-not-editable = Agententyp '{ $name }' stammt aus dem Arbeitsbereich eines laufenden Agenten und wird ueber /api/agents verwaltet
+api-error-registry-type-not-found = Agententyp '{ $name }' nicht im Registry gefunden
 
 # Manifest errors
 api-error-manifest-too-large = Manifest zu gross (max 1MB)
@@ -83,3 +85,6 @@ api-error-rate-limited = Anfragelimit ueberschritten. Bitte versuchen Sie es spa
 # typed MemoryRouteError-style helper. Without this key, every `t_args("api-error-generic", …)`
 # call returns the literal key as the response body and `$error` interpolation never runs.
 api-error-generic = Fehler: { $error }
+
+api-error-validation-avatar-url-invalid = Die Avatar-URL muss die Avatar-Route sein, die dieser Daemon für den Agenten bereitstellt, oder leer. Lade das Bild hoch, statt es zu verlinken.
+api-error-validation-color-invalid = Die Farbe muss ein Hex-Code sein, der mit '#' beginnt

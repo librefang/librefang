@@ -32,12 +32,14 @@ api-error-template-parse-failed = Failed to parse template: { $error }
 api-error-template-required = Either 'manifest_toml' or 'template' is required
 api-error-template-invalid-manifest = Invalid template manifest
 api-error-template-read-failed = Failed to read template
+api-error-template-snapshot-failed = Could not save a snapshot of the current agent type, so the restore was cancelled and nothing was overwritten. Try again.
 api-error-template-promote-no-token = No GitHub token configured. Connect GitHub in Settings or set GITHUB_TOKEN.
 api-error-template-promote-review-required = This template still contains private details that must be removed before publishing. Review the findings and edit the manifest.
 api-error-template-promote-render-failed = Cannot render the sanitized manifest as TOML: { $error }
 api-error-agent-type-exists = An agent type named '{ $name }' already exists
 api-error-agent-type-name-taken = '{ $name }' is the name of a live agent; pick another name for the agent type
 api-error-agent-type-not-editable = Agent type '{ $name }' comes from a live agent workspace and is managed through /api/agents
+api-error-registry-type-not-found = Agent type '{ $name }' not found in the registry
 
 # Manifest errors
 api-error-manifest-too-large = Manifest too large (max 1MB)
@@ -307,7 +309,7 @@ api-error-tool-requires-agent = Tool '{ $name }' requires human approval and can
 api-error-validation-content-empty = Content cannot be empty
 api-error-validation-name-empty = new_name cannot be empty
 api-error-validation-title-required = Title is required
-api-error-validation-avatar-url-invalid = Avatar URL must be http/https or data URI
+api-error-validation-avatar-url-invalid = Avatar URL must be the avatar route this daemon serves for the agent, or empty. Upload the image instead of linking to it.
 api-error-validation-color-invalid = Color must be a hex code starting with '#'
 
 # General errors

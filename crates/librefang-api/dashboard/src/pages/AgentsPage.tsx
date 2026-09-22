@@ -1,12 +1,14 @@
-import { formatRelativeTime } from "../lib/datetime";
+import { formatRelativeTime, formatSqliteDateTime } from "../lib/datetime";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { useNavigate } from "@tanstack/react-router";
+import { useNavigate, useSearch } from "@tanstack/react-router";
 import {
+  ALLOWED_AVATAR_TYPES,
+  MAX_AVATAR_BYTES,
   type AgentDetail,
+  type AgentIdentity,
   type AgentItem,
   type CloneAgentResult,
-  type PromptVersion,
   type ToolDefinition,
 } from "../api";
 import { useQueryClient } from "@tanstack/react-query";
@@ -18,31 +20,33 @@ import { ConfirmDialog } from "../components/ui/ConfirmDialog";
 import { DrawerPanel } from "../components/ui/DrawerPanel";
 import { Modal } from "../components/ui/Modal";
 import {
+  isMcpGroupCardActionable,
   isMcpServerGranted,
   isToolAllowed,
   isToolBlocked,
+  mcpGroupCardState,
   resolveMcpGrantMode,
+  toggleMcpServerGrant,
+  type McpGroupCardState,
 } from "../lib/toolGrants";
 import { useCreateShortcut } from "../lib/useCreateShortcut";
 import { MultiSelectCmdk } from "../components/ui/MultiSelectCmdk";
 import { Card } from "../components/ui/Card";
-import { MarkdownContent } from "../components/ui/MarkdownContent";
 import { Input } from "../components/ui/Input";
 import { Button } from "../components/ui/Button";
-import { Badge } from "../components/ui/Badge";
+import { Badge, dotColors } from "../components/ui/Badge";
 import { Avatar } from "../components/ui/Avatar";
-import { PromptsExperimentsModal } from "../components/PromptsExperimentsModal";
+import { AgentAvatar } from "../components/AgentAvatar";
+import { PromptsExperimentsPanel } from "../components/PromptsExperimentsPanel";
+import { AgentTabBar } from "../components/AgentTabs";
+import type { AgentTabDef } from "../components/AgentTabs";
+import { AgentBrief } from "../components/AgentBrief";
+import type { AgentBriefMessage } from "../components/AgentBrief";
+import { QuickRunModal } from "../components/QuickRunModal";
 import { useUIStore } from "../lib/store";
 import { copyToClipboard } from "../lib/clipboard";
 import { toastErr } from "../lib/errors";
-import { filterVisible } from "../lib/hiddenModels";
-import { Search, Users, MessageCircle, X, Cpu, Wrench, Shield, Plus, Loader2, Pause, Play, Clock, Brain, Zap, FlaskConical, Trash2, Copy, RotateCcw, Pencil, Bot, Database, FileText, MoreHorizontal, Sparkles, ChevronDown, Check, Save, Library, GitBranch, Route } from "lucide-react";
-import {
-  buildModelConfigPatch,
-  emptyModelNumerics,
-  seedModelNumerics,
-  type ModelDraft,
-} from "../lib/agentModelPatch";
+import { Search, Users, MessageCircle, X, Cpu, Wrench, Shield, Plus, Loader2, Pause, Play, Clock, Brain, Zap, FlaskConical, Trash2, Copy, RotateCcw, Pencil, Bot, Database, FileText, MoreHorizontal, Sparkles, ChevronDown, Check, Save, GitBranch, History, Radio, Route, Settings } from "lucide-react";
 import { truncateId } from "../lib/string";
 import { pickLatestSessionId } from "../lib/sessionSelector";
 import { getStatusVariant } from "../lib/status";
@@ -56,11 +60,12 @@ import { useProviders } from "../lib/queries/providers";
 import { useModels } from "../lib/queries/models";
 import { useSkills } from "../lib/queries/skills";
 import { useMcpServers } from "../lib/queries/mcp";
+import { useWhoami } from "../lib/queries/authz";
 import { AgentManifestForm } from "../components/AgentManifestForm";
-import { AgentModelParamFields } from "../components/AgentModelParamFields";
-import { selectModelLimits } from "../lib/modelLimits";
+import type { ManifestSectionId } from "../components/AgentManifestForm";
+import { sectionForInvalidField } from "../components/AgentManifestForm";
 import { AgentSchedulePanel } from "../components/AgentSchedulePanel";
-import { AgentModelRoutingPanel } from "../components/AgentModelRoutingPanel";
+import { useModelRouterProfiles } from "../lib/queries/modelRouter";
 import { AgentSkillItem } from "../components/AgentSkillItem";
 import {
   emptyManifestExtras,
@@ -82,23 +87,29 @@ import {
   useAgentTools,
   useAgentSkills,
   useAgentMcpServers,
-  usePromptVersions,
+  useAgentAvatarUrl,
+  useAgentManifestHistory,
+  useAgentManifest,
+  useAgentChannels,
   useTools,
 } from "../lib/queries/agents";
 import {
   useAgentTemplateToml,
   useCloneAgent,
   useDeleteAgent,
+  useDeleteAgentAvatar,
   usePatchAgent,
-  usePatchAgentRuntimeConfig,
+  useUpdateAgentIdentity,
+  useUploadAgentAvatar,
   useResetAgentSession,
   useResumeAgent,
   useSpawnAgent,
   useSuspendAgent,
   useUpdateAgentTools,
   useSetAgentSkills,
+  useSetAgentMcpServers,
+  useSetAgentChannels,
 } from "../lib/mutations/agents";
-import { useBindPromptVersionToAgent } from "../lib/mutations/prompts";
 import { formatNumber } from "../lib/format";
 
 /**
@@ -125,6 +136,10 @@ type AgentCronSummary = {
 type AgentView = AgentDetail & {
   state?: string;
   description?: string;
+  /** Emoji, colour and avatar reference. `GET /api/agents/{id}` emits these
+   *  (`lifecycle.rs: get_agent`) but `AgentDetail` never declared them, which
+   *  is the whole reason the drawer rendered initials for everyone (#8339). */
+  identity?: AgentIdentity;
   profile?: string;
   model_name?: string;
   model_provider?: string;
@@ -168,12 +183,11 @@ export function cloneResultNotice(result: CloneAgentResult): {
  * Whether the token-footprint panel has data to show. A genuine zero (a
  * tools-disabled agent with no system_prompt) is real data, not "missing" —
  * only the absence of the field means the daemon has nothing to report.
+ *
+ * Lives next to the panel that renders it (`AgentBrief`) and is re-exported
+ * here so the existing import site and its tests keep working.
  */
-export function hasTokenFootprintData(
-  injectedFootprintTokens: number | null | undefined,
-): injectedFootprintTokens is number {
-  return injectedFootprintTokens != null;
-}
+export { hasTokenFootprintData } from "../components/AgentBrief";
 
 /** Two-column row used inside the detail modal's value cards. */
 function DetailRow({ label, children }: { label: React.ReactNode; children: React.ReactNode }) {
@@ -185,58 +199,299 @@ function DetailRow({ label, children }: { label: React.ReactNode; children: Reac
   );
 }
 
-export function SystemPromptSection({
+/**
+ * The agent's visual identity, editable: emoji, and the avatar image (#8339).
+ *
+ * There is deliberately no field for `avatar_url`. It may only ever hold this
+ * agent's own avatar path — #8349 closed it to that — so the upload and remove
+ * buttons are the only two things that write it. A free-text URL box would be a
+ * way to make the dashboard fetch from wherever the text said, which is the one
+ * thing the backend change exists to prevent.
+ *
+ * `onChanged` fires after a successful write so the drawer can re-read the
+ * agent: the identity lives in the page's local `detailAgent` state, which a
+ * query invalidation alone does not reach.
+ */
+export function AgentAppearanceSection({
   agentId,
-  prompt,
+  identity,
+  onChanged,
 }: {
   agentId: string;
-  prompt: string;
+  identity?: AgentIdentity;
+  onChanged: () => void;
 }) {
   const { t } = useTranslation();
   const addToast = useUIStore((s) => s.addToast);
+  const updateIdentityMutation = useUpdateAgentIdentity();
+  const uploadAvatarMutation = useUploadAgentAvatar();
+  const deleteAvatarMutation = useDeleteAgentAvatar();
+  const storedEmoji = identity?.emoji ?? "";
+  const hasAvatar = !!identity?.avatar_url;
+  const [emojiDraft, setEmojiDraft] = useState(storedEmoji);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
-  const current = prompt ?? "";
-  const [draft, setDraft] = useState(current);
-  const [showLibrary, setShowLibrary] = useState(false);
-  // Re-seed draft when live prompt changes (e.g. after a bind or agent-switch).
+  // Re-seed on the agent, not on the stored emoji: the drawer stays mounted
+  // while the user clicks through the list, and keying this on the value would
+  // wipe a half-typed emoji the moment an unrelated poll refreshed the agent.
   useEffect(() => {
-    setDraft(current);
-  }, [current]);
+    setEmojiDraft(identity?.emoji ?? "");
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- keyed on the agent, deliberately not on the stored emoji
+  }, [agentId]);
 
-  const patchAgent = usePatchAgent();
-  const bindVersion = useBindPromptVersionToAgent();
-  // Only fetch versions once the operator opens the library picker.
-  const versionsQuery = usePromptVersions(agentId, { enabled: showLibrary });
-
-  const dirty = draft !== current;
-
-  const save = () => {
-    if (!dirty || patchAgent.isPending) return;
-    patchAgent.mutate(
-      { agentId, body: { system_prompt: draft } },
+  /** PATCH the emoji. Colour is left alone — the body omits it, and #6608 made
+   *  an omitted field preserve its stored value rather than null it. */
+  function saveEmoji() {
+    if (updateIdentityMutation.isPending) return;
+    const next = emojiDraft.trim();
+    if (next === storedEmoji) return;
+    updateIdentityMutation.mutate(
+      // The empty string, never `undefined`: omitting a field is how a PATCH
+      // says "leave it", so clearing an emoji has to be spelled out.
+      { agentId, identity: { emoji: next } },
       {
-        onSuccess: () =>
+        onSuccess: () => {
+          onChanged();
           addToast(
-            t("agents.system_prompt_saved", { defaultValue: "System prompt saved" }),
+            next
+              ? t("agents.identity.emoji_saved", { defaultValue: "Emoji updated" })
+              : t("agents.identity.emoji_cleared", { defaultValue: "Emoji cleared" }),
             "success",
-          ),
+          );
+        },
         onError: (e: Error) =>
-          addToast(e.message || t("common.error", { defaultValue: "Error" }), "error"),
+          addToast(
+            e?.message || t("agents.identity.emoji_failed", { defaultValue: "Failed to update the emoji" }),
+            "error",
+          ),
       },
     );
-  };
+  }
 
-  const bind = (version: PromptVersion) => {
-    if (bindVersion.isPending) return;
-    bindVersion.mutate(
-      { agentId, version, previousSystemPrompt: current },
+  /** Validate the picked file, then send its bytes.
+   *
+   *  Both checks mirror the server's and neither replaces it: the daemon
+   *  decides the format by sniffing the bytes, so a `.png` that is really
+   *  something else is refused there whatever the browser said here. Checking
+   *  first only avoids spending an upload that was never going to be accepted,
+   *  and lets the message name the actual problem. */
+  function handleFileChange(event: React.ChangeEvent<HTMLInputElement>) {
+    const input = event.target;
+    const file = input.files?.[0];
+    // Cleared before any early return, so picking the same file twice in a row
+    // still fires `change` — the value is what the browser compares against.
+    input.value = "";
+    if (!file) return;
+
+    if (!(ALLOWED_AVATAR_TYPES as readonly string[]).includes(file.type)) {
+      addToast(
+        t("agents.identity.avatar_type_rejected", {
+          defaultValue: "An avatar must be a PNG, JPEG, GIF or WebP image. SVG is not accepted.",
+        }),
+        "error",
+      );
+      return;
+    }
+    if (file.size > MAX_AVATAR_BYTES) {
+      addToast(
+        t("agents.identity.avatar_too_large", {
+          defaultValue: "That image is {{size}} MB; the limit is {{limit}} MB.",
+          size: (file.size / (1024 * 1024)).toFixed(1),
+          limit: (MAX_AVATAR_BYTES / (1024 * 1024)).toFixed(0),
+        }),
+        "error",
+      );
+      return;
+    }
+
+    uploadAvatarMutation.mutate(
+      { agentId, file },
+      {
+        onSuccess: () => {
+          onChanged();
+          addToast(t("agents.identity.avatar_saved", { defaultValue: "Avatar updated" }), "success");
+        },
+        onError: (e: Error) =>
+          addToast(
+            e?.message || t("agents.identity.avatar_failed", { defaultValue: "Failed to upload the avatar" }),
+            "error",
+          ),
+      },
+    );
+  }
+
+  function removeAvatar() {
+    if (deleteAvatarMutation.isPending) return;
+    deleteAvatarMutation.mutate(agentId, {
+      onSuccess: () => {
+        onChanged();
+        addToast(t("agents.identity.avatar_removed", { defaultValue: "Avatar removed" }), "success");
+      },
+      onError: (e: Error) =>
+        addToast(
+          e?.message || t("agents.identity.avatar_remove_failed", { defaultValue: "Failed to remove the avatar" }),
+          "error",
+        ),
+    });
+  }
+
+  return (
+    <section>
+      <h4 className="text-sm font-semibold flex items-center gap-2 mb-2">
+        <Sparkles className="w-3.5 h-3.5 text-brand" />
+        {t("agents.identity.title", { defaultValue: "Appearance" })}
+      </h4>
+      <div className="rounded-lg bg-main border border-border-subtle p-4 space-y-2">
+        <DetailRow label={t("agents.identity.emoji", { defaultValue: "Emoji" })}>
+          <div className="flex items-center gap-2 justify-end">
+            <input
+              type="text"
+              value={emojiDraft}
+              onChange={e => setEmojiDraft(e.target.value)}
+              onKeyDown={e => {
+                // Same `isComposing` guard as the rename field: in a CJK IME
+                // Enter confirms the candidate, and submitting on it would
+                // hijack the composition.
+                if (e.key === "Enter" && !e.nativeEvent.isComposing) saveEmoji();
+              }}
+              // 16, not 1 or 2: a single emoji is not a single character. A
+              // family with ZWJ joiners (👨‍👩‍👧‍👦) is eleven UTF-16 units,
+              // and a cap that counted "characters" would truncate it into a
+              // different picture.
+              maxLength={16}
+              placeholder={t("agents.identity.emoji_placeholder", { defaultValue: "None" })}
+              aria-label={t("agents.identity.emoji", { defaultValue: "Emoji" })}
+              className="w-24 px-2 py-1 rounded-md border border-border-subtle bg-surface text-lg text-center outline-none focus:border-brand"
+            />
+            <button
+              type="button"
+              onClick={saveEmoji}
+              disabled={updateIdentityMutation.isPending || emojiDraft.trim() === storedEmoji}
+              className="px-3 py-1 rounded-lg text-xs font-semibold bg-brand text-white hover:bg-brand/90 disabled:opacity-50 disabled:cursor-not-allowed shrink-0"
+            >
+              {updateIdentityMutation.isPending ? t("common.saving") : t("common.save")}
+            </button>
+          </div>
+        </DetailRow>
+        <DetailRow label={t("agents.identity.avatar", { defaultValue: "Avatar image" })}>
+          <div className="flex items-center gap-2 justify-end">
+            <input
+              type="file"
+              ref={fileInputRef}
+              accept={ALLOWED_AVATAR_TYPES.join(",")}
+              onChange={handleFileChange}
+              className="hidden"
+              data-testid="agent-avatar-file-input"
+              aria-label={t("agents.identity.avatar", { defaultValue: "Avatar image" })}
+            />
+            <button
+              type="button"
+              onClick={() => fileInputRef.current?.click()}
+              disabled={uploadAvatarMutation.isPending}
+              className="px-3 py-1 rounded-lg text-xs font-semibold bg-main hover:bg-main/80 text-text-dim border border-border-subtle disabled:opacity-50 disabled:cursor-not-allowed shrink-0"
+            >
+              {uploadAvatarMutation.isPending
+                ? t("common.saving")
+                : hasAvatar
+                  ? t("agents.identity.avatar_replace", { defaultValue: "Replace" })
+                  : t("agents.identity.avatar_upload", { defaultValue: "Upload" })}
+            </button>
+            {hasAvatar && (
+              <button
+                type="button"
+                onClick={removeAvatar}
+                disabled={deleteAvatarMutation.isPending}
+                className="px-3 py-1 rounded-lg text-xs font-semibold text-error border border-error/30 hover:bg-error/10 disabled:opacity-50 disabled:cursor-not-allowed shrink-0"
+              >
+                {t("common.remove", { defaultValue: "Remove" })}
+              </button>
+            )}
+          </div>
+        </DetailRow>
+        <p className="text-[11px] text-text-dim leading-relaxed">
+          {t("agents.identity.avatar_hint", {
+            defaultValue: "PNG, JPEG, GIF or WebP, up to 2 MB. SVG is not accepted. The image is stored by the daemon and served only to signed-in callers.",
+          })}
+        </p>
+      </div>
+    </section>
+  );
+}
+
+/**
+ * Whether the signed-in credential may edit an agent's emoji and avatar.
+ *
+ * The daemon's rule for both writes the appearance section performs is
+ * `role >= UserRole::Admin` (middleware.rs), and it reads the *credential's*
+ * role — the group-derived ones `whoami` reports separately do not open this
+ * door, which is the direction that would hand a viewer controls that can only
+ * 403.
+ *
+ * Pure and exported because `AgentsPage` has no render harness, so a predicate
+ * left inline would be covered by nothing.
+ */
+export function canEditAgentIdentity(role: string | undefined): boolean {
+  return role === "admin" || role === "owner";
+}
+
+/**
+ * What the create drawer should open on when `/agents` was reached with a
+ * `template` search param, or `null` when it was not.
+ *
+ * Pure and exported on purpose: `AgentsPage` has no render harness (it holds
+ * some twenty hooks), so a rule left inline in the effect below would be
+ * covered by nothing, and the param name is the contract with the sender on
+ * `/agent-types`.
+ */
+export function createDrawerSeed(
+  template: string | undefined,
+): { createMode: "template"; templateName: string } | null {
+  // Falsy covers both "no param" and the empty string `validateSearch` would
+  // otherwise admit.
+  if (!template) return null;
+  return { createMode: "template", templateName: template };
+}
+
+/**
+ * Channels quick-widget for the Configure drawer (#7742). `PUT
+ * /api/agents/{id}/channels` has existed since `config.rs` shipped
+ * `get_agent_channels` / `set_agent_channels` (promised when #4912 / #4963
+ * closed) but never got a dashboard client — this is that client. Reuses
+ * `MultiSelectCmdk`, the same picker skills/tools already use, seeded from
+ * the instance's configured channel types.
+ */
+export function ChannelsSection({ agentId }: { agentId: string }) {
+  const { t } = useTranslation();
+  const addToast = useUIStore((s) => s.addToast);
+
+  const channelsQuery = useAgentChannels(agentId);
+  const setChannels = useSetAgentChannels();
+
+  const assigned = useMemo(() => channelsQuery.data?.assigned ?? [], [channelsQuery.data]);
+  const available = channelsQuery.data?.available ?? [];
+  const [draft, setDraft] = useState<string[] | null>(null);
+  // Reset the draft whenever the agent changes (drawer reused across
+  // selections) or the persisted value moves out from under a pristine draft.
+  useEffect(() => {
+    setDraft(null);
+  }, [agentId]);
+
+  const current = draft ?? assigned;
+  const dirty =
+    draft !== null &&
+    (draft.length !== assigned.length || draft.some((c) => !assigned.includes(c)));
+
+  const save = () => {
+    if (draft === null || setChannels.isPending) return;
+    setChannels.mutate(
+      { agentId, channels: draft },
       {
         onSuccess: () => {
           addToast(
-            t("agents.prompt_bound", { defaultValue: "Prompt bound from library" }),
+            t("agents.detail.channels_saved", { defaultValue: "Channels updated" }),
             "success",
           );
-          setShowLibrary(false);
+          setDraft(null);
         },
         onError: (e: Error) =>
           addToast(e.message || t("common.error", { defaultValue: "Error" }), "error"),
@@ -246,101 +501,182 @@ export function SystemPromptSection({
 
   return (
     <section>
-      <div className="flex items-center justify-between mb-2">
-        <h4 className="text-sm font-semibold">{t("agents.system_prompt")}</h4>
-        <button
-          type="button"
-          onClick={() => setShowLibrary((v) => !v)}
-          className="inline-flex items-center gap-1 text-xs text-brand hover:underline font-medium"
-        >
-          <Library className="w-3.5 h-3.5" />
-          {t("agents.bind_from_library", { defaultValue: "Bind from library" })}
-        </button>
-      </div>
-
-      <textarea
-        value={draft}
-        disabled={patchAgent.isPending}
-        onChange={(e) => setDraft(e.target.value)}
-        placeholder={t("agents.system_prompt_placeholder", {
-          defaultValue: "This agent has no system prompt yet.",
+      <h4 className="text-sm font-semibold mb-2 flex items-center gap-2">
+        <Radio className="w-3.5 h-3.5 text-brand" />
+        {t("agents.detail.channels", { defaultValue: "Channels" })}
+      </h4>
+      <p className="text-[11px] text-text-dim mb-2 leading-relaxed">
+        {t("agents.detail.channels_hint", {
+          defaultValue: "Empty means reachable from every configured channel.",
         })}
-        rows={8}
-        className="w-full rounded-lg border border-border-subtle bg-main px-3 py-2 text-sm font-mono leading-relaxed resize-y disabled:opacity-50 focus:outline-none focus:border-brand"
-      />
-      <div className="flex justify-end mt-2">
-        <button
-          type="button"
-          disabled={!dirty || patchAgent.isPending}
-          onClick={save}
-          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-brand text-white text-xs font-bold disabled:opacity-40 disabled:cursor-not-allowed hover:bg-brand/90 transition-colors"
-        >
-          {patchAgent.isPending ? (
-            <Loader2 className="w-3 h-3 animate-spin" />
-          ) : (
-            <Save className="w-3 h-3" />
-          )}
-          {t("common.save")}
-        </button>
-      </div>
-
-      {showLibrary && (
-        <div className="mt-2 rounded-lg border border-border-subtle bg-main/40 p-2 space-y-1">
-          {versionsQuery.isLoading ? (
-            <p className="text-xs text-text-dim px-1 py-2">
-              {t("common.loading", { defaultValue: "Loading..." })}
-            </p>
-          ) : versionsQuery.isError ? (
-            <p className="text-xs text-red-500 px-1 py-2">
-              {t("agents.prompt_versions_load_err", {
-                defaultValue: "Failed to load prompt versions",
-              })}
-            </p>
-          ) : !versionsQuery.data || versionsQuery.data.length === 0 ? (
-            <p className="text-xs text-text-dim px-1 py-2">
-              {t("agents.no_prompt_versions", {
-                defaultValue: "No saved prompt versions for this agent yet.",
-              })}
-            </p>
-          ) : (
-            versionsQuery.data.map((v) => (
-              <div
-                key={v.id}
-                className="flex items-center justify-between gap-2 rounded-md px-2 py-1.5 hover:bg-main/60"
-              >
-                <div className="min-w-0">
-                  <span className="text-xs font-semibold">v{v.version}</span>
-                  {v.is_active && (
-                    <Badge variant="brand" className="ml-1.5 text-[10px]">
-                      {t("agents.prompt_active", { defaultValue: "active" })}
-                    </Badge>
-                  )}
-                  {v.description && (
-                    <span className="ml-1.5 text-[11px] text-text-dim truncate">
-                      {v.description}
-                    </span>
-                  )}
-                </div>
-                <button
-                  type="button"
-                  disabled={bindVersion.isPending}
-                  onClick={() => bind(v)}
-                  className="shrink-0 inline-flex items-center gap-1 px-2 py-1 rounded-md border border-border-subtle text-[11px] font-bold text-text-dim hover:text-brand hover:border-brand disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
-                >
-                  {t("agents.bind", { defaultValue: "Bind" })}
-                </button>
-              </div>
-            ))
-          )}
+      </p>
+      {channelsQuery.isLoading ? (
+        <p className="text-xs text-text-dim">{t("common.loading", { defaultValue: "Loading..." })}</p>
+      ) : /* `available` comes only from `config.sidecar_channels`
+             (`routes/agents/config.rs: get_agent_channels`) and never unions in
+             the agent's own `channels`, so an allowlist left over from a
+             since-removed sidecar channel has a non-empty `assigned` against an
+             empty `available`. Gating on `available` alone hid that allowlist
+             behind "No channels configured" while it actively restricted the
+             agent, with no way to clear it. `MultiSelectCmdk` renders its chips
+             from `value`, so an assigned-but-unavailable name still shows and
+             still survives a save (#7749 review). */
+        available.length > 0 || assigned.length > 0 ? (
+        <MultiSelectCmdk
+          options={available}
+          value={current}
+          onChange={(next) => setDraft(typeof next === "function" ? next(current) : next)}
+          placeholder={t("agents.detail.channels_search_placeholder", {
+            defaultValue: "Search channels…",
+          })}
+        />
+      ) : (
+        <p className="text-xs text-text-dim">
+          {t("agents.detail.no_channels_configured", {
+            defaultValue: "No channels configured on this instance.",
+          })}
+        </p>
+      )}
+      {dirty && (
+        <div className="flex justify-end gap-2 mt-2">
+          <button
+            type="button"
+            onClick={() => setDraft(null)}
+            className="px-3 py-1 rounded-lg text-xs font-semibold bg-main hover:bg-main/80 text-text-dim border border-border-subtle"
+          >
+            {t("common.cancel")}
+          </button>
+          <button
+            type="button"
+            disabled={setChannels.isPending}
+            onClick={save}
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-brand text-white text-xs font-bold disabled:opacity-40 disabled:cursor-not-allowed hover:bg-brand/90 transition-colors"
+          >
+            {setChannels.isPending ? (
+              <Loader2 className="w-3 h-3 animate-spin" />
+            ) : (
+              <Save className="w-3 h-3" />
+            )}
+            {t("common.save")}
+          </button>
         </div>
       )}
     </section>
   );
 }
 
+/**
+ * The two main tabs of the agent detail panel.
+ *
+ * Every other surface of an agent is reachable from one of these two, and the
+ * split is by *what you are doing*, not by which subsystem the field belongs
+ * to: `info` reads the agent (what it is doing, what it has been doing, what it
+ * remembers), `config` writes it. The eight tabs this replaced were split by
+ * subsystem, which is how the token footprint ended up in a drawer and the
+ * complexity router two levels below the tab that named it.
+ */
+export type AgentMainTab = "info" | "config";
+
+/**
+ * Sub-tabs of "logs & info", in display order.
+ *
+ * Read-only surfaces, which is why they live under the reading tab: the
+ * manifest editor is the one writer of the agent's configuration, and none of
+ * these four carries a field of its own.
+ */
+export const INFO_TABS = ["logs", "memory", "prompts", "history"] as const;
+
+export type InfoTab = (typeof INFO_TABS)[number];
+
+/**
+ * The config groups, in display order.
+ *
+ * A runtime array rather than a bare union for the same reason
+ * `MANIFEST_SECTION_IDS` is one: the guard that checks every group has content
+ * and every group has a label can walk the real list instead of restating it.
+ */
+export const CONFIG_GROUP_IDS = [
+  "general",
+  "model",
+  "tools",
+  "memory",
+  "limits",
+  "channels",
+  "planning",
+  "conversation",
+] as const;
+
+export type ConfigGroupId = (typeof CONFIG_GROUP_IDS)[number];
+
+/**
+ * Which manifest sections each config group hosts.
+ *
+ * This is the map the whole surface hangs from: the group tabs are drawn from
+ * its keys, the form is handed its values, and the guards assert that the two
+ * directions agree — every section appears exactly once, and every group
+ * appears exactly once in the bar.
+ *
+ * The grouping is by subject rather than by manifest table, because the table
+ * boundaries are an implementation detail of the Rust struct and an operator
+ * looking for "where do I cap this agent's spending" does not know that
+ * `resources` and `rl_export` are siblings of `limits`.
+ *
+ * Every section of `AgentManifestForm` is here, including the ones the plan's
+ * original table named as separate groups: `tools` and `exec_policy` render
+ * inside `capabilities`, `resources` and `rl_export` inside `limits`, and
+ * `autonomous` — which that table omitted — is a scheduling concern, so it sits
+ * with the cron jobs it governs.
+ */
+export const CONFIG_GROUPS: Record<ConfigGroupId, readonly ManifestSectionId[]> = {
+  general: ["identity", "prompt", "lifecycle", "response_format"],
+  model: ["model", "fallback_models", "thinking", "routing"],
+  tools: ["capabilities", "skills", "mcp_servers", "skill_workshop"],
+  memory: ["proactive_memory", "auto_dream", "compaction"],
+  limits: ["limits"],
+  channels: ["channel_overrides"],
+  planning: ["scheduling", "autonomous", "async_tasks"],
+  conversation: ["context_injection", "shared_folders"],
+};
+
+/**
+ * The config group that owns the first field a validation run complained about.
+ *
+ * A failed save has to send the operator somewhere they can act. With the
+ * sections grouped the offending field is usually in a group they are not
+ * looking at, and an error nobody can see is indistinguishable from no error —
+ * so this resolves the first reported field path to its section, and that
+ * section to the one group that hosts it.
+ *
+ * Pulled out of `saveManifestEditor` so it can be tested without rendering the
+ * page: `AgentsPage` has some twenty hooks and no render harness, so anything
+ * left inline there is untestable by construction. The decision is the part
+ * with behaviour in it; the caller is one `setConfigGroup`.
+ *
+ * Returns `undefined` when nothing maps — an unrecognised path (in which case
+ * `sectionForInvalidField` has no entry and its guard test fails), or a
+ * section no group hosts (in which case the layout guard fails). Every path
+ * `validateManifestForm` can produce is covered by one of those two, which is
+ * what makes the fallback safe rather than silent.
+ */
+export function groupForFirstInvalidField(
+  errors: readonly string[],
+): ConfigGroupId | undefined {
+  const firstBadSection = errors
+    .map(sectionForInvalidField)
+    .find((section): section is ManifestSectionId => section !== undefined);
+  if (!firstBadSection) return undefined;
+
+  return CONFIG_GROUP_IDS.find((group) =>
+    CONFIG_GROUPS[group].includes(firstBadSection),
+  );
+}
+
 export function AgentsPage() {
   const { t } = useTranslation();
   const navigate = useNavigate();
+  // The `template` search param, set by the agent-types page's Run button.
+  // Deliberately not named `search`: the local state below is the agent filter.
+  const { template: routeTemplate } = useSearch({ from: "/agents" });
   const [search, setSearch] = useState("");
   const [detailAgent, setDetailAgent] = useState<AgentDetail | null>(null);
   const [showCreate, setShowCreate] = useState(false);
@@ -353,13 +689,9 @@ export function AgentsPage() {
   const [formExtras, setFormExtras] = useState<ManifestExtras>(emptyManifestExtras);
   const [formErrors, setFormErrors] = useState<Set<string>>(new Set());
   const [tomlParseError, setTomlParseError] = useState<string | null>(null);
-  const [showPrompts, setShowPrompts] = useState(false);
-  const [editingModel, setEditingModel] = useState(false);
-  const [modelDraft, setModelDraft] = useState<ModelDraft>({
-    provider: "",
-    model: "",
-    ...emptyModelNumerics(),
-  });
+  // Parent whose ledger pays for the Quick Run (#6699). Held as an id rather
+  // than a flag so the dialog knows which agent to preselect; `null` is closed.
+  const [quickRunParent, setQuickRunParent] = useState<string | null>(null);
   // Inline-rename state for the detail/edit modal header. The agent name is
   // the primary identifier in the UI and was previously read-only — now
   // clicking the title swaps it for an input and PATCHes /agents/{id}.
@@ -396,20 +728,58 @@ export function AgentsPage() {
   // Tab switcher inside the inline detail panel.  Mirrors the design's
   // five sections (Conversation / Memory / Skills / Schedule / Logs).
   const [toolsDraft, setToolsDraft] = useState<string[] | null>(null);
+  // Staged `mcp_servers` grant list for the Tools tab's MCP groups (#6565
+  // follow-up). Independent from `toolsDraft` because it saves through a
+  // different endpoint (`PUT /agents/{id}/mcp_servers`, not
+  // `/agents/{id}/tools`) — see `handleSave` in `renderToolsTab`.
+  const [mcpServersDraft, setMcpServersDraft] = useState<string[] | null>(null);
   const [expandedToolGroup, setExpandedToolGroup] = useState<string | null>(null);
   // Skills tab draft — mirrors `toolsDraft`. Holds the staged per-agent skill
   // allowlist; `null` = pristine (no edits). Add/remove/customize/reset only
   // mutate this local draft, so nothing persists until the Save button fires
   // the PUT — leaving the tab discards the draft (the "change your mind" path).
   const [skillsDraft, setSkillsDraft] = useState<string[] | null>(null);
-  const [agentTab, setAgentTab] = useState<
-    "conversation" | "memory" | "skills" | "tools" | "routing" | "schedule" | "logs"
-  >("conversation");
-  // Whether the deep-edit drawer is open. Decoupled from `detailAgent` so
+  // The agent view is two tabs deep: the main tab picks reading or writing,
+  // the second level picks which sub-surface. Three independent pieces of
+  // state rather than one union, because they are remembered independently —
+  // leaving config for the logs and coming back should land in the group you
+  // were editing, not reset to the first one.
+  const [mainTab, setMainTab] = useState<AgentMainTab>("info");
+  const [infoTab, setInfoTab] = useState<InfoTab>("logs");
+  const [configGroup, setConfigGroup] = useState<ConfigGroupId>("general");
+  // The config tab's "advanced mode". One switch for every section's folded
+  // half; see `AgentManifestFormProps.advanced` for why it is not per section.
+  const [advancedMode, setAdvancedMode] = useState(false);
+  // Whether the details drawer is open. Decoupled from `detailAgent` so
   // selecting an agent in the list shows the inline detail panel without
-  // popping a drawer; the drawer is only opened when the user explicitly
-  // clicks "Configure" / "Edit" from the detail header's overflow menu.
+  // popping a drawer; the drawer holds the avatar editor, the agent's
+  // read-only lineage and the lifecycle actions, and is opened from the
+  // detail header's overflow button.
   const [detailDrawerOpen, setDetailDrawerOpen] = useState(false);
+  // The manifest editor (#7742) is the config tab now, so it is live exactly
+  // while that tab is selected — see `manifestEditorLive` below.
+  // Seeded from `GET /agents/{id}/manifest` (raw TOML) the first time it opens
+  // for a given agent; `manifestEditorSeededFor` gates the seed effect so a
+  // background refetch of that query (e.g. from an unrelated invalidation)
+  // never clobbers in-progress edits, and so switching agents re-seeds rather
+  // than carrying one agent's edits onto another.
+  const [manifestEditorSeededFor, setManifestEditorSeededFor] = useState<string | null>(null);
+  const [manifestEditorFormState, setManifestEditorFormState] =
+    useState<ManifestFormState>(emptyManifestForm);
+  const [manifestEditorExtras, setManifestEditorExtras] =
+    useState<ManifestExtras>(emptyManifestExtras);
+  const [manifestEditorErrors, setManifestEditorErrors] = useState<Set<string>>(new Set());
+  const [manifestEditorParseError, setManifestEditorParseError] = useState<string | null>(null);
+  // The config tab is the manifest editor's only surface, so editing is live
+  // exactly while that tab is selected. Every query the form needs hangs off
+  // this one condition.
+  const manifestEditorLive = mainTab === "config" && !!detailAgent;
+  // The two second-level surfaces whose data is fetched at page level rather
+  // than inside the component that shows it. Named rather than inlined because
+  // each gates its queries: a panel fetched for every selected agent would turn
+  // opening a page into five requests.
+  const toolsGroupOpen = mainTab === "config" && configGroup === "tools";
+  const historyTabOpen = mainTab === "info" && infoTab === "history";
   const addToast = useUIStore((s) => s.addToast);
   useCreateShortcut(() => setShowCreate(true));
   const templatesQuery = useAgentTemplates({
@@ -433,13 +803,28 @@ export function AgentsPage() {
   const spawnMutation = useSpawnAgent();
   const suspendMutation = useSuspendAgent();
   const resumeMutation = useResumeAgent();
-  const patchAgentRuntimeConfigMutation = usePatchAgentRuntimeConfig();
   const patchAgentMutation = usePatchAgent();
+  // #7749 review: the config tab's Save must not read the rename flow's
+  // mutation state — a failed rename (duplicate name → 400) would render its
+  // error inside the manifest editor and an in-flight rename would disable
+  // that Save. Its own instance, like `ChannelsSection` has its own.
+  const manifestPatchMutation = usePatchAgent();
   const cloneMutation = useCloneAgent();
   const resetSessionMutation = useResetAgentSession();
   const updateToolsMutation = useUpdateAgentTools();
+  const setAgentMcpServersMutation = useSetAgentMcpServers();
   const templateTomlMutation = useAgentTemplateToml();
   const qc = useQueryClient();
+
+  // --- Visual identity of the agent in the drawer (#8339) ------------------
+  const whoami = useWhoami();
+  const canEditAppearance = canEditAgentIdentity(whoami.data?.role);
+
+  const detailIdentity = (detailAgent as AgentView | null)?.identity;
+  // Gated on "this agent has one" so an agent without an avatar costs no
+  // request at all; `undefined` while loading or absent, which is what `Avatar`
+  // wants — it falls back to the initials on its own.
+  const detailAvatarSrc = useAgentAvatarUrl(detailAgent?.id ?? "", !!detailIdentity?.avatar_url);
 
   const rawDeleteMutation = useDeleteAgent();
   const handleDeleteSuccess = (agentId: string) => {
@@ -507,28 +892,11 @@ export function AgentsPage() {
     };
   }
 
-  function startModelEdit() {
-    setModelDraft({
-      provider: detailAgent?.model?.provider ?? "",
-      model: detailAgent?.model?.model ?? "",
-      // An empty field is the inherit state, so a `null` from the backend seeds
-      // an empty box rather than the compiled default. Seeding 4096 / 0.7 here
-      // is what used to make an untouched field look like a deliberate choice.
-      ...seedModelNumerics(detailAgent?.model),
-    });
-    setEditingModel(true);
-  }
-
-  function cancelModelEdit() {
-    setEditingModel(false);
-  }
-
   function closeDetailModal() {
     // Closing the drawer no longer deselects the agent — the inline detail
     // panel remains visible. Use deselectAgent() to fully exit the
     // selection (e.g. when an agent is deleted).
     setDetailDrawerOpen(false);
-    setEditingModel(false);
     setEditingName(false);
     closeToolsEditor();
   }
@@ -613,7 +981,8 @@ export function AgentsPage() {
     enabled:
       (showToolsEditor && !!toolsEditorAgentId) ||
       (showCreate && createMode === "form") ||
-      (!!detailAgent && agentTab === "tools"),
+      (!!detailAgent && toolsGroupOpen) ||
+      manifestEditorLive,
   });
   const agentToolsQuery = useAgentTools(toolsEditorAgentId ?? "", { enabled: showToolsEditor && !!toolsEditorAgentId });
   const toolsEditorLoading = showToolsEditor && !!toolsEditorAgentId && (toolsListQuery.isLoading || agentToolsQuery.isLoading);
@@ -646,40 +1015,6 @@ export function AgentsPage() {
     addToast(toastErr(err, t("agents.tools_load_failed", { defaultValue: "Failed to load tools" })), "error");
   }, [showToolsEditor, toolsEditorAgentId, toolsListQuery.error, agentToolsQuery.error, addToast, t]);
 
-  function saveModelEdit() {
-    if (!detailAgent) return;
-    // buildModelConfigPatch validates the draft and includes a field only when
-    // the user changed it, using the same baseline as the modelDirty gate so the
-    // two can't drift (the #5917 follow-up: a provider-only edit must not write
-    // back values for max_tokens / temperature the backend had omitted). An
-    // emptied field is a real edit and reaches the backend as `null`, which
-    // hands the knob back to the per-model override.
-    const { patch } = buildModelConfigPatch(modelDraft, detailAgent.model);
-    if (!patch) return;
-
-    if (Object.keys(patch).length === 0) {
-      setEditingModel(false);
-      return;
-    }
-
-    patchAgentRuntimeConfigMutation.mutate(
-      { agentId: detailAgent.id, isHand: detailAgent.is_hand === true, config: patch },
-      {
-        onSuccess: async () => {
-          setEditingModel(false);
-          await refreshDetailAgent(detailAgent.id, detailAgent.is_hand);
-          addToast(t("agents.model_saved", { defaultValue: "Model updated" }), "success");
-        },
-        onError: (e) => {
-          addToast(
-            toastErr(e, t("agents.model_save_failed", { defaultValue: "Failed to update model" })),
-            "error",
-          );
-        },
-      },
-    );
-  }
-
   // Share the snapshot query with OverviewPage — same cache key means React Query
   // deduplicates the poll when both pages are mounted, and agent counts on the
   // Overview tab stay in sync with this list automatically.
@@ -707,29 +1042,47 @@ export function AgentsPage() {
   // the design's stderr-style log feed wants. The previous source
   // (global audit) only had admin lifecycle entries, leaving the tab
   // blank for almost every agent.
+  // The model router's profile catalog backs the manifest form's
+  // allowed_profiles finder — the capability the routing panel used to own
+  // exclusively, ported when the panel died.
+  const routerProfilesQuery = useModelRouterProfiles();
   const agentEventsQuery = useAgentEvents(detailAgent?.id ?? "", 30);
+  const routerProfileCatalog = useMemo(
+    () =>
+      (routerProfilesQuery.data?.profiles ?? []).map((p) => ({
+        name: p.name,
+        description: [`${p.provider}/${p.model}`, p.cost_tier].join(" · "),
+      })),
+    [routerProfilesQuery.data],
+  );
   const tabAgentToolsQuery = useAgentTools(detailAgent?.id ?? "", {
-    enabled: !!detailAgent && agentTab === "tools",
+    enabled: !!detailAgent && toolsGroupOpen,
   });
   // Per-agent MCP server assignment (#7713). The Tools tab is where MCP grants
   // are explained, and it is the only place a declared-but-unconnected server
   // can be shown at all: a server with no connection contributes no tools, so
   // it forms no tool group and would otherwise be invisible on this page.
   const tabAgentMcpQuery = useAgentMcpServers(detailAgent?.id ?? "", {
-    enabled: !!detailAgent && agentTab === "tools",
+    enabled: !!detailAgent && toolsGroupOpen,
   });
   // Per-agent skill assignment (#4917) — backs the inline assign/unassign
   // UI on the Skills tab. Returns { assigned, available, mode, disabled };
   // gated on the tab being open so we don't fetch the registry pool at
   // page load.
   const tabAgentSkillsQuery = useAgentSkills(detailAgent?.id ?? "", {
-    enabled: !!detailAgent && agentTab === "skills",
+    enabled: !!detailAgent && toolsGroupOpen,
   });
   const setAgentSkillsMutation = useSetAgentSkills();
 
+  // Manifest version history — fetched only when the History tab is active.
+  const manifestHistoryQuery = useAgentManifestHistory(detailAgent?.id ?? "", {
+    enabled: !!detailAgent && historyTabOpen,
+  });
+
   useEffect(() => {
-    if (agentTab !== "tools") {
+    if (!toolsGroupOpen) {
       setToolsDraft(null);
+      setMcpServersDraft(null);
       setExpandedToolGroup(null);
       return;
     }
@@ -739,13 +1092,13 @@ export function AgentsPage() {
     if (declared.length > 0 && toolsDraft === null) {
       setToolsDraft([...declared]);
     }
-  }, [agentTab, tabAgentToolsQuery.data, toolsDraft]);
+  }, [toolsGroupOpen, tabAgentToolsQuery.data, toolsDraft]);
 
   // Seed / reset the Skills draft, same shape as the Tools effect above.
   // Only an allowlist-mode agent (a pinned set) seeds the draft; "all" mode
   // leaves it null so the all-view renders until the operator customizes.
   useEffect(() => {
-    if (agentTab !== "skills") {
+    if (!toolsGroupOpen) {
       setSkillsDraft(null);
       return;
     }
@@ -755,7 +1108,7 @@ export function AgentsPage() {
     if (pinned.length > 0 && skillsDraft === null) {
       setSkillsDraft([...pinned]);
     }
-  }, [agentTab, skillsDraft, tabAgentSkillsQuery.data]);
+  }, [toolsGroupOpen, skillsDraft, tabAgentSkillsQuery.data]);
 
   // Per-agent session list — Conversation tab uses this directly. The
   // global /api/sessions used previously was paginated to 50, so the
@@ -771,17 +1124,16 @@ export function AgentsPage() {
   );
   const sessionDetailQuery = useSessionDetails(latestSessionForAgent ?? "");
 
-  const modelsQuery = useModels(
-    { provider: modelDraft.provider },
-    { enabled: !!modelDraft.provider.trim() },
-  );
-
-  // Separate models query for the create-form's chosen provider. We don't
-  // reuse modelsQuery because that one is gated on the inline-edit widget's
-  // selection, which is unrelated to the create modal.
+  const formModelsQueryProvider = showCreate
+    ? formState.model.provider
+    : manifestEditorFormState.model.provider;
   const formModelsQuery = useModels(
-    { provider: formState.model.provider },
-    { enabled: showCreate && createMode === "form" && !!formState.model.provider.trim() },
+    { provider: formModelsQueryProvider },
+    {
+      enabled:
+        ((showCreate && createMode === "form") || manifestEditorLive) &&
+        !!formModelsQueryProvider.trim(),
+    },
   );
 
   const providersQuery = useProviders();
@@ -796,6 +1148,11 @@ export function AgentsPage() {
   // the cache.
   const skillsQuery = useSkills({
     enabled: !!detailAgent || (showCreate && createMode === "form"),
+  });
+  // Raw manifest TOML for the full manifest editor (#7742) — only fetched
+  // while that drawer is open for the currently selected agent.
+  const agentManifestQuery = useAgentManifest(detailAgent?.id ?? "", {
+    enabled: manifestEditorLive,
   });
   const skillDescriptionByName = useMemo(() => {
     const map = new Map<string, string>();
@@ -860,6 +1217,19 @@ export function AgentsPage() {
         : undefined,
     [toolsListQuery.data],
   );
+  // Descriptions for the Tools Editor drawer's three `MultiSelectCmdk`
+  // fields (Declared Tools / Allowlist / Blocklist), keyed by tool name.
+  // Was the one `MultiSelectCmdk` call-site in the dashboard missing
+  // `optionMeta` — every other one (AgentTypesPage, AgentManifestForm)
+  // passes it so search matches on description too. Reuses
+  // `toolCatalogForForm` rather than mapping `toolsListQuery.data` again.
+  const toolsEditorOptionMeta = useMemo(() => {
+    const meta: Record<string, { description?: string }> = {};
+    for (const entry of toolCatalogForForm ?? []) {
+      if (entry.description) meta[entry.name] = { description: entry.description };
+    }
+    return meta;
+  }, [toolCatalogForForm]);
   // Configured MCP servers catalog for the create-dialog finder (#5246).
   // The MCP servers field previously rendered as a free-text TagInput,
   // forcing users to remember server names exactly. Gate-fetch the
@@ -870,7 +1240,7 @@ export function AgentsPage() {
   // and reopening the dialog triggers a fresh fetch via the `enabled`
   // toggle anyway.
   const mcpServersQuery = useMcpServers({
-    enabled: showCreate && createMode === "form",
+    enabled: (showCreate && createMode === "form") || manifestEditorLive,
     refetchInterval: false,
   });
   const mcpCatalogForForm = useMemo<
@@ -903,6 +1273,18 @@ export function AgentsPage() {
     setTomlParseError(null);
     setTemplateName("");
     setTemplateCustomName("");
+    // Drop the incoming `template` param on the way out. Without this, pressing
+    // Run on the same type a second time would navigate to a URL that already
+    // equals the current one, the effect below would not re-run, and the drawer
+    // would stay shut — the press would look like nothing happened.
+    if (routeTemplate) {
+      void navigate({ to: "/agents", search: {}, replace: true });
+      // This drawer was opened by a Run press rather than by the Create button,
+      // so hand the tab back to its default. Leaving it on Template would show
+      // an empty picker with Create disabled the next time the drawer is opened
+      // by hand. A tab the operator picked for themselves still persists.
+      setCreateMode("form");
+    }
     // Don't reset while a spawn is in flight — reset() flips isPending
     // back to false, and since the fetch isn't actually aborted the user
     // could reopen the modal and submit again before the first response
@@ -913,6 +1295,18 @@ export function AgentsPage() {
       spawnMutation.reset();
     }
   };
+
+  // Arriving from the agent-types page's Run button: the operator asked to
+  // instantiate that type, so the create drawer opens on the template tab with
+  // the type already selected. Run used to ask which *existing* agent to fork
+  // instead, which answers a different question than the button asks.
+  useEffect(() => {
+    const seed = createDrawerSeed(routeTemplate);
+    if (!seed) return;
+    setShowCreate(true);
+    setCreateMode(seed.createMode);
+    setTemplateName(seed.templateName);
+  }, [routeTemplate]);
 
   // Bidirectional Form ⇄ TOML sync. Going Form→TOML pushes the form's
   // serialized output into the textarea so advanced users can keep editing.
@@ -945,29 +1339,99 @@ export function AgentsPage() {
     setCreateMode(next);
   };
 
-  const hiddenModelKeys = useUIStore((s) => s.hiddenModelKeys);
-  const hiddenSet = useMemo(() => new Set(hiddenModelKeys), [hiddenModelKeys]);
+  // Full manifest editor (#7742) — reset and seed. Distinct from the create
+  // dialog's Form⇄TOML sync above: this is a single seed-once parse (the
+  // editor's own TOML source is the server, not a sibling tab), not a
+  // bidirectional textarea round-trip.
+  //
+  // Seeding is keyed on the agent, not on a surface being launched: the
+  // sections render inside whichever group the operator is on, so the form has
+  // to hold the selected agent's manifest for as long as the config tab is
+  // selected.
+  const manifestEditorAgentId = detailAgent?.id ?? null;
 
-  const visibleModels = useMemo(
-    () => filterVisible(modelsQuery.data?.models ?? [], hiddenSet),
-    [modelsQuery.data?.models, hiddenSet],
-  );
-
-  // Single-model providers (e.g. a self-hosted Unsloth Studio endpoint that
-  // serves exactly one model) used to leave the Save button stuck disabled:
-  // switching provider clears modelDraft.model, and with only one option the
-  // user has nothing else to pick to repopulate it, so the !model.trim()
-  // validity gate never released. Auto-select the sole model so changing the
-  // provider (or any other field) is enough to enable Save. See #5917.
+  // Clear the previous agent's parse the moment the selection changes.
+  // Without this the tabs render one agent's values under another agent's
+  // name until the manifest request lands — and, because the query is seeded
+  // once, they would keep rendering them.
   useEffect(() => {
-    if (!editingModel) return;
-    if (!modelDraft.provider.trim()) return;
-    if (modelsQuery.isLoading || modelDraft.model.trim()) return;
-    if (visibleModels.length === 1) {
-      const only = visibleModels[0].id;
-      setModelDraft(d => (d.model ? d : { ...d, model: only }));
+    setManifestEditorSeededFor(null);
+    setManifestEditorErrors(new Set());
+    setManifestEditorParseError(null);
+    setManifestEditorFormState(emptyManifestForm());
+    setManifestEditorExtras(emptyManifestExtras());
+    // #7749 review: the query cache holds the TOML for `staleTime: 30_000`,
+    // so reopening inside that window would serve a stale copy that the seed
+    // effect below marks as seeded — and a save would then write the older
+    // manifest over whatever changed on the server since (file-watcher
+    // reload, another tab, POST /reload). Drop the entry so the enabled query
+    // refetches and the editor only ever seeds from post-open data.
+    if (manifestEditorLive && manifestEditorAgentId) {
+      qc.removeQueries({ queryKey: agentQueries.manifest(manifestEditorAgentId).queryKey });
     }
-  }, [editingModel, modelDraft.provider, modelDraft.model, modelsQuery.isLoading, visibleModels]);
+  }, [manifestEditorAgentId, manifestEditorLive, qc]);
+
+  useEffect(() => {
+    if (!manifestEditorLive || !manifestEditorAgentId) return;
+    if (manifestEditorSeededFor === manifestEditorAgentId) return;
+    if (!agentManifestQuery.data) return;
+    const parsed = parseManifestToml(agentManifestQuery.data);
+    if (parsed.ok) {
+      setManifestEditorFormState(parsed.form);
+      setManifestEditorExtras(parsed.extras);
+      setManifestEditorParseError(null);
+    } else {
+      setManifestEditorParseError(
+        parsed.message === "json_schema_unsafe_integer"
+          ? t("agents.form.json_schema_unsafe_integer")
+          : parsed.message,
+      );
+    }
+    setManifestEditorSeededFor(manifestEditorAgentId);
+  }, [
+    manifestEditorLive,
+    manifestEditorAgentId,
+    manifestEditorSeededFor,
+    agentManifestQuery.data,
+    t,
+  ]);
+
+  const saveManifestEditor = () => {
+    if (!detailAgent) return;
+    const errors = validateManifestForm(manifestEditorFormState);
+    setManifestEditorErrors(new Set(errors));
+    if (errors.length > 0) {
+      // The offending field may live in a config group the operator is not
+      // looking at, and with the sections grouped that is the common case
+      // rather than an edge one — an error nobody can see is indistinguishable
+      // from no error at all. This sends them to the config tab and to the
+      // group that owns the first one; `Field` and the section's own `invalid`
+      // flag then highlight it and force its section open, so the jump lands
+      // on something that reads as an explanation rather than as a stray
+      // navigation.
+      const owningGroup = groupForFirstInvalidField(errors);
+      if (owningGroup) {
+        setMainTab("config");
+        setConfigGroup(owningGroup);
+      }
+      return;
+    }
+    const toml = serializeManifestForm(manifestEditorFormState, manifestEditorExtras);
+    manifestPatchMutation.mutate(
+      { agentId: detailAgent.id, body: { manifest_toml: toml } },
+      {
+        onSuccess: async () => {
+          addToast(
+            t("agents.detail.manifest_saved", { defaultValue: "Configuration saved" }),
+            "success",
+          );
+          await refreshDetailAgent(detailAgent.id, detailAgent.is_hand);
+        },
+        onError: (e: Error) =>
+          addToast(e.message || t("common.error", { defaultValue: "Error" }), "error"),
+      },
+    );
+  };
 
   const agents = useMemo(() => agentsQuery.data?.agents ?? [], [agentsQuery.data?.agents]);
   const visibleAgents = useMemo(
@@ -1021,26 +1485,13 @@ export function AgentsPage() {
   const isDetailDrawerCrashed = drawerDetailState === "crashed";
   const drawerStatusColor = isDetailDrawerSuspended ? "bg-warning" : isDetailDrawerCrashed ? "bg-error" : "bg-success";
   const lockRename = !!detailAgent?.is_hand;
-  const activeConfigMutation = patchAgentRuntimeConfigMutation;
-  // Save enables when the draft is both valid AND differs from the persisted model in any field — Provider, Model, Max tokens, or Temperature.
-  // Both facts are read off `buildModelConfigPatch`, the same strict builder Save itself calls: a null patch means the draft is invalid, an empty patch means nothing changed.
-  // Sharing the builder also keeps trailing garbage ("4096abc") from enabling a button that then no-ops, because the parse that rejects it is the parse that would have built the request.
-  const currentModel = detailAgent?.model;
-  // The declared capacities for the model being edited, so the drawer trims rungs the endpoint
-  // cannot honour and warns on an over-limit value — the same two things the create form does with
-  // the same helper, instead of the drawer silently offering both.
-  const drawerModelLimits = useMemo(
-    () => selectModelLimits(visibleModels, modelDraft.model, modelDraft.provider),
-    [visibleModels, modelDraft.model, modelDraft.provider],
-  );
-  const modelPatchPreview = buildModelConfigPatch(modelDraft, currentModel).patch;
-  const modelValid = modelPatchPreview !== null;
-  const modelDirty = modelPatchPreview !== null && Object.keys(modelPatchPreview).length > 0;
-  const saveModelDisabled =
-    activeConfigMutation.isPending || !modelValid || !modelDirty;
 
   const selectAgent = async (agent: AgentItem) => {
-    setAgentTab("conversation");
+    // Selecting an agent lands on its live state, not on the group the
+    // operator was editing in the previous one — that group's fields are the
+    // previous agent's manifest.
+    setMainTab("info");
+    setInfoTab("logs");
     try {
       const d = await qc.fetchQuery(agentQueries.detail(agent.id));
       setDetailAgent(mergeOriginFields(mergeHandFlag(d, agent.is_hand), agent));
@@ -1090,9 +1541,27 @@ export function AgentsPage() {
         } ${stateLower === "suspended" ? "opacity-70" : ""}`}
       >
         <div className="flex items-center gap-2 min-w-0">
-          <Badge variant={getStatusVariant(agent.state)} dot className="shrink-0">
-            <span className="sr-only">{agent.state || "idle"}</span>
-          </Badge>
+          {/* `<div>`, not `<span>`: `AgentAvatar` renders `Avatar`, which is a
+              `<div>`, and a span cannot legally contain one. */}
+          <div className="relative shrink-0">
+            <AgentAvatar
+              agentId={agent.id}
+              avatarUrl={agent.identity?.avatar_url}
+              emoji={agent.identity?.emoji}
+              fallback={agent.name}
+              size="sm"
+            />
+            {/* State pinned to the avatar's corner, the way the detail drawer
+                below places it, instead of the pill this row used to carry —
+                that pill held nothing but the dot. Placement is the same; the
+                colour is not, and was not before either: this row reads
+                `getStatusVariant`, the drawer its own three-way map. */}
+            <span
+              className={`absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 rounded-full ${dotColors[getStatusVariant(agent.state)]} border-2 border-surface`}
+              role="img"
+              aria-label={agent.state || "idle"}
+            />
+          </div>
           <span className="font-mono text-[13px] truncate flex-1 min-w-0 text-text-main">
             {t(`agents.builtin.${agent.name}.name`, { defaultValue: agent.name })}
           </span>
@@ -1110,7 +1579,7 @@ export function AgentsPage() {
             {agent.last_active ? formatRelativeTime(agent.last_active) : "—"}
           </span>
         </div>
-        <div className="font-mono text-[10.5px] text-text-dim flex items-center gap-2 pl-[22px] mt-1">
+        <div className="font-mono text-[10.5px] text-text-dim flex items-center gap-2 pl-10 mt-1">
           <span className="truncate min-w-0">{agent.model_name || agent.model_provider || "—"}</span>
           <span className="text-text-dim/60">·</span>
           <span className="truncate min-w-0">
@@ -1132,107 +1601,56 @@ export function AgentsPage() {
     );
   };
 
-  // Inline detail panel — replaces the old card-grid + drawer mix.  The
-  // drawer is kept around for deep edits (rename, model, tools, prompts)
-  // and opened from the panel's overflow menu.  Five tabs mirror the
-  // design: Conversation / Memory / Skills / Schedule / Logs.
+  // Inline detail panel — replaces the old card-grid + drawer mix.
+  //
+  // Two tabs, and the split is by what the operator is doing. "logs & info"
+  // reads the agent: a brief, then logs, memory, prompts and manifest history.
+  // "config" writes it: every manifest section, grouped, one save.
+  //
+  // The two tab lists are derived from `CONFIG_GROUP_IDS` and `INFO_TABS`
+  // rather than written out here, so a group added to the map cannot end up
+  // without a tab to reach it.
+  const mainTabs: Array<AgentTabDef<AgentMainTab>> = [
+    { id: "info", label: t("agents.tab.logs_info", { defaultValue: "logs & info" }), Icon: FileText },
+    { id: "config", label: t("agents.tab.config", { defaultValue: "config" }), Icon: Settings },
+  ];
+  const infoTabs: Array<AgentTabDef<InfoTab>> = [
+    { id: "logs", label: t("agents.info.logs", { defaultValue: "Logs" }), Icon: FileText },
+    { id: "memory", label: t("agents.info.memory", { defaultValue: "Memory" }), Icon: Database },
+    { id: "prompts", label: t("agents.info.prompts", { defaultValue: "Prompts & experiments" }), Icon: FlaskConical },
+    { id: "history", label: t("agents.info.history", { defaultValue: "History" }), Icon: History },
+  ];
+  // The group tabs, in the order the map declares. The icon per group is a
+  // property of the group, not of the map — `CONFIG_GROUPS` is about which
+  // fields live where, and a presentation choice there would be an icon in
+  // the middle of a data structure.
+  const GROUP_ICONS: Record<ConfigGroupId, typeof Bot> = {
+    general: Bot,
+    model: Route,
+    tools: Wrench,
+    memory: Database,
+    limits: Shield,
+    channels: Radio,
+    planning: Clock,
+    conversation: Sparkles,
+  };
+  // The label comes from the id, with no `defaultValue`: the English text
+  // for each group lives in the locale files like every other label, and a
+  // second copy here would be one more place to keep in step. The guard in
+  // `AgentsPage.test.tsx` fails if an id has no label in any locale, which is
+  // what keeps a missing one from rendering as a raw key.
+  const configTabs: Array<AgentTabDef<ConfigGroupId>> = CONFIG_GROUP_IDS.map(
+    (id) => ({
+      id,
+      label: t(`agents.group.${id}`),
+      Icon: GROUP_ICONS[id],
+    }),
+  );
+
   const renderDetailPanel = (agent: AgentDetail) => {
     const detailState = ((agent as AgentView).state || "").toLowerCase();
     const isSuspended = detailState === "suspended";
     const isCrashed = detailState === "crashed";
-    const detailCaps = (agent as AgentView).capabilities;
-    const toolsCount = Array.isArray(detailCaps?.tools) ? detailCaps.tools.length : 0;
-    const tabs: Array<{ id: typeof agentTab; label: string; Icon: typeof Bot }> = [
-      { id: "conversation", label: t("agents.tab.conversation", { defaultValue: "Conversation" }), Icon: MessageCircle },
-      { id: "memory",       label: t("agents.tab.memory",       { defaultValue: "Memory" }),       Icon: Database },
-      { id: "skills",       label: t("agents.tab.skills",       { defaultValue: "Skills" }),       Icon: Sparkles },
-      { id: "tools",        label: t("agents.tab.tools",        { defaultValue: "Tools" }),        Icon: Wrench },
-      { id: "routing",      label: t("agents.tab.routing",      { defaultValue: "Routing" }),      Icon: Route },
-      { id: "schedule",     label: t("agents.tab.schedule",     { defaultValue: "Schedule" }),     Icon: Clock },
-      { id: "logs",         label: t("agents.tab.logs",         { defaultValue: "Logs" }),         Icon: FileText },
-    ];
-
-    const live = agentStatsQuery.data;
-    const sessions24h = live?.sessions_24h ?? 0;
-    const cost24h = live?.cost_24h ?? 0;
-    const p95Ms = live?.p95_latency_ms ?? 0;
-    const samples = live?.samples ?? 0;
-    const activeNow = live?.active_now ?? 0;
-    const prev = live?.prev;
-    // Sort alphabetically (#4940) so the row preview shows the same
-    // first-3 every time — matches the Skills tab ordering.
-    const skillNames: string[] = (
-      Array.isArray((agent as AgentView).skills)
-        ? ((agent as AgentView).skills as string[])
-        : Array.isArray((agent as AgentView).capabilities?.skills)
-          ? (((agent as AgentView).capabilities!.skills) as string[])
-          : []
-    )
-      .slice()
-      .sort();
-    const toolsMeta = skillNames.length > 0
-      ? skillNames.slice(0, 3).join(" · ")
-      : toolsCount > 0
-        ? `${toolsCount} configured`
-        : "—";
-
-    const pctDelta = (cur: number, p: number): string => {
-      if (p === 0) return cur > 0 ? "new" : "—";
-      const d = ((cur - p) / p) * 100;
-      const sign = d >= 0 ? "+" : "−";
-      return `${sign}${Math.abs(d).toFixed(0)}%`;
-    };
-    const usdDelta = (cur: number, p: number): string => {
-      const d = cur - p;
-      if (Math.abs(d) < 0.01) return cur === 0 && p === 0 ? "—" : "≈$0.00";
-      const sign = d >= 0 ? "+" : "−";
-      return `${sign}$${Math.abs(d).toFixed(2)}`;
-    };
-    const msDelta = (cur: number, p: number): string => {
-      if (cur === 0 && p === 0) return "—";
-      if (p === 0) return "new";
-      const d = cur - p;
-      const sign = d >= 0 ? "+" : "−";
-      return Math.abs(d) >= 1000
-        ? `${sign}${(Math.abs(d) / 1000).toFixed(1)}s`
-        : `${sign}${Math.abs(Math.round(d))}ms`;
-    };
-
-    const kpiTiles = [
-      {
-        l: t("agents.kpi.sessions", { defaultValue: "Sessions · 24h" }),
-        v: String(sessions24h),
-        m: prev
-          ? activeNow > 0
-            ? `${activeNow} live · ${pctDelta(sessions24h, prev.sessions_24h)}`
-            : pctDelta(sessions24h, prev.sessions_24h)
-          : activeNow > 0 ? `${activeNow} live` : "—",
-      },
-      {
-        l: t("agents.kpi.cost", { defaultValue: "Cost · 24h" }),
-        v: `$${cost24h.toFixed(2)}`,
-        m: prev ? usdDelta(cost24h, prev.cost_24h) : "—",
-      },
-      {
-        l: t("agents.kpi.p95", { defaultValue: "P95 latency" }),
-        v: p95Ms > 0
-          ? p95Ms >= 1000
-            ? `${(p95Ms / 1000).toFixed(2)}s`
-            : `${Math.round(p95Ms)}ms`
-          : "—",
-        m: prev && (samples > 0 || prev.p95_latency_ms > 0)
-          ? msDelta(p95Ms, prev.p95_latency_ms)
-          : samples > 0
-            ? t("agents.kpi.samples", { count: samples, defaultValue: "{{count}} samples" })
-            : "—",
-      },
-      {
-        l: t("agents.kpi.tools", { defaultValue: "Tools" }),
-        v: toolsCount != null ? String(toolsCount) : "—",
-        m: toolsMeta,
-      },
-    ];
-
     return (
       <Card padding="none" className="surface-lit overflow-hidden flex flex-col min-h-0 lg:min-h-[640px] h-full lg:h-auto">
         {/* Header */}
@@ -1304,6 +1722,23 @@ export function AgentsPage() {
                   <span className="hidden sm:inline">{t("agents.suspend", { defaultValue: "Pause" })}</span>
                 </Button>
               )}
+              {/* Quick Run (#6699) — a one-off ephemeral worker on this
+                  agent's budget. Anchored here rather than on the agent-types
+                  row because the parent that is billed, and whose
+                  `[resources]` quota is the ceiling, is the agent, not a type.
+                  Hidden for hands, which cannot be a parent. */}
+              {!agent.is_hand && (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  leftIcon={<Zap className="w-3.5 h-3.5" />}
+                  aria-label={t("agents.quick_run")}
+                  title={t("agents.quick_run")}
+                  onClick={() => setQuickRunParent(agent.id)}
+                >
+                  <span className="hidden sm:inline">{t("agents.quick_run")}</span>
+                </Button>
+              )}
               <Button
                 variant="secondary"
                 size="sm"
@@ -1314,162 +1749,222 @@ export function AgentsPage() {
               >
                 <span className="hidden sm:inline">{t("common.interact", { defaultValue: "Chat" })}</span>
               </Button>
+              {/* Details — the avatar editor, the agent's read-only lineage
+                  and its lifecycle actions (reset, delete, chat). Not
+                  configuration: that lives on the config tab, and a second
+                  surface that writes the same manifest is what the reform
+                  removed. */}
               <Button
                 variant="ghost"
                 size="sm"
                 onClick={() => setDetailDrawerOpen(true)}
-                title={t("agents.configure", { defaultValue: "Configure" })}
-                aria-label={t("agents.configure", { defaultValue: "Configure" })}
+                title={t("common.details", { defaultValue: "Details" })}
+                aria-label={t("common.details", { defaultValue: "Details" })}
               >
                 <MoreHorizontal className="w-4 h-4" />
               </Button>
             </div>
           </div>
 
-          {/* KPI tiles — Sessions · Cost · P95 · Tools (matches design canvas).
-              Backed by GET /api/agents/{id}/stats so values are accurate even
-              when the agent hasn't appeared in the global session list page. */}
-              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 mt-4">
-                {kpiTiles.map((s) => (
-                  <div key={s.l} className="px-3 py-2 rounded-md bg-main/60 border border-border-subtle">
-                    <div className="text-[10px] uppercase font-semibold text-text-dim tracking-[0.08em]">{s.l}</div>
-                    <div className="font-mono font-semibold text-[17px] mt-1 truncate tabular-nums text-text-main">{s.v}</div>
-                    <div className="text-[10.5px] text-text-dim/80 mt-0.5 truncate">{s.m}</div>
-                  </div>
-                ))}
-              </div>
-
-          {/* Tabs */}
-          <div className="flex gap-1 mt-4 -mb-3 border-b border-border-subtle overflow-x-auto">
-            {tabs.map((tab) => {
-              const active = agentTab === tab.id;
-              const Icon = tab.Icon;
-              return (
-                <button
-                  key={tab.id}
-                  onClick={() => setAgentTab(tab.id)}
-                  className={`px-3 py-2 text-[12.5px] flex items-center gap-1.5 border-b-2 -mb-px shrink-0 transition-colors cursor-pointer ${
-                    active
-                      ? "border-brand text-text-main font-medium"
-                      : "border-transparent text-text-dim hover:text-text-main"
-                  }`}
-                >
-                  <Icon className="w-[13px] h-[13px]" />
-                  {tab.label}
-                </button>
-              );
-            })}
-          </div>
+          {/* The two main tabs. The KPI tiles and the token footprint used to
+              sit here, above every tab, which put a reading surface on top of
+              a writing one — they are the first thing "logs & info" shows. */}
+          <AgentTabBar
+            tabs={mainTabs}
+            active={mainTab}
+            onSelect={setMainTab}
+            ariaLabel={t("agents.tabs.main", { defaultValue: "Agent view" })}
+            className="mt-4 -mb-3"
+          />
         </div>
 
         {/* Tab content */}
         <div className="flex-1 overflow-y-auto px-3 sm:px-5 py-3 sm:py-4">
-          {renderTabContent(agent, isCrashed)}
+          {mainTab === "info"
+            ? renderInfoTab(agent, isCrashed)
+            : renderConfigTab(agent)}
         </div>
       </Card>
     );
   };
 
-  const renderTabContent = (agent: AgentDetail, isCrashed: boolean) => {
-    if (isCrashed && agentTab === "conversation") {
-      return (
-        <EmptyState
-          title={t("agents.detail.crashed_title", {
-            defaultValue: "{{name}} is in error state",
-            name: agent.name,
-          })}
-          icon={<X className="h-6 w-6 text-error" />}
-          action={
-            <Button variant="primary" size="sm" leftIcon={<RotateCcw className="h-3.5 w-3.5" />} onClick={async () => {
-              try { await resumeMutation.mutateAsync(agent.id); } catch (e) {
-                addToast(toastErr(e, t("agents.resume_failed", { defaultValue: "Failed to resume agent" })), "error");
-              }
-            }}>
-              {t("agents.resume", { defaultValue: "Resume" })}
-            </Button>
-          }
+  // ---------- "logs & info" — the brief, then four read-only surfaces.
+  //
+  // The brief is not a sub-tab: it is what the operator came for, and hiding
+  // the state, the cost and the tail of the conversation behind one more click
+  // is how the token footprint ended up in a drawer.
+  const renderInfoTab = (agent: AgentDetail, isCrashed: boolean) => {
+    const sessionData = sessionDetailQuery.data as
+      | { messages?: AgentBriefMessage[] }
+      | undefined;
+    const detailCaps = (agent as AgentView).capabilities;
+    const toolsCount = Array.isArray(detailCaps?.tools) ? detailCaps.tools.length : 0;
+
+    const skillNames: string[] = (
+      Array.isArray((agent as AgentView).skills)
+        ? ((agent as AgentView).skills as string[])
+        : Array.isArray((agent as AgentView).capabilities?.skills)
+          ? (((agent as AgentView).capabilities!.skills) as string[])
+          : []
+    )
+      .slice()
+      .sort();
+    const toolsMeta = skillNames.length > 0
+      ? skillNames.slice(0, 3).join(" · ")
+      : toolsCount > 0
+        ? `${toolsCount} configured`
+        : "—";
+
+    return (
+      <div className="flex flex-col gap-4">
+        {isCrashed && (
+          <EmptyState
+            title={t("agents.detail.crashed_title", {
+              defaultValue: "{{name}} is in error state",
+              name: agent.name,
+            })}
+            icon={<X className="h-6 w-6 text-error" />}
+            action={
+              <Button variant="primary" size="sm" leftIcon={<RotateCcw className="h-3.5 w-3.5" />} onClick={async () => {
+                try { await resumeMutation.mutateAsync(agent.id); } catch (e) {
+                  addToast(toastErr(e, t("agents.resume_failed", { defaultValue: "Failed to resume agent" })), "error");
+                }
+              }}>
+                {t("agents.resume", { defaultValue: "Resume" })}
+              </Button>
+            }
+          />
+        )}
+        <AgentBrief
+          agent={agent as AgentView}
+          stats={agentStatsQuery.data}
+          events={agentEventsQuery.data ?? []}
+          messages={sessionData?.messages ?? []}
+          conversationLoading={sessionDetailQuery.isLoading}
+          hasSession={!!latestSessionForAgent}
+          toolsCount={toolsCount}
+          toolsMeta={toolsMeta}
+          onOpenChat={() => navigate({ to: "/chat", search: { agentId: agent.id } })}
         />
-      );
-    }
-    switch (agentTab) {
-      case "conversation":      return renderConversationTab(agent);
-      case "memory":            return renderMemoryTab(agent);
-      case "skills":            return renderSkillsTab(agent);
-      case "tools":             return renderToolsTab(agent);
-      case "routing":           return renderRoutingTab(agent);
-      case "schedule":          return renderScheduleTab(agent);
-      case "logs":              return renderLogsTab(agent);
-    }
+        <AgentTabBar
+          tabs={infoTabs}
+          active={infoTab}
+          onSelect={setInfoTab}
+          ariaLabel={t("agents.tabs.info", { defaultValue: "Agent information" })}
+          variant="pill"
+        />
+        <div>
+          {infoTab === "logs" && renderLogsTab(agent)}
+          {infoTab === "memory" && renderMemoryTab(agent)}
+          {infoTab === "prompts" && <PromptsExperimentsPanel agentId={agent.id} />}
+          {infoTab === "history" && renderHistoryTab(agent)}
+        </div>
+      </div>
+    );
   };
 
-  // ---------- Conversation tab — chat-bubble preview of latest session
-  const renderConversationTab = (agent: AgentDetail) => {
-    const sessionData = sessionDetailQuery.data as
-      | { messages?: Array<{ role?: string; content?: unknown }> }
-      | undefined;
-    const allMessages = Array.isArray(sessionData?.messages) ? sessionData!.messages! : [];
-    const visibleMessages = allMessages
-      .filter((m) => m.role === "user" || m.role === "assistant")
-      .slice(-5);
-    const messageText = (m: { content?: unknown }): string => {
-      if (typeof m.content === "string") return m.content;
-      if (Array.isArray(m.content)) {
-        return (m.content as Array<{ type?: string; text?: string }>)
-          .filter((b) => b.type === "text" || b.text)
-          .map((b) => b.text ?? "")
-          .join(" ");
-      }
-      return "";
-    };
+  // ---------- "config" — every manifest section, grouped, one save.
+  //
+  // The group is the tab. Inside it, the live panels that own a grant over
+  // their own endpoint (skills, tools, cron, channels) come first — they are
+  // what is actually in effect right now — and the manifest form follows,
+  // because the form is the one writer of the file those grants end up in.
+  const renderConfigTab = (agent: AgentDetail) => {
+    if (manifestEditorParseError) {
+      return (
+        <p className="text-xs text-error">
+          {t("agents.form.toml_parse_error", { msg: manifestEditorParseError })}
+        </p>
+      );
+    }
+    if (agentManifestQuery.isError) {
+      return (
+        <p className="text-xs text-error">
+          {t("agents.detail.manifest_load_failed", {
+            defaultValue: "Failed to load the current configuration.",
+          })}
+        </p>
+      );
+    }
+    if (agentManifestQuery.isLoading) {
+      return (
+        <p className="text-xs text-text-dim flex items-center gap-2">
+          <Loader2 className="w-3.5 h-3.5 animate-spin" />
+          {t("common.loading", { defaultValue: "Loading..." })}
+        </p>
+      );
+    }
     return (
-      <div className="flex flex-col gap-2.5">
-        <div className="text-[11px] uppercase font-semibold tracking-[0.08em] text-text-dim mb-1">
-          {t("agents.detail.live_conversation", { defaultValue: "Live conversation" })}
-        </div>
-        {sessionDetailQuery.isLoading && latestSessionForAgent ? (
-          <div className="text-[12px] text-text-dim italic">{t("common.loading", { defaultValue: "Loading..." })}</div>
-        ) : visibleMessages.length === 0 ? (
-          <div className="rounded-md border border-border-subtle bg-main/40 p-4 text-[12px] text-text-dim italic">
-            {t("agents.detail.no_conversation", {
-              defaultValue: "No conversation yet — open the chat to send the first message.",
-            })}
-          </div>
-        ) : (
-          visibleMessages.map((m, i) => {
-            const isUser = m.role === "user";
-            const txt = messageText(m).trim();
-            if (!txt) return null;
-            // Truncate first, then render. The full conversation lives
-            // behind the "Open chat" button — this is a preview only.
-            const preview = txt.length > 280 ? `${txt.slice(0, 280)}…` : txt;
-            return (
-              <div key={i} className={`flex ${isUser ? "justify-end" : "justify-start"}`}>
-                <div
-                  className={`max-w-[78%] rounded-lg px-3 py-2 text-[12.5px] break-words border ${
-                    isUser
-                      ? "bg-brand/10 border-brand/30 text-text-main"
-                      : "bg-main/60 border-border-subtle text-text-main"
-                  }`}
-                >
-                  {isUser ? (
-                    <span className="whitespace-pre-wrap">{preview}</span>
-                  ) : (
-                    <MarkdownContent>{preview}</MarkdownContent>
-                  )}
-                </div>
-              </div>
-            );
-          })
-        )}
-        <div className="flex justify-start mt-1">
+      <div className="flex flex-col gap-4">
+        {/* The switch governs every section's folded half, and Save commits the
+            whole manifest — so both belong at the top of the tab, not at the
+            bottom of a group the operator may not be in. */}
+        <div className="flex items-center justify-between gap-3 flex-wrap">
+          <label className="inline-flex items-center gap-2 cursor-pointer select-none">
+            <input
+              type="checkbox"
+              checked={advancedMode}
+              onChange={(e) => setAdvancedMode(e.target.checked)}
+              className="h-3.5 w-3.5 accent-brand"
+              aria-label={t("agents.config.advanced_mode", { defaultValue: "Advanced mode" })}
+            />
+            <span className="text-xs font-semibold text-text-dim">
+              {t("agents.config.advanced_mode", { defaultValue: "Advanced mode" })}
+            </span>
+            <span className="text-[11px] text-text-dim/70 hidden sm:inline">
+              {t("agents.config.advanced_hint", {
+                defaultValue: "show every field, not just the everyday ones",
+              })}
+            </span>
+          </label>
           <Button
             variant="primary"
             size="sm"
-            leftIcon={<MessageCircle className="h-3.5 w-3.5" />}
-            onClick={() => navigate({ to: "/chat", search: { agentId: agent.id } })}
+            onClick={saveManifestEditor}
+            disabled={manifestPatchMutation.isPending}
           >
-            {t("agents.detail.open_chat", { defaultValue: "Open chat" })}
+            {manifestPatchMutation.isPending
+              ? t("common.saving", { defaultValue: "Saving..." })
+              : t("common.save", { defaultValue: "Save" })}
           </Button>
+        </div>
+        <AgentTabBar
+          tabs={configTabs}
+          active={configGroup}
+          onSelect={setConfigGroup}
+          ariaLabel={t("agents.tabs.config_groups", { defaultValue: "Configuration groups" })}
+          // Pill, like the info sub-tabs: these are one level below the main
+          // tabs and the same shape says so without a second legend.
+          variant="pill"
+        />
+        <div className="flex flex-col gap-4">
+          {configGroup === "channels" && <ChannelsSection agentId={agent.id} />}
+          {configGroup === "planning" && <AgentSchedulePanel agent={agent} />}
+          {configGroup === "tools" && (
+            <>
+              {renderSkillsTab(agent)}
+              {renderToolsTab(agent)}
+            </>
+          )}
+          <AgentManifestForm
+            value={manifestEditorFormState}
+            onChange={setManifestEditorFormState}
+            providers={formProviderOptions}
+            models={formModelOptions}
+            invalidFields={manifestEditorErrors}
+            extras={manifestEditorExtras}
+            skillCatalog={skillCatalogForForm}
+            toolCatalog={toolCatalogForForm}
+            mcpCatalog={mcpCatalogForForm}
+            routerProfileCatalog={routerProfileCatalog}
+            routerProfilesEnabled={routerProfilesQuery.data?.enabled}
+            // Identity is decided by the panel header's rename control; a
+            // second editable Name field here would be a second answer to the
+            // same question.
+            nameField="readonly"
+            sections={CONFIG_GROUPS[configGroup] as ManifestSectionId[]}
+            advanced={advancedMode}
+          />
         </div>
       </div>
     );
@@ -1893,7 +2388,12 @@ export function AgentsPage() {
     const usesAll = declared.length === 0;
     const draft = toolsDraft ?? [];
     const draftSet = new Set(draft);
-    const isDirty = toolsDraft !== null &&
+    // Builtin (`capabilities_tools`) dirty flag — drives the "all" vs
+    // allowlist view switch and the declared-tool count in the header.
+    // Kept separate from the MCP draft below because the two save through
+    // different endpoints and toggling one must not force a re-render of
+    // the other's view.
+    const isBuiltinDirty = toolsDraft !== null &&
       (draft.length !== declared.length || draft.some((n) => !declared.includes(n)));
 
     // #6565: MCP tools are granted by the agent's `mcp_servers` allowlist, not by `capabilities_tools` — the kernel explicitly skips the declared-tools filter for them (`tools_and_skills.rs`, Step 3).
@@ -1901,17 +2401,57 @@ export function AgentsPage() {
     const blocklist = agentToolCfg?.tool_blocklist ?? [];
     // `tool_allowlist` is the other half of the kernel's Step 4 filter and applies to MCP tools too since #6495, so a non-empty allowlist that names no `mcp__*` glob strips the entire server even while `mcp_servers` still grants it.
     const allowlist = agentToolCfg?.tool_allowlist ?? [];
+    // Staged MCP grant list (#6565 follow-up). `mcpServersDraft` mirrors
+    // `toolsDraft`'s "null = pristine" convention: nothing is written to
+    // `agent.toml: mcp_servers` until Save. `mcpDraftArr` is what the group
+    // cards read for live grant state; `persistedMcpServers` is the
+    // server-as-of-last-fetch baseline `isMcpDirty` compares against.
+    const persistedMcpServers = agent.mcp_servers ?? [];
+    const mcpDraftArr = mcpServersDraft ?? persistedMcpServers;
+    const isMcpDirty = mcpServersDraft !== null &&
+      (mcpServersDraft.length !== persistedMcpServers.length ||
+        mcpServersDraft.some((n) => !persistedMcpServers.includes(n)));
     // The kernel gates MCP on `!mcp_disabled && !mcp_servers.is_empty()`, and `tools_disabled` short-circuits every tool before that.
     // Both hard switches have to fold into "none", or an `mcp_disabled` agent with `mcp_servers = ["*"]` renders as a live grant.
-    const mcpMode =
+    // Once the operator stages an edit, the mode is re-derived from the draft array alone (mirrors `usesAll`/`isBuiltinDirty` for capabilities_tools) rather than the server's last-known mode string, so a fresh single-server grant reads as "allowlist" immediately instead of staying pinned at the persisted "none".
+    const mcpModeEffective =
       agent.tools_disabled || agent.mcp_disabled
         ? "none"
-        : resolveMcpGrantMode(agent.mcp_servers, agent.mcp_servers_mode);
+        : mcpServersDraft !== null
+          ? resolveMcpGrantMode(mcpServersDraft, undefined)
+          : resolveMcpGrantMode(agent.mcp_servers, agent.mcp_servers_mode);
     const isMcpGroup = (groupName: string) => mcpServerByGroup.has(groupName);
     const isMcpGroupGranted = (groupName: string) => {
       const server = mcpServerByGroup.get(groupName);
       if (server === undefined) return false;
-      return isMcpServerGranted(server, agent.mcp_servers, mcpMode);
+      return isMcpServerGranted(server, mcpDraftArr, mcpModeEffective);
+    };
+    // Both hard switches, read straight off the agent rather than through
+    // `mcpModeEffective` — that one folds them into "none", which is
+    // indistinguishable from "no server granted yet" and would label an inert
+    // card as grantable.
+    const mcpHardDisabled = !!(agent.tools_disabled || agent.mcp_disabled);
+    // One source of truth for what an MCP card may do and say, shared by the
+    // all-tools grid and the assigned/available lists (#7749 review).
+    const mcpCardStateOf = (groupName: string) =>
+      mcpGroupCardState({
+        granted: isMcpGroupGranted(groupName),
+        mode: mcpModeEffective,
+        hardDisabled: mcpHardDisabled,
+      });
+    // Never "click to assign" on a card that cannot be clicked.
+    const mcpGroupLabel = (state: McpGroupCardState): string => {
+      if (state === "hard-disabled") {
+        return t("agents.detail.tools_mcp_inert", {
+          defaultValue: "not granted — MCP is hard-disabled",
+        });
+      }
+      if (state === "grantable") {
+        return t("agents.detail.tools_mcp_not_granted", {
+          defaultValue: "not granted — click to grant",
+        });
+      }
+      return t("agents.detail.tools_mcp_granted", { defaultValue: "granted via mcp_servers" });
     };
     // Whether one tool inside a group counts as active for display purposes.
     const isToolActive = (groupName: string, tool: ToolDefinition): boolean => {
@@ -1949,9 +2489,22 @@ export function AgentsPage() {
     };
 
     const handleToggleGroup = (groupName: string) => {
-      // MCP grants live in `agent.toml: mcp_servers`, which this tab's save endpoint (`PUT /api/agents/{id}/tools`) cannot write — it only carries capabilities_tools / tool_allowlist / tool_blocklist.
-      // Writing MCP tool names into capabilities_tools would look like it worked and change nothing, so the MCP groups are read-only here and point at the MCP servers tab instead (#6565).
-      if (isMcpGroup(groupName)) return;
+      if (isMcpGroup(groupName)) {
+        // MCP grants live in `agent.toml: mcp_servers`, a separate
+        // draft/endpoint from `capabilities_tools` (#6565 follow-up) — see
+        // `handleSave`. Nothing to toggle once the server is already
+        // granted through the `["*"]`/"all" wildcard; that requires
+        // editing the wildcard itself, not a per-server pin. And nothing to
+        // stage under a hard switch either: with `tools_disabled` or
+        // `mcp_disabled` the kernel skips MCP entirely, so a staged grant
+        // would arm a Save that changes nothing visible or effective
+        // (#7749 review) — the banner above the cards explains why instead.
+        const server = mcpServerByGroup.get(groupName);
+        if (!server || !isMcpGroupCardActionable(mcpCardStateOf(groupName))) return;
+        setMcpServersDraft((prev) => toggleMcpServerGrant(prev ?? persistedMcpServers, server));
+        if (expandedToolGroup === groupName) setExpandedToolGroup(null);
+        return;
+      }
       const groupTools = grouped.get(groupName) ?? [];
       const names = groupTools.map((t) => t.name);
       const status = getGroupStatus(groupName, groupTools);
@@ -1968,7 +2521,9 @@ export function AgentsPage() {
     };
 
     const handleToggleTool = (groupName: string, toolName: string) => {
-      // Same reasoning as `handleToggleGroup`: a per-tool toggle inside an MCP group has nowhere valid to write (#6565).
+      // MCP tools aren't filtered by `capabilities_tools` (#6565), so
+      // per-tool assignment inside an MCP group has nowhere to write — the
+      // group itself is the unit of grant, handled by `handleToggleGroup`.
       if (isMcpGroup(groupName)) return;
       setToolsDraft((prev) => {
         const s = new Set(prev ?? []);
@@ -1980,29 +2535,57 @@ export function AgentsPage() {
 
     const handleSave = () => {
       if (!agent.id) return;
-      updateToolsMutation.mutate(
-        {
-          agentId: agent.id,
-          payload: {
-            capabilities_tools: draft,
-            tool_allowlist: agentToolCfg?.tool_allowlist ?? [],
-            tool_blocklist: agentToolCfg?.tool_blocklist ?? [],
+      const agentId = agent.id;
+      if (isBuiltinDirty) {
+        updateToolsMutation.mutate(
+          {
+            agentId,
+            payload: {
+              capabilities_tools: draft,
+              tool_allowlist: agentToolCfg?.tool_allowlist ?? [],
+              tool_blocklist: agentToolCfg?.tool_blocklist ?? [],
+            },
           },
-        },
-        {
-          onSuccess: () => {
-            addToast(t("agents.detail.tools_saved", { defaultValue: "Saved to agent.toml" }), "success");
-            setToolsDraft(null);
-            setExpandedToolGroup(null);
+          {
+            onSuccess: () => {
+              addToast(t("agents.detail.tools_saved", { defaultValue: "Saved to agent.toml" }), "success");
+              setToolsDraft(null);
+              setExpandedToolGroup(null);
+            },
+            onError: (e) => {
+              addToast(
+                toastErr(e, t("agents.tools_save_failed", { defaultValue: "Failed to update tools" })),
+                "error",
+              );
+            },
           },
-          onError: (e) => {
-            addToast(
-              toastErr(e, t("agents.tools_save_failed", { defaultValue: "Failed to update tools" })),
-              "error",
-            );
+        );
+      }
+      if (isMcpDirty) {
+        setAgentMcpServersMutation.mutate(
+          { agentId, mcpServers: mcpDraftArr },
+          {
+            onSuccess: async () => {
+              await refreshDetailAgent(agentId, agent.is_hand);
+              addToast(
+                t("agents.detail.tools_mcp_saved", { defaultValue: "MCP servers updated" }),
+                "success",
+              );
+              setMcpServersDraft(null);
+              setExpandedToolGroup(null);
+            },
+            onError: (e) => {
+              addToast(
+                toastErr(
+                  e,
+                  t("agents.detail.tools_mcp_save_failed", { defaultValue: "Failed to update MCP servers" }),
+                ),
+                "error",
+              );
+            },
           },
-        },
-      );
+        );
+      }
     };
 
     // Declared MCP servers with no live connection (#7713). The kernel derives
@@ -2021,6 +2604,67 @@ export function AgentsPage() {
       ([name, tools]) => getGroupStatus(name, tools) === "none",
     );
 
+    // Shared per-tool checklist rendered under an expanded group, for both
+    // the assigned and available sections (#6565 follow-up — previously
+    // only the assigned section could expand). MCP rows stay non-clickable
+    // (`handleToggleTool` no-ops for them) — the server as a whole is
+    // granted/revoked from the group header, individual MCP tools are only
+    // ever filtered further by `tool_allowlist` / `tool_blocklist`.
+    const renderGroupToolList = (
+      groupName: string,
+      groupTools: ToolDefinition[],
+      mcpGroup: boolean,
+    ) => (
+      <div className="ml-4 mt-1.5 flex flex-col gap-1">
+        {mcpGroup && (
+          <p className="px-2.5 py-1.5 text-[10.5px] text-text-dim/70">
+            {t("agents.detail.tools_mcp_readonly", {
+              defaultValue:
+                "MCP tools are granted per server via mcp_servers in agent.toml. Toggle the group above to grant or revoke this server — individual tools are further filtered by tool_allowlist and tool_blocklist.",
+            })}
+          </p>
+        )}
+        {groupTools.map((tool) => {
+          const isActive = isToolActive(groupName, tool);
+          const blocked = mcpGroup && isToolBlocked(tool.name, blocklist);
+          return (
+            <div
+              key={tool.name}
+              onClick={() => handleToggleTool(groupName, tool.name)}
+              className={`flex items-center gap-2 px-2.5 py-1.5 rounded border transition-colors ${
+                mcpGroup ? "cursor-default" : "cursor-pointer"
+              } ${
+                isActive
+                  ? `border-brand/20 bg-main/40${mcpGroup ? "" : " hover:border-red-400/30"}`
+                  : `border-border-subtle bg-main/20 opacity-60${mcpGroup ? "" : " hover:border-brand/30 hover:opacity-100"}`
+              }`}
+            >
+              <div
+                className={`w-3 h-3 rounded-sm border flex items-center justify-center shrink-0 ${
+                  isActive ? "border-brand bg-brand/20" : "border-text-dim/30"
+                }`}
+              >
+                {isActive && <Check className="w-2 h-2 text-brand" />}
+              </div>
+              <span className="font-mono text-[11px] text-text-main truncate flex-1 min-w-0">
+                {tool.name}
+              </span>
+              {blocked && (
+                <span className="font-mono text-[9.5px] text-amber-500/80 shrink-0">
+                  {t("agents.detail.tools_blocked", { defaultValue: "blocklisted" })}
+                </span>
+              )}
+              {tool.description && (
+                <span className="font-mono text-[9.5px] text-text-dim/60 truncate max-w-[50%] hidden sm:inline">
+                  {tool.description}
+                </span>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    );
+
     return (
       <div className="flex flex-col gap-3">
         <div className="flex items-center justify-between">
@@ -2029,7 +2673,7 @@ export function AgentsPage() {
             {" · "}
             {isLoading
               ? "…"
-              : usesAll && !isDirty
+              : usesAll && !isBuiltinDirty
                 ? t("agents.detail.tools_all", { defaultValue: "all" })
                 : draft.length}
           </div>
@@ -2068,11 +2712,21 @@ export function AgentsPage() {
           </div>
         )}
 
+        {/* Above the view switch, not inside one arm of it: the MCP cards this
+            explains live in the all-tools grid and in the assigned/available
+            lists, and the branch it used to sit in is the one with no cards on
+            screen at all (#7749 review). */}
+        {!isLoading && mcpHardDisabled && (
+          <p className="text-xs text-warning">
+            {t("agents.detail.mcp_hard_disabled_note", { defaultValue: "MCP servers are hard-disabled for this agent (tools_disabled or mcp_disabled). Granting one here would change nothing until the hard switch is turned off, so the toggles are inert." })}
+          </p>
+        )}
+
         {isLoading ? (
           <div className="rounded-md border border-border-subtle bg-main/40 p-4 flex items-center justify-center">
             <Loader2 className="w-4 h-4 animate-spin text-text-dim" />
           </div>
-        ) : usesAll && !isDirty ? (
+        ) : usesAll && !isBuiltinDirty ? (
           sortedGroups.length > 0 ? (
             <>
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
@@ -2080,12 +2734,21 @@ export function AgentsPage() {
                   // An empty `capabilities_tools` means "all builtin tools", but it says nothing about MCP: an MCP server is only reachable when `mcp_servers` grants it (#6565), so label MCP groups by their actual grant instead of "included".
                   const mcpGroup = isMcpGroup(groupName);
                   const granted = !mcpGroup || isMcpGroupGranted(groupName);
+                  // `mcp_servers` is its own draft and its own endpoint, so an
+                  // MCP grant can be toggled straight from this card. Routing it
+                  // through Customize instead made `isBuiltinDirty` true and had
+                  // Save write `capabilities_tools = [<every builtin that exists
+                  // today>]` as a side effect of an MCP-only intent, silently
+                  // ending the agent's "all tools" status (#7749 review).
+                  const cardState = mcpGroup ? mcpCardStateOf(groupName) : null;
+                  const actionable = cardState !== null && isMcpGroupCardActionable(cardState);
                   return (
                     <div
                       key={groupName}
+                      onClick={actionable ? () => handleToggleGroup(groupName) : undefined}
                       className={`px-3 py-2.5 rounded-md border bg-main/40 flex items-start justify-between gap-2 ${
                         granted ? "border-border-subtle" : "border-border-subtle opacity-60"
-                      }`}
+                      } ${actionable ? "cursor-pointer transition-colors hover:border-brand/40" : ""}`}
                     >
                       <div className="min-w-0 flex-1">
                         <div className="font-mono text-[12.5px] font-medium text-text-main truncate flex items-center gap-1.5">
@@ -2099,27 +2762,27 @@ export function AgentsPage() {
                         <div className="font-mono text-[10.5px] text-text-dim/80 mt-0.5 truncate">
                           {groupTools.length} tool{groupTools.length !== 1 ? "s" : ""}
                           {" · "}
-                          {!mcpGroup
+                          {cardState === null
                             ? t("agents.detail.tools_included", { defaultValue: "included" })
-                            : granted
-                              ? t("agents.detail.tools_mcp_granted", {
-                                  defaultValue: "granted via mcp_servers",
-                                })
-                              : t("agents.detail.tools_mcp_not_granted", {
-                                  defaultValue: "grant on the MCP servers tab",
-                                })}
+                            : mcpGroupLabel(cardState)}
                         </div>
                       </div>
+                      {actionable && !granted && (
+                        <Plus className="w-3.5 h-3.5 text-brand/70 shrink-0 mt-0.5" />
+                      )}
                     </div>
                   );
                 })}
               </div>
-              <button
+              <Button
+                variant="ghost"
+                size="sm"
                 onClick={handleCustomize}
-                className="text-[11px] text-brand hover:underline font-medium self-start mt-1"
+                data-testid="tools-customize-btn"
+                className="self-start"
               >
                 {t("agents.detail.tools_customize", { defaultValue: "Customize — switch to allowlist" })}
-              </button>
+              </Button>
             </>
           ) : (
             <div className="rounded-md border border-border-subtle bg-main/40 p-4 flex items-start gap-3">
@@ -2143,6 +2806,9 @@ export function AgentsPage() {
                   const activeCount = activeCountIn(groupName, groupTools);
                   const isExpanded = expandedToolGroup === groupName;
                   const mcpGroup = isMcpGroup(groupName);
+                  // Same rule as the other two card lists rather than a third
+                  // inline reading of the mode (#7749 review).
+                  const mcpRemovable = mcpGroup && isMcpGroupCardActionable(mcpCardStateOf(groupName));
                   return (
                     <div key={groupName} className="flex flex-col">
                       <div
@@ -2185,7 +2851,7 @@ export function AgentsPage() {
                               className={`w-3.5 h-3.5 transition-transform ${isExpanded ? "" : "-rotate-90"}`}
                             />
                           </button>
-                          {!mcpGroup && (
+                          {(!mcpGroup || mcpRemovable) && (
                             <button
                               onClick={() => handleToggleGroup(groupName)}
                               className="text-text-dim hover:text-red-400 transition-colors p-0.5"
@@ -2196,56 +2862,7 @@ export function AgentsPage() {
                           )}
                         </div>
                       </div>
-                      {isExpanded && (
-                        <div className="ml-4 mt-1.5 flex flex-col gap-1">
-                          {mcpGroup && (
-                            <p className="px-2.5 py-1.5 text-[10.5px] text-text-dim/70">
-                              {t("agents.detail.tools_mcp_readonly", {
-                                defaultValue:
-                                  "This server is granted through mcp_servers in agent.toml. Change the grant on the MCP servers tab; individual tools are filtered by tool_allowlist and tool_blocklist.",
-                              })}
-                            </p>
-                          )}
-                          {groupTools.map((tool) => {
-                            const isActive = isToolActive(groupName, tool);
-                            const blocked = mcpGroup && isToolBlocked(tool.name, blocklist);
-                            return (
-                              <div
-                                key={tool.name}
-                                onClick={() => handleToggleTool(groupName, tool.name)}
-                                className={`flex items-center gap-2 px-2.5 py-1.5 rounded border transition-colors ${
-                                  mcpGroup ? "cursor-default" : "cursor-pointer"
-                                } ${
-                                  isActive
-                                    ? `border-brand/20 bg-main/40${mcpGroup ? "" : " hover:border-red-400/30"}`
-                                    : `border-border-subtle bg-main/20 opacity-60${mcpGroup ? "" : " hover:border-brand/30 hover:opacity-100"}`
-                                }`}
-                              >
-                                <div
-                                  className={`w-3 h-3 rounded-sm border flex items-center justify-center shrink-0 ${
-                                    isActive ? "border-brand bg-brand/20" : "border-text-dim/30"
-                                  }`}
-                                >
-                                  {isActive && <Check className="w-2 h-2 text-brand" />}
-                                </div>
-                                <span className="font-mono text-[11px] text-text-main truncate flex-1 min-w-0">
-                                  {tool.name}
-                                </span>
-                                {blocked && (
-                                  <span className="font-mono text-[9.5px] text-amber-500/80 shrink-0">
-                                    {t("agents.detail.tools_blocked", { defaultValue: "blocklisted" })}
-                                  </span>
-                                )}
-                                {tool.description && (
-                                  <span className="font-mono text-[9.5px] text-text-dim/60 truncate max-w-[50%] hidden sm:inline">
-                                    {tool.description}
-                                  </span>
-                                )}
-                              </div>
-                            );
-                          })}
-                        </div>
-                      )}
+                      {isExpanded && renderGroupToolList(groupName, groupTools, mcpGroup)}
                     </div>
                   );
                 })}
@@ -2259,36 +2876,57 @@ export function AgentsPage() {
                 </div>
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
                   {availableGroups.map(([groupName, groupTools]) => {
-                    // An ungranted MCP server cannot be assigned from this tab — `PUT /api/agents/{id}/tools` has no `mcp_servers` field (#6565), so it renders as a non-interactive hint.
                     const mcpGroup = isMcpGroup(groupName);
+                    const isExpanded = expandedToolGroup === groupName;
+                    // A builtin group is always assignable; an MCP one only in
+                    // the states that stage something. Dropping the pointer and
+                    // the hover highlight too, not just the label — an inert card
+                    // that still looks clickable is the same defect one layer down.
+                    const actionable =
+                      !mcpGroup || isMcpGroupCardActionable(mcpCardStateOf(groupName));
                     return (
-                      <div
-                        key={groupName}
-                        onClick={mcpGroup ? undefined : () => handleToggleGroup(groupName)}
-                        className={`px-3 py-2.5 rounded-md border border-border-subtle bg-main/40 transition-colors flex items-start justify-between gap-2 ${
-                          mcpGroup ? "cursor-default" : "cursor-pointer hover:border-brand/40"
-                        }`}
-                      >
-                        <div className="min-w-0 flex-1">
-                          <div className="font-mono text-[12.5px] font-medium text-text-main truncate flex items-center gap-1.5">
-                            {mcpGroup ? (
-                              <Cpu className="w-3.5 h-3.5 text-brand/70 shrink-0" />
-                            ) : (
-                              <Wrench className="w-3.5 h-3.5 text-text-dim/70 shrink-0" />
-                            )}
-                            {groupName}
+                      <div key={groupName} className="flex flex-col">
+                        <div
+                          onClick={actionable ? () => handleToggleGroup(groupName) : undefined}
+                          className={`px-3 py-2.5 rounded-md border border-border-subtle bg-main/40 transition-colors flex items-start justify-between gap-2 ${
+                            actionable ? "cursor-pointer hover:border-brand/40" : ""
+                          }`}
+                        >
+                          <div className="min-w-0 flex-1">
+                            <div className="font-mono text-[12.5px] font-medium text-text-main truncate flex items-center gap-1.5">
+                              {mcpGroup ? (
+                                <Cpu className="w-3.5 h-3.5 text-brand/70 shrink-0" />
+                              ) : (
+                                <Wrench className="w-3.5 h-3.5 text-text-dim/70 shrink-0" />
+                              )}
+                              {groupName}
+                            </div>
+                            <div className="font-mono text-[10.5px] text-text-dim/80 mt-0.5 truncate">
+                              {groupTools.length} tool{groupTools.length !== 1 ? "s" : ""}
+                              {" · "}
+                              {/* An MCP card under a hard switch stages nothing, so it must not read "click to assign" (#7749 review). */}
+                              {mcpGroup
+                                ? mcpGroupLabel(mcpCardStateOf(groupName))
+                                : t("agents.detail.tools_click_assign", { defaultValue: "click to assign" })}
+                            </div>
                           </div>
-                          <div className="font-mono text-[10.5px] text-text-dim/80 mt-0.5 truncate">
-                            {groupTools.length} tool{groupTools.length !== 1 ? "s" : ""}
-                            {" · "}
-                            {mcpGroup
-                              ? t("agents.detail.tools_mcp_not_granted", {
-                                  defaultValue: "grant on the MCP servers tab",
-                                })
-                              : t("agents.detail.tools_click_assign", { defaultValue: "click to assign" })}
+                          <div className="flex items-center gap-1 shrink-0 mt-0.5">
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setExpandedToolGroup(isExpanded ? null : groupName);
+                              }}
+                              className="text-text-dim hover:text-brand transition-colors p-0.5"
+                              title={t("agents.detail.tools_fine_grain", { defaultValue: "Configure individual tools" })}
+                            >
+                              <ChevronDown
+                                className={`w-3.5 h-3.5 transition-transform ${isExpanded ? "" : "-rotate-90"}`}
+                              />
+                            </button>
+                            {actionable && <Plus className="w-3.5 h-3.5 text-brand/70 shrink-0" />}
                           </div>
                         </div>
-                        {!mcpGroup && <Plus className="w-3.5 h-3.5 text-brand/70 shrink-0 mt-0.5" />}
+                        {isExpanded && renderGroupToolList(groupName, groupTools, mcpGroup)}
                       </div>
                     );
                   })}
@@ -2310,9 +2948,13 @@ export function AgentsPage() {
             variant="primary"
             size="sm"
             onClick={handleSave}
-            disabled={!isDirty || updateToolsMutation.isPending}
+            disabled={
+              !(isBuiltinDirty || isMcpDirty) ||
+              updateToolsMutation.isPending ||
+              setAgentMcpServersMutation.isPending
+            }
           >
-            {updateToolsMutation.isPending
+            {updateToolsMutation.isPending || setAgentMcpServersMutation.isPending
               ? t("common.saving", { defaultValue: "Saving..." })
               : t("common.save", { defaultValue: "Save" })}
           </Button>
@@ -2321,26 +2963,14 @@ export function AgentsPage() {
     );
   };
 
-  // ---------- Schedule tab — editable triggers / cron / continuous-mode panel
-  // (issue #4924). The read-only summary that lived here previously is now
-  // owned by AgentSchedulePanel, which talks to the existing CRUD endpoints
-  // (POST/PATCH/DELETE /api/triggers and /api/cron/jobs, PATCH /api/agents/{id}
-  // for `schedule`). The synthetic "Last 14 runs" bar chart was a placeholder
-  // (no real per-fire telemetry endpoint yet) and was dropped in favour of
-  // real editing affordances — restore it once a per-agent run-history feed
-  // exists.
-  // ---------- Routing tab — per-agent model routing (fixed vs router-chosen,
-  // profile allowlist, cost budget). Owned by AgentModelRoutingPanel, which
-  // talks to GET/PUT /api/agents/{id}/model_routing and
-  // GET /api/model-router/profiles.
-  const renderRoutingTab = (agent: AgentDetail) => (
-    <AgentModelRoutingPanel agent={agent} />
-  );
-
-  const renderScheduleTab = (agent: AgentDetail) => (
-    <AgentSchedulePanel agent={agent} />
-  );
-
+  // ---------- Schedule tab — runtime registries only (issue #4924).
+  // AgentSchedulePanel owns the CRUD endpoints (POST/PATCH/DELETE
+  // /api/triggers and /api/cron/jobs). The manifest's [schedule] — mode,
+  // cron, conditions — is edited by the manifest form the same tab hosts,
+  // not by a second surface here. The synthetic "Last 14 runs" bar chart was
+  // a placeholder (no real per-fire telemetry endpoint yet) and was dropped
+  // in favour of real editing affordances — restore it once a per-agent
+  // run-history feed exists.
   // ---------- Logs tab — terminal-style turn feed per design canvas
   // Sourced from /api/agents/{id}/events (usage_events) so each row is
   // a real LLM turn — model / latency / tokens / cost — instead of the
@@ -2410,6 +3040,47 @@ export function AgentsPage() {
                   {formatLine(e)}
                 </span>
               </div>
+            ))}
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  // ---------- History tab — manifest version timeline
+  const renderHistoryTab = (_agent: AgentDetail) => {
+    const versions = manifestHistoryQuery.data ?? [];
+    return (
+      <div className="flex flex-col gap-3">
+        <div className="text-[11px] uppercase font-semibold tracking-[0.08em] text-text-dim">
+          {t("agents.detail.manifest_history", { defaultValue: "Manifest history" })} · {versions.length}
+        </div>
+        {manifestHistoryQuery.isLoading ? (
+          <div className="text-[12px] text-text-dim italic">{t("common.loading", { defaultValue: "Loading..." })}</div>
+        ) : manifestHistoryQuery.isError ? (
+          <div className="rounded-md border border-red-500/30 bg-red-500/10 p-4 text-[12px] text-red-500">
+            {t("agents.detail.manifest_history_load_err", { defaultValue: "Failed to load manifest history." })}
+          </div>
+        ) : versions.length === 0 ? (
+          <div className="rounded-md border border-border-subtle bg-main/40 p-4 text-[12px] text-text-dim italic">
+            {t("agents.detail.no_history", { defaultValue: "No config changes recorded yet." })}
+          </div>
+        ) : (
+          <div className="flex flex-col gap-2">
+            {versions.map((v) => (
+              <details
+                key={v.id}
+                className="rounded-md border border-border-subtle bg-main/40 group"
+              >
+                <summary className="px-3 py-2 cursor-pointer text-[12px] flex items-center gap-2 select-none">
+                  <History className="w-3.5 h-3.5 text-text-dim shrink-0" />
+                  <span className="font-medium">{formatSqliteDateTime(v.timestamp)}</span>
+                  <span className="text-text-dim">· {v.change_source}</span>
+                </summary>
+                <pre className="px-3 pb-3 text-[11px] font-mono leading-[1.6] max-h-60 overflow-auto whitespace-pre-wrap break-all text-text-dim">
+                  {v.manifest_toml}
+                </pre>
+              </details>
             ))}
           </div>
         )}
@@ -2554,7 +3225,9 @@ export function AgentsPage() {
           </div>
         </Card>
 
-        {/* Right detail panel — header + KPI tiles + 5 tabs.
+        {/* Right detail panel — header, then the two main tabs. The KPI
+            tiles and the token footprint live in the brief inside "logs &
+            info", not above both tabs.
             Mobile: rendered as a fixed full-viewport overlay above the
             list (top inset 0, bottom inset 14 reserves the global tab
             bar's ~56px so it never gets covered). lg+: collapses back
@@ -2601,7 +3274,12 @@ export function AgentsPage() {
               <div className="flex items-start justify-between gap-3">
                 <div className="flex items-start gap-3 min-w-0 flex-1">
                   <div className="relative shrink-0">
-                    <Avatar fallback={detailAgent.name} size="lg" />
+                    <Avatar
+                      fallback={detailAgent.name}
+                      size="lg"
+                      src={detailAvatarSrc}
+                      emoji={detailIdentity?.emoji}
+                    />
                     <span
                       className={`absolute -bottom-0.5 -right-0.5 w-3 h-3 rounded-full ${drawerStatusColor} border-2 border-surface ${!isDetailDrawerSuspended && !isDetailDrawerCrashed ? "animate-pulse" : ""}`}
                       role="img"
@@ -2692,183 +3370,17 @@ export function AgentsPage() {
             {/* Body — scrollable inspectable sections. */}
             <div className="px-6 py-5 space-y-5">
 
-              {/* Model */}
-              {detailAgent.model && (
-                <section>
-                  <div className="flex items-center justify-between mb-2">
-                    <h4 className="text-sm font-semibold flex items-center gap-2">
-                      <Cpu className="w-3.5 h-3.5 text-brand" />
-                      {t("agents.model")}
-                    </h4>
-                    {!editingModel && (
-                      <button
-                        onClick={startModelEdit}
-                        className="text-xs text-brand hover:underline font-medium"
-                      >
-                        {t("common.edit")}
-                      </button>
-                    )}
-                  </div>
-                  <div className="rounded-lg bg-main border border-border-subtle p-4 space-y-2">
-                    {editingModel ? (
-                      <>
-                        {!detailAgent.is_hand && (
-                          <div className="flex justify-end">
-                            <button
-                              type="button"
-                              onClick={() => setModelDraft(d => ({ ...d, provider: "default", model: "default" }))}
-                              disabled={modelDraft.provider === "default" && modelDraft.model === "default"}
-                              className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-medium text-brand border border-brand/30 hover:bg-brand/10 disabled:opacity-50 disabled:cursor-default"
-                            >
-                              <RotateCcw className="w-3 h-3" />
-                              {t("agents.use_global_default", { defaultValue: "Use global default" })}
-                            </button>
-                          </div>
-                        )}
-                        <DetailRow label={t("agents.provider")}>
-                          <select
-                            value={modelDraft.provider}
-                            onChange={e => setModelDraft(d => ({ ...d, provider: e.target.value, model: "" }))}
-                            className="w-44 px-2 py-1 rounded-md border border-border-subtle bg-surface text-sm font-mono outline-none focus:border-brand text-right"
-                            disabled={providersQuery.isLoading}
-                          >
-                            {providersQuery.isLoading && <option value="">{t("common.loading", { defaultValue: "Loading..." })}</option>}
-                            {providersQuery.error && <option value="">{t("agents.providers_error_loading", { defaultValue: "Error loading" })}</option>}
-                            {!providersQuery.isLoading && configuredProviders.length === 0 && <option value="">{t("agents.no_providers", { defaultValue: "No providers" })}</option>}
-                            {modelDraft.provider && !configuredProviders.some(p => p.id === modelDraft.provider) && (
-                              <option value={modelDraft.provider}>{modelDraft.provider}</option>
-                            )}
-                            {configuredProviders.map(p => (
-                              <option key={p.id} value={p.id}>{p.display_name || p.id}</option>
-                            ))}
-                          </select>
-                        </DetailRow>
-                        <DetailRow label={t("agents.model")}>
-                          {/* Combobox, not a plain <select>: the <datalist>
-                              suggests catalog models for the provider, but the
-                              field still accepts a typed-in id. Agent-type
-                              providers (codex-cli / claude-code / gemini-cli)
-                              carry no catalog models, and one pointed at a
-                              third-party base may run a model the catalog never
-                              lists — both must remain settable from the UI when
-                              editing an existing agent, matching the create
-                              form's free-text fallback (#6318). */}
-                          <input
-                            list="agent-detail-model-options"
-                            value={modelDraft.model}
-                            onChange={e => setModelDraft(d => ({ ...d, model: e.target.value }))}
-                            className="w-44 px-2 py-1 rounded-md border border-border-subtle bg-surface text-sm font-mono outline-none focus:border-brand text-right"
-                            disabled={modelsQuery.isLoading || !modelDraft.provider.trim()}
-                            autoComplete="off"
-                            spellCheck={false}
-                            placeholder={
-                              !modelDraft.provider.trim()
-                                ? t("agents.select_provider_first", { defaultValue: "Select provider first" })
-                                : modelsQuery.isLoading
-                                  ? t("common.loading", { defaultValue: "Loading..." })
-                                  : t("agents.form.model_id_placeholder", { defaultValue: "e.g. gpt-4o" })
-                            }
-                          />
-                          <datalist id="agent-detail-model-options">
-                            {visibleModels.map(m => (
-                              <option key={m.id} value={m.id}>{m.display_name || m.id}</option>
-                            ))}
-                          </datalist>
-                        </DetailRow>
-                        {/*
-                          The same step ladders the create form and the model
-                          settings use, rather than a second set of hand-rolled
-                          number boxes. One parameter, one control: a bare
-                          `<input type="number">` stated neither the usual value
-                          nor the ceiling, so setting a temperature meant knowing
-                          that 0.7 is typical and 2 is the limit, while the
-                          identical parameter elsewhere in the app was a labelled
-                          ladder.
-
-                          Every field is tri-state, and `""` is the third state:
-                          it means the agent has no opinion and the model's own
-                          setting applies. That is why an untouched row must stay
-                          empty (#5917).
-                        */}
-                        <AgentModelParamFields
-                          draft={modelDraft}
-                          onChange={(field, next) => setModelDraft(d => ({ ...d, [field]: next }))}
-                          isHand={detailAgent.is_hand === true}
-                          limits={drawerModelLimits}
-                        />
-                        <div className="flex justify-end gap-2 pt-1">
-                          <button
-                            onClick={cancelModelEdit}
-                            className="px-3 py-1 rounded-md text-xs font-semibold bg-main hover:bg-main/80 text-text-dim border border-border-subtle"
-                          >
-                            {t("common.cancel")}
-                          </button>
-                          <button
-                            onClick={saveModelEdit}
-                            disabled={saveModelDisabled}
-                            className="px-3 py-1 rounded-md text-xs font-semibold bg-brand hover:bg-brand/90 text-white disabled:opacity-50"
-                          >
-                            {activeConfigMutation.isPending ? t("common.saving") : t("common.save")}
-                          </button>
-                        </div>
-                      </>
-                    ) : (
-                      <>
-                        <DetailRow label={t("agents.provider")}>
-                          <span className="font-mono text-brand">{detailAgent.model.provider}</span>
-                        </DetailRow>
-                        <DetailRow label={t("agents.model")}>
-                          <span className="font-mono">{detailAgent.model.model}</span>
-                        </DetailRow>
-                        {/*
-                          `null` is the inherit state, so it is named rather
-                          than rendered as the system default. Printing 4096
-                          here said the agent had chosen that number when it had
-                          chosen nothing, which is the same confusion the
-                          tri-state fields were introduced to remove.
-                        */}
-                        <DetailRow label={t("agents.max_tokens")}>
-                          <span className="font-mono">
-                            {detailAgent.model.max_tokens == null
-                              ? t("agents.form.inherit_default")
-                              : formatNumber(detailAgent.model.max_tokens)}
-                          </span>
-                        </DetailRow>
-                        <DetailRow label={t("agents.temperature")}>
-                          <span className="font-mono">
-                            {detailAgent.model.temperature == null
-                              ? t("agents.form.inherit_default")
-                              : detailAgent.model.temperature}
-                          </span>
-                        </DetailRow>
-                        {/*
-                          The rest of what the editor can set. Leaving them out
-                          made a saved value invisible the moment edit mode
-                          closed, so there was nowhere to notice that a write
-                          had not taken — which is how the hand-agent drop
-                          stayed hidden.
-                        */}
-                        {([
-                          ["model_param.top_p", detailAgent.model.top_p, false],
-                          ["model_param.frequency_penalty", detailAgent.model.frequency_penalty, false],
-                          ["model_param.presence_penalty", detailAgent.model.presence_penalty, false],
-                          ["model_param.context_window", detailAgent.model.context_window, true],
-                          ["model_param.max_output_tokens", detailAgent.model.max_output_tokens, true],
-                        ] as const).map(([key, value, isTokenCount]) => (
-                          <DetailRow key={key} label={t(key)}>
-                            <span className="font-mono">
-                              {value == null
-                                ? t("agents.form.inherit_default")
-                                : isTokenCount
-                                  ? formatNumber(value)
-                                  : value}
-                            </span>
-                          </DetailRow>
-                        ))}
-                      </>
-                    )}
-                  </div>
-                </section>
+              {/* Appearance — the emoji and the avatar image (#8339).
+                  Its own component, and exported, for the reason the file header
+                  gives for the brief: `AgentsPage` has ~20 hooks and no render
+                  harness, so anything that has to be tested has to be reachable
+                  without mounting the page. */}
+              {canEditAppearance && (
+                <AgentAppearanceSection
+                  agentId={detailAgent.id}
+                  identity={detailIdentity}
+                  onChanged={() => { void refreshDetailAgent(detailAgent.id); }}
+                />
               )}
 
               {/* Origin */}
@@ -2953,46 +3465,6 @@ export function AgentsPage() {
                 </div>
               </section>
 
-              {/* Web Search Augmentation */}
-              <section>
-                <h4 className="text-sm font-semibold mb-2">
-                  {t("agents.web_search", { defaultValue: "Web Search" })}
-                </h4>
-                <div className="rounded-lg bg-main border border-border-subtle p-4">
-                  <div className="flex items-start justify-between gap-3">
-                    <div className="min-w-0">
-                      <p className="text-sm">{t("agents.web_search_augmentation", { defaultValue: "Search Augmentation" })}</p>
-                      <p className="text-xs text-text-dim mt-0.5 leading-relaxed">
-                        {t("agents.web_search_augmentation_hint", { defaultValue: "Auto-search the web and inject results into context before LLM call" })}
-                      </p>
-                    </div>
-                    <select
-                      value={detailAgent.web_search_augmentation || "off"}
-                      onChange={e => {
-                        const mode = e.target.value as "off" | "auto" | "always";
-                        patchAgentRuntimeConfigMutation.mutate(
-                          {
-                            agentId: detailAgent.id,
-                            isHand: detailAgent.is_hand === true,
-                            config: { web_search_augmentation: mode },
-                          },
-                          {
-                            onSuccess: async () => {
-                              await refreshDetailAgent(detailAgent.id, detailAgent.is_hand);
-                            },
-                          },
-                        );
-                      }}
-                      className="w-28 px-2 py-1 rounded-md border border-border-subtle bg-surface text-sm font-mono outline-none focus:border-brand text-right shrink-0"
-                    >
-                      <option value="off">{t("common.off", { defaultValue: "Off" })}</option>
-                      <option value="auto">{t("common.auto", { defaultValue: "Auto" })}</option>
-                      <option value="always">{t("common.always", { defaultValue: "Always" })}</option>
-                    </select>
-                  </div>
-                </div>
-              </section>
-
               {/* Capabilities */}
               {detailAgent.capabilities && (
                 <section>
@@ -3021,12 +3493,6 @@ export function AgentsPage() {
                   </div>
                 </section>
               )}
-
-              {/* System Prompt — always shown so an agent with no prompt yet can add one */}
-              <SystemPromptSection
-                agentId={detailAgent.id}
-                prompt={detailAgent.system_prompt ?? ""}
-              />
 
               {/* Skills */}
               {detailAgent.skills && detailAgent.skills.length > 0 && (
@@ -3199,49 +3665,10 @@ export function AgentsPage() {
                 )}
               </div>
 
-              {hasTokenFootprintData(detailAgent.injected_footprint_tokens) && (
-                <div className="rounded-lg bg-main/30 p-3 space-y-1.5">
-                  <p className="text-[11px] font-bold text-text-dim">
-                    {t("agents.token_usage_title", { defaultValue: "Token footprint" })}
-                  </p>
-                  <div className="flex justify-between text-[11px] border-t border-border/40 pt-1.5">
-                    <span className="font-bold">
-                      {t("agents.token_injected_total", { defaultValue: "Injected per request" })}
-                    </span>
-                    <span className="font-mono font-bold">
-                      {formatNumber(detailAgent.injected_footprint_tokens)}
-                    </span>
-                  </div>
-                  {(agentEventsQuery.data ?? []).length > 0 && (
-                    <div className="border-t border-border/40 pt-1.5 space-y-1">
-                      <p className="text-[10px] text-text-dim">
-                        {t("agents.token_recent", { defaultValue: "Recent calls" })}
-                      </p>
-                      {(agentEventsQuery.data ?? []).slice(0, 5).map((call, i) => (
-                        <div key={`${call.timestamp}-${i}`} className="flex justify-between text-[10px]">
-                          <span className="text-text-dim truncate">{call.model}</span>
-                          <span className="font-mono">
-                            {call.input_tokens}/{call.output_tokens} · ${call.cost_usd.toFixed(4)}
-                          </span>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              )}
-
-              <Button
-                variant="secondary"
-                size="sm"
-                className="w-full"
-                onClick={() => setShowPrompts(true)}
-              >
-                <FlaskConical className="w-3.5 h-3.5 mr-1.5" />
-                {t("agents.prompts")}
-              </Button>
             </div>
         </DrawerPanel>
       )}
+
 
       {/* Tools Editor Modal */}
       {showToolsEditor && toolsEditorAgentId && (
@@ -3292,10 +3719,12 @@ export function AgentsPage() {
                   </div>
                   <MultiSelectCmdk
                     options={availableToolNames}
+                    optionMeta={toolsEditorOptionMeta}
                     value={capabilitiesToolsDraft}
                     onChange={setCapabilitiesToolsDraft}
                     placeholder={t("agents.tools_search_placeholder", { defaultValue: "Search tools..." })}
                     disabled={toolsDisabledState}
+                    allowFreeText
                   />
                 </div>
 
@@ -3310,10 +3739,12 @@ export function AgentsPage() {
                   </div>
                   <MultiSelectCmdk
                     options={availableToolNames}
+                    optionMeta={toolsEditorOptionMeta}
                     value={toolAllowlistDraft}
                     onChange={setToolAllowlistDraft}
                     placeholder={t("agents.tools_search_placeholder", { defaultValue: "Search tools..." })}
                     disabled={toolsDisabledState}
+                    allowFreeText
                   />
                 </div>
 
@@ -3328,10 +3759,12 @@ export function AgentsPage() {
                   </div>
                   <MultiSelectCmdk
                     options={availableToolNames}
+                    optionMeta={toolsEditorOptionMeta}
                     value={toolBlocklistDraft}
                     onChange={setToolBlocklistDraft}
                     placeholder={t("agents.tools_search_placeholder", { defaultValue: "Search tools..." })}
                     disabled={toolsDisabledState}
+                    allowFreeText
                   />
                 </div>
 
@@ -3441,6 +3874,8 @@ export function AgentsPage() {
                 skillCatalog={skillCatalogForForm}
                 toolCatalog={toolCatalogForForm}
                 mcpCatalog={mcpCatalogForForm}
+                routerProfileCatalog={routerProfileCatalog}
+                routerProfilesEnabled={routerProfilesQuery.data?.enabled}
               />
               <div className="space-y-2">
                 <div className="flex items-center justify-between gap-2">
@@ -3676,12 +4111,11 @@ export function AgentsPage() {
         </div>
       </DrawerPanel>
 
-      {/* Prompts & Experiments Modal */}
-      {showPrompts && detailAgent && (
-        <PromptsExperimentsModal
-          agentId={detailAgent.id}
-          agentName={t(`agents.builtin.${detailAgent.name}.name`, { defaultValue: detailAgent.name })}
-          onClose={() => setShowPrompts(false)}
+      {/* Quick Run Modal (#6699) — one ephemeral worker, gone when it ends. */}
+      {quickRunParent !== null && (
+        <QuickRunModal
+          initialParent={quickRunParent}
+          onClose={() => setQuickRunParent(null)}
         />
       )}
       <ConfirmDialog

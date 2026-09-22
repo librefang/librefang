@@ -14,6 +14,7 @@ use std::sync::{mpsc, Arc, OnceLock};
 use std::time::Duration;
 
 use super::screens::{
+    agents::ManifestVersion,
     audit::AuditEntry,
     channels::{ChannelAdapterInfo, ChannelFieldInfo, ChannelInstance, ConfigureRequest},
     config_editor::{parse_config_sections, ConfigSection},
@@ -28,7 +29,9 @@ use super::screens::{
     peers::PeerInfo,
     security::SecurityFeature,
     sessions::SessionInfo,
-    settings::{BackupInfo, ModelInfo, ProviderInfo, TestResult, ToolInfo},
+    settings::{
+        BackupInfo, ModelInfo, ProviderInfo, TestResult, ToolInfo, VaultKeyInfo, VaultKeySource,
+    },
     skills::{ClawHubResult, McpServerInfo, SkillInfo},
     templates::{self, ProviderAuth, TemplateInfo, TemplateSource},
     triggers::TriggerInfo,
@@ -221,6 +224,10 @@ pub enum AppEvent {
     /// whatever it had (usually nothing) and the operator cannot tell a 5xx
     /// from an empty config from a request that never went out (#8141).
     MemoryConfigFailed(FetchFailure),
+    /// The agent's `[workspaces]` table, as `(name, path, mode)` rows.
+    AgentWorkspacesLoaded(String, Vec<(String, String, String)>),
+    /// The shared-folders write came back 2xx.
+    AgentWorkspacesUpdated(String),
     /// Memory KV pairs loaded.
     MemoryKvLoaded(Vec<KvPair>),
     /// Memory KV saved.
@@ -254,6 +261,23 @@ pub enum AppEvent {
         name: String,
         result: Result<String, String>,
     },
+    /// Result of restoring an agent type from the registry.
+    RegistryRestoreResult {
+        name: String,
+        ok: bool,
+        message: String,
+    },
+    /// Template version history loaded — rows on success, a localized failure message otherwise.
+    TemplateHistoryLoaded {
+        name: String,
+        result: Result<Vec<TemplateVersionRow>, String>,
+    },
+    /// Result of restoring a template to one specific historical version.
+    TemplateVersionRestoreResult {
+        name: String,
+        ok: bool,
+        message: String,
+    },
     /// Security features loaded.
     SecurityLoaded(Vec<SecurityFeature>),
     /// Security chain verification result.
@@ -285,6 +309,17 @@ pub enum AppEvent {
     ProviderKeyDeleted(String),
     /// Provider test result.
     ProviderTestResult(TestResult),
+    /// Writable vault keys, whether each is in the vault, and where the daemon
+    /// resolves it from (#8164).
+    VaultKeysLoaded(Vec<VaultKeyInfo>),
+    /// A vault key was stored; carries the key name and the source the daemon
+    /// resolves it from *after* the write, never the value. The source is what
+    /// stops the confirmation from claiming success on a host whose environment
+    /// overrides the key and makes the stored value inert.
+    VaultKeySaved(String, VaultKeySource),
+    /// A vault key was cleared; carries the key name and the source that remains.
+    /// `Environment` means the clear revoked nothing the daemon actually uses.
+    VaultKeyDeleted(String, VaultKeySource),
     /// Model catalogue loaded for the Models screen (refs #7774).
     ModelCatalogLoaded(Vec<ModelRow>),
     /// One model's operator capacity limits were persisted; carries the
@@ -439,6 +474,25 @@ pub enum AppEvent {
     },
     /// Agent model routing updated.
     AgentModelRoutingUpdated(String),
+    /// The agent's recorded manifest snapshots, newest first. An empty vector is
+    /// a real answer — an agent whose manifest was never persisted has none.
+    ///
+    /// `agent_id` is the agent the fetch was issued for. This pane renders another
+    /// agent's entire `agent.toml`, so a response that outlived its request has to
+    /// be droppable rather than displayed under whichever header is open now.
+    AgentManifestHistoryLoaded {
+        agent_id: String,
+        versions: Vec<ManifestVersion>,
+    },
+    /// The agent's manifest snapshots could not be read — see [`FetchFailure`].
+    ///
+    /// Separate from the catch-all `FetchError` so that clearing the history
+    /// pane's loading flag is scoped to a history failure, instead of any agent-tab
+    /// fetch failure standing in for one.
+    AgentManifestHistoryFailed {
+        agent_id: String,
+        failure: FetchFailure,
+    },
     /// Comms topology loaded.
     CommsTopologyLoaded {
         nodes: Vec<super::screens::comms::CommsNode>,
@@ -2045,7 +2099,228 @@ pub fn spawn_fetch_agent_mcp_servers(
     });
 }
 
-/// Update an agent's skills.
+/// Read the agent's `[workspaces]` table out of its manifest TOML.
+///
+/// Goes through `GET /api/agents/{id}/manifest` rather than the JSON agent
+/// detail, because the detail response does not carry the workspace
+/// declarations at all.
+///
+/// Only `path`-based declarations become rows: a `mount` entry is not a
+/// shared folder under `workspaces_dir` and the editor has no field for it,
+/// so it is hidden here and carried through verbatim by
+/// [`spawn_update_agent_workspaces`] instead of being silently rewritten as
+/// an empty `path`.
+pub fn spawn_fetch_agent_workspaces(
+    backend: BackendRef,
+    agent_id: String,
+    tx: mpsc::Sender<AppEvent>,
+) {
+    std::thread::spawn(move || match backend {
+        BackendRef::Daemon { base_url, api_key } => {
+            let client = make_daemon_client(api_key.as_deref());
+            // A failed GET, an unreadable body and a manifest that does not
+            // parse each reach the operator as an error instead of an empty
+            // editor that reads as "no shared folders".
+            let parsed: Result<toml::Value, String> = daemon_response(
+                client
+                    .get(format!("{base_url}/api/agents/{agent_id}/manifest"))
+                    .send(),
+                || crate::i18n::t("tui-event-workspaces-manifest-read-failed"),
+            )
+            .and_then(|r| {
+                r.text()
+                    .map_err(|_| crate::i18n::t("tui-event-workspaces-manifest-read-failed"))
+            })
+            .and_then(|text| {
+                toml::from_str::<toml::Value>(&text)
+                    .map_err(|_| crate::i18n::t("tui-event-workspaces-manifest-read-failed"))
+            });
+            match parsed {
+                Ok(value) => {
+                    let entries = workspaces_editor_rows(&value);
+                    let _ = tx.send(AppEvent::AgentWorkspacesLoaded(agent_id, entries));
+                }
+                Err(message) => {
+                    let _ = tx.send(AppEvent::FetchError(message));
+                }
+            }
+        }
+        BackendRef::InProcess(_) => {
+            let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
+                "tui-event-workspaces-not-available-in-process",
+            )));
+        }
+    });
+}
+
+/// Canonicalize a manifest `mode` string to the spelling
+/// `GET /api/agents/{id}/manifest` actually serializes (`readwrite` /
+/// `readonly`), collapsing the deserialize-only `WorkspaceMode` aliases
+/// (`rw`, `r`, `read`, `read-write`, `read-only` —
+/// `librefang-types/src/agent.rs`) into it. Downstream code compares
+/// against these two canonical spellings only.
+fn canonical_workspace_mode(raw: &str) -> &'static str {
+    match raw {
+        "r" | "read" | "read-only" | "readonly" => "readonly",
+        _ => "readwrite",
+    }
+}
+
+/// Path-based workspace rows for the editor, as `(name, path, mode)`.
+///
+/// Declarations without a string `path` (mount-based, or malformed) are not
+/// rows the editor can render, so they are skipped here and preserved
+/// verbatim on save. A manifest without a `[workspaces]` table yields no
+/// rows.
+fn workspaces_editor_rows(manifest: &toml::Value) -> Vec<(String, String, String)> {
+    manifest
+        .get("workspaces")
+        .and_then(|w| w.as_table())
+        .map(|t| {
+            t.iter()
+                .filter_map(|(name, decl)| {
+                    let path = decl.get("path").and_then(toml::Value::as_str)?;
+                    let mode = decl
+                        .get("mode")
+                        .and_then(toml::Value::as_str)
+                        .map(canonical_workspace_mode)
+                        .unwrap_or("readwrite");
+                    Some((name.clone(), path.to_string(), mode.to_string()))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Write the edited shared folders back.
+///
+/// `PATCH /api/agents/{id}` with `manifest_toml` replaces the whole manifest,
+/// so the current one is fetched first and only its `[workspaces]` table is
+/// replaced. Sending a manifest built from the editor alone would silently
+/// drop every field the editor does not render.
+///
+/// The read-modify-write has no lost-update protection: `PATCH
+/// /api/agents/{id}` carries no version or ETag precondition, so a manifest
+/// written between the GET and the PATCH is overwritten with a stale base.
+/// Any surface adopting this pattern inherits that limitation — closing it
+/// needs a manifest generation counter on the endpoint.
+pub fn spawn_update_agent_workspaces(
+    backend: BackendRef,
+    agent_id: String,
+    workspaces: Vec<(String, String, String)>,
+    tx: mpsc::Sender<AppEvent>,
+) {
+    std::thread::spawn(move || match backend {
+        BackendRef::Daemon { base_url, api_key } => {
+            let client = make_daemon_client(api_key.as_deref());
+            let outcome: Result<(), String> = (|| {
+                let resp = daemon_response(
+                    client
+                        .get(format!("{base_url}/api/agents/{agent_id}/manifest"))
+                        .send(),
+                    || crate::i18n::t("tui-event-workspaces-manifest-read-failed"),
+                )?;
+                let text = resp
+                    .text()
+                    .map_err(|_| crate::i18n::t("tui-event-workspaces-manifest-read-failed"))?;
+                let toml_content =
+                    rebuild_manifest_with_workspaces(&text, &workspaces).map_err(|e| match e {
+                        WorkspacesRebuildError::ManifestUnreadable => {
+                            crate::i18n::t("tui-event-workspaces-manifest-read-failed")
+                        }
+                        WorkspacesRebuildError::DuplicateName(name) => crate::i18n::t_args(
+                            "tui-event-workspaces-duplicate-name",
+                            &[("name", &name)],
+                        ),
+                    })?;
+                daemon_response(
+                    client
+                        .patch(format!("{base_url}/api/agents/{agent_id}"))
+                        .json(&serde_json::json!({"manifest_toml": toml_content}))
+                        .send(),
+                    || crate::i18n::t("tui-event-workspaces-update-failed"),
+                )?;
+                Ok(())
+            })();
+            match outcome {
+                Ok(()) => {
+                    let _ = tx.send(AppEvent::AgentWorkspacesUpdated(agent_id));
+                }
+                Err(message) => {
+                    let _ = tx.send(AppEvent::FetchError(message));
+                }
+            }
+        }
+        BackendRef::InProcess(_) => {
+            let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
+                "tui-event-workspaces-not-available-in-process",
+            )));
+        }
+    });
+}
+
+/// Why a manifest could not be rebuilt with the editor's `[workspaces]` rows.
+#[derive(Debug)]
+enum WorkspacesRebuildError {
+    /// The fetched manifest is not valid TOML.
+    ManifestUnreadable,
+    /// Two rows (or a row and a preserved declaration) claim the same name;
+    /// saving would make one silently win, so the write is refused.
+    DuplicateName(String),
+}
+
+/// Rebuild the manifest with its `[workspaces]` table replaced by the
+/// editor's rows, leaving every other table untouched.
+///
+/// Declarations the editor does not render — anything without a string
+/// `path` (mount-based, or malformed) — are carried over verbatim rather
+/// than dropped, so a save cannot turn a mount into an empty `path`.
+/// `mode` is written only when it is not the kernel default `readwrite`
+/// (accepting the same aliases `canonical_workspace_mode` does), so a
+/// manifest that relies on the default does not gain an explicit key.
+/// Duplicate folder names are refused instead of silently last-wins.
+fn rebuild_manifest_with_workspaces(
+    manifest_toml: &str,
+    workspaces: &[(String, String, String)],
+) -> Result<String, WorkspacesRebuildError> {
+    let mut value: toml::Value =
+        toml::from_str(manifest_toml).map_err(|_| WorkspacesRebuildError::ManifestUnreadable)?;
+    let table = value
+        .as_table_mut()
+        .ok_or(WorkspacesRebuildError::ManifestUnreadable)?;
+    // Copy the declarations the editor does not render before replacing the
+    // table, so they survive the save untouched.
+    let preserved: Vec<(String, toml::Value)> = table
+        .get("workspaces")
+        .and_then(toml::Value::as_table)
+        .map(|t| {
+            t.iter()
+                .filter(|(_, decl)| decl.get("path").and_then(toml::Value::as_str).is_none())
+                .map(|(name, decl)| (name.clone(), decl.clone()))
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut ws = toml::map::Map::new();
+    for (name, path, mode) in workspaces {
+        let mut entry = toml::map::Map::new();
+        entry.insert("path".to_string(), toml::Value::String(path.clone()));
+        let mode = canonical_workspace_mode(mode);
+        if mode != "readwrite" {
+            entry.insert("mode".to_string(), toml::Value::String(mode.to_string()));
+        }
+        if ws.insert(name.clone(), toml::Value::Table(entry)).is_some() {
+            return Err(WorkspacesRebuildError::DuplicateName(name.clone()));
+        }
+    }
+    for (name, decl) in preserved {
+        if ws.insert(name.clone(), decl).is_some() {
+            return Err(WorkspacesRebuildError::DuplicateName(name));
+        }
+    }
+    table.insert("workspaces".to_string(), toml::Value::Table(ws));
+    toml::to_string(&value).map_err(|_| WorkspacesRebuildError::ManifestUnreadable)
+}
+
 pub fn spawn_update_agent_skills(
     backend: BackendRef,
     agent_id: String,
@@ -2139,6 +2414,108 @@ pub fn spawn_fetch_agent_model_params(
                 "tui-event-model-params-daemon-only",
             )));
         }
+    });
+}
+
+/// Largest page `GET /api/agents/{id}/manifest-history` will serve.
+///
+/// Asked for in full because the endpoint has no offset parameter: whatever the
+/// first response omits cannot be paged to afterwards, and the store keeps far
+/// fewer snapshots per agent than this anyway.
+const MANIFEST_HISTORY_LIMIT: u32 = 200;
+
+/// Fetch an agent's recorded manifest snapshots for the read-only history pane.
+pub fn spawn_fetch_agent_manifest_history(
+    backend: BackendRef,
+    agent_id: String,
+    tx: mpsc::Sender<AppEvent>,
+) {
+    let limit = MANIFEST_HISTORY_LIMIT;
+    std::thread::spawn(move || {
+        let fail = |tx: &mpsc::Sender<AppEvent>, failure: FetchFailure| {
+            let _ = tx.send(AppEvent::AgentManifestHistoryFailed {
+                agent_id: agent_id.clone(),
+                failure,
+            });
+        };
+        let versions = match backend {
+            BackendRef::Daemon { base_url, api_key } => {
+                let client = make_daemon_client(api_key.as_deref());
+                // A bad agent id is answered by the endpoint (400 for a non-UUID,
+                // 404 for one it does not know), so the reason it gives is reported
+                // instead of a generic failure.
+                let outcome = daemon_response(
+                    client
+                        .get(format!(
+                            "{base_url}/api/agents/{agent_id}/manifest-history?limit={limit}"
+                        ))
+                        .send(),
+                    || crate::i18n::t("tui-event-manifest-history-fetch-failed"),
+                );
+                let resp = match outcome {
+                    Ok(resp) => resp,
+                    Err(message) => {
+                        fail(&tx, FetchFailure::Error(message));
+                        return;
+                    }
+                };
+                let Ok(body) = resp.json::<serde_json::Value>() else {
+                    fail(
+                        &tx,
+                        FetchFailure::Error(crate::i18n::t(
+                            "tui-event-manifest-history-fetch-failed",
+                        )),
+                    );
+                    return;
+                };
+                body["versions"]
+                    .as_array()
+                    .map(|arr| {
+                        arr.iter()
+                            .map(|v| ManifestVersion {
+                                timestamp: v["timestamp"].as_str().unwrap_or_default().to_string(),
+                                change_source: v["change_source"]
+                                    .as_str()
+                                    .unwrap_or_default()
+                                    .to_string(),
+                                manifest_toml: v["manifest_toml"]
+                                    .as_str()
+                                    .unwrap_or_default()
+                                    .to_string(),
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            }
+            // Snapshots are written into the substrate by the same kernel this arm
+            // holds, so an in-process TUI can read them directly — including rows a
+            // daemon wrote in an earlier session against the same `~/.librefang`.
+            // Unlike the model-params fetch this is modelled on, there is no advisory
+            // limit check that only the endpoint performs; it is a pure read.
+            BackendRef::InProcess(kernel) => {
+                use librefang_kernel::KernelApi;
+                let store =
+                    librefang_memory::ManifestVersionStore::new(kernel.memory_substrate().pool());
+                match store.list_for_agent(&agent_id, limit as usize) {
+                    Ok(rows) => rows
+                        .into_iter()
+                        .map(|r| ManifestVersion {
+                            timestamp: r.timestamp,
+                            change_source: r.change_source,
+                            manifest_toml: r.manifest_toml,
+                        })
+                        .collect(),
+                    Err(e) => {
+                        fail(&tx, FetchFailure::Error(e.to_string()));
+                        return;
+                    }
+                }
+            }
+        };
+        let _ = tx.send(AppEvent::AgentManifestHistoryLoaded {
+            agent_id: agent_id.clone(),
+            versions,
+        });
     });
 }
 
@@ -3624,6 +4001,152 @@ pub fn spawn_promote_agent_type(backend: BackendRef, name: String, tx: mpsc::Sen
     });
 }
 
+/// One row of a template's version history, as served by `GET /api/templates/{name}/history`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TemplateVersionRow {
+    pub id: String,
+    pub timestamp: String,
+    pub change_source: String,
+}
+
+/// Parse the body of `GET /api/templates/{name}/history` into display rows.
+/// The endpoint answers `{"versions": [{id, template_name, timestamp, manifest_toml, change_source}, …]}` —
+/// a missing or non-array `versions` envelope is an error, not an empty list, because a failed
+/// request must not render the same "no history" state as an empty list.
+/// This guarantee stops at the envelope: within one row, a missing or non-string `id` /
+/// `timestamp` / `change_source` falls back to a placeholder (`"?"` / `"unknown"`) rather than
+/// erroring, so a daemon that renamed a row field renders placeholders instead of surfacing the
+/// shape mismatch.
+pub(crate) fn parse_template_history(
+    body: &serde_json::Value,
+) -> Result<Vec<TemplateVersionRow>, String> {
+    let items = body
+        .get("versions")
+        .ok_or_else(|| crate::i18n::t("tui-templates-history-shape"))?
+        .as_array()
+        .ok_or_else(|| crate::i18n::t("tui-templates-history-shape"))?;
+    items
+        .iter()
+        .map(|v| {
+            Ok(TemplateVersionRow {
+                // The id is an integer in the current API but the row type is display-only,
+                // so both a JSON number and a string are accepted without printing quotes.
+                id: match v.get("id") {
+                    Some(serde_json::Value::Number(n)) => n.to_string(),
+                    Some(serde_json::Value::String(s)) => s.clone(),
+                    Some(other) => other.to_string(),
+                    None => "?".to_string(),
+                },
+                timestamp: v
+                    .get("timestamp")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("unknown")
+                    .to_string(),
+                change_source: v
+                    .get("change_source")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("unknown")
+                    .to_string(),
+            })
+        })
+        .collect()
+}
+
+pub fn spawn_restore_from_registry(backend: BackendRef, name: String, tx: mpsc::Sender<AppEvent>) {
+    std::thread::spawn(move || {
+        let (ok, message) = if !is_safe_template_name(&name) {
+            (false, crate::i18n::t("tui-templates-restore-invalid-name"))
+        } else {
+            match backend {
+                BackendRef::Daemon { base_url, api_key } => {
+                    let client = make_daemon_client(api_key.as_deref());
+                    let outcome = client
+                        .post(format!("{base_url}/api/templates/{name}/restore"))
+                        .send();
+                    match daemon_response(outcome, || {
+                        crate::i18n::t("tui-templates-restore-failed")
+                    }) {
+                        Ok(_) => (true, crate::i18n::t("tui-templates-restore-success")),
+                        Err(message) => (false, message),
+                    }
+                }
+                BackendRef::InProcess(_) => {
+                    (false, crate::i18n::t("tui-templates-restore-daemon-only"))
+                }
+            }
+        };
+        let _ = tx.send(AppEvent::RegistryRestoreResult { name, ok, message });
+    });
+}
+
+/// Restore a template to one specific historical version, via
+/// `POST /api/templates/{name}/history/{version_id}/restore` — the only
+/// restore endpoint the daemon serves today (see `spawn_restore_from_registry`).
+pub fn spawn_restore_template_version(
+    backend: BackendRef,
+    name: String,
+    version_id: String,
+    tx: mpsc::Sender<AppEvent>,
+) {
+    std::thread::spawn(move || {
+        let (ok, message) = if !is_safe_template_name(&name) || !is_safe_template_name(&version_id)
+        {
+            (false, crate::i18n::t("tui-templates-restore-invalid-name"))
+        } else {
+            match backend {
+                BackendRef::Daemon { base_url, api_key } => {
+                    let client = make_daemon_client(api_key.as_deref());
+                    let outcome = client
+                        .post(format!(
+                            "{base_url}/api/templates/{name}/history/{version_id}/restore"
+                        ))
+                        .send();
+                    match daemon_response(outcome, || {
+                        crate::i18n::t("tui-templates-version-restore-failed")
+                    }) {
+                        Ok(_) => (true, crate::i18n::t("tui-templates-restore-success")),
+                        Err(message) => (false, message),
+                    }
+                }
+                BackendRef::InProcess(_) => {
+                    (false, crate::i18n::t("tui-templates-restore-daemon-only"))
+                }
+            }
+        };
+        let _ = tx.send(AppEvent::TemplateVersionRestoreResult { name, ok, message });
+    });
+}
+
+pub fn spawn_fetch_template_history(backend: BackendRef, name: String, tx: mpsc::Sender<AppEvent>) {
+    std::thread::spawn(move || {
+        let result = if !is_safe_template_name(&name) {
+            Err(crate::i18n::t("tui-templates-restore-invalid-name"))
+        } else {
+            match backend {
+                BackendRef::Daemon { base_url, api_key } => {
+                    let client = make_daemon_client(api_key.as_deref());
+                    let outcome = client
+                        .get(format!("{base_url}/api/templates/{name}/history"))
+                        .send();
+                    match daemon_response(outcome, || {
+                        crate::i18n::t("tui-templates-history-failed")
+                    }) {
+                        Ok(resp) => match resp.json::<serde_json::Value>() {
+                            Ok(body) => parse_template_history(&body),
+                            Err(e) => Err(e.to_string()),
+                        },
+                        Err(message) => Err(message),
+                    }
+                }
+                BackendRef::InProcess(_) => {
+                    Err(crate::i18n::t("tui-templates-history-daemon-only"))
+                }
+            }
+        };
+        let _ = tx.send(AppEvent::TemplateHistoryLoaded { name, result });
+    });
+}
+
 pub fn spawn_fetch_template_providers(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
     std::thread::spawn(move || match backend {
         BackendRef::Daemon { base_url, api_key } => {
@@ -4151,7 +4674,7 @@ pub fn spawn_fetch_tools(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
 pub fn spawn_save_provider_key(
     backend: BackendRef,
     name: String,
-    api_key: String,
+    api_key: zeroize::Zeroizing<String>,
     tx: mpsc::Sender<AppEvent>,
 ) {
     std::thread::spawn(move || match backend {
@@ -4163,7 +4686,7 @@ pub fn spawn_save_provider_key(
             let outcome = daemon_response(
                 client
                     .post(format!("{base_url}/api/providers/{name}/key"))
-                    .json(&serde_json::json!({"key": api_key}))
+                    .json(&serde_json::json!({"key": api_key.as_str()}))
                     .send(),
                 || crate::i18n::t_args("tui-event-provider-save-key-failed", &[("name", &name)]),
             );
@@ -4207,6 +4730,159 @@ pub fn spawn_delete_provider_key(backend: BackendRef, name: String, tx: mpsc::Se
         BackendRef::InProcess(_) => {
             let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
                 "tui-event-provider-key-management-not-available-in-process",
+            )));
+        }
+    });
+}
+
+/// Fetch the writable vault keys, whether each is in the vault, and where the
+/// daemon resolves it from (#8164).
+///
+/// The response carries names, a boolean and a source; there is no read-back
+/// endpoint, so nothing here can ever receive a stored value to leak.
+///
+/// Failures go through [`daemon_response`] like every sibling fetcher, because
+/// the alternative is worse than a missing list: an empty `Vec` reaches
+/// `draw_vault` as `tui-settings-vault-empty`, telling an operator whose role
+/// the daemon just refused — or whose daemon is not running at all — that this
+/// build has no writable vault keys. The dashboard half of #8164 reports the
+/// `403` explicitly, and the two surfaces have to agree about the same
+/// response.
+pub fn spawn_fetch_vault_keys(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
+    std::thread::spawn(move || match backend {
+        BackendRef::Daemon { base_url, api_key } => {
+            let client = make_daemon_client(api_key.as_deref());
+            let outcome = daemon_response(
+                client.get(format!("{base_url}/api/vault/keys")).send(),
+                || crate::i18n::t("tui-event-vault-list-failed"),
+            );
+            match outcome {
+                Ok(resp) => {
+                    let keys = resp
+                        .json::<serde_json::Value>()
+                        .ok()
+                        .and_then(|body| {
+                            body["keys"].as_array().map(|arr| {
+                                arr.iter()
+                                    .map(|entry| VaultKeyInfo {
+                                        key: entry["key"].as_str().unwrap_or("").to_string(),
+                                        set: entry["set"].as_bool().unwrap_or(false),
+                                        source: VaultKeySource::from_wire(
+                                            entry["source"].as_str().unwrap_or_default(),
+                                        ),
+                                    })
+                                    .collect()
+                            })
+                        })
+                        .unwrap_or_default();
+                    let _ = tx.send(AppEvent::VaultKeysLoaded(keys));
+                }
+                Err(message) => {
+                    let _ = tx.send(AppEvent::FetchError(message));
+                }
+            }
+        }
+        BackendRef::InProcess(_) => {
+            let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
+                "tui-event-vault-not-available-in-process",
+            )));
+        }
+    });
+}
+
+/// The `source` a vault write response reports, defaulting to `Unset` when the
+/// body cannot be read.
+///
+/// A body that will not parse is not evidence of an environment override, and
+/// claiming one would be its own wrong answer; the subsequent list refresh is
+/// what corrects the pane either way.
+fn response_source(resp: reqwest::blocking::Response) -> VaultKeySource {
+    resp.json::<serde_json::Value>()
+        .ok()
+        .and_then(|body| body["source"].as_str().map(VaultKeySource::from_wire))
+        .unwrap_or_default()
+}
+
+/// Percent-encode a vault key for use as a path segment.
+///
+/// #8164's design goal is that adding a name to the server-side `WRITABLE_KEYS`
+/// allowlist surfaces it in both the dashboard and the TUI with no client
+/// change. The namespace that allowlist guards already holds
+/// `mcp-oauth:{server_url}:client_secret`-shaped names, so an entry containing
+/// `/`, `:` or `%` would work from the dashboard — which goes through
+/// `encodeURIComponent` — and silently address the wrong path, or miss the
+/// route entirely, from here. `urlencoding::encode` renders `/` as `%2F`,
+/// which is what keeps the two halves in agreement.
+fn encode_path_segment(segment: &str) -> String {
+    urlencoding::encode(segment).into_owned()
+}
+
+/// Store a secret under a writable vault key.
+///
+/// `value` is moved into the request body and dropped with the closure; it is
+/// never logged, and the success event carries only the key name.
+pub fn spawn_set_vault_key(
+    backend: BackendRef,
+    key: String,
+    value: zeroize::Zeroizing<String>,
+    tx: mpsc::Sender<AppEvent>,
+) {
+    std::thread::spawn(move || match backend {
+        BackendRef::Daemon { base_url, api_key } => {
+            let client = make_daemon_client(api_key.as_deref());
+            let outcome = daemon_response(
+                client
+                    .put(format!(
+                        "{base_url}/api/vault/keys/{}",
+                        encode_path_segment(&key)
+                    ))
+                    .json(&serde_json::json!({ "value": value.as_str() }))
+                    .send(),
+                || crate::i18n::t_args("tui-event-vault-save-failed", &[("key", &key)]),
+            );
+            match outcome {
+                Ok(resp) => {
+                    let _ = tx.send(AppEvent::VaultKeySaved(key, response_source(resp)));
+                }
+                Err(message) => {
+                    let _ = tx.send(AppEvent::FetchError(message));
+                }
+            }
+        }
+        BackendRef::InProcess(_) => {
+            let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
+                "tui-event-vault-not-available-in-process",
+            )));
+        }
+    });
+}
+
+/// Clear a writable vault key.
+pub fn spawn_delete_vault_key(backend: BackendRef, key: String, tx: mpsc::Sender<AppEvent>) {
+    std::thread::spawn(move || match backend {
+        BackendRef::Daemon { base_url, api_key } => {
+            let client = make_daemon_client(api_key.as_deref());
+            let outcome = daemon_response(
+                client
+                    .delete(format!(
+                        "{base_url}/api/vault/keys/{}",
+                        encode_path_segment(&key)
+                    ))
+                    .send(),
+                || crate::i18n::t_args("tui-event-vault-delete-failed", &[("key", &key)]),
+            );
+            match outcome {
+                Ok(resp) => {
+                    let _ = tx.send(AppEvent::VaultKeyDeleted(key, response_source(resp)));
+                }
+                Err(message) => {
+                    let _ = tx.send(AppEvent::FetchError(message));
+                }
+            }
+        }
+        BackendRef::InProcess(_) => {
+            let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
+                "tui-event-vault-not-available-in-process",
             )));
         }
     });
@@ -6233,6 +6909,54 @@ mod tests {
         );
     }
 
+    /// A vault listing that cannot reach the daemon must report a failure, not an empty list.
+    ///
+    /// Every failure used to collapse into `VaultKeysLoaded(vec![])`: a non-2xx body has no
+    /// `keys` array so `.as_array()` was `None`, and a transport error took the `Err(_) =>
+    /// Vec::new()` arm. `draw_vault` renders that as `tui-settings-vault-empty` — "This daemon
+    /// exposes no writable vault keys" — so an operator the daemon refused by role, or one whose
+    /// daemon is not running, was told this build has no vault keys at all.
+    #[test]
+    fn vault_keys_fetch_reports_an_unreachable_daemon() {
+        let (tx, rx) = mpsc::channel();
+        spawn_fetch_vault_keys(unreachable_daemon(), tx);
+
+        let ev = rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("an unreachable daemon must still produce an event");
+        match ev {
+            AppEvent::FetchError(reason) => {
+                assert!(!reason.is_empty(), "the failure must carry a reason");
+            }
+            AppEvent::VaultKeysLoaded(keys) => panic!(
+                "an unreachable daemon must not be reported as an empty vault listing (got {} keys)",
+                keys.len()
+            ),
+            _ => panic!("expected FetchError, got another AppEvent"),
+        }
+    }
+
+    /// The TUI must address the same URL the dashboard's `encodeURIComponent` produces.
+    ///
+    /// #8164's premise is that adding a name to the server-side allowlist surfaces it in both
+    /// surfaces with no client change, and the namespace already holds
+    /// `mcp-oauth:{server_url}:client_secret`-shaped names. Interpolating one raw would request a
+    /// different path than the dashboard, or miss the route entirely.
+    #[test]
+    fn vault_key_path_segments_are_percent_encoded() {
+        assert_eq!(encode_path_segment("GITHUB_TOKEN"), "GITHUB_TOKEN");
+        assert_eq!(
+            encode_path_segment("mcp-oauth:https://evil.example/x:client_secret"),
+            "mcp-oauth%3Ahttps%3A%2F%2Fevil.example%2Fx%3Aclient_secret",
+            "a `/` in a key must not become a path separator"
+        );
+        assert_eq!(
+            encode_path_segment("a%2Fb"),
+            "a%252Fb",
+            "an existing `%` must be escaped once"
+        );
+    }
+
     /// Same for a goal's run state, and the event must name the goal so the
     /// status line can be specific about which row is stale.
     #[test]
@@ -6296,6 +7020,167 @@ mod tests {
             FetchFailure::RequiresDaemon,
             FetchFailure::Error("connection refused".to_string())
         );
+    }
+
+    #[test]
+    fn workspace_rows_skip_mount_declarations() {
+        // `mode = "r"` here is the deserialize-only `WorkspaceMode` alias, not
+        // what the live API renders (`readonly`) — exercising it proves the
+        // editor's read path normalizes both spellings the same way.
+        let manifest: toml::Value = toml::from_str(
+            r#"
+[workspaces.library]
+path = "shared/library"
+mode = "r"
+
+[workspaces.vault]
+mount = "/data/vault"
+mode = "r"
+"#,
+        )
+        .unwrap();
+        let rows = workspaces_editor_rows(&manifest);
+        assert_eq!(
+            rows,
+            vec![(
+                "library".to_string(),
+                "shared/library".to_string(),
+                "readonly".to_string()
+            )]
+        );
+    }
+
+    #[test]
+    fn workspace_rows_default_mode_to_readwrite() {
+        let manifest: toml::Value = toml::from_str(
+            r#"
+[workspaces.library]
+path = "shared/library"
+"#,
+        )
+        .unwrap();
+        let rows = workspaces_editor_rows(&manifest);
+        assert_eq!(
+            rows,
+            vec![(
+                "library".to_string(),
+                "shared/library".to_string(),
+                "readwrite".to_string()
+            )]
+        );
+    }
+
+    #[test]
+    fn workspace_rows_normalize_the_canonical_api_spelling_too() {
+        // This is what `GET /api/agents/{id}/manifest` actually serializes —
+        // `WorkspaceMode`'s aliases are deserialize-only, so the live wire
+        // format never contains `r` / `rw`. NOT evidence of the alias fix by
+        // itself: the pre-fix code (`as_str().unwrap_or("rw")`) already
+        // passed a canonical `"readonly"` through unchanged, so this only
+        // guards against a future normalization step mishandling the
+        // canonical case. `workspace_rows_skip_mount_declarations` and
+        // `workspace_rows_default_mode_to_readwrite` are what demonstrate
+        // the fix — they fail against the pre-fix code.
+        let manifest: toml::Value = toml::from_str(
+            r#"
+[workspaces.library]
+path = "shared/library"
+mode = "readonly"
+"#,
+        )
+        .unwrap();
+        let rows = workspaces_editor_rows(&manifest);
+        assert_eq!(rows[0].2, "readonly");
+    }
+
+    #[test]
+    fn rebuild_preserves_mount_declarations_and_other_tables() {
+        let manifest = r#"
+name = "deanna"
+[skills]
+review = true
+[workspaces.library]
+path = "shared/library"
+[workspaces.vault]
+mount = "/data/vault"
+mode = "r"
+"#;
+        let rebuilt = rebuild_manifest_with_workspaces(
+            manifest,
+            &[(
+                "library".to_string(),
+                "shared/library".to_string(),
+                "rw".to_string(),
+            )],
+        )
+        .unwrap();
+        let value: toml::Value = toml::from_str(&rebuilt).unwrap();
+        // Every table the editor does not render survives the save.
+        assert_eq!(value["skills"]["review"].as_bool(), Some(true));
+        let vault = &value["workspaces"]["vault"];
+        assert_eq!(
+            vault.get("mount").and_then(toml::Value::as_str),
+            Some("/data/vault")
+        );
+        assert_eq!(vault.get("mode").and_then(toml::Value::as_str), Some("r"));
+        // The edited row is written through.
+        assert_eq!(
+            value["workspaces"]["library"]["path"].as_str(),
+            Some("shared/library")
+        );
+        // The default mode is not materialized as an explicit key.
+        assert_eq!(value["workspaces"]["library"].get("mode"), None);
+    }
+
+    #[test]
+    fn rebuild_writes_explicit_mode_when_not_the_default() {
+        let manifest = "name = \"deanna\"\n";
+        let rebuilt = rebuild_manifest_with_workspaces(
+            manifest,
+            &[(
+                "library".to_string(),
+                "shared/library".to_string(),
+                // The alias, not the canonical spelling — the write path
+                // must normalize it the same way the read path does.
+                "r".to_string(),
+            )],
+        )
+        .unwrap();
+        let value: toml::Value = toml::from_str(&rebuilt).unwrap();
+        assert_eq!(
+            value["workspaces"]["library"]["mode"].as_str(),
+            Some("readonly")
+        );
+    }
+
+    #[test]
+    fn rebuild_refuses_duplicate_folder_names() {
+        let manifest = "name = \"deanna\"\n";
+        let err = rebuild_manifest_with_workspaces(
+            manifest,
+            &[
+                ("library".to_string(), "a".to_string(), "rw".to_string()),
+                ("library".to_string(), "b".to_string(), "rw".to_string()),
+            ],
+        )
+        .err()
+        .unwrap();
+        assert!(matches!(err, WorkspacesRebuildError::DuplicateName(n) if n == "library"));
+    }
+
+    #[test]
+    fn rebuild_refuses_a_row_that_collides_with_a_preserved_mount() {
+        let manifest = r#"
+[workspaces.vault]
+mount = "/data/vault"
+"#;
+        let err = rebuild_manifest_with_workspaces(
+            manifest,
+            &[("vault".to_string(), "shared".to_string(), "rw".to_string())],
+        )
+        .err()
+        .unwrap();
+        assert!(matches!(err, WorkspacesRebuildError::DuplicateName(n) if n == "vault"));
     }
 
     /// `GET /api/channels` mixes configured instances and catalog adapters in
@@ -7020,5 +7905,27 @@ mod tests {
             }
             _ => panic!("expected ConfigValueSaved"),
         }
+    }
+
+    /// The reviewer's regression: the endpoint answers an object with a
+    /// `versions` array, but the old code deserialized the body straight into
+    /// `Vec<Value>` and let `unwrap_or_default()` swallow the mismatch — the
+    /// screen showed "no history" against a populated response.
+    #[test]
+    fn history_parse_reads_the_real_envelope_and_rows() {
+        let body = serde_json::json!({
+            "versions": [{
+                "id": 7,
+                "template_name": "payroll",
+                "timestamp": "2026-09-02T08:34:21Z",
+                "manifest_toml": "name = \"payroll\"\n",
+                "change_source": "update"
+            }]
+        });
+        let rows = parse_template_history(&body).expect("the served shape must parse");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, "7");
+        assert_eq!(rows[0].timestamp, "2026-09-02T08:34:21Z");
+        assert_eq!(rows[0].change_source, "update");
     }
 }

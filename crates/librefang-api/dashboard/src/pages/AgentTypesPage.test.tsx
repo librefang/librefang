@@ -4,14 +4,12 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { QueryClientProvider } from "@tanstack/react-query";
 import { AgentTypesPage } from "./AgentTypesPage";
 import { useAgentType, useAgentTypes, useAgentTypeHistory } from "../lib/queries/agentTypes";
-import { useAgents, useTools } from "../lib/queries/agents";
+import { useTools } from "../lib/queries/agents";
 import { useSkills } from "../lib/queries/skills";
 import {
-  useCreateAgentType,
   useDeleteAgentType,
   usePromoteAgentType,
   useRestoreTemplateVersion,
-  useSpawnEphemeral,
 } from "../lib/mutations/agentTypes";
 import * as agentTypeMutations from "../lib/mutations/agentTypes";
 import { ApiError } from "../lib/http/errors";
@@ -31,32 +29,38 @@ vi.mock("../lib/queries/agentTypes", () => ({
 }));
 
 vi.mock("../lib/queries/agents", () => ({
-  useAgents: vi.fn(),
   useTools: vi.fn(),
 }));
 
 vi.mock("../lib/queries/skills", () => ({ useSkills: vi.fn() }));
 
-// Both names for the manifest-write hook: `main` exports it as
-// `useUpdateAgentType` and #8028 renames it to `useUpdateAgentTypeToml`.
-// This test only needs it stubbed — it never asserts on it — so the factory
-// provides both and the page gets whichever one it imports. Pinning a single
-// name would break this file on whichever of the two PRs merges second, for a
-// hook that has nothing to do with what is being tested.
+// Both names for the manifest-write and manifest-create hooks: `main` exports
+// them as `useUpdateAgentType` / `useCreateAgentType` and #8028 renames them to
+// `useUpdateAgentTypeToml` / `useCreateAgentTypeFromToml`.
+// This test only needs them stubbed — it never asserts on either — so the
+// factory provides both spellings and the page gets whichever one it imports.
+// Pinning a single name would break this file on whichever of the two PRs
+// merges second, for hooks that have nothing to do with what is being tested.
 vi.mock("../lib/mutations/agentTypes", () => ({
   useCreateAgentType: vi.fn(),
+  useCreateAgentTypeFromToml: vi.fn(),
   useDeleteAgentType: vi.fn(),
   usePromoteAgentType: vi.fn(),
   useRestoreTemplateVersion: vi.fn(),
-  useSpawnEphemeral: vi.fn(),
   useUpdateAgentType: vi.fn(),
   useUpdateAgentTypeToml: vi.fn(),
 }));
+
+// `useNavigate` is hoisted out of the factory because `vi.mock` is hoisted
+// above the imports: the component calls it on every row press, so the stub has
+// to exist before the factory runs.
+const { navigateSpy } = vi.hoisted(() => ({ navigateSpy: vi.fn() }));
 
 vi.mock("@tanstack/react-router", () => ({
   Link: ({ children, ...rest }: { children: React.ReactNode } & Record<string, unknown>) => (
     <a {...(rest as Record<string, unknown>)}>{children}</a>
   ),
+  useNavigate: () => navigateSpy,
 }));
 
 // motion/react drives Modal and ConfirmDialog through async animation hooks
@@ -118,6 +122,18 @@ const TYPE: AgentTemplate = {
   model: "claude-sonnet-5",
   source: "agent-type",
   editable: true,
+  from_registry: true,
+};
+
+/** A second row, only ever rendered when a test needs two of them at once. */
+const OTHER_TYPE: AgentTemplate = {
+  name: "analyst",
+  description: "Sifts numbers",
+  provider: "anthropic",
+  model: "claude-sonnet-5",
+  source: "agent-type",
+  editable: true,
+  from_registry: false,
 };
 
 const DETAIL: AgentTypeDetail = {
@@ -165,16 +181,20 @@ function mockQuery<T>(data: T) {
 type MutationStub = { mutateAsync: ReturnType<typeof vi.fn>; isPending: boolean };
 
 /**
- * Promotion is the mutation every test varies; restore and the history payload
- * are opt-in so the tests that do not open the history modal keep reading as
- * one argument.
+ * Promotion is the mutation every test varies; the type list, the restore stub
+ * and the history payload are opt-in so the tests that do not need them keep
+ * reading as one argument.
  */
 function renderPage(
   promote: MutationStub,
-  extras: { restore?: MutationStub; versions?: TemplateVersionEntry[] } = {},
+  extras: {
+    types?: AgentTemplate[];
+    restore?: MutationStub;
+    versions?: TemplateVersionEntry[];
+  } = {},
 ) {
   vi.mocked(useAgentTypes).mockReturnValue(
-    mockQuery([TYPE]) as unknown as ReturnType<typeof useAgentTypes>,
+    mockQuery(extras.types ?? [TYPE]) as unknown as ReturnType<typeof useAgentTypes>,
   );
   vi.mocked(useAgentType).mockReturnValue(
     mockQuery(DETAIL) as unknown as ReturnType<typeof useAgentType>,
@@ -184,18 +204,18 @@ function renderPage(
       typeof useAgentTypeHistory
     >,
   );
-  vi.mocked(useAgents).mockReturnValue(mockQuery([]) as unknown as ReturnType<typeof useAgents>);
   vi.mocked(useTools).mockReturnValue(mockQuery([]) as unknown as ReturnType<typeof useTools>);
   vi.mocked(useSkills).mockReturnValue(mockQuery([]) as unknown as ReturnType<typeof useSkills>);
-  // Stub both spellings of the manifest-write hook rather than picking one:
-  // the page calls whichever it imports, and an unstubbed `vi.fn()` returns
-  // `undefined`, which the page then destructures and crashes on.
+  // Stub both spellings of the manifest-write and manifest-create hooks rather
+  // than picking one: the page calls whichever it imports, and an unstubbed
+  // `vi.fn()` returns `undefined`, which the page then destructures and
+  // crashes on.
   const mutations = agentTypeMutations as unknown as Record<string, unknown>;
   for (const hook of [
-    useCreateAgentType,
     useDeleteAgentType,
     useRestoreTemplateVersion,
-    useSpawnEphemeral,
+    mutations.useCreateAgentType,
+    mutations.useCreateAgentTypeFromToml,
     mutations.useUpdateAgentType,
     mutations.useUpdateAgentTypeToml,
   ]) {
@@ -231,6 +251,44 @@ function previewButton() {
 function promoteButton() {
   return screen.getByRole("button", { name: PROMOTE_LABEL });
 }
+
+const RUN_LABEL = "Create Agent";
+
+// Run on a type instantiates it. It used to open a modal asking which existing
+// agent to fork (#6699), which answers a different question than the button
+// asks: the operator pressed play on a *type*, and the flow that turns a type
+// into an agent is the create drawer. Landing anywhere else makes them pick the
+// same type a second time, from a dropdown, on the next page.
+describe("AgentTypesPage run", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    useUIStore.setState({ toasts: [] });
+  });
+
+  it("opens the create flow with this type already selected", () => {
+    renderPage(idle);
+    // The accessible name carries the row's own type, not just the verb, so
+    // this also pins that the control is distinguishable per row.
+    fireEvent.click(screen.getByRole("button", { name: `${RUN_LABEL}: ${TYPE.name}` }));
+    expect(navigateSpy).toHaveBeenCalledWith({
+      to: "/agents",
+      search: { template: TYPE.name },
+    });
+  });
+
+  // With one row on screen the test above cannot tell a name taken from the row
+  // apart from one taken from the list it happens to be the first of. Putting
+  // the wanted row second closes that: a name read off the list, or off the
+  // first row, now sends `analyst` and fails here.
+  it("takes the name from the row it was pressed on", () => {
+    renderPage(idle, { types: [OTHER_TYPE, TYPE] });
+    fireEvent.click(screen.getByRole("button", { name: `${RUN_LABEL}: ${TYPE.name}` }));
+    expect(navigateSpy).toHaveBeenCalledWith({
+      to: "/agents",
+      search: { template: TYPE.name },
+    });
+  });
+});
 
 describe("AgentTypesPage promotion", () => {
   beforeEach(() => {
@@ -306,6 +364,33 @@ describe("AgentTypesPage promotion", () => {
     expect(screen.queryByRole("link", { name: /View pull request/ })).toBeNull();
   });
 });
+
+// An `editable` row still may have no registry original — created through
+// `POST /api/templates` or `agent_type_create` rather than promoted from one.
+// Before `from_registry` existed, the restore control rendered identically
+// either way, and its drawer could only answer "this agent type does not
+// exist in the registry" after the click (#8042 review).
+describe("AgentTypesPage restore control", () => {
+  // The two states change the control's own accessible name — that is the
+  // thing under test — so each test finds it by the name it expects, rather
+  // than through a helper that would have to already know which case it is.
+
+  it("is enabled when the type has a registry original", () => {
+    renderPage({ mutateAsync: vi.fn(), isPending: false }, { types: [{ ...TYPE, from_registry: true }] });
+
+    expect(screen.getByRole("button", { name: "Restore from registry" })).toBeEnabled();
+  });
+
+  it("is disabled and explains why when the type has no registry original", () => {
+    renderPage({ mutateAsync: vi.fn(), isPending: false }, { types: [{ ...TYPE, from_registry: false }] });
+
+    expect(
+      screen.getByRole("button", { name: "This agent type does not exist in the registry." }),
+    ).toBeDisabled();
+    expect(screen.queryByRole("button", { name: "Restore from registry" })).toBeNull();
+  });
+});
+
 
 // Restoring rewrites the template's agent.toml on disk, and the snapshot the
 // server records afterwards holds the restored content rather than what it

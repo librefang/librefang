@@ -41,6 +41,7 @@ class LibreFang {
     this.groups = new GroupsResource(this);
     this.hands = new HandsResource(this);
     this.inbox = new InboxResource(this);
+    this.knowledge = new KnowledgeResource(this);
     this.mcp = new McpResource(this);
     this.media = new MediaResource(this);
     this.memory = new MemoryResource(this);
@@ -52,6 +53,7 @@ class LibreFang {
     this.sessions = new SessionsResource(this);
     this.skills = new SkillsResource(this);
     this.system = new SystemResource(this);
+    this.tasks = new TasksResource(this);
     this.tools = new ToolsResource(this);
     this.users = new UsersResource(this);
     this.vault = new VaultResource(this);
@@ -208,6 +210,18 @@ class AgentsResource {
     return this._c._request("PATCH", `/api/agents/${id}`, data, undefined);
   }
 
+  async serveAgentAvatar(id) {
+    return this._c._request("GET", `/api/agents/${id}/avatar`);
+  }
+
+  async uploadAgentAvatar(id, body, contentType) {
+    return this._c._request("POST", `/api/agents/${id}/avatar`, body, undefined, contentType || "application/octet-stream");
+  }
+
+  async deleteAgentAvatar(id) {
+    return this._c._request("DELETE", `/api/agents/${id}/avatar`);
+  }
+
   async getAgentChannels(id) {
     return this._c._request("GET", `/api/agents/${id}/channels`);
   }
@@ -276,6 +290,14 @@ class AgentsResource {
     return this._c._request("GET", `/api/agents/${id}/logs`, undefined, query);
   }
 
+  async getAgentManifestToml(id) {
+    return this._c._request("GET", `/api/agents/${id}/manifest`);
+  }
+
+  async listAgentManifestHistory(id, query) {
+    return this._c._request("GET", `/api/agents/${id}/manifest-history`, undefined, query);
+  }
+
   async getAgentMcpServers(id) {
     return this._c._request("GET", `/api/agents/${id}/mcp_servers`);
   }
@@ -326,6 +348,10 @@ class AgentsResource {
 
   async listAgentRuntime(id) {
     return this._c._request("GET", `/api/agents/${id}/runtime`);
+  }
+
+  async saveAgentAsAgentType(id, data) {
+    return this._c._request("POST", `/api/agents/${id}/save-as-agent-type`, data, undefined);
   }
 
   async getAgentSession(id, query) {
@@ -842,6 +868,40 @@ class InboxResource {
 
   async inboxStatus() {
     return this._c._request("GET", "/api/inbox/status");
+  }
+}
+
+// ── Knowledge Resource
+
+class KnowledgeResource {
+  constructor(client) { this._c = client; }
+
+  async listBases() {
+    return this._c._request("GET", "/api/knowledge");
+  }
+
+  async createBase(data) {
+    return this._c._request("POST", "/api/knowledge", data, undefined);
+  }
+
+  async deleteBase(name) {
+    return this._c._request("DELETE", `/api/knowledge/${name}`);
+  }
+
+  async setHolders(name, data) {
+    return this._c._request("PUT", `/api/knowledge/${name}/agents`, data, undefined);
+  }
+
+  async listDocuments(name) {
+    return this._c._request("GET", `/api/knowledge/${name}/documents`);
+  }
+
+  async putDocument(name, filename, body, contentType) {
+    return this._c._request("PUT", `/api/knowledge/${name}/documents/${filename}`, body, undefined, contentType || "application/octet-stream");
+  }
+
+  async deleteDocument(name, filename) {
+    return this._c._request("DELETE", `/api/knowledge/${name}/documents/${filename}`);
   }
 }
 
@@ -1706,8 +1766,24 @@ class SystemResource {
     return this._c._request("POST", `/api/templates/${name}/promote`);
   }
 
+  async getAgentTypeRegistryDiff(name) {
+    return this._c._request("GET", `/api/templates/${name}/registry-diff`);
+  }
+
+  async restoreAgentTypeFromRegistry(name) {
+    return this._c._request("POST", `/api/templates/${name}/restore`);
+  }
+
   async getAgentTemplateToml(name) {
     return this._c._request("GET", `/api/templates/${name}/toml`);
+  }
+
+  async putAgentTemplateToml(name, body, contentType) {
+    return this._c._request("PUT", `/api/templates/${name}/toml`, body, undefined, contentType || "text/plain");
+  }
+
+  async postAgentTemplateToml(name, body, contentType) {
+    return this._c._request("POST", `/api/templates/${name}/toml`, body, undefined, contentType || "text/plain");
   }
 
   async version() {
@@ -1716,6 +1792,16 @@ class SystemResource {
 
   async apiVersions() {
     return this._c._request("GET", "/api/versions");
+  }
+}
+
+// ── Tasks Resource
+
+class TasksResource {
+  constructor(client) { this._c = client; }
+
+  async taskQueuePostRoot(data) {
+    return this._c._request("POST", "/api/tasks", data, undefined);
   }
 }
 
@@ -1746,6 +1832,10 @@ class UsersResource {
     return this._c._request("POST", "/api/users/import", data, undefined);
   }
 
+  async serveMyAvatar() {
+    return this._c._request("GET", "/api/users/me/avatar");
+  }
+
   async getUser(name) {
     return this._c._request("GET", `/api/users/${name}`);
   }
@@ -1756,6 +1846,22 @@ class UsersResource {
 
   async deleteUser(name) {
     return this._c._request("DELETE", `/api/users/${name}`);
+  }
+
+  async serveUserAvatar(name) {
+    return this._c._request("GET", `/api/users/${name}/avatar`);
+  }
+
+  async uploadUserAvatar(name, body, contentType) {
+    return this._c._request("POST", `/api/users/${name}/avatar`, body, undefined, contentType || "application/octet-stream");
+  }
+
+  async deleteUserAvatar(name) {
+    return this._c._request("DELETE", `/api/users/${name}/avatar`);
+  }
+
+  async updateUserIdentity(name, data) {
+    return this._c._request("PATCH", `/api/users/${name}/identity`, data, undefined);
   }
 
   async getUserPolicy(name) {

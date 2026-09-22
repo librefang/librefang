@@ -1,0 +1,4 @@
+A message containing an empty list item, an empty heading, an empty fenced block or an empty blockquote is sent as rich blocks again instead of silently falling back to Markdown.
+`sendRichMessage` refuses the whole payload with `RICH_MESSAGE_CONTENT_REQUIRED` when any block carries no content, so one blank bullet in an otherwise ordinary message cost the rich path entirely — the message still arrived through the legacy Markdown fallback, with an `[telegram] rich blocks unavailable for this text` line that read as a converter failure when the converter had worked.
+The four shapes now match what Telegram's own parse does with the same source: the empty item carries an empty paragraph, and the empty heading, fence and quote are not emitted at all.
+Found by sending the converter's own output to the API rather than by comparing its parse with Telegram's — the check every previous round had made, which cannot see this class at all (#8393) (@nevgenov)

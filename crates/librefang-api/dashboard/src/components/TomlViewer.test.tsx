@@ -4,7 +4,7 @@ import React from "react";
 import { TomlViewer } from "./TomlViewer";
 
 // `motion/react` ships browser-only animation primitives jsdom can't drive.
-// Same shim as Modal.test / PromptsExperimentsModal.test — render children
+// Same shim as Modal.test / PromptsExperimentsPanel.test — render children
 // inline and turn `motion.foo` into the corresponding host tag.
 vi.mock("motion/react", () => ({
   AnimatePresence: ({ children }: { children: React.ReactNode }) => (

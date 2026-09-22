@@ -839,7 +839,7 @@ max_retries = 0             # 0 = retry forever
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `claim_ttl_secs` | u64 | `600` | How long an `in_progress` task may stay claimed before the sweeper resets it. `0` disables the sweep entirely. |
+| `claim_ttl_secs` | u64 | `600` | How long an `in_progress` task may stay claimed before the sweeper resets it. `0` disables the *global* clock only — a task that declared its own `timeout_secs` still expires. |
 | `sweep_interval_secs` | u64 | `30` | How often the sweeper scans for stuck tasks. |
 | `max_retries` | u32 | `0` | Maximum number of auto-resets before a stuck task is marked `failed`. `0` = retry indefinitely (the safe default for idempotent work; lower it for tasks that have side effects). |
 

@@ -2,3 +2,7 @@ node_modules
 package-lock.json
 playwright-report
 test-results
+
+# Playwright screenshots written by e2e/agent-view.spec.ts — build output
+# for a human to look at, not something to commit.
+e2e-screenshots

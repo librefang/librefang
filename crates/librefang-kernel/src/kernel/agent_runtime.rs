@@ -273,7 +273,7 @@ impl LibreFangKernel {
     }
 
     /// Write enabled flag to agent's TOML file.
-    fn persist_agent_enabled(&self, _agent_id: AgentId, name: &str, enabled: bool) {
+    fn persist_agent_enabled(&self, agent_id: AgentId, name: &str, enabled: bool) {
         let cfg = self.config.load();
         // Check both workspaces/agents/ and workspaces/hands/ directories
         let agents_path = cfg
@@ -312,6 +312,20 @@ impl LibreFangKernel {
                 };
                 if let Err(e) = atomic_write_toml(&toml_path, &new_content) {
                     warn!("Failed to persist enabled={enabled} for {name}: {e}");
+                    return;
+                }
+                // Suspend/resume rewrites agent.toml outside `persist_full_manifest_at`
+                // (this function patches the `enabled` line directly rather than
+                // re-serializing the whole manifest), so it must record its own
+                // history snapshot or the History tab silently misses every
+                // suspend/resume (#8041).
+                let store =
+                    librefang_memory::ManifestVersionStore::new(self.memory.substrate.pool());
+                let change_source = if enabled { "resume" } else { "suspend" };
+                if let Err(e) =
+                    store.record_version(&agent_id.to_string(), name, &new_content, change_source)
+                {
+                    warn!("Failed to record manifest version snapshot for {name}: {e}");
                 }
             }
             Err(e) => warn!("Failed to read agent TOML for {name}: {e}"),
@@ -442,6 +456,7 @@ impl LibreFangKernel {
             .unwrap_or_else(|| librefang_memory::session::Session {
                 id: target_session_id,
                 agent_id,
+                parent_session_id: None,
                 messages: Vec::new(),
                 context_window_tokens: 0,
                 label: None,
@@ -642,6 +657,7 @@ impl LibreFangKernel {
             .unwrap_or_else(|| librefang_memory::session::Session {
                 id: target_session_id,
                 agent_id,
+                parent_session_id: None,
                 messages: Vec::new(),
                 context_window_tokens: 0,
                 label: None,
@@ -838,6 +854,23 @@ impl LibreFangKernel {
                     id = %dropped,
                     "Purged canonical UUID from agent_identities registry (#4614)"
                 );
+            }
+            // The avatar goes with the identity, and it goes here rather than
+            // on every teardown precisely because `purge_identity` is already
+            // the flag that separates "the operator asked for this agent to
+            // stop existing" from "the runtime is recycling it" (#8339).
+            // Hand reactivation, provisioning prune, a tool-driven kill and
+            // the TUI all reach this function through `kill_agent`, which
+            // passes `false`; only the confirmed `DELETE /api/agents/{id}` and
+            // `librefang agent delete` pass `true`. Deleting on the former
+            // would make an agent silently lose its picture on an internal
+            // restart it never asked for.
+            let removed = librefang_types::media::remove_avatars(
+                &self.config_ref().effective_avatars_dir(),
+                &agent_id.to_string(),
+            );
+            if removed > 0 {
+                info!(agent = %entry.name, id = %agent_id, removed, "Removed stored avatar (#8339)");
             }
         }
 

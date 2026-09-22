@@ -1,12 +1,16 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   spawnAgent,
+  spawnEphemeral,
   cloneAgent,
   stopAgent,
   suspendAgent,
   resumeAgent,
   deleteAgent,
   patchAgent,
+  updateAgentIdentity,
+  uploadAgentAvatar,
+  deleteAgentAvatar,
   patchAgentConfig,
   patchHandAgentRuntimeConfig,
   clearHandAgentRuntimeConfig,
@@ -26,9 +30,11 @@ import {
   resetAgentSession,
   updateAgentTools,
   setAgentSkills,
+  setAgentMcpServers,
+  setAgentChannels,
   getAgentTemplateToml,
 } from "../http/client";
-import type { AgentSchedulePatch, CloneAgentPayload, PromptExperiment, PromptVersion, SendAgentMessageOptions } from "../../api";
+import type { AgentSchedulePatch, CloneAgentPayload, PromptExperiment, PromptVersion, SendAgentMessageOptions, SpawnEphemeralRequest } from "../../api";
 import { clearChatSessionCacheForAgent } from "../chatSessionCache";
 import {
   agentKeys,
@@ -90,6 +96,30 @@ export function useSpawnAgent() {
   });
 }
 
+/**
+ * Run one ephemeral worker and return what it produced (#6699).
+ *
+ * The worker leaves nothing behind — no registry entry, no session, no
+ * workspace — so there is no agent list to refresh afterwards. What it does
+ * leave is spend on the *parent's* ledger, which is why usage and budget are
+ * invalidated here: a Quick Run that silently cost money and left the budget
+ * widget showing the pre-run figure is the exact surprise this feature must
+ * not produce. `agentKeys.stats` is invalidated for the same reason and is not
+ * redundant with the two above — the parent's `Cost · 24h` tile on the Agents
+ * page reads from the stats query, and that page is where the run is started.
+ */
+export function useSpawnEphemeral() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (body: SpawnEphemeralRequest) => spawnEphemeral(body),
+    onSettled: (_data, _error, body) => {
+      qc.invalidateQueries({ queryKey: agentKeys.stats(body.parent) });
+      qc.invalidateQueries({ queryKey: usageKeys.all });
+      qc.invalidateQueries({ queryKey: budgetKeys.all });
+    },
+  });
+}
+
 export function useCloneAgent() {
   const qc = useQueryClient();
   return useMutation({
@@ -112,12 +142,21 @@ export function useStopAgent() {
   });
 }
 
+/**
+ * Suspend an agent.
+ *
+ * Invalidates `detail(agentId)` as well as the list because suspending
+ * rewrites `agent.toml` and records a `suspend` manifest-version snapshot
+ * (#8041) — and `manifestHistory` lives under the detail key, so the open
+ * History tab picks up the row this request just wrote.
+ */
 export function useSuspendAgent() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: suspendAgent,
-    onSuccess: () => {
+    onSuccess: (_data, agentId) => {
       qc.invalidateQueries({ queryKey: agentKeys.lists() });
+      qc.invalidateQueries({ queryKey: agentKeys.detail(agentId) });
       qc.invalidateQueries({ queryKey: overviewKeys.snapshot() });
     },
   });
@@ -157,12 +196,14 @@ export function useDeleteAgent() {
   });
 }
 
+/** Resume an agent. Same invalidation set as `useSuspendAgent`, for the same reason. */
 export function useResumeAgent() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: resumeAgent,
-    onSuccess: () => {
+    onSuccess: (_data, agentId) => {
       qc.invalidateQueries({ queryKey: agentKeys.lists() });
+      qc.invalidateQueries({ queryKey: agentKeys.detail(agentId) });
       qc.invalidateQueries({ queryKey: overviewKeys.snapshot() });
     },
   });
@@ -170,8 +211,18 @@ export function useResumeAgent() {
 
 /**
  * Manifest-level partial update: name, description, system_prompt,
- * mcp_servers, model. Distinct from `usePatchAgentRuntimeConfig`, which
- * targets the role-appropriate model-tuning endpoint.
+ * mcp_servers, model, schedule — or, via `manifest_toml`, a full-manifest
+ * replacement (#7742: the dashboard's full manifest editor). Distinct from
+ * `usePatchAgentRuntimeConfig`, which targets the role-appropriate
+ * model-tuning endpoint.
+ *
+ * `manifest_toml` can touch nearly every manifest field in one request, so
+ * its invalidation fan-out is broader than the other partial fields:
+ * `agentKeys.manifest(id)` (the editor's own seed read), `mcpServers(id)`,
+ * `skills(id)`, and `tools(id)` all derive from the same manifest and would
+ * otherwise show stale state until their own PUT/GET is separately
+ * triggered. Cheap to over-invalidate here since `manifest_toml` PATCHes
+ * are infrequent, user-initiated saves, not a hot path.
  */
 export function usePatchAgent() {
   const qc = useQueryClient();
@@ -190,11 +241,129 @@ export function usePatchAgent() {
         mcp_servers?: string[];
         schedule?: AgentSchedulePatch;
         auto_evolve?: boolean;
+        manifest_toml?: string;
       };
     }) => patchAgent(agentId, body),
     onSuccess: (_data, variables) => {
       qc.invalidateQueries({ queryKey: agentKeys.lists() });
+      // Reaches `manifestHistory` too — it is nested under this key.
       qc.invalidateQueries({ queryKey: agentKeys.detail(variables.agentId) });
+      qc.invalidateQueries({ queryKey: agentKeys.manifestHistory(variables.agentId) });
+      if (variables.body.manifest_toml !== undefined) {
+        qc.invalidateQueries({ queryKey: agentKeys.manifest(variables.agentId) });
+        qc.invalidateQueries({ queryKey: agentKeys.mcpServers(variables.agentId) });
+        qc.invalidateQueries({ queryKey: agentKeys.skills(variables.agentId) });
+        qc.invalidateQueries({ queryKey: agentKeys.tools(variables.agentId) });
+        qc.invalidateQueries({ queryKey: agentKeys.channels(variables.agentId) });
+      }
+    },
+  });
+}
+
+/**
+ * PATCH /agents/{id}/identity — the agent's emoji and colour (#8339).
+ *
+ * Partial since #6608: a field left out of the body keeps its stored value, so
+ * setting an emoji cannot silently drop a colour. The corollary is that
+ * *clearing* one means sending it as an empty string — `undefined` is already
+ * spoken for by "not provided" and would leave the old value in place.
+ *
+ * `avatar_url` is not writable through here. It may only hold this agent's own
+ * avatar path, and the two hooks below are what put it there.
+ *
+ * Invalidates `detail(id)`, `lists()` and the dashboard snapshot: those are the
+ * three reads that carry the identity that just changed. The snapshot is the
+ * one that is easy to miss — `AgentsPage`'s rows render the emoji and the
+ * avatar out of it, not out of `agentKeys`.
+ */
+export function useUpdateAgentIdentity() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      agentId,
+      identity,
+    }: {
+      agentId: string;
+      identity: { emoji?: string; color?: string };
+    }) => updateAgentIdentity(agentId, identity),
+    onSuccess: (_data, variables) => {
+      qc.invalidateQueries({ queryKey: agentKeys.lists() });
+      qc.invalidateQueries({ queryKey: agentKeys.detail(variables.agentId) });
+      // The list rows do not read the identity out of `agentKeys` at all —
+      // `AgentsPage` renders them from the dashboard snapshot, whose key is a
+      // sibling of `agentKeys.all` rather than a child of it. Without this the
+      // row goes on showing the previous emoji until the snapshot's own 5 s
+      // poll comes round.
+      //
+      // Every other mutation in this file that changes what the list shows
+      // already does this — spawn, clone, suspend, resume, delete and
+      // reset-session all invalidate the snapshot. The three identity hooks
+      // were the ones that got missed, which is why an uploaded avatar used to
+      // take five seconds to appear in the row. Same line in the two avatar
+      // hooks below.
+      qc.invalidateQueries({ queryKey: overviewKeys.snapshot() });
+    },
+  });
+}
+
+/**
+ * POST /agents/{id}/avatar — store an image as this agent's avatar (#8339).
+ *
+ * The body is the raw bytes: no multipart, no filename anywhere. The server
+ * decides the format by sniffing them, so a file the browser mislabelled is
+ * still stored correctly and an SVG is still refused.
+ *
+ * Invalidates `avatar(id)` — the cached Blob is now the previous image — as
+ * well as the reads that carry `avatar_url`: `lists()`, `detail(id)` and the
+ * dashboard snapshot the list rows render from. The avatar key is invalidated
+ * in `onSuccess` rather than `onSettled` deliberately: the handler writes the
+ * bytes to a temp file and renames it into place, so an upload that fails leaves
+ * the previous avatar exactly as it was, and re-fetching the image after one
+ * only spends a request to arrive back at the bytes already in hand. That
+ * premise belongs to the handler rather than to this file — `routes::agents::avatar`
+ * has to keep clearing the superseded formats *after* a successful rename, not
+ * before it, or a failed upload starts deleting the picture it was meant to
+ * replace and this becomes `onSettled`.
+ */
+export function useUploadAgentAvatar() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ agentId, file }: { agentId: string; file: Blob }) =>
+      uploadAgentAvatar(agentId, file),
+    onSuccess: (_data, variables) => {
+      qc.invalidateQueries({ queryKey: agentKeys.avatar(variables.agentId) });
+      qc.invalidateQueries({ queryKey: agentKeys.lists() });
+      qc.invalidateQueries({ queryKey: agentKeys.detail(variables.agentId) });
+      qc.invalidateQueries({ queryKey: overviewKeys.snapshot() });
+    },
+  });
+}
+
+/**
+ * DELETE /agents/{id}/avatar — remove the image and clear `avatar_url` (#8339).
+ *
+ * The reference is cleared whether or not a file was found, which is how an
+ * agent whose `avatar_url` outlived its file — a database restored without the
+ * avatars directory — gets back to rendering its initials.
+ *
+ * The avatar key is **removed** rather than invalidated, and that is the one
+ * place this mutation diverges from the upload above it. `agentKeys.avatar` is
+ * gated on `enabled: hasAvatar`, which is "is `identity.avatar_url` set", so the
+ * `detail` refetch this same `onSuccess` triggers is what switches the query
+ * off. A disabled `useQuery` keeps returning its cached `data`, and an
+ * invalidation on a disabled query never becomes a refetch — so the deleted
+ * image goes on rendering until the entry is garbage-collected. `useDeleteAgent`
+ * removes its own key for the same reason.
+ */
+export function useDeleteAgentAvatar() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: deleteAgentAvatar,
+    onSuccess: (_data, agentId) => {
+      qc.removeQueries({ queryKey: agentKeys.avatar(agentId) });
+      qc.invalidateQueries({ queryKey: agentKeys.lists() });
+      qc.invalidateQueries({ queryKey: agentKeys.detail(agentId) });
+      qc.invalidateQueries({ queryKey: overviewKeys.snapshot() });
     },
   });
 }
@@ -216,7 +385,9 @@ export function usePatchAgentRuntimeConfig() {
       : patchAgentConfig(agentId, config),
     onSuccess: (_data, variables) => {
       qc.invalidateQueries({ queryKey: agentKeys.lists() });
+      // Reaches `manifestHistory` too — it is nested under this key.
       qc.invalidateQueries({ queryKey: agentKeys.detail(variables.agentId) });
+      qc.invalidateQueries({ queryKey: agentKeys.manifestHistory(variables.agentId) });
       if (variables.isHand) {
         qc.invalidateQueries({ queryKey: handKeys.details() });
       }
@@ -231,7 +402,9 @@ export function usePatchAgentRuntimeConfig() {
  * - `agentKeys.lists()` because the model/provider badge surfaced in the
  *   agent list row comes from the live manifest.
  * - `agentKeys.detail(agentId)` because the config panel bound to this
- *   hook reads the same manifest fields.
+ *   hook reads the same manifest fields — and, through the nested
+ *   `manifestHistory` key, the History tab, since restoring the HAND.toml
+ *   defaults rewrites the manifest and records a snapshot.
  * - `handKeys.details()` because the hand-detail view shows per-role
  *   runtime override state; the coordinator agent's clear is observable
  *   through any cached hand detail that references this agent's role.
@@ -562,8 +735,64 @@ export function useSetAgentSkills() {
   });
 }
 
+/**
+ * PUT /agents/{id}/mcp_servers — replace the agent's MCP server grant list
+ * (#6565 follow-up). Powers the group-level MCP grant/revoke on the agent
+ * detail Tools tab, which previously could only read MCP grant state and
+ * pointed the operator at a non-existent "MCP servers tab" to change it.
+ * `agentKeys.detail(id)` carries the `mcp_servers` / `mcp_servers_mode`
+ * fields this tab reads, so invalidating it is what actually refreshes the
+ * grant state; `agentKeys.mcpServers(id)` is invalidated too for forward
+ * compatibility with a future dedicated GET hook.
+ */
+export function useSetAgentMcpServers() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      agentId,
+      mcpServers,
+    }: {
+      agentId: string;
+      mcpServers: string[];
+    }) => setAgentMcpServers(agentId, mcpServers),
+    onSuccess: (_data, variables) => {
+      qc.invalidateQueries({ queryKey: agentKeys.mcpServers(variables.agentId) });
+      qc.invalidateQueries({ queryKey: agentKeys.detail(variables.agentId) });
+      qc.invalidateQueries({ queryKey: agentKeys.lists() });
+    },
+  });
+}
+
 export function useAgentTemplateToml() {
   return useMutation({
     mutationFn: getAgentTemplateToml,
+  });
+}
+
+/**
+ * PUT /agents/{id}/channels — replace the agent's channel allowlist (#7742).
+ * Powers the Configure drawer's Channels section, the previously-missing
+ * client for a route that has existed since `config.rs` shipped
+ * `get_agent_channels` / `set_agent_channels` with zero call sites.
+ *
+ * Invalidates:
+ * - `agentKeys.channels(id)` — the section's own read (assigned / available / mode).
+ * - `agentKeys.detail(id)` — forward-compatible with a future `channels` field
+ *   on the curated detail payload, mirroring the `mcpServers` mutation's note.
+ */
+export function useSetAgentChannels() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      agentId,
+      channels,
+    }: {
+      agentId: string;
+      channels: string[];
+    }) => setAgentChannels(agentId, channels),
+    onSuccess: (_data, variables) => {
+      qc.invalidateQueries({ queryKey: agentKeys.channels(variables.agentId) });
+      qc.invalidateQueries({ queryKey: agentKeys.detail(variables.agentId) });
+    },
   });
 }

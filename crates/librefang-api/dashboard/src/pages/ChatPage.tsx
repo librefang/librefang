@@ -33,7 +33,7 @@ import {
   setCachedChatMessages,
 } from "../lib/chatSessionCache";
 import { useTtsManager } from "../lib/tts";
-import { MessageCircle, Send, Square, Bot, User, RefreshCw, AlertCircle, Wifi, Sparkles, X, ArrowRight, ArrowLeft, Zap, ShieldAlert, CheckCircle, XCircle, Clock, Plus, Trash2, ChevronDown, Loader2, Copy, Volume2, Pause, Download, Brain, Eye, EyeOff, Mic, MicOff, Globe, Paperclip, FileText, Menu, Minus } from "lucide-react";
+import { MessageCircle, Send, Square, Bot, User, RefreshCw, AlertCircle, Wifi, Sparkles, X, ArrowRight, ArrowLeft, Zap, ShieldAlert, CheckCircle, XCircle, Clock, Plus, Trash2, ChevronDown, Loader2, Copy, Volume2, Pause, Download, Brain, Eye, EyeOff, Mic, MicOff, Globe, Paperclip, FileText, Menu, Minus, CheckSquare } from "lucide-react";
 import { Badge } from "../components/ui/Badge";
 import { MarkdownContent } from "../components/ui/MarkdownContent";
 import {
@@ -43,12 +43,16 @@ import {
   DEFAULT_CHAT_SCALE,
   CHAT_SCALE_STEP,
 } from "../lib/store";
+import { conversationToMarkdown, exportFilename } from "../lib/chatExport";
 import { copyToClipboard } from "../lib/clipboard";
 import { ToolCallsPanel } from "../components/ui/ToolCallsPanel";
 import { filterVisible } from "../lib/hiddenModels";
 import { useVoiceInput } from "../lib/useVoiceInput";
 import { Typewriter_v2 } from "../components/Typewriter_v2";
 import { AuthenticatedImage } from "../components/AuthenticatedImage";
+import { AgentAvatar } from "../components/AgentAvatar";
+import { UserAvatar } from "../components/UserAvatar";
+import { useWhoami } from "../lib/queries/authz";
 import { useMathPlugins } from "../lib/hooks/useMathPlugins";
 import {
   useCreateAgentSession,
@@ -1391,15 +1395,48 @@ export function useChatMessages(
 interface MessageBubbleProps {
   message: ChatMessage;
   usageFooter: string;
+  /** The agent this session belongs to — what the bubble's avatar renders.
+   *  Undefined before the agent list resolves, in which case the bubble keeps
+   *  the generic bot icon it used to show.
+   *
+   *  The identity arrives as two primitives rather than as one `AgentIdentity`
+   *  object: this component is memoised against the streaming re-renders, and
+   *  the agent list it is read from is rebuilt every poll, so an object prop
+   *  would be a new reference every 30 s and drop the memo each time. */
+  agentId?: string;
+  agentName?: string;
+  agentAvatarUrl?: string;
+  agentEmoji?: string;
+  /** The signed-in user, for the other side of the same bubble. Undefined while
+   *  `whoami` is in flight, or in no-auth mode, where the bubble keeps the
+   *  generic person icon it used to show.
+   *
+   *  Primitives for the reason the agent's are: this component is memoised. */
+  userName?: string;
+  userEmoji?: string;
+  /** `whoami.has_avatar`, which decides whether the picture is worth fetching.
+   *  Undefined means the daemon did not say, which is not the same as "no". */
+  userHasAvatar?: boolean;
   onCopy?: (messageId: string, content: string) => void;
   copied?: boolean;
   onSpeak?: (messageId: string, content: string) => void;
   isSpeaking?: boolean;
   ttsStatus?: "idle" | "loading" | "playing" | "paused";
   ttsAvailable?: boolean;
+  /**
+   * Selection state for export. `undefined` means selection is off entirely,
+   * which is the normal case — the checkbox column only exists while the
+   * operator is choosing what to take out, so a transcript is not permanently
+   * fringed with controls nobody uses.
+   */
+  selected?: boolean;
+  onToggleSelected?: (messageId: string) => void;
 }
 
-const MessageBubble = memo(function MessageBubble({ message, usageFooter, onCopy, copied, onSpeak, isSpeaking, ttsStatus, ttsAvailable }: MessageBubbleProps) {
+/** Exported for its test, like `AgentAppearanceSection` on the users page:
+ *  mounting `ChatPage` to reach it would mean standing up a session, a selected
+ *  agent and a streaming transcript to assert two lines of avatar selection. */
+export const MessageBubble = memo(function MessageBubble({ message, usageFooter, agentId, agentName, agentAvatarUrl, agentEmoji, userName, userEmoji, userHasAvatar, onCopy, copied, onSpeak, isSpeaking, ttsStatus, ttsAvailable, selected, onToggleSelected }: MessageBubbleProps) {
   const { t } = useTranslation();
   const isUser = message.role === "user";
   const isSystem = message.role === "system";
@@ -1438,16 +1475,66 @@ const MessageBubble = memo(function MessageBubble({ message, usageFooter, onCopy
     );
   }
 
+  const selectable = onToggleSelected !== undefined;
+
   return (
-    <motion.div className={`flex ${isUser ? "justify-end" : "justify-start"}`} variants={messageIn} initial="initial" animate="animate">
+    <motion.div
+      className={`flex items-start gap-2 ${isUser ? "justify-end" : "justify-start"}`}
+      variants={messageIn}
+      initial="initial"
+      animate="animate"
+    >
+      {/*
+        The checkbox only exists while the operator is choosing what to export.
+        A transcript permanently fringed with controls nobody uses is worse
+        than one extra click to start selecting, and `print:hidden` keeps it
+        out of the paper copy.
+      */}
+      {selectable && (
+        <label className="mt-1 shrink-0 cursor-pointer print:hidden">
+          <input
+            type="checkbox"
+            checked={selected ?? false}
+            onChange={() => onToggleSelected?.(message.id)}
+            aria-label={t("chat.export_select_message", { defaultValue: "Include this message in the export" })}
+            className="h-3.5 w-3.5 accent-brand"
+          />
+        </label>
+      )}
       <div className={`flex flex-col min-w-0 w-fit max-w-[90%] sm:max-w-[min(75%,70ch)] ${isUser ? "items-end" : "items-start"}`}>
         {/* Avatar + name */}
         <div className={`flex items-center gap-2 mb-1.5 ${isUser ? "self-end flex-row-reverse" : "self-start"}`}>
-          <div className={`h-7 w-7 rounded-lg flex items-center justify-center ${
-            isUser ? "bg-brand text-white shadow-sm" : "bg-surface border border-border-subtle"
-          }`}>
-            {isUser ? <User className="h-3.5 w-3.5" /> : <Bot className="h-3.5 w-3.5 text-brand" />}
-          </div>
+          {/* Both sides are real. The user's keeps the generic person icon only
+              when there is nobody to name — no-auth mode, or `whoami` still in
+              flight; otherwise `UserAvatar` draws their image, then their
+              emoji, then their initials. The agent's draws its own, from the
+              same three-step chain. */}
+          {isUser ? (
+            userName ? (
+              <UserAvatar
+                name={userName}
+                emoji={userEmoji}
+                hasAvatar={userHasAvatar}
+                size="sm"
+              />
+            ) : (
+              <div className="h-8 w-8 shrink-0 grid place-items-center rounded-full bg-brand text-white shadow-sm">
+                <User className="h-3.5 w-3.5" />
+              </div>
+            )
+          ) : agentId ? (
+            <AgentAvatar
+              agentId={agentId}
+              avatarUrl={agentAvatarUrl}
+              emoji={agentEmoji}
+              fallback={agentName ?? t("chat.bot")}
+              size="sm"
+            />
+          ) : (
+            <div className="h-8 w-8 shrink-0 grid place-items-center rounded-full bg-surface border border-border-subtle">
+              <Bot className="h-3.5 w-3.5 text-brand" />
+            </div>
+          )}
           <span className={`text-[11px] font-bold uppercase tracking-wider ${isUser ? "text-brand" : "text-text-dim"}`}>
             {isUser ? t("chat.you") : t("chat.bot")}
           </span>
@@ -1565,9 +1652,14 @@ const MessageBubble = memo(function MessageBubble({ message, usageFooter, onCopy
             // word would otherwise overflow, so normal text is untouched.
             <p className="whitespace-pre-line [overflow-wrap:anywhere]">{displayContent}</p>
           ) : (
+            // `diagrams` only here: this is the settled turn, where the fence
+            // is complete. The streaming view renders through `Typewriter_v2`
+            // and the thinking panel grows token by token, so a diagram in
+            // either would be re-parsed and re-laid-out on every frame.
             <MarkdownContent
               remarkPlugins={mathPlugins.remarkPlugins}
               rehypePlugins={mathPlugins.rehypePlugins}
+              diagrams
             >
               {displayContent}
             </MarkdownContent>
@@ -2498,8 +2590,10 @@ function ContextUsageIndicator({ agentId, sessionId }: { agentId: string; sessio
 }
 
 // Connection status bar with session dropdown
-function ConnectionBar({ agentName, isLoading, messageCount, onClear, onExport, wsConnected, modelName, modelProvider, sessions, activeSessionId, onSwitchSession, onNewSession, onDeleteSession, agentId, isHand, onModelChange, webSearchAugmentation, onWebSearchChange, webSearchAvailable, onOpenConfig, attached, attachedEventCount, onOpenMobileSheet }: {
-  agentName: string; isLoading: boolean; messageCount: number; onClear: () => void; onExport: () => void; wsConnected?: boolean; modelName?: string; modelProvider?: string;
+function ConnectionBar({ agentName, isLoading, messageCount, onClear, onExport, onStartExportSelection, wsConnected, modelName, modelProvider, sessions, activeSessionId, onSwitchSession, onNewSession, onDeleteSession, agentId, isHand, onModelChange, webSearchAugmentation, onWebSearchChange, webSearchAvailable, onOpenConfig, attached, attachedEventCount, onOpenMobileSheet }: {
+  agentName: string; isLoading: boolean; messageCount: number; onClear: () => void; onExport: () => void;
+  /** Enter the pick-messages mode. Absent means the surface does not offer it. */
+  onStartExportSelection?: () => void; wsConnected?: boolean; modelName?: string; modelProvider?: string;
   sessions?: SessionListItem[]; activeSessionId?: string;
   onSwitchSession?: (sessionId: string) => void; onNewSession?: () => void; onDeleteSession?: (sessionId: string) => void;
   /** Target agent id for the model picker PATCH. */
@@ -2997,6 +3091,20 @@ function ConnectionBar({ agentName, isLoading, messageCount, onClear, onExport, 
               <Download className="h-3 w-3" />
               <span className="hidden sm:inline">{t("chat.export", { defaultValue: "Export" })}</span>
             </button>
+            {/*
+              Separate from Export rather than a dropdown on it: the common case
+              is taking the whole conversation, and putting that behind a menu
+              would cost a click on every use to serve the rarer one.
+            */}
+            {onStartExportSelection && (
+              <button
+                onClick={onStartExportSelection}
+                title={t("chat.export_pick", { defaultValue: "Pick messages to export or print" })}
+                className="flex items-center gap-1.5 px-2 py-1.5 rounded-lg text-xs font-medium text-text-dim/60 hover:text-brand hover:bg-brand/5 transition-colors"
+              >
+                <CheckSquare className="h-3 w-3" />
+              </button>
+            )}
             <button onClick={onClear} className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium text-text-dim/60 hover:text-error hover:bg-error/5 transition-colors">
               <X className="h-3 w-3" />
               {t("chat.clear_chat")}
@@ -3141,6 +3249,23 @@ export function ChatPage() {
   // Message windowing: render only the last N messages to avoid DOM bloat in
   // long sessions. The user can load earlier messages with the button above.
   const [visibleCount, setVisibleCount] = useState(50);
+
+  // Export selection. `null` is "not choosing"; a Set is "choosing, and these
+  // are in". Kept as two states rather than an empty-Set sentinel so leaving
+  // selection mode cannot silently narrow a later export to whatever happened
+  // to be ticked minutes ago.
+  const [exportSelection, setExportSelection] = useState<Set<string> | null>(null);
+  const [exportThinking, setExportThinking] = useState(false);
+
+  const toggleExportSelected = useCallback((messageId: string) => {
+    setExportSelection((current) => {
+      if (current === null) return current;
+      const next = new Set(current);
+      if (next.has(messageId)) next.delete(messageId);
+      else next.add(messageId);
+      return next;
+    });
+  }, []);
   // Mobile-only: agent picker / session list slide-in sheet visibility.
   const [mobileSheetOpen, setMobileSheetOpen] = useState(false);
   const addToast = useUIStore((s) => s.addToast);
@@ -3241,6 +3366,10 @@ export function ChatPage() {
   }, [showHandAgents]);
 
   const agentsQuery = useAgents({ includeHands: showHandAgents });
+  // The signed-in user, for the other side of every message bubble. Resolved
+  // here rather than inside `MessageBubble` because that component is memoised
+  // and the name is the same for all of them.
+  const whoami = useWhoami();
   // Check if web search is available (any search API key configured)
   const webSearchAvailable = ((configQuery.data as Record<string, unknown>)?.web as Record<string, unknown> | undefined)?.search_available === true;
   const handsQuery = useActiveHandsWhen(showHandAgents);
@@ -3364,43 +3493,6 @@ export function ChatPage() {
   // Export current conversation as a markdown file. Keeps the local
   // timestamp, role, content, and (when present) tool call summaries
   // so operators can archive or share transcripts.
-  const handleExport = useCallback(() => {
-    if (messages.length === 0) return;
-    const agentName = agents.find(a => a.id === selectedAgentId)?.name ?? selectedAgentId;
-    const lines: string[] = [
-      `# Conversation with ${agentName}`,
-      "",
-      `_Exported: ${new Date().toISOString()}_`,
-      `_${messages.length} messages_`,
-      "",
-      "---",
-      "",
-    ];
-    for (const m of messages) {
-      const ts = m.timestamp instanceof Date ? m.timestamp.toISOString() : new Date(m.timestamp as string).toISOString();
-      const role = m.role === "assistant" ? agentName : m.role;
-      lines.push(`### ${role} · ${ts}`);
-      lines.push("");
-      if (m.content) {
-        lines.push(m.content);
-        lines.push("");
-      }
-      if (m.tools && m.tools.length > 0) {
-        lines.push(`_Tools: ${m.tools.map(t => t.name).join(", ")}_`);
-        lines.push("");
-      }
-    }
-    const blob = new Blob([lines.join("\n")], { type: "text/markdown;charset=utf-8" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    const date = new Date().toISOString().slice(0, 10);
-    a.download = `chat-${agentName.replace(/[^a-zA-Z0-9-_]/g, "_")}-${date}.md`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    setTimeout(() => URL.revokeObjectURL(url), 1000);
-  }, [messages, agents, selectedAgentId]);
   const { pendingApprovals, removeApproval } = useApprovalPoller(selectedAgentId || null);
   const selectedAgent = agents.find(a => a.id === selectedAgentId);
 
@@ -3441,6 +3533,79 @@ export function ChatPage() {
   // in the response and handleBackendNewSession pins the URL, at which point
   // this becomes non-null and the highlight is correct.
   const activeSessionId = deriveDropdownActiveSessionId(urlSessionId);
+
+  const runExport = useCallback(
+    (mode: "download" | "print") => {
+      const chosen =
+        exportSelection === null
+          ? messages
+          : messages.filter((m) => exportSelection.has(m.id));
+      // Nothing ticked means nothing to take, and silently exporting the whole
+      // conversation instead would be the opposite of what was asked for.
+      if (chosen.length === 0) {
+        addToast(
+          t("chat.export_nothing_selected", {
+            defaultValue: "Select at least one message to export.",
+          }),
+          "info",
+        );
+        return;
+      }
+      const exportedAt = new Date();
+      const markdown = conversationToMarkdown(chosen, {
+        agentName: selectedAgent?.name ?? t("chat.bot"),
+        sessionId: activeSessionId,
+        includeThinking: exportThinking,
+        exportedAt,
+      });
+
+      if (mode === "print") {
+        // Printing the live page would carry the sidebar, the composer and
+        // whatever is scrolled out of view. A plain document of exactly the
+        // chosen messages is what someone means by "print the conversation".
+        const w = window.open("", "_blank", "noopener,noreferrer");
+        if (!w) {
+          addToast(
+            t("chat.export_popup_blocked", {
+              defaultValue: "Allow pop-ups to print the conversation.",
+            }),
+            "error",
+          );
+          return;
+        }
+        w.document.title = exportFilename(selectedAgent?.name ?? "conversation", exportedAt);
+        // `textContent`, not innerHTML: the transcript is model output, and
+        // this window is being built by hand rather than by React.
+        const pre = w.document.createElement("pre");
+        pre.style.whiteSpace = "pre-wrap";
+        pre.style.wordBreak = "break-word";
+        pre.style.fontFamily = "ui-monospace, monospace";
+        pre.style.fontSize = "12px";
+        pre.textContent = markdown;
+        w.document.body.appendChild(pre);
+        w.print();
+        return;
+      }
+
+      const blob = new Blob([markdown], { type: "text/markdown;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = exportFilename(selectedAgent?.name ?? "conversation", exportedAt);
+      a.click();
+      // Revoking immediately can cancel the download in Safari; one turn of
+      // the event loop is enough and the object is small.
+      setTimeout(() => URL.revokeObjectURL(url), 0);
+    },
+    [messages, exportSelection, exportThinking, selectedAgent, activeSessionId, addToast, t],
+  );
+
+  // Kept as a one-click "export everything" so the button behaves as it always
+  // has; `runExport` is the same path with a selection applied.
+  const handleExport = useCallback(() => {
+    if (messages.length === 0) return;
+    runExport("download");
+  }, [messages.length, runExport]);
   // Best-effort resolved session id, used only for features that need *some*
   // session reference (SSE attach viewer) but do not imply a UI "active"
   // guarantee.  Falls back to the most-recently-created session when the URL
@@ -3460,6 +3625,57 @@ export function ChatPage() {
 
   // Sidebar clicks update the URL — no switch_agent_session POST. Each tab's
   // URL carries its own sessionId, and the send path forwards it per-request.
+  // ── Session tabs ────────────────────────────────────────────────────
+  //
+  // The strip is a UI list, not server state: a session exists whether or not
+  // it has a tab, and closing one must never delete it. Visiting a session
+  // opens its tab, which is what makes "several conversations at once" work
+  // without a second way to create them.
+  const openChatTabs = useUIStore((s) => s.openChatTabs);
+  const openChatTab = useUIStore((s) => s.openChatTab);
+  const closeChatTab = useUIStore((s) => s.closeChatTab);
+  const pruneChatTabs = useUIStore((s) => s.pruneChatTabs);
+  const agentTabs = useMemo(
+    () => (selectedAgentId ? (openChatTabs[selectedAgentId] ?? []) : []),
+    [openChatTabs, selectedAgentId],
+  );
+
+  useEffect(() => {
+    if (selectedAgentId && activeSessionId) openChatTab(selectedAgentId, activeSessionId);
+  }, [selectedAgentId, activeSessionId, openChatTab]);
+
+  useEffect(() => {
+    // A session deleted from the dropdown, another browser tab, or the CLI
+    // leaves a tab pointing at nothing. Only prune once the list has actually
+    // loaded — an empty `sessions` while the query is in flight would close
+    // every tab the operator has open.
+    const loaded = sessionsQuery.data;
+    if (!selectedAgentId || !loaded || loaded.length === 0) return;
+    pruneChatTabs(
+      selectedAgentId,
+      new Set(loaded.map((session) => session.session_id).filter((id): id is string => !!id)),
+    );
+  }, [selectedAgentId, sessionsQuery.data, pruneChatTabs]);
+
+  const handleCloseTab = useCallback(
+    (sessionId: string) => {
+      if (!selectedAgentId) return;
+      const remaining = agentTabs.filter((id) => id !== sessionId);
+      closeChatTab(selectedAgentId, sessionId);
+      // Closing the one you are looking at has to land somewhere. The
+      // neighbour, not "no session" — dropping the param would re-derive the
+      // server-active session and could reopen the tab just closed.
+      if (sessionId === activeSessionId && remaining.length > 0) {
+        navigate({
+          to: "/chat",
+          search: { agentId: selectedAgentId, sessionId: remaining[remaining.length - 1] },
+          replace: true,
+        });
+      }
+    },
+    [selectedAgentId, agentTabs, activeSessionId, closeChatTab, navigate],
+  );
+
   const handleSwitchSession = useCallback(async (sessionId: string) => {
     if (!selectedAgentId) return;
     navigate({
@@ -3555,12 +3771,27 @@ export function ChatPage() {
           : "hover:bg-surface-hover"
       }`}
     >
-      <div className={`relative h-10 w-10 rounded-xl flex items-center justify-center font-black text-lg ${
-        selectedAgentId === agent.id ? "bg-white/20"
-        : (agent.state || "").toLowerCase() === "running" ? "bg-linear-to-br from-brand/20 to-accent/20 text-brand"
-        : "bg-main text-text-dim/40"
-      }`}>
-        {displayName.charAt(0).toUpperCase()}
+      {/* The slot the first letter used to sit in. `size="md"` is the same
+          `h-10 w-10` the chip used, but two things do shift: the silhouette
+          becomes `rounded-full` — identity is a circle everywhere else in the
+          SPA — and the fallback initial drops from `text-lg` to `text-sm`.
+          The three background states are restated because the avatar's own
+          `bg-brand/10 text-brand` is invisible on the `bg-brand` selected row. */}
+      <div className="relative shrink-0">
+        <AgentAvatar
+          agentId={agent.id}
+          avatarUrl={agent.identity?.avatar_url}
+          emoji={agent.identity?.emoji}
+          fallback={displayName}
+          size="md"
+          className={
+            selectedAgentId === agent.id
+              ? "bg-white/20 text-white"
+              : (agent.state || "").toLowerCase() === "running"
+                ? "bg-transparent bg-linear-to-br from-brand/20 to-accent/20 text-brand"
+                : "bg-main text-text-dim/40"
+          }
+        />
         {(agent.state || "").toLowerCase() === "running" ? (
           <span className="absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 rounded-full bg-success border-2 border-white dark:border-surface animate-pulse" />
         ) : (
@@ -3778,6 +4009,7 @@ export function ChatPage() {
               messageCount={messages.length}
               onClear={() => { void clearHistory(); }}
               onExport={handleExport}
+              onStartExportSelection={() => setExportSelection(new Set(messages.map((m) => m.id)))}
               wsConnected={wsConnected}
               modelName={selectedAgent?.model_name}
               modelProvider={selectedAgent?.model_provider}
@@ -3807,6 +4039,62 @@ export function ChatPage() {
                 } catch { /* Config update failure — non-critical */ }
               }}
             />
+          )}
+
+          {/*
+            Session tabs. Only once there are two — a single tab is a label
+            pretending to be a control, and the header already names the
+            conversation you are in.
+          */}
+          {agentTabs.length > 1 && (
+            <div
+              role="tablist"
+              aria-label={t("chat.session_tabs", { defaultValue: "Open conversations" })}
+              className="flex items-center gap-1 overflow-x-auto border-b border-border-subtle/50 px-2 py-1 scrollbar-thin"
+            >
+              {agentTabs.map((sessionId) => {
+                const isActive = sessionId === activeSessionId;
+                return (
+                  <div
+                    key={sessionId}
+                    className={`group flex shrink-0 items-center gap-1 rounded-t-lg border-b-2 px-2 py-1 text-[11px] transition-colors ${
+                      isActive
+                        ? "border-brand bg-brand/5 text-brand font-bold"
+                        : "border-transparent text-text-dim hover:text-text-main hover:bg-surface-hover"
+                    }`}
+                  >
+                    <button
+                      type="button"
+                      role="tab"
+                      aria-selected={isActive}
+                      onClick={() => { if (!isActive) void handleSwitchSession(sessionId); }}
+                      className="max-w-[16ch] truncate"
+                    >
+                      {pickSessionDropdownLabel(sessionId, sessionsQuery.data) ?? sessionId.slice(0, 8)}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleCloseTab(sessionId)}
+                      aria-label={t("chat.session_tab_close", { defaultValue: "Close this tab" })}
+                      title={t("chat.session_tab_close_hint", {
+                        defaultValue: "Closes the tab. The conversation is kept.",
+                      })}
+                      className="rounded p-0.5 opacity-0 transition-opacity hover:text-error focus-visible:opacity-100 group-hover:opacity-100"
+                    >
+                      <X className="h-2.5 w-2.5" />
+                    </button>
+                  </div>
+                );
+              })}
+              <button
+                type="button"
+                onClick={() => { void handleNewSession(); }}
+                aria-label={t("chat.new_session", { defaultValue: "New session" })}
+                className="shrink-0 rounded-lg p-1 text-text-dim hover:text-brand hover:bg-surface-hover"
+              >
+                <Plus className="h-3 w-3" />
+              </button>
+            </div>
           )}
 
           {/*
@@ -3859,18 +4147,88 @@ export function ChatPage() {
                     {t("chat.load_earlier_messages", { count: messages.length - visibleCount, defaultValue: `Load ${messages.length - visibleCount} earlier messages` })}
                   </button>
                 )}
+                {exportSelection !== null && (
+                  <div className="sticky top-0 z-10 flex flex-wrap items-center gap-2 rounded-xl border border-brand/30 bg-surface/95 px-3 py-2 backdrop-blur print:hidden">
+                    <span className="text-[11px] font-bold text-brand">
+                      {t("chat.export_selected_count", {
+                        count: exportSelection.size,
+                        defaultValue: `${exportSelection.size} selected`,
+                      })}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => setExportSelection(new Set(messages.map((m) => m.id)))}
+                      className="rounded-lg px-2 py-1 text-[11px] text-text-dim hover:text-brand hover:bg-surface-hover"
+                    >
+                      {t("chat.export_select_all", { defaultValue: "Select all" })}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setExportSelection(new Set())}
+                      className="rounded-lg px-2 py-1 text-[11px] text-text-dim hover:text-brand hover:bg-surface-hover"
+                    >
+                      {t("chat.export_select_none", { defaultValue: "Clear" })}
+                    </button>
+                    <label className="flex items-center gap-1.5 text-[11px] text-text-dim">
+                      <input
+                        type="checkbox"
+                        checked={exportThinking}
+                        onChange={(e) => setExportThinking(e.target.checked)}
+                        className="h-3 w-3 accent-brand"
+                      />
+                      {/* Off by default: reasoning traces are long, and they are
+                          the part most likely to carry something the operator
+                          would not paste elsewhere. */}
+                      {t("chat.export_include_reasoning", { defaultValue: "Include reasoning" })}
+                    </label>
+                    <div className="ml-auto flex items-center gap-1.5">
+                      <button
+                        type="button"
+                        onClick={() => runExport("download")}
+                        className="inline-flex items-center gap-1 rounded-lg border border-brand/30 bg-brand/10 px-2 py-1 text-[11px] font-bold text-brand hover:bg-brand/20"
+                      >
+                        <Download className="h-3 w-3" />
+                        {t("chat.export_as_markdown_short", { defaultValue: "Markdown" })}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => runExport("print")}
+                        className="rounded-lg border border-border-subtle px-2 py-1 text-[11px] font-bold text-text-dim hover:text-brand"
+                      >
+                        {t("chat.export_print", { defaultValue: "Print" })}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setExportSelection(null)}
+                        aria-label={t("chat.export_cancel", { defaultValue: "Cancel export" })}
+                        className="rounded-lg p-1 text-text-dim hover:text-brand"
+                      >
+                        <X className="h-3 w-3" />
+                      </button>
+                    </div>
+                  </div>
+                )}
                 <CompactionSummaryBanner summary={compactedSummary} isCompacting={isCompacting} />
                 {messages.slice(-visibleCount).map(msg => (
                   <MessageBubble
                     key={msg.id}
                     message={msg}
                     usageFooter={usageFooter}
+                    agentId={selectedAgent?.id}
+                    agentName={selectedAgent?.name}
+                    agentAvatarUrl={selectedAgent?.identity?.avatar_url}
+                    agentEmoji={selectedAgent?.identity?.emoji}
+                    userName={whoami.data?.name}
+                    userEmoji={whoami.data?.emoji}
+                    userHasAvatar={whoami.data?.has_avatar}
                     onCopy={handleCopy}
                     copied={copiedMessageId === msg.id}
                     onSpeak={ttsAvailable ? tts.toggle : undefined}
                     isSpeaking={tts.speakingMessageId === msg.id}
                     ttsStatus={tts.speakingMessageId === msg.id ? tts.status : "idle"}
                     ttsAvailable={ttsAvailable}
+                    selected={exportSelection?.has(msg.id)}
+                    onToggleSelected={exportSelection === null ? undefined : toggleExportSelected}
                   />
                 ))}
                 {/* Inline approval cards for pending requests */}

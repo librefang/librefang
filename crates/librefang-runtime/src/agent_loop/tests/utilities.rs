@@ -239,6 +239,7 @@ async fn test_tool_failure_allows_retry_on_next_iteration() {
     let mut session = librefang_memory::session::Session {
         id: librefang_types::agent::SessionId::new(),
         agent_id,
+        parent_session_id: None,
         messages: Vec::new(),
         context_window_tokens: 0,
         label: None,
@@ -303,6 +304,7 @@ async fn test_repeated_tool_failures_cap_exits_loop() {
     let mut session = librefang_memory::session::Session {
         id: librefang_types::agent::SessionId::new(),
         agent_id,
+        parent_session_id: None,
         messages: Vec::new(),
         context_window_tokens: 0,
         label: None,
@@ -366,6 +368,7 @@ async fn test_streaming_tool_failure_allows_retry() {
     let mut session = librefang_memory::session::Session {
         id: librefang_types::agent::SessionId::new(),
         agent_id,
+        parent_session_id: None,
         messages: Vec::new(),
         context_window_tokens: 0,
         label: None,
@@ -432,6 +435,7 @@ async fn test_streaming_repeated_tool_failures_cap_exits() {
     let mut session = librefang_memory::session::Session {
         id: librefang_types::agent::SessionId::new(),
         agent_id,
+        parent_session_id: None,
         messages: Vec::new(),
         context_window_tokens: 0,
         label: None,
@@ -768,6 +772,7 @@ fn fresh_session() -> librefang_memory::session::Session {
     librefang_memory::session::Session {
         id: librefang_types::agent::SessionId::new(),
         agent_id: librefang_types::agent::AgentId::new(),
+        parent_session_id: None,
         messages: Vec::new(),
         context_window_tokens: 0,
         label: None,
@@ -2021,6 +2026,7 @@ async fn test_normal_turn_persists_session_as_incognito_control() {
     let mut session = librefang_memory::session::Session {
         id: session_id,
         agent_id,
+        parent_session_id: None,
         messages: Vec::new(),
         context_window_tokens: 0,
         label: None,
@@ -2095,6 +2101,7 @@ async fn test_heartbeat_pruning_keeps_new_messages_start_on_current_turn() {
     let mut session = librefang_memory::session::Session {
         id: session_id,
         agent_id,
+        parent_session_id: None,
         messages,
         context_window_tokens: 0,
         label: None,
@@ -2170,6 +2177,7 @@ async fn test_incognito_skips_session_save_on_end_turn() {
     let mut session = librefang_memory::session::Session {
         id: session_id,
         agent_id,
+        parent_session_id: None,
         messages: Vec::new(),
         context_window_tokens: 0,
         label: None,
@@ -2251,6 +2259,7 @@ async fn test_incognito_skips_proactive_memory_auto_memorize() {
     let mut session = librefang_memory::session::Session {
         id: librefang_types::agent::SessionId::new(),
         agent_id,
+        parent_session_id: None,
         messages: Vec::new(),
         context_window_tokens: 0,
         label: None,
@@ -2333,6 +2342,7 @@ async fn test_normal_turn_auto_memorizes_proactive_memory_control() {
     let mut session = librefang_memory::session::Session {
         id: librefang_types::agent::SessionId::new(),
         agent_id,
+        parent_session_id: None,
         messages: Vec::new(),
         context_window_tokens: 0,
         label: None,
@@ -2736,5 +2746,53 @@ fn record_loop_guard_outcome_does_not_pace_ordinary_calls_that_mention_status() 
     assert!(
         matches!(&verdict, LoopGuardVerdict::Block(msg) if msg.contains("identical results")),
         "the fourth identical listing must hit the strict outcome threshold, got: {verdict:?}"
+    );
+}
+
+// --- Tests for build_extra_body (#8112 typed sampling fields) ---
+#[test]
+fn test_build_extra_body_merges_typed_sampling_fields() {
+    let model = ModelConfig {
+        top_p: Some(0.9),
+        frequency_penalty: Some(0.5),
+        presence_penalty: Some(-0.5),
+        ..Default::default()
+    };
+    let body = build_extra_body(&model).expect("typed sampling fields must produce a body");
+    // `f32` widens to `f64` inside `serde_json::Value`, so compare numerically
+    // with a tolerance instead of against the `f64` literal.
+    let v = |k: &str| body.get(k).and_then(serde_json::Value::as_f64).unwrap();
+    assert!((v("top_p") - 0.9).abs() < 1e-6);
+    assert!((v("frequency_penalty") - 0.5).abs() < 1e-6);
+    assert!((v("presence_penalty") - (-0.5)).abs() < 1e-6);
+}
+
+#[test]
+fn test_build_extra_body_typed_field_overrides_extra_params_key() {
+    // The agent manifest's typed field is the operator's intent; a stale
+    // `extra_params` key of the same name (e.g. left by an older form or a
+    // model-catalog override) must not win.
+    let model = ModelConfig {
+        top_p: Some(0.9),
+        extra_params: BTreeMap::from([("top_p".to_string(), serde_json::json!(0.1))]),
+        ..Default::default()
+    };
+    let body = build_extra_body(&model).expect("non-empty body");
+    let v = body
+        .get("top_p")
+        .and_then(serde_json::Value::as_f64)
+        .unwrap();
+    assert!(
+        (v - 0.9).abs() < 1e-6,
+        "typed field must override the legacy extra_params key"
+    );
+}
+
+#[test]
+fn test_build_extra_body_none_sends_nothing() {
+    let model = ModelConfig::default();
+    assert!(
+        build_extra_body(&model).is_none(),
+        "a ModelConfig without typed sampling fields and without extra_params must produce no extra_body"
     );
 }

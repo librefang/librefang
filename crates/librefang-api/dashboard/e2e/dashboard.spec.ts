@@ -2,7 +2,14 @@ import { expect, test } from "@playwright/test";
 
 test("loads dashboard shell", async ({ page }) => {
   await page.goto("/");
-  await expect(page.getByText("LibreFang")).toBeVisible();
+  // The sidebar's wordmark, not any text containing the name: the partner
+  // banner ("LibreFang × EveryAPI"), the breadcrumb and the mobile header's
+  // copy also match, and strict mode rejects the ambiguous locator rather than
+  // picking one. `complementary` is the sidebar; the mobile header is `banner`
+  // and hidden at this viewport.
+  await expect(
+    page.getByRole("complementary").getByText("librefang", { exact: true }),
+  ).toBeVisible();
   await expect(page.getByRole("link", { name: "Overview" })).toBeVisible();
   await expect(page.getByRole("link", { name: "Agents" })).toBeVisible();
   await expect(page.getByRole("link", { name: "Sessions" })).toBeVisible();
