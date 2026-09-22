@@ -182,6 +182,18 @@ async fn non_owner_cannot_read_agent_scoped_resources() {
             format!("/api/agents/{aid}/sessions/{sid}/trajectory"),
             None,
         ),
+        // This one was missing from the inventory, and that is how it went
+        // unnoticed: it is the only agent-scoped read in `observability.rs`
+        // that answered on the agent's existence alone, so a Viewer could
+        // read another user's manifest history. The dedicated test in
+        // `agent_manifest_history_authz_test.rs` covers the route by hand-
+        // injecting the extension; this entry is what exercises it through
+        // the real middleware, which is the layer that let it through.
+        (
+            Method::GET,
+            format!("/api/agents/{aid}/manifest-history"),
+            None,
+        ),
     ];
 
     let mut failures = Vec::new();

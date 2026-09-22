@@ -4248,6 +4248,41 @@ mod tests {
         assert_eq!(get_schema_version(&conn).unwrap(), SCHEMA_VERSION);
     }
 
+    /// v58 is a no-op against a database that already has `manifest_versions`.
+    ///
+    /// This is not hypothetical. v58 and v60 create the same table with
+    /// byte-identical DDL, and pre-release builds created it under numbers of
+    /// their own, so a database reaching this rung with the table already
+    /// present is the ordinary case rather than the exception.
+    /// `CREATE TABLE IF NOT EXISTS` plus `INSERT OR IGNORE` is what makes that
+    /// a no-op instead of "table manifest_versions already exists" on boot —
+    /// this test is what stops someone simplifying either clause away.
+    ///
+    /// `ManifestVersionStore` assumes the table exists on every boot, which is
+    /// why the guard is pinned from this PR rather than left implicit.
+    #[test]
+    fn test_migrate_v58_is_a_noop_when_the_table_already_exists() {
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+        assert!(try_table_exists(&conn, "manifest_versions").unwrap());
+
+        // Second run, directly and then through the ladder.
+        migrate_v58(&conn).expect("re-running v58 on an existing table must not error");
+        run_migrations(&conn).expect("a second full run must not error");
+        assert_eq!(get_schema_version(&conn).unwrap(), SCHEMA_VERSION);
+
+        // The audit row is recorded exactly once — `INSERT OR IGNORE` rather
+        // than a second row claiming the same version was applied twice.
+        let audit_rows: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM migrations WHERE version = 58",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(audit_rows, 1, "v58 must record exactly one migrations row");
+    }
+
     #[test]
     fn test_migrate_v10_partial_apply_does_not_panic() {
         // #3452 — simulate a DB that crashed mid-v10 with the agent_id columns

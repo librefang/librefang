@@ -112,12 +112,21 @@ export function useStopAgent() {
   });
 }
 
+/**
+ * Suspend an agent.
+ *
+ * Invalidates `detail(agentId)` as well as the list because suspending
+ * rewrites `agent.toml` and records a `suspend` manifest-version snapshot
+ * (#8041) — and `manifestHistory` lives under the detail key, so the open
+ * History tab picks up the row this request just wrote.
+ */
 export function useSuspendAgent() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: suspendAgent,
-    onSuccess: () => {
+    onSuccess: (_data, agentId) => {
       qc.invalidateQueries({ queryKey: agentKeys.lists() });
+      qc.invalidateQueries({ queryKey: agentKeys.detail(agentId) });
       qc.invalidateQueries({ queryKey: overviewKeys.snapshot() });
     },
   });
@@ -157,12 +166,14 @@ export function useDeleteAgent() {
   });
 }
 
+/** Resume an agent. Same invalidation set as `useSuspendAgent`, for the same reason. */
 export function useResumeAgent() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: resumeAgent,
-    onSuccess: () => {
+    onSuccess: (_data, agentId) => {
       qc.invalidateQueries({ queryKey: agentKeys.lists() });
+      qc.invalidateQueries({ queryKey: agentKeys.detail(agentId) });
       qc.invalidateQueries({ queryKey: overviewKeys.snapshot() });
     },
   });
@@ -194,6 +205,7 @@ export function usePatchAgent() {
     }) => patchAgent(agentId, body),
     onSuccess: (_data, variables) => {
       qc.invalidateQueries({ queryKey: agentKeys.lists() });
+      // Reaches `manifestHistory` too — it is nested under this key.
       qc.invalidateQueries({ queryKey: agentKeys.detail(variables.agentId) });
     },
   });
@@ -216,6 +228,7 @@ export function usePatchAgentRuntimeConfig() {
       : patchAgentConfig(agentId, config),
     onSuccess: (_data, variables) => {
       qc.invalidateQueries({ queryKey: agentKeys.lists() });
+      // Reaches `manifestHistory` too — it is nested under this key.
       qc.invalidateQueries({ queryKey: agentKeys.detail(variables.agentId) });
       if (variables.isHand) {
         qc.invalidateQueries({ queryKey: handKeys.details() });
@@ -231,7 +244,9 @@ export function usePatchAgentRuntimeConfig() {
  * - `agentKeys.lists()` because the model/provider badge surfaced in the
  *   agent list row comes from the live manifest.
  * - `agentKeys.detail(agentId)` because the config panel bound to this
- *   hook reads the same manifest fields.
+ *   hook reads the same manifest fields — and, through the nested
+ *   `manifestHistory` key, the History tab, since restoring the HAND.toml
+ *   defaults rewrites the manifest and records a snapshot.
  * - `handKeys.details()` because the hand-detail view shows per-role
  *   runtime override state; the coordinator agent's clear is observable
  *   through any cached hand detail that references this agent's role.

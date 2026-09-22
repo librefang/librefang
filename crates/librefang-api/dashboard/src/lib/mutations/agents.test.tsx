@@ -134,6 +134,14 @@ describe("usePatchAgent", () => {
     expect(invalidateSpy).toHaveBeenCalledWith({
       queryKey: agentKeys.detail("agent-1"),
     });
+    // #8041: a rename can accompany other manifest edits recorded on the
+    // same persist, and the History tab must not show stale data right
+    // after the request that produced the newest snapshot. No separate
+    // invalidation is needed for that — `manifestHistory` is nested under
+    // the detail key, so the call above reaches it.
+    expect(
+      agentKeys.manifestHistory("agent-1").slice(0, agentKeys.detail("agent-1").length),
+    ).toEqual(agentKeys.detail("agent-1"));
   });
 });
 
@@ -167,6 +175,11 @@ describe("usePatchAgentRuntimeConfig", () => {
     expect(invalidateSpy).toHaveBeenCalledWith({
       queryKey: agentKeys.detail("agent-1"),
     });
+    // #8041: model/runtime config changes are recorded to manifest history
+    // too, and the detail invalidation above reaches the nested history key.
+    expect(
+      agentKeys.manifestHistory("agent-1").slice(0, agentKeys.detail("agent-1").length),
+    ).toEqual(agentKeys.detail("agent-1"));
     // Non-hand mutations MUST NOT dirty hand-detail caches — asserting this
     // guards against regressions that widen invalidation unnecessarily.
     expect(invalidateSpy).not.toHaveBeenCalledWith({
@@ -300,6 +313,35 @@ describe.each([
 
     expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: agentKeys.lists() });
     expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: overviewKeys.snapshot() });
+  });
+});
+
+// #8041: suspend/resume rewrite `agent.toml` and record their own manifest
+// version snapshot on the kernel side, so an open History tab is stale the
+// moment the request returns. Both used to invalidate only `lists()` and
+// `overviewKeys.snapshot()` — neither of which is a prefix of the history
+// key — so the row the request had just written stayed invisible.
+describe.each([
+  { name: "useSuspendAgent", hook: useSuspendAgent },
+  { name: "useResumeAgent", hook: useResumeAgent },
+])("$name refreshes the manifest history it just wrote to", ({ hook }) => {
+  it("invalidates a key that prefixes agentKeys.manifestHistory", async () => {
+    const { queryClient, wrapper } = createQueryClientWrapper();
+    const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");
+
+    const { result } = renderHook(() => hook(), { wrapper });
+    await result.current.mutateAsync("agent-1");
+
+    const history = agentKeys.manifestHistory("agent-1");
+    const invalidated = invalidateSpy.mock.calls.some(([arg]) => {
+      const key = arg?.queryKey as readonly unknown[] | undefined;
+      return (
+        !!key &&
+        key.length <= history.length &&
+        key.every((segment, i) => segment === history[i])
+      );
+    });
+    expect(invalidated).toBe(true);
   });
 });
 
