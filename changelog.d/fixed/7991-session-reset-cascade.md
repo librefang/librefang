@@ -1,0 +1,2 @@
+Stop `reset_session` / `reboot_session` from cascade-deleting a session's whole descendant subtree.
+They reused the same delete primitive `DELETE /api/sessions/{id}` uses to intentionally remove a session's sub-agent runs, so resetting a chat's own history silently took every session it had delegated to down with it; the dashboard "delete session" affordance keeps the cascade and now reports every id it actually removed instead of a bare 204. (#7991) (@DaBlitzStein)

@@ -67,6 +67,7 @@ fn api_v1_routes(webhook_body_limit: usize) -> Router<Arc<AppState>> {
         .merge(routes::goals::router())
         .merge(routes::groups::router())
         .merge(routes::inbox::router())
+        .merge(routes::knowledge::router())
         .merge(routes::media::router())
         .merge(routes::prompts::router())
         .merge(routes::terminal::router())

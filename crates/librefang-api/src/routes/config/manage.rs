@@ -801,10 +801,10 @@ fn redacted_config_json(
         // rather than field-by-field because the section carries no secret and
         // no redaction marker — the GitHub token stays in the env / vault, so
         // there is nothing here to scrub on the way out. `api_base_url`,
-        // `fork_owner` and `base_branch` are still shown: it is the
-        // *destination* each names, not the section, that carries the
-        // credential, and all three are write-blocked for exactly that reason
-        // (#8179 review).
+        // `fork_owner`, `base_branch` and `release_org` are still shown: it is
+        // the *destination* each names, not the section, that carries the
+        // credential, and all four are write-blocked for exactly that reason
+        // (#8179 review, #8180).
         "promotion": serde_json::to_value(&config.skills.promotion)
             .unwrap_or_else(|_| serde_json::json!({})),
     });

@@ -1,0 +1,3 @@
+The registry-diff table now renders list and empty values the way the rest of the dashboard does, instead of as raw JSON.
+Six of the twelve fields it compares are string lists, so the array case is the common one: a differing `tools` arrived as `["read_file","write_file"]` and spent most of a 200px truncating cell on quotes and brackets, hiding the entries the row exists to show.
+A `provider` or `model` that is not set arrived as the literal word `null`, which reads as a value the operator chose rather than one that is absent; it now renders as an em dash, the same way an empty list already did. (#8042) (@DaBlitzStein)

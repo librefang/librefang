@@ -4615,6 +4615,7 @@ dependencies = [
  "tracing-opentelemetry",
  "tracing-subscriber",
  "unic-langid",
+ "urlencoding",
  "uuid",
  "walkdir",
  "which",

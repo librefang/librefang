@@ -30,6 +30,27 @@ Before it existed every agent carried a concrete `4096` / `0.7` whether or not a
 System defaults are `DEFAULT_MODEL_MAX_TOKENS` (4096) and `DEFAULT_MODEL_TEMPERATURE` (0.7).
 The other three have no default: unset means the parameter is simply not sent.
 
+### How the preferences reach the wire
+
+`max_tokens`, `temperature`, `top_p`, `frequency_penalty` and `presence_penalty` are typed fields on `CompletionRequest` (`crates/librefang-llm-driver/src/lib.rs`), and each driver places them where its own API reads them (#8290).
+They used to travel as `top_p` / `frequency_penalty` / `presence_penalty` entries in `extra_params`, which only the OpenAI-format and Ollama drivers merge into the body: Anthropic and Gemini dropped them without a word, the OpenAI-format driver forwarded them to models that reject them, and Ollama posted them at the top level of the body where no sampler reads them.
+
+| Driver | `top_p` | `frequency_penalty` / `presence_penalty` |
+|---|---|---|
+| OpenAI-format | top-level field | top-level fields |
+| Anthropic | top-level field, sent **instead of** `temperature` | not sent — the Messages API has no such parameters |
+| Gemini / Vertex AI | `generationConfig.topP` | not sent — support varies by model and a model without it answers 400 |
+| Ollama (native) | `options.top_p` | `options.frequency_penalty` / `options.presence_penalty` |
+
+The gate is per model as well as per provider.
+The OpenAI-format driver sends none of the three to the reasoning models that reject `temperature` (o-series, `gpt-5-mini`) or to the Kimi K2 line, whose samplers are fixed.
+The Anthropic driver sends `top_p` only to the models that still accept sampling parameters, and never on an extended-thinking turn.
+Claude 4 and newer reject `temperature` and `top_p` in one request; `temperature` is always populated on the request (the system default fills it when nobody chose one) while `top_p` is present only when someone set it, so a set `top_p` wins.
+Every parameter a driver drops is logged at `debug` with the provider and model.
+
+`extra_params` stays the escape hatch for everything else, and on the drivers that merge it an explicit entry still overrides the typed value of the same name.
+`ResolvedInferenceParams::apply_to` removes any `top_p` / `frequency_penalty` / `presence_penalty` entry from `extra_params`, so a stale copy cannot bypass the gate.
+
 ### Endpoint facts — what the transport will accept
 
 `reasoning_effort`, plus the `use_max_completion_tokens` / `force_max_tokens` / `no_system_role` transport flags.

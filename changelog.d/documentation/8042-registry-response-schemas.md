@@ -1,0 +1,2 @@
+The `registry-diff` and `restore` agent-type routes now publish a response schema in the generated OpenAPI spec, matching every sibling route in the same module.
+Both declared only a description and no `body`, so the spec and the four generated SDKs typed the 200 as an untyped blob and a client could not reach `identical`, `diffs` or the restored manifest without hand-parsing the response. (#8042) (@DaBlitzStein)

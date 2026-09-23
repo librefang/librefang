@@ -109,6 +109,8 @@ pub struct LogsState {
     pub auto_refresh: bool,
     pub list_state: ListState,
     pub loading: bool,
+    /// The last fetch failure, drawn in place of the key hints until the next successful load clears it.
+    pub status_msg: String,
     pub tick: usize,
     pub poll_tick: usize,
 }
@@ -129,6 +131,7 @@ impl LogsState {
             auto_refresh: true,
             list_state: ListState::default(),
             loading: false,
+            status_msg: String::new(),
             tick: 0,
             poll_tick: 0,
         }
@@ -438,7 +441,7 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut LogsState) {
 
     // ── Hints ──
     f.render_widget(
-        widgets::hint_bar(&crate::i18n::t("tui-logs-hints")),
+        widgets::status_or_hint(&state.status_msg, &crate::i18n::t("tui-logs-hints")),
         chunks[2],
     );
 }
