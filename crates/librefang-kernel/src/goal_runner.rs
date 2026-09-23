@@ -1235,6 +1235,7 @@ impl GoalRunner {
     ///
     /// The sweep holds `start_lock` from the read of the persisted rows to the last registry write, so a concurrent `start()` or `stop()` cannot change a row between the sweep reading it and demoting it (#8429).
     /// It never replaces a live run: a goal whose registry entry still owns a loop task is skipped, because its `Running` row belongs to that loop even when it looks stale — a resumed run keeps the `started_at` of the run it checkpointed.
+    /// The loop writes its own row without the lock, so a candidate's row is re-read after the registry check and skipped if a loop that just paused or finished has deleted it.
     pub fn recover_stale_runs(&self, stale_timeout: Duration) -> Vec<GoalId> {
         let Some(store) = self.store.as_ref() else {
             return Vec::new();
@@ -1302,6 +1303,18 @@ impl GoalRunner {
                 debug!(goal_id = %goal_id, "Skipping goal run recovery: a live run owns this goal");
                 continue;
             }
+            // `start_lock` excludes `start()` and `stop()`, but not the loop itself, which writes and deletes its own row without it.
+            // A loop that paused or finished after `load_all_runs` has already deleted its row and then removed its registry entry, in that order, so the snapshot row is stale but the registry check above passes.
+            // Demoting from the snapshot would resurrect the row as `Stopped` (`save_run` is an upsert) and insert a placeholder that reports a completed run as interrupted, or shadows a paused run's checkpoint in `state()`.
+            // Re-reading the row after the registry check sees that deletion, because the loop deletes before it removes the entry.
+            let row = match store.get_run(&row.goal_id) {
+                Ok(Some(current)) if current.phase == GoalRunPhase::Running.to_string() => current,
+                Ok(_) => continue,
+                Err(e) => {
+                    warn!(goal_id = %goal_id, "Skipping goal run recovery: re-reading the run row failed: {e}");
+                    continue;
+                }
+            };
             warn!(
                 goal_id = %goal_id,
                 started_at = %started_at,
