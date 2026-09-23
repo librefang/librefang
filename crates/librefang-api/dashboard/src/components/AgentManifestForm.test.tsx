@@ -327,6 +327,9 @@ describe("AgentManifestForm — inference parameters", () => {
       "model_param.top_p",
       "model_param.frequency_penalty",
       "model_param.presence_penalty",
+      "model_param.top_k",
+      "model_param.min_p",
+      "model_param.repeat_penalty",
     ]) {
       expect(screen.getByText(label)).toBeInTheDocument();
     }
@@ -358,6 +361,9 @@ describe("AgentManifestForm — inference parameters", () => {
       "top_p",
       "frequency_penalty",
       "presence_penalty",
+      "top_k",
+      "min_p",
+      "repeat_penalty",
     ]) {
       const field = screen.getByText(`model_param.${param}`).closest("div") as HTMLElement;
       expect(within(field).getByRole("button", { name: "model_param.inherit" })).toHaveAttribute(
@@ -403,7 +409,7 @@ describe("AgentManifestForm — inference parameters", () => {
     const user = userEvent.setup();
     render(<Harness />);
 
-    // Scoped to the response-length field: the form now renders seven ladders,
+    // Scoped to the response-length field: the form now renders ten ladders,
     // so an unscoped "first custom button" is whichever one the layout happens
     // to put first.
     const lengthField = screen.getByText("model_param.max_tokens").closest("div") as HTMLElement;

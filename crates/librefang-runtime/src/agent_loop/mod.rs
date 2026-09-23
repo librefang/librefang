@@ -1353,6 +1353,9 @@ async fn run_agent_loop_inner(
             top_p: manifest.model.top_p,
             frequency_penalty: manifest.model.frequency_penalty,
             presence_penalty: manifest.model.presence_penalty,
+            top_k: manifest.model.top_k,
+            min_p: manifest.model.min_p,
+            repeat_penalty: manifest.model.repeat_penalty,
             // Clone from the pre-built snapshot rather than the original to
             // avoid redundant Arc-deref / string traversal on every iteration.
             system: Some(system_prompt_snapshot.clone()),

@@ -1331,7 +1331,7 @@ const IDENTICAL_VALUE_EXEMPTIONS: &[IdenticalValueExemption] = &[
         ],
     },
     IdenticalValueExemption {
-        reason: "Identifiers and acronyms used as literal column headers or field labels. `ID`, `URL`, `PID`, `API`, `MCP` and `Top-p` are not translated in any of the shipped locales, and a column header that differs from the API field it shows is harder to read, not easier.",
+        reason: "Identifiers and acronyms used as literal column headers or field labels. `ID`, `URL`, `PID`, `API`, `MCP`, `Top-p` and `Top-K` are not translated in any of the shipped locales, and a column header that differs from the API field it shows is harder to read, not easier.",
         locales: &[],
         keys: &[
             "label-api",
@@ -1342,6 +1342,7 @@ const IDENTICAL_VALUE_EXEMPTIONS: &[IdenticalValueExemption] = &[
             "tui-agents-detail-id",
             "tui-agents-detail-mcp",
             "tui-agents-header-id",
+            "tui-agents-param-top-k",
             "tui-agents-param-top-p",
             "tui-event-daemon-http-status",
             "tui-extensions-header-id",

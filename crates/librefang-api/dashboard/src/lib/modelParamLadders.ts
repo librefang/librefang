@@ -57,6 +57,28 @@ export const TOP_P_LADDER = [0.1, 0.5, 0.8, 0.9, 0.95, 1] as const;
 export const PENALTY_LADDER = [-2, -1, -0.5, 0, 0.5, 1, 2] as const;
 
 /**
+ * Top-k presets, smallest first.
+ *
+ * A token count, so whole numbers only; `40` is llama.cpp's and Ollama's default and `64` is Gemini's.
+ * `1` is greedy decoding, a real setting rather than the inherit state.
+ */
+export const TOP_K_LADDER = [1, 10, 20, 40, 64, 100] as const;
+
+/**
+ * Minimum-probability (min-p) presets, smallest first.
+ *
+ * A fraction of the top token's probability. `0` switches the filter off; `0.05` is llama.cpp's default and the value usually recommended alongside a higher temperature.
+ */
+export const MIN_P_LADDER = [0, 0.02, 0.05, 0.1, 0.2] as const;
+
+/**
+ * Repetition-penalty presets, smallest first.
+ *
+ * Multiplicative, so `1` is "off" rather than `0`; useful values sit just above it, and past `1.5` output degrades.
+ */
+export const REPEAT_PENALTY_LADDER = [1, 1.05, 1.1, 1.15, 1.2, 1.3, 1.5] as const;
+
+/**
  * Render a rung the way operators read it: `128K`, `1M`, `0.7`, or the raw number.
  *
  * Shared by the token ladders and the sampling ladders. The `K`/`M` shortening only fires on exact

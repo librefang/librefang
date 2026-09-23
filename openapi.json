@@ -17445,6 +17445,14 @@
             "description": "Maximum tokens to request for the LLM response.\n\nTri-state: omit the key to leave it unchanged, send `null` to hand the\nfield back to \"inherit\" (the per-model override, then the system\ndefault, supplies it), or send a number to pin it for this agent.",
             "minimum": 0
           },
+          "min_p": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "float",
+            "description": "Minimum-probability (min-p) sampling (0.0–1.0). Same tri-state as [`Self::max_tokens`]."
+          },
           "model": {
             "type": [
               "string",
@@ -17471,6 +17479,14 @@
               "null"
             ]
           },
+          "repeat_penalty": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "float",
+            "description": "Repetition penalty (0.01–2.0, `1.0` = off). Same tri-state as [`Self::max_tokens`]."
+          },
           "system_prompt": {
             "type": [
               "string",
@@ -17484,6 +17500,15 @@
             ],
             "format": "float",
             "description": "Sampling temperature (0.0–2.0). Lower values are more deterministic.\nSame tri-state as [`Self::max_tokens`]."
+          },
+          "top_k": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Top-k sampling (≥ 1). Same tri-state as [`Self::max_tokens`].",
+            "minimum": 0
           },
           "top_p": {
             "type": [

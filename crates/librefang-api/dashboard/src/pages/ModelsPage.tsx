@@ -189,6 +189,12 @@ type SettingsState = {
   freqEnabled: boolean;
   presPenalty: number;
   presEnabled: boolean;
+  topK: number;
+  topKEnabled: boolean;
+  minP: number;
+  minPEnabled: boolean;
+  repeatPenalty: number;
+  repeatPenaltyEnabled: boolean;
   reasoningEffort: string;
   useMaxCompletionTokens: boolean;
   noSystemRole: boolean;
@@ -219,6 +225,12 @@ const settingsInitial: SettingsState = {
   freqEnabled: false,
   presPenalty: 0.0,
   presEnabled: false,
+  topK: 40,
+  topKEnabled: false,
+  minP: 0.05,
+  minPEnabled: false,
+  repeatPenalty: 1.0,
+  repeatPenaltyEnabled: false,
   reasoningEffort: "",
   useMaxCompletionTokens: false,
   noSystemRole: false,
@@ -271,6 +283,11 @@ export function settingsStateFromOverrides(
       : {}),
     ...(overrides.presence_penalty != null
       ? { presPenalty: overrides.presence_penalty, presEnabled: true }
+      : {}),
+    ...(overrides.top_k != null ? { topK: overrides.top_k, topKEnabled: true } : {}),
+    ...(overrides.min_p != null ? { minP: overrides.min_p, minPEnabled: true } : {}),
+    ...(overrides.repeat_penalty != null
+      ? { repeatPenalty: overrides.repeat_penalty, repeatPenaltyEnabled: true }
       : {}),
     reasoningEffort: overrides.reasoning_effort ?? "",
     useMaxCompletionTokens: overrides.use_max_completion_tokens ?? false,
@@ -1399,7 +1416,10 @@ function ModelSettingsModal({ model, onClose, onSaved, onReset, onError }: {
         | "temperature"
         | "topP"
         | "freqPenalty"
-        | "presPenalty",
+        | "presPenalty"
+        | "topK"
+        | "minP"
+        | "repeatPenalty",
       enabledField:
         | "contextWindowEnabled"
         | "maxOutputTokensEnabled"
@@ -1407,7 +1427,10 @@ function ModelSettingsModal({ model, onClose, onSaved, onReset, onError }: {
         | "tempEnabled"
         | "topPEnabled"
         | "freqEnabled"
-        | "presEnabled",
+        | "presEnabled"
+        | "topKEnabled"
+        | "minPEnabled"
+        | "repeatPenaltyEnabled",
       next: string,
     ) => {
       const trimmed = next.trim();
@@ -1462,6 +1485,9 @@ function ModelSettingsModal({ model, onClose, onSaved, onReset, onError }: {
     if (s.maxTokensEnabled) overrides.max_tokens = s.maxTokens;
     if (s.freqEnabled) overrides.frequency_penalty = s.freqPenalty;
     if (s.presEnabled) overrides.presence_penalty = s.presPenalty;
+    if (s.topKEnabled) overrides.top_k = s.topK;
+    if (s.minPEnabled) overrides.min_p = s.minP;
+    if (s.repeatPenaltyEnabled) overrides.repeat_penalty = s.repeatPenalty;
     if (s.reasoningEffort) overrides.reasoning_effort = s.reasoningEffort;
     if (s.useMaxCompletionTokens) overrides.use_max_completion_tokens = true;
     if (s.noSystemRole) overrides.no_system_role = true;
@@ -1656,6 +1682,33 @@ function ModelSettingsModal({ model, onClose, onSaved, onReset, onError }: {
             value={state.presEnabled ? String(state.presPenalty) : ""}
             onChange={(next) =>
               setLadderField("presence_penalty", "presPenalty", "presEnabled", next)
+            }
+          />
+
+          {/*
+            The local-model samplers, on the same rungs as the agent editor. Only some providers read them; the hint says which, because the driver drops them silently for the rest.
+          */}
+          <p className="text-[10px] text-text-dim/70 leading-snug">
+            {t("model_param.local_samplers_hint")}
+          </p>
+
+          <ModelParamField
+            param="top_k"
+            value={state.topKEnabled ? String(state.topK) : ""}
+            onChange={(next) => setLadderField("top_k", "topK", "topKEnabled", next)}
+          />
+
+          <ModelParamField
+            param="min_p"
+            value={state.minPEnabled ? String(state.minP) : ""}
+            onChange={(next) => setLadderField("min_p", "minP", "minPEnabled", next)}
+          />
+
+          <ModelParamField
+            param="repeat_penalty"
+            value={state.repeatPenaltyEnabled ? String(state.repeatPenalty) : ""}
+            onChange={(next) =>
+              setLadderField("repeat_penalty", "repeatPenalty", "repeatPenaltyEnabled", next)
             }
           />
 

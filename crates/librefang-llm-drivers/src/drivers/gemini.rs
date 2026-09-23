@@ -220,6 +220,9 @@ pub(crate) struct GenerationConfig {
     /// Nucleus sampling, serialized as `topP`.
     #[serde(skip_serializing_if = "Option::is_none")]
     top_p: Option<f32>,
+    /// Top-k sampling, serialized as `topK`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    top_k: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     max_output_tokens: Option<u32>,
     /// Structured-output MIME type — `application/json` for `ResponseFormat::Json` / `JsonSchema`.
@@ -665,6 +668,8 @@ pub(crate) fn build_request(
         generation_config: Some(GenerationConfig {
             temperature,
             top_p,
+            // Set by `build_request_from`, the one caller with a request to take it from.
+            top_k: None,
             max_output_tokens,
             response_mime_type,
             response_schema,
@@ -674,7 +679,8 @@ pub(crate) fn build_request(
 
 /// Build the `generateContent` body for `request` — the one place the Gemini and Vertex AI drivers turn a `CompletionRequest` into this wire's shape.
 ///
-/// Sampling parameters (#8290): `topP` goes into `generationConfig`, which has it on every Gemini model.
+/// Sampling parameters (#8290): `topP` and `topK` go into `generationConfig`.
+/// `min_p` and `repeat_penalty` are llama.cpp-family parameters with no `generateContent` field, so they are dropped.
 /// `presencePenalty` / `frequencyPenalty` are declared in the schema too, but support for them varies by model, a model without it answers 400 rather than ignoring them, and nothing in the catalog records which models have it — so they are not sent, and a tuning preference cannot take down every turn.
 /// `provider` only labels the debug line for what was dropped.
 pub(crate) fn build_request_from(
@@ -685,13 +691,24 @@ pub(crate) fn build_request_from(
         provider,
         &request.model,
         &[
-            ("frequency_penalty", request.frequency_penalty),
-            ("presence_penalty", request.presence_penalty),
+            (
+                "frequency_penalty",
+                super::sampling::wide(request.frequency_penalty),
+            ),
+            (
+                "presence_penalty",
+                super::sampling::wide(request.presence_penalty),
+            ),
+            ("min_p", super::sampling::wide(request.min_p)),
+            (
+                "repeat_penalty",
+                super::sampling::wide(request.repeat_penalty),
+            ),
         ],
     );
     let (contents, system_instruction) = convert_messages(&request.messages, &request.system);
     let tools = convert_tools(request);
-    build_request(
+    let mut body = build_request(
         contents,
         system_instruction,
         tools,
@@ -699,7 +716,11 @@ pub(crate) fn build_request_from(
         request.top_p,
         Some(request.max_tokens),
         request.response_format.as_ref(),
-    )
+    );
+    if let Some(config) = body.generation_config.as_mut() {
+        config.top_k = request.top_k;
+    }
+    body
 }
 
 /// Parse a JSON response body and convert to CompletionResponse.
@@ -1536,6 +1557,7 @@ mod tests {
             generation_config: Some(GenerationConfig {
                 temperature: Some(0.7),
                 top_p: None,
+                top_k: None,
                 max_output_tokens: Some(1024),
                 response_mime_type: None,
                 response_schema: None,
@@ -1877,6 +1899,7 @@ mod tests {
         let config = GenerationConfig {
             temperature: Some(0.5),
             top_p: None,
+            top_k: None,
             max_output_tokens: Some(2048),
             response_mime_type: None,
             response_schema: None,
@@ -1891,6 +1914,7 @@ mod tests {
 
     /// #8290: `top_p` reaches `generationConfig.topP`; before this the Gemini and Vertex AI drivers never read `extra_body`, so it was dropped without a word.
     /// The penalties are not sent: support varies by model and a model without it answers 400.
+    /// `topK` (#8290 part 2) goes into `generationConfig` too; `min_p` and `repeat_penalty` have no Gemini field.
     #[test]
     fn sampling_params_land_in_generation_config() {
         let request = CompletionRequest {
@@ -1901,11 +1925,15 @@ mod tests {
             top_p: Some(0.85),
             frequency_penalty: Some(0.5),
             presence_penalty: Some(-0.25),
+            top_k: Some(40),
+            min_p: Some(0.05),
+            repeat_penalty: Some(1.1),
             ..Default::default()
         };
         let body = serde_json::to_value(build_request_from("gemini", &request)).unwrap();
         let config = &body["generationConfig"];
         assert_eq!(config["topP"], serde_json::json!(0.85_f32));
+        assert_eq!(config["topK"], serde_json::json!(40));
         assert_eq!(config["temperature"], serde_json::json!(0.3_f32));
         for key in [
             "presencePenalty",
@@ -1913,6 +1941,11 @@ mod tests {
             "presence_penalty",
             "frequency_penalty",
             "top_p",
+            "top_k",
+            "min_p",
+            "minP",
+            "repeat_penalty",
+            "repeatPenalty",
         ] {
             assert!(
                 config.get(key).is_none(),
@@ -1924,10 +1957,12 @@ mod tests {
         // Unset stays off the wire rather than serializing as null.
         let unset = CompletionRequest {
             top_p: None,
+            top_k: None,
             ..request
         };
         let body = serde_json::to_value(build_request_from("gemini", &unset)).unwrap();
         assert!(body["generationConfig"].get("topP").is_none(), "{body}");
+        assert!(body["generationConfig"].get("topK").is_none(), "{body}");
     }
 
     #[test]

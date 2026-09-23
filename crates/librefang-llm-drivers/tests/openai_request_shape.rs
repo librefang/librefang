@@ -194,3 +194,65 @@ async fn streaming_sse_aggregates_text_deltas_into_final_response() {
         "stream must terminate with ContentComplete"
     );
 }
+
+/// Send one request with the local-runtime samplers set through the driver `create_driver` builds for `provider`, and return the body the endpoint received.
+async fn local_sampler_body_for(provider: &str) -> serde_json::Value {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(openai_200_body("ok")))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let driver =
+        librefang_llm_drivers::drivers::create_driver(&librefang_llm_driver::DriverConfig {
+            provider: provider.to_string(),
+            api_key: Some("sk-test-local".to_string()),
+            base_url: Some(server.uri()),
+            request_timeout_secs: Some(5),
+            ..Default::default()
+        })
+        .expect("create_driver");
+    let request = librefang_llm_driver::CompletionRequest {
+        top_k: Some(40),
+        min_p: Some(0.05),
+        repeat_penalty: Some(1.1),
+        ..simple_request("qwen3-8b")
+    };
+    driver
+        .complete(request)
+        .await
+        .expect("complete should succeed");
+    request_json(&server.received_requests().await.expect("requests")[0])
+}
+
+/// #8290 part 2, end to end through the provider factory: the dialect comes from the provider name, so a factory that forgot to declare it would compile and silently send nothing.
+/// vLLM and OpenRouter get `repetition_penalty`, a custom provider named for llama.cpp gets `repeat_penalty`, and `openai` gets none of the three.
+#[tokio::test]
+#[serial_test::serial]
+async fn provider_factory_declares_the_local_sampler_dialect() {
+    let _env = isolated_env();
+
+    let vllm = local_sampler_body_for("vllm").await;
+    assert_eq!(vllm["top_k"], 40);
+    assert_eq!(vllm["min_p"], serde_json::json!(0.05_f32));
+    assert_eq!(vllm["repetition_penalty"], serde_json::json!(1.1_f32));
+    assert!(vllm.get("repeat_penalty").is_none(), "{vllm}");
+
+    let llama = local_sampler_body_for("llamacpp").await;
+    assert_eq!(llama["top_k"], 40);
+    assert_eq!(llama["min_p"], serde_json::json!(0.05_f32));
+    assert_eq!(llama["repeat_penalty"], serde_json::json!(1.1_f32));
+
+    let openrouter = local_sampler_body_for("openrouter").await;
+    assert_eq!(openrouter["top_k"], 40);
+    assert_eq!(openrouter["min_p"], serde_json::json!(0.05_f32));
+    assert_eq!(openrouter["repetition_penalty"], serde_json::json!(1.1_f32));
+    assert!(openrouter.get("repeat_penalty").is_none(), "{openrouter}");
+
+    let openai = local_sampler_body_for("openai").await;
+    for key in ["top_k", "min_p", "repeat_penalty", "repetition_penalty"] {
+        assert!(openai.get(key).is_none(), "openai got {key}: {openai}");
+    }
+}

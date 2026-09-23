@@ -2254,7 +2254,11 @@ pub fn spawn_update_agent_model_params(
 
 /// Whether a config key carries a whole-token count rather than a sampling float.
 fn is_token_count(key: &str) -> bool {
-    matches!(key, "max_tokens" | "context_window" | "max_output_tokens")
+    // `top_k` is not a token budget, but it is a `u32` on the route for the same reason: `40.0` is rejected where the schema says an integer.
+    matches!(
+        key,
+        "max_tokens" | "context_window" | "max_output_tokens" | "top_k"
+    )
 }
 
 /// Update an agent's MCP servers.
