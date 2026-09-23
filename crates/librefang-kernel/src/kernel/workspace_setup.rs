@@ -923,7 +923,7 @@ pub fn reconcile_identity_name(workspace: &Path, old_name: &str, new_name: &str)
 ///
 /// Returns `Ok(true)` when the file changed and `Ok(false)` when it already held these values.
 /// Refuses, without writing anything:
-/// - with [`LibreFangError::InvalidInput`] a value containing a line break, which would smuggle a second key into the block;
+/// - with [`LibreFangError::InvalidInput`] a value containing a line break, which would smuggle a second key into the block, or values that would grow the file past `MAX_IDENTITY_FILE_BYTES` (32 KiB), which the prompt read would truncate and the file `PUT` route would refuse;
 /// - with [`LibreFangError::Conflict`] a file that is missing, is not a regular file (neither it nor `.identity/` is followed through a symlink), or opens a `---` block it never closes, where there is no known end to place an edit before.
 pub fn write_identity_front_matter(
     workspace: &Path,
@@ -963,6 +963,11 @@ pub fn write_identity_front_matter(
     })?;
     if patched == content {
         return Ok(false);
+    }
+    if patched.len() > MAX_IDENTITY_FILE_BYTES && patched.len() > content.len() {
+        return Err(LibreFangError::InvalidInput(format!(
+            "the personality values would grow .identity/IDENTITY.md past {MAX_IDENTITY_FILE_BYTES} bytes, the most an identity file is read or written at"
+        )));
     }
     super::cron_script::atomic_write_toml(&path, &patched)?;
     let keys: Vec<&str> = fields.iter().map(|(key, _)| *key).collect();
@@ -1438,12 +1443,13 @@ pub(super) fn append_daily_memory_log(workspace: &Path, response: &str) {
     }
 }
 
+/// Size cap on a workspace identity file: [`read_identity_file`] truncates anything longer, `PUT /api/agents/{id}/files/{name}` refuses it, and [`write_identity_front_matter`] will not grow IDENTITY.md past it.
+pub(super) const MAX_IDENTITY_FILE_BYTES: usize = 32_768;
+
 /// Read a workspace identity file with a size cap to prevent prompt stuffing.
 /// Checks `.identity/{filename}` first (new layout), falls back to `{filename}` at workspace
 /// root (pre-migration layout). Returns None if the file doesn't exist or is empty.
 pub(super) fn read_identity_file(workspace: &Path, filename: &str) -> Option<String> {
-    const MAX_IDENTITY_FILE_BYTES: usize = 32_768; // 32KB cap
-
     // Prefer the new `.identity/` location; fall back to root for unmigrated workspaces.
     let candidates = [
         workspace.join(".identity").join(filename),
@@ -2123,6 +2129,16 @@ mod identity_personality_tests {
         let path = write_identity(tmp.path(), FILE);
         let err =
             write_identity_front_matter(tmp.path(), &[("vibe", "calm\nname: evil")]).unwrap_err();
+        assert!(matches!(err, LibreFangError::InvalidInput(_)), "{err:?}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), FILE);
+    }
+
+    #[test]
+    fn value_that_grows_the_file_past_the_identity_cap_is_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = write_identity(tmp.path(), FILE);
+        let long = "x".repeat(MAX_IDENTITY_FILE_BYTES);
+        let err = write_identity_front_matter(tmp.path(), &[("vibe", &long)]).unwrap_err();
         assert!(matches!(err, LibreFangError::InvalidInput(_)), "{err:?}");
         assert_eq!(std::fs::read_to_string(&path).unwrap(), FILE);
     }

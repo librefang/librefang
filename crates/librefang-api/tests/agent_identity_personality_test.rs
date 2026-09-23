@@ -256,6 +256,30 @@ async fn personality_value_with_a_line_break_is_rejected_before_anything_changes
     );
 }
 
+/// `/config` applies the rename before the personality write, so only the up-front validation keeps a rejected body from renaming the agent.
+#[tokio::test(flavor = "multi_thread")]
+async fn config_personality_line_break_is_rejected_before_the_rename_applies() {
+    let server = start_full_router().await;
+    let id = spawn(&server, "personality-config-newline").await;
+    let path = identity_path(&server, &id);
+    let before = std::fs::read_to_string(&path).unwrap();
+
+    let status = patch(
+        &server,
+        &format!("/api/agents/{id}/config"),
+        serde_json::json!({"name": "renamed-by-a-rejected-body", "vibe": "calm\nname: someone-else"}),
+    )
+    .await;
+    assert_eq!(status, 400);
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+    let body = get_agent(&server, &id).await;
+    assert_eq!(
+        body["name"],
+        serde_json::json!("personality-config-newline"),
+        "a rejected body applies none of its fields"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn unterminated_front_matter_is_refused_not_guessed_at() {
     let server = start_full_router().await;
