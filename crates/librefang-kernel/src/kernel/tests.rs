@@ -19254,3 +19254,61 @@ async fn resetting_a_session_does_not_cascade_delete_its_children() {
         .expect("the parent sid must be recreated empty at the same id");
     assert!(recreated_parent.messages.is_empty());
 }
+
+/// A rename must reach the next turn's prompt, not only the file on disk (#8469).
+///
+/// The workspace identity files are cached for `PROMPT_CACHE_TTL`, so a rename that rewrote IDENTITY.md without dropping the cache entry would keep serving the old `name:` for up to 30 s after `PATCH` reported success.
+#[tokio::test(flavor = "multi_thread")]
+async fn rename_agent_drops_cached_identity_so_the_next_turn_sees_the_new_name() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().join("librefang-kernel-rename-identity-cache");
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+
+    let manifest = AgentManifest {
+        name: "cache-a".to_string(),
+        description: "rename identity cache test agent".to_string(),
+        author: "test".to_string(),
+        module: "builtin:chat".to_string(),
+        ..Default::default()
+    };
+    let agent_id = kernel.spawn_agent(manifest).expect("spawn should succeed");
+    let workspace = kernel
+        .agents
+        .registry
+        .get(agent_id)
+        .expect("agent must be registered")
+        .manifest
+        .workspace
+        .expect("spawned agent has a workspace");
+
+    let warmed = kernel.cached_workspace_metadata(&workspace, false);
+    assert!(
+        warmed
+            .identity_md
+            .as_deref()
+            .is_some_and(|md| md.contains("\nname: cache-a\n")),
+        "the warmed cache must hold the spawn-time IDENTITY.md, got: {:?}",
+        warmed.identity_md
+    );
+
+    kernel
+        .rename_agent(agent_id, "cache-b".to_string())
+        .expect("rename should succeed");
+
+    let identity = kernel
+        .cached_workspace_metadata(&workspace, false)
+        .identity_md
+        .expect("IDENTITY.md must still be readable after the rename");
+    assert!(
+        identity.contains("\nname: cache-b\n") && !identity.contains("\nname: cache-a\n"),
+        "the next prompt build must see the renamed IDENTITY.md, not the cached one: {identity}"
+    );
+
+    kernel.shutdown();
+}
