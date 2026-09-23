@@ -489,6 +489,23 @@ jobs:
           cargo clippy --all-targets -- -D warnings
           cargo test
           cargo build --release
+      - name: Sidecar + SDK — check at declared rust-version (locked)
+        # Both crates sit outside the kernel workspace, so the MSRV job never compiles them (#8124).
+        # The toolchain is read from each crate's own `rust-version`, so CI checks exactly what the manifest claims.
+        # `--locked` against the committed Cargo.lock keeps this deterministic: a fresh resolve under resolver v2 picks the newest dependencies regardless of the floor, and would turn this gate red whenever a transitive crate published a release.
+        run: |
+          set -euo pipefail
+          for dir in sdk/rust/librefang-sidecar sdk/rust/librefang-sidecar-telegram; do
+            msrv=$(sed -n 's/^rust-version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "$dir/Cargo.toml")
+            if [ -z "$msrv" ]; then
+              echo "::error file=$dir/Cargo.toml::no rust-version declared"
+              exit 1
+            fi
+            echo "::group::$dir at Rust $msrv"
+            rustup toolchain install "$msrv" --profile minimal --no-self-update
+            (cd "$dir" && cargo "+$msrv" check --locked --all-targets)
+            echo "::endgroup::"
+          done
       - name: Install cross
         run: cargo install cross --locked
       - name: Sidecar — cross build (aarch64-musl, sibling path dep)

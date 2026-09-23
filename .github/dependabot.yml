@@ -14,6 +14,25 @@ updates:
           - "minor"
           - "patch"
 
+  # Rust sidecar SDK and the Telegram sidecar the release archive ships.
+  # Each is its own workspace root with a committed Cargo.lock (#8124), so the root entry above does not see them.
+  # CI checks both at their declared rust-version with `--locked`; a bump that raises the floor goes red there and must raise `rust-version` in the same PR.
+  - package-ecosystem: "cargo"
+    directories:
+      - "/sdk/rust/librefang-sidecar"
+      - "/sdk/rust/librefang-sidecar-telegram"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+    groups:
+      sidecar-cargo-minor-patch:
+        update-types:
+          - "minor"
+          - "patch"
+
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
