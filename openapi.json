@@ -1032,8 +1032,28 @@
               }
             }
           },
+          "400": {
+            "description": "A field is malformed: an invalid agent ID, colour or avatar URL, a personality value containing a line break, or personality values that would grow IDENTITY.md past the 32 KiB identity-file cap. A rejected personality value changes nothing",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Agent not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
           "409": {
-            "description": "The new name is taken, or a personality field was sent and the agent's IDENTITY.md cannot be edited in place (missing, not a regular file, or its front matter is never closed)",
+            "description": "The new name is taken, or a personality field was sent and the agent's IDENTITY.md cannot be edited in place (missing, not a regular file, or its front matter is never closed). When a personality field was sent, nothing was changed",
             "content": {
               "application/json": {
                 "schema": {

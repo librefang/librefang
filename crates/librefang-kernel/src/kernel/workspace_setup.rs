@@ -844,7 +844,10 @@ fn write_or_cleanup<W: std::io::Write>(mut writer: W, path: &Path, content: &[u8
 /// A rename (#8469) and a personality PATCH (#8447) each read the file, edit one block and write it back, so two of them landing together would otherwise each publish a copy missing the other's change.
 static IDENTITY_FRONT_MATTER_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-fn lock_identity_front_matter() -> std::sync::MutexGuard<'static, ()> {
+/// Hold this while replacing IDENTITY.md wholesale, as `PUT /api/agents/{id}/files/IDENTITY.md` does.
+///
+/// Without it a read-modify-write that read the file before the `PUT` landed renames its stale copy over the operator's new content, and the `PUT` answered 200 for an edit that is already gone.
+pub fn lock_identity_front_matter() -> std::sync::MutexGuard<'static, ()> {
     // The guarded section holds no state of its own, so a panic inside it leaves nothing to repair.
     IDENTITY_FRONT_MATTER_LOCK
         .lock()
@@ -945,7 +948,7 @@ pub fn write_identity_front_matter(
         Ok(path) => path,
         Err(IdentityMdUnusable::Missing) => {
             return Err(LibreFangError::Conflict(
-                "the agent has no .identity/IDENTITY.md to hold its personality; it is regenerated the next time the agent spawns".to_string(),
+                "the agent has no .identity/IDENTITY.md to hold its personality; create it with PUT /api/agents/{id}/files/IDENTITY.md, or respawn the agent with `generate_identity_files` enabled (the default), which writes it from the template".to_string(),
             ))
         }
         Err(IdentityMdUnusable::NotRegular) => {
@@ -996,7 +999,8 @@ fn locate_front_matter(content: &str) -> FrontMatterSpan {
     let Some(first) = lines.next() else {
         return FrontMatterSpan::Absent;
     };
-    if strip_eol(first).trim_end() != "---" {
+    // A UTF-8 byte order mark is not content: a file some Windows editors saved as `\u{feff}---` still opens with a fence.
+    if strip_eol(first.strip_prefix('\u{feff}').unwrap_or(first)).trim_end() != "---" {
         return FrontMatterSpan::Absent;
     }
     let mut offset = first.len();
@@ -1013,7 +1017,7 @@ fn locate_front_matter(content: &str) -> FrontMatterSpan {
 }
 
 /// The first top-level `key:` line in `content[inner_start..close]`, as the byte range of its content (line ending excluded) and its trimmed raw value.
-/// An indented `key:` belongs to a nested mapping and does not match.
+/// An indented `key:` belongs to a nested mapping and does not match; `key :`, which YAML reads as the same key, does.
 fn find_front_matter_key<'a>(
     content: &'a str,
     inner_start: usize,
@@ -1025,7 +1029,7 @@ fn find_front_matter_key<'a>(
         let body = strip_eol(line);
         if let Some(value) = body
             .strip_prefix(key)
-            .and_then(|rest| rest.strip_prefix(':'))
+            .and_then(|rest| rest.trim_start_matches([' ', '\t']).strip_prefix(':'))
         {
             return Some((offset, offset + body.len(), value.trim()));
         }
@@ -1081,7 +1085,12 @@ fn upsert_front_matter(content: &str, fields: &[(&str, &str)]) -> Option<String>
             } else {
                 "\n"
             };
-            format!("---{eol}---{eol}{content}")
+            // A byte order mark has to stay the first thing in the file, ahead of the new fence.
+            let (bom, rest) = match content.strip_prefix('\u{feff}') {
+                Some(rest) => ("\u{feff}", rest),
+                None => ("", content),
+            };
+            format!("{bom}---{eol}---{eol}{rest}")
         }
     };
     for (key, value) in fields {
@@ -2123,6 +2132,49 @@ mod identity_personality_tests {
         );
     }
 
+    /// YAML reads `vibe : x` as the key `vibe`; appending a second `vibe:` line would leave two values for one key.
+    #[test]
+    fn key_with_space_before_the_colon_is_rewritten_not_duplicated() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = write_identity(tmp.path(), "---\nname: a\nvibe : helpful\n---\nbody\n");
+        assert!(write_identity_front_matter(tmp.path(), &[("vibe", "calm")]).unwrap());
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "---\nname: a\nvibe: calm\n---\nbody\n"
+        );
+    }
+
+    /// A file saved with a UTF-8 byte order mark still opens with its front matter; a second block would be prepended above it otherwise.
+    #[test]
+    fn front_matter_after_a_byte_order_mark_is_edited_in_place() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = write_identity(
+            tmp.path(),
+            "\u{feff}---\nname: a\nvibe: helpful\n---\nbody\n",
+        );
+        assert!(write_identity_front_matter(tmp.path(), &[("vibe", "calm")]).unwrap());
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "\u{feff}---\nname: a\nvibe: calm\n---\nbody\n"
+        );
+        assert!(reconcile_identity_name(tmp.path(), "a", "b"));
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "\u{feff}---\nname: b\nvibe: calm\n---\nbody\n"
+        );
+    }
+
+    #[test]
+    fn byte_order_mark_stays_first_when_a_block_is_added() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = write_identity(tmp.path(), "\u{feff}# Identity\n");
+        assert!(write_identity_front_matter(tmp.path(), &[("vibe", "calm")]).unwrap());
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "\u{feff}---\nvibe: calm\n---\n# Identity\n"
+        );
+    }
+
     #[test]
     fn value_with_a_line_break_is_refused_and_nothing_is_written() {
         let tmp = tempfile::tempdir().unwrap();
@@ -2158,6 +2210,10 @@ mod identity_personality_tests {
         let tmp = tempfile::tempdir().unwrap();
         let err = write_identity_front_matter(tmp.path(), &[("vibe", "calm")]).unwrap_err();
         assert!(matches!(err, LibreFangError::Conflict(_)), "{err:?}");
+        // Spawn writes the file only when `generate_identity_files` is on, so the message names both ways to get one.
+        let message = err.to_string();
+        assert!(message.contains("generate_identity_files"), "{message}");
+        assert!(message.contains("PUT /api/agents/"), "{message}");
         assert!(!tmp.path().join(".identity").exists());
     }
 

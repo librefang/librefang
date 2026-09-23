@@ -256,7 +256,7 @@ async fn personality_value_with_a_line_break_is_rejected_before_anything_changes
     );
 }
 
-/// `/config` applies the rename before the personality write, so only the up-front validation keeps a rejected body from renaming the agent.
+/// A personality value with a line break is refused with the rest of the request validation, before `/config` applies any field.
 #[tokio::test(flavor = "multi_thread")]
 async fn config_personality_line_break_is_rejected_before_the_rename_applies() {
     let server = start_full_router().await;
@@ -299,4 +299,120 @@ async fn unterminated_front_matter_is_refused_not_guessed_at() {
         "there is no block whose end is known, so the edit cannot be placed without guessing"
     );
     assert_eq!(std::fs::read_to_string(&path).unwrap(), broken);
+}
+
+async fn patch_json(
+    server: &TestServer,
+    path: &str,
+    body: serde_json::Value,
+) -> (reqwest::StatusCode, serde_json::Value) {
+    let resp = reqwest::Client::new()
+        .patch(format!("{}{path}", server.base_url))
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    let status = resp.status();
+    (status, resp.json().await.unwrap())
+}
+
+/// Every step of `/config` after the personality write only edits the in-memory registry, and `save_agent` runs at the end.
+/// A personality refusal that returned after the rename and the description had been applied left them changed in memory, answered as an error, and reverted on the next restart.
+fn assert_name_and_description_unchanged(body: &serde_json::Value, name: &str) {
+    assert_eq!(
+        body["name"],
+        serde_json::json!(name),
+        "a refused body must not rename the agent"
+    );
+    assert_eq!(
+        body["description"],
+        serde_json::json!("Identity ownership test agent (#8447)"),
+        "a refused body must not change the description"
+    );
+}
+
+/// An agent spawned with `generate_identity_files = false` has no IDENTITY.md, so a personality edit is refused with 409 — and the rename and description sent with it must not apply.
+#[tokio::test(flavor = "multi_thread")]
+async fn config_personality_conflict_changes_nothing() {
+    let server = start_full_router().await;
+    let name = "personality-config-no-file";
+    let resp = reqwest::Client::new()
+        .post(format!("{}/api/agents", server.base_url))
+        .json(
+            &serde_json::json!({"manifest_toml": manifest(name).replacen(
+                "module = \"builtin:chat\"\n",
+                "module = \"builtin:chat\"\ngenerate_identity_files = false\n",
+                1,
+            )}),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 201);
+    let id = resp.json::<serde_json::Value>().await.unwrap()["agent_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let path = identity_path(&server, &id);
+    assert!(!path.exists(), "the agent opted out of identity files");
+
+    let (status, body) = patch_json(
+        &server,
+        &format!("/api/agents/{id}/config"),
+        serde_json::json!({"name": "renamed-by-a-refused-body", "description": "changed by a refused body", "vibe": "calm"}),
+    )
+    .await;
+    assert_eq!(status, 409, "{body}");
+    let message = body["error"].as_str().unwrap_or_default();
+    assert!(
+        message.contains("generate_identity_files"),
+        "the message must not promise a regeneration spawn never performs for this agent: {message}"
+    );
+    assert!(!path.exists(), "a refused edit creates no file");
+    assert_name_and_description_unchanged(&get_agent(&server, &id).await, name);
+}
+
+/// Values that would grow IDENTITY.md past the identity-file cap are refused by the kernel with 400, which only the file write can tell; the rename and description sent with them must not apply.
+#[tokio::test(flavor = "multi_thread")]
+async fn config_personality_oversize_changes_nothing() {
+    let server = start_full_router().await;
+    let name = "personality-config-oversize";
+    let id = spawn(&server, name).await;
+    let path = identity_path(&server, &id);
+    let before = std::fs::read_to_string(&path).unwrap();
+
+    let (status, body) = patch_json(
+        &server,
+        &format!("/api/agents/{id}/config"),
+        serde_json::json!({"name": "renamed-by-a-refused-body", "description": "changed by a refused body", "vibe": "x".repeat(33 * 1024)}),
+    )
+    .await;
+    assert_eq!(status, 400, "{body}");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+    assert_name_and_description_unchanged(&get_agent(&server, &id).await, name);
+}
+
+/// The personality is written before the rename, so a rename that is going to be refused is checked first: a 409 for a taken name must not leave the personality edit behind.
+#[tokio::test(flavor = "multi_thread")]
+async fn config_rename_conflict_with_personality_changes_nothing() {
+    let server = start_full_router().await;
+    spawn(&server, "personality-name-holder").await;
+    let name = "personality-config-rename-conflict";
+    let id = spawn(&server, name).await;
+    let path = identity_path(&server, &id);
+    let before = std::fs::read_to_string(&path).unwrap();
+
+    let (status, body) = patch_json(
+        &server,
+        &format!("/api/agents/{id}/config"),
+        serde_json::json!({"name": "personality-name-holder", "description": "changed by a refused body", "vibe": "calm"}),
+    )
+    .await;
+    assert_eq!(status, 409, "{body}");
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        before,
+        "a refused rename must not leave the personality edit behind"
+    );
+    assert_name_and_description_unchanged(&get_agent(&server, &id).await, name);
 }

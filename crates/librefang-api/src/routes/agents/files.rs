@@ -241,6 +241,59 @@ mod identity_file_list_tests {
         );
     }
 
+    /// An IDENTITY.md `PUT` waits for the kernel's front-matter lock (#8447).
+    ///
+    /// A personality PATCH or a rename holds it across its read and its rename; a `PUT` that did not take it could land in between and be overwritten by the stale copy, after answering 200.
+    /// Other identity files are not front-matter edited, so their writes do not wait.
+    #[test]
+    fn identity_md_write_waits_for_the_front_matter_lock() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().to_path_buf();
+        std::fs::create_dir(workspace.join(".identity")).unwrap();
+        std::fs::write(workspace.join(".identity/IDENTITY.md"), "before").unwrap();
+
+        let guard = librefang_kernel::kernel::lock_identity_front_matter();
+
+        let (soul_done_tx, soul_done_rx) = mpsc::channel();
+        let soul_ws = workspace.clone();
+        let soul = std::thread::spawn(move || {
+            write_identity_file(&soul_ws, "SOUL.md", "soul").expect("write must succeed");
+            soul_done_tx.send(()).unwrap();
+        });
+        soul_done_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("a SOUL.md write must not wait for the IDENTITY.md lock");
+        soul.join().unwrap();
+
+        let (done_tx, done_rx) = mpsc::channel();
+        let identity_ws = workspace.clone();
+        let identity = std::thread::spawn(move || {
+            write_identity_file(&identity_ws, "IDENTITY.md", "after").expect("write must succeed");
+            done_tx.send(()).unwrap();
+        });
+        assert!(
+            done_rx.recv_timeout(Duration::from_millis(300)).is_err(),
+            "the IDENTITY.md write must wait while the lock is held"
+        );
+        assert_eq!(
+            std::fs::read_to_string(workspace.join(".identity/IDENTITY.md")).unwrap(),
+            "before"
+        );
+
+        drop(guard);
+        done_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the write must proceed once the lock is released");
+        identity.join().unwrap();
+        assert_eq!(
+            std::fs::read_to_string(workspace.join(".identity/IDENTITY.md")).unwrap(),
+            "after"
+        );
+    }
+
     /// Once `.identity/<name>` exists it is the copy the read path prefers, so
     /// writes must keep landing there and leave a stale root fallback alone.
     #[test]
@@ -467,6 +520,10 @@ fn write_identity_file(
     filename: &str,
     content: &str,
 ) -> Result<(), IdentityFileMutationError> {
+    // The kernel edits IDENTITY.md's front matter by read-modify-rename (a rename, #8469; a personality PATCH, #8447).
+    // Replacing the file while one of those is between its read and its rename would let its stale copy land on top of this write.
+    let _front_matter_guard =
+        (filename == "IDENTITY.md").then(librefang_kernel::kernel::lock_identity_front_matter);
     let ws_canonical = workspace
         .canonicalize()
         .map_err(|_| IdentityFileMutationError::Workspace)?;

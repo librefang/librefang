@@ -1220,7 +1220,9 @@ pub struct PatchAgentConfigRequest {
     request_body(content = PatchAgentConfigRequest, description = "Agent config fields to update"),
     responses(
         (status = 200, description = "Hot-update agent name, description, system prompt, identity, and model", body = crate::types::JsonObject),
-        (status = 409, description = "The new name is taken, or a personality field was sent and the agent's IDENTITY.md cannot be edited in place (missing, not a regular file, or its front matter is never closed)", body = crate::types::JsonObject),
+        (status = 400, description = "A field is malformed: an invalid agent ID, colour or avatar URL, a personality value containing a line break, or personality values that would grow IDENTITY.md past the 32 KiB identity-file cap. A rejected personality value changes nothing", body = crate::types::JsonObject),
+        (status = 404, description = "Agent not found", body = crate::types::JsonObject),
+        (status = 409, description = "The new name is taken, or a personality field was sent and the agent's IDENTITY.md cannot be edited in place (missing, not a regular file, or its front matter is never closed). When a personality field was sent, nothing was changed", body = crate::types::JsonObject),
         (status = 423, description = "This agent is provisioned by the deployment; its manifest cannot be changed through the API", body = crate::types::JsonObject)
     )
 )]
@@ -1316,6 +1318,39 @@ pub async fn patch_agent_config(
         return refusal;
     }
 
+    // Personality goes to IDENTITY.md, the file the prompt reads, not the registry (#8447).
+    // It is the first thing written, because every later step only edits the in-memory registry, which reaches disk through the `save_agent` at the end: an IDENTITY.md that refuses the edit (400 / 409) or fails to write would otherwise return early with a rename or description already applied in memory, answered as an error and silently reverted on restart.
+    if !personality.front_matter_fields().is_empty() {
+        // The one later step that can refuse the request is the rename, so check it before the file changes: a rename that is going to answer 409 must not leave a personality edit behind.
+        if let Some(new_name) = req.name.as_deref().filter(|name| !name.is_empty()) {
+            let refused = librefang_types::agent::validate_agent_name(new_name)
+                .err()
+                .or_else(|| {
+                    state
+                        .kernel
+                        .agent_registry()
+                        .find_by_name(new_name)
+                        .map(|_| {
+                            librefang_types::error::LibreFangError::AgentAlreadyExists(
+                                new_name.to_string(),
+                            )
+                        })
+                });
+            if let Some(e) = refused {
+                let e = crate::error::KernelError::from(e);
+                return (
+                    StatusCode::CONFLICT,
+                    Json(
+                        serde_json::json!({"error": t.t_args("api-error-generic", &[("error", &e.to_string())])}),
+                    ),
+                );
+            }
+        }
+        if let Err(e) = state.kernel.set_agent_personality(agent_id, &personality) {
+            return super::personality_write_error(&e, &t);
+        }
+    }
+
     // Update name
     if let Some(ref new_name) = req.name {
         if !new_name.is_empty() {
@@ -1358,13 +1393,6 @@ pub async fn patch_agent_config(
                 StatusCode::NOT_FOUND,
                 Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
             );
-        }
-    }
-
-    // Personality goes to IDENTITY.md, the file the prompt reads, not the registry (#8447).
-    if !personality.front_matter_fields().is_empty() {
-        if let Err(e) = state.kernel.set_agent_personality(agent_id, &personality) {
-            return super::personality_write_error(&e, &t);
         }
     }
 
