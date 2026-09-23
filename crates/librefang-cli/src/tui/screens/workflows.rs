@@ -671,7 +671,7 @@ impl WorkflowState {
     /// Serialize the drafted steps into the array `POST /api/workflows` reads from `steps`.
     ///
     /// Refuses, naming the first offending step, when there are no steps or a step has a blank agent value or prompt.
-    /// The API would reject a blank agent value too, but only after the wizard has closed; a blank prompt it would silently replace with `{{input}}`, which is not what an operator who left the field empty by mistake asked for.
+    /// The API would reject a blank agent value too, but only after the wizard has closed; a blank prompt it would accept as-is, because the server substitutes `{{input}}` only when the `prompt` key is absent and this wizard always sends it, so the step would run with an empty template.
     pub fn build_create_steps(&self) -> Result<serde_json::Value, StepDraftError> {
         if self.create_steps.is_empty() {
             return Err(StepDraftError::NoSteps);
