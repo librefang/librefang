@@ -2206,7 +2206,7 @@
         ],
         "responses": {
           "200": {
-            "description": "An agent's model routing mode and router override",
+            "description": "An agent's model routing mode and router override, plus `routing_inert_reason` (`\"stable_mode\"` when the kernel mode makes routing inert, else null) and `pinned_model`",
             "content": {
               "application/json": {
                 "schema": {
@@ -2268,7 +2268,7 @@
         },
         "responses": {
           "200": {
-            "description": "Updated model routing settings",
+            "description": "Updated model routing settings, with the same fields as the GET; `routing_inert_reason` is `\"stable_mode\"` when the saved settings have no effect under the current kernel mode, else null",
             "content": {
               "application/json": {
                 "schema": {
