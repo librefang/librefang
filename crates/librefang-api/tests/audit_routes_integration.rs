@@ -856,3 +856,135 @@ async fn audit_verify_does_not_misclassify_an_undifferentiated_failure_as_diverg
     assert_eq!(body["valid"], serde_json::json!(false));
     assert_eq!(body["anchor_status"], serde_json::json!("error"));
 }
+
+// ---------------------------------------------------------------------------
+// GET /api/logs/stream — `?level=` is classified from the outcome (#8270)
+// ---------------------------------------------------------------------------
+
+/// Seed entries whose level can only be told from the outcome (the two `ToolInvoke`s) or only from the action (`BudgetExceeded` with an `ok` outcome), in an order where every non-matching entry sits before a matching one, so a leak through the filter shows up inside the first events read.
+fn seed_level_classification_entries(state: &routes::AppState) {
+    let log = state.kernel.audit();
+    log.record(
+        "agent-alpha",
+        AuditAction::ToolInvoke,
+        "tool ran fine",
+        "ok",
+    );
+    log.record(
+        "agent-alpha",
+        AuditAction::ToolInvoke,
+        "tool blew up",
+        "error: boom",
+    );
+    log.record("agent-alpha", AuditAction::AgentKill, "agent killed", "ok");
+    log.record(
+        "agent-alpha",
+        AuditAction::PermissionDenied,
+        "write refused",
+        "denied",
+    );
+    log.record(
+        "agent-alpha",
+        AuditAction::BudgetExceeded,
+        "daily=$5.20/$5.00",
+        "ok",
+    );
+}
+
+/// Open the SSE stream at `path` and return the first `want` JSON `data:` events, failing if they do not arrive within the timeout.
+async fn read_sse_events(app: Router, path: &str, want: usize) -> Vec<serde_json::Value> {
+    let req = Request::builder()
+        .method(Method::GET)
+        .uri(path)
+        .header("authorization", format!("Bearer {AUDIT_ADMIN_KEY}"))
+        .body(Body::empty())
+        .expect("build request");
+    let resp = app.oneshot(req).await.expect("oneshot");
+    assert_eq!(resp.status(), StatusCode::OK);
+    let mut body = resp.into_body();
+    let mut buffer = String::new();
+    let mut events = Vec::new();
+    let collect = async {
+        while events.len() < want {
+            let frame = body
+                .frame()
+                .await
+                .expect("SSE stream ended early")
+                .expect("SSE frame error");
+            let Ok(data) = frame.into_data() else {
+                continue;
+            };
+            buffer.push_str(std::str::from_utf8(&data).expect("SSE frames are UTF-8"));
+            while let Some(end) = buffer.find("\n\n") {
+                let event: String = buffer.drain(..end + 2).collect();
+                for line in event.lines() {
+                    if let Some(json) = line.strip_prefix("data:") {
+                        events.push(
+                            serde_json::from_str::<serde_json::Value>(json.trim())
+                                .expect("SSE data must be JSON"),
+                        );
+                    }
+                }
+            }
+        }
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(10), collect)
+        .await
+        .unwrap_or_else(|_| panic!("timed out waiting for {want} SSE events from {path}"));
+    events.truncate(want);
+    events
+}
+
+fn event_summary(events: &[serde_json::Value]) -> Vec<(String, String, String)> {
+    events
+        .iter()
+        .map(|event| {
+            (
+                event["action"].as_str().unwrap_or_default().to_string(),
+                event["outcome"].as_str().unwrap_or_default().to_string(),
+                event["level"].as_str().unwrap_or_default().to_string(),
+            )
+        })
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn logs_stream_level_error_matches_failed_outcomes_and_failure_actions() {
+    let h = build_admin_audit_harness();
+    seed_level_classification_entries(&h.state);
+
+    let events = read_sse_events(h.app.clone(), "/api/logs/stream?level=error", 3).await;
+
+    let s = |a: &str, o: &str, l: &str| (a.to_string(), o.to_string(), l.to_string());
+    assert_eq!(
+        event_summary(&events),
+        [
+            s("ToolInvoke", "error: boom", "error"),
+            s("PermissionDenied", "denied", "error"),
+            s("BudgetExceeded", "ok", "error"),
+        ],
+        "a failed ToolInvoke is an error by its outcome, a denial and a budget cap by their action, and no ok entry leaks through"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn logs_stream_level_info_keeps_successful_actions_including_agent_kill() {
+    let h = build_admin_audit_harness();
+    seed_level_classification_entries(&h.state);
+
+    // `filter=agent-alpha` leaves out the harness kernel's own boot-time `AgentSpawn`, which is also `info`.
+
+    let events = read_sse_events(
+        h.app.clone(),
+        "/api/logs/stream?level=INFO&filter=agent-alpha",
+        2,
+    )
+    .await;
+
+    let s = |a: &str, o: &str, l: &str| (a.to_string(), o.to_string(), l.to_string());
+    assert_eq!(
+        event_summary(&events),
+        [s("ToolInvoke", "ok", "info"), s("AgentKill", "ok", "info")],
+        "a successful kill is a deliberate action, not a warning, and the failed ToolInvoke between them is filtered out"
+    );
+}

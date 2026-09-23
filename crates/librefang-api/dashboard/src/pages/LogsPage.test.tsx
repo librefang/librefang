@@ -157,6 +157,31 @@ describe("LogsPage", () => {
     );
   });
 
+  // Mirrors `audit_level_reads_the_outcome_first_with_an_action_fallback` in `routes/logs.rs`, so the page badge and the SSE `level` filter give the same answer for the same entry (#8270).
+  it.each([
+    ["ToolInvoke", "ok", "info"],
+    ["ToolInvoke", "error: boom", "error"],
+    ["ToolInvoke", "  Error: padded and capitalised", "error"],
+    ["ConfigChange", "failed", "error"],
+    ["DreamConsolidation", "fail", "error"],
+    ["DreamConsolidation", "aborted", "info"],
+    ["McpConnect", "error: connect failed", "error"],
+    ["PermissionDenied", "denied", "error"],
+    ["PermissionDenied", "ok", "error"],
+    ["BudgetExceeded", "ok", "error"],
+    ["BudgetExceeded", "", "error"],
+    ["CapabilityCheck", "denied", "error"],
+    ["AgentKill", "ok", "info"],
+    ["AgentKill", "error: agent not found", "error"],
+    ["ToolInvoke", "warning: nearing limit", "warn"],
+    ["ToolInvoke", "debug: cache miss", "debug"],
+    ["PermissionDenied", "warn: soft deny", "warn"],
+    ["AgentSpawn", "completed", "info"],
+    ["ToolInvoke", "", "info"],
+  ])("classifies %s with outcome %j as %s", (action, outcome, expected) => {
+    expect(auditLogLevel({ action, outcome } as AuditEntry)).toBe(expected);
+  });
+
   it("projects exports to the log-view contract", () => {
     const [entry] = sampleEntries();
     const exported = projectAuditLogExport([
