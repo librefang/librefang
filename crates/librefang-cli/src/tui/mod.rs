@@ -289,6 +289,8 @@ impl App {
                 self.dashboard.provider = provider;
                 self.dashboard.model = model;
                 self.dashboard.loading = false;
+                // The status request opens each dashboard refresh, so its success is what retires the last round's failure.
+                self.dashboard.status_msg.clear();
             }
             AppEvent::AuditLoaded(rows) => {
                 self.dashboard.recent_audit = rows;
@@ -587,18 +589,86 @@ impl App {
                 self.agents.sub = agents::AgentSubScreen::AgentDetail;
             }
             AppEvent::FetchError(err) => {
-                // Route to the active tab's status message
+                // Route to the active tab's status message, and bring down that tab's spinner.
+                //
+                // Every screen draws its spinner on `loading` alone, and only a successful *Loaded event clears it, so a failure that only wrote the message would leave the pane spinning with the message invisible underneath (#8059 review, #8154).
+                // The match is exhaustive on purpose: a new tab has to decide where its errors go, where a `_ => {}` arm used to drop them.
                 match self.active_tab {
-                    Tab::Workflows => self.workflows.status_msg = err,
-                    Tab::Triggers => self.triggers.status_msg = err,
-                    Tab::Goals => self.goals.status_msg = err,
-                    Tab::Sessions => self.sessions.status_msg = err,
-                    Tab::Memory => self.memory.status_msg = err,
-                    Tab::Models => self.models.status_msg = err,
-                    Tab::Skills => self.skills.status_msg = err,
-                    Tab::Hands => self.hands.status_msg = err,
-                    Tab::Extensions => self.extensions.status_msg = err,
-                    Tab::Templates => self.templates.status_msg = err,
+                    Tab::Dashboard => {
+                        self.dashboard.loading = false;
+                        self.dashboard.status_msg = err;
+                    }
+                    Tab::Agents => self.agents.status_msg = err,
+                    Tab::Chat => self.chat.status_msg = Some(err),
+                    Tab::Workflows => {
+                        self.workflows.loading = false;
+                        self.workflows.status_msg = err;
+                    }
+                    Tab::Triggers => {
+                        self.triggers.loading = false;
+                        self.triggers.status_msg = err;
+                    }
+                    Tab::Goals => {
+                        self.goals.loading = false;
+                        self.goals.status_msg = err;
+                    }
+                    Tab::Sessions => {
+                        self.sessions.loading = false;
+                        self.sessions.status_msg = err;
+                    }
+                    Tab::Memory => {
+                        self.memory.loading = false;
+                        self.memory.status_msg = err;
+                    }
+                    Tab::Models => {
+                        self.models.loading = false;
+                        self.models.status_msg = err;
+                    }
+                    Tab::Skills => {
+                        self.skills.loading = false;
+                        self.skills.status_msg = err;
+                    }
+                    Tab::Hands => {
+                        self.hands.loading = false;
+                        self.hands.status_msg = err;
+                    }
+                    Tab::Extensions => {
+                        self.extensions.loading = false;
+                        self.extensions.status_msg = err;
+                    }
+                    Tab::Templates => {
+                        self.templates.loading = false;
+                        self.templates.status_msg = err;
+                    }
+                    Tab::Peers => {
+                        self.peers.loading = false;
+                        self.peers.status_msg = err;
+                    }
+                    Tab::Groups => {
+                        self.groups.loading = false;
+                        self.groups.status_msg = err;
+                    }
+                    Tab::Comms => {
+                        self.comms.loading = false;
+                        self.comms.status_msg = err;
+                        self.comms.status_is_fetch_error = true;
+                    }
+                    Tab::Security => {
+                        self.security.loading = false;
+                        self.security.status_msg = err;
+                    }
+                    Tab::Audit => {
+                        self.audit.loading = false;
+                        self.audit.status_msg = err;
+                    }
+                    Tab::Usage => {
+                        self.usage.loading = false;
+                        self.usage.status_msg = err;
+                    }
+                    Tab::Logs => {
+                        self.logs.loading = false;
+                        self.logs.status_msg = err;
+                    }
                     // The config editor is the one Settings pane that does not
                     // share `settings.loading`: it draws its own status line and
                     // its own spinner, so a refused write or a failed fetch has
@@ -630,7 +700,6 @@ impl App {
                         self.channels.loading = false;
                         self.channels.status_msg = err;
                     }
-                    _ => {}
                 }
             }
 
@@ -836,8 +905,12 @@ impl App {
                 self.templates.providers = providers;
             }
             AppEvent::SecurityLoaded(features) => {
-                self.security.features = features;
+                // An empty answer keeps the builtin feature list that `SecurityState::new` seeded, rather than blanking the screen.
+                if !features.is_empty() {
+                    self.security.features = features;
+                }
                 self.security.loading = false;
+                self.security.status_msg.clear();
             }
             AppEvent::SecurityChainVerified { valid, message } => {
                 self.security.chain_verified = Some(valid);
@@ -855,6 +928,8 @@ impl App {
             AppEvent::UsageSummaryLoaded(summary) => {
                 self.usage.summary = summary;
                 self.usage.loading = false;
+                // The summary request opens each usage refresh, so its success is what retires the last round's failure.
+                self.usage.status_msg.clear();
             }
             AppEvent::UsageByModelLoaded(models) => {
                 self.usage.by_model = models;
@@ -913,6 +988,41 @@ impl App {
             AppEvent::ProviderTestResult(result) => {
                 self.settings.test_result = Some(result);
             }
+            AppEvent::VaultKeysLoaded(keys) => {
+                self.settings.vault_keys = keys;
+                if !self.settings.vault_keys.is_empty()
+                    && self.settings.vault_list.selected().is_none()
+                {
+                    self.settings.vault_list.select(Some(0));
+                }
+                self.settings.loading = false;
+            }
+            // A write that lands under an environment override is stored and
+            // inert. Confirming it as a plain success is the report houko
+            // flagged: the operator walks away believing they changed what the
+            // daemon uses.
+            AppEvent::VaultKeySaved(key, source) => {
+                self.settings.status_msg = crate::i18n::t_args(
+                    if source == settings::VaultKeySource::Environment {
+                        "tui-mod-vault-key-saved-env-override"
+                    } else {
+                        "tui-mod-vault-key-saved"
+                    },
+                    &[("key", &key)],
+                );
+                self.refresh_settings_vault();
+            }
+            AppEvent::VaultKeyDeleted(key, source) => {
+                self.settings.status_msg = crate::i18n::t_args(
+                    if source == settings::VaultKeySource::Environment {
+                        "tui-mod-vault-key-deleted-env-override"
+                    } else {
+                        "tui-mod-vault-key-deleted"
+                    },
+                    &[("key", &key)],
+                );
+                self.refresh_settings_vault();
+            }
             AppEvent::ModelCatalogLoaded(list) => {
                 self.models.models = list;
                 if !self.models.models.is_empty() && self.models.list_state.selected().is_none() {
@@ -936,6 +1046,7 @@ impl App {
                     self.groups.list_state.select(Some(0));
                 }
                 self.groups.loading = false;
+                self.groups.status_msg.clear();
             }
             AppEvent::ConfigSectionsLoaded(sections) => {
                 self.settings.config.set_sections(sections);
@@ -1017,11 +1128,17 @@ impl App {
                     self.peers.list_state.select(Some(0));
                 }
                 self.peers.loading = false;
+                self.peers.status_msg.clear();
             }
             AppEvent::CommsTopologyLoaded { nodes, edges } => {
                 self.comms.nodes = nodes;
                 self.comms.edges = edges;
                 self.comms.loading = false;
+                // The topology request opens each comms refresh, so its success retires the last round's failure; a send or task result is left alone.
+                if self.comms.status_is_fetch_error {
+                    self.comms.status_msg.clear();
+                    self.comms.status_is_fetch_error = false;
+                }
             }
             AppEvent::CommsEventsLoaded(events) => {
                 self.comms.events = events;
@@ -1032,15 +1149,18 @@ impl App {
             }
             AppEvent::CommsSendResult(msg) => {
                 self.comms.status_msg = msg;
+                self.comms.status_is_fetch_error = false;
                 self.refresh_comms();
             }
             AppEvent::CommsTaskResult(msg) => {
                 self.comms.status_msg = msg;
+                self.comms.status_is_fetch_error = false;
             }
             AppEvent::LogsLoaded(entries) => {
                 self.logs.entries = entries;
                 self.logs.refilter();
                 self.logs.loading = false;
+                self.logs.status_msg.clear();
             }
             AppEvent::HandsLoaded(list) => {
                 self.hands.definitions = list;
@@ -1777,6 +1897,13 @@ impl App {
         if let Some(backend) = self.backend.to_ref() {
             self.settings.loading = true;
             event::spawn_fetch_auxiliary(backend, self.event_tx.clone());
+        }
+    }
+
+    fn refresh_settings_vault(&mut self) {
+        if let Some(backend) = self.backend.to_ref() {
+            self.settings.loading = true;
+            event::spawn_fetch_vault_keys(backend, self.event_tx.clone());
         }
     }
 
@@ -2532,6 +2659,17 @@ impl App {
             settings::SettingsAction::RefreshTools => self.refresh_settings_tools(),
             settings::SettingsAction::RefreshBackups => self.refresh_settings_backups(),
             settings::SettingsAction::RefreshAuxiliary => self.refresh_settings_auxiliary(),
+            settings::SettingsAction::RefreshVault => self.refresh_settings_vault(),
+            settings::SettingsAction::SetVaultKey { key, value } => {
+                if let Some(backend) = self.backend.to_ref() {
+                    event::spawn_set_vault_key(backend, key, value, self.event_tx.clone());
+                }
+            }
+            settings::SettingsAction::DeleteVaultKey(key) => {
+                if let Some(backend) = self.backend.to_ref() {
+                    event::spawn_delete_vault_key(backend, key, self.event_tx.clone());
+                }
+            }
             settings::SettingsAction::SaveProviderKey { name, key } => {
                 if let Some(backend) = self.backend.to_ref() {
                     event::spawn_save_provider_key(backend, name, key, self.event_tx.clone());
@@ -3556,5 +3694,139 @@ mod run_history_refresh_tests {
             !app.workflows.loading,
             "the spinner still has to come down, or an operator load hangs forever"
         );
+    }
+}
+
+#[cfg(test)]
+mod fetch_error_routing_tests {
+    use super::*;
+
+    fn app_on(tab: Tab) -> App {
+        let (tx, _rx) = mpsc::channel();
+        let mut app = App::new(None, tx);
+        app.phase = Phase::Main;
+        app.active_tab = tab;
+        app
+    }
+
+    /// The case from #8154: the Sessions fetch now reports its failure, and the spinner that only `SessionsLoaded` used to clear must come down with it.
+    #[test]
+    fn a_failed_sessions_fetch_clears_the_spinner_and_shows_the_reason() {
+        let mut app = app_on(Tab::Sessions);
+        app.sessions.loading = true;
+
+        app.handle_event(AppEvent::FetchError(
+            "Failed to load sessions: HTTP 500".into(),
+        ));
+
+        assert!(
+            !app.sessions.loading,
+            "the spinner would hide the message forever"
+        );
+        assert_eq!(app.sessions.status_msg, "Failed to load sessions: HTTP 500");
+    }
+
+    /// Hands is one of the `stall` fetches, which sent nothing at all on failure before #8154.
+    #[test]
+    fn a_failed_hands_fetch_clears_the_spinner_and_shows_the_reason() {
+        let mut app = app_on(Tab::Hands);
+        app.hands.loading = true;
+
+        app.handle_event(AppEvent::FetchError(
+            "Failed to load hands: HTTP 500".into(),
+        ));
+
+        assert!(!app.hands.loading);
+        assert_eq!(app.hands.status_msg, "Failed to load hands: HTTP 500");
+    }
+
+    /// The tabs that had no arm dropped the error through `_ => {}`; the dashboard is the first screen that fetches.
+    #[test]
+    fn a_failed_dashboard_fetch_is_no_longer_dropped() {
+        let mut app = app_on(Tab::Dashboard);
+        app.dashboard.loading = true;
+
+        app.handle_event(AppEvent::FetchError(
+            "Failed to load the daemon status: connection refused".into(),
+        ));
+
+        assert!(!app.dashboard.loading);
+        assert_eq!(
+            app.dashboard.status_msg,
+            "Failed to load the daemon status: connection refused"
+        );
+    }
+
+    /// Chat keeps its status as an `Option`, drawn in red under the transcript.
+    #[test]
+    fn a_failed_chat_fetch_reaches_the_chat_status_line() {
+        let mut app = app_on(Tab::Chat);
+
+        app.handle_event(AppEvent::FetchError(
+            "Failed to list agents: HTTP 401".into(),
+        ));
+
+        assert_eq!(
+            app.chat.status_msg.as_deref(),
+            Some("Failed to list agents: HTTP 401")
+        );
+    }
+
+    /// The polled screens retry every few seconds, so a failure must not outlive the recovery that follows it.
+    #[test]
+    fn a_polled_screen_retires_its_failure_on_the_next_successful_load() {
+        let mut app = app_on(Tab::Logs);
+        app.logs.loading = true;
+
+        app.handle_event(AppEvent::FetchError("Failed to load logs: HTTP 503".into()));
+        assert!(!app.logs.loading);
+        assert_eq!(app.logs.status_msg, "Failed to load logs: HTTP 503");
+
+        app.handle_event(AppEvent::LogsLoaded(Vec::new()));
+        assert!(
+            app.logs.status_msg.is_empty(),
+            "a stale failure would sit over a screen that is working again"
+        );
+    }
+
+    /// An empty security answer keeps the builtin feature list but must still bring the spinner down; before, the daemon arm sent nothing in that case.
+    #[test]
+    fn an_empty_security_answer_keeps_the_builtin_features_and_clears_the_spinner() {
+        let mut app = app_on(Tab::Security);
+        let builtin = app.security.features.len();
+        assert!(builtin > 0, "SecurityState::new seeds a builtin list");
+        app.security.loading = true;
+
+        app.handle_event(AppEvent::SecurityLoaded(Vec::new()));
+
+        assert_eq!(app.security.features.len(), builtin);
+        assert!(!app.security.loading);
+    }
+
+    /// Comms polls too, but its status line also carries send results, which the refresh a send triggers must not wipe.
+    #[test]
+    fn comms_retires_a_fetch_failure_on_the_next_load_but_keeps_a_send_result() {
+        let mut app = app_on(Tab::Comms);
+        let topology = || AppEvent::CommsTopologyLoaded {
+            nodes: Vec::new(),
+            edges: Vec::new(),
+        };
+
+        app.handle_event(AppEvent::FetchError(
+            "Failed to load the agent topology: HTTP 503".into(),
+        ));
+        assert_eq!(
+            app.comms.status_msg,
+            "Failed to load the agent topology: HTTP 503"
+        );
+        app.handle_event(topology());
+        assert!(
+            app.comms.status_msg.is_empty(),
+            "a stale failure would sit over a screen that is working again"
+        );
+
+        app.handle_event(AppEvent::CommsTaskResult("Task posted".into()));
+        app.handle_event(topology());
+        assert_eq!(app.comms.status_msg, "Task posted");
     }
 }

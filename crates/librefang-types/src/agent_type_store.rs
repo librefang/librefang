@@ -61,6 +61,14 @@ pub fn workspace_agent_manifest_path(name: &str) -> PathBuf {
     workspace_agents_dir().join(name).join("agent.toml")
 }
 
+/// The registry checkout root (`$LIBREFANG_HOME/registry/`), the source side of a registry sync.
+///
+/// This store's own directory is the *destination* side, so the two are siblings under the same home and a caller that wants to compare an installed agent type against the copy the registry ships needs both.
+/// Named here rather than derived by the caller because the obvious derivation — taking the parent of [`agent_types_dir`] — is only correct while the store stays exactly one level below home, and it fails open: `Path::parent` returning `None` is indistinguishable from a registry that ships no such type, so a caller that mis-derives the root reports "not in the registry" for every name instead of erroring.
+pub fn registry_cache_dir() -> PathBuf {
+    librefang_home().join("registry")
+}
+
 /// Validate an agent-type name before it is joined onto the store directory.
 ///
 /// Only permits `[A-Za-z0-9_-]` to guarantee the result cannot escape the base directory through `..`, absolute paths, or platform separators (`/`, `\`).
@@ -143,7 +151,46 @@ pub fn create_agent_type(
     let rendered = toml::to_string_pretty(&manifest).map_err(|e| {
         CreateAgentTypeError::Io(format!("failed to render agent type '{name}': {e}"))
     })?;
+    claim_and_write(name, &rendered)?;
 
+    Ok(CreatedAgentType {
+        name: name.to_string(),
+        manifest,
+        manifest_toml: rendered,
+    })
+}
+
+/// Create a new agent type from an already-fully-formed manifest, refusing to overwrite anything.
+///
+/// The dashboard's raw-TOML editor authors a complete [`AgentManifest`] up front — unlike
+/// [`create_agent_type`], there is no flat [`AgentTypeSpec`] to expand.
+/// Before this existed, creating a type meant two requests: `POST /api/templates` (name +
+/// description over a default manifest) followed by `PUT /api/templates/{name}/toml` (the
+/// manifest the operator actually authored). A failure on the second request left the stub
+/// from the first sitting on disk, and even when both succeeded, one user action produced two
+/// version-history snapshots for a document that only ever existed as its final form (#8028).
+/// This claims the name atomically exactly like `create_agent_type` and writes once, so there is
+/// no intermediate state and nothing to reconcile.
+pub fn create_agent_type_from_manifest(
+    name: &str,
+    manifest: &AgentManifest,
+) -> Result<String, CreateAgentTypeError> {
+    validate_agent_type_name(name).map_err(|_| CreateAgentTypeError::InvalidName)?;
+    if workspace_agent_manifest_path(name).exists() {
+        return Err(CreateAgentTypeError::ShadowsLiveAgent);
+    }
+
+    let rendered = toml::to_string_pretty(manifest).map_err(|e| {
+        CreateAgentTypeError::Io(format!("failed to render agent type '{name}': {e}"))
+    })?;
+    claim_and_write(name, &rendered)?;
+    Ok(rendered)
+}
+
+/// Claim `name`'s path atomically and write `rendered` into it — the shared landing of every
+/// create path, so the race-free claim and the leaves-nothing-behind cleanup on a failed write
+/// exist in exactly one place rather than risking drift between them.
+fn claim_and_write(name: &str, rendered: &str) -> Result<(), CreateAgentTypeError> {
     let dir = agent_types_dir();
     std::fs::create_dir_all(&dir).map_err(|e| {
         CreateAgentTypeError::Io(format!("failed to create {}: {e}", dir.display()))
@@ -172,11 +219,7 @@ pub fn create_agent_type(
         )));
     }
 
-    Ok(CreatedAgentType {
-        name: name.to_string(),
-        manifest,
-        manifest_toml: rendered,
-    })
+    Ok(())
 }
 
 /// Serialize a manifest over an agent type that already exists, in one atomic rename.

@@ -2,6 +2,8 @@ import { queryOptions, useQuery } from "@tanstack/react-query";
 import {
   listAgents,
   getAgentDetail,
+  getAgentManifest,
+  getAgentChannels,
   getAgentStats,
   listAgentEvents,
   listAgentSessions,
@@ -15,7 +17,6 @@ import {
   getAgentTools,
   getAgentSkills,
   getAgentMcpServers,
-  getAgentChannels,
 } from "../http/client";
 import { agentKeys, toolKeys } from "./keys";
 import { withOverrides, type QueryOverrides } from "./options";
@@ -140,7 +141,18 @@ export const agentQueries = {
       queryFn: () => getAgentMcpServers(agentId),
       enabled: !!agentId,
     }),
-  agentChannels: (agentId: string) =>
+  // Full manifest as raw TOML (#7742). Disabled by default — callers gate
+  // this on the full manifest editor being open via QueryOverrides, since
+  // the payload is only needed while that drawer is mounted.
+  manifest: (agentId: string) =>
+    queryOptions({
+      queryKey: agentKeys.manifest(agentId),
+      queryFn: () => getAgentManifest(agentId),
+      enabled: false,
+    }),
+  // Per-agent channel allowlist (#7742) — backs the Configure drawer's
+  // Channels section.
+  channels: (agentId: string) =>
     queryOptions({
       queryKey: agentKeys.channels(agentId),
       queryFn: () => getAgentChannels(agentId),
@@ -213,6 +225,10 @@ export function useAgentMcpServers(agentId: string, options: QueryOverrides = {}
   return useQuery(withOverrides(agentQueries.agentMcpServers(agentId), options));
 }
 
+export function useAgentManifest(agentId: string, options: QueryOverrides = {}) {
+  return useQuery(withOverrides(agentQueries.manifest(agentId), options));
+}
+
 export function useAgentChannels(agentId: string, options: QueryOverrides = {}) {
-  return useQuery(withOverrides(agentQueries.agentChannels(agentId), options));
+  return useQuery(withOverrides(agentQueries.channels(agentId), options));
 }

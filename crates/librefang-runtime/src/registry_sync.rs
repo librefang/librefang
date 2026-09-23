@@ -577,6 +577,28 @@ fn download_and_extract(
     Ok(())
 }
 
+/// A `git` invocation that talks to the network, with the two ways it can wait forever removed.
+///
+/// `std::process::Command` has no deadline, so this is not a bound on how long a transfer may take —
+/// it is a bound on the two ways it can hang rather than finish.
+///
+/// `GIT_TERMINAL_PROMPT=0` makes a credential prompt fail instead of waiting: a process with no tty
+/// has nothing to answer it, and git waits on that stream indefinitely.
+///
+/// The low-speed pair makes a transfer that has effectively stopped abort — git gives up once it has
+/// moved under a kilobyte per second for thirty seconds. A clone that is merely slow still runs to
+/// completion, which a `timeout` around the whole command would have taken away.
+///
+/// Measured cost of not having this: the clone below held the shared cargo lock for about half an
+/// hour from inside a test, and the queue behind it is not FIFO, so three other lanes stopped.
+fn git_network() -> Command {
+    let mut command = Command::new("git");
+    command.env("GIT_TERMINAL_PROMPT", "0");
+    command.env("GIT_HTTP_LOW_SPEED_LIMIT", "1000");
+    command.env("GIT_HTTP_LOW_SPEED_TIME", "30");
+    command
+}
+
 /// Fallback: clone the registry using git (for environments where HTTP tarball
 /// download fails but git is available).
 fn git_clone_fallback(
@@ -589,7 +611,7 @@ fn git_clone_fallback(
     if registry_cache.join(".git").exists() {
         // Already a git repo — fetch and reset to origin/main so that a
         // detached HEAD or local branch can never stall the sync.
-        let fetch_ok = Command::new("git")
+        let fetch_ok = git_network()
             .args(["fetch", "--depth", "1", "-q", "origin", "main"])
             .current_dir(registry_cache)
             .status()
@@ -611,7 +633,7 @@ fn git_clone_fallback(
             std::fs::remove_dir_all(registry_cache)?;
         }
         let repo_url = apply_mirror(registry_mirror, &registry_urls(registry_host).clone_url);
-        let status = Command::new("git")
+        let status = git_network()
             .args([
                 "clone",
                 "--depth",
@@ -1657,6 +1679,58 @@ mod tests {
         assert!(
             !home_dir.join("workspaces").join("agents").exists(),
             "and must not create the old destination either"
+        );
+    }
+}
+
+#[cfg(test)]
+mod git_network_tests {
+    use super::git_network;
+
+    /// The three settings that turn a wait-forever into a failure, asserted rather than assumed.
+    ///
+    /// Each is invisible at its call site: without them the command still runs, and only hangs when
+    /// the network stalls or git decides it wants a credential — which is the state that held the
+    /// shared cargo lock for about half an hour, from inside a test, with three lanes queued behind
+    /// a lock that is not FIFO.
+    #[test]
+    fn a_network_git_invocation_cannot_wait_for_a_prompt_or_a_stalled_transfer() {
+        let command = git_network();
+        let envs: Vec<(String, Option<String>)> = command
+            .get_envs()
+            .map(|(key, value)| {
+                (
+                    key.to_string_lossy().into_owned(),
+                    value.map(|v| v.to_string_lossy().into_owned()),
+                )
+            })
+            .collect();
+        let get = |name: &str| -> Option<String> {
+            envs.iter()
+                .find(|(key, _)| key == name)
+                .and_then(|(_, value)| value.clone())
+        };
+
+        assert_eq!(
+            get("GIT_TERMINAL_PROMPT").as_deref(),
+            Some("0"),
+            "a process with no tty has nothing to answer a credential prompt with, and git waits \
+             on that stream indefinitely rather than failing"
+        );
+        assert_eq!(
+            get("GIT_HTTP_LOW_SPEED_LIMIT").as_deref(),
+            Some("1000"),
+            "a transfer that has stopped must abort rather than be waited out"
+        );
+        assert_eq!(
+            get("GIT_HTTP_LOW_SPEED_TIME").as_deref(),
+            Some("30"),
+            "…after thirty seconds of it, not never"
+        );
+        assert_eq!(
+            command.get_args().count(),
+            0,
+            "the helper sets the environment and nothing else, so a caller's arguments stay its own"
         );
     }
 }

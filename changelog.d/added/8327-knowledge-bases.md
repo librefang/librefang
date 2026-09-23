@@ -1,0 +1,4 @@
+Documents can be uploaded once and shared with the agents you choose, from the dashboard.
+A knowledge base is a directory of files plus the list of agents that hold it; a holder reads its documents as `@name/whatever.md` and can be granted write access separately.
+Nothing new stores them: a base is a named workspace, the `[workspaces]` mechanism agents have supported end to end since #8051, so the sharing decision lives in each agent's manifest beside every other per-agent capability, deleting a base is deleting a directory with no index left to disagree with it, and the agent's `TOOLS.md` is rewritten the moment a grant changes rather than at its next restart.
+What was missing was never the storage or the retrieval — it was that using any of it meant hand-editing TOML and copying files onto the host. (#8327) (@DaBlitzStein)

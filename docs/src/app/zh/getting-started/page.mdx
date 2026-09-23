@@ -67,6 +67,8 @@ irm https://librefang.ai/install.ps1 | iex
 - `LIBREFANG_VERSION` — 指定版本（默认：最新版）
 - `LIBREFANG_AUTO_START` — 自动启动守护进程（默认：1）
 
+在 macOS 上，发行版二进制使用 Developer ID 签名，完全磁盘访问权限和自动化授权会在更新后保留；从旧的 ad-hoc 签名版本升级时，需要重新授予一次（参见 [`librefang update`](/zh/integrations/cli#librefang-update)）。
+
 **Windows EXE（手动安装）**
 
 如果你偏好手动安装，或脚本在你的环境中无法运行：

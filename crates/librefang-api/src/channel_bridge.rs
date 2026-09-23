@@ -2250,6 +2250,28 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
         self.resolve_binding_lookup(lookup, instance, Some(conversation_id))
     }
 
+    async fn set_conversation_override(
+        &self,
+        instance: &str,
+        conversation_id: &str,
+        agent_id: AgentId,
+        bound_by: &str,
+    ) -> Result<(), String> {
+        // The store holds agent names, and `resolve_binding_lookup` maps them back through `find_by_name`.
+        // Record the registry's own name for the id rather than whatever the user typed: a spawned agent's manifest `name` need not match the manifest directory `/agent` was given.
+        let agent_name = self
+            .kernel
+            .agent_registry()
+            .get(agent_id)
+            .map(|entry| entry.name.clone())
+            .ok_or_else(|| format!("agent {agent_id} is not in the registry"))?;
+        self.kernel
+            .memory_substrate()
+            .channel_bindings()
+            .set_conversation_binding(instance, conversation_id, &agent_name, bound_by)
+            .map_err(|e| e.to_string())
+    }
+
     async fn resolve_instance_default(&self, instance: &str) -> Option<AgentId> {
         // Lower binding level (#5671): the instance default seeded from
         // `[[sidecar_channels]] agent`.
@@ -3688,6 +3710,58 @@ mod tests {
             .seed_instance_default("ghost-bot", "does-not-exist")
             .unwrap();
         assert_eq!(adapter.resolve_instance_default("ghost-bot").await, None);
+
+        kernel.shutdown();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn set_conversation_override_round_trips_through_real_substrate() {
+        // Injection-site guard (#7140): `/agent` persists its selection through `set_conversation_override`, whose trait default is a no-op returning Ok.
+        // A missing kernel-adapter override would ack every `/agent` while writing nothing, and the instance default would keep winning — exactly the reported bug — with the bridge's mock-handle tests still green.
+        use librefang_testing::MockKernelBuilder;
+
+        let (kernel, _tmp) = MockKernelBuilder::new().build();
+        let assistant = kernel
+            .agent_registry()
+            .find_by_name("assistant")
+            .expect("default assistant agent should exist after boot")
+            .id;
+        let adapter = KernelBridgeAdapter::new(kernel.clone());
+
+        adapter
+            .set_conversation_override("tg-bot", "peer-1", assistant, "user:peer-1")
+            .await
+            .expect("override write must succeed");
+        assert_eq!(
+            adapter
+                .resolve_conversation_override("tg-bot", "peer-1")
+                .await,
+            Some(assistant),
+            "the written override must be what the chat path reads back"
+        );
+        assert_eq!(
+            kernel
+                .memory_substrate()
+                .channel_bindings()
+                .conversation_binding("tg-bot", "peer-1")
+                .unwrap()
+                .as_deref(),
+            Some("assistant"),
+            "the store holds the registry name, which is what resolve maps back to an id"
+        );
+        assert_eq!(
+            adapter
+                .resolve_conversation_override("tg-bot", "peer-2")
+                .await,
+            None,
+            "an override is scoped to its own conversation"
+        );
+
+        // An id that is not in the registry has no name to record, so the write is refused rather than storing an unresolvable binding.
+        assert!(adapter
+            .set_conversation_override("tg-bot", "peer-3", AgentId::new(), "user:peer-3")
+            .await
+            .is_err());
 
         kernel.shutdown();
     }

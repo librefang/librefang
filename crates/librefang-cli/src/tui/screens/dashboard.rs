@@ -44,6 +44,8 @@ pub struct DashboardState {
     pub dreams: Vec<DreamRow>,
     pub dreams_enabled: bool,
     pub loading: bool,
+    /// The last fetch failure, drawn in place of the key hints until the next successful load clears it.
+    pub status_msg: String,
     pub tick: usize,
     pub audit_scroll: u16,
 }
@@ -66,6 +68,7 @@ impl DashboardState {
             dreams: Vec::new(),
             dreams_enabled: false,
             loading: false,
+            status_msg: String::new(),
             tick: 0,
             audit_scroll: 0,
         }
@@ -141,7 +144,7 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut DashboardState) {
     draw_audit_body(f, chunks[4], state);
 
     f.render_widget(
-        widgets::hint_bar(&crate::i18n::t("tui-dashboard-hints")),
+        widgets::status_or_hint(&state.status_msg, &crate::i18n::t("tui-dashboard-hints")),
         chunks[5],
     );
 }

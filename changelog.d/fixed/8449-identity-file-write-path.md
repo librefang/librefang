@@ -1,0 +1,5 @@
+An agent identity file was written to a different place from the one the read served, and the API answered 200 either way.
+The writer always created `.identity/<name>`, so in the un-migrated case it left the file the `GET` had served untouched and added a second copy that the kernel's reader then preferred, and the operator's edit went to a file nobody read.
+A symlinked identity file was replaced by a regular file instead of being written through, which cut a file shared between agents off from every later edit; `GET` and `DELETE` already resolved the link, so the three verbs disagreed.
+A workspace root holding a *directory* named `SOUL.md` was treated as the file's home, because the check asked `exists()` where `is_file()` was the question, and the write then aimed at a directory and answered 500.
+And a root copy that `migrate_identity_files` moved mid-write was recreated by the write, leaving two files — one of which the read path never prefers, so the edit was invisible, and one the next migration deleted as the stale duplicate, losing it altogether (#8449) (@DaBlitzStein)

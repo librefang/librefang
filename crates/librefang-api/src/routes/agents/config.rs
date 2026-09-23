@@ -1303,11 +1303,8 @@ pub async fn patch_agent_config(
     // Update name
     if let Some(ref new_name) = req.name {
         if !new_name.is_empty() {
-            if let Err(e) = state
-                .kernel
-                .agent_registry()
-                .update_name(agent_id, new_name.clone())
-            {
+            // `rename_agent`, not the bare registry rename, so IDENTITY.md's front matter follows the new name (#8469).
+            if let Err(e) = state.kernel.rename_agent(agent_id, new_name.clone()) {
                 return (
                     StatusCode::CONFLICT,
                     Json(

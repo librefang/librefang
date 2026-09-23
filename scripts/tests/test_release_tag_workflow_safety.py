@@ -1050,8 +1050,81 @@ def check_repository_automation() -> None:
         raise SystemExit("secret inventory treats an expiring App token as persistent")
 
 
+# #8234: every macOS CLI build is signed with the Developer ID certificate, not ad hoc.
+# macOS keys Full Disk Access and Automation grants on a binary's code identity, and an ad-hoc signature derives that identity from the binary's own hash, so each release silently revoked them.
+# The jobs are duplicated between release.yml and release-cli.yml, so each copy is checked on its own.
+MACOS_CLI_SIGNING_JOBS = (
+    (RELEASE_WORKFLOW, "cli_mac", ("ai.librefang.cli", "ai.librefang.sidecar-telegram")),
+    (RELEASE_WORKFLOW, "cli_mac_mini", ("ai.librefang.cli",)),
+    (ROOT / ".github" / "workflows" / "release-cli.yml", "cli_mac", ("ai.librefang.cli", "ai.librefang.sidecar-telegram")),
+    (ROOT / ".github" / "workflows" / "release-cli.yml", "cli_mac_mini", ("ai.librefang.cli",)),
+)
+
+
+def check_macos_cli_signing() -> None:
+    for workflow, job_name, identifiers in MACOS_CLI_SIGNING_JOBS:
+        label = f"{workflow.name} {job_name}"
+        job = yaml.safe_load(workflow.read_text(encoding="utf-8")).get("jobs", {}).get(job_name)
+        if not isinstance(job, dict):
+            raise SystemExit(f"{label} is missing")
+        steps = job.get("steps", [])
+        names = [step.get("name") for step in steps]
+        indices = {}
+        for required in (
+            "Import macOS signing certificate",
+            "Codesign",
+            "Clean up macOS signing keychain",
+            "Package",
+        ):
+            if required not in names:
+                raise SystemExit(f"{label} has no `{required}` step")
+            indices[required] = names.index(required)
+        if not (
+            indices["Import macOS signing certificate"]
+            < indices["Codesign"]
+            < indices["Clean up macOS signing keychain"]
+            < indices["Package"]
+        ):
+            raise SystemExit(f"{label} does not import, sign and clean up before packaging")
+
+        import_step = steps[indices["Import macOS signing certificate"]]
+        env = import_step.get("env", {})
+        if env.get("MAC_CERT_BASE64") != "${{ secrets.MAC_CERT_BASE64 }}" or env.get(
+            "MAC_CERT_PASSWORD"
+        ) != "${{ secrets.MAC_CERT_PASSWORD }}":
+            raise SystemExit(f"{label} does not import the Developer ID certificate secrets")
+        if 'echo "MACOS_SIGNING_IDENTITY=$IDENTITY" >> "$GITHUB_ENV"' not in import_step.get("run", ""):
+            raise SystemExit(f"{label} does not export the signing identity")
+
+        cleanup_step = steps[indices["Clean up macOS signing keychain"]]
+        if cleanup_step.get("if") != "always()" or 'security delete-keychain "$KEYCHAIN_PATH"' not in cleanup_step.get("run", ""):
+            raise SystemExit(f"{label} does not always delete the temporary signing keychain")
+
+        sign_script = steps[indices["Codesign"]].get("run", "")
+        for fragment in (
+            'codesign --force --timestamp --identifier "$2" --sign "$MACOS_SIGNING_IDENTITY" "$1"',
+            'codesign --force --identifier "$2" --sign - "$1"',
+            "::warning::",
+            'codesign --verify --strict --verbose=2 "$1"',
+        ):
+            if fragment not in sign_script:
+                raise SystemExit(f"{label} Codesign step is missing: {fragment}")
+        # Hardened runtime would need JIT entitlements for wasmtime; the decision for #8234 is to sign without it.
+        if "--options" in sign_script or "runtime" in sign_script:
+            raise SystemExit(f"{label} enables the hardened runtime")
+        signed = re.findall(r"^\s*sign .+ (\S+)$", sign_script, re.MULTILINE)
+        if tuple(signed) != identifiers:
+            raise SystemExit(f"{label} signs identifiers {signed}, expected {list(identifiers)}")
+
+        # A second signing pass anywhere else in the job, like the old unconditional `codesign --force --sign -`, would overwrite the Developer ID signature.
+        for index, step in enumerate(steps):
+            if index != indices["Codesign"] and re.search(r"\bcodesign\s+--force\b", step.get("run", "")):
+                raise SystemExit(f"{label} re-signs outside the Codesign step: {step.get('name')}")
+
+
 def main() -> None:
     check_repository_automation()
+    check_macos_cli_signing()
     unsafe_forms = (
         "${{ inputs.version }}",
         "${{inputs['version']}}",

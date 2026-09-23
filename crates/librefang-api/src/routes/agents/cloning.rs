@@ -139,8 +139,19 @@ pub async fn clone_agent(
     let mut warnings = Vec::new();
     if let Some(src_ws) = source_workspace {
         if let Some(dst_ws) = destination_workspace {
-            match tokio::task::spawn_blocking(move || copy_clone_identity_files(&src_ws, &dst_ws))
-                .await
+            let source_name = source_manifest.name.clone();
+            let clone_name = req.new_name.clone();
+            match tokio::task::spawn_blocking(move || {
+                let copied = copy_clone_identity_files(&src_ws, &dst_ws);
+                // The copy carried the source's IDENTITY.md, whose front matter still names the source; point it at the clone unless the operator had set a different persona (#8469).
+                librefang_kernel::kernel::reconcile_identity_name(
+                    &dst_ws,
+                    &source_name,
+                    &clone_name,
+                );
+                copied
+            })
+            .await
             {
                 Ok(Ok(())) => {}
                 Ok(Err(error)) => {

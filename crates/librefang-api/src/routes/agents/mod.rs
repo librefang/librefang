@@ -24,7 +24,7 @@ mod config;
 mod ephemeral;
 mod files;
 mod identity;
-mod lifecycle;
+pub(crate) mod lifecycle;
 mod messaging;
 mod observability;
 mod sessions;
@@ -222,6 +222,10 @@ pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
         .route(
             "/agents/{id}/reload",
             axum::routing::post(reload_agent_manifest),
+        )
+        .route(
+            "/agents/{id}/manifest",
+            axum::routing::get(get_agent_manifest_toml),
         )
         .route(
             "/agents/{id}/files",

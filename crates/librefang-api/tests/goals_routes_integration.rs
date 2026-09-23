@@ -664,6 +664,101 @@ async fn goal_run_start_returns_500_not_404_on_storage_failure() {
     );
 }
 
+/// #8427: a start that cannot read the goal's pause checkpoint must refuse with a 500 and leave the checkpoint in place.
+///
+/// The runner used to read the failure as "no checkpoint", start the goal again at iteration 0, and delete the checkpoint it could not read on the way — the paused run's progress was gone and the route answered 200.
+/// Refusing through the same `false` the route renders as a deleted goal would have been a 404 that sends the operator to re-create a goal that exists, so the refusal has its own outcome.
+#[tokio::test(flavor = "multi_thread")]
+async fn goal_run_start_returns_500_and_keeps_an_unreadable_pause_checkpoint_8427() {
+    let h = boot().await;
+    let goal = create_goal(
+        &h,
+        serde_json::json!({"title": "paused, unreadable", "agent_id": "11111111-1111-1111-1111-111111111111"}),
+    )
+    .await;
+    let id = goal["id"].as_str().unwrap().to_string();
+    let key = librefang_kernel::goal_runner::goal_pause_key(id.parse().unwrap());
+    let agent = librefang_types::goal::goals_storage_agent_id()
+        .0
+        .to_string();
+
+    // Not JSON, so `StructuredStore::get` fails on it — the same `Err` a pool or SQLite failure produces.
+    let pool = h._state.kernel.memory_substrate().pool();
+    pool.get()
+        .expect("pool connection")
+        .execute(
+            "INSERT INTO kv_store (agent_id, key, value, version, updated_at) VALUES (?1, ?2, ?3, 1, ?4)",
+            rusqlite::params![
+                agent,
+                key,
+                b"this is not json".as_slice(),
+                chrono::Utc::now().to_rfc3339()
+            ],
+        )
+        .expect("seeding the unreadable checkpoint must succeed");
+    let checkpoint_rows = || -> i64 {
+        pool.get()
+            .expect("pool connection")
+            .query_row(
+                "SELECT COUNT(*) FROM kv_store WHERE agent_id = ?1 AND key = ?2",
+                rusqlite::params![agent, key],
+                |row| row.get(0),
+            )
+            .unwrap()
+    };
+
+    let (status, body) =
+        json_request(&h, Method::POST, &format!("/api/goals/{id}/start"), None).await;
+    assert_eq!(
+        status,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "an unreadable checkpoint is neither a deleted goal nor a fresh start: {body:?}"
+    );
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("could not start"),
+        "{body:?}"
+    );
+    assert_eq!(
+        checkpoint_rows(),
+        1,
+        "a refused start must not discard the checkpoint it could not read"
+    );
+
+    // `/resume` gates on the run readout, which reports the paused run as absent; that must not become a 409 "no paused run, use /start" for a checkpoint that is only unreadable.
+    let (status, body) =
+        json_request(&h, Method::POST, &format!("/api/goals/{id}/resume"), None).await;
+    assert_eq!(
+        status,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "an unreadable checkpoint is not the absence of a paused run: {body:?}"
+    );
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("could not start"),
+        "{body:?}"
+    );
+    assert_eq!(
+        checkpoint_rows(),
+        1,
+        "a refused resume must not discard the checkpoint it could not read"
+    );
+
+    // The run readout has no other source for a paused run, so it still reports none; the runner logs why.
+    let (rs, run) = json_request(&h, Method::GET, &format!("/api/goals/{id}/run"), None).await;
+    assert_eq!(rs, StatusCode::OK);
+    assert_eq!(run["running"].as_bool(), Some(false), "{run:?}");
+    assert_eq!(
+        checkpoint_rows(),
+        1,
+        "reading the run must not discard the checkpoint either"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // PUT /api/goals/{id}
 // ---------------------------------------------------------------------------

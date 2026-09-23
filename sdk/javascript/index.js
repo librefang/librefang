@@ -41,6 +41,7 @@ class LibreFang {
     this.groups = new GroupsResource(this);
     this.hands = new HandsResource(this);
     this.inbox = new InboxResource(this);
+    this.knowledge = new KnowledgeResource(this);
     this.mcp = new McpResource(this);
     this.media = new MediaResource(this);
     this.memory = new MemoryResource(this);
@@ -274,6 +275,10 @@ class AgentsResource {
 
   async agentLogs(id, query) {
     return this._c._request("GET", `/api/agents/${id}/logs`, undefined, query);
+  }
+
+  async getAgentManifestToml(id) {
+    return this._c._request("GET", `/api/agents/${id}/manifest`);
   }
 
   async getAgentMcpServers(id) {
@@ -842,6 +847,40 @@ class InboxResource {
 
   async inboxStatus() {
     return this._c._request("GET", "/api/inbox/status");
+  }
+}
+
+// ── Knowledge Resource
+
+class KnowledgeResource {
+  constructor(client) { this._c = client; }
+
+  async listBases() {
+    return this._c._request("GET", "/api/knowledge");
+  }
+
+  async createBase(data) {
+    return this._c._request("POST", "/api/knowledge", data, undefined);
+  }
+
+  async deleteBase(name) {
+    return this._c._request("DELETE", `/api/knowledge/${name}`);
+  }
+
+  async setHolders(name, data) {
+    return this._c._request("PUT", `/api/knowledge/${name}/agents`, data, undefined);
+  }
+
+  async listDocuments(name) {
+    return this._c._request("GET", `/api/knowledge/${name}/documents`);
+  }
+
+  async putDocument(name, filename, body, contentType) {
+    return this._c._request("PUT", `/api/knowledge/${name}/documents/${filename}`, body, undefined, contentType || "application/octet-stream");
+  }
+
+  async deleteDocument(name, filename) {
+    return this._c._request("DELETE", `/api/knowledge/${name}/documents/${filename}`);
   }
 }
 
@@ -1706,8 +1745,24 @@ class SystemResource {
     return this._c._request("POST", `/api/templates/${name}/promote`);
   }
 
+  async getAgentTypeRegistryDiff(name) {
+    return this._c._request("GET", `/api/templates/${name}/registry-diff`);
+  }
+
+  async restoreAgentTypeFromRegistry(name) {
+    return this._c._request("POST", `/api/templates/${name}/restore`);
+  }
+
   async getAgentTemplateToml(name) {
     return this._c._request("GET", `/api/templates/${name}/toml`);
+  }
+
+  async putAgentTemplateToml(name, body, contentType) {
+    return this._c._request("PUT", `/api/templates/${name}/toml`, body, undefined, contentType || "text/plain");
+  }
+
+  async postAgentTemplateToml(name, body, contentType) {
+    return this._c._request("POST", `/api/templates/${name}/toml`, body, undefined, contentType || "text/plain");
   }
 
   async version() {

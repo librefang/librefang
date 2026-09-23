@@ -58,6 +58,7 @@ fn populated_session(
     Session {
         id: sid,
         agent_id,
+        parent_session_id: None,
         messages,
         context_window_tokens: 0,
         label: None,

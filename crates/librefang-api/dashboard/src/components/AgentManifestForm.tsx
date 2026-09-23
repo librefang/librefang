@@ -3,6 +3,48 @@ import { useTranslation } from "react-i18next";
 import { AlertTriangle, ChevronDown, Plus, Trash2, X } from "lucide-react";
 import { CAPABILITY_ROUTING_KEYS, generateUid } from "../lib/agentManifest";
 import type { ManifestExtras, ManifestFormState } from "../lib/agentManifest";
+
+/// The tri-state caption for a memory capability field (#7749 review):
+/// `null` is the omitted key (unrestricted), `[]` is the declared-empty deny.
+/// Only shown when the list is empty — a non-empty list speaks for itself.
+/// The toggle exists because an empty tag input cannot carry the distinction.
+function MemoryScopeNote({
+  value,
+  onSet,
+}: {
+  value: string[] | null;
+  onSet: (next: string[] | null) => void;
+}) {
+  const { t } = useTranslation();
+  const isEmpty = (value ?? []).length === 0;
+  if (!isEmpty) return null;
+  if (value === null) {
+    return (
+      <p className="mt-1 text-xs text-text-dim">
+        {t("agents.form.memory_scope_unrestricted")}{" "}
+        <button
+          type="button"
+          className="underline hover:text-brand"
+          onClick={() => onSet([])}
+        >
+          {t("agents.form.memory_scope_restrict")}
+        </button>
+      </p>
+    );
+  }
+  return (
+    <p className="mt-1 text-xs text-warning">
+      {t("agents.form.memory_scope_denied")}{" "}
+      <button
+        type="button"
+        className="underline hover:text-brand"
+        onClick={() => onSet(null)}
+      >
+        {t("agents.form.memory_scope_unrestrict")}
+      </button>
+    </p>
+  );
+}
 import { MultiSelectCmdk } from "./ui/MultiSelectCmdk";
 import { ModelParamField } from "./ui/ModelParamField";
 import {
@@ -69,6 +111,23 @@ interface AgentManifestFormProps {
    * users can reference servers the dashboard doesn't know about yet.
    */
   mcpCatalog?: ManifestCatalogEntry[];
+  /**
+   * How the "Name" field behaves for this caller (#8028).
+   *
+   * - `"editable"` (default): the field a caller spawning a brand-new agent
+   *   fills in themselves.
+   * - `"readonly"`: identity is decided elsewhere (a URL path segment, a
+   *   sibling field) and this form only displays it. Rendering it editable
+   *   here — as the agent-type editor did — invites an operator to "rename"
+   *   an existing type: the request goes through, a success toast appears,
+   *   and nothing changes, because the server pins the name to the URL
+   *   rather than trusting the body.
+   * - `"hidden"`: the caller collects the name through its own field (e.g.
+   *   the agent-type create dialog, which has always had exactly one Name
+   *   input) and would otherwise end up with two fields that disagree about
+   *   which one wins.
+   */
+  nameField?: "editable" | "readonly" | "hidden";
 }
 
 export function AgentManifestForm({
@@ -81,6 +140,7 @@ export function AgentManifestForm({
   skillCatalog,
   toolCatalog,
   mcpCatalog,
+  nameField = "editable",
 }: AgentManifestFormProps) {
   const { t } = useTranslation();
 
@@ -153,16 +213,28 @@ export function AgentManifestForm({
   return (
     <div className="space-y-4">
       <Section title={t("agents.form.basics")}>
-        <Field label={t("agents.form.name")} required invalid={invalidFields.has("name")}>
-          <input
-            type="text"
-            value={value.name}
-            onChange={(e) => update({ name: e.target.value })}
-            placeholder={t("agents.form.name_placeholder")}
-            className={inputClass}
-            autoFocus
-          />
-        </Field>
+        {nameField !== "hidden" && (
+          <Field
+            label={t("agents.form.name")}
+            required
+            invalid={invalidFields.has("name")}
+            hint={nameField === "readonly" ? t("agents.form.name_locked_hint") : undefined}
+          >
+            <input
+              type="text"
+              value={value.name}
+              onChange={(e) => update({ name: e.target.value })}
+              placeholder={t("agents.form.name_placeholder")}
+              className={`${inputClass} disabled:opacity-50 disabled:cursor-not-allowed`}
+              autoFocus={nameField === "editable"}
+              disabled={nameField === "readonly"}
+              // `Field` wraps in a <div> rather than a <label> (#5246), so the
+              // visible label is not associated with the control. Without this
+              // the input has no accessible name.
+              aria-label={t("agents.form.name")}
+            />
+          </Field>
+        )}
         <Field label={t("agents.form.description")}>
           <input
             type="text"
@@ -217,7 +289,11 @@ export function AgentManifestForm({
 
       <Section title={t("agents.form.model")}>
         <div className="grid grid-cols-2 gap-3">
-          <Field label={t("agents.form.provider")} required invalid={invalidFields.has("model.provider")}>
+          <Field
+            label={t("agents.form.provider")}
+            hint={t("agents.form.inherit_default")}
+            invalid={invalidFields.has("model.provider")}
+          >
             <select
               value={value.model.provider}
               onChange={(e) => updateModel({ provider: e.target.value, model: "" })}
@@ -227,9 +303,9 @@ export function AgentManifestForm({
               {/* The option list is "providers you could pick", which excludes
                   one whose key was rejected or whose local service is down. The
                   agent may already be assigned to exactly that provider, and a
-                  controlled <select> with no matching <option> renders blank on
-                  a `required` field — so the current value is always listed,
-                  even when it is not something you would newly choose. */}
+                  controlled <select> with no matching <option> renders blank —
+                  so the current value is always listed, even when it is not
+                  something you would newly choose. */}
               {providerOptions.map((p) => (
                 <option key={p.name} value={p.name}>
                   {p.name}
@@ -237,7 +313,11 @@ export function AgentManifestForm({
               ))}
             </select>
           </Field>
-          <Field label={t("agents.form.model_id")} required invalid={invalidFields.has("model.model")}>
+          <Field
+            label={t("agents.form.model_id")}
+            hint={t("agents.form.inherit_default")}
+            invalid={invalidFields.has("model.model")}
+          >
             {filteredModels.length > 0 ? (
               <select
                 value={value.model.model}
@@ -484,16 +564,24 @@ export function AgentManifestForm({
         <div className="grid grid-cols-2 gap-3">
           <Field label={t("agents.form.memory_read")}>
             <TagInput
-              value={value.capabilities.memory_read}
+              value={value.capabilities.memory_read ?? []}
               onChange={(next) => updateCapabilities({ memory_read: next })}
               placeholder={t("agents.form.memory_glob_placeholder")}
+            />
+            <MemoryScopeNote
+              value={value.capabilities.memory_read}
+              onSet={(next) => updateCapabilities({ memory_read: next })}
             />
           </Field>
           <Field label={t("agents.form.memory_write")}>
             <TagInput
-              value={value.capabilities.memory_write}
+              value={value.capabilities.memory_write ?? []}
               onChange={(next) => updateCapabilities({ memory_write: next })}
               placeholder={t("agents.form.memory_glob_placeholder")}
+            />
+            <MemoryScopeNote
+              value={value.capabilities.memory_write}
+              onSet={(next) => updateCapabilities({ memory_write: next })}
             />
           </Field>
           <Field label={t("agents.form.agent_message")}>
@@ -715,7 +803,7 @@ export function AgentManifestForm({
 
       <CollapsibleSection title={t("agents.form.fallback_models")} defaultOpen={false}>
         <p className="text-[10px] text-text-dim/70 mb-2">{t("agents.form.fallback_models_hint")}</p>
-        {value.fallback_models.map((fb, idx) => (
+        {(value.fallback_models ?? []).map((fb, idx) => (
           <div
             key={fb._uid}
             className="rounded-lg border border-border-subtle/60 bg-main/40 p-2 mb-2 space-y-2"
@@ -724,7 +812,7 @@ export function AgentManifestForm({
               <span className="text-[10px] font-bold text-text-dim uppercase">#{idx + 1}</span>
               <button
                 type="button"
-                onClick={() => update({ fallback_models: value.fallback_models.filter((_, i) => i !== idx) })}
+                onClick={() => update({ fallback_models: (value.fallback_models ?? []).filter((_, i) => i !== idx) })}
                 className="text-text-dim hover:text-error"
                 aria-label={t("agents.form.remove_fallback")}
               >
@@ -735,28 +823,28 @@ export function AgentManifestForm({
               <input
                 type="text"
                 value={fb.provider}
-                onChange={(e) => update({ fallback_models: patchListItem(value.fallback_models, idx, { ...fb, provider: e.target.value }) })}
+                onChange={(e) => update({ fallback_models: patchListItem(value.fallback_models ?? [], idx, { ...fb, provider: e.target.value }) })}
                 placeholder={t("agents.form.provider")}
                 className={inputClass}
               />
               <input
                 type="text"
                 value={fb.model}
-                onChange={(e) => update({ fallback_models: patchListItem(value.fallback_models, idx, { ...fb, model: e.target.value }) })}
+                onChange={(e) => update({ fallback_models: patchListItem(value.fallback_models ?? [], idx, { ...fb, model: e.target.value }) })}
                 placeholder={t("agents.form.model_id")}
                 className={inputClass}
               />
               <input
                 type="text"
                 value={fb.api_key_env}
-                onChange={(e) => update({ fallback_models: patchListItem(value.fallback_models, idx, { ...fb, api_key_env: e.target.value }) })}
+                onChange={(e) => update({ fallback_models: patchListItem(value.fallback_models ?? [], idx, { ...fb, api_key_env: e.target.value }) })}
                 placeholder={t("agents.form.api_key_env")}
                 className={inputClass}
               />
               <input
                 type="text"
                 value={fb.base_url}
-                onChange={(e) => update({ fallback_models: patchListItem(value.fallback_models, idx, { ...fb, base_url: e.target.value }) })}
+                onChange={(e) => update({ fallback_models: patchListItem(value.fallback_models ?? [], idx, { ...fb, base_url: e.target.value }) })}
                 placeholder={t("agents.form.base_url")}
                 className={inputClass}
               />
@@ -768,7 +856,7 @@ export function AgentManifestForm({
           onClick={() =>
             update({
               fallback_models: [
-                ...value.fallback_models,
+                ...value.fallback_models ?? [],
                 { _uid: generateUid(), provider: "", model: "", api_key_env: "", base_url: "", extras: {} },
               ],
             })
@@ -778,6 +866,30 @@ export function AgentManifestForm({
           <Plus className="w-3.5 h-3.5" />
           {t("agents.form.add_fallback")}
         </button>
+        {(value.fallback_models ?? []).length === 0 &&
+          (value.fallback_models === null ? (
+            <p className="mt-1 text-xs text-text-dim">
+              {t("agents.form.fallback_scope_inherited")}{" "}
+              <button
+                type="button"
+                className="underline hover:text-brand"
+                onClick={() => update({ fallback_models: [] })}
+              >
+                {t("agents.form.fallback_scope_disable")}
+              </button>
+            </p>
+          ) : (
+            <p className="mt-1 text-xs text-warning">
+              {t("agents.form.fallback_scope_disabled")}{" "}
+              <button
+                type="button"
+                className="underline hover:text-brand"
+                onClick={() => update({ fallback_models: null })}
+              >
+                {t("agents.form.fallback_scope_inherit")}
+              </button>
+            </p>
+          ))}
       </CollapsibleSection>
 
       <CollapsibleSection title={t("agents.form.thinking")} defaultOpen={false}>

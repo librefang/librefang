@@ -57,9 +57,9 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
       - name: Build image (load to local daemon)
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
         with:
           context: .
           file: Dockerfile
@@ -101,7 +101,7 @@ jobs:
         # The `conclusion != 'skipped'` guard keeps this quiet when an earlier step failed and no SARIF was ever written, and `continue-on-error` keeps a repository without code scanning enabled from turning a green scan red on the upload alone.
         if: ${{ !cancelled() && steps.scan.conclusion != 'skipped' && github.repository == 'librefang/librefang' }}
         continue-on-error: true
-        uses: github/codeql-action/upload-sarif@b96794f015dfd88f77b49b1c93e0fa7110f94c63 # v4.38.0
+        uses: github/codeql-action/upload-sarif@1c5b675653bb5c22dbe9b12b556ec555138e09fd # v4.38.1
         with:
           sarif_file: ${{ runner.temp }}/trivy-reports/main-linux-amd64.sarif
           # Distinct per scanned image: code scanning replaces the previous

@@ -234,6 +234,15 @@ fn registry_len() -> usize {
     recover_lock(registry()).len()
 }
 
+/// Whether `session_id` has a bucket in the process-wide registry. Test helper.
+///
+/// [`with_session`] cannot answer this — it inserts on access — so a test that needs to assert an
+/// id is *absent* needs this one.
+#[cfg(test)]
+fn is_tracked(session_id: &SessionId) -> bool {
+    recover_lock(registry()).contains_key(session_id)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -459,13 +468,22 @@ mod tests {
     #[test]
     fn forget_session_is_idempotent_on_missing_id() {
         let unknown = SessionId::new();
-        let before = registry_len();
+        assert!(
+            !is_tracked(&unknown),
+            "a freshly-minted id is not tracked to begin with"
+        );
+
         forget_session(&unknown);
         forget_session(&unknown);
-        assert_eq!(
-            registry_len(),
-            before,
-            "forget on a never-tracked id is a no-op"
+
+        // The registry is process-wide and the rest of this binary mutates it in parallel, so the
+        // old assertion — that the total length did not change — measured what the other tests were
+        // doing as much as what this one was: measured at one failure in five full-suite runs,
+        // against a suite where nothing else had changed. It asks about the id, which is the
+        // question "forget on a never-tracked id is a no-op" actually poses.
+        assert!(
+            !is_tracked(&unknown),
+            "forget on a never-tracked id is a no-op — and must not create one"
         );
     }
 }
