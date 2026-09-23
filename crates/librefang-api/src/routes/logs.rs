@@ -17,7 +17,7 @@ pub fn router() -> axum::Router<Arc<AppState>> {
 ///
 /// Streams new audit entries as Server-Sent Events. Accepts optional query
 /// parameters for filtering:
-///   - `level`  — filter by classified level (info, warn, error, debug), classified from the entry's `outcome` (leading `error` / `fail` / `denied`, `warn`, `debug`), falling back to the action so `PermissionDenied` and `BudgetExceeded` are errors; each event carries the classification as `level`
+///   - `level`  — filter by classified level (info, warn, error, debug), classified from the entry's `outcome` (leading `error` / `fail` / `denied` or a status code ending `_failed` / `_error` / `_denied` such as `db_remove_failed`, `warn`, `debug`), falling back to the action so `PermissionDenied` and `BudgetExceeded` are errors; each event carries the classification as `level`
 ///   - `filter` — text substring filter across action/detail/agent_id
 ///
 /// A heartbeat ping is sent every 15 seconds to keep the connection alive.
@@ -177,9 +177,10 @@ pub async fn logs_stream(
 /// Classify an audit entry into a level (error, warn, debug, info).
 ///
 /// The outcome decides first, because it is the field that records whether the action went wrong: `AuditEntry.outcome` is "ok", "denied" or an error message, while the action name is the same string whether a `ToolInvoke` succeeded or failed (#8270).
-/// An outcome leading with `error` / `fail` / `denied` is an error, one leading with `warn` is a warning, one leading with `debug` is debug.
+/// An outcome leading with `error` / `fail` / `denied` is an error, and so is one whose leading snake_case status code ends in `_failed` / `_error` / `_denied`: the kernel records a kill whose database removal failed as `db_remove_failed` and a config write whose reload failed as `saved_reload_failed`, and those are stored in audit rows that cannot be rewritten.
+/// An outcome leading with `warn` is a warning, one leading with `debug` is debug.
 /// Any other outcome falls back to the action, and only the actions that are failures by definition classify as errors that way — a refusal (`PermissionDenied`) or a spend cap being hit (`BudgetExceeded`) is exactly what an operator filtering for `error` is looking for.
-/// `AgentKill` is deliberately not among them: a kill is an intentional operation, and its outcome says whether it failed.
+/// `AgentKill` is deliberately not among them: a kill is an intentional operation, and its outcome (`ok` or `db_remove_failed`) says whether it failed.
 ///
 /// The dashboard's `auditLogLevel` (`dashboard/src/pages/LogsPage.tsx`) implements the same rule, so the Logs page badge and this stream's `level` filter agree on every entry; the two test tables pin that.
 fn classify_audit_level(action: &AuditAction, outcome: &str) -> &'static str {
@@ -190,7 +191,22 @@ fn classify_audit_level(action: &AuditAction, outcome: &str) -> &'static str {
             .get(..prefix.len())
             .is_some_and(|head| head.eq_ignore_ascii_case(prefix.as_bytes()))
     };
-    if leads_with("error") || leads_with("fail") || leads_with("denied") {
+    // The leading snake_case status code: `db_remove_failed` out of `db_remove_failed`, `ok` out of `ok: failed_over`.
+    let code = &outcome[..outcome
+        .bytes()
+        .position(|b| !(b.is_ascii_alphanumeric() || b == b'_'))
+        .unwrap_or(outcome.len())];
+    let code_ends_with = |suffix: &str| {
+        code.len() >= suffix.len()
+            && code.as_bytes()[code.len() - suffix.len()..].eq_ignore_ascii_case(suffix.as_bytes())
+    };
+    if leads_with("error")
+        || leads_with("fail")
+        || leads_with("denied")
+        || code_ends_with("_failed")
+        || code_ends_with("_error")
+        || code_ends_with("_denied")
+    {
         return "error";
     }
     if leads_with("warn") {
@@ -331,6 +347,17 @@ mod tests {
             (AuditAction::CapabilityCheck, "denied", "error"),
             (AuditAction::AgentKill, "ok", "info"),
             (AuditAction::AgentKill, "error: agent not found", "error"),
+            (AuditAction::AgentKill, "db_remove_failed", "error"),
+            (AuditAction::ConfigChange, "saved_reload_failed", "error"),
+            (
+                AuditAction::AgentMessage,
+                "failed after 3 attempt(s): timeout",
+                "error",
+            ),
+            (AuditAction::ToolInvoke, "remote_error: 502", "error"),
+            (AuditAction::ConfigChange, "applied_partial", "info"),
+            (AuditAction::ConfigChange, "no_changes", "info"),
+            (AuditAction::ToolInvoke, "ok: failed_over to backup", "info"),
             (AuditAction::ToolInvoke, "warning: nearing limit", "warn"),
             (AuditAction::ToolInvoke, "debug: cache miss", "debug"),
             (AuditAction::PermissionDenied, "warn: soft deny", "warn"),

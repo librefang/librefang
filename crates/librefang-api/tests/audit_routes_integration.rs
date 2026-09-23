@@ -861,7 +861,7 @@ async fn audit_verify_does_not_misclassify_an_undifferentiated_failure_as_diverg
 // GET /api/logs/stream — `?level=` is classified from the outcome (#8270)
 // ---------------------------------------------------------------------------
 
-/// Seed entries whose level can only be told from the outcome (the two `ToolInvoke`s) or only from the action (`BudgetExceeded` with an `ok` outcome), in an order where every non-matching entry sits before a matching one, so a leak through the filter shows up inside the first events read.
+/// Seed entries whose level can only be told from the outcome (the two `ToolInvoke`s and the two `AgentKill`s) or only from the action (`BudgetExceeded` with an `ok` outcome), in an order where every non-matching entry sits before a matching one, so a leak through the filter shows up inside the first events read.
 fn seed_level_classification_entries(state: &routes::AppState) {
     let log = state.kernel.audit();
     log.record(
@@ -877,6 +877,13 @@ fn seed_level_classification_entries(state: &routes::AppState) {
         "error: boom",
     );
     log.record("agent-alpha", AuditAction::AgentKill, "agent killed", "ok");
+    // The outcome the kernel writes when a kill's database removal fails (`kernel/agent_runtime.rs`).
+    log.record(
+        "agent-alpha",
+        AuditAction::AgentKill,
+        "agent killed",
+        "db_remove_failed",
+    );
     log.record(
         "agent-alpha",
         AuditAction::PermissionDenied,
@@ -953,17 +960,18 @@ async fn logs_stream_level_error_matches_failed_outcomes_and_failure_actions() {
     let h = build_admin_audit_harness();
     seed_level_classification_entries(&h.state);
 
-    let events = read_sse_events(h.app.clone(), "/api/logs/stream?level=error", 3).await;
+    let events = read_sse_events(h.app.clone(), "/api/logs/stream?level=error", 4).await;
 
     let s = |a: &str, o: &str, l: &str| (a.to_string(), o.to_string(), l.to_string());
     assert_eq!(
         event_summary(&events),
         [
             s("ToolInvoke", "error: boom", "error"),
+            s("AgentKill", "db_remove_failed", "error"),
             s("PermissionDenied", "denied", "error"),
             s("BudgetExceeded", "ok", "error"),
         ],
-        "a failed ToolInvoke is an error by its outcome, a denial and a budget cap by their action, and no ok entry leaks through"
+        "a failed ToolInvoke and a failed kill are errors by their outcome, a denial and a budget cap by their action, and no ok entry leaks through"
     );
 }
 
