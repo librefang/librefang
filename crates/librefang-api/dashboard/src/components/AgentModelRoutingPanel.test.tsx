@@ -70,6 +70,9 @@ const catalog: ModelRouterProfiles = {
 const OPT_OUT_BANNER =
   /opted out of routing \(fixed\) — the allowlist and budget below have no effect/i;
 
+const STABLE_MODE_BANNER =
+  /The kernel runs in Stable mode, which freezes model choice: no router runs/i;
+
 function withQueryClient(node: ReactNode) {
   const qc = new QueryClient({
     defaultOptions: {
@@ -112,5 +115,36 @@ describe("AgentModelRoutingPanel", () => {
     await waitFor(() => {
       expect(screen.queryByText(OPT_OUT_BANNER)).not.toBeInTheDocument();
     });
+  });
+
+  // #8446: Stable mode runs no router at all, so every setting in the panel is saved and never applied.
+  it("warns that nothing here takes effect while the kernel runs in Stable mode", async () => {
+    seed({
+      mode: "flexible",
+      allowed_profiles: ["coder"],
+      routing_inert_reason: "stable_mode",
+      pinned_model: "pinned-model",
+    });
+
+    withQueryClient(<AgentModelRoutingPanel agent={agent} />);
+
+    expect(await screen.findByText(STABLE_MODE_BANNER)).toBeInTheDocument();
+    expect(screen.getByText("Inert in Stable mode")).toBeInTheDocument();
+  });
+
+  it("shows no Stable-mode warning while routing is live", async () => {
+    seed({
+      mode: "flexible",
+      allowed_profiles: ["coder"],
+      routing_inert_reason: null,
+    });
+
+    withQueryClient(<AgentModelRoutingPanel agent={agent} />);
+
+    expect(await screen.findByText("coder")).toBeInTheDocument();
+    await waitFor(() => {
+      expect(screen.queryByText(STABLE_MODE_BANNER)).not.toBeInTheDocument();
+    });
+    expect(screen.queryByText("Inert in Stable mode")).not.toBeInTheDocument();
   });
 });

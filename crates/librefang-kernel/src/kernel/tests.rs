@@ -19317,3 +19317,82 @@ async fn rename_agent_drops_cached_identity_so_the_next_turn_sees_the_new_name()
 
     kernel.shutdown();
 }
+
+/// A personality edit must reach the next turn's prompt, not only the file on disk (#8447).
+///
+/// The workspace identity files are cached for `PROMPT_CACHE_TTL`, so a write that did not drop the cache entry would keep serving the old front matter after `PATCH` reported success.
+#[tokio::test(flavor = "multi_thread")]
+async fn set_agent_personality_drops_cached_identity_so_the_next_turn_sees_it() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().join("librefang-kernel-personality-cache");
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+
+    let manifest = AgentManifest {
+        name: "personality-cache".to_string(),
+        description: "personality identity cache test agent".to_string(),
+        author: "test".to_string(),
+        module: "builtin:chat".to_string(),
+        ..Default::default()
+    };
+    let agent_id = kernel.spawn_agent(manifest).expect("spawn should succeed");
+    let workspace = kernel
+        .agents
+        .registry
+        .get(agent_id)
+        .expect("agent must be registered")
+        .manifest
+        .workspace
+        .expect("spawned agent has a workspace");
+
+    let warmed = kernel.cached_workspace_metadata(&workspace, false);
+    assert!(
+        warmed
+            .identity_md
+            .as_deref()
+            .is_some_and(|md| md.contains("\nvibe: helpful\n")),
+        "the warmed cache must hold the spawn-time IDENTITY.md, got: {:?}",
+        warmed.identity_md
+    );
+
+    kernel
+        .set_agent_personality(
+            agent_id,
+            &librefang_types::agent::AgentPersonality {
+                vibe: Some("technical".to_string()),
+                ..Default::default()
+            },
+        )
+        .expect("personality write should succeed");
+
+    let identity = kernel
+        .cached_workspace_metadata(&workspace, false)
+        .identity_md
+        .expect("IDENTITY.md must still be readable after the write");
+    assert!(
+        identity.contains("\nvibe: technical\n") && !identity.contains("\nvibe: helpful\n"),
+        "the next prompt build must see the new front matter, not the cached one: {identity}"
+    );
+
+    let unknown = kernel.set_agent_personality(
+        AgentId::new(),
+        &librefang_types::agent::AgentPersonality {
+            vibe: Some("x".to_string()),
+            ..Default::default()
+        },
+    );
+    assert!(
+        matches!(
+            unknown,
+            Err(KernelError::LibreFang(LibreFangError::AgentNotFound(_)))
+        ),
+        "{unknown:?}"
+    );
+
+    kernel.shutdown();
+}

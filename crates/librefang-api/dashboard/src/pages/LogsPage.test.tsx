@@ -157,6 +157,39 @@ describe("LogsPage", () => {
     );
   });
 
+  // Mirrors `audit_level_reads_the_outcome_first_with_an_action_fallback` in `routes/logs.rs`, so the page badge and the SSE `level` filter give the same answer for the same entry (#8270).
+  it.each([
+    ["ToolInvoke", "ok", "info"],
+    ["ToolInvoke", "error: boom", "error"],
+    ["ToolInvoke", "  Error: padded and capitalised", "error"],
+    ["ConfigChange", "failed", "error"],
+    ["DreamConsolidation", "fail", "error"],
+    ["DreamConsolidation", "aborted", "info"],
+    ["McpConnect", "error: connect failed", "error"],
+    ["PermissionDenied", "denied", "error"],
+    ["PermissionDenied", "ok", "error"],
+    ["BudgetExceeded", "ok", "error"],
+    ["BudgetExceeded", "", "error"],
+    ["CapabilityCheck", "denied", "error"],
+    ["AgentKill", "ok", "info"],
+    ["AgentKill", "error: agent not found", "error"],
+    ["AgentKill", "db_remove_failed", "error"],
+    ["AgentMessage", "failed: no LLM provider configured — configure via dashboard settings", "error"],
+    ["ConfigChange", "saved_reload_failed", "error"],
+    ["AgentMessage", "failed after 3 attempt(s): timeout", "error"],
+    ["ToolInvoke", "remote_error: 502", "error"],
+    ["ConfigChange", "applied_partial", "info"],
+    ["ConfigChange", "no_changes", "info"],
+    ["ToolInvoke", "ok: failed_over to backup", "info"],
+    ["ToolInvoke", "warning: nearing limit", "warn"],
+    ["ToolInvoke", "debug: cache miss", "debug"],
+    ["PermissionDenied", "warn: soft deny", "warn"],
+    ["AgentSpawn", "completed", "info"],
+    ["ToolInvoke", "", "info"],
+  ])("classifies %s with outcome %j as %s", (action, outcome, expected) => {
+    expect(auditLogLevel({ action, outcome } as AuditEntry)).toBe(expected);
+  });
+
   it("projects exports to the log-view contract", () => {
     const [entry] = sampleEntries();
     const exported = projectAuditLogExport([

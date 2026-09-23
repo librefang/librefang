@@ -13,6 +13,7 @@ import { useSkills } from "../lib/queries/skills";
 import { useProviders } from "../lib/queries/providers";
 import { useModels } from "../lib/queries/models";
 import { useMcpServers } from "../lib/queries/mcp";
+import { useModelRoutingInertReason } from "../lib/queries/config";
 import {
   useCreateAgentTypeFromToml,
   useDeleteAgentType,
@@ -92,6 +93,9 @@ function AgentTypeEditor({
   const toolsQuery = useTools();
   const skillsQuery = useSkills();
   const mcpServersQuery = useMcpServers();
+  // #8446: a template has no running agent to carry `routing_inert_reason`, so the Routing section reads the kernel-wide mode off the shared config cache, as the agent create form does.
+  // The editor is mounted only while open, so this fetches nothing until then.
+  const routingInertReasonQuery = useModelRoutingInertReason();
 
   const [newName, setNewName] = useState("");
   const [formState, setFormState] = useState<ManifestFormState>(emptyManifestForm);
@@ -238,6 +242,7 @@ function AgentTypeEditor({
             toolCatalog={toolCatalog}
             mcpCatalog={mcpCatalog}
             nameField={isCreate ? "hidden" : "readonly"}
+            routingInertReason={routingInertReasonQuery.data}
           />
 
           <div className="flex justify-end gap-2 pt-1">

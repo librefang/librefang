@@ -3093,19 +3093,21 @@ mod tests {
             }
         };
 
-        assert!(runner.start(
-            goal_id,
-            agent_id,
-            Some(100),
-            substrate.clone(),
-            send,
-            no_learnings_hook,
-            no_evaluator,
-            false,
-            None,
-            None,
-            None,
-        ));
+        assert!(runner
+            .start(
+                goal_id,
+                agent_id,
+                Some(100),
+                substrate.clone(),
+                send,
+                no_learnings_hook,
+                no_evaluator,
+                false,
+                None,
+                None,
+                None,
+            )
+            .is_started());
         let deadline = std::time::Instant::now() + Duration::from_secs(2);
         while live.load(Ordering::SeqCst) == 0 && std::time::Instant::now() < deadline {
             tokio::time::sleep(Duration::from_millis(2)).await;
