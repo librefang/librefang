@@ -4323,6 +4323,13 @@
     "go_to_overview": "Go to Overview"
   },
   "agentTypes": {
+    "change_source": {
+      "create": "Created",
+      "dashboard": "Dashboard edit",
+      "restore": "Restored",
+      "toml": "Raw TOML edit",
+      "unknown": "Unknown source"
+    },
     "confirm_delete": "Delete the agent type '{{name}}'? Agents already spawned from it are not affected.",
     "confirm_restore": "Restore '{{name}}' to the version saved {{timestamp}} ({{source}})? This overwrites the template's current agent.toml; the snapshot recorded afterwards holds the restored content, not the content it replaced.",
     "create_title": "New agent type",

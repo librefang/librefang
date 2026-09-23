@@ -146,7 +146,8 @@ const VERSION: TemplateVersionEntry = {
   // Stored naive-UTC, exactly as the history endpoint returns it.
   timestamp: "2026-09-01T10:30:00",
   manifest_toml: 'name = "researcher"\ndescription = "Read papers"\n',
-  change_source: "edit",
+  // A value the server actually writes: `put_agent_type` records a dashboard save as "dashboard".
+  change_source: "dashboard",
 };
 
 const idle = { mutateAsync: vi.fn(), isPending: false };
@@ -317,8 +318,8 @@ describe("AgentTypesPage template history", () => {
     useUIStore.setState({ toasts: [] });
   });
 
-  function openHistory(restore: MutationStub) {
-    renderPage({ mutateAsync: vi.fn(), isPending: false }, { restore, versions: [VERSION] });
+  function openHistory(restore: MutationStub, version: TemplateVersionEntry = VERSION) {
+    renderPage({ mutateAsync: vi.fn(), isPending: false }, { restore, versions: [version] });
     fireEvent.click(screen.getByRole("button", { name: "History" }));
   }
 
@@ -336,7 +337,9 @@ describe("AgentTypesPage template history", () => {
     // and en-US separates the time from AM/PM with U+202F — normalize both sides.
     const stamp = new Date(VERSION.timestamp + "Z").toLocaleString().replace(/\s+/g, " ");
     expect(message).toHaveTextContent(stamp);
-    expect(message).toHaveTextContent("(edit)");
+    // `change_source` is a wire token, not prose: the operator reads its label, in the dialog as in the row's badge (#8394).
+    expect(message).toHaveTextContent("(Dashboard edit)");
+    expect(message).not.toHaveTextContent("(dashboard)");
 
     fireEvent.click(screen.getByRole("button", { name: "Confirm" }));
 
@@ -344,6 +347,29 @@ describe("AgentTypesPage template history", () => {
       expect(mutateAsync).toHaveBeenCalledWith({ name: "researcher", versionId: 7 }),
     );
     expect(useUIStore.getState().toasts.map((t) => t.message)).toContain("Version restored");
+  });
+
+  it("labels the row's change source instead of printing the wire token", () => {
+    openHistory({ mutateAsync: vi.fn(), isPending: false });
+
+    const badge = screen.getByText("Dashboard edit");
+    // The raw value stays reachable for anyone matching a row against the database or the API response.
+    expect(badge).toHaveAttribute("title", "dashboard");
+    expect(screen.queryByText("dashboard")).toBeNull();
+  });
+
+  // A producer the dashboard has not been taught yet (or a row from an older database) must still say where it came from rather than go blank.
+  it("shows an unmapped change source verbatim in the badge and the dialog", () => {
+    openHistory(
+      { mutateAsync: vi.fn(), isPending: false },
+      { ...VERSION, change_source: "some_future_source" },
+    );
+
+    expect(screen.getByText("some_future_source")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Restore" }));
+    const message = screen.getByText(/Restore 'researcher' to the version saved/);
+    expect(message).toHaveTextContent("(some_future_source)");
   });
 
   it("writes nothing when the restore confirmation is cancelled", () => {

@@ -31,6 +31,7 @@ import { MultiSelectCmdk } from "../components/ui/MultiSelectCmdk";
 import { useUIStore } from "../lib/store";
 import { toastErr } from "../lib/errors";
 import { copyToClipboard } from "../lib/clipboard";
+import { changeSourceLabel } from "../lib/changeSource";
 
 /**
  * The subset of an agent type this editor writes.
@@ -586,7 +587,9 @@ function TemplateHistoryModal({
                   <span className="text-[12px] font-medium text-text-main">
                     {versionTimestamp(v)}
                   </span>
-                  <Badge variant="default" className="ml-2">{v.change_source}</Badge>
+                  <Badge variant="default" className="ml-2" title={v.change_source}>
+                    {changeSourceLabel(t, v.change_source)}
+                  </Badge>
                 </div>
                 <div className="flex shrink-0 items-center gap-1">
                   <button
@@ -626,7 +629,7 @@ function TemplateHistoryModal({
         message={t("agentTypes.confirm_restore", {
           name,
           timestamp: pendingRestore ? versionTimestamp(pendingRestore) : "",
-          source: pendingRestore?.change_source ?? "",
+          source: pendingRestore ? changeSourceLabel(t, pendingRestore.change_source) : "",
         })}
         tone="destructive"
       />

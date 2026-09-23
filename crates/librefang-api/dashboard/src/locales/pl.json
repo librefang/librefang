@@ -4337,6 +4337,13 @@
     "go_to_overview": "Przejdź do przeglądu"
   },
   "agentTypes": {
+    "change_source": {
+      "create": "Created",
+      "dashboard": "Dashboard edit",
+      "restore": "Restored",
+      "toml": "Raw TOML edit",
+      "unknown": "Unknown source"
+    },
     "confirm_delete": "Usunąć typ agenta '{{name}}'? Agenci już z niego utworzeni pozostaną nienaruszeni.",
     "confirm_restore": "Restore '{{name}}' to the version saved {{timestamp}} ({{source}})? This overwrites the template's current agent.toml; the snapshot recorded afterwards holds the restored content, not the content it replaced.",
     "create_title": "Nowy typ agenta",
