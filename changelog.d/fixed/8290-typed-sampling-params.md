@@ -1,0 +1,3 @@
+Send `top_p`, `frequency_penalty` and `presence_penalty` where each provider reads them, instead of through the `extra_params` map that only two drivers merged.
+Before, Anthropic and Gemini dropped all three without a word, Ollama posted them at the top level of the body where no sampler reads them, and the OpenAI-format driver forwarded them unfiltered to reasoning models that answer 400.
+They are now typed request fields: Ollama puts them in `options`, Gemini and Vertex AI send `generationConfig.topP`, Anthropic sends `top_p` in place of `temperature` on the models that still accept sampling parameters, and each driver drops, with a debug log, the parameters its target model rejects (#8290) (@houko)

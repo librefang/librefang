@@ -459,17 +459,7 @@ impl LlmDriver for VertexAiDriver {
     async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
         let url = self.endpoint_url(&request.model, false);
 
-        let (contents, system_instruction) =
-            super::gemini::convert_messages(&request.messages, &request.system);
-        let tools = super::gemini::convert_tools(&request);
-        let body = super::gemini::build_request(
-            contents,
-            system_instruction,
-            tools,
-            Some(request.temperature),
-            Some(request.max_tokens),
-            request.response_format.as_ref(),
-        );
+        let body = super::gemini::build_request_from("vertex_ai", &request);
 
         // Configurable in-driver retry cap (#10); default 3 (four total
         // attempts, including transport-error retries below).
@@ -568,17 +558,7 @@ impl LlmDriver for VertexAiDriver {
     ) -> Result<CompletionResponse, LlmError> {
         let url = self.endpoint_url(&request.model, true);
 
-        let (contents, system_instruction) =
-            super::gemini::convert_messages(&request.messages, &request.system);
-        let tools = super::gemini::convert_tools(&request);
-        let body = super::gemini::build_request(
-            contents,
-            system_instruction,
-            tools,
-            Some(request.temperature),
-            Some(request.max_tokens),
-            request.response_format.as_ref(),
-        );
+        let body = super::gemini::build_request_from("vertex_ai", &request);
 
         // Configurable in-driver retry cap (#10); default 3 (four total
         // attempts, including transport-error retries below).

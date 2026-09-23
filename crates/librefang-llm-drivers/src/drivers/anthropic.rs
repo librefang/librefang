@@ -116,6 +116,10 @@ struct ApiRequest {
     tools: Vec<ApiTool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     temperature: Option<f32>,
+    /// Nucleus sampling.
+    /// Never sent alongside `temperature` — Claude 4 and newer answer 400 to a request carrying both — see [`build_anthropic_request`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    top_p: Option<f32>,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     stream: bool,
     /// Extended thinking configuration, in whichever spelling this model's schema still accepts.
@@ -492,18 +496,31 @@ fn build_anthropic_request(request: &CompletionRequest) -> ApiRequest {
         effective_max_tokens
     };
 
+    // Sampling parameters were removed on Opus 4.7 and newer and answer 400 there; on the models that still take one, extended thinking is incompatible with a caller-chosen temperature, and with any `top_p` outside [0.95, 1], so neither is sent while thinking is on.
+    let sampling_allowed = generation.accepts_sampling_params() && requested_thinking.is_none();
+    // Claude 4 and newer reject `temperature` and `top_p` in the same request.
+    // `request.temperature` is always populated — the resolver fills in a system default when nobody chose one — whereas `top_p` is present only when an operator set it, so an explicit `top_p` is the stronger signal and wins.
+    let top_p = request.top_p.filter(|_| sampling_allowed);
+    let temperature = (sampling_allowed && top_p.is_none()).then_some(request.temperature);
+    // The Messages API has no penalty parameters at all (#8290); sending them would be a 400 on every turn.
+    super::sampling::log_dropped(
+        "anthropic",
+        &request.model,
+        &[
+            ("top_p", request.top_p.filter(|_| !sampling_allowed)),
+            ("frequency_penalty", request.frequency_penalty),
+            ("presence_penalty", request.presence_penalty),
+        ],
+    );
+
     ApiRequest {
         model: request.model.clone(),
         max_tokens: effective_max_tokens,
         system,
         messages: api_messages,
         tools: api_tools,
-        // Sampling parameters were removed on Opus 4.7 and newer and answer 400 there; on the models that still take one, extended thinking is incompatible with a caller-chosen temperature.
-        temperature: if generation.accepts_sampling_params() && requested_thinking.is_none() {
-            Some(request.temperature)
-        } else {
-            None
-        },
+        temperature,
+        top_p,
         stream: false,
         thinking: thinking_value,
         output_config,
@@ -2123,6 +2140,84 @@ mod tests {
                 "{model} still accepts temperature",
             );
         }
+    }
+
+    /// A request with every typed sampling parameter set, for the #8290 wire tests.
+    fn sampling_request(model: &str, thinking: Option<ThinkingConfig>) -> CompletionRequest {
+        CompletionRequest {
+            top_p: Some(0.9),
+            frequency_penalty: Some(0.5),
+            presence_penalty: Some(-0.25),
+            ..wire_request(model, thinking)
+        }
+    }
+
+    /// #8290: `top_p` reaches the Messages API, which it never did while it travelled in `extra_body` — this driver does not merge that map.
+    /// It replaces `temperature` rather than joining it, because Claude 4 and newer answer 400 to a request carrying both.
+    /// The penalties have no Messages API field at all, so they never reach the body.
+    #[test]
+    fn top_p_is_sent_instead_of_temperature_and_penalties_are_dropped() {
+        for model in [
+            "claude-opus-4-6",
+            "claude-sonnet-4-6",
+            "claude-haiku-4-5-20251001",
+            "claude-sonnet-4-5-20250929",
+            "kimi-for-coding",
+        ] {
+            let body =
+                serde_json::to_value(build_anthropic_request(&sampling_request(model, None)))
+                    .unwrap();
+            assert_eq!(body["top_p"], serde_json::json!(0.9_f32), "{model}");
+            assert!(body.get("temperature").is_none(), "{model}: {body}");
+            assert!(body.get("frequency_penalty").is_none(), "{model}: {body}");
+            assert!(body.get("presence_penalty").is_none(), "{model}: {body}");
+        }
+    }
+
+    /// The models that removed sampling parameters must not get `top_p` either — it is the same 400 as `temperature`.
+    #[test]
+    fn modern_models_get_no_top_p() {
+        for model in ["claude-opus-5", "claude-opus-4-7", "claude-sonnet-5"] {
+            let body =
+                serde_json::to_value(build_anthropic_request(&sampling_request(model, None)))
+                    .unwrap();
+            for key in [
+                "top_p",
+                "temperature",
+                "frequency_penalty",
+                "presence_penalty",
+            ] {
+                assert!(body.get(key).is_none(), "{model} got {key}: {body}");
+            }
+        }
+    }
+
+    /// Extended thinking constrains `top_p` to [0.95, 1] on the models that still take it, so it is dropped with the temperature while thinking is on.
+    #[test]
+    fn thinking_turn_gets_no_top_p() {
+        let thinking = Some(ThinkingConfig {
+            budget_tokens: 8192,
+            ..Default::default()
+        });
+        let body = serde_json::to_value(build_anthropic_request(&sampling_request(
+            "claude-sonnet-4-5-20250929",
+            thinking,
+        )))
+        .unwrap();
+        assert!(body.get("top_p").is_none(), "{body}");
+        assert!(body.get("temperature").is_none(), "{body}");
+    }
+
+    /// With no `top_p` set, the body is exactly what it was before #8290: the temperature and nothing else.
+    #[test]
+    fn no_top_p_keeps_the_temperature() {
+        let body = serde_json::to_value(build_anthropic_request(&wire_request(
+            "claude-sonnet-4-6",
+            None,
+        )))
+        .unwrap();
+        assert_eq!(body["temperature"], serde_json::json!(0.7_f32));
+        assert!(body.get("top_p").is_none(), "{body}");
     }
 
     /// On Opus 4.6 and newer, `thinking: {"type": "enabled", "budget_tokens": N}` is either deprecated or removed; the current form is `{"type": "adaptive"}`.
