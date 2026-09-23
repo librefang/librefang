@@ -15,6 +15,9 @@ fn read_skill_catalog_registry(
 /// GET /api/skills — List installed skills.
 ///
 /// `categories` always reflects all skills regardless of the `?category=` filter.
+///
+/// Each item carries both directions of a skill's tool relationship, named so they cannot be confused (#8445): `tools_count` counts the tools the skill *provides*, while `required_tools` / `required_tools_count` / `required_capabilities` echo the manifest's `[requirements]` table, i.e. what the agent must be granted for the skill to run.
+/// The `required_*` lists are always present; a skill that declares nothing reports empty lists, which is a different fact from "unknown".
 #[utoipa::path(
     get,
     path = "/api/skills",
@@ -82,6 +85,9 @@ pub async fn list_skills(
                 "author": s.manifest.skill.author,
                 "runtime": format!("{:?}", s.manifest.runtime.runtime_type),
                 "tools_count": s.manifest.tools.provided.len(),
+                "required_tools": s.manifest.requirements.tools,
+                "required_tools_count": s.manifest.requirements.tools.len(),
+                "required_capabilities": s.manifest.requirements.capabilities,
                 "tags": s.manifest.skill.tags,
                 "enabled": s.enabled,
                 "source": source,
@@ -902,6 +908,9 @@ pub async fn create_skill(
 
 /// Get detailed information about a specific skill, including linked files,
 /// tags, evolution history, and readiness status.
+///
+/// `tools` lists the tools the skill *provides*; `required_tools` and `required_capabilities` list what it *needs* from the host, from the manifest's `[requirements]` table (#8445).
+/// Both `required_*` lists are always present and empty when the skill declares nothing.
 #[utoipa::path(
     get,
     path = "/api/skills/{name}",
@@ -958,6 +967,8 @@ pub async fn get_skill_detail(
             "tags": manifest.skill.tags,
             "runtime": format!("{:?}", manifest.runtime.runtime_type),
             "tools": tools,
+            "required_tools": manifest.requirements.tools,
+            "required_capabilities": manifest.requirements.capabilities,
             "has_prompt_context": manifest.prompt_context.is_some(),
             "prompt_context_length": manifest.prompt_context.as_ref().map(|c| c.len()).unwrap_or(0),
             "source": manifest.source,

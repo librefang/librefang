@@ -5,7 +5,8 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { cloneResultNotice, hasTokenFootprintData, SystemPromptSection, DescriptionSection, ChannelsSection } from "./AgentsPage";
+import { cloneResultNotice, hasTokenFootprintData, SystemPromptSection, DescriptionSection, ChannelsSection, ManifestEditorForm } from "./AgentsPage";
+import { emptyManifestExtras, emptyManifestForm } from "../lib/agentManifest";
 import { usePatchAgent, useSetAgentChannels } from "../lib/mutations/agents";
 import { useBindPromptVersionToAgent } from "../lib/mutations/prompts";
 import { usePromptVersions, useAgentChannels } from "../lib/queries/agents";
@@ -301,5 +302,32 @@ describe("ChannelsSection (#7742)", () => {
       agentId: "agent-1",
       channels: ["telegram", "discord"],
     });
+  });
+});
+
+// #8446: the create form warned that Stable mode makes `[routing]` inert, but the existing-agent editor rendered the same Routing section silently.
+describe("ManifestEditorForm (#8446)", () => {
+  function renderEditor(routing_inert_reason: "stable_mode" | null) {
+    render(
+      <ManifestEditorForm
+        agent={{ routing_inert_reason }}
+        value={emptyManifestForm()}
+        onChange={() => {}}
+        providers={[{ name: "openai" }]}
+        models={[{ provider: "openai", id: "gpt-4o" }]}
+        invalidFields={new Set()}
+        extras={emptyManifestExtras()}
+      />,
+    );
+  }
+
+  it("warns in the Routing section when the agent's detail says Stable mode makes routing inert", () => {
+    renderEditor("stable_mode");
+    expect(screen.getByText("agents.form.routing_stable_inert")).toBeInTheDocument();
+  });
+
+  it("shows no Stable-mode warning while routing is live", () => {
+    renderEditor(null);
+    expect(screen.queryByText("agents.form.routing_stable_inert")).not.toBeInTheDocument();
   });
 });

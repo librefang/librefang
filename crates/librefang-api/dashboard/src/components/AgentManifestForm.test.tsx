@@ -37,6 +37,7 @@ function Harness({
   models = [{ provider: "openai", id: "gpt-4o" }],
   providers = [{ name: "openai" }],
   nameField,
+  routingInertReason,
 }: {
   skillCatalog?: ManifestCatalogEntry[];
   toolCatalog?: ManifestCatalogEntry[];
@@ -46,6 +47,7 @@ function Harness({
   models?: HarnessModel[];
   providers?: { name: string }[];
   nameField?: "editable" | "readonly" | "hidden";
+  routingInertReason?: "stable_mode" | null;
 }) {
   const [state, setState] = useState<ManifestFormState>(() => initialState ?? emptyManifestForm());
   return (
@@ -60,6 +62,7 @@ function Harness({
       toolCatalog={toolCatalog}
       mcpCatalog={mcpCatalog}
       nameField={nameField}
+      routingInertReason={routingInertReason}
     />
   );
 }
@@ -521,5 +524,20 @@ describe("AgentManifestForm — nameField", () => {
     const input = screen.getByRole("textbox", { name: "agents.form.name" });
     expect(input).toBeDisabled();
     expect(input).toHaveValue("existing-type");
+  });
+});
+
+// #8446: Stable mode runs no router, so a `[routing]` block written here is saved and never applied.
+describe("AgentManifestForm — routing in Stable mode", () => {
+  it("warns in the Routing section that routing has no effect in Stable mode", () => {
+    render(<Harness routingInertReason="stable_mode" />);
+
+    expect(screen.getByText("agents.form.routing_stable_inert")).toBeInTheDocument();
+  });
+
+  it("shows no Stable-mode warning while routing is live", () => {
+    render(<Harness routingInertReason={null} />);
+
+    expect(screen.queryByText("agents.form.routing_stable_inert")).not.toBeInTheDocument();
   });
 });

@@ -669,6 +669,8 @@ pub(crate) fn cmd_agent_routing_show(agent_id_str: &str, json: bool) {
 
     let mode = body["mode"].as_str().unwrap_or("fixed");
     ui::kv(&i18n::t("agent-routing-label-mode"), mode);
+    // #8446: printed before the fixed-mode early return because Stable mode also overrides a fixed agent's model with `pinned_model`.
+    print_routing_inert_reason(&body);
     if mode != "flexible" {
         println!("{}", i18n::t("agent-routing-fixed-explainer"));
         return;
@@ -700,6 +702,26 @@ pub(crate) fn cmd_agent_routing_show(agent_id_str: &str, json: bool) {
             &i18n::t("agent-routing-fixed-opt-out"),
         );
     }
+}
+
+/// Warn when the kernel mode makes the routing settings in `body` (a `GET` or `PUT /api/agents/{id}/model_routing` response) inert (#8446).
+///
+/// Stable mode runs neither router and applies only `pinned_model`, falling back to the manifest model, so the settings shown or just saved have no effect until the kernel leaves Stable mode.
+fn print_routing_inert_reason(body: &serde_json::Value) {
+    if let Some(value) = routing_inert_warning(body) {
+        ui::kv_warn(&i18n::t("agent-routing-label-stable"), &value);
+    }
+}
+
+/// The warning [`print_routing_inert_reason`] prints, or `None` when routing is live.
+fn routing_inert_warning(body: &serde_json::Value) -> Option<String> {
+    if body["routing_inert_reason"].as_str() != Some("stable_mode") {
+        return None;
+    }
+    Some(match body["pinned_model"].as_str() {
+        Some(model) => i18n::t_args("agent-routing-stable-inert", &[("model", model)]),
+        None => i18n::t("agent-routing-stable-inert-manifest"),
+    })
 }
 
 /// Build the PUT body for `routing-set` (#7781 review).
@@ -776,6 +798,8 @@ pub(crate) fn cmd_agent_routing_set(
                 &[("id", &agent_id), ("mode", mode)]
             )
         );
+        // The write succeeded and persisted, but in Stable mode it has no effect yet; say so instead of reporting plain success.
+        print_routing_inert_reason(&body);
     } else {
         let err_fallback = i18n::t("error-unknown");
         eprintln!(
@@ -1333,7 +1357,7 @@ pub(crate) fn cmd_message(
 
 #[cfg(test)]
 mod tests {
-    use super::{build_routing_set_payload, parse_inference_param};
+    use super::{build_routing_set_payload, parse_inference_param, routing_inert_warning};
 
     #[test]
     fn inherit_literals_become_json_null() {
@@ -1413,6 +1437,41 @@ mod tests {
         assert_eq!(
             payload["allowed_profiles"],
             serde_json::json!(["coder", "quick"])
+        );
+    }
+
+    /// #8446: `routing` and `routing-set` must say when Stable mode makes the settings inert, and name the model that runs instead.
+    #[test]
+    fn stable_mode_routing_warning_names_the_model_that_runs() {
+        let pinned = routing_inert_warning(&serde_json::json!({
+            "routing_inert_reason": "stable_mode",
+            "pinned_model": "pinned-test-model",
+        }))
+        .expect("Stable mode must produce a warning");
+        assert!(pinned.contains("pinned-test-model"), "got: {pinned}");
+
+        let manifest = routing_inert_warning(&serde_json::json!({
+            "routing_inert_reason": "stable_mode",
+            "pinned_model": null,
+        }))
+        .expect("Stable mode without a pinned model must still warn");
+        assert!(
+            !manifest.contains("agent-routing-"),
+            "untranslated key: {manifest}"
+        );
+
+        assert_eq!(
+            routing_inert_warning(&serde_json::json!({
+                "routing_inert_reason": null,
+                "pinned_model": "pinned-test-model",
+            })),
+            None,
+            "live routing must not warn"
+        );
+        // A daemon predating the field sends no key at all, which must read as live routing.
+        assert_eq!(
+            routing_inert_warning(&serde_json::json!({"mode": "flexible"})),
+            None
         );
     }
 }

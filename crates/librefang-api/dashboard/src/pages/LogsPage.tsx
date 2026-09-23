@@ -27,11 +27,27 @@ function logModule(entry: AuditEntry) {
 
 type LogLevel = keyof typeof LOG_LEVELS;
 
+// Actions that are failures by definition: their outcome is often "ok" or "denied", but an operator looking for errors wants them.
+const FAILURE_ACTIONS = new Set(["PermissionDenied", "BudgetExceeded"]);
+
+// Outcome first, action as a fallback — the same rule as `classify_audit_level` in `routes/logs.rs`, so this badge and the `/api/logs/stream?level=` filter agree on every entry (#8270).
+// A leading snake_case status code ending in `_failed` / `_error` / `_denied` is a failure too: the kernel writes `db_remove_failed` for a kill whose database removal failed and `saved_reload_failed` for a config write whose reload failed.
 export function auditLogLevel(entry: AuditEntry): LogLevel {
-  const outcome = (entry.outcome ?? "").toLowerCase();
-  if (outcome.startsWith("error")) return "error";
+  const outcome = (entry.outcome ?? "").trimStart().toLowerCase();
+  const code = /^[a-z0-9_]*/.exec(outcome)?.[0] ?? "";
+  if (
+    outcome.startsWith("error") ||
+    outcome.startsWith("fail") ||
+    outcome.startsWith("denied") ||
+    code.endsWith("_failed") ||
+    code.endsWith("_error") ||
+    code.endsWith("_denied")
+  ) {
+    return "error";
+  }
   if (outcome.startsWith("warn")) return "warn";
   if (outcome.startsWith("debug")) return "debug";
+  if (entry.action && FAILURE_ACTIONS.has(entry.action)) return "error";
   return "info";
 }
 
