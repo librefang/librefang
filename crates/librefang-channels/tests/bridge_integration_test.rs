@@ -4040,3 +4040,187 @@ async fn test_dispatch_cap_backpressures_the_adapter_stream() {
     manager.abort();
     producer.abort();
 }
+
+// ---------------------------------------------------------------------------
+// #7140: commands and chat must agree on the agent a conversation talks to
+// ---------------------------------------------------------------------------
+
+/// Kernel handle modelling the #5671 channel-instance binding store: an instance default (the `[[sidecar_channels]] agent` seed) plus a writable per-conversation override table, so `/agent` can be observed persisting a selection the chat path then honours.
+struct ConversationBindingHandle {
+    agents: Vec<(AgentId, String)>,
+    instance: String,
+    instance_default: AgentId,
+    /// `(instance, conversation_id) -> (agent_id, bound_by)` written by `set_conversation_override`.
+    overrides: Mutex<HashMap<(String, String), (AgentId, String)>>,
+    /// Every agent a chat turn was dispatched to.
+    received: Mutex<Vec<AgentId>>,
+    /// Every agent a `/new` reset reached.
+    resets: Mutex<Vec<AgentId>>,
+}
+
+#[async_trait]
+impl ChannelBridgeHandle for ConversationBindingHandle {
+    async fn send_message(&self, agent_id: AgentId, message: &str) -> Result<String, String> {
+        self.received.lock().unwrap().push(agent_id);
+        Ok(format!("Echo: {message}"))
+    }
+
+    async fn find_agent_by_name(&self, name: &str) -> Result<Option<AgentId>, String> {
+        Ok(self
+            .agents
+            .iter()
+            .find(|(_, n)| n == name)
+            .map(|(id, _)| *id))
+    }
+
+    async fn list_agents(&self) -> Result<Vec<(AgentId, String)>, String> {
+        Ok(self.agents.clone())
+    }
+
+    async fn spawn_agent_by_name(&self, _manifest_name: &str) -> Result<AgentId, String> {
+        Err("mock: spawn not implemented".to_string())
+    }
+
+    async fn resolve_conversation_override(
+        &self,
+        instance: &str,
+        conversation_id: &str,
+    ) -> Option<AgentId> {
+        self.overrides
+            .lock()
+            .unwrap()
+            .get(&(instance.to_string(), conversation_id.to_string()))
+            .map(|(id, _)| *id)
+    }
+
+    async fn set_conversation_override(
+        &self,
+        instance: &str,
+        conversation_id: &str,
+        agent_id: AgentId,
+        bound_by: &str,
+    ) -> Result<(), String> {
+        self.overrides.lock().unwrap().insert(
+            (instance.to_string(), conversation_id.to_string()),
+            (agent_id, bound_by.to_string()),
+        );
+        Ok(())
+    }
+
+    async fn resolve_instance_default(&self, instance: &str) -> Option<AgentId> {
+        (instance == self.instance).then_some(self.instance_default)
+    }
+
+    async fn reset_channel_session(
+        &self,
+        agent_id: AgentId,
+        channel: &str,
+        _chat_id: Option<&str>,
+        _is_internal_system: bool,
+    ) -> Result<String, String> {
+        self.resets.lock().unwrap().push(agent_id);
+        Ok(format!(
+            "Session reset for this {channel} chat. Other surfaces untouched."
+        ))
+    }
+
+    fn record_consumer_lag(&self, _n: u64, _ctx: &'static str) {
+        // Test mock: no event bus to forward to.
+    }
+}
+
+fn with_account(mut msg: ChannelMessage, instance: &str) -> ChannelMessage {
+    msg.metadata.insert(
+        "account_id".to_string(),
+        serde_json::Value::String(instance.to_string()),
+    );
+    msg
+}
+
+/// Regression for #7140 root causes 2 and 3, driven through the real `BridgeManager`.
+/// A sidecar instance whose default is agent A: `/new` has to reset A (the agent chat goes to), `/agent B` has to persist a per-conversation override, and from then on chat and `/new` both have to reach B.
+/// Before the fix `/new` resolved through the router alone and found nothing, and `/agent B` wrote only a router user default that the instance default outranks, so chat kept going to A while the ack said "Now talking to agent: B".
+#[tokio::test]
+async fn test_agent_command_sticks_and_commands_follow_chat_routing() {
+    let agent_a = AgentId::new();
+    let agent_b = AgentId::new();
+    let handle = Arc::new(ConversationBindingHandle {
+        agents: vec![
+            (agent_a, "alpha".to_string()),
+            (agent_b, "beta".to_string()),
+        ],
+        instance: "tg-bot".to_string(),
+        instance_default: agent_a,
+        overrides: Mutex::new(HashMap::new()),
+        received: Mutex::new(Vec::new()),
+        resets: Mutex::new(Vec::new()),
+    });
+    let router = Arc::new(AgentRouter::new());
+    let (adapter, tx) = MockAdapter::new("binding-adapter", ChannelType::Telegram);
+    let mut manager = BridgeManager::new(handle.clone(), router);
+    manager.start_adapter(adapter.clone()).await.unwrap();
+
+    // 1. `/new` before any selection resets the instance default, the agent chat is routed to.
+    tx.send(with_account(
+        make_command_msg(ChannelType::Telegram, "peer-1", "new", vec![]),
+        "tg-bot",
+    ))
+    .await
+    .unwrap();
+    wait_until("first /new reply", || !adapter.get_sent().is_empty()).await;
+    assert_eq!(
+        handle.resets.lock().unwrap().clone(),
+        vec![agent_a],
+        "/new must reset the agent the conversation's chat resolves to; replies: {:?}",
+        adapter.get_sent(),
+    );
+
+    // 2. `/agent beta` persists a per-conversation override under the same keys the chat path reads.
+    tx.send(with_account(
+        make_command_msg(ChannelType::Telegram, "peer-1", "agent", vec!["beta"]),
+        "tg-bot",
+    ))
+    .await
+    .unwrap();
+    wait_until("/agent reply", || adapter.get_sent().len() >= 2).await;
+    assert_eq!(adapter.get_sent()[1].1, "Now talking to agent: beta");
+    assert_eq!(
+        handle
+            .overrides
+            .lock()
+            .unwrap()
+            .get(&("tg-bot".to_string(), "peer-1".to_string()))
+            .cloned(),
+        Some((agent_b, "user:peer-1".to_string())),
+        "/agent must write the per-conversation binding the chat path consults",
+    );
+
+    // 3. The next ordinary message reaches the selected agent, not the instance default.
+    tx.send(with_account(
+        make_text_msg(ChannelType::Telegram, "peer-1", "hello"),
+        "tg-bot",
+    ))
+    .await
+    .unwrap();
+    wait_until("chat reply", || adapter.get_sent().len() >= 3).await;
+    assert_eq!(
+        handle.received.lock().unwrap().clone(),
+        vec![agent_b],
+        "chat must follow the /agent selection",
+    );
+
+    // 4. And `/new` now resets the agent the user is actually talking to.
+    tx.send(with_account(
+        make_command_msg(ChannelType::Telegram, "peer-1", "new", vec![]),
+        "tg-bot",
+    ))
+    .await
+    .unwrap();
+    wait_until("second /new reply", || adapter.get_sent().len() >= 4).await;
+    assert_eq!(
+        handle.resets.lock().unwrap().clone(),
+        vec![agent_a, agent_b]
+    );
+
+    manager.stop().await;
+}
