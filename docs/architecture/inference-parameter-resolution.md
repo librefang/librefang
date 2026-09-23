@@ -19,7 +19,7 @@ The specific setting lost to the general one, which is backwards from what anyon
 
 ### Preferences — how the agent should sound
 
-`temperature`, `top_p`, `max_tokens`, `frequency_penalty`, `presence_penalty`.
+`temperature`, `top_p`, `max_tokens`, `frequency_penalty`, `presence_penalty`, `top_k`, `min_p`, `repeat_penalty`.
 
 Resolution: **agent manifest > per-model override > system default.**
 
@@ -28,7 +28,7 @@ That state is what makes the ordering possible.
 Before it existed every agent carried a concrete `4096` / `0.7` whether or not anyone chose those numbers, so letting the manifest win would have made per-model overrides unreachable for every agent in existence — the inverted priority was a workaround for the missing state, not a decision about precedence.
 
 System defaults are `DEFAULT_MODEL_MAX_TOKENS` (4096) and `DEFAULT_MODEL_TEMPERATURE` (0.7).
-The other three have no default: unset means the parameter is simply not sent.
+The others have no default: unset means the parameter is simply not sent.
 
 ### How the preferences reach the wire
 
@@ -48,8 +48,30 @@ The Anthropic driver sends `top_p` only to the models that still accept sampling
 Claude 4 and newer reject `temperature` and `top_p` in one request; `temperature` is always populated on the request (the system default fills it when nobody chose one) while `top_p` is present only when someone set it, so a set `top_p` wins.
 Every parameter a driver drops is logged at `debug` with the provider and model.
 
+#### The local-model samplers: `top_k`, `min_p`, `repeat_penalty`
+
+These three are what llama.cpp-derived runtimes are usually tuned with, and none of them is an OpenAI Chat Completions parameter.
+They are typed fields on `CompletionRequest` too, with the same agent > per-model override > unset precedence.
+`top_k` is a whole number of at least 1, `min_p` is 0–1, and `repeat_penalty` is 0.01–2 with `1.0` meaning off; `PATCH /api/agents/{id}/config` rejects anything else.
+`repeat_penalty` is not `frequency_penalty` under another name: it is multiplicative and llama.cpp applies it over a window of recent tokens, so the two are not interchangeable.
+
+| Driver | `top_k` | `min_p` | `repeat_penalty` |
+|---|---|---|---|
+| Anthropic | top-level field (alongside `temperature`) | not sent | not sent |
+| Gemini / Vertex AI | `generationConfig.topK` | not sent | not sent |
+| Ollama (native) | `options.top_k` | `options.min_p` | `options.repeat_penalty` |
+| OpenAI-format, `vllm` | top-level field | top-level field | top-level **`repetition_penalty`** (vLLM's name) |
+| OpenAI-format, `lmstudio` | top-level field | not sent — not in LM Studio's documented parameters | top-level field |
+| OpenAI-format, custom provider named `llamacpp` / `llama.cpp` / `llama-cpp` / `llama_cpp` / `llama-server` | top-level field | top-level field | top-level field |
+| OpenAI-format, anything else (`openai`, hosted gateways) | not sent | not sent | not sent |
+
+The OpenAI-format driver decides from the provider name, because that is the only thing that says which runtime is behind the URL (`LocalSamplerDialect::for_provider` in `crates/librefang-llm-drivers/src/drivers/openai.rs`).
+`api.openai.com` answers an unknown body field with a 400, and hosted gateways differ in whether they reject, ignore or forward one, so none of them gets these by default; a gateway that does accept them can still be sent them through `extra_params`.
+The fixed-sampling gate above applies to these three as well.
+Anthropic, like the others, drops `top_k` for the models that removed sampling parameters and on an extended-thinking turn.
+
 `extra_params` stays the escape hatch for everything else, and on the drivers that merge it an explicit entry still overrides the typed value of the same name.
-`ResolvedInferenceParams::apply_to` removes any `top_p` / `frequency_penalty` / `presence_penalty` entry from `extra_params`, so a stale copy cannot bypass the gate.
+`ResolvedInferenceParams::apply_to` removes any `top_p` / `frequency_penalty` / `presence_penalty` / `top_k` / `min_p` / `repeat_penalty` entry from `extra_params`, so a stale copy cannot bypass the gate.
 
 ### Endpoint facts — what the transport will accept
 

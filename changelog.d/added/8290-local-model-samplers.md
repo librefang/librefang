@@ -1,0 +1,3 @@
+Add `top_k`, `min_p` and `repeat_penalty` as agent and per-model sampling settings, editable in the dashboard beside `top_p`, so local-model deployments no longer have to set their most common tuning knobs as untyped `extra_params` entries.
+Each provider receives only the ones it reads: Anthropic gets `top_k`, Gemini and Vertex AI get `generationConfig.topK`, Ollama gets all three in `options`, and the OpenAI-format driver sends them only to vLLM (as `repetition_penalty` for the penalty), LM Studio (without `min_p`) and a custom provider named for llama.cpp.
+`api.openai.com` and hosted gateways, which reject or ignore unknown body fields, receive none of them, and every dropped value is logged at debug level (#8290) (@houko)
