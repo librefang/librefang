@@ -1,0 +1,3 @@
+Upgrade russh to 0.62.5 or later, closing four SSH advisories (GHSA-5xvq-cp9x-6p6r, GHSA-cqjc-rmpq-xprq, GHSA-g9hv-x236-4qp3, GHSA-m65r-rprj-r5rg) in the optional `ssh-backend` remote-exec transport.
+The dashboard, website, docs and WhatsApp gateway lockfiles also move off vulnerable brace-expansion, js-yaml, esbuild, tmp, uuid, qs, postcss-selector-parser and protobufjs releases, mostly through in-range updates and scoped overrides only where a parent pins an old major.
+The two extract-zip advisories stay open because no patched release exists and it is reachable only through the dev-only Lighthouse CI chain (#8499) (@houko)
