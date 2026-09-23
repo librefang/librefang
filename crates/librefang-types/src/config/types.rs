@@ -1791,7 +1791,7 @@ pub enum RegistryPromotionMode {
 /// owns the token, the fork's own default branch as the PR base, a
 /// path-derived head-branch prefix, and no explicit commit author.
 ///
-/// `api_base_url` and `release_org` are also read by the release path — `librefang skill publish` and the GitHub-releases fallback of `librefang skill search` / `install` (`librefang-skills::marketplace`) — so one setting points both flows at the same GitHub, GitHub Enterprise Server included (#8180).
+/// `api_base_url` and `release_org` are also read by the release path — `librefang skill publish` and the GitHub-releases fallback of `librefang skill install` (`librefang-skills::marketplace`) — so one setting points both flows at the same GitHub, GitHub Enterprise Server included (#8180).
 /// That path creates a release on a repository and uploads an asset to it rather than opening a pull request, and ignores every other field here.
 ///
 /// The GitHub token is deliberately *not* configured here.

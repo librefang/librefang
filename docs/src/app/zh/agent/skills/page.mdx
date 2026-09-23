@@ -573,7 +573,7 @@ api_base_url = "https://github.example.com/api/v3"  # GitHub REST API 根地址�
 release_org = "acme-skills"                         # 存放每个技能 release 仓库的组织
 ```
 
-`librefang skill search` / `install` 的 GitHub releases 回退路径也读取这两个字段。
+`librefang skill install` 的 GitHub releases 回退路径（同步的注册中心副本中没有该技能时使用）也读取这两个字段。
 由于 GitHub token 会发送到它们指向的目标，这两个字段不能通过 `POST /api/config/set` 设置，请直接在磁盘上编辑 `config.toml`。
 
 ---

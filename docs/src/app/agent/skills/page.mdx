@@ -640,7 +640,7 @@ api_base_url = "https://github.example.com/api/v3"  # GitHub REST API root; http
 release_org = "acme-skills"                         # owner of the per-skill release repositories
 ```
 
-The GitHub-releases fallback of `librefang skill search` / `install` reads the same two fields.
+The GitHub-releases fallback of `librefang skill install` (used when the synced registry checkout has no such skill) reads the same two fields.
 Neither can be set through `POST /api/config/set`, because the GitHub token is sent to the destination they name; edit `config.toml` on disk.
 
 ---
