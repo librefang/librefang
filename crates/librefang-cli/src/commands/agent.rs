@@ -911,7 +911,7 @@ pub(crate) fn cmd_agent_set(agent_id_str: &str, field: &str, value: &str) {
 
 /// The per-agent knobs `librefang agent set` accepts beyond `model`.
 ///
-/// Five sampling preferences plus the two endpoint limits — the same set the
+/// The sampling preferences plus the two endpoint limits — the same set the
 /// dashboard and the TUI expose, so no surface can set something the others
 /// cannot.
 pub(crate) const INFERENCE_PARAM_FIELDS: &[&str] = &[
@@ -920,6 +920,9 @@ pub(crate) const INFERENCE_PARAM_FIELDS: &[&str] = &[
     "top_p",
     "frequency_penalty",
     "presence_penalty",
+    "top_k",
+    "min_p",
+    "repeat_penalty",
     "context_window",
     "max_output_tokens",
 ];
@@ -939,7 +942,7 @@ pub(crate) fn parse_inference_param(field: &str, value: &str) -> Result<serde_js
         return Ok(serde_json::Value::Null);
     }
     match field {
-        "max_tokens" => trimmed
+        "max_tokens" | "top_k" => trimmed
             .parse::<u32>()
             .map(|v| serde_json::json!(v))
             .map_err(|_| invalid_param(field, trimmed, true)),
@@ -1389,6 +1392,28 @@ mod tests {
             parse_inference_param("presence_penalty", "-0.5").unwrap(),
             serde_json::json!(-0.5_f32)
         );
+    }
+
+    /// #8290: `top_k` is a `u32` on the route, so it parses as an integer — `40.0` sent where the schema says `u32` is rejected by the daemon.
+    #[test]
+    fn local_model_samplers_parse_with_their_route_types() {
+        assert_eq!(
+            parse_inference_param("top_k", "40").unwrap(),
+            serde_json::json!(40)
+        );
+        assert!(parse_inference_param("top_k", "4.5").is_err());
+        assert_eq!(
+            parse_inference_param("min_p", "0.05").unwrap(),
+            serde_json::json!(0.05_f32)
+        );
+        assert_eq!(
+            parse_inference_param("repeat_penalty", "1.1").unwrap(),
+            serde_json::json!(1.1_f32)
+        );
+        for field in ["top_k", "min_p", "repeat_penalty"] {
+            assert!(super::INFERENCE_PARAM_FIELDS.contains(&field), "{field}");
+            assert!(parse_inference_param(field, "inherit").unwrap().is_null());
+        }
     }
 
     /// A typo fails here rather than as a `400` after a round trip to the

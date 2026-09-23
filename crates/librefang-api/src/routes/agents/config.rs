@@ -1202,6 +1202,18 @@ pub struct PatchAgentConfigRequest {
     #[serde(default, deserialize_with = "deserialize_present")]
     #[schema(value_type = Option<f32>)]
     pub presence_penalty: Option<Option<f32>>,
+    /// Top-k sampling (≥ 1). Same tri-state as [`Self::max_tokens`].
+    #[serde(default, deserialize_with = "deserialize_present")]
+    #[schema(value_type = Option<u32>)]
+    pub top_k: Option<Option<u32>>,
+    /// Minimum-probability (min-p) sampling (0.0–1.0). Same tri-state as [`Self::max_tokens`].
+    #[serde(default, deserialize_with = "deserialize_present")]
+    #[schema(value_type = Option<f32>)]
+    pub min_p: Option<Option<f32>>,
+    /// Repetition penalty (0.01–2.0, `1.0` = off). Same tri-state as [`Self::max_tokens`].
+    #[serde(default, deserialize_with = "deserialize_present")]
+    #[schema(value_type = Option<f32>)]
+    pub repeat_penalty: Option<Option<f32>>,
     /// Context-window override in tokens — a limit, not a preference.
     /// Same tri-state as [`Self::max_tokens`]; `null` returns resolution to
     /// the registry / probe chain.
@@ -1554,6 +1566,17 @@ pub async fn patch_agent_config(
             -2.0..=2.0,
             "presence_penalty must be between -2.0 and 2.0",
         ),
+        (
+            req.min_p.flatten(),
+            0.0..=1.0,
+            "min_p must be between 0.0 and 1.0",
+        ),
+        // `0` would divide every logit by zero in llama.cpp and vLLM rejects it; `1.0` is "off".
+        (
+            req.repeat_penalty.flatten(),
+            0.01..=2.0,
+            "repeat_penalty must be between 0.01 and 2.0",
+        ),
     ] {
         if value.is_some_and(|v| !range.contains(&v)) {
             return (
@@ -1561,6 +1584,12 @@ pub async fn patch_agent_config(
                 Json(serde_json::json!({ "error": message })),
             );
         }
+    }
+    if let Some(Some(0)) = req.top_k {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "top_k must be greater than 0"})),
+        );
     }
     if let Some(Some(0)) = req.max_tokens {
         return (
@@ -1592,6 +1621,10 @@ pub async fn patch_agent_config(
             .map(|v| registry.update_frequency_penalty(agent_id, v)),
         req.presence_penalty
             .map(|v| registry.update_presence_penalty(agent_id, v)),
+        req.top_k.map(|v| registry.update_top_k(agent_id, v)),
+        req.min_p.map(|v| registry.update_min_p(agent_id, v)),
+        req.repeat_penalty
+            .map(|v| registry.update_repeat_penalty(agent_id, v)),
         req.context_window
             .map(|v| registry.update_context_window(agent_id, v)),
         req.max_output_tokens

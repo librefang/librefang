@@ -11,9 +11,9 @@ interface AgentModelParamFieldsProps {
   /** The numeric half of the model draft. `""` is the inherit state everywhere, not zero. */
   draft: Record<ModelNumericField, string>;
   /**
-   * One handler keyed by field rather than seven closures.
+   * One handler keyed by field rather than one closure per parameter.
    *
-   * Seven hand-written setters differing only in a key is the shape that eventually writes `presence_penalty` into `frequency_penalty`, and nothing renders the drawer in a test that would notice.
+   * Ten hand-written setters differing only in a key is the shape that eventually writes `presence_penalty` into `frequency_penalty`, and nothing renders the drawer in a test that would notice.
    * Passing the field through makes that mistake unspellable.
    */
   onChange: (field: ModelNumericField, next: string) => void;
@@ -21,7 +21,7 @@ interface AgentModelParamFieldsProps {
    * Hand agents reach a different write path with a smaller surface.
    *
    * `PATCH /api/agents/{id}/hand-runtime-config` deserializes the full `PatchAgentConfigRequest` but maps only `max_tokens` and `temperature` into `HandAgentRuntimeOverride` (`crates/librefang-api/src/routes/agents/config.rs:1401-1419`, and the struct itself in `crates/librefang-hands/src/lib.rs:1158-1173`).
-   * The other five are known keys, so nothing rejects them — the request returns 200 and the values are dropped on the floor.
+   * The other eight are known keys, so nothing rejects them — the request returns 200 and the values are dropped on the floor.
    * Do not render them here again without a field on that struct to receive them.
    */
   isHand: boolean;
@@ -30,7 +30,7 @@ interface AgentModelParamFieldsProps {
 }
 
 /**
- * The seven model parameters an agent can pin, as the shared step ladders.
+ * The model parameters an agent can pin, as the shared step ladders.
  *
  * Extracted from the detail drawer so the wiring is reachable from a test: the page itself has no render harness (~20 hooks), which is why `SystemPromptSection` is exported from it too.
  */
@@ -66,6 +66,27 @@ export function AgentModelParamFields({
             param="presence_penalty"
             value={draft.presence_penalty}
             onChange={(next) => onChange("presence_penalty", next)}
+          />
+          {/*
+            The local-model samplers. Only some providers read them — Anthropic and Gemini take top-k, Ollama and llama.cpp-family servers take all three — and the driver drops the rest, so the hint says so rather than letting a no-op look like a setting.
+          */}
+          <p className="text-[10px] text-text-dim/70 leading-snug">
+            {t("model_param.local_samplers_hint")}
+          </p>
+          <ModelParamField
+            param="top_k"
+            value={draft.top_k}
+            onChange={(next) => onChange("top_k", next)}
+          />
+          <ModelParamField
+            param="min_p"
+            value={draft.min_p}
+            onChange={(next) => onChange("min_p", next)}
+          />
+          <ModelParamField
+            param="repeat_penalty"
+            value={draft.repeat_penalty}
+            onChange={(next) => onChange("repeat_penalty", next)}
           />
         </>
       )}

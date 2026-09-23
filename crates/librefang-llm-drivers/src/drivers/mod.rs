@@ -758,7 +758,8 @@ fn create_driver_from_entry(
                 request_timeout_secs,
             )
             .with_emit_caller_trace_headers(config.emit_caller_trace_headers)
-            .with_max_retries(config.max_retries),
+            .with_max_retries(config.max_retries)
+            .with_sampler_dialect(openai::LocalSamplerDialect::for_provider(entry.name)),
         )),
         ApiFormat::Anthropic => Ok(Arc::new(
             anthropic::AnthropicDriver::with_proxy_and_timeout(
@@ -913,7 +914,9 @@ pub fn create_driver(config: &DriverConfig) -> Result<Arc<dyn LlmDriver>, LlmErr
                 config.proxy_url.as_deref(),
                 config.request_timeout_secs,
             )
-            .with_emit_caller_trace_headers(config.emit_caller_trace_headers),
+            .with_emit_caller_trace_headers(config.emit_caller_trace_headers)
+            // A custom provider's own name is the only statement of which runtime it is; `llamacpp` and its spellings opt into llama.cpp's samplers (#8290).
+            .with_sampler_dialect(openai::LocalSamplerDialect::for_provider(provider)),
         ));
     }
 

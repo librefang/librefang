@@ -3392,6 +3392,9 @@ export function AgentsPage() {
                           ["model_param.top_p", detailAgent.model.top_p, false],
                           ["model_param.frequency_penalty", detailAgent.model.frequency_penalty, false],
                           ["model_param.presence_penalty", detailAgent.model.presence_penalty, false],
+                          ["model_param.top_k", detailAgent.model.top_k, false],
+                          ["model_param.min_p", detailAgent.model.min_p, false],
+                          ["model_param.repeat_penalty", detailAgent.model.repeat_penalty, false],
                           ["model_param.context_window", detailAgent.model.context_window, true],
                           ["model_param.max_output_tokens", detailAgent.model.max_output_tokens, true],
                         ] as const).map(([key, value, isTokenCount]) => (

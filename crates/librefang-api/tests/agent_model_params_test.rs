@@ -9,7 +9,7 @@
 //!    state, which is what forced the per-model override to win over the agent
 //!    manifest — an agent that could not say "I have no opinion" left the
 //!    override no way to reach it.
-//! 2. **All five preference knobs are settable per agent**, not just
+//! 2. **Every preference knob is settable per agent**, not just
 //!    `max_tokens` and `temperature`.
 //! 3. **A limit warns but never clamps**, and only when the limit came from a
 //!    real source — a discovery placeholder stays silent (#7780).
@@ -387,6 +387,61 @@ async fn context_window_is_checked_against_the_catalog_window() {
     assert_eq!(warnings[0]["limit"], 200_000);
 }
 
+/// #8290: `top_k` / `min_p` / `repeat_penalty` follow the same tri-state contract as the other preferences, reach the live manifest the agent loop reads, and come back on `GET /api/agents/{id}`.
+#[tokio::test(flavor = "multi_thread")]
+async fn local_model_samplers_round_trip_through_patch() {
+    let h = boot().await;
+    let id = spawn_on(&h.state, "local-samplers", "known-model");
+
+    let (_, body) = send(h.app.clone(), get(id)).await;
+    assert_eq!(body["model"]["provider"], "ollama", "{body}");
+    for key in ["top_k", "min_p", "repeat_penalty"] {
+        assert!(
+            body["model"][key].is_null(),
+            "fresh agent must inherit {key}: {body}"
+        );
+    }
+
+    let (status, body) = send(
+        h.app.clone(),
+        patch(
+            id,
+            serde_json::json!({"top_k": 40, "min_p": 0.05, "repeat_penalty": 1.1}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let (_, body) = send(h.app.clone(), get(id)).await;
+    assert_eq!(body["model"]["top_k"], serde_json::json!(40));
+    assert_knob(&body["model"]["min_p"], 0.05);
+    assert_knob(&body["model"]["repeat_penalty"], 1.1);
+    let manifest = h
+        .state
+        .kernel
+        .agent_registry()
+        .get(id)
+        .expect("agent")
+        .manifest;
+    assert_eq!(manifest.model.top_k, Some(40));
+    assert_eq!(manifest.model.min_p, Some(0.05));
+    assert_eq!(manifest.model.repeat_penalty, Some(1.1));
+    for key in ["top_k", "min_p", "repeat_penalty"] {
+        assert!(
+            !manifest.model.extra_params.contains_key(key),
+            "{key} must live on its typed field, not in extra_params"
+        );
+    }
+
+    // `null` clears one without touching the others.
+    let (status, _) = send(h.app.clone(), patch(id, serde_json::json!({"min_p": null}))).await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, body) = send(h.app.clone(), get(id)).await;
+    assert!(body["model"]["min_p"].is_null(), "{body}");
+    assert_eq!(body["model"]["top_k"], serde_json::json!(40));
+    assert_knob(&body["model"]["repeat_penalty"], 1.1);
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn out_of_range_preferences_are_rejected() {
     let h = boot().await;
@@ -397,6 +452,11 @@ async fn out_of_range_preferences_are_rejected() {
         serde_json::json!({"top_p": 1.5}),
         serde_json::json!({"frequency_penalty": -3.0}),
         serde_json::json!({"presence_penalty": 2.5}),
+        serde_json::json!({"top_k": 0}),
+        serde_json::json!({"min_p": 1.5}),
+        serde_json::json!({"min_p": -0.1}),
+        serde_json::json!({"repeat_penalty": 0.0}),
+        serde_json::json!({"repeat_penalty": 2.5}),
         serde_json::json!({"max_tokens": 0}),
         serde_json::json!({"context_window": 0}),
     ] {
@@ -404,10 +464,17 @@ async fn out_of_range_preferences_are_rejected() {
         assert_eq!(status, StatusCode::BAD_REQUEST, "should reject {body}");
     }
 
+    // `top_k` is a `u32` on the request, so a negative never reaches the range check: the JSON extractor refuses it first.
+    let (status, _) = send(h.app.clone(), patch(id, serde_json::json!({"top_k": -1}))).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+
     // `null` is always valid — it stores nothing, so there is nothing to range-check.
     for body in [
         serde_json::json!({"temperature": null}),
         serde_json::json!({"top_p": null}),
+        serde_json::json!({"top_k": null}),
+        serde_json::json!({"min_p": null}),
+        serde_json::json!({"repeat_penalty": null}),
         serde_json::json!({"max_tokens": null}),
         serde_json::json!({"context_window": null}),
     ] {

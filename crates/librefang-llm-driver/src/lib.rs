@@ -280,6 +280,18 @@ pub struct CompletionRequest {
     ///
     /// Sent only by the drivers whose wire has the field; see [`Self::top_p`].
     pub presence_penalty: Option<f32>,
+    /// Top-k sampling. `None` = not set.
+    ///
+    /// Anthropic, Gemini / Vertex AI and Ollama have it; the OpenAI-format driver sends it only to the local servers and gateways known to read it (see `LocalSamplerDialect`). See [`Self::top_p`].
+    pub top_k: Option<u32>,
+    /// Minimum-probability (min-p) sampling. `None` = not set.
+    ///
+    /// A llama.cpp / Ollama / vLLM parameter; see [`Self::top_k`] for where it is sent.
+    pub min_p: Option<f32>,
+    /// llama.cpp-style repetition penalty (`1.0` = off). `None` = not set.
+    ///
+    /// Not the same parameter as [`Self::frequency_penalty`]. A driver whose runtime spells it differently (vLLM's `repetition_penalty`) renames it on the wire.
+    pub repeat_penalty: Option<f32>,
     /// System prompt (extracted from messages for APIs that need it separately).
     pub system: Option<String>,
     /// Extended thinking configuration (if supported by the model).

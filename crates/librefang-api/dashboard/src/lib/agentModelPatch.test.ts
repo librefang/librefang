@@ -236,6 +236,9 @@ describe("buildModelConfigPatch", () => {
       top_p: "0.9",
       frequency_penalty: "-0.5",
       presence_penalty: "1.25",
+      top_k: "40",
+      min_p: "0.05",
+      repeat_penalty: "1.1",
       context_window: "200000",
       max_output_tokens: "8192",
     });
@@ -246,6 +249,9 @@ describe("buildModelConfigPatch", () => {
       top_p: 0.9,
       frequency_penalty: -0.5,
       presence_penalty: 1.25,
+      top_k: 40,
+      min_p: 0.05,
+      repeat_penalty: 1.1,
       context_window: 200000,
       max_output_tokens: 8192,
     });
@@ -279,6 +285,12 @@ describe("buildModelConfigPatch", () => {
       ["top_p", "1.5"],
       ["frequency_penalty", "-3"],
       ["presence_penalty", "9"],
+      // The bounds `patch_agent_config` enforces for the local-model samplers (#8290).
+      ["top_k", "0"],
+      ["top_k", "4.5"],
+      ["min_p", "1.5"],
+      ["repeat_penalty", "0"],
+      ["repeat_penalty", "3"],
       ["temperature", "2.5"],
       ["context_window", "0"],
       ["max_output_tokens", "0"],
@@ -359,6 +371,9 @@ describe("seedModelNumerics", () => {
       top_p: null,
       frequency_penalty: null,
       presence_penalty: null,
+      top_k: null,
+      min_p: null,
+      repeat_penalty: null,
       context_window: null,
       max_output_tokens: null,
     });
