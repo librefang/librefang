@@ -1,6 +1,6 @@
 //! #8290 — the typed sampling parameters, tested at the two places the agent loop builds a `CompletionRequest`.
 //!
-//! The driver wire tests prove each driver places `top_p` / `frequency_penalty` / `presence_penalty` correctly once they are on the request, and the `inference_params` tests prove the resolver puts them on the manifest.
+//! The driver wire tests prove each driver places `top_p` / `frequency_penalty` / `presence_penalty` / `top_k` / `min_p` / `repeat_penalty` correctly once they are on the request, and the `inference_params` tests prove the resolver puts them on the manifest.
 //! Neither notices if `agent_loop/mod.rs` or `run_streaming.rs` stops copying them across: the fields are `Option`, so `top_p: None` (or a move to `..Default::default()`) compiles cleanly and every driver then sees `None`.
 //! These tests drive both entry points end to end and assert on the request the driver was handed.
 
@@ -57,6 +57,9 @@ fn manifest_with_sampling() -> AgentManifest {
     manifest.model.top_p = Some(0.9);
     manifest.model.frequency_penalty = Some(0.5);
     manifest.model.presence_penalty = Some(-0.25);
+    manifest.model.top_k = Some(40);
+    manifest.model.min_p = Some(0.05);
+    manifest.model.repeat_penalty = Some(1.1);
     manifest
 }
 
@@ -80,6 +83,9 @@ fn assert_typed_sampling(recorder: &RecordingDriver) {
     assert_eq!(request.top_p, Some(0.9));
     assert_eq!(request.frequency_penalty, Some(0.5));
     assert_eq!(request.presence_penalty, Some(-0.25));
+    assert_eq!(request.top_k, Some(40));
+    assert_eq!(request.min_p, Some(0.05));
+    assert_eq!(request.repeat_penalty, Some(1.1));
     // The values travel on the typed fields only; `extra_body` is the untyped escape hatch and must not carry a second copy.
     assert!(
         request.extra_body.is_none(),

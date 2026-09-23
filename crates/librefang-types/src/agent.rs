@@ -918,7 +918,7 @@ pub const DEFAULT_MODEL_TEMPERATURE: f32 = 0.7;
 
 /// LLM model configuration for an agent.
 ///
-/// The five sampling knobs (`max_tokens`, `temperature`, `top_p`, `frequency_penalty`, `presence_penalty`) are **preferences**, and each is tri-state.
+/// The sampling knobs (`max_tokens`, `temperature`, `top_p`, `frequency_penalty`, `presence_penalty`, `top_k`, `min_p`, `repeat_penalty`) are **preferences**, and each is tri-state.
 /// `Some(v)` is an explicit agent-level choice and beats the per-model override in [`crate::model_catalog::ModelOverrides`]; `None` means "inherit", so the model override applies, and failing that the system default.
 /// The specific setting winning over the general one is what lets two instances of the same agent type run the same model at different temperatures.
 ///
@@ -959,6 +959,22 @@ pub struct ModelConfig {
     /// Presence penalty (-2.0–2.0). `None` = inherit.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub presence_penalty: Option<f32>,
+    /// Top-k sampling: consider only the `k` most likely tokens (≥ 1). `None` = inherit.
+    ///
+    /// Anthropic, Gemini and llama.cpp-derived runtimes have it; OpenAI does not, so the OpenAI-format driver sends it only to the local servers known to read it (#8290).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub top_k: Option<u32>,
+    /// Minimum-probability (min-p) sampling (0.0–1.0): drop tokens less likely than this fraction of the top token's probability. `None` = inherit.
+    ///
+    /// A llama.cpp / Ollama / vLLM parameter; hosted APIs other than those do not have it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_p: Option<f32>,
+    /// Repetition penalty (0.01–2.0, `1.0` = off), applied over recently generated tokens. `None` = inherit.
+    ///
+    /// Distinct from [`Self::frequency_penalty`]: it is multiplicative and llama.cpp applies it over a sliding window, so the two are not interchangeable.
+    /// The stored key is llama.cpp's name; the drivers translate it where a runtime spells it differently (vLLM's `repetition_penalty`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repeat_penalty: Option<f32>,
     /// System prompt for the agent.
     pub system_prompt: String,
     /// Optional API key environment variable name.
@@ -1012,6 +1028,9 @@ impl Default for ModelConfig {
             top_p: None,
             frequency_penalty: None,
             presence_penalty: None,
+            top_k: None,
+            min_p: None,
+            repeat_penalty: None,
             system_prompt: "You are a helpful AI agent.".to_string(),
             api_key_env: None,
             base_url: None,
@@ -3504,6 +3523,58 @@ model = "llama-3.3-70b-versatile"
         let tc = back.thinking.unwrap();
         assert_eq!(tc.budget_tokens, 5000);
         assert!(tc.stream_thinking);
+    }
+
+    /// #8290: `top_k` / `min_p` / `repeat_penalty` in an agent's `[model]` table used to fall into the flattened `extra_params` map, the only place they could live.
+    /// They now parse onto their typed fields, so an existing `agent.toml` migrates without an edit, and they survive both the TOML and the JSON (API) round trip.
+    #[test]
+    fn test_manifest_local_samplers_round_trip_on_typed_fields() {
+        let toml_str = r#"
+            name = "local"
+            [model]
+            provider = "ollama"
+            model = "qwen3:8b"
+            top_k = 40
+            min_p = 0.05
+            repeat_penalty = 1.1
+            enable_memory = true
+        "#;
+        let manifest: AgentManifest = toml::from_str(toml_str).expect("parse agent.toml");
+        let m = &manifest.model;
+        assert_eq!(m.top_k, Some(40));
+        assert_eq!(m.min_p, Some(0.05));
+        assert_eq!(m.repeat_penalty, Some(1.1));
+        for key in ["top_k", "min_p", "repeat_penalty"] {
+            assert!(
+                !m.extra_params.contains_key(key),
+                "{key} fell into extra_params"
+            );
+        }
+        // Unrelated provider keys still go to the escape hatch.
+        assert_eq!(
+            m.extra_params.get("enable_memory"),
+            Some(&serde_json::json!(true))
+        );
+
+        let toml_back: AgentManifest =
+            toml::from_str(&toml::to_string(&manifest).expect("serialize agent.toml"))
+                .expect("reparse agent.toml");
+        let json_back: AgentManifest =
+            serde_json::from_str(&serde_json::to_string(&manifest).unwrap()).unwrap();
+        for back in [&toml_back, &json_back] {
+            assert_eq!(back.model.top_k, Some(40));
+            assert_eq!(back.model.min_p, Some(0.05));
+            assert_eq!(back.model.repeat_penalty, Some(1.1));
+        }
+
+        // Unset stays absent on the way out rather than serializing as a value.
+        let plain = toml::to_string(&AgentManifest::default()).unwrap();
+        for key in ["top_k", "min_p", "repeat_penalty"] {
+            assert!(
+                !plain.contains(key),
+                "{key} serialized while unset: {plain}"
+            );
+        }
     }
 
     /// Per-agent knobs live in `agent.toml`, not `config.toml` (CLAUDE.md #5476),

@@ -120,6 +120,9 @@ struct ApiRequest {
     /// Never sent alongside `temperature` — Claude 4 and newer answer 400 to a request carrying both — see [`build_anthropic_request`].
     #[serde(skip_serializing_if = "Option::is_none")]
     top_p: Option<f32>,
+    /// Top-k sampling. Unlike `top_p` it may accompany `temperature`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    top_k: Option<u32>,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     stream: bool,
     /// Extended thinking configuration, in whichever spelling this model's schema still accepts.
@@ -496,12 +499,13 @@ fn build_anthropic_request(request: &CompletionRequest) -> ApiRequest {
         effective_max_tokens
     };
 
-    // Sampling parameters were removed on Opus 4.7 and newer and answer 400 there; on the models that still take one, extended thinking is incompatible with a caller-chosen temperature, and with any `top_p` outside [0.95, 1], so neither is sent while thinking is on.
+    // Sampling parameters were removed on Opus 4.7 and newer and answer 400 there; on the models that still take one, extended thinking is incompatible with a caller-chosen temperature or `top_k`, and with any `top_p` outside [0.95, 1], so none of them is sent while thinking is on.
     let sampling_allowed = generation.accepts_sampling_params() && requested_thinking.is_none();
     // Claude 4 and newer reject `temperature` and `top_p` in the same request.
     // `request.temperature` is always populated — the resolver fills in a system default when nobody chose one — whereas `top_p` is present only when an operator set it, so an explicit `top_p` is the stronger signal and wins.
     let top_p = request.top_p.filter(|_| sampling_allowed);
     let temperature = (sampling_allowed && top_p.is_none()).then_some(request.temperature);
+    let top_k = request.top_k.filter(|_| sampling_allowed);
     if top_p.is_some() {
         // The same "I set it and nothing changed" question as the drops below, for the one parameter `top_p` displaces.
         debug!(
@@ -511,16 +515,22 @@ fn build_anthropic_request(request: &CompletionRequest) -> ApiRequest {
             "top_p is set; temperature not sent, because this model rejects both in one request"
         );
     }
-    // The Messages API has no penalty parameters at all (#8290); sending them would be a 400 on every turn.
-    super::sampling::log_dropped(
-        "anthropic",
-        &request.model,
-        &[
-            ("top_p", request.top_p.filter(|_| !sampling_allowed)),
-            ("frequency_penalty", request.frequency_penalty),
-            ("presence_penalty", request.presence_penalty),
-        ],
-    );
+    // The Messages API has no penalty or min-p parameters at all (#8290); sending them would be a 400 on every turn.
+    {
+        use super::sampling::wide;
+        super::sampling::log_dropped(
+            "anthropic",
+            &request.model,
+            &[
+                ("top_p", wide(request.top_p.filter(|_| !sampling_allowed))),
+                ("top_k", wide(request.top_k.filter(|_| !sampling_allowed))),
+                ("frequency_penalty", wide(request.frequency_penalty)),
+                ("presence_penalty", wide(request.presence_penalty)),
+                ("min_p", wide(request.min_p)),
+                ("repeat_penalty", wide(request.repeat_penalty)),
+            ],
+        );
+    }
 
     ApiRequest {
         model: request.model.clone(),
@@ -530,6 +540,7 @@ fn build_anthropic_request(request: &CompletionRequest) -> ApiRequest {
         tools: api_tools,
         temperature,
         top_p,
+        top_k,
         stream: false,
         thinking: thinking_value,
         output_config,
@@ -2157,6 +2168,9 @@ mod tests {
             top_p: Some(0.9),
             frequency_penalty: Some(0.5),
             presence_penalty: Some(-0.25),
+            top_k: Some(40),
+            min_p: Some(0.05),
+            repeat_penalty: Some(1.1),
             ..wire_request(model, thinking)
         }
     }
@@ -2180,7 +2194,24 @@ mod tests {
             assert!(body.get("temperature").is_none(), "{model}: {body}");
             assert!(body.get("frequency_penalty").is_none(), "{model}: {body}");
             assert!(body.get("presence_penalty").is_none(), "{model}: {body}");
+            // #8290 part 2: `top_k` is a Messages API field; `min_p` and `repeat_penalty` are not.
+            assert_eq!(body["top_k"], serde_json::json!(40), "{model}");
+            assert!(body.get("min_p").is_none(), "{model}: {body}");
+            assert!(body.get("repeat_penalty").is_none(), "{model}: {body}");
         }
+    }
+
+    /// #8290 part 2: `top_k` may ride alongside `temperature` — only `top_p` displaces it.
+    #[test]
+    fn top_k_is_sent_with_the_temperature() {
+        let body = serde_json::to_value(build_anthropic_request(&CompletionRequest {
+            top_k: Some(40),
+            ..wire_request("claude-sonnet-4-6", None)
+        }))
+        .unwrap();
+        assert_eq!(body["top_k"], serde_json::json!(40));
+        assert_eq!(body["temperature"], serde_json::json!(0.7_f32));
+        assert!(body.get("top_p").is_none(), "{body}");
     }
 
     /// The models that removed sampling parameters must not get `top_p` either — it is the same 400 as `temperature`.
@@ -2192,16 +2223,19 @@ mod tests {
                     .unwrap();
             for key in [
                 "top_p",
+                "top_k",
                 "temperature",
                 "frequency_penalty",
                 "presence_penalty",
+                "min_p",
+                "repeat_penalty",
             ] {
                 assert!(body.get(key).is_none(), "{model} got {key}: {body}");
             }
         }
     }
 
-    /// Extended thinking constrains `top_p` to [0.95, 1] on the models that still take it, so it is dropped with the temperature while thinking is on.
+    /// Extended thinking constrains `top_p` to [0.95, 1] and rejects a set `top_k` on the models that still take them, so both are dropped with the temperature while thinking is on.
     #[test]
     fn thinking_turn_gets_no_top_p() {
         let thinking = Some(ThinkingConfig {
@@ -2214,6 +2248,7 @@ mod tests {
         )))
         .unwrap();
         assert!(body.get("top_p").is_none(), "{body}");
+        assert!(body.get("top_k").is_none(), "{body}");
         assert!(body.get("temperature").is_none(), "{body}");
     }
 
