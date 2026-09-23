@@ -454,14 +454,23 @@ pub struct ModelOverrides {
     /// Presence penalty (-2.0–2.0).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub presence_penalty: Option<f32>,
-    /// Top-k sampling (≥ 1). See [`crate::agent::ModelConfig::top_k`].
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// Top-k sampling (≥ 1). See [`crate::agent::ModelConfig::top_k`], including its lenient parsing: one bad value here would otherwise fail the whole `model_overrides.json`.
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::serde_compat::top_k_lenient"
+    )]
     pub top_k: Option<u32>,
     /// Minimum-probability sampling (0.0–1.0). See [`crate::agent::ModelConfig::min_p`].
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::serde_compat::f32_lenient"
+    )]
     pub min_p: Option<f32>,
     /// Repetition penalty (0.01–2.0, `1.0` = off). See [`crate::agent::ModelConfig::repeat_penalty`].
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::serde_compat::f32_lenient"
+    )]
     pub repeat_penalty: Option<f32>,
     /// Reasoning effort level ("low", "medium", "high").
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1744,5 +1753,23 @@ aliases = []
         for key in ["top_k", "min_p", "repeat_penalty"] {
             assert!(!unset.contains(key), "{unset}");
         }
+
+        // A hand-edited `model_overrides.json` with a `-1` / float / non-number spelling must not fail the whole file.
+        let lenient: std::collections::HashMap<String, ModelOverrides> = serde_json::from_str(
+            r#"{
+                "vllm:a": {"top_k": -1, "min_p": "x", "repeat_penalty": 1, "temperature": 0.3},
+                "vllm:b": {"top_k": 40.0},
+                "vllm:c": {"top_k": 40.5}
+            }"#,
+        )
+        .expect("lenient overrides parse");
+        let a = &lenient["vllm:a"];
+        assert_eq!(
+            (a.top_k, a.min_p, a.repeat_penalty),
+            (None, None, Some(1.0))
+        );
+        assert_eq!(a.temperature, Some(0.3), "sibling fields still parse");
+        assert_eq!(lenient["vllm:b"].top_k, Some(40));
+        assert_eq!(lenient["vllm:c"].top_k, None);
     }
 }

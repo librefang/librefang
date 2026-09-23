@@ -11,10 +11,9 @@
 //!   [`librefang_types::inference_params`] and `e` opens a field for the value
 //!   that is not on the ladder. Stepping left off the first rung lands on
 //!   *inherit*, which is a real position rather than a number.
-//! * **Increments** for the sampling knobs. Temperature and the penalties are
-//!   continuous, so ← / → nudge them by a sensible step within their range.
-//!   `top_k` steps the same way but only through whole numbers, and
-//!   `repeat_penalty` starts from `1.0`, its "off" value, rather than from zero.
+//! * **Increments** for the sampling knobs.
+//!   Temperature and the penalties are continuous, so ← / → nudge them by a sensible step within their range.
+//!   `top_k` steps the same way but only through whole numbers, and `repeat_penalty` starts from `1.0`, its "off" value, rather than from zero.
 //!
 //! The state here is deliberately free of any ratatui or HTTP dependency so
 //! the stepping rules can be unit-tested directly.

@@ -962,18 +962,34 @@ pub struct ModelConfig {
     /// Top-k sampling: consider only the `k` most likely tokens (≥ 1). `None` = inherit.
     ///
     /// Anthropic, Gemini and llama.cpp-derived runtimes have it; OpenAI does not, so the OpenAI-format driver sends it only to the local servers and gateways known to read it (see `LocalSamplerDialect`) (#8290).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    ///
+    /// Parsing is lenient (see [`crate::serde_compat::top_k_lenient`]) because this key used to live in the untyped `extra_params`: an integral float such as `40.0` is `40`, and `0` or a negative value such as vLLM's / llama.cpp's `-1` ("disabled") reads as `None`.
+    /// `None` omits `top_k` from every request, which on vLLM is the runtime's own "disabled" default; llama.cpp and Ollama instead fall back to their built-in default (`40`), so turning top-k off there takes a `k` at least the vocabulary size.
+    /// A non-integral float or a non-number is dropped to `None` with a `WARN` rather than failing the whole manifest.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::serde_compat::top_k_lenient"
+    )]
     pub top_k: Option<u32>,
     /// Minimum-probability (min-p) sampling (0.0–1.0): drop tokens less likely than this fraction of the top token's probability. `None` = inherit.
     ///
     /// A llama.cpp / Ollama / vLLM parameter; hosted APIs other than those do not have it.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::serde_compat::f32_lenient"
+    )]
     pub min_p: Option<f32>,
     /// Repetition penalty (0.01–2.0, `1.0` = off), applied over recently generated tokens. `None` = inherit.
     ///
     /// Distinct from [`Self::frequency_penalty`]: it is multiplicative and llama.cpp applies it over a sliding window, so the two are not interchangeable.
     /// The stored key is llama.cpp's name; the drivers translate it where a runtime spells it differently (vLLM's `repetition_penalty`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::serde_compat::f32_lenient"
+    )]
     pub repeat_penalty: Option<f32>,
     /// System prompt for the agent.
     pub system_prompt: String,
@@ -3575,6 +3591,110 @@ model = "llama-3.3-70b-versatile"
                 "{key} serialized while unset: {plain}"
             );
         }
+    }
+
+    /// #8290: the untyped `extra_params` these keys used to live in accepted any value, so an `agent.toml` or a stored msgpack manifest can carry `top_k = -1` (vLLM / llama.cpp "disabled"), a float `top_k = 40.0`, or a non-number.
+    /// None of those may fail the manifest — on boot a failed msgpack decode skips the agent entirely.
+    #[test]
+    fn test_manifest_legacy_sampler_spellings_do_not_fail_the_load() {
+        // (top_k, min_p, repeat_penalty) as written by hand -> expected typed values.
+        type Written = (serde_json::Value, serde_json::Value, serde_json::Value);
+        type Expected = (Option<u32>, Option<f32>, Option<f32>);
+        let cases: [(Written, Expected); 5] = [
+            (
+                (
+                    serde_json::json!(-1),
+                    serde_json::json!(0.05),
+                    serde_json::json!(1.1),
+                ),
+                (None, Some(0.05), Some(1.1)),
+            ),
+            (
+                (
+                    serde_json::json!(40.0),
+                    serde_json::json!(0),
+                    serde_json::json!(1),
+                ),
+                (Some(40), Some(0.0), Some(1.0)),
+            ),
+            (
+                (
+                    serde_json::json!(0),
+                    serde_json::json!("0.05"),
+                    serde_json::json!(true),
+                ),
+                (None, None, None),
+            ),
+            (
+                (
+                    serde_json::json!(40.5),
+                    serde_json::json!(0.1),
+                    serde_json::json!(1.05),
+                ),
+                (None, Some(0.1), Some(1.05)),
+            ),
+            (
+                (
+                    serde_json::json!("40"),
+                    serde_json::json!(0.2),
+                    serde_json::json!(1.2),
+                ),
+                (None, Some(0.2), Some(1.2)),
+            ),
+        ];
+        for ((top_k, min_p, repeat_penalty), (want_k, want_min_p, want_rp)) in cases {
+            let check = |m: &ModelConfig, via: &str| {
+                assert_eq!(m.top_k, want_k, "top_k {top_k} via {via}");
+                assert_eq!(m.min_p, want_min_p, "min_p {min_p} via {via}");
+                assert_eq!(
+                    m.repeat_penalty, want_rp,
+                    "repeat_penalty {repeat_penalty} via {via}"
+                );
+            };
+
+            // agent.toml.
+            let toml_str = format!(
+                "name = \"local\"\n[model]\nprovider = \"vllm\"\nmodel = \"m\"\ntop_k = {}\nmin_p = {}\nrepeat_penalty = {}\n",
+                toml::Value::try_from(&top_k).unwrap(),
+                toml::Value::try_from(&min_p).unwrap(),
+                toml::Value::try_from(&repeat_penalty).unwrap(),
+            );
+            let manifest: AgentManifest = toml::from_str(&toml_str)
+                .unwrap_or_else(|e| panic!("agent.toml rejected:\n{toml_str}\n{e}"));
+            check(&manifest.model, "toml");
+
+            // A manifest persisted before the fields were typed: the values sit in `extra_params` and are written by the same `to_vec_named` the SQLite store uses.
+            let mut legacy = AgentManifest::default();
+            legacy
+                .model
+                .extra_params
+                .insert("top_k".into(), top_k.clone());
+            legacy
+                .model
+                .extra_params
+                .insert("min_p".into(), min_p.clone());
+            legacy
+                .model
+                .extra_params
+                .insert("repeat_penalty".into(), repeat_penalty.clone());
+            let blob = rmp_serde::to_vec_named(&legacy).unwrap();
+            let back: AgentManifest = rmp_serde::from_slice(&blob)
+                .unwrap_or_else(|e| panic!("stored manifest rejected for top_k {top_k}: {e}"));
+            check(&back.model, "msgpack");
+        }
+
+        // Valid values serialize exactly as before and survive the msgpack round trip unchanged.
+        let mut valid = AgentManifest::default();
+        valid.model.top_k = Some(40);
+        valid.model.min_p = Some(0.05);
+        valid.model.repeat_penalty = Some(1.1);
+        let toml_out = toml::to_string(&valid).unwrap();
+        assert!(toml_out.contains("top_k = 40\n"), "{toml_out}");
+        let back: AgentManifest =
+            rmp_serde::from_slice(&rmp_serde::to_vec_named(&valid).unwrap()).unwrap();
+        assert_eq!(back.model.top_k, Some(40));
+        assert_eq!(back.model.min_p, Some(0.05));
+        assert_eq!(back.model.repeat_penalty, Some(1.1));
     }
 
     /// Per-agent knobs live in `agent.toml`, not `config.toml` (CLAUDE.md #5476),
