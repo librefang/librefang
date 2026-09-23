@@ -1,16 +1,17 @@
 //! Shared bookkeeping for the typed sampling parameters on `CompletionRequest` (#8290).
 //!
-//! `top_p`, `frequency_penalty` and `presence_penalty` are typed fields, and each driver decides for itself where on its wire they go.
+//! `top_p`, `frequency_penalty`, `presence_penalty`, `top_k`, `min_p` and `repeat_penalty` are typed fields, and each driver decides for itself where on its wire they go.
 //! A driver whose wire has no field for one — or whose target model rejects it — drops it rather than turning a tuning preference into a 400 on every turn.
 //! This module only makes those drops visible, so that "I set `top_p` and nothing changed" has an answer in the debug log.
 
 /// Log, at `debug`, each parameter in `dropped` that the caller actually set.
 ///
 /// Entries whose value is `None` were never requested and are skipped, so drivers can pass every parameter they do not send without filtering first.
+/// Values are widened to `f64` so the integer `top_k` and the float parameters share one list; both conversions are lossless.
 pub(crate) fn log_dropped(
     provider: &'static str,
     model: &str,
-    dropped: &[(&'static str, Option<f32>)],
+    dropped: &[(&'static str, Option<f64>)],
 ) {
     for (param, value) in dropped {
         if let Some(value) = value {
@@ -23,4 +24,9 @@ pub(crate) fn log_dropped(
             );
         }
     }
+}
+
+/// Widen an optional sampling value for [`log_dropped`].
+pub(crate) fn wide<T: Into<f64>>(value: Option<T>) -> Option<f64> {
+    value.map(Into::into)
 }

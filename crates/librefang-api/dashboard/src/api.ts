@@ -1489,6 +1489,9 @@ export interface AgentModelDetail {
   top_p?: number | null;
   frequency_penalty?: number | null;
   presence_penalty?: number | null;
+  top_k?: number | null;
+  min_p?: number | null;
+  repeat_penalty?: number | null;
   /** Endpoint limits rather than sampling preferences. */
   context_window?: number | null;
   max_output_tokens?: number | null;
@@ -1620,6 +1623,9 @@ export async function patchAgentConfig(
     top_p?: number | null;
     frequency_penalty?: number | null;
     presence_penalty?: number | null;
+    top_k?: number | null;
+    min_p?: number | null;
+    repeat_penalty?: number | null;
     context_window?: number | null;
     max_output_tokens?: number | null;
     web_search_augmentation?: "off" | "auto" | "always";
@@ -2500,6 +2506,9 @@ export interface ModelOverrides {
   max_tokens?: number;
   frequency_penalty?: number;
   presence_penalty?: number;
+  top_k?: number;
+  min_p?: number;
+  repeat_penalty?: number;
   reasoning_effort?: string;
   use_max_completion_tokens?: boolean;
   no_system_role?: boolean;

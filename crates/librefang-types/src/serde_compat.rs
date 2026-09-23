@@ -307,6 +307,78 @@ where
     deserializer.deserialize_any(ExecPolicyVisitor)
 }
 
+/// Deserialize a `top_k` sampling value leniently (#8290).
+///
+/// Before `top_k` was a typed `Option<u32>` it lived in the flattened `extra_params` map, which accepted any value, so stored manifests and existing `agent.toml` files can carry spellings a strict `u32` rejects — and one rejected field fails the whole manifest, which on boot silently drops the agent.
+/// The mapping, chosen so no such value can fail a load:
+/// - a positive integer, or a float with no fractional part (`40.0`), is that `k`;
+/// - `0` or any negative value (vLLM and llama.cpp document `-1` / `<= 0` as "disable top-k") is `None`, i.e. inherit, which omits `top_k` from the request;
+/// - a non-integral float, a value above `u32::MAX`, or a non-number is dropped to `None` with a `WARN` rather than rounded, since rounding would silently turn a misplaced `0.9` into the most restrictive `k = 1`.
+pub fn top_k_lenient<'de, D>(deserializer: D) -> Result<Option<u32>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let Some(value) = Option::<serde_json::Value>::deserialize(deserializer)? else {
+        return Ok(None);
+    };
+    Ok(top_k_from_value(&value))
+}
+
+fn top_k_from_value(value: &serde_json::Value) -> Option<u32> {
+    let n = match value {
+        serde_json::Value::Null => return None,
+        serde_json::Value::Number(n) => n,
+        other => {
+            tracing::warn!(value = %other, "ignoring top_k: expected an integer");
+            return None;
+        }
+    };
+    let as_int = if let Some(i) = n.as_i64() {
+        Some(i128::from(i))
+    } else if let Some(u) = n.as_u64() {
+        Some(i128::from(u))
+    } else {
+        n.as_f64()
+            .filter(|f| f.is_finite() && f.fract() == 0.0)
+            .map(|f| f as i128)
+    };
+    match as_int {
+        Some(i) if i <= 0 => None,
+        Some(i) => match u32::try_from(i) {
+            Ok(k) => Some(k),
+            Err(_) => {
+                tracing::warn!(value = %n, "ignoring top_k: larger than u32::MAX");
+                None
+            }
+        },
+        None => {
+            tracing::warn!(value = %n, "ignoring top_k: not a whole number");
+            None
+        }
+    }
+}
+
+/// Deserialize an `f32` sampling value (`min_p`, `repeat_penalty`) leniently (#8290).
+///
+/// Like [`top_k_lenient`], these used to live in the untyped `extra_params` map, so a stored value may be any JSON type.
+/// Any number (integer or float) is accepted as-is; a non-number is dropped to `None` with a `WARN` instead of failing the whole manifest.
+pub fn f32_lenient<'de, D>(deserializer: D) -> Result<Option<f32>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let Some(value) = Option::<serde_json::Value>::deserialize(deserializer)? else {
+        return Ok(None);
+    };
+    match value {
+        serde_json::Value::Null => Ok(None),
+        serde_json::Value::Number(n) => Ok(n.as_f64().map(|f| f as f32)),
+        other => {
+            tracing::warn!(value = %other, "ignoring sampling parameter: expected a number");
+            Ok(None)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

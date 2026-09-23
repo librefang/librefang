@@ -682,6 +682,28 @@ describe("ModelsPage", () => {
     );
   });
 
+  it("saves the local-model sampler overrides picked on their rungs (#8290)", async () => {
+    setLoaded();
+    const { update } = setMutationDefaults();
+    renderPage();
+    fireEvent.click(screen.getAllByTitle("models.settings_title")[0]);
+
+    fireEvent.click(within(ladderFor("model_param.top_k")).getByRole("button", { name: "40" }));
+    fireEvent.click(within(ladderFor("model_param.min_p")).getByRole("button", { name: "0.05" }));
+    fireEvent.click(
+      within(ladderFor("model_param.repeat_penalty")).getByRole("button", { name: "1.1" }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "common.save" }));
+
+    await waitFor(() =>
+      expect(update.mutateAsync).toHaveBeenCalledWith(
+        expect.objectContaining({
+          overrides: expect.objectContaining({ top_k: 40, min_p: 0.05, repeat_penalty: 1.1 }),
+        }),
+      ),
+    );
+  });
+
   // Entering custom from inherit used to emit the smallest rung, which flipped
   // the override on and armed Save with a number nobody picked.
   it("does not enable an override merely by opening the custom field", async () => {
@@ -1031,6 +1053,25 @@ describe("ModelsPage helpers", () => {
     expect(first.tempEnabled).toBe(true);
     expect(settingsStateEqual(first, equivalent)).toBe(true);
     expect(settingsStateEqual(first, changed)).toBe(false);
+  });
+
+  it("hydrates and compares the local-model sampler overrides (#8290)", () => {
+    const state = settingsStateFromOverrides({ top_k: 40, min_p: 0.05, repeat_penalty: 1.1 });
+    expect(state).toMatchObject({
+      topK: 40,
+      topKEnabled: true,
+      minP: 0.05,
+      minPEnabled: true,
+      repeatPenalty: 1.1,
+      repeatPenaltyEnabled: true,
+    });
+    const inherited = settingsStateFromOverrides({});
+    expect(inherited.topKEnabled).toBe(false);
+    expect(inherited.minPEnabled).toBe(false);
+    expect(inherited.repeatPenaltyEnabled).toBe(false);
+    expect(
+      settingsStateEqual(state, settingsStateFromOverrides({ top_k: 20, min_p: 0.05, repeat_penalty: 1.1 })),
+    ).toBe(false);
   });
 
   it("formats capability override labels with explicit branches", () => {

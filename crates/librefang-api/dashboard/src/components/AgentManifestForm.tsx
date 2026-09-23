@@ -395,6 +395,24 @@ export function AgentManifestForm({
             onChange={(next) => updateModel({ presence_penalty: next })}
           />
         </div>
+        <p className="text-[11px] text-text-dim">{t("model_param.local_samplers_hint")}</p>
+        <div className="grid grid-cols-2 gap-3">
+          <ModelParamField
+            param="top_k"
+            value={value.model.top_k}
+            onChange={(next) => updateModel({ top_k: next })}
+          />
+          <ModelParamField
+            param="min_p"
+            value={value.model.min_p}
+            onChange={(next) => updateModel({ min_p: next })}
+          />
+          <ModelParamField
+            param="repeat_penalty"
+            value={value.model.repeat_penalty}
+            onChange={(next) => updateModel({ repeat_penalty: next })}
+          />
+        </div>
         <ModelParamField
           param="max_tokens"
           value={value.model.max_tokens}
