@@ -798,6 +798,8 @@ pub struct GoalRunner {
     /// replace path; it does nothing for two `start()` calls racing on the same
     /// goal id. The guarded region is fully synchronous (no `.await`), so this
     /// std `Mutex` is never held across an await point.
+    ///
+    /// It also serializes the boot recovery sweep ([`GoalRunner::recover_stale_runs`]), the only other writer of registry entries, so the sweep cannot demote a row or insert a placeholder in the middle of a start or stop (#8429).
     start_lock: std::sync::Mutex<()>,
 }
 
@@ -1230,6 +1232,9 @@ impl GoalRunner {
     /// **not** auto-resumed — an in-flight LLM call cannot be replayed, so the
     /// policy matches workflow: surface the interrupted run as failed/stopped
     /// rather than silently restarting it. Returns the recovered goal ids.
+    ///
+    /// The sweep holds `start_lock` from the read of the persisted rows to the last registry write, so a concurrent `start()` or `stop()` cannot change a row between the sweep reading it and demoting it (#8429).
+    /// It never replaces a live run: a goal whose registry entry still owns a loop task is skipped, because its `Running` row belongs to that loop even when it looks stale — a resumed run keeps the `started_at` of the run it checkpointed.
     pub fn recover_stale_runs(&self, stale_timeout: Duration) -> Vec<GoalId> {
         let Some(store) = self.store.as_ref() else {
             return Vec::new();
@@ -1237,6 +1242,8 @@ impl GoalRunner {
         if stale_timeout.is_zero() {
             return Vec::new();
         }
+        // Synchronous SQLite work only, like the critical section of `start()`, so this std guard never spans an await point.
+        let guard = lock_goal_run_start_stop(&self.start_lock);
         let rows = match store.load_all_runs() {
             Ok(rows) => rows,
             Err(e) => {
@@ -1283,6 +1290,16 @@ impl GoalRunner {
                 continue;
             }
             if age < stale_secs {
+                continue;
+            }
+            // A registry entry with a task is a loop this process is running, and the row is its durable mirror.
+            // Demoting the row and overwriting the entry with a placeholder would leave that loop unreachable: `stop()` would remove only the placeholder, and the loop would keep issuing agent turns until its iteration cap.
+            if self
+                .runs
+                .get(&goal_id)
+                .is_some_and(|handle| handle.task.is_some())
+            {
+                debug!(goal_id = %goal_id, "Skipping goal run recovery: a live run owns this goal");
                 continue;
             }
             warn!(
@@ -1355,6 +1372,8 @@ impl GoalRunner {
             }
             recovered.push(goal_id);
         }
+        // The WAL checkpoint touches neither the registry nor a run row, so it does not need to hold up a start.
+        drop(guard);
         if !recovered.is_empty() {
             if let Err(e) = store.wal_checkpoint() {
                 warn!("Goal run recovery WAL checkpoint failed: {e}");
@@ -2871,6 +2890,102 @@ mod tests {
         let row = store.get_run(&goal_id.to_string()).unwrap().unwrap();
         assert_eq!(row.phase, GoalRunPhase::Running.to_string());
         assert!(row.last_error.is_none());
+    }
+
+    /// The recovery sweep must never replace a live run (#8429).
+    ///
+    /// The sweep used to demote every stale-looking `Running` row and insert a `task: None` placeholder over whatever the registry held for that goal.
+    /// A run started while the sweep was in progress, or a resumed run whose `started_at` comes from an old checkpoint, has a `Running` row the sweep reads as stale; overwriting its registry entry left the loop unreachable, so `stop()` removed only the placeholder and the loop kept issuing agent turns until its iteration cap.
+    ///
+    /// A 1 ms staleness window (`as_secs() == 0`) makes the live run's own freshly written row count as stale, which reproduces the clobber deterministically instead of depending on the interleaving.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn recover_stale_runs_never_clobbers_a_live_run() {
+        let substrate = Arc::new(MemorySubstrate::open_in_memory(0.01).unwrap());
+        let store = store_from(&substrate);
+        let agent_id = AgentId::new();
+        let goal = test_goal(agent_id);
+        seed_goal(&substrate, &goal);
+        let goal_id = goal.id;
+
+        let (_tx, rx) = watch::channel(false);
+        let runner = GoalRunner::new_with_store(rx, store.clone(), substrate.clone());
+
+        // Each turn registers the loop as live and parks forever; the RAII guard decrements the counter when the task is aborted.
+        let live = Arc::new(AtomicU64::new(0));
+        let gate = Arc::new(tokio::sync::Notify::new());
+        let send = {
+            let live = live.clone();
+            let gate = gate.clone();
+            move |_a: AgentId, _p: String| {
+                let live = live.clone();
+                let gate = gate.clone();
+                async move {
+                    struct Dec(Arc<AtomicU64>);
+                    impl Drop for Dec {
+                        fn drop(&mut self) {
+                            self.0.fetch_sub(1, Ordering::SeqCst);
+                        }
+                    }
+                    live.fetch_add(1, Ordering::SeqCst);
+                    let _dec = Dec(live.clone());
+                    gate.notified().await;
+                    Ok::<String, String>("GOAL_PROGRESS: 1".to_string())
+                }
+            }
+        };
+
+        assert!(runner.start(
+            goal_id,
+            agent_id,
+            Some(100),
+            substrate.clone(),
+            send,
+            no_learnings_hook,
+            no_evaluator,
+            false,
+            None,
+            None,
+            None,
+        ));
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while live.load(Ordering::SeqCst) == 0 && std::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+        assert_eq!(
+            live.load(Ordering::SeqCst),
+            1,
+            "the live loop never reached its first turn"
+        );
+
+        let recovered = runner.recover_stale_runs(Duration::from_millis(1));
+        assert!(
+            !recovered.contains(&goal_id),
+            "a live run must not be reported as recovered"
+        );
+
+        // The registry still holds the live run, not a terminal placeholder.
+        let observed = runner
+            .state(goal_id)
+            .expect("live run must stay registered");
+        assert_eq!(observed.phase, GoalRunPhase::Running);
+        assert!(observed.last_error.is_none());
+
+        // The durable row still describes the live run.
+        let row = store.get_run(&goal_id.to_string()).unwrap().unwrap();
+        assert_eq!(row.phase, GoalRunPhase::Running.to_string());
+        assert!(row.last_error.is_none());
+
+        // And the loop is still reachable: stop() aborts it.
+        assert!(runner.stop(goal_id));
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while live.load(Ordering::SeqCst) != 0 && std::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert_eq!(
+            live.load(Ordering::SeqCst),
+            0,
+            "stop() must abort the live loop after a recovery sweep"
+        );
     }
 
     // --- Concurrent-start atomicity (finding #8) ---
