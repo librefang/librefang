@@ -179,7 +179,7 @@ const pushAdvancedFormSections = (lines: string[], form: ManifestFormState): voi
     lines.push("");
   }
 
-  if (form.fallback_models.length) {
+  if (form.fallback_models !== null && form.fallback_models.length) {
     lines.push("## Fallback Models");
     lines.push("");
     lines.push("| # | Provider | Model |");
