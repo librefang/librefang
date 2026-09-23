@@ -2847,7 +2847,7 @@ export interface paths {
          * GET /api/logs/stream — SSE endpoint for real-time audit log streaming.
          * @description Streams new audit entries as Server-Sent Events. Accepts optional query
          *     parameters for filtering:
-         *       - `level`  — filter by classified level (info, warn, error)
+         *       - `level`  — filter by classified level (info, warn, error, debug), classified from the entry's `outcome` (leading `error` / `fail` / `denied`, `warn`, `debug`), falling back to the action so `PermissionDenied` and `BudgetExceeded` are errors; each event carries the classification as `level`
          *       - `filter` — text substring filter across action/detail/agent_id
          *
          *     A heartbeat ping is sent every 15 seconds to keep the connection alive.

@@ -2,4 +2,4 @@
 The stream used to classify the action name, which is the same string whether a `ToolInvoke` succeeded or failed, while the dashboard's Logs page classified the outcome, so one entry could be an error on the page and info on the stream.
 Both surfaces now apply one rule: an outcome leading with `error`, `fail` or `denied` is an error, one leading with `warn` a warning, one leading with `debug` debug, and otherwise the action decides, with only `PermissionDenied` and `BudgetExceeded` counting as errors because they are failures by definition.
 Each stream event now also carries the server's classification as `level`.
-A successful `AgentKill` is no longer `warn` on the stream: a kill is a deliberate operation and its outcome says whether it failed, so a client filtering `level=warn` to watch kills should filter on the action instead (#8270) (@houko)
+A successful `AgentKill` is no longer `warn` on the stream: a kill is a deliberate operation and its outcome says whether it failed, so a client filtering `level=warn` to watch kills should filter on the action instead (#8477) (@houko)
