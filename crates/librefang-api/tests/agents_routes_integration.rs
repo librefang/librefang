@@ -2525,10 +2525,7 @@ fn full_identity_body() -> serde_json::Value {
     })
 }
 
-/// Read all six identity fields straight off the registry entry.
-///
-/// `GET /api/agents/{id}` exposes only `emoji` / `avatar_url` / `color` (`routes::agents::agent_json`), so the three personality fields have no HTTP read surface at all.
-/// Extending that response to make the assertions uniform would be a response-shape change well beyond this fix (it would drag in the dashboard's `AgentIdentity` type and the generated OpenAPI), so the test reads the same state the handler wrote instead.
+/// Read the three appearance fields straight off the registry entry, which owns them.
 fn stored_identity(state: &Arc<AppState>, id: AgentId) -> librefang_types::agent::AgentIdentity {
     state
         .kernel
@@ -2538,7 +2535,26 @@ fn stored_identity(state: &Arc<AppState>, id: AgentId) -> librefang_types::agent
         .identity
 }
 
-/// A single-field PATCH must change that field and leave the other five untouched.
+/// The value of a top-level front-matter key in the agent's `.identity/IDENTITY.md`, which owns the three personality fields (#8447).
+fn identity_front_matter_value(state: &Arc<AppState>, id: AgentId, key: &str) -> Option<String> {
+    let workspace = state
+        .kernel
+        .agent_registry()
+        .get(id)
+        .expect("agent exists")
+        .manifest
+        .workspace
+        .expect("spawned agent has a workspace");
+    let content = std::fs::read_to_string(workspace.join(".identity").join("IDENTITY.md"))
+        .expect("IDENTITY.md generated at spawn");
+    let block = content.strip_prefix("---\n")?.split_once("\n---\n")?.0;
+    block
+        .lines()
+        .find_map(|line| line.strip_prefix(key)?.strip_prefix(':'))
+        .map(|value| value.trim().to_string())
+}
+
+/// A single-field PATCH must change that field and leave the other five untouched, wherever each one is stored.
 /// Before #6608 this handler built a fresh `AgentIdentity` from the request body alone, so the five omitted fields were nulled and the response was still 200.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_patch_identity_merges_instead_of_replacing() {
@@ -2587,21 +2603,17 @@ async fn test_patch_identity_merges_instead_of_replacing() {
         Some("#123456"),
         "color must survive a partial PATCH"
     );
-    assert_eq!(
-        identity.archetype.as_deref(),
-        Some("researcher"),
-        "archetype must survive a partial PATCH"
-    );
-    assert_eq!(
-        identity.vibe.as_deref(),
-        Some("technical"),
-        "vibe must survive a partial PATCH"
-    );
-    assert_eq!(
-        identity.greeting_style.as_deref(),
-        Some("brief"),
-        "greeting_style must survive a partial PATCH"
-    );
+    for (key, value) in [
+        ("archetype", "researcher"),
+        ("vibe", "technical"),
+        ("greeting_style", "brief"),
+    ] {
+        assert_eq!(
+            identity_front_matter_value(&h.state, id, key).as_deref(),
+            Some(value),
+            "{key} must survive a partial PATCH"
+        );
+    }
 
     // The three fields the HTTP read surface does expose agree with the above.
     let (status, body) = send(h.app.clone(), get(&format!("/api/agents/{id}"))).await;
@@ -2614,7 +2626,7 @@ async fn test_patch_identity_merges_instead_of_replacing() {
     assert_eq!(body["identity"]["color"], serde_json::json!("#123456"));
 }
 
-/// `PATCH /identity` and `PATCH /config` write the same six identity fields, so the same partial body must produce the same stored identity through either route.
+/// `PATCH /identity` and `PATCH /config` write the same six identity fields, so the same partial body must produce the same stored identity — registry and IDENTITY.md alike — through either route.
 /// Two PATCH endpoints on one resource having opposite semantics is the core of #6608, and this equivalence is what keeps them from diverging again.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_patch_identity_and_patch_config_agree_on_partial_updates() {
@@ -2669,22 +2681,29 @@ async fn test_patch_identity_and_patch_config_agree_on_partial_updates() {
         "avatar_url diverged"
     );
     assert_eq!(from_identity.color, from_config.color, "color diverged");
-    assert_eq!(
-        from_identity.archetype, from_config.archetype,
-        "archetype diverged"
-    );
-    assert_eq!(from_identity.vibe, from_config.vibe, "vibe diverged");
-    assert_eq!(
-        from_identity.greeting_style, from_config.greeting_style,
-        "greeting_style diverged"
-    );
+    for key in ["archetype", "vibe", "greeting_style"] {
+        assert_eq!(
+            identity_front_matter_value(&h.state, via_identity, key),
+            identity_front_matter_value(&h.state, via_config, key),
+            "{key} diverged"
+        );
+    }
 
     // Pin the shared expectation too, so the test cannot pass by both routes
     // being broken in the same way.
-    assert_eq!(from_identity.vibe.as_deref(), Some("playful"));
     assert_eq!(from_identity.emoji.as_deref(), Some("🐙"));
-    assert_eq!(from_identity.archetype.as_deref(), Some("researcher"));
-    assert_eq!(from_identity.greeting_style.as_deref(), Some("brief"));
+    assert_eq!(
+        identity_front_matter_value(&h.state, via_identity, "vibe").as_deref(),
+        Some("playful")
+    );
+    assert_eq!(
+        identity_front_matter_value(&h.state, via_identity, "archetype").as_deref(),
+        Some("researcher")
+    );
+    assert_eq!(
+        identity_front_matter_value(&h.state, via_identity, "greeting_style").as_deref(),
+        Some("brief")
+    );
 }
 
 /// Sending an empty string is as close as either route gets to clearing an identity field, since `null` / omitted is already spoken for by "not provided".

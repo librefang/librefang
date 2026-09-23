@@ -1,7 +1,12 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { renderHook, waitFor } from "@testing-library/react";
 import type { RegistrySchema } from "../../api";
-import { configQueries, useRegistrySchema, useRawConfigToml } from "./config";
+import {
+  configQueries,
+  selectModelRoutingInertReason,
+  useRegistrySchema,
+  useRawConfigToml,
+} from "./config";
 import * as client from "../http/client";
 import { registryKeys, configKeys } from "./keys";
 import { createQueryClientWrapper } from "../test/query-client";
@@ -114,5 +119,19 @@ describe("useRawConfigToml", () => {
     await waitFor(() => {
       expect(queryClient.getQueryData(configKeys.rawToml())).toEqual(mockToml);
     });
+  });
+});
+
+// #8446: the create form has no agent to ask, so it reads the kernel mode off `GET /api/config`.
+describe("selectModelRoutingInertReason", () => {
+  it("reports stable_mode only when the kernel runs in Stable mode", () => {
+    expect(selectModelRoutingInertReason({ mode: "stable" })).toBe("stable_mode");
+    expect(selectModelRoutingInertReason({ mode: "default" })).toBeNull();
+    expect(selectModelRoutingInertReason({ mode: "dev" })).toBeNull();
+  });
+
+  it("treats a payload without a mode as live routing", () => {
+    expect(selectModelRoutingInertReason({})).toBeNull();
+    expect(selectModelRoutingInertReason(undefined)).toBeNull();
   });
 });
