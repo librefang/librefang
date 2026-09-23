@@ -727,6 +727,27 @@ async fn goal_run_start_returns_500_and_keeps_an_unreadable_pause_checkpoint_842
         "a refused start must not discard the checkpoint it could not read"
     );
 
+    // `/resume` gates on the run readout, which reports the paused run as absent; that must not become a 409 "no paused run, use /start" for a checkpoint that is only unreadable.
+    let (status, body) =
+        json_request(&h, Method::POST, &format!("/api/goals/{id}/resume"), None).await;
+    assert_eq!(
+        status,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "an unreadable checkpoint is not the absence of a paused run: {body:?}"
+    );
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("could not start"),
+        "{body:?}"
+    );
+    assert_eq!(
+        checkpoint_rows(),
+        1,
+        "a refused resume must not discard the checkpoint it could not read"
+    );
+
     // The run readout has no other source for a paused run, so it still reports none; the runner logs why.
     let (rs, run) = json_request(&h, Method::GET, &format!("/api/goals/{id}/run"), None).await;
     assert_eq!(rs, StatusCode::OK);
