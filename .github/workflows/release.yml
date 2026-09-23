@@ -598,13 +598,86 @@ jobs:
       - name: Build Telegram sidecar
         # Separate cargo workspace → separate target/ under the manifest dir.
         run: cargo build --release --target ${{ matrix.target }} --manifest-path sdk/rust/librefang-sidecar-telegram/Cargo.toml
-      - name: Ad-hoc codesign
+      # Sign with the Developer ID certificate the desktop job uses, so every release carries the same code identity (#8234).
+      # macOS keys Full Disk Access and Automation grants on that identity; an ad-hoc signature derives it from the binary's own hash, so each update used to revoke them.
+      # Neither notarized nor built with the hardened runtime: that would need JIT entitlements for wasmtime, and install.sh strips quarantine before first run exactly as it did for the ad-hoc build.
+      - name: Import macOS signing certificate
+        env:
+          MAC_CERT_BASE64: ${{ secrets.MAC_CERT_BASE64 }}
+          MAC_CERT_PASSWORD: ${{ secrets.MAC_CERT_PASSWORD }}
         run: |
-          xattr -cr target/${{ matrix.target }}/release/librefang || true
-          codesign --force --sign - target/${{ matrix.target }}/release/librefang
-          SIDECAR=sdk/rust/librefang-sidecar-telegram/target/${{ matrix.target }}/release/librefang-sidecar-telegram
-          xattr -cr "$SIDECAR" || true
-          codesign --force --sign - "$SIDECAR"
+          if [ -z "$MAC_CERT_BASE64" ]; then
+            echo "No certificate configured, skipping..."
+            exit 0
+          fi
+          echo "$MAC_CERT_BASE64" | base64 --decode > "$RUNNER_TEMP/certificate.p12"
+          KEYCHAIN_PATH="$RUNNER_TEMP/app-signing.keychain-db"
+          KEYCHAIN_PASSWORD=$(openssl rand -base64 32)
+          security list-keychains -d user > "$RUNNER_TEMP/prior-signing-keychains.txt"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security import "$RUNNER_TEMP/certificate.p12" -P "$MAC_CERT_PASSWORD" \
+            -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
+          rm -f "$RUNNER_TEMP/certificate.p12"
+          # Prepend (not replace) the search list, so the cleanup step can restore it exactly.
+          read -r -a PRIOR <<< "$(tr -d '"' < "$RUNNER_TEMP/prior-signing-keychains.txt" | tr '\n' ' ')"
+          security list-keychains -d user -s "$KEYCHAIN_PATH" "${PRIOR[@]}"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: \
+            -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH" > /dev/null
+          # Captured first so a certificate without a Developer ID identity leaves IDENTITY empty (and the Codesign step warns) instead of failing the pipeline under pipefail.
+          IDENTITIES=$(security find-identity -v -p codesigning "$KEYCHAIN_PATH")
+          IDENTITY=$(printf '%s\n' "$IDENTITIES" | awk -F'"' '/Developer ID Application/ { print $2; exit }')
+          echo "Using signing identity: ${IDENTITY:-<none>}"
+          echo "MACOS_SIGNING_IDENTITY=$IDENTITY" >> "$GITHUB_ENV"
+      - name: Codesign
+        run: |
+          # $1 = binary, $2 = code-signing identifier.
+          # Keep the identifiers stable: with the Developer ID team they form the designated requirement that macOS privacy grants are matched against.
+          sign() {
+            xattr -cr "$1" || true
+            if [ -n "${MACOS_SIGNING_IDENTITY:-}" ]; then
+              # --timestamp contacts Apple's timestamp service, which fails transiently now and then.
+              for attempt in 1 2 3; do
+                if codesign --force --timestamp --identifier "$2" --sign "$MACOS_SIGNING_IDENTITY" "$1"; then
+                  break
+                fi
+                if [ "$attempt" = 3 ]; then
+                  echo "::error::codesign failed for $1 after 3 attempts"
+                  return 1
+                fi
+                echo "codesign failed (attempt $attempt/3), retrying in 10s..."
+                sleep 10
+              done
+            else
+              echo "::warning::No Developer ID signing identity; ad-hoc signing $1. macOS Full Disk Access and Automation grants will not survive updating to this build (#8234)."
+              codesign --force --identifier "$2" --sign - "$1"
+            fi
+            codesign --verify --strict --verbose=2 "$1"
+            codesign -dv --verbose=2 "$1"
+          }
+          sign target/${{ matrix.target }}/release/librefang ai.librefang.cli
+          sign sdk/rust/librefang-sidecar-telegram/target/${{ matrix.target }}/release/librefang-sidecar-telegram ai.librefang.sidecar-telegram
+      - name: Clean up macOS signing keychain
+        if: always()
+        run: |
+          KEYCHAIN_PATH="$RUNNER_TEMP/app-signing.keychain-db"
+          PRIOR_KEYCHAINS="$RUNNER_TEMP/prior-signing-keychains.txt"
+          STATUS=0
+          rm -f "$RUNNER_TEMP/certificate.p12"
+          if [ -f "$PRIOR_KEYCHAINS" ]; then
+            if ! xargs security list-keychains -d user -s < "$PRIOR_KEYCHAINS"; then
+              echo "::error::Failed to restore the prior keychain search list"
+              STATUS=1
+            fi
+          fi
+          if [ -f "$KEYCHAIN_PATH" ]; then
+            if ! security delete-keychain "$KEYCHAIN_PATH"; then
+              echo "::error::Failed to delete the temporary signing keychain"
+              STATUS=1
+            fi
+          fi
+          exit "$STATUS"
       - name: Package
         run: |
           cp sdk/rust/librefang-sidecar-telegram/target/${{ matrix.target }}/release/librefang-sidecar-telegram target/${{ matrix.target }}/release/librefang-sidecar-telegram
@@ -1045,10 +1118,85 @@ jobs:
           key: cli-mini-${{ matrix.target }}-${{ env.RELEASE_TAG }}
       - name: Build CLI (mini)
         run: cargo build --release --target ${{ matrix.target }} --bin librefang --no-default-features --features mini
-      - name: Ad-hoc codesign
+      # Sign with the Developer ID certificate the desktop job uses, so every release carries the same code identity (#8234).
+      # macOS keys Full Disk Access and Automation grants on that identity; an ad-hoc signature derives it from the binary's own hash, so each update used to revoke them.
+      # Neither notarized nor built with the hardened runtime: that would need JIT entitlements for wasmtime, and install.sh strips quarantine before first run exactly as it did for the ad-hoc build.
+      - name: Import macOS signing certificate
+        env:
+          MAC_CERT_BASE64: ${{ secrets.MAC_CERT_BASE64 }}
+          MAC_CERT_PASSWORD: ${{ secrets.MAC_CERT_PASSWORD }}
         run: |
-          xattr -cr target/${{ matrix.target }}/release/librefang || true
-          codesign --force --sign - target/${{ matrix.target }}/release/librefang
+          if [ -z "$MAC_CERT_BASE64" ]; then
+            echo "No certificate configured, skipping..."
+            exit 0
+          fi
+          echo "$MAC_CERT_BASE64" | base64 --decode > "$RUNNER_TEMP/certificate.p12"
+          KEYCHAIN_PATH="$RUNNER_TEMP/app-signing.keychain-db"
+          KEYCHAIN_PASSWORD=$(openssl rand -base64 32)
+          security list-keychains -d user > "$RUNNER_TEMP/prior-signing-keychains.txt"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security import "$RUNNER_TEMP/certificate.p12" -P "$MAC_CERT_PASSWORD" \
+            -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
+          rm -f "$RUNNER_TEMP/certificate.p12"
+          # Prepend (not replace) the search list, so the cleanup step can restore it exactly.
+          read -r -a PRIOR <<< "$(tr -d '"' < "$RUNNER_TEMP/prior-signing-keychains.txt" | tr '\n' ' ')"
+          security list-keychains -d user -s "$KEYCHAIN_PATH" "${PRIOR[@]}"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: \
+            -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH" > /dev/null
+          # Captured first so a certificate without a Developer ID identity leaves IDENTITY empty (and the Codesign step warns) instead of failing the pipeline under pipefail.
+          IDENTITIES=$(security find-identity -v -p codesigning "$KEYCHAIN_PATH")
+          IDENTITY=$(printf '%s\n' "$IDENTITIES" | awk -F'"' '/Developer ID Application/ { print $2; exit }')
+          echo "Using signing identity: ${IDENTITY:-<none>}"
+          echo "MACOS_SIGNING_IDENTITY=$IDENTITY" >> "$GITHUB_ENV"
+      - name: Codesign
+        run: |
+          # $1 = binary, $2 = code-signing identifier.
+          # Keep the identifiers stable: with the Developer ID team they form the designated requirement that macOS privacy grants are matched against.
+          sign() {
+            xattr -cr "$1" || true
+            if [ -n "${MACOS_SIGNING_IDENTITY:-}" ]; then
+              # --timestamp contacts Apple's timestamp service, which fails transiently now and then.
+              for attempt in 1 2 3; do
+                if codesign --force --timestamp --identifier "$2" --sign "$MACOS_SIGNING_IDENTITY" "$1"; then
+                  break
+                fi
+                if [ "$attempt" = 3 ]; then
+                  echo "::error::codesign failed for $1 after 3 attempts"
+                  return 1
+                fi
+                echo "codesign failed (attempt $attempt/3), retrying in 10s..."
+                sleep 10
+              done
+            else
+              echo "::warning::No Developer ID signing identity; ad-hoc signing $1. macOS Full Disk Access and Automation grants will not survive updating to this build (#8234)."
+              codesign --force --identifier "$2" --sign - "$1"
+            fi
+            codesign --verify --strict --verbose=2 "$1"
+            codesign -dv --verbose=2 "$1"
+          }
+          sign target/${{ matrix.target }}/release/librefang ai.librefang.cli
+      - name: Clean up macOS signing keychain
+        if: always()
+        run: |
+          KEYCHAIN_PATH="$RUNNER_TEMP/app-signing.keychain-db"
+          PRIOR_KEYCHAINS="$RUNNER_TEMP/prior-signing-keychains.txt"
+          STATUS=0
+          rm -f "$RUNNER_TEMP/certificate.p12"
+          if [ -f "$PRIOR_KEYCHAINS" ]; then
+            if ! xargs security list-keychains -d user -s < "$PRIOR_KEYCHAINS"; then
+              echo "::error::Failed to restore the prior keychain search list"
+              STATUS=1
+            fi
+          fi
+          if [ -f "$KEYCHAIN_PATH" ]; then
+            if ! security delete-keychain "$KEYCHAIN_PATH"; then
+              echo "::error::Failed to delete the temporary signing keychain"
+              STATUS=1
+            fi
+          fi
+          exit "$STATUS"
       - name: Package
         run: |
           cd target/${{ matrix.target }}/release
