@@ -13,7 +13,7 @@ use dashmap::DashMap;
 use librefang_channels::types::SenderContext;
 use librefang_kernel::kernel_handle::prelude::*;
 use librefang_kernel::kernel_handle::SessionWriter;
-use librefang_types::agent::{AgentId, AgentIdentity, AgentManifest, ResetScope};
+use librefang_types::agent::{AgentId, AgentIdentity, AgentManifest, AgentPersonality, ResetScope};
 use librefang_types::i18n::ErrorTranslator;
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock};
@@ -416,12 +416,13 @@ pub(crate) fn effective_default_model(
     override_dm.cloned().unwrap_or_else(|| base.clone())
 }
 
-/// Merge a partial identity update onto an agent's stored identity (#6608).
+/// Merge a partial appearance update onto an agent's stored identity (#6608).
 ///
-/// PATCH semantics for the six `AgentIdentity` fields: an `incoming` field of `None` means "not provided by the caller" and preserves the stored value; `Some(v)` overwrites it.
+/// PATCH semantics for the three `AgentIdentity` fields (`emoji`, `avatar_url`, `color`): an `incoming` field of `None` means "not provided by the caller" and preserves the stored value; `Some(v)` overwrites it.
+/// The three personality fields both routes also accept are not merged here: they are written into IDENTITY.md's front matter by `LibreFangKernel::set_agent_personality` (#8447), and a file edit keeps every key it is not given by construction.
 ///
-/// Both `PATCH /api/agents/{id}/identity` and `PATCH /api/agents/{id}/config` write these same six fields, and #6608 was the two drifting into opposite semantics: `/config` merged, `/identity` built a fresh `AgentIdentity` from the request alone, so `PATCH {"emoji": "X"}` through `/identity` nulled the other five fields and returned `200`.
-/// Routing both handlers through this one function is what keeps them from diverging again — a per-handler copy of the six-line merge is exactly what produced the bug.
+/// Both `PATCH /api/agents/{id}/identity` and `PATCH /api/agents/{id}/config` write these same fields, and #6608 was the two drifting into opposite semantics: `/config` merged, `/identity` built a fresh `AgentIdentity` from the request alone, so `PATCH {"emoji": "X"}` through `/identity` nulled the other fields and returned `200`.
+/// Routing both handlers through this one function is what keeps them from diverging again — a per-handler copy of the merge is exactly what produced the bug.
 ///
 /// Neither endpoint can set a field back to `None`, because `None` is already spoken for by "not provided".
 /// The closest available operation is to store an empty string: `Some("")` passes both handlers' `color` / `avatar_url` validators (each is guarded by `!x.is_empty()`) and is stored as `Some("")`, which `GET /api/agents/{id}` then reports as `""` rather than `null`.
@@ -433,10 +434,51 @@ pub(crate) fn merge_agent_identity(
         emoji: incoming.emoji.or(current.emoji),
         avatar_url: incoming.avatar_url.or(current.avatar_url),
         color: incoming.color.or(current.color),
-        archetype: incoming.archetype.or(current.archetype),
-        vibe: incoming.vibe.or(current.vibe),
-        greeting_style: incoming.greeting_style.or(current.greeting_style),
     }
+}
+
+/// Map a `set_agent_personality` failure (#8447) onto the response both identity PATCH routes return.
+///
+/// `Conflict` covers the agent whose IDENTITY.md cannot be edited in place (missing, not a regular file, front matter never closed): answering 200 there would repeat the bug this write exists to fix, an edit reported as applied that the prompt never sees.
+pub(crate) fn personality_write_error(
+    e: &crate::error::KernelError,
+    t: &ErrorTranslator,
+) -> (StatusCode, Json<serde_json::Value>) {
+    use crate::error::KernelError;
+    use librefang_types::error::LibreFangError;
+    let status = match e {
+        KernelError::LibreFang(LibreFangError::AgentNotFound(_)) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
+            );
+        }
+        KernelError::LibreFang(LibreFangError::InvalidInput(_)) => StatusCode::BAD_REQUEST,
+        KernelError::LibreFang(LibreFangError::Conflict(_)) => StatusCode::CONFLICT,
+        _ => StatusCode::INTERNAL_SERVER_ERROR,
+    };
+    (
+        status,
+        Json(serde_json::json!({"error": kernel_err_body(status, e, t)})),
+    )
+}
+
+/// Refuse a personality value with a line break before a PATCH applies any of its fields (#8447).
+///
+/// The kernel refuses it too, but only when it gets there; both routes apply other fields first, so the check has to run with the rest of the request validation for a rejected body to change nothing.
+pub(crate) fn reject_multiline_personality(
+    personality: &AgentPersonality,
+    t: &ErrorTranslator,
+) -> Option<(StatusCode, Json<serde_json::Value>)> {
+    personality.multiline_field().map(|key| {
+        let reason = format!("`{key}` must be a single line");
+        (
+            StatusCode::BAD_REQUEST,
+            Json(
+                serde_json::json!({"error": t.t_args("api-error-generic", &[("error", &reason)])}),
+            ),
+        )
+    })
 }
 
 /// Resolve the session id the attachment blocks should be written to,
@@ -997,13 +1039,10 @@ mod tests {
             emoji: Some("stored-emoji".to_string()),
             avatar_url: Some("https://example.invalid/stored.png".to_string()),
             color: Some("#000001".to_string()),
-            archetype: Some("stored-archetype".to_string()),
-            vibe: Some("stored-vibe".to_string()),
-            greeting_style: Some("stored-greeting".to_string()),
         }
     }
 
-    /// A one-field update must preserve the other five.
+    /// A one-field update must preserve the other two.
     /// This is #6608 in unit form: the pre-fix `/identity` handler dropped them.
     #[test]
     fn merge_agent_identity_preserves_fields_the_caller_omitted() {
@@ -1020,30 +1059,21 @@ mod tests {
             Some("https://example.invalid/stored.png")
         );
         assert_eq!(merged.color.as_deref(), Some("#000001"));
-        assert_eq!(merged.archetype.as_deref(), Some("stored-archetype"));
-        assert_eq!(merged.vibe.as_deref(), Some("stored-vibe"));
-        assert_eq!(merged.greeting_style.as_deref(), Some("stored-greeting"));
     }
 
     /// Every field is wired to its own counterpart.
-    /// A transposed pair (`vibe: incoming.archetype.or(...)`) is precisely the drift class this helper exists to prevent, and only a per-field assertion catches it, so each field is driven with a distinguishable value.
+    /// A transposed pair (`color: incoming.emoji.or(...)`) is precisely the drift class this helper exists to prevent, and only a per-field assertion catches it, so each field is driven with a distinguishable value.
     #[test]
     fn merge_agent_identity_maps_each_field_to_itself() {
         let incoming = AgentIdentity {
             emoji: Some("in-emoji".to_string()),
             avatar_url: Some("in-avatar".to_string()),
             color: Some("in-color".to_string()),
-            archetype: Some("in-archetype".to_string()),
-            vibe: Some("in-vibe".to_string()),
-            greeting_style: Some("in-greeting".to_string()),
         };
         let merged = merge_agent_identity(full_identity(), incoming);
         assert_eq!(merged.emoji.as_deref(), Some("in-emoji"));
         assert_eq!(merged.avatar_url.as_deref(), Some("in-avatar"));
         assert_eq!(merged.color.as_deref(), Some("in-color"));
-        assert_eq!(merged.archetype.as_deref(), Some("in-archetype"));
-        assert_eq!(merged.vibe.as_deref(), Some("in-vibe"));
-        assert_eq!(merged.greeting_style.as_deref(), Some("in-greeting"));
     }
 
     /// An empty string is the documented way to clear a field, since `None` already means "not provided".
@@ -1068,9 +1098,6 @@ mod tests {
         assert_eq!(merged.emoji, full_identity().emoji);
         assert_eq!(merged.avatar_url, full_identity().avatar_url);
         assert_eq!(merged.color, full_identity().color);
-        assert_eq!(merged.archetype, full_identity().archetype);
-        assert_eq!(merged.vibe, full_identity().vibe);
-        assert_eq!(merged.greeting_style, full_identity().greeting_style);
     }
 
     /// The pre-fix prefix-match (`"image/"`) let SVG, BMP, TIFF, HEIC and

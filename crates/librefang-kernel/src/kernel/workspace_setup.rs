@@ -670,7 +670,10 @@ pub(super) fn backfill_workspace_dir(
 /// to preserve manual edits. TOOLS.md is always rewritten so named workspace paths stay
 /// current after the agent manifest is updated.
 ///
-/// The one exception is the `name:` key in IDENTITY.md's front matter: a rename rewrites it through [`reconcile_identity_name`] when it still holds the previous name, so the file the prompt injects verbatim does not keep presenting the old identity (#8469).
+/// The one exception is IDENTITY.md's front matter, which later edits reach in place: a rename rewrites its `name:` key through [`reconcile_identity_name`] when it still holds the previous name (#8469), and the identity PATCH routes write `archetype` / `vibe` / `greeting_style` through [`write_identity_front_matter`] (#8447), so the file the prompt injects verbatim does not keep presenting a stale identity.
+///
+/// The template carries personality only.
+/// Appearance (`emoji` / `avatar_url` / `color`) is owned by the registry's `AgentIdentity`, and nothing reads it from this file, so files generated before #8447 keep their empty appearance lines as harmless leftovers and new ones no longer get them.
 pub(super) fn generate_identity_files(
     workspace: &Path,
     manifest: &AgentManifest,
@@ -744,13 +747,10 @@ pub(super) fn generate_identity_files(
          name: {name}\n\
          archetype: assistant\n\
          vibe: helpful\n\
-         emoji:\n\
-         avatar_url:\n\
          greeting_style: warm\n\
-         color:\n\
          ---\n\
          # Identity\n\
-         <!-- Visual identity and personality at a glance. Edit these fields freely. -->\n",
+         <!-- Personality at a glance. Edit these fields freely. -->\n",
         name = manifest.name
     );
 
@@ -839,6 +839,46 @@ fn write_or_cleanup<W: std::io::Write>(mut writer: W, path: &Path, content: &[u8
     }
 }
 
+/// Serializes every read-modify-write of an IDENTITY.md front matter in this process.
+///
+/// A rename (#8469) and a personality PATCH (#8447) each read the file, edit one block and write it back, so two of them landing together would otherwise each publish a copy missing the other's change.
+static IDENTITY_FRONT_MATTER_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn lock_identity_front_matter() -> std::sync::MutexGuard<'static, ()> {
+    // The guarded section holds no state of its own, so a panic inside it leaves nothing to repair.
+    IDENTITY_FRONT_MATTER_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// `{workspace}/.identity/IDENTITY.md` when both it and `.identity/` are real (not symlinked) and the file is a regular file.
+///
+/// `symlink_metadata` on the file alone would still follow a symlinked `.identity/` out of the workspace, and the atomic rename both writers use would replace a symlinked file with a regular one.
+fn identity_md_if_regular(workspace: &Path) -> Result<PathBuf, IdentityMdUnusable> {
+    let dir = workspace.join(".identity");
+    let path = dir.join("IDENTITY.md");
+    match std::fs::symlink_metadata(&dir) {
+        Ok(meta) if meta.file_type().is_dir() => {}
+        Ok(_) => return Err(IdentityMdUnusable::NotRegular),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Err(IdentityMdUnusable::Missing)
+        }
+        Err(e) => return Err(IdentityMdUnusable::Io(e)),
+    }
+    match std::fs::symlink_metadata(&path) {
+        Ok(meta) if meta.file_type().is_file() => Ok(path),
+        Ok(_) => Err(IdentityMdUnusable::NotRegular),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(IdentityMdUnusable::Missing),
+        Err(e) => Err(IdentityMdUnusable::Io(e)),
+    }
+}
+
+enum IdentityMdUnusable {
+    Missing,
+    NotRegular,
+    Io(std::io::Error),
+}
+
 /// Carry a rename into `{workspace}/.identity/IDENTITY.md` (#8469).
 ///
 /// IDENTITY.md is written once by [`generate_identity_files`] and never overwritten, yet it is injected verbatim into the system prompt, so without this a renamed agent keeps introducing itself by its old name.
@@ -853,12 +893,10 @@ pub fn reconcile_identity_name(workspace: &Path, old_name: &str, new_name: &str)
     if old_name == new_name || new_name.contains(['\n', '\r']) {
         return false;
     }
-    let path = workspace.join(".identity").join("IDENTITY.md");
-    // `symlink_metadata` so a symlinked IDENTITY.md is not followed out of the workspace; the atomic rename below would also replace the link itself with a regular file.
-    match std::fs::symlink_metadata(&path) {
-        Ok(meta) if meta.file_type().is_file() => {}
-        _ => return false,
-    }
+    let _guard = lock_identity_front_matter();
+    let Ok(path) = identity_md_if_regular(workspace) else {
+        return false;
+    };
     let Ok(content) = std::fs::read_to_string(&path) else {
         return false;
     };
@@ -877,51 +915,189 @@ pub fn reconcile_identity_name(workspace: &Path, old_name: &str, new_name: &str)
     }
 }
 
-/// Pure half of [`reconcile_identity_name`]: return `content` with the front-matter `name:` value replaced, or `None` when nothing should change.
-fn rewrite_front_matter_name(content: &str, old_name: &str, new_name: &str) -> Option<String> {
-    fn strip_eol(line: &str) -> &str {
-        line.strip_suffix('\n')
-            .map(|l| l.strip_suffix('\r').unwrap_or(l))
-            .unwrap_or(line)
+/// Write personality fields into the front matter of `{workspace}/.identity/IDENTITY.md` (#8447).
+///
+/// Personality is owned by this file rather than the registry because the file is what the prompt injects: a value stored anywhere else never reaches the model.
+/// Each `(key, value)` rewrites the first top-level line for that key inside the leading `---` block, or is added at the end of the block when the key is absent; a file with no front matter at all gains a block at the top.
+/// The body, every other line of the block and the file's line endings are preserved byte for byte, and the new file is published with an atomic rename.
+///
+/// Returns `Ok(true)` when the file changed and `Ok(false)` when it already held these values.
+/// Refuses, without writing anything:
+/// - with [`LibreFangError::InvalidInput`] a value containing a line break, which would smuggle a second key into the block;
+/// - with [`LibreFangError::Conflict`] a file that is missing, is not a regular file (neither it nor `.identity/` is followed through a symlink), or opens a `---` block it never closes, where there is no known end to place an edit before.
+pub fn write_identity_front_matter(
+    workspace: &Path,
+    fields: &[(&str, &str)],
+) -> Result<bool, LibreFangError> {
+    if let Some((key, _)) = fields
+        .iter()
+        .find(|(_, value)| value.contains(['\n', '\r']))
+    {
+        return Err(LibreFangError::InvalidInput(format!(
+            "`{key}` must be a single line"
+        )));
     }
+    if fields.is_empty() {
+        return Ok(false);
+    }
+    let _guard = lock_identity_front_matter();
+    let path = match identity_md_if_regular(workspace) {
+        Ok(path) => path,
+        Err(IdentityMdUnusable::Missing) => {
+            return Err(LibreFangError::Conflict(
+                "the agent has no .identity/IDENTITY.md to hold its personality; it is regenerated the next time the agent spawns".to_string(),
+            ))
+        }
+        Err(IdentityMdUnusable::NotRegular) => {
+            return Err(LibreFangError::Conflict(
+                ".identity/IDENTITY.md is not a regular file, so its personality fields are not rewritten".to_string(),
+            ))
+        }
+        Err(IdentityMdUnusable::Io(e)) => return Err(LibreFangError::Io(e)),
+    };
+    let content = std::fs::read_to_string(&path)?;
+    let patched = upsert_front_matter(&content, fields).ok_or_else(|| {
+        LibreFangError::Conflict(
+            ".identity/IDENTITY.md opens a `---` front matter block that is never closed; fix the file before editing its personality".to_string(),
+        )
+    })?;
+    if patched == content {
+        return Ok(false);
+    }
+    super::cron_script::atomic_write_toml(&path, &patched)?;
+    let keys: Vec<&str> = fields.iter().map(|(key, _)| *key).collect();
+    info!(path = %path.display(), ?keys, "Updated IDENTITY.md personality front matter");
+    Ok(true)
+}
 
+fn strip_eol(line: &str) -> &str {
+    line.strip_suffix('\n')
+        .map(|l| l.strip_suffix('\r').unwrap_or(l))
+        .unwrap_or(line)
+}
+
+/// Where the leading `---` block of an IDENTITY.md sits.
+enum FrontMatterSpan {
+    /// The file does not open with a `---` line.
+    Absent,
+    /// It opens with one but never closes it.
+    Unterminated,
+    /// The block's lines occupy `inner_start..close`; `close` is where the closing fence line starts.
+    Block { inner_start: usize, close: usize },
+}
+
+fn locate_front_matter(content: &str) -> FrontMatterSpan {
     let mut lines = content.split_inclusive('\n');
-    let first = lines.next()?;
+    let Some(first) = lines.next() else {
+        return FrontMatterSpan::Absent;
+    };
     if strip_eol(first).trim_end() != "---" {
-        return None;
+        return FrontMatterSpan::Absent;
     }
     let mut offset = first.len();
-    // Byte range of the matching `name:` line's content, excluding its line ending.
-    let mut target: Option<(usize, usize)> = None;
     for line in lines {
-        let body = strip_eol(line);
-        if body.trim_end() == "---" {
-            let (start, end) = target?;
-            let mut patched = String::with_capacity(content.len() + new_name.len());
-            patched.push_str(&content[..start]);
-            patched.push_str("name: ");
-            patched.push_str(new_name);
-            patched.push_str(&content[end..]);
-            return Some(patched);
-        }
-        if target.is_none() {
-            if let Some(value) = body.strip_prefix("name:") {
-                let value = value.trim();
-                let unquoted = value
-                    .strip_prefix('"')
-                    .and_then(|v| v.strip_suffix('"'))
-                    .or_else(|| value.strip_prefix('\'').and_then(|v| v.strip_suffix('\'')))
-                    .unwrap_or(value);
-                if unquoted != old_name {
-                    return None;
-                }
-                target = Some((offset, offset + body.len()));
-            }
+        if strip_eol(line).trim_end() == "---" {
+            return FrontMatterSpan::Block {
+                inner_start: first.len(),
+                close: offset,
+            };
         }
         offset += line.len();
     }
-    // No closing fence: not front matter, so the `name:` line is operator prose.
+    FrontMatterSpan::Unterminated
+}
+
+/// The first top-level `key:` line in `content[inner_start..close]`, as the byte range of its content (line ending excluded) and its trimmed raw value.
+/// An indented `key:` belongs to a nested mapping and does not match.
+fn find_front_matter_key<'a>(
+    content: &'a str,
+    inner_start: usize,
+    close: usize,
+    key: &str,
+) -> Option<(usize, usize, &'a str)> {
+    let mut offset = inner_start;
+    for line in content[inner_start..close].split_inclusive('\n') {
+        let body = strip_eol(line);
+        if let Some(value) = body
+            .strip_prefix(key)
+            .and_then(|rest| rest.strip_prefix(':'))
+        {
+            return Some((offset, offset + body.len(), value.trim()));
+        }
+        offset += line.len();
+    }
     None
+}
+
+/// `key: value`, or the bare `key:` the generated template uses for an empty value.
+fn front_matter_line(key: &str, value: &str) -> String {
+    if value.is_empty() {
+        format!("{key}:")
+    } else {
+        format!("{key}: {value}")
+    }
+}
+
+/// Pure half of [`reconcile_identity_name`]: return `content` with the front-matter `name:` value replaced, or `None` when nothing should change.
+fn rewrite_front_matter_name(content: &str, old_name: &str, new_name: &str) -> Option<String> {
+    // No closing fence: not front matter, so any `name:` line is operator prose.
+    let FrontMatterSpan::Block { inner_start, close } = locate_front_matter(content) else {
+        return None;
+    };
+    let (start, end, value) = find_front_matter_key(content, inner_start, close, "name")?;
+    let unquoted = value
+        .strip_prefix('"')
+        .and_then(|v| v.strip_suffix('"'))
+        .or_else(|| value.strip_prefix('\'').and_then(|v| v.strip_suffix('\'')))
+        .unwrap_or(value);
+    if unquoted != old_name {
+        return None;
+    }
+    let mut patched = String::with_capacity(content.len() + new_name.len());
+    patched.push_str(&content[..start]);
+    patched.push_str(&front_matter_line("name", new_name));
+    patched.push_str(&content[end..]);
+    Some(patched)
+}
+
+/// Pure half of [`write_identity_front_matter`]: set each `(key, value)` inside the leading front matter, or `None` when the block is never closed.
+fn upsert_front_matter(content: &str, fields: &[(&str, &str)]) -> Option<String> {
+    let mut out = match locate_front_matter(content) {
+        FrontMatterSpan::Unterminated => return None,
+        FrontMatterSpan::Block { .. } => content.to_string(),
+        FrontMatterSpan::Absent => {
+            // Match the file's own line ending so a CRLF file does not gain LF-only fence lines.
+            let eol = if content
+                .split_inclusive('\n')
+                .next()
+                .is_some_and(|line| line.ends_with("\r\n"))
+            {
+                "\r\n"
+            } else {
+                "\n"
+            };
+            format!("---{eol}---{eol}{content}")
+        }
+    };
+    for (key, value) in fields {
+        let FrontMatterSpan::Block { inner_start, close } = locate_front_matter(&out) else {
+            return None;
+        };
+        let line = front_matter_line(key, value);
+        match find_front_matter_key(&out, inner_start, close, key) {
+            Some((start, end, _)) => out.replace_range(start..end, &line),
+            None => {
+                // The opening fence's line ending, so an inserted line matches its neighbours.
+                let eol = if out[..inner_start].ends_with("\r\n") {
+                    "\r\n"
+                } else {
+                    "\n"
+                };
+                out.insert_str(close, &format!("{line}{eol}"));
+            }
+        }
+    }
+    Some(out)
 }
 
 /// Build the TOOLS.md content, injecting named workspace paths and modes.
@@ -1838,5 +2014,190 @@ mod identity_rename_tests {
         std::os::unix::fs::symlink(&target, dir.join("IDENTITY.md")).unwrap();
         assert!(!reconcile_identity_name(tmp.path(), "a", "b"));
         assert_eq!(std::fs::read_to_string(&target).unwrap(), GENERATED);
+    }
+}
+
+#[cfg(test)]
+mod identity_personality_tests {
+    //! Regression tests for #8447: personality fields are written into IDENTITY.md's front matter, which is what reaches the prompt, and nothing else in that file changes.
+
+    use super::*;
+
+    fn write_identity(workspace: &Path, content: &str) -> PathBuf {
+        let dir = workspace.join(".identity");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("IDENTITY.md");
+        std::fs::write(&path, content).unwrap();
+        path
+    }
+
+    const FILE: &str = "---\nname: a\narchetype: assistant\nvibe: helpful\ngreeting_style: warm\n---\n# Identity\nvibe: prose in the body\n";
+
+    #[test]
+    fn existing_keys_are_rewritten_and_the_rest_is_byte_identical() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = write_identity(tmp.path(), FILE);
+        assert!(write_identity_front_matter(
+            tmp.path(),
+            &[("vibe", "technical"), ("archetype", "coder")]
+        )
+        .unwrap());
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "---\nname: a\narchetype: coder\nvibe: technical\ngreeting_style: warm\n---\n# Identity\nvibe: prose in the body\n"
+        );
+    }
+
+    #[test]
+    fn absent_key_is_added_at_the_end_of_the_block() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = write_identity(tmp.path(), "---\nname: a\n---\nbody\n");
+        assert!(write_identity_front_matter(tmp.path(), &[("greeting_style", "brief")]).unwrap());
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "---\nname: a\ngreeting_style: brief\n---\nbody\n"
+        );
+    }
+
+    #[test]
+    fn file_without_front_matter_gains_a_block_above_the_untouched_body() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = write_identity(tmp.path(), "# Identity\nvibe: prose\n");
+        assert!(write_identity_front_matter(tmp.path(), &[("vibe", "calm")]).unwrap());
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "---\nvibe: calm\n---\n# Identity\nvibe: prose\n"
+        );
+    }
+
+    #[test]
+    fn crlf_line_endings_are_preserved_for_rewritten_and_added_lines() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = write_identity(
+            tmp.path(),
+            "---\r\nname: a\r\nvibe: helpful\r\n---\r\n# Identity\r\n",
+        );
+        assert!(write_identity_front_matter(
+            tmp.path(),
+            &[("vibe", "calm"), ("archetype", "coder")]
+        )
+        .unwrap());
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "---\r\nname: a\r\nvibe: calm\r\narchetype: coder\r\n---\r\n# Identity\r\n"
+        );
+    }
+
+    #[test]
+    fn empty_value_is_written_as_a_bare_key() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = write_identity(tmp.path(), FILE);
+        assert!(write_identity_front_matter(tmp.path(), &[("vibe", "")]).unwrap());
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            FILE.replacen("vibe: helpful\n", "vibe:\n", 1)
+        );
+    }
+
+    #[test]
+    fn unchanged_values_do_not_rewrite_the_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_identity(tmp.path(), FILE);
+        assert!(!write_identity_front_matter(tmp.path(), &[("vibe", "helpful")]).unwrap());
+    }
+
+    #[test]
+    fn indented_key_is_not_the_top_level_key() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = write_identity(tmp.path(), "---\nowner:\n  vibe: nested\n---\n");
+        assert!(write_identity_front_matter(tmp.path(), &[("vibe", "calm")]).unwrap());
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "---\nowner:\n  vibe: nested\nvibe: calm\n---\n"
+        );
+    }
+
+    #[test]
+    fn value_with_a_line_break_is_refused_and_nothing_is_written() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = write_identity(tmp.path(), FILE);
+        let err =
+            write_identity_front_matter(tmp.path(), &[("vibe", "calm\nname: evil")]).unwrap_err();
+        assert!(matches!(err, LibreFangError::InvalidInput(_)), "{err:?}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), FILE);
+    }
+
+    #[test]
+    fn unterminated_front_matter_is_refused_and_nothing_is_written() {
+        let tmp = tempfile::tempdir().unwrap();
+        let content = "---\nname: a\n# Identity\n";
+        let path = write_identity(tmp.path(), content);
+        let err = write_identity_front_matter(tmp.path(), &[("vibe", "calm")]).unwrap_err();
+        assert!(matches!(err, LibreFangError::Conflict(_)), "{err:?}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), content);
+    }
+
+    #[test]
+    fn missing_file_is_refused_and_creates_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let err = write_identity_front_matter(tmp.path(), &[("vibe", "calm")]).unwrap_err();
+        assert!(matches!(err, LibreFangError::Conflict(_)), "{err:?}");
+        assert!(!tmp.path().join(".identity").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_file_or_directory_is_not_followed() {
+        let outside = tempfile::tempdir().unwrap();
+        let target = outside.path().join("IDENTITY.md");
+        std::fs::write(&target, FILE).unwrap();
+
+        let file_link = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(file_link.path().join(".identity")).unwrap();
+        std::os::unix::fs::symlink(
+            &target,
+            file_link.path().join(".identity").join("IDENTITY.md"),
+        )
+        .unwrap();
+        let err = write_identity_front_matter(file_link.path(), &[("vibe", "calm")]).unwrap_err();
+        assert!(matches!(err, LibreFangError::Conflict(_)), "{err:?}");
+
+        let dir_link = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(outside.path(), dir_link.path().join(".identity")).unwrap();
+        let err = write_identity_front_matter(dir_link.path(), &[("vibe", "calm")]).unwrap_err();
+        assert!(matches!(err, LibreFangError::Conflict(_)), "{err:?}");
+        assert!(!reconcile_identity_name(dir_link.path(), "a", "b"));
+
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), FILE);
+    }
+
+    #[test]
+    fn generated_template_carries_personality_but_not_appearance() {
+        let tmp = tempfile::tempdir().unwrap();
+        let manifest = AgentManifest {
+            name: "a".to_string(),
+            ..AgentManifest::default()
+        };
+        generate_identity_files(tmp.path(), &manifest, &HashMap::new());
+        let content =
+            std::fs::read_to_string(tmp.path().join(".identity").join("IDENTITY.md")).unwrap();
+        for key in ["archetype:", "vibe:", "greeting_style:"] {
+            assert!(
+                content.contains(&format!("\n{key}")),
+                "{key} missing: {content}"
+            );
+        }
+        for key in ["emoji:", "avatar_url:", "color:"] {
+            assert!(
+                !content.contains(key),
+                "{key} is owned by the registry, not the file: {content}"
+            );
+        }
+        assert!(write_identity_front_matter(tmp.path(), &[("vibe", "calm")]).unwrap());
+        assert!(
+            std::fs::read_to_string(tmp.path().join(".identity").join("IDENTITY.md"))
+                .unwrap()
+                .contains("\nvibe: calm\n")
+        );
     }
 }

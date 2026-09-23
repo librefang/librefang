@@ -1,0 +1,5 @@
+Editing an agent's personality now changes what the agent sees.
+`PATCH /api/agents/{id}/identity` and `PATCH /api/agents/{id}/config` stored `archetype`, `vibe` and `greeting_style` in the agent registry, which nothing reads, while the prompt reads them from `.identity/IDENTITY.md`, so the request answered 200 and the agent kept its old personality.
+Each identity field now has one owner: appearance (`emoji`, `avatar_url`, `color`) stays in the registry that draws the dashboard avatar, and personality is written into the IDENTITY.md front matter — only that key's line, added inside the block when absent, the body and line endings untouched — with the cached identity files dropped so the next turn already sees it.
+A value containing a line break is refused with 400, and a file whose front matter never closes, or that is missing or not a regular file, with 409 instead of a 200 that changed nothing.
+New IDENTITY.md files no longer carry empty `emoji:`, `avatar_url:` and `color:` lines, which nothing read from the file; existing files are left as they are (#8447) (@houko)

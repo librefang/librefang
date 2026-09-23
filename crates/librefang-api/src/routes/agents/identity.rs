@@ -3,25 +3,35 @@ use super::*;
 // ---------------------------------------------------------------------------
 // Agent Identity endpoint
 // ---------------------------------------------------------------------------
-/// Request body for updating agent visual identity.
+/// Request body for updating an agent's identity.
 ///
-/// Every field is optional and carries PATCH semantics: an omitted or `null` field preserves the stored value, and an empty string stores an empty string (`GET /api/agents/{id}` then reports `""`, not `null`).
+/// The fields have two owners (#8447).
+/// Appearance (`emoji`, `avatar_url`, `color`) is stored in the agent registry and drawn by the dashboard.
+/// Personality (`archetype`, `vibe`, `greeting_style`) is written into the front matter of `{workspace}/.identity/IDENTITY.md`, the file the system prompt injects, and is read back from that file (`GET /api/agents/{id}/files/IDENTITY.md`).
+///
+/// Every field is optional and carries PATCH semantics: an omitted or `null` field preserves the current value, and an empty string stores an empty string (`GET /api/agents/{id}` then reports `""`, not `null`; a personality key is written as a bare `key:`).
 /// See `merge_agent_identity` in the parent module for why `null` cannot mean "clear".
 #[derive(serde::Deserialize, utoipa::ToSchema)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct UpdateIdentityRequest {
+    /// Appearance, stored in the registry.
     pub emoji: Option<String>,
+    /// Appearance, stored in the registry.
     pub avatar_url: Option<String>,
+    /// Appearance, stored in the registry.
     pub color: Option<String>,
+    /// Personality, written into IDENTITY.md's front matter.
     #[serde(default)]
     pub archetype: Option<String>,
+    /// Personality, written into IDENTITY.md's front matter.
     #[serde(default)]
     pub vibe: Option<String>,
+    /// Personality, written into IDENTITY.md's front matter.
     #[serde(default)]
     pub greeting_style: Option<String>,
 }
 
-/// PATCH /api/agents/{id}/identity — Update an agent's visual identity.
+/// PATCH /api/agents/{id}/identity — Update an agent's appearance and personality.
 #[utoipa::path(
     patch,
     path = "/api/agents/{id}/identity",
@@ -29,10 +39,13 @@ pub(crate) struct UpdateIdentityRequest {
     params(("id" = String, Path, description = "Agent ID")),
     request_body(
         content = UpdateIdentityRequest,
-        description = "Identity fields to update. PATCH semantics: an omitted or `null` field preserves the stored value, and a partial body never nulls the fields it does not mention. A field cannot be set back to `null`, because `null` already means \"not provided\"; sending an empty string stores an empty string, which is the closest thing to clearing one. Identical in behaviour to the six identity fields of `PATCH /api/agents/{id}/config`."
+        description = "Identity fields to update. Appearance (`emoji`, `avatar_url`, `color`) is stored in the agent registry; personality (`archetype`, `vibe`, `greeting_style`) is written into the front matter of the agent's `.identity/IDENTITY.md`, which is what reaches the prompt, leaving the rest of that file untouched. PATCH semantics: an omitted or `null` field preserves the current value, and a partial body never nulls the fields it does not mention. A field cannot be set back to `null`, because `null` already means \"not provided\"; sending an empty string stores an empty string, which is the closest thing to clearing one. Identical in behaviour to the six identity fields of `PATCH /api/agents/{id}/config`."
     ),
     responses(
-        (status = 200, description = "Update an agent's visual identity", body = crate::types::JsonObject),
+        (status = 200, description = "Update an agent's appearance and personality", body = crate::types::JsonObject),
+        (status = 400, description = "A colour, avatar URL or personality value is malformed; nothing was changed", body = crate::types::JsonObject),
+        (status = 404, description = "Agent not found", body = crate::types::JsonObject),
+        (status = 409, description = "The agent's IDENTITY.md cannot be edited in place (missing, not a regular file, or its front matter is never closed); nothing was changed", body = crate::types::JsonObject),
         (status = 423, description = "This agent is provisioned by the deployment; its manifest cannot be changed through the API", body = crate::types::JsonObject)
     )
 )]
@@ -83,9 +96,26 @@ pub async fn update_agent_identity(
         }
     }
 
-    // Read the stored identity and merge the provided fields onto it (#6608).
-    // This endpoint is a PATCH: before the fix it built a fresh `AgentIdentity` from the request alone, so a single-field body silently nulled the other five and returned 200.
-    // `merge_agent_identity` is shared with `PATCH /api/agents/{id}/config`, which writes the same six fields.
+    let personality = AgentPersonality {
+        archetype: req.archetype,
+        vibe: req.vibe,
+        greeting_style: req.greeting_style,
+    };
+    if let Some(refusal) = super::reject_multiline_personality(&personality, &t) {
+        return refusal;
+    }
+
+    // Personality goes to IDENTITY.md, the file the prompt reads, not the registry (#8447).
+    // It is written before the appearance so a file that cannot be edited refuses the whole body instead of reporting a half-applied 200.
+    if !personality.front_matter_fields().is_empty() {
+        if let Err(e) = state.kernel.set_agent_personality(agent_id, &personality) {
+            return super::personality_write_error(&e, &t);
+        }
+    }
+
+    // Read the stored appearance and merge the provided fields onto it (#6608).
+    // This endpoint is a PATCH: before the fix it built a fresh `AgentIdentity` from the request alone, so a single-field body silently nulled the other fields and returned 200.
+    // `merge_agent_identity` is shared with `PATCH /api/agents/{id}/config`, which writes the same fields.
     //
     // A missing agent yields `AgentIdentity::default()` here and is then reported as 404 by `update_identity` below, matching `/config`.
     let current = state
@@ -100,9 +130,6 @@ pub async fn update_agent_identity(
             emoji: req.emoji,
             avatar_url: req.avatar_url,
             color: req.color,
-            archetype: req.archetype,
-            vibe: req.vibe,
-            greeting_style: req.greeting_style,
         },
     );
 
