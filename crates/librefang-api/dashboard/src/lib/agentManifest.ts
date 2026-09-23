@@ -78,8 +78,24 @@ export interface ManifestFormState {
     network: string[];
     shell: string[];
     tools: string[];
-    memory_read: string[];
-    memory_write: string[];
+    /**
+     * `null` when the manifest never declared the key.
+     *
+     * These two are the only capability lists where the kernel tells the two
+     * apart, and the difference is load-bearing (#7605): an absent key is
+     * permissive, while `memory_read = []` is a **declared** empty list that
+     * grants nothing — so it denies. Everywhere else an empty list reads as
+     * "undeclared, therefore unrestricted" (`capabilities.tools = []` grants
+     * every tool), which is exactly why these two are `Option<Vec<String>>`
+     * kernel-side (`librefang-types/src/agent.rs:1888`).
+     *
+     * Collapsing both to `[]` loses the deny: the emitter would then have no
+     * way to tell "never declared" from "declared and empty", and it omits
+     * empty lists — silently turning an agent locked out of memory into an
+     * unrestricted one the first time anyone saves the form.
+     */
+    memory_read: string[] | null;
+    memory_write: string[] | null;
     agent_message: string[];
     ofp_connect: string[];
     agent_spawn: boolean;
@@ -178,6 +194,14 @@ export interface ManifestExtras {
   // known fields alone, so opening an agent in the editor and saving it
   // silently deletes any newer key from that agent's agent.toml.
   thinking: TomlTable;
+  // `[autonomous]` and `[routing]` are in `FORM_TOP_LEVEL_KEYS`, which means
+  // their tables never reach `topLevel` — so without a slot of their own, every
+  // key the form has no widget for is consumed on parse and never re-emitted.
+  // `block_stall_degrade_after` (the loop-guard threshold) was being deleted
+  // that way; `reasoning_mode` was the same bug in `[thinking]`, which is why
+  // that slot exists above.
+  autonomous: TomlTable;
+  routing: TomlTable;
 }
 
 export const emptyManifestExtras = (): ManifestExtras => ({
@@ -186,6 +210,8 @@ export const emptyManifestExtras = (): ManifestExtras => ({
   resources: {},
   capabilities: {},
   thinking: {},
+  autonomous: {},
+  routing: {},
 });
 
 export const emptyManifestForm = (): ManifestFormState => ({
@@ -229,8 +255,11 @@ export const emptyManifestForm = (): ManifestFormState => ({
     network: [],
     shell: [],
     tools: [],
-    memory_read: [],
-    memory_write: [],
+    // `null`, not `[]`: a manifest that never had a `[capabilities]` block
+    // declares neither, and `[]` would emit a deny the operator never asked
+    // for. See the field doc on `ManifestFormState["capabilities"]`.
+    memory_read: null,
+    memory_write: null,
     agent_message: [],
     ofp_connect: [],
     agent_spawn: false,
@@ -414,6 +443,22 @@ const FORM_CAPABILITY_KEYS = new Set([
   "speech",
 ]);
 const FORM_THINKING_KEYS = new Set(["budget_tokens", "stream_thinking"]);
+const FORM_AUTONOMOUS_KEYS = new Set([
+  "max_iterations",
+  "max_restarts",
+  "heartbeat_interval_secs",
+  "heartbeat_timeout_secs",
+  "heartbeat_keep_recent",
+  "heartbeat_channel",
+  "quiet_hours",
+]);
+const FORM_ROUTING_KEYS = new Set([
+  "simple_model",
+  "medium_model",
+  "complex_model",
+  "simple_threshold",
+  "complex_threshold",
+]);
 
 const SCHEDULE_DEFAULT_INTERVAL = "300";
 const PRIORITIES = ["Low", "Normal", "High", "Critical"] as const;
@@ -642,6 +687,15 @@ export const serializeManifestForm = (
   const safeThinkingExtras = form.thinking.enabled
     ? pluckSafeExtras(extras.thinking, deferredSectionExtras, "thinking")
     : {};
+  // Same conditional shape as `thinking`: the toggle owns the whole table, so
+  // switching it off is the user deleting the section and the preserved keys go
+  // with it rather than stranding a block the form no longer writes.
+  const safeAutonomousExtras = form.autonomous.enabled
+    ? pluckSafeExtras(extras.autonomous, deferredSectionExtras, "autonomous")
+    : {};
+  const safeRoutingExtras = form.routing.enabled
+    ? pluckSafeExtras(extras.routing, deferredSectionExtras, "routing")
+    : {};
 
   // [workspaces] — table header, so it is emitted here, after every
   // top-level scalar; a header inside the scalar block would scope the
@@ -699,8 +753,11 @@ export const serializeManifestForm = (
   if (form.capabilities.network.length) capabilityBody.push(`network = ${tomlArray(form.capabilities.network)}`);
   if (form.capabilities.shell.length) capabilityBody.push(`shell = ${tomlArray(form.capabilities.shell)}`);
   if (form.capabilities.tools.length) capabilityBody.push(`tools = ${tomlArray(form.capabilities.tools)}`);
-  if (form.capabilities.memory_read.length) capabilityBody.push(`memory_read = ${tomlArray(form.capabilities.memory_read)}`);
-  if (form.capabilities.memory_write.length) capabilityBody.push(`memory_write = ${tomlArray(form.capabilities.memory_write)}`);
+  // Not `if (….length)`: an empty-but-declared list is a deny, and emitting
+  // nothing would silently lift it. `null` is the only value that means
+  // "never declared", and only it is omitted.
+  if (form.capabilities.memory_read !== null) capabilityBody.push(`memory_read = ${tomlArray(form.capabilities.memory_read)}`);
+  if (form.capabilities.memory_write !== null) capabilityBody.push(`memory_write = ${tomlArray(form.capabilities.memory_write)}`);
   if (form.capabilities.agent_message.length) capabilityBody.push(`agent_message = ${tomlArray(form.capabilities.agent_message)}`);
   if (form.capabilities.ofp_connect.length) capabilityBody.push(`ofp_connect = ${tomlArray(form.capabilities.ofp_connect)}`);
   if (form.capabilities.agent_spawn) writeBoolScalar(capabilityBody, "agent_spawn", true);
@@ -735,7 +792,7 @@ export const serializeManifestForm = (
     writeIntegerScalar(body, "heartbeat_keep_recent", parseUnsignedTomlInteger(form.autonomous.heartbeat_keep_recent));
     writeStringScalar(body, "heartbeat_channel", form.autonomous.heartbeat_channel.trim());
     writeStringScalar(body, "quiet_hours", form.autonomous.quiet_hours.trim());
-    lines.push("", "[autonomous]", ...body);
+    lines.push("", "[autonomous]", ...body, ...renderExtraScalars(safeAutonomousExtras));
   }
 
   // [routing]
@@ -746,7 +803,7 @@ export const serializeManifestForm = (
     writeStringScalar(body, "complex_model", form.routing.complex_model.trim());
     writeNumberScalar(body, "simple_threshold", parseInteger(form.routing.simple_threshold));
     writeNumberScalar(body, "complex_threshold", parseInteger(form.routing.complex_threshold));
-    lines.push("", "[routing]", ...body);
+    lines.push("", "[routing]", ...body, ...renderExtraScalars(safeRoutingExtras));
   }
 
   // [[fallback_models]]
@@ -1114,6 +1171,17 @@ const asStringArray = (v: unknown): string[] => {
   if (!Array.isArray(v)) return [];
   return v.filter((x): x is string => typeof x === "string");
 };
+/**
+ * Like {@link asStringArray}, but keeps "the key was not there" apart from
+ * "the key was there and held nothing".
+ *
+ * Only `memory_read` / `memory_write` need it: the kernel reads those two as
+ * `Option<Vec<String>>`, where absent is permissive and `[]` denies (#7605).
+ * For every other list the two collapse to the same meaning, which is why
+ * they are plain `string[]`.
+ */
+const asDeclaredStringArray = (v: unknown): string[] | null =>
+  v === undefined || v === null ? null : asStringArray(v);
 const containsBigInt = (value: unknown): boolean => {
   if (typeof value === "bigint") return true;
   if (Array.isArray(value)) return value.some(containsBigInt);
@@ -1253,8 +1321,10 @@ export const parseManifestToml = (toml: string): ParseResult | ParseError => {
   form.capabilities.network = asStringArray(capTable.network);
   form.capabilities.shell = asStringArray(capTable.shell);
   form.capabilities.tools = asStringArray(capTable.tools);
-  form.capabilities.memory_read = asStringArray(capTable.memory_read);
-  form.capabilities.memory_write = asStringArray(capTable.memory_write);
+  // Not `asStringArray`: `memory_read = []` is a deny the kernel honours, so
+  // the form has to carry it forward rather than flatten it into "absent".
+  form.capabilities.memory_read = asDeclaredStringArray(capTable.memory_read);
+  form.capabilities.memory_write = asDeclaredStringArray(capTable.memory_write);
   form.capabilities.agent_message = asStringArray(capTable.agent_message);
   form.capabilities.ofp_connect = asStringArray(capTable.ofp_connect);
   form.capabilities.agent_spawn = asBoolean(capTable.agent_spawn, false);
@@ -1283,6 +1353,7 @@ export const parseManifestToml = (toml: string): ParseResult | ParseError => {
     form.autonomous.heartbeat_keep_recent = asNumberString(a.heartbeat_keep_recent);
     form.autonomous.heartbeat_channel = asString(a.heartbeat_channel);
     form.autonomous.quiet_hours = asString(a.quiet_hours);
+    extras.autonomous = stripKnown(a, FORM_AUTONOMOUS_KEYS);
   }
 
   // [routing]
@@ -1294,6 +1365,7 @@ export const parseManifestToml = (toml: string): ParseResult | ParseError => {
     form.routing.complex_model = asString(r.complex_model);
     form.routing.simple_threshold = asNumberString(r.simple_threshold);
     form.routing.complex_threshold = asNumberString(r.complex_threshold);
+    extras.routing = stripKnown(r, FORM_ROUTING_KEYS);
   }
 
   // [[context_injection]]
@@ -1385,10 +1457,20 @@ const parseExecPolicyShorthand = (
   raw: unknown,
 ): ManifestFormState["exec_policy_shorthand"] => {
   if (typeof raw !== "string") return "";
-  if ((EXEC_SHORTHANDS as readonly string[]).includes(raw)) {
-    return raw as ManifestFormState["exec_policy_shorthand"];
+  // Lowercased first, because the kernel lowercases it: `exec_policy_lenient`
+  // normalises through `to_lowercase()` before mapping
+  // (`crates/librefang-types/src/serde_compat.rs:262`, wired in at
+  // `agent.rs:1347`), so `"Deny"` and `"FULL"` are valid manifests the runtime
+  // honours. Matching exactly here read them as a spelling the form did not
+  // know, returned "", and dropped the key on the next save — an agent whose
+  // policy was `"Deny"` came back with none, and one carrying `shell_exec` is
+  // promoted to `Full` when none is present
+  // (`kernel/spawn.rs:236-250`, `kernel/boot.rs:2690-2705`).
+  const spelling = raw.toLowerCase();
+  if ((EXEC_SHORTHANDS as readonly string[]).includes(spelling)) {
+    return spelling as ManifestFormState["exec_policy_shorthand"];
   }
-  return EXEC_POLICY_ALIASES[raw] ?? "";
+  return EXEC_POLICY_ALIASES[spelling] ?? "";
 };
 
 const parseResponseFormatField = (raw: unknown): ManifestFormState["response_format"] => {

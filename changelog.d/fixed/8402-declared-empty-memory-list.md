@@ -1,0 +1,3 @@
+`memory_read` and `memory_write` are the two capability lists the kernel reads as `Option<Vec<String>>`, where an absent key is permissive and a declared empty list grants nothing (#7605); the editor flattened both into `[]` on load and then emitted nothing for an empty list on save, so an agent locked out of memory came back with no restriction the first time anyone opened and saved it.
+The form now carries `string[] | null`, where `null` is "the manifest never declared the key": `null` is omitted on save and `[]` is written as `memory_read = []`.
+A key that was absent stays absent, so saving cannot manufacture a deny either. (#8402) (@DaBlitzStein)
