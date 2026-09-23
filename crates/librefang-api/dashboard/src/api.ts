@@ -1978,7 +1978,7 @@ export async function promoteAgentType(name: string): Promise<PromoteAgentTypeRe
 /**
  * What produced a stored version, as the server writes it.
  *
- * `create`, `dashboard` and `restore` are the `record_template_version` call sites in `routes/agent_templates.rs`; `toml` is the raw-TOML save path; `unknown` is the SQLite column default (`crates/librefang-memory/src/migration.rs`), which no producer writes but an older row can carry.
+ * `create`, `dashboard` and `restore` are the `record_template_version` call sites in `routes/agent_templates.rs`; `toml` is reserved for the raw-TOML save path that #8028 adds, so the label is ready before that producer lands; `unknown` is the SQLite column default (`crates/librefang-memory/src/migration.rs`), which no producer writes but an older row can carry.
  * Every entry needs an `agentTypes.change_source.<value>` locale key — render through `changeSourceLabel` in `lib/changeSource.ts`, never the raw token.
  */
 export const CHANGE_SOURCES = ["create", "dashboard", "restore", "toml", "unknown"] as const;
