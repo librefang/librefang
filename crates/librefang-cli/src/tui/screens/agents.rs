@@ -9,7 +9,9 @@ use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::{Alignment, Constraint, Flex, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Padding, Paragraph};
+use ratatui::widgets::{
+    Block, Borders, List, ListItem, ListState, Padding, Paragraph, Widget, Wrap,
+};
 use ratatui::Frame;
 
 /// Available built-in tools for the custom agent builder.
@@ -129,6 +131,10 @@ pub struct AgentSelectState {
     /// on save for the same reason as `router_default_profile` (#7781
     /// review).
     pub router_fixed: bool,
+    /// The kernel runs in Stable mode, so no router runs and the editor must say its settings are inert (#8446).
+    pub routing_stable_mode: bool,
+    /// `agent.toml: pinned_model`, named in the Stable-mode warning as the model that actually runs; `None` means the manifest model.
+    pub router_pinned_model: Option<String>,
     /// Set only by `AgentModelRoutingLoaded`. `Enter` in the routing editor
     /// is a no-op while this is `false` — a fetch that failed after `r` was
     /// pressed must not let a save write the reset placeholder values (or,
@@ -302,6 +308,8 @@ impl AgentSelectState {
             cost_budget_idx: 0,
             router_default_profile: None,
             router_fixed: false,
+            routing_stable_mode: false,
+            router_pinned_model: None,
             routing_loaded: false,
             spawned_toml: None,
             status_msg: String::new(),
@@ -673,6 +681,8 @@ impl AgentSelectState {
                     self.cost_budget_idx = 0;
                     self.router_default_profile = None;
                     self.router_fixed = false;
+                    self.routing_stable_mode = false;
+                    self.router_pinned_model = None;
                     self.routing_loaded = false;
                     self.sub = AgentSubScreen::EditModelRouting;
                     return AgentAction::FetchAgentModelRouting(id);
@@ -2014,6 +2024,24 @@ fn draw_edit_model_params(f: &mut Frame, area: Rect, state: &AgentSelectState) {
     f.render_widget(widgets::hint_bar(&hints), chunks[3]);
 }
 
+/// Rows a wrapped paragraph occupies at `width` columns.
+///
+/// Measured by rendering into a scratch buffer, so it applies exactly the word wrapping (and the CJK / wide-character widths) the real render will; `ratatui`'s own `Paragraph::line_count` sits behind an unstable feature.
+/// Capped at 16 rows, far more than any warning line needs, so a zero-width area cannot allocate an unbounded buffer.
+fn wrapped_height(paragraph: &Paragraph, width: u16) -> u16 {
+    const MAX_ROWS: u16 = 16;
+    if width == 0 {
+        return 0;
+    }
+    let area = Rect::new(0, 0, width, MAX_ROWS);
+    let mut buf = ratatui::buffer::Buffer::empty(area);
+    paragraph.clone().render(area, &mut buf);
+    (0..MAX_ROWS)
+        .rev()
+        .find(|&y| (0..width).any(|x| buf[(x, y)].symbol() != " "))
+        .map_or(0, |y| y + 1)
+}
+
 /// Model routing editor: mode, profile allowlist, cost budget.
 ///
 /// Labels are the human-readable names an operator recognises; the wire
@@ -2026,8 +2054,27 @@ fn draw_edit_model_routing(f: &mut Frame, area: Rect, state: &AgentSelectState) 
         crate::i18n::t("tui-agents-title-model-routing").trim(),
     );
 
+    // #8446: shown in both modes, because Stable mode also replaces a fixed agent's model with `pinned_model`.
+    let warning = state.routing_stable_mode.then(|| {
+        let text = match state.router_pinned_model.as_deref() {
+            Some(model) => {
+                crate::i18n::t_args("tui-agents-label-routing-stable-inert", &[("model", model)])
+            }
+            None => crate::i18n::t("tui-agents-label-routing-stable-inert-manifest"),
+        };
+        Paragraph::new(text)
+            .style(Style::default().fg(theme::YELLOW))
+            .wrap(Wrap { trim: true })
+    });
+    // The sentence runs well past one terminal row (longer in uk / ko, and a model name can be any length), so the row is as tall as the wrapped text rather than a fixed guess that cuts off its end.
+    let warning_height = warning
+        .as_ref()
+        .map_or(0, |p| wrapped_height(p, inner.width));
+
     let chunks = Layout::vertical([
         Constraint::Length(3),
+        // Stable-mode warning row, collapsed while routing is live.
+        Constraint::Length(warning_height),
         Constraint::Min(3),
         Constraint::Length(2),
         Constraint::Length(1),
@@ -2052,17 +2099,21 @@ fn draw_edit_model_routing(f: &mut Frame, area: Rect, state: &AgentSelectState) 
         chunks[0],
     );
 
+    if let Some(warning) = warning {
+        f.render_widget(warning, chunks[1]);
+    }
+
     if !flexible {
         // Nothing below applies while the agent is pinned to its own model;
         // showing a disabled picker would imply the values still matter.
         f.render_widget(
             widgets::empty_state(&crate::i18n::t("tui-agents-label-routing-fixed-explainer")),
-            chunks[1],
+            chunks[2],
         );
     } else if state.router_profiles.is_empty() {
         f.render_widget(
             widgets::empty_state(&crate::i18n::t("tui-agents-label-no-router-profiles")),
-            chunks[1],
+            chunks[2],
         );
     } else {
         let items: Vec<ListItem> = state
@@ -2081,7 +2132,7 @@ fn draw_edit_model_routing(f: &mut Frame, area: Rect, state: &AgentSelectState) 
                 ListItem::new(format!("  {check} {name}")).style(style)
             })
             .collect();
-        f.render_widget(List::new(items), chunks[1]);
+        f.render_widget(List::new(items), chunks[2]);
     }
 
     let budget_label = crate::i18n::t(COST_BUDGET_OPTIONS[state.cost_budget_idx].0);
@@ -2102,13 +2153,13 @@ fn draw_edit_model_routing(f: &mut Frame, area: Rect, state: &AgentSelectState) 
             "tui-agents-line-routing-summary",
             &[("budget", &budget_label), ("allowed", &allowlist_summary)],
         )),
-        chunks[2],
+        chunks[3],
     );
 
     f.render_widget(
         Paragraph::new(crate::i18n::t("tui-agents-hints-model-routing"))
             .style(Style::default().fg(theme::DIM)),
-        chunks[3],
+        chunks[4],
     );
 }
 
@@ -2346,6 +2397,8 @@ mod tests {
         state.cost_budget_idx = 2;
         state.router_default_profile = Some("coder".to_string());
         state.router_fixed = true;
+        state.routing_stable_mode = true;
+        state.router_pinned_model = Some("pinned-model".to_string());
         state.routing_loaded = true;
 
         state.handle_detail(key(KeyCode::Char('r')));
@@ -2356,6 +2409,8 @@ mod tests {
         assert_eq!(state.cost_budget_idx, 0);
         assert_eq!(state.router_default_profile, None);
         assert!(!state.router_fixed);
+        assert!(!state.routing_stable_mode);
+        assert_eq!(state.router_pinned_model, None);
         assert!(
             !state.routing_loaded,
             "re-entering must require a fresh AgentModelRoutingLoaded before Enter can save"
@@ -2388,6 +2443,91 @@ mod tests {
         assert!(
             !state.status_msg.is_empty(),
             "the operator needs to know why Enter did nothing"
+        );
+    }
+
+    fn render_model_routing(state: &AgentSelectState) -> String {
+        render_model_routing_rows(state, 120).concat()
+    }
+
+    /// One string per terminal row, so a wrapped sentence can be rejoined across row breaks.
+    fn render_model_routing_rows(state: &AgentSelectState, width: u16) -> Vec<String> {
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, 30)).unwrap();
+        terminal
+            .draw(|f| draw_edit_model_routing(f, f.area(), state))
+            .expect("the routing editor must render");
+        let buffer = terminal.backend().buffer();
+        (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect()
+    }
+
+    /// #8446: Stable mode runs no router, so the routing editor must say its settings are inert and name the model that runs, in either mode.
+    #[test]
+    fn routing_editor_warns_in_stable_mode() {
+        for mode in ["flexible", "fixed"] {
+            let mut state = AgentSelectState::new();
+            state.model_mode = mode.to_string();
+            state.router_profiles = vec![("coder".to_string(), true)];
+            state.routing_stable_mode = true;
+            state.router_pinned_model = Some("pinned-test-model".to_string());
+            state.routing_loaded = true;
+
+            let rendered = render_model_routing(&state);
+            assert!(
+                rendered.contains("Stable mode") && rendered.contains("pinned-test-model"),
+                "{mode}: the Stable-mode warning must render and name the pinned model.\nrendered:\n{rendered}"
+            );
+        }
+
+        let mut live = AgentSelectState::new();
+        live.model_mode = "flexible".to_string();
+        live.router_profiles = vec![("coder".to_string(), true)];
+        live.routing_loaded = true;
+        let rendered = render_model_routing(&live);
+        assert!(
+            !rendered.contains("Stable mode"),
+            "no warning while routing is live.\nrendered:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("coder"),
+            "the profile list must still render"
+        );
+    }
+
+    /// #8446 review: the warning wraps to three or more rows at a normal terminal width with a long model name, and a fixed two-row slot cut off the sentence that says when the settings take effect.
+    #[test]
+    fn routing_stable_warning_is_not_truncated_at_80_columns() {
+        let mut state = AgentSelectState::new();
+        state.model_mode = "flexible".to_string();
+        state.router_profiles = vec![("coder".to_string(), true)];
+        state.routing_stable_mode = true;
+        state.router_pinned_model =
+            Some("openrouter/anthropic/claude-sonnet-4.5-20250929-extended-context".to_string());
+        state.routing_loaded = true;
+
+        let rows = render_model_routing_rows(&state, 80);
+        // Strip the screen block's borders and rejoin the wrapped rows into one line of text.
+        let text = rows
+            .iter()
+            .map(|row| row.trim_matches(|c: char| c.is_whitespace() || "│┃║|".contains(c)))
+            .filter(|row| !row.is_empty())
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            text.contains("Settings saved here take effect once the kernel leaves Stable mode."),
+            "the end of the Stable-mode warning must be visible at 80 columns.\nrendered:\n{}",
+            rows.join("\n")
+        );
+        assert!(
+            text.contains("coder"),
+            "the profile list must still render below the warning.\nrendered:\n{}",
+            rows.join("\n")
         );
     }
 }

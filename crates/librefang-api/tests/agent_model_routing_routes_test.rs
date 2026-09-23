@@ -12,6 +12,7 @@
 //!                                         unknown agent, non-owner)
 //!   GET  /api/model-router/profiles      (builtin catalog, home override,
 //!                                         deterministic ordering)
+//!   GET  /api/agents/{id}                (routing_inert_reason in Stable mode)
 //!
 //! Run: cargo test -p librefang-api --test agent_model_routing_routes_test
 
@@ -22,7 +23,7 @@ use librefang_api::routes::AppState;
 use librefang_api::server;
 use librefang_kernel::LibreFangKernel;
 use librefang_types::agent::{AgentId, AgentManifest};
-use librefang_types::config::{DefaultModelConfig, KernelConfig};
+use librefang_types::config::{DefaultModelConfig, KernelConfig, KernelMode};
 use librefang_types::model_profile::ModelRouterConfig;
 use std::path::Path;
 use std::sync::Arc;
@@ -49,6 +50,19 @@ const TEST_TOKEN: &str = "test-secret";
 /// Boot a kernel over a fresh temp home, optionally seeding a
 /// `model_profiles.toml` override and a `[model_router]` config block.
 async fn boot_with(model_router: ModelRouterConfig, seed_profiles: Option<&str>) -> Harness {
+    boot_full(model_router, seed_profiles, KernelMode::default()).await
+}
+
+/// Boot with the kernel in `mode`, which is what decides whether either router runs at all (#8446).
+async fn boot_in_mode(mode: KernelMode) -> Harness {
+    boot_full(ModelRouterConfig::default(), None, mode).await
+}
+
+async fn boot_full(
+    model_router: ModelRouterConfig,
+    seed_profiles: Option<&str>,
+    mode: KernelMode,
+) -> Harness {
     let tmp = tempfile::tempdir().expect("tempdir");
 
     librefang_kernel::registry_sync::seed_registry_fixture_for_tests(tmp.path());
@@ -61,6 +75,7 @@ async fn boot_with(model_router: ModelRouterConfig, seed_profiles: Option<&str>)
         home_dir: tmp.path().to_path_buf(),
         data_dir: tmp.path().join("data"),
         api_key: TEST_TOKEN.to_string(),
+        mode,
         model_router,
         default_model: DefaultModelConfig {
             provider: "ollama".to_string(),
@@ -666,6 +681,108 @@ fn find_agent_toml(home: &Path, agent_name: &str) -> std::path::PathBuf {
     let mut found = None;
     walk(home, agent_name, &mut found);
     found.unwrap_or_else(|| panic!("no agent.toml for '{agent_name}' under {}", home.display()))
+}
+
+// ---------------------------------------------------------------------------
+// Stable mode makes routing inert (#8446)
+// ---------------------------------------------------------------------------
+
+/// Stable mode freezes model choice: the kernel runs neither the profile router nor the tier router (`model_selection_path` in `librefang-kernel`).
+/// Every surface that shows or accepts an agent's routing configuration must say so, rather than reporting the setting as though it will take effect.
+#[tokio::test(flavor = "multi_thread")]
+async fn stable_mode_reports_model_routing_as_inert() {
+    let h = boot_in_mode(KernelMode::Stable).await;
+    let manifest = AgentManifest {
+        name: "routing-stable".to_string(),
+        pinned_model: Some("pinned-test-model".to_string()),
+        ..AgentManifest::default()
+    };
+    let id = h
+        .state
+        .kernel
+        .spawn_agent_typed(manifest)
+        .expect("spawn_agent");
+
+    let (status, body) = send(
+        h.app.clone(),
+        get(&format!("/api/agents/{id}/model_routing")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body={body:?}");
+    assert_eq!(body["routing_inert_reason"], "stable_mode", "body={body:?}");
+    // The model Stable mode actually runs, so a surface can name it.
+    assert_eq!(body["pinned_model"], "pinned-test-model", "body={body:?}");
+
+    // The write is still valid and persisted (it takes effect once the kernel leaves Stable mode), so it stays a 200, but the response must not read as plain success.
+    let (put_status, put_body) = send(
+        h.app.clone(),
+        put_json(
+            &format!("/api/agents/{id}/model_routing"),
+            serde_json::json!({ "mode": "flexible" }),
+        ),
+    )
+    .await;
+    assert_eq!(put_status, StatusCode::OK, "PUT body={put_body:?}");
+    assert_eq!(put_body["mode"], "flexible");
+    assert_eq!(
+        put_body["routing_inert_reason"], "stable_mode",
+        "PUT body={put_body:?}"
+    );
+    // The dashboard seeds its cache from this response, so it must carry the GET's fields too.
+    assert_eq!(put_body["pinned_model"], "pinned-test-model");
+    assert_eq!(put_body["fixed"], false);
+
+    let (detail_status, detail) = send(h.app.clone(), get(&format!("/api/agents/{id}"))).await;
+    assert_eq!(detail_status, StatusCode::OK, "detail={detail:?}");
+    assert_eq!(
+        detail["routing_inert_reason"], "stable_mode",
+        "detail={detail:?}"
+    );
+}
+
+/// Outside Stable mode routing is live, so every surface reports no inert reason: an explicit `null`, not a missing key.
+#[tokio::test(flavor = "multi_thread")]
+async fn default_mode_reports_no_routing_inert_reason() {
+    let h = boot().await;
+    let id = spawn_named(&h.state, "routing-live");
+
+    let (_, body) = send(
+        h.app.clone(),
+        get(&format!("/api/agents/{id}/model_routing")),
+    )
+    .await;
+    assert!(
+        body.get("routing_inert_reason")
+            .is_some_and(|v| v.is_null()),
+        "body={body:?}"
+    );
+    assert!(
+        body.get("pinned_model").is_some_and(|v| v.is_null()),
+        "body={body:?}"
+    );
+
+    let (_, put_body) = send(
+        h.app.clone(),
+        put_json(
+            &format!("/api/agents/{id}/model_routing"),
+            serde_json::json!({ "mode": "flexible" }),
+        ),
+    )
+    .await;
+    assert!(
+        put_body
+            .get("routing_inert_reason")
+            .is_some_and(|v| v.is_null()),
+        "PUT body={put_body:?}"
+    );
+
+    let (_, detail) = send(h.app.clone(), get(&format!("/api/agents/{id}"))).await;
+    assert!(
+        detail
+            .get("routing_inert_reason")
+            .is_some_and(|v| v.is_null()),
+        "detail={detail:?}"
+    );
 }
 
 // ---------------------------------------------------------------------------

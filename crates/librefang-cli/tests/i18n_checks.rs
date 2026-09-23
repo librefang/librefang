@@ -1359,7 +1359,6 @@ const IDENTICAL_VALUE_EXEMPTIONS: &[IdenticalValueExemption] = &[
             "channel-install-sdk-cmd",
             "desktop-install-skipped-brew",
             "mcp-vault-set-hint",
-            "tui-workflows-placeholder-steps",
         ],
     },
     IdenticalValueExemption {

@@ -812,7 +812,7 @@ pub async fn set_agent_channels(
     tag = "agents",
     params(("id" = String, Path, description = "Agent ID")),
     responses(
-        (status = 200, description = "An agent's model routing mode and router override", body = crate::types::JsonObject),
+        (status = 200, description = "An agent's model routing mode and router override, plus `routing_inert_reason` (`\"stable_mode\"` when the kernel mode makes routing inert, else null) and `pinned_model`", body = crate::types::JsonObject),
         (status = 400, description = "Malformed agent id", body = crate::types::JsonObject),
         (status = 404, description = "Agent not found, or not visible to the caller", body = crate::types::JsonObject)
     )
@@ -868,6 +868,10 @@ pub async fn get_agent_model_routing(
             // per-agent opt-out was write-only before: no surface could
             // know it was set.
             "fixed": router_override.map(|o| o.fixed).unwrap_or(false),
+            // `"stable_mode"` when the kernel will run no router for this agent whatever is stored above; `null` when routing is live (#8446).
+            "routing_inert_reason": super::model_routing_inert_reason(&state),
+            // The model Stable mode applies instead of any routed choice, so a surface reporting the inert reason can name what actually runs; `null` means the manifest model.
+            "pinned_model": entry.manifest.pinned_model,
         })),
     )
 }
@@ -890,7 +894,7 @@ pub async fn get_agent_model_routing(
     params(("id" = String, Path, description = "Agent ID")),
     request_body(content = crate::types::JsonObject, description = "Mode, allowed profiles, cost budget and default profile"),
     responses(
-        (status = 200, description = "Updated model routing settings", body = crate::types::JsonObject),
+        (status = 200, description = "Updated model routing settings, with the same fields as the GET; `routing_inert_reason` is `\"stable_mode\"` when the saved settings have no effect under the current kernel mode, else null", body = crate::types::JsonObject),
         (status = 400, description = "Invalid agent id, mode or cost budget", body = crate::types::JsonObject),
         (status = 404, description = "Agent not found, or not visible to the caller", body = crate::types::JsonObject),
         (status = 423, description = "This agent is provisioned by the deployment; its manifest cannot be changed through the API", body = crate::types::JsonObject)
@@ -1054,6 +1058,11 @@ pub async fn set_agent_model_routing(
                 "default_profile": router_override
                     .as_ref()
                     .and_then(|o| o.default_profile.clone()),
+                // Echoed so the response carries the same fields as the GET: the dashboard seeds its cache from it, and a missing key would briefly hide the opt-out and inert banners after every save.
+                "fixed": router_override.as_ref().map(|o| o.fixed).unwrap_or(false),
+                // The save is valid and persisted, but in Stable mode it has no effect until the mode changes; say so in the response rather than reporting plain success (#8446).
+                "routing_inert_reason": super::model_routing_inert_reason(&state),
+                "pinned_model": entry.manifest.pinned_model,
             })),
         ),
         Err(e) => (
@@ -1152,11 +1161,17 @@ pub struct PatchAgentConfigRequest {
     pub name: Option<String>,
     pub description: Option<String>,
     pub system_prompt: Option<String>,
+    /// Appearance, stored in the agent registry.
     pub emoji: Option<String>,
+    /// Appearance, stored in the agent registry.
     pub avatar_url: Option<String>,
+    /// Appearance, stored in the agent registry.
     pub color: Option<String>,
+    /// Personality, written into the front matter of the agent's `.identity/IDENTITY.md`, which is what reaches the prompt (#8447).
     pub archetype: Option<String>,
+    /// Personality, written into the front matter of the agent's `.identity/IDENTITY.md`, which is what reaches the prompt (#8447).
     pub vibe: Option<String>,
+    /// Personality, written into the front matter of the agent's `.identity/IDENTITY.md`, which is what reaches the prompt (#8447).
     pub greeting_style: Option<String>,
     pub model: Option<String>,
     pub provider: Option<String>,
@@ -1214,6 +1229,9 @@ pub struct PatchAgentConfigRequest {
     request_body(content = PatchAgentConfigRequest, description = "Agent config fields to update"),
     responses(
         (status = 200, description = "Hot-update agent name, description, system prompt, identity, and model", body = crate::types::JsonObject),
+        (status = 400, description = "A field is malformed: an invalid agent ID, colour or avatar URL, a personality value containing a line break, or personality values that would grow IDENTITY.md past the 32 KiB identity-file cap. A rejected personality value changes nothing", body = crate::types::JsonObject),
+        (status = 404, description = "Agent not found", body = crate::types::JsonObject),
+        (status = 409, description = "The new name is taken, or a personality field was sent and the agent's IDENTITY.md cannot be edited in place (missing, not a regular file, or its front matter is never closed). When a personality field was sent, nothing was changed", body = crate::types::JsonObject),
         (status = 423, description = "This agent is provisioned by the deployment; its manifest cannot be changed through the API", body = crate::types::JsonObject)
     )
 )]
@@ -1300,6 +1318,48 @@ pub async fn patch_agent_config(
         }
     }
 
+    let personality = AgentPersonality {
+        archetype: req.archetype,
+        vibe: req.vibe,
+        greeting_style: req.greeting_style,
+    };
+    if let Some(refusal) = super::reject_multiline_personality(&personality, &t) {
+        return refusal;
+    }
+
+    // Personality goes to IDENTITY.md, the file the prompt reads, not the registry (#8447).
+    // It is the first thing written, because every later step only edits the in-memory registry, which reaches disk through the `save_agent` at the end: an IDENTITY.md that refuses the edit (400 / 409) or fails to write would otherwise return early with a rename or description already applied in memory, answered as an error and silently reverted on restart.
+    if !personality.front_matter_fields().is_empty() {
+        // The one later step that can refuse the request is the rename, so check it before the file changes: a rename that is going to answer 409 must not leave a personality edit behind.
+        if let Some(new_name) = req.name.as_deref().filter(|name| !name.is_empty()) {
+            let refused = librefang_types::agent::validate_agent_name(new_name)
+                .err()
+                .or_else(|| {
+                    state
+                        .kernel
+                        .agent_registry()
+                        .find_by_name(new_name)
+                        .map(|_| {
+                            librefang_types::error::LibreFangError::AgentAlreadyExists(
+                                new_name.to_string(),
+                            )
+                        })
+                });
+            if let Some(e) = refused {
+                let e = crate::error::KernelError::from(e);
+                return (
+                    StatusCode::CONFLICT,
+                    Json(
+                        serde_json::json!({"error": t.t_args("api-error-generic", &[("error", &e.to_string())])}),
+                    ),
+                );
+            }
+        }
+        if let Err(e) = state.kernel.set_agent_personality(agent_id, &personality) {
+            return super::personality_write_error(&e, &t);
+        }
+    }
+
     // Update name
     if let Some(ref new_name) = req.name {
         if !new_name.is_empty() {
@@ -1345,16 +1405,12 @@ pub async fn patch_agent_config(
         }
     }
 
-    // Update identity fields (merge — only overwrite provided fields)
-    let has_identity_field = req.emoji.is_some()
-        || req.avatar_url.is_some()
-        || req.color.is_some()
-        || req.archetype.is_some()
-        || req.vibe.is_some()
-        || req.greeting_style.is_some();
+    // Update appearance fields (merge — only overwrite provided fields)
+    let has_appearance_field =
+        req.emoji.is_some() || req.avatar_url.is_some() || req.color.is_some();
 
-    if has_identity_field {
-        // Read current identity, merge with provided fields.
+    if has_appearance_field {
+        // Read current appearance, merge with provided fields.
         // The merge itself lives in `merge_agent_identity` so this handler and `PATCH /api/agents/{id}/identity` cannot drift apart again (#6608).
         let current = state
             .kernel
@@ -1368,9 +1424,6 @@ pub async fn patch_agent_config(
                 emoji: req.emoji,
                 avatar_url: req.avatar_url,
                 color: req.color,
-                archetype: req.archetype,
-                vibe: req.vibe,
-                greeting_style: req.greeting_style,
             },
         );
         if state

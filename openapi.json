@@ -1032,6 +1032,36 @@
               }
             }
           },
+          "400": {
+            "description": "A field is malformed: an invalid agent ID, colour or avatar URL, a personality value containing a line break, or personality values that would grow IDENTITY.md past the 32 KiB identity-file cap. A rejected personality value changes nothing",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Agent not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The new name is taken, or a personality field was sent and the agent's IDENTITY.md cannot be edited in place (missing, not a regular file, or its front matter is never closed). When a personality field was sent, nothing was changed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
           "423": {
             "description": "This agent is provisioned by the deployment; its manifest cannot be changed through the API",
             "content": {
@@ -1530,7 +1560,7 @@
         "tags": [
           "agents"
         ],
-        "summary": "PATCH /api/agents/{id}/identity — Update an agent's visual identity.",
+        "summary": "PATCH /api/agents/{id}/identity — Update an agent's appearance and personality.",
         "operationId": "update_agent_identity",
         "parameters": [
           {
@@ -1544,7 +1574,7 @@
           }
         ],
         "requestBody": {
-          "description": "Identity fields to update. PATCH semantics: an omitted or `null` field preserves the stored value, and a partial body never nulls the fields it does not mention. A field cannot be set back to `null`, because `null` already means \"not provided\"; sending an empty string stores an empty string, which is the closest thing to clearing one. Identical in behaviour to the six identity fields of `PATCH /api/agents/{id}/config`.",
+          "description": "Identity fields to update. Appearance (`emoji`, `avatar_url`, `color`) is stored in the agent registry; personality (`archetype`, `vibe`, `greeting_style`) is written into the front matter of the agent's `.identity/IDENTITY.md`, which is what reaches the prompt, leaving the rest of that file untouched. PATCH semantics: an omitted or `null` field preserves the current value, and a partial body never nulls the fields it does not mention. A field cannot be set back to `null`, because `null` already means \"not provided\"; sending an empty string stores an empty string, which is the closest thing to clearing one. Identical in behaviour to the six identity fields of `PATCH /api/agents/{id}/config`.",
           "content": {
             "application/json": {
               "schema": {
@@ -1556,7 +1586,37 @@
         },
         "responses": {
           "200": {
-            "description": "Update an agent's visual identity",
+            "description": "Update an agent's appearance and personality",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "A colour, avatar URL or personality value is malformed; nothing was changed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Agent not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The agent's IDENTITY.md cannot be edited in place (missing, not a regular file, or its front matter is never closed); nothing was changed",
             "content": {
               "application/json": {
                 "schema": {
@@ -2146,7 +2206,7 @@
         ],
         "responses": {
           "200": {
-            "description": "An agent's model routing mode and router override",
+            "description": "An agent's model routing mode and router override, plus `routing_inert_reason` (`\"stable_mode\"` when the kernel mode makes routing inert, else null) and `pinned_model`",
             "content": {
               "application/json": {
                 "schema": {
@@ -2208,7 +2268,7 @@
         },
         "responses": {
           "200": {
-            "description": "Updated model routing settings",
+            "description": "Updated model routing settings, with the same fields as the GET; `routing_inert_reason` is `\"stable_mode\"` when the saved settings have no effect under the current kernel mode, else null",
             "content": {
               "application/json": {
                 "schema": {
@@ -8216,7 +8276,7 @@
           "system"
         ],
         "summary": "GET /api/logs/stream — SSE endpoint for real-time audit log streaming.",
-        "description": "Streams new audit entries as Server-Sent Events. Accepts optional query\nparameters for filtering:\n  - `level`  — filter by classified level (info, warn, error)\n  - `filter` — text substring filter across action/detail/agent_id\n\nA heartbeat ping is sent every 15 seconds to keep the connection alive.\nThe endpoint polls the audit log every second. The first poll sends up\nto the most recent 200 entries as a bounded backfill (prevents a flood\nwhen subscribing against a long-running daemon); every subsequent poll\nuses a cursor (`since_seq`) so bursts faster than the previous\n`recent(200)` sliding window are no longer silently truncated.",
+        "description": "Streams new audit entries as Server-Sent Events. Accepts optional query\nparameters for filtering:\n  - `level`  — filter by classified level (info, warn, error, debug), classified from the entry's `outcome` (leading `error` / `fail` / `denied` or a status code ending `_failed` / `_error` / `_denied` such as `db_remove_failed`, `warn`, `debug`), falling back to the action so `PermissionDenied` and `BudgetExceeded` are errors; each event carries the classification as `level`\n  - `filter` — text substring filter across action/detail/agent_id\n\nA heartbeat ping is sent every 15 seconds to keep the connection alive.\nThe endpoint polls the audit log every second. The first poll sends up\nto the most recent 200 entries as a bounded backfill (prevents a flood\nwhen subscribing against a long-running daemon); every subsequent poll\nuses a cursor (`since_seq`) so bursts faster than the previous\n`recent(200)` sliding window are no longer silently truncated.",
         "operationId": "logs_stream",
         "responses": {
           "200": {
@@ -12704,7 +12764,7 @@
           "skills"
         ],
         "summary": "GET /api/skills — List installed skills.",
-        "description": "`categories` always reflects all skills regardless of the `?category=` filter.",
+        "description": "`categories` always reflects all skills regardless of the `?category=` filter.\n\nEach item carries both directions of a skill's tool relationship, named so they cannot be confused (#8445): `tools_count` counts the tools the skill *provides*, while `required_tools` / `required_tools_count` / `required_capabilities` echo the manifest's `[requirements]` table, i.e. what the agent must be granted for the skill to run.\nThe `required_*` lists are always present; a skill that declares nothing reports empty lists, which is a different fact from \"unknown\".",
         "operationId": "list_skills",
         "responses": {
           "200": {
@@ -13089,6 +13149,7 @@
           "skills"
         ],
         "summary": "Get detailed information about a specific skill, including linked files,\ntags, evolution history, and readiness status.",
+        "description": "`tools` lists the tools the skill *provides*; `required_tools` and `required_capabilities` list what it *needs* from the host, from the manifest's `[requirements]` table (#8445).\nBoth `required_*` lists are always present and empty when the skill declares nothing.",
         "operationId": "get_skill_detail",
         "parameters": [
           {
@@ -17299,13 +17360,15 @@
             "type": [
               "string",
               "null"
-            ]
+            ],
+            "description": "Personality, written into the front matter of the agent's `.identity/IDENTITY.md`, which is what reaches the prompt (#8447)."
           },
           "avatar_url": {
             "type": [
               "string",
               "null"
-            ]
+            ],
+            "description": "Appearance, stored in the agent registry."
           },
           "base_url": {
             "type": [
@@ -17317,7 +17380,8 @@
             "type": [
               "string",
               "null"
-            ]
+            ],
+            "description": "Appearance, stored in the agent registry."
           },
           "context_window": {
             "type": [
@@ -17338,7 +17402,8 @@
             "type": [
               "string",
               "null"
-            ]
+            ],
+            "description": "Appearance, stored in the agent registry."
           },
           "fallback_models": {
             "type": [
@@ -17359,7 +17424,8 @@
             "type": [
               "string",
               "null"
-            ]
+            ],
+            "description": "Personality, written into the front matter of the agent's `.identity/IDENTITY.md`, which is what reaches the prompt (#8447)."
           },
           "max_output_tokens": {
             "type": [
@@ -17431,7 +17497,8 @@
             "type": [
               "string",
               "null"
-            ]
+            ],
+            "description": "Personality, written into the front matter of the agent's `.identity/IDENTITY.md`, which is what reaches the prompt (#8447)."
           },
           "web_search_augmentation": {
             "type": [
@@ -18016,43 +18083,49 @@
       },
       "UpdateIdentityRequest": {
         "type": "object",
-        "description": "Request body for updating agent visual identity.\n\nEvery field is optional and carries PATCH semantics: an omitted or `null` field preserves the stored value, and an empty string stores an empty string (`GET /api/agents/{id}` then reports `\"\"`, not `null`).\nSee `merge_agent_identity` in the parent module for why `null` cannot mean \"clear\".",
+        "description": "Request body for updating an agent's identity.\n\nThe fields have two owners (#8447).\nAppearance (`emoji`, `avatar_url`, `color`) is stored in the agent registry and drawn by the dashboard.\nPersonality (`archetype`, `vibe`, `greeting_style`) is written into the front matter of `{workspace}/.identity/IDENTITY.md`, the file the system prompt injects, and is read back from that file (`GET /api/agents/{id}/files/IDENTITY.md`).\n\nEvery field is optional and carries PATCH semantics: an omitted or `null` field preserves the current value, and an empty string stores an empty string (`GET /api/agents/{id}` then reports `\"\"`, not `null`; a personality key is written as a bare `key:`).\nSee `merge_agent_identity` in the parent module for why `null` cannot mean \"clear\".",
         "properties": {
           "archetype": {
             "type": [
               "string",
               "null"
-            ]
+            ],
+            "description": "Personality, written into IDENTITY.md's front matter."
           },
           "avatar_url": {
             "type": [
               "string",
               "null"
-            ]
+            ],
+            "description": "Appearance, stored in the registry."
           },
           "color": {
             "type": [
               "string",
               "null"
-            ]
+            ],
+            "description": "Appearance, stored in the registry."
           },
           "emoji": {
             "type": [
               "string",
               "null"
-            ]
+            ],
+            "description": "Appearance, stored in the registry."
           },
           "greeting_style": {
             "type": [
               "string",
               "null"
-            ]
+            ],
+            "description": "Personality, written into IDENTITY.md's front matter."
           },
           "vibe": {
             "type": [
               "string",
               "null"
-            ]
+            ],
+            "description": "Personality, written into IDENTITY.md's front matter."
           }
         },
         "additionalProperties": false
