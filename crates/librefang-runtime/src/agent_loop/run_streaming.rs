@@ -851,6 +851,9 @@ async fn run_agent_loop_streaming_inner(
             top_p: manifest.model.top_p,
             frequency_penalty: manifest.model.frequency_penalty,
             presence_penalty: manifest.model.presence_penalty,
+            top_k: manifest.model.top_k,
+            min_p: manifest.model.min_p,
+            repeat_penalty: manifest.model.repeat_penalty,
             // Clone from pre-built snapshot (same rationale as non-streaming loop).
             system: Some(system_prompt_snapshot.clone()),
             thinking: manifest.thinking.clone(),

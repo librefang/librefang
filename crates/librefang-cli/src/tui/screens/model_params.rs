@@ -1,6 +1,6 @@
 //! The TUI's per-agent inference-parameter editor.
 //!
-//! Same seven knobs, same tri-state, and the same two step ladders as the
+//! Same knobs, same tri-state, and the same two step ladders as the
 //! dashboard's agent editor — the TUI is not a reduced view of the WebUI here,
 //! it can set everything the WebUI can.
 //!
@@ -11,8 +11,9 @@
 //!   [`librefang_types::inference_params`] and `e` opens a field for the value
 //!   that is not on the ladder. Stepping left off the first rung lands on
 //!   *inherit*, which is a real position rather than a number.
-//! * **Increments** for the sampling knobs. Temperature and the penalties are
-//!   continuous, so ← / → nudge them by a sensible step within their range.
+//! * **Increments** for the sampling knobs.
+//!   Temperature and the penalties are continuous, so ← / → nudge them by a sensible step within their range.
+//!   `top_k` steps the same way but only through whole numbers, and `repeat_penalty` starts from `1.0`, its "off" value, rather than from zero.
 //!
 //! The state here is deliberately free of any ratatui or HTTP dependency so
 //! the stepping rules can be unit-tested directly.
@@ -26,6 +27,9 @@ pub enum ParamField {
     TopP,
     FrequencyPenalty,
     PresencePenalty,
+    TopK,
+    MinP,
+    RepeatPenalty,
     MaxTokens,
     ContextWindow,
     MaxOutputTokens,
@@ -38,6 +42,9 @@ pub const FIELDS: &[ParamField] = &[
     ParamField::TopP,
     ParamField::FrequencyPenalty,
     ParamField::PresencePenalty,
+    ParamField::TopK,
+    ParamField::MinP,
+    ParamField::RepeatPenalty,
     ParamField::MaxTokens,
     ParamField::ContextWindow,
     ParamField::MaxOutputTokens,
@@ -51,6 +58,9 @@ impl ParamField {
             ParamField::TopP => "top_p",
             ParamField::FrequencyPenalty => "frequency_penalty",
             ParamField::PresencePenalty => "presence_penalty",
+            ParamField::TopK => "top_k",
+            ParamField::MinP => "min_p",
+            ParamField::RepeatPenalty => "repeat_penalty",
             ParamField::MaxTokens => "max_tokens",
             ParamField::ContextWindow => "context_window",
             ParamField::MaxOutputTokens => "max_output_tokens",
@@ -68,6 +78,9 @@ impl ParamField {
             ParamField::TopP => "tui-agents-param-top-p",
             ParamField::FrequencyPenalty => "tui-agents-param-frequency-penalty",
             ParamField::PresencePenalty => "tui-agents-param-presence-penalty",
+            ParamField::TopK => "tui-agents-param-top-k",
+            ParamField::MinP => "tui-agents-param-min-p",
+            ParamField::RepeatPenalty => "tui-agents-param-repeat-penalty",
             ParamField::MaxTokens => "tui-agents-param-max-tokens",
             ParamField::ContextWindow => "tui-agents-param-context-window",
             ParamField::MaxOutputTokens => "tui-agents-param-max-output-tokens",
@@ -81,6 +94,9 @@ impl ParamField {
             ParamField::TopP => "tui-agents-param-top-p-hint",
             ParamField::FrequencyPenalty => "tui-agents-param-frequency-penalty-hint",
             ParamField::PresencePenalty => "tui-agents-param-presence-penalty-hint",
+            ParamField::TopK => "tui-agents-param-top-k-hint",
+            ParamField::MinP => "tui-agents-param-min-p-hint",
+            ParamField::RepeatPenalty => "tui-agents-param-repeat-penalty-hint",
             ParamField::MaxTokens => "tui-agents-param-max-tokens-hint",
             ParamField::ContextWindow => "tui-agents-param-context-window-hint",
             ParamField::MaxOutputTokens => "tui-agents-param-max-output-tokens-hint",
@@ -95,19 +111,42 @@ impl ParamField {
         )
     }
 
+    /// Whether this knob only takes whole numbers. `top_k` is a `u32` on the route.
+    pub fn is_integer(self) -> bool {
+        self == ParamField::TopK || self.is_ladder()
+    }
+
     /// Increment applied by ← / → for a continuous knob.
     fn increment(self) -> f64 {
         match self {
-            ParamField::Temperature | ParamField::TopP => 0.05,
+            ParamField::Temperature
+            | ParamField::TopP
+            | ParamField::MinP
+            | ParamField::RepeatPenalty => 0.05,
+            ParamField::TopK => 5.0,
             _ => 0.1,
         }
     }
 
+    /// Where stepping starts from when the knob is on inherit.
+    ///
+    /// `repeat_penalty` is multiplicative, so its neutral value is `1.0`; starting from zero would make the first → a penalty of 0.05, which is the opposite of "a little".
+    fn origin(self) -> f64 {
+        match self {
+            ParamField::RepeatPenalty => 1.0,
+            _ => 0.0,
+        }
+    }
+
     /// Inclusive range a continuous knob is clamped to.
+    ///
+    /// The bounds are the ones `PATCH /api/agents/{id}/config` enforces.
     fn range(self) -> (f64, f64) {
         match self {
             ParamField::Temperature => (0.0, 2.0),
-            ParamField::TopP => (0.0, 1.0),
+            ParamField::TopP | ParamField::MinP => (0.0, 1.0),
+            ParamField::TopK => (1.0, f64::from(u32::MAX)),
+            ParamField::RepeatPenalty => (0.01, 2.0),
             _ => (-2.0, 2.0),
         }
     }
@@ -213,6 +252,7 @@ impl ModelParamsEditor {
         match self.values[index] {
             None => "inherit".to_string(),
             Some(v) if FIELDS[index].is_ladder() => format_tokens(v.max(0.0) as u64),
+            Some(v) if FIELDS[index].is_integer() => format!("{}", v.max(0.0) as u64),
             Some(v) => format!("{v:.2}"),
         }
     }
@@ -245,7 +285,7 @@ impl ModelParamsEditor {
             self.values[self.cursor] = next.map(|v| v as f64);
         } else {
             let (lo, hi) = field.range();
-            let base = self.values[self.cursor].unwrap_or(0.0);
+            let base = self.values[self.cursor].unwrap_or(field.origin());
             if delta < 0 && self.values[self.cursor].is_none() {
                 return; // already at "no opinion"; nothing below it
             }
@@ -281,7 +321,7 @@ impl ModelParamsEditor {
         self.custom = Some(
             self.values[self.cursor]
                 .map(|v| {
-                    if FIELDS[self.cursor].is_ladder() {
+                    if FIELDS[self.cursor].is_integer() {
                         format!("{}", v.max(0.0) as u64)
                     } else {
                         format!("{v}")
@@ -339,6 +379,12 @@ impl ModelParamsEditor {
                 ));
             }
         } else {
+            if field.is_integer() && parsed.fract() != 0.0 {
+                return Err(crate::i18n::t_args(
+                    "tui-agents-param-not-whole",
+                    &[("field", &field.label())],
+                ));
+            }
             let (lo, hi) = field.range();
             if !(lo..=hi).contains(&parsed) {
                 return Err(crate::i18n::t_args(
@@ -559,6 +605,61 @@ mod tests {
         assert_eq!(changes.len(), 2, "untouched fields stay out of the payload");
         assert!(changes.contains(&("temperature", None)));
         assert!(changes.contains(&("top_p", Some(0.05))));
+    }
+
+    /// #8290: the local-model samplers step within the route's bounds — `top_k` in whole numbers, `repeat_penalty` away from its neutral `1.0` — and go out under their own keys.
+    #[test]
+    fn local_model_samplers_step_within_their_route_bounds() {
+        let mut ed = editor();
+
+        focus(&mut ed, ParamField::TopK);
+        ed.step(1);
+        assert_eq!(ed.display(index_of(ParamField::TopK)), "5");
+        for _ in 0..5 {
+            ed.step(-1);
+        }
+        assert_eq!(
+            ed.value(index_of(ParamField::TopK)),
+            Some(1.0),
+            "top_k never steps below 1, which the route rejects"
+        );
+
+        focus(&mut ed, ParamField::RepeatPenalty);
+        ed.step(1);
+        assert_eq!(
+            ed.display(index_of(ParamField::RepeatPenalty)),
+            "1.05",
+            "the first step is a small penalty above 'off', not 0.05"
+        );
+
+        focus(&mut ed, ParamField::MinP);
+        ed.step(1);
+        assert_eq!(ed.display(index_of(ParamField::MinP)), "0.05");
+
+        let changes = ed.changes();
+        assert!(changes.contains(&("top_k", Some(1.0))));
+        assert!(changes.contains(&("repeat_penalty", Some(1.05))));
+        assert!(changes.contains(&("min_p", Some(0.05))));
+    }
+
+    #[test]
+    fn a_fractional_top_k_is_rejected() {
+        let mut ed = editor();
+        focus(&mut ed, ParamField::TopK);
+        ed.begin_custom();
+        for c in "4.5".chars() {
+            ed.push_custom_char(c);
+        }
+        assert!(ed.commit_custom().is_err());
+
+        let mut ed = editor();
+        focus(&mut ed, ParamField::RepeatPenalty);
+        ed.begin_custom();
+        ed.push_custom_char('0');
+        assert!(
+            ed.commit_custom().is_err(),
+            "a zero repetition penalty is outside the route's range"
+        );
     }
 
     #[test]

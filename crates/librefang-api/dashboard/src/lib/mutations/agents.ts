@@ -72,6 +72,9 @@ export type AgentConfigPatch = {
   top_p?: number | null;
   frequency_penalty?: number | null;
   presence_penalty?: number | null;
+  top_k?: number | null;
+  min_p?: number | null;
+  repeat_penalty?: number | null;
   // Endpoint limits, not sampling preferences: an over-limit request is
   // reported in the response's `warnings` and stored as sent, never clamped.
   context_window?: number | null;

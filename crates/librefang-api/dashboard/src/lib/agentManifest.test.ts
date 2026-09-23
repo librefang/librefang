@@ -1136,6 +1136,9 @@ describe("agentManifest — inference parameters (#7781)", () => {
     form.model.top_p = "0.85";
     form.model.frequency_penalty = "0.4";
     form.model.presence_penalty = "-0.3";
+    form.model.top_k = "40";
+    form.model.min_p = "0.05";
+    form.model.repeat_penalty = "1.1";
     form.model.max_tokens = "8192";
     form.model.context_window = "200000";
     form.model.max_output_tokens = "16384";
@@ -1145,6 +1148,9 @@ describe("agentManifest — inference parameters (#7781)", () => {
     expect(toml).toContain("top_p = 0.85");
     expect(toml).toContain("frequency_penalty = 0.4");
     expect(toml).toContain("presence_penalty = -0.3");
+    expect(toml).toContain("top_k = 40");
+    expect(toml).toContain("min_p = 0.05");
+    expect(toml).toContain("repeat_penalty = 1.1");
     expect(toml).toContain("max_tokens = 8192");
     expect(toml).toContain("context_window = 200000");
     expect(toml).toContain("max_output_tokens = 16384");
@@ -1156,6 +1162,11 @@ describe("agentManifest — inference parameters (#7781)", () => {
     expect(parsed.form.model.top_p).toBe("0.85");
     expect(parsed.form.model.frequency_penalty).toBe("0.4");
     expect(parsed.form.model.presence_penalty).toBe("-0.3");
+    expect(parsed.form.model.top_k).toBe("40");
+    expect(parsed.form.model.min_p).toBe("0.05");
+    expect(parsed.form.model.repeat_penalty).toBe("1.1");
+    // Owned by the form, so not carried a second time as an unknown extra key.
+    expect(parsed.extras.model).not.toHaveProperty("top_k");
     expect(parsed.form.model.max_tokens).toBe("8192");
     expect(parsed.form.model.context_window).toBe("200000");
     expect(parsed.form.model.max_output_tokens).toBe("16384");
@@ -1179,6 +1190,9 @@ describe("agentManifest — inference parameters (#7781)", () => {
     expect(toml).not.toContain("top_p");
     expect(toml).not.toContain("frequency_penalty");
     expect(toml).not.toContain("presence_penalty");
+    expect(toml).not.toContain("top_k");
+    expect(toml).not.toContain("min_p");
+    expect(toml).not.toContain("repeat_penalty");
     expect(toml).not.toContain("max_tokens");
     expect(toml).not.toContain("context_window");
     expect(toml).not.toContain("max_output_tokens");

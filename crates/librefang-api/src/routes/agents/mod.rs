@@ -1936,6 +1936,19 @@ mod tests {
         assert_eq!(req.max_output_tokens, Some(Some(8192)));
     }
 
+    /// #8290: the local-model samplers are accepted on the same tri-state contract.
+    #[test]
+    fn test_patch_config_request_accepts_the_local_model_samplers() {
+        let req: PatchAgentConfigRequest =
+            serde_json::from_str(r#"{"top_k": 40, "min_p": 0.05, "repeat_penalty": null}"#)
+                .unwrap();
+        assert_eq!(req.top_k, Some(Some(40)));
+        assert_eq!(req.min_p, Some(Some(0.05)));
+        assert_eq!(req.repeat_penalty, Some(None));
+        let absent: PatchAgentConfigRequest = serde_json::from_str("{}").unwrap();
+        assert_eq!(absent.top_k, None);
+    }
+
     /// `reasoning_effort` is deliberately not on this request: it is an
     /// endpoint fact, not an agent preference, and letting an agent force it
     /// on reintroduces the gateway-rejects-every-turn failure of #7770.

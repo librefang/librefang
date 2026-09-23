@@ -3,8 +3,11 @@ import { StepLadderInput } from "./StepLadderInput";
 import {
   CONTEXT_WINDOW_LADDER,
   MAX_OUTPUT_TOKENS_LADDER,
+  MIN_P_LADDER,
   PENALTY_LADDER,
+  REPEAT_PENALTY_LADDER,
   TEMPERATURE_LADDER,
+  TOP_K_LADDER,
   TOP_P_LADDER,
 } from "../../lib/modelParamLadders";
 
@@ -24,7 +27,10 @@ export type ModelParamName =
   | "temperature"
   | "top_p"
   | "frequency_penalty"
-  | "presence_penalty";
+  | "presence_penalty"
+  | "top_k"
+  | "min_p"
+  | "repeat_penalty";
 
 const LADDERS: Record<ModelParamName, readonly number[]> = {
   context_window: CONTEXT_WINDOW_LADDER,
@@ -37,6 +43,10 @@ const LADDERS: Record<ModelParamName, readonly number[]> = {
   // The two penalties take the same range and the same sign convention.
   frequency_penalty: PENALTY_LADDER,
   presence_penalty: PENALTY_LADDER,
+  top_k: TOP_K_LADDER,
+  min_p: MIN_P_LADDER,
+  // Multiplicative with `1` as "off", so it does not share the additive penalties' rungs.
+  repeat_penalty: REPEAT_PENALTY_LADDER,
 };
 
 const LABEL_KEYS: Record<ModelParamName, string> = {
@@ -47,6 +57,9 @@ const LABEL_KEYS: Record<ModelParamName, string> = {
   top_p: "model_param.top_p",
   frequency_penalty: "model_param.frequency_penalty",
   presence_penalty: "model_param.presence_penalty",
+  top_k: "model_param.top_k",
+  min_p: "model_param.min_p",
+  repeat_penalty: "model_param.repeat_penalty",
 };
 
 const PLACEHOLDER_KEYS: Record<ModelParamName, string> = {
@@ -57,6 +70,9 @@ const PLACEHOLDER_KEYS: Record<ModelParamName, string> = {
   top_p: "model_param.top_p_placeholder",
   frequency_penalty: "model_param.penalty_placeholder",
   presence_penalty: "model_param.penalty_placeholder",
+  top_k: "model_param.top_k_placeholder",
+  min_p: "model_param.min_p_placeholder",
+  repeat_penalty: "model_param.repeat_penalty_placeholder",
 };
 
 /**
@@ -82,12 +98,17 @@ export const MODEL_PARAM_RANGES: Record<
   top_p: { min: 0, max: 1, integer: false },
   frequency_penalty: { min: -2, max: 2, integer: false },
   presence_penalty: { min: -2, max: 2, integer: false },
+  // `u32` on the route and rejected at zero, like the token counts.
+  top_k: { min: 1, max: 4294967295, integer: true },
+  min_p: { min: 0, max: 1, integer: false },
+  // `0` divides every logit by zero in llama.cpp and vLLM rejects it; the route's floor is 0.01.
+  repeat_penalty: { min: 0.01, max: 2, integer: false },
 };
 
 /**
  * Every parameter this module governs, in a fixed order.
  *
- * Exported so a caller that has to iterate them — the agent patch-builder walks all seven to decide
+ * Exported so a caller that has to iterate them — the agent patch-builder walks all of them to decide
  * which changed — reads the set from here instead of restating it. A second list is a second thing
  * to forget to extend.
  */
@@ -102,6 +123,9 @@ const STEPS: Record<ModelParamName, number> = {
   top_p: 0.01,
   frequency_penalty: 0.01,
   presence_penalty: 0.01,
+  top_k: 1,
+  min_p: 0.01,
+  repeat_penalty: 0.01,
 };
 
 /**

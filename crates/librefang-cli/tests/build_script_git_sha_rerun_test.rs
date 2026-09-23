@@ -9,7 +9,8 @@ use std::process::Command;
 
 const PACKAGE: &str = "sha-rerun-regression";
 
-const MANIFEST: &str = "[package]\nname = \"sha-rerun-regression\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[build-dependencies]\nchrono = \"0.4\"\nwhich = \"8\"\n";
+/// The fixture declares a `librefang` bin because the real build script emits `cargo:rustc-link-arg-bin=librefang=…` on Windows, and cargo rejects that instruction outright when the package has no bin of that name.
+const MANIFEST: &str = "[package]\nname = \"sha-rerun-regression\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[[bin]]\nname = \"librefang\"\npath = \"src/main.rs\"\n[build-dependencies]\nchrono = \"0.4\"\nwhich = \"8\"\n";
 
 /// The build script has to answer with the commit the checkout is at, whichever one that is.
 const REPORTS_CHECKOUT: &str =
@@ -62,6 +63,7 @@ fn write_package(root: &Path) {
     fs::create_dir_all(root.join("src")).unwrap();
     fs::write(root.join("Cargo.toml"), MANIFEST).unwrap();
     fs::write(root.join("src/lib.rs"), "pub fn fixture() {}\n").unwrap();
+    fs::write(root.join("src/main.rs"), "fn main() {}\n").unwrap();
     fs::write(root.join("build.rs"), include_str!("../build.rs")).unwrap();
 }
 

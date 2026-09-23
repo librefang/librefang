@@ -454,6 +454,24 @@ pub struct ModelOverrides {
     /// Presence penalty (-2.0–2.0).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub presence_penalty: Option<f32>,
+    /// Top-k sampling (≥ 1). See [`crate::agent::ModelConfig::top_k`], including its lenient parsing: one bad value here would otherwise fail the whole `model_overrides.json`.
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::serde_compat::top_k_lenient"
+    )]
+    pub top_k: Option<u32>,
+    /// Minimum-probability sampling (0.0–1.0). See [`crate::agent::ModelConfig::min_p`].
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::serde_compat::f32_lenient"
+    )]
+    pub min_p: Option<f32>,
+    /// Repetition penalty (0.01–2.0, `1.0` = off). See [`crate::agent::ModelConfig::repeat_penalty`].
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::serde_compat::f32_lenient"
+    )]
+    pub repeat_penalty: Option<f32>,
     /// Reasoning effort level ("low", "medium", "high").
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<String>,
@@ -509,6 +527,9 @@ impl ModelOverrides {
             && self.max_tokens.is_none()
             && self.frequency_penalty.is_none()
             && self.presence_penalty.is_none()
+            && self.top_k.is_none()
+            && self.min_p.is_none()
+            && self.repeat_penalty.is_none()
             && self.reasoning_effort.is_none()
             && self.use_max_completion_tokens.is_none()
             && self.no_system_role.is_none()
@@ -1698,5 +1719,57 @@ aliases = []
         .expect("serialize");
         assert!(!json.contains("context_window"), "{json}");
         assert!(!json.contains("max_output_tokens"), "{json}");
+    }
+
+    /// #8290: the per-model `top_k` / `min_p` / `repeat_penalty` survive a `model_overrides.json` round trip, count toward `is_empty` (or a document carrying only one would be dropped on save), and stay off the wire while unset.
+    #[test]
+    fn local_model_sampler_overrides_round_trip() {
+        for o in [
+            ModelOverrides {
+                top_k: Some(40),
+                ..Default::default()
+            },
+            ModelOverrides {
+                min_p: Some(0.05),
+                ..Default::default()
+            },
+            ModelOverrides {
+                repeat_penalty: Some(1.1),
+                ..Default::default()
+            },
+        ] {
+            assert!(!o.is_empty(), "{o:?}");
+        }
+
+        let json = r#"{"top_k": 40, "min_p": 0.05, "repeat_penalty": 1.1}"#;
+        let o: ModelOverrides = serde_json::from_str(json).expect("parse overrides");
+        let back: ModelOverrides =
+            serde_json::from_str(&serde_json::to_string(&o).unwrap()).unwrap();
+        assert_eq!(back.top_k, Some(40));
+        assert_eq!(back.min_p, Some(0.05));
+        assert_eq!(back.repeat_penalty, Some(1.1));
+
+        let unset = serde_json::to_string(&ModelOverrides::default()).unwrap();
+        for key in ["top_k", "min_p", "repeat_penalty"] {
+            assert!(!unset.contains(key), "{unset}");
+        }
+
+        // A hand-edited `model_overrides.json` with a `-1` / float / non-number spelling must not fail the whole file.
+        let lenient: std::collections::HashMap<String, ModelOverrides> = serde_json::from_str(
+            r#"{
+                "vllm:a": {"top_k": -1, "min_p": "x", "repeat_penalty": 1, "temperature": 0.3},
+                "vllm:b": {"top_k": 40.0},
+                "vllm:c": {"top_k": 40.5}
+            }"#,
+        )
+        .expect("lenient overrides parse");
+        let a = &lenient["vllm:a"];
+        assert_eq!(
+            (a.top_k, a.min_p, a.repeat_penalty),
+            (None, None, Some(1.0))
+        );
+        assert_eq!(a.temperature, Some(0.3), "sibling fields still parse");
+        assert_eq!(lenient["vllm:b"].top_k, Some(40));
+        assert_eq!(lenient["vllm:c"].top_k, None);
     }
 }

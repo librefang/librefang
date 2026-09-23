@@ -287,8 +287,12 @@ fn base_dir(state: &AppState, name: &str) -> Option<PathBuf> {
 }
 
 /// The `path` a manifest declaration carries for a base, as written in `agent.toml`.
+///
+/// Joined with `/` rather than `Path::join`, which uses `\` on Windows: this string is shown in the API, written into `agent.toml`, and has to read the same on every host.
+///
+/// Path comparisons against it are component-wise, so `holders_of` still matches a declaration written with either separator.
 fn decl_path(name: &str) -> PathBuf {
-    FsPath::new(KNOWLEDGE_PREFIX).join(name)
+    PathBuf::from(format!("{KNOWLEDGE_PREFIX}/{name}"))
 }
 
 fn bad_request(message: &str) -> (StatusCode, Json<serde_json::Value>) {
@@ -978,7 +982,9 @@ mod tests {
     ///
     /// Reachable because the directory is shared: an operator drops files onto
     /// the host, and an `rw` agent writes into it.
-    #[cfg(unix)]
+    ///
+    /// Not on macOS: APFS and HFS+ refuse to create a name that is not valid UTF-8 (EILSEQ), so the file cannot exist there and neither can the case.
+    #[cfg(all(unix, not(target_os = "macos")))]
     #[test]
     fn a_document_whose_name_is_not_utf8_is_not_listed() {
         use std::os::unix::ffi::OsStrExt;
