@@ -61,6 +61,67 @@ function Harness({
   );
 }
 
+describe("AgentManifestForm — complexity routing tiers", () => {
+  const MODELS = [
+    { provider: "openai", id: "gpt-4o" },
+    { provider: "anthropic", id: "claude-sonnet-5" },
+  ];
+
+  async function openRouting(user: ReturnType<typeof userEvent.setup>) {
+    await user.click(screen.getByText("agents.form.routing"));
+    await user.click(screen.getByLabelText("agents.form.routing_enabled"));
+  }
+
+  // The tier fields hold a bare model name — the daemon resolves it against the
+  // global catalog via `ModelCatalog::find_model`, so a `provider/model` string
+  // would not resolve. The picker speaks in pairs, and the adapter between the
+  // two is exactly where a provider could leak into the stored value.
+  it("stores the model name alone when a tier is picked", async () => {
+    const user = userEvent.setup();
+    render(<Harness models={MODELS} />);
+    await openRouting(user);
+
+    await user.click(screen.getByRole("button", { name: "agents.form.simple_model: None" }));
+    await user.click(screen.getByRole("button", { name: "anthropic/claude-sonnet-5" }));
+
+    // The trigger reads back from the form state, so this fails if either the
+    // provider leaked in or the name never reached `simple_model`.
+    expect(
+      screen.getByRole("button", { name: "agents.form.simple_model: claude-sonnet-5" }),
+    ).toBeInTheDocument();
+  });
+
+  it("offers every model in one flat list, with no provider step", async () => {
+    const user = userEvent.setup();
+    render(<Harness models={MODELS} />);
+    await openRouting(user);
+
+    await user.click(screen.getByRole("button", { name: "agents.form.medium_model: None" }));
+
+    // Both providers' models are reachable without drilling in, which is the
+    // point of the flat shape for a field that cannot hold a provider.
+    expect(screen.getByRole("button", { name: "openai/gpt-4o" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "anthropic/claude-sonnet-5" })).toBeInTheDocument();
+  });
+
+  it("accepts a model the catalog has never seen", async () => {
+    const user = userEvent.setup();
+    render(<Harness models={MODELS} />);
+    await openRouting(user);
+
+    await user.click(screen.getByRole("button", { name: "agents.form.complex_model: None" }));
+    await user.click(screen.getByRole("button", { name: "Custom" }));
+    // No provider field in this shape: requiring one would make a valid entry
+    // impossible to commit.
+    await user.type(screen.getByLabelText("Model"), "llama-3.3-70b");
+    await user.click(screen.getByRole("button", { name: "Confirm" }));
+
+    expect(
+      screen.getByRole("button", { name: "agents.form.complex_model: llama-3.3-70b" }),
+    ).toBeInTheDocument();
+  });
+});
+
 describe("AgentManifestForm — provider selection", () => {
   // The caller passes only providers that can serve a request, so an agent
   // assigned to one whose key was rejected (or whose local service is down)

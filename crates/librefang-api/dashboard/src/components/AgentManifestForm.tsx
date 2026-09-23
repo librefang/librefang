@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { AlertTriangle, ChevronDown, Plus, Trash2, X } from "lucide-react";
+import { AlertTriangle, Plus, Trash2, X } from "lucide-react";
 import { CAPABILITY_ROUTING_KEYS, generateUid } from "../lib/agentManifest";
 import type { ManifestExtras, ManifestFormState } from "../lib/agentManifest";
 import { MultiSelectCmdk } from "./ui/MultiSelectCmdk";
@@ -10,6 +10,18 @@ import {
   resolveMaxTokensLimit,
   selectModelLimits,
 } from "../lib/modelLimits";
+import { CollapsibleSection } from "./ui/CollapsibleSection";
+import { Field } from "./ui/Field";
+import { ModelPicker } from "./ui/ModelPicker";
+
+/**
+ * The routing tiers and `pinned_model` hold a bare model name — the daemon
+ * resolves it against the global catalog, so `provider/model` would not
+ * resolve — while the picker speaks in pairs. Adapting at the call site keeps
+ * the picker from having to know that some of its callers discard the
+ * provider.
+ */
+const asModelName = (name: string) => (name ? { provider: "", model: name } : null);
 
 /**
  * Catalog entry for the skill/tool finder (#5049). Both fields are
@@ -110,6 +122,14 @@ export function AgentManifestForm({
   const filteredModels = useMemo(
     () => (value.model.provider ? models.filter((m) => m.provider === value.model.provider) : models),
     [models, value.model.provider],
+  );
+
+  // The picker wants `{ id }` rather than `{ name }`. Memoised because it is
+  // passed to every fallback row, and a fresh array each render would defeat
+  // the picker's own memoisation of its provider list.
+  const providerPickerList = useMemo(
+    () => providerOptions.map((p) => ({ id: p.name })),
+    [providerOptions],
   );
 
   // Build {options, meta} pairs for the skill/tool finders (#5049).
@@ -732,20 +752,30 @@ export function AgentManifestForm({
               </button>
             </div>
             <div className="grid grid-cols-2 gap-2">
-              <input
-                type="text"
-                value={fb.provider}
-                onChange={(e) => update({ fallback_models: patchListItem(value.fallback_models, idx, { ...fb, provider: e.target.value }) })}
-                placeholder={t("agents.form.provider")}
-                className={inputClass}
-              />
-              <input
-                type="text"
-                value={fb.model}
-                onChange={(e) => update({ fallback_models: patchListItem(value.fallback_models, idx, { ...fb, model: e.target.value }) })}
-                placeholder={t("agents.form.model_id")}
-                className={inputClass}
-              />
+              {/* Provider and model are one decision here — which model this
+                  fallback stands for — so they are one control rather than two
+                  boxes to type an id into. `allowCustom` stays on because a
+                  fallback exists precisely for the case where the preferred
+                  provider is not reachable. */}
+              <div className="col-span-2">
+                <ModelPicker
+                  label={`${t("agents.form.model_id")} ${idx + 1}`}
+                  variant="pair"
+                  allowCustom
+                  value={fb.model ? { provider: fb.provider, model: fb.model } : null}
+                  onChange={(next) =>
+                    update({
+                      fallback_models: patchListItem(value.fallback_models, idx, {
+                        ...fb,
+                        provider: next.provider,
+                        model: next.model,
+                      }),
+                    })
+                  }
+                  models={models}
+                  providers={providerPickerList}
+                />
+              </div>
               <input
                 type="text"
                 value={fb.api_key_env}
@@ -903,27 +933,33 @@ export function AgentManifestForm({
           <div className="space-y-2 mt-2">
             <div className="grid grid-cols-3 gap-3">
               <Field label={t("agents.form.simple_model")}>
-                <input
-                  type="text"
-                  value={value.routing.simple_model}
-                  onChange={(e) => updateRouting({ simple_model: e.target.value })}
-                  className={inputClass}
+                <ModelPicker
+                  label={t("agents.form.simple_model")}
+                  variant="model"
+                  allowCustom
+                  value={asModelName(value.routing.simple_model)}
+                  onChange={(next) => updateRouting({ simple_model: next.model })}
+                  models={models}
                 />
               </Field>
               <Field label={t("agents.form.medium_model")}>
-                <input
-                  type="text"
-                  value={value.routing.medium_model}
-                  onChange={(e) => updateRouting({ medium_model: e.target.value })}
-                  className={inputClass}
+                <ModelPicker
+                  label={t("agents.form.medium_model")}
+                  variant="model"
+                  allowCustom
+                  value={asModelName(value.routing.medium_model)}
+                  onChange={(next) => updateRouting({ medium_model: next.model })}
+                  models={models}
                 />
               </Field>
               <Field label={t("agents.form.complex_model")}>
-                <input
-                  type="text"
-                  value={value.routing.complex_model}
-                  onChange={(e) => updateRouting({ complex_model: e.target.value })}
-                  className={inputClass}
+                <ModelPicker
+                  label={t("agents.form.complex_model")}
+                  variant="model"
+                  allowCustom
+                  value={asModelName(value.routing.complex_model)}
+                  onChange={(next) => updateRouting({ complex_model: next.model })}
+                  models={models}
                 />
               </Field>
             </div>
@@ -1179,11 +1215,13 @@ export function AgentManifestForm({
             </select>
           </Field>
           <Field label={t("agents.form.pinned_model")}>
-            <input
-              type="text"
-              value={value.pinned_model}
-              onChange={(e) => update({ pinned_model: e.target.value })}
-              className={inputClass}
+            <ModelPicker
+              label={t("agents.form.pinned_model")}
+              variant="model"
+              allowCustom
+              value={asModelName(value.pinned_model)}
+              onChange={(next) => update({ pinned_model: next.model })}
+              models={models}
             />
           </Field>
           <Field label={t("agents.form.workspace")}>
@@ -1365,96 +1403,6 @@ function Section({ title, children }: { title: string; children: React.ReactNode
     <div className="space-y-2.5 rounded-xl border border-border-subtle/60 bg-surface/40 p-3">
       <p className="text-[10px] font-bold uppercase tracking-widest text-text-dim">{title}</p>
       {children}
-    </div>
-  );
-}
-
-function CollapsibleSection({
-  title,
-  children,
-  defaultOpen,
-  invalid,
-}: {
-  title: string;
-  children: React.ReactNode;
-  defaultOpen?: boolean;
-  invalid?: boolean;
-}) {
-  return (
-    <details
-      className="group rounded-xl border border-border-subtle/60 bg-surface/40 overflow-hidden"
-      open={defaultOpen || invalid}
-    >
-      <summary
-        aria-invalid={invalid || undefined}
-        className="flex items-center justify-between p-3 cursor-pointer list-none select-none"
-      >
-        <span
-          className={`text-[10px] font-bold uppercase tracking-widest ${
-            invalid ? "text-error" : "text-text-dim"
-          }`}
-        >
-          {title}
-        </span>
-        <ChevronDown className="w-4 h-4 text-text-dim transition-transform group-open:rotate-180" />
-      </summary>
-      <div className="px-3 pb-3 space-y-2.5">{children}</div>
-    </details>
-  );
-}
-
-function Field({
-  label,
-  hint,
-  required,
-  invalid,
-  error,
-  errorId,
-  children,
-}: {
-  label: string;
-  hint?: string;
-  required?: boolean;
-  invalid?: boolean;
-  error?: string;
-  errorId?: string;
-  children: React.ReactNode;
-}) {
-  // Use a <div> wrapper rather than a <label> (#5246). A <label>
-  // forwards every click within its bounds to its first labelable form
-  // control, which silently steals clicks on composite widgets like
-  // MultiSelectCmdk (cmdk dropdown options): the click that lights up
-  // an item was being redirected to the search input, so picking a
-  // skill / tool from the catalog never reached the option's
-  // onSelect handler and the chip was never added. Switching to <div>
-  // makes each interactive child (input, button, option) receive its
-  // own click as the user intends. The trade-off is that the label
-  // text no longer focuses the input on click — which is a non-issue
-  // here because every field already gets focus via direct click on
-  // its visible control.
-  return (
-    <div className="block">
-      {label && (
-        <span
-          className={`text-[10px] font-bold uppercase block ${
-            invalid ? "text-error" : "text-text-dim"
-          }`}
-        >
-          {label}
-          {required && <span className="ml-0.5 text-error">*</span>}
-        </span>
-      )}
-      <span className={label ? "mt-1 block" : "block"}>{children}</span>
-      {invalid && error && (
-        <span
-          id={errorId}
-          className="mt-1 block text-[10px] text-error"
-          role="alert"
-        >
-          {error}
-        </span>
-      )}
-      {hint && <span className="mt-1 text-[10px] text-text-dim/70 block">{hint}</span>}
     </div>
   );
 }
