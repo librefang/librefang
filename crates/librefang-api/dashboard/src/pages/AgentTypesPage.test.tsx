@@ -6,6 +6,7 @@ import { AgentTypesPage } from "./AgentTypesPage";
 import { useAgentType, useAgentTypes, useAgentTypeHistory } from "../lib/queries/agentTypes";
 import { useAgents, useTools } from "../lib/queries/agents";
 import { useSkills } from "../lib/queries/skills";
+import { useModelRoutingInertReason } from "../lib/queries/config";
 import {
   useDeleteAgentType,
   usePromoteAgentType,
@@ -35,6 +36,12 @@ vi.mock("../lib/queries/agents", () => ({
 }));
 
 vi.mock("../lib/queries/skills", () => ({ useSkills: vi.fn() }));
+
+// Only the routing-inert projection is stubbed; the rest of the module stays real.
+vi.mock("../lib/queries/config", async () => ({
+  ...(await vi.importActual<typeof import("../lib/queries/config")>("../lib/queries/config")),
+  useModelRoutingInertReason: vi.fn(),
+}));
 
 // Both names for the manifest-write and manifest-create hooks: `main` exports
 // them as `useUpdateAgentType` / `useCreateAgentType` and #8028 renames them to
@@ -180,7 +187,11 @@ type MutationStub = { mutateAsync: ReturnType<typeof vi.fn>; isPending: boolean 
 function renderPage(
   promote: MutationStub,
   arg:
-    | { restore?: MutationStub; versions?: TemplateVersionEntry[] }
+    | {
+        restore?: MutationStub;
+        versions?: TemplateVersionEntry[];
+        routingInertReason?: "stable_mode" | null;
+      }
     | AgentTemplate[] = {},
 ) {
   const templates = Array.isArray(arg) ? arg : [TYPE];
@@ -199,6 +210,11 @@ function renderPage(
   vi.mocked(useAgents).mockReturnValue(mockQuery([]) as unknown as ReturnType<typeof useAgents>);
   vi.mocked(useTools).mockReturnValue(mockQuery([]) as unknown as ReturnType<typeof useTools>);
   vi.mocked(useSkills).mockReturnValue(mockQuery([]) as unknown as ReturnType<typeof useSkills>);
+  vi.mocked(useModelRoutingInertReason).mockReturnValue(
+    mockQuery(extras.routingInertReason ?? null) as unknown as ReturnType<
+      typeof useModelRoutingInertReason
+    >,
+  );
   // Stub both spellings of the manifest-write and manifest-create hooks rather
   // than picking one: the page calls whichever it imports, and an unstubbed
   // `vi.fn()` returns `undefined`, which the page then destructures and
@@ -423,5 +439,33 @@ describe("AgentTypesPage restore control", () => {
       screen.getByRole("button", { name: "This agent type does not exist in the registry." }),
     ).toBeDisabled();
     expect(screen.queryByRole("button", { name: "Restore from registry" })).toBeNull();
+  });
+});
+
+// #8446: a template's `[routing]` block is as inert under Stable mode as an agent's, and the editor rendered the Routing section without saying so.
+describe("AgentTypesPage editor in Stable mode", () => {
+  const WARNING = "The kernel runs in Stable mode, which freezes model choice";
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    useUIStore.setState({ toasts: [] });
+  });
+
+  it("warns in the Routing section of an existing type's editor", () => {
+    renderPage(idle, { routingInertReason: "stable_mode" });
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    expect(screen.getByText(new RegExp(WARNING))).toBeInTheDocument();
+  });
+
+  it("warns in the Routing section of the create editor", () => {
+    renderPage(idle, { routingInertReason: "stable_mode" });
+    fireEvent.click(screen.getByRole("button", { name: "New agent type" }));
+    expect(screen.getByText(new RegExp(WARNING))).toBeInTheDocument();
+  });
+
+  it("shows no warning while routing is live", () => {
+    renderPage(idle, { routingInertReason: null });
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    expect(screen.queryByText(new RegExp(WARNING))).not.toBeInTheDocument();
   });
 });

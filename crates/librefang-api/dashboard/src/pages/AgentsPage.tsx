@@ -194,6 +194,28 @@ function DetailRow({ label, children }: { label: React.ReactNode; children: Reac
   );
 }
 
+/**
+ * The existing-agent "Edit full configuration" form (#8446).
+ *
+ * An existing agent carries the kernel's answer on its detail payload as `routing_inert_reason`, so the Routing section warns from that rather than from a second config fetch.
+ * Split out of the drawer so a test can render it without AgentsPage's ~20 hooks.
+ */
+export function ManifestEditorForm({
+  agent,
+  ...formProps
+}: { agent: Pick<AgentDetail, "routing_inert_reason"> } & Omit<
+  React.ComponentProps<typeof AgentManifestForm>,
+  "nameField" | "routingInertReason"
+>) {
+  return (
+    <AgentManifestForm
+      {...formProps}
+      nameField="readonly"
+      routingInertReason={agent.routing_inert_reason ?? null}
+    />
+  );
+}
+
 export function SystemPromptSection({
   agentId,
   prompt,
@@ -3791,7 +3813,8 @@ export function AgentsPage() {
               </p>
             ) : (
               <div className="max-h-[65vh] overflow-y-auto pr-1">
-                <AgentManifestForm
+                <ManifestEditorForm
+                  agent={detailAgent}
                   value={manifestEditorFormState}
                   onChange={setManifestEditorFormState}
                   providers={formProviderOptions}
@@ -3801,7 +3824,6 @@ export function AgentsPage() {
                   skillCatalog={skillCatalogForForm}
                   toolCatalog={toolCatalogForForm}
                   mcpCatalog={mcpCatalogForForm}
-                  nameField="readonly"
                 />
               </div>
             )}
