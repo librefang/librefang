@@ -651,6 +651,7 @@ impl App {
                     Tab::Comms => {
                         self.comms.loading = false;
                         self.comms.status_msg = err;
+                        self.comms.status_is_fetch_error = true;
                     }
                     Tab::Security => {
                         self.security.loading = false;
@@ -1133,6 +1134,11 @@ impl App {
                 self.comms.nodes = nodes;
                 self.comms.edges = edges;
                 self.comms.loading = false;
+                // The topology request opens each comms refresh, so its success retires the last round's failure; a send or task result is left alone.
+                if self.comms.status_is_fetch_error {
+                    self.comms.status_msg.clear();
+                    self.comms.status_is_fetch_error = false;
+                }
             }
             AppEvent::CommsEventsLoaded(events) => {
                 self.comms.events = events;
@@ -1143,10 +1149,12 @@ impl App {
             }
             AppEvent::CommsSendResult(msg) => {
                 self.comms.status_msg = msg;
+                self.comms.status_is_fetch_error = false;
                 self.refresh_comms();
             }
             AppEvent::CommsTaskResult(msg) => {
                 self.comms.status_msg = msg;
+                self.comms.status_is_fetch_error = false;
             }
             AppEvent::LogsLoaded(entries) => {
                 self.logs.entries = entries;
@@ -3793,5 +3801,32 @@ mod fetch_error_routing_tests {
 
         assert_eq!(app.security.features.len(), builtin);
         assert!(!app.security.loading);
+    }
+
+    /// Comms polls too, but its status line also carries send results, which the refresh a send triggers must not wipe.
+    #[test]
+    fn comms_retires_a_fetch_failure_on_the_next_load_but_keeps_a_send_result() {
+        let mut app = app_on(Tab::Comms);
+        let topology = || AppEvent::CommsTopologyLoaded {
+            nodes: Vec::new(),
+            edges: Vec::new(),
+        };
+
+        app.handle_event(AppEvent::FetchError(
+            "Failed to load the agent topology: HTTP 503".into(),
+        ));
+        assert_eq!(
+            app.comms.status_msg,
+            "Failed to load the agent topology: HTTP 503"
+        );
+        app.handle_event(topology());
+        assert!(
+            app.comms.status_msg.is_empty(),
+            "a stale failure would sit over a screen that is working again"
+        );
+
+        app.handle_event(AppEvent::CommsTaskResult("Task posted".into()));
+        app.handle_event(topology());
+        assert_eq!(app.comms.status_msg, "Task posted");
     }
 }

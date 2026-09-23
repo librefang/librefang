@@ -3746,7 +3746,8 @@ pub fn spawn_fetch_security(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
             });
         }
         BackendRef::InProcess(_) => {
-            // Use builtin defaults (already loaded in SecurityState::new())
+            // The builtin defaults seeded by `SecurityState::new()` are the answer here; an empty list tells the handler to keep them and bring the spinner down, which sending nothing left up forever.
+            let _ = tx.send(AppEvent::SecurityLoaded(Vec::new()));
         }
     });
 }
