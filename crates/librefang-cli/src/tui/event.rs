@@ -449,6 +449,10 @@ pub enum AppEvent {
         /// operator opted out (#7781 review).
         fixed: bool,
         available: Vec<String>,
+        /// The kernel runs in Stable mode, which runs no router, so nothing this editor saves takes effect until the mode changes (#8446).
+        stable_mode: bool,
+        /// `agent.toml: pinned_model`, the model Stable mode runs; `None` means the manifest model.
+        pinned_model: Option<String>,
     },
     /// Agent model routing updated.
     AgentModelRoutingUpdated(String),
@@ -2560,6 +2564,8 @@ pub fn spawn_fetch_agent_model_routing(
                     let cost_budget = body["cost_budget"].as_str().map(String::from);
                     let default_profile = body["default_profile"].as_str().map(String::from);
                     let fixed = body["fixed"].as_bool().unwrap_or(false);
+                    let stable_mode = body["routing_inert_reason"].as_str() == Some("stable_mode");
+                    let pinned_model = body["pinned_model"].as_str().map(String::from);
                     let _ = tx.send(AppEvent::AgentModelRoutingLoaded {
                         mode,
                         allowed_profiles,
@@ -2567,6 +2573,8 @@ pub fn spawn_fetch_agent_model_routing(
                         default_profile,
                         fixed,
                         available,
+                        stable_mode,
+                        pinned_model,
                     });
                     return;
                 }
@@ -2611,6 +2619,8 @@ pub fn spawn_fetch_agent_model_routing(
                 .map(|t| t.as_str().to_string());
             let default_profile = router_override.and_then(|o| o.default_profile.clone());
             let fixed = router_override.map(|o| o.fixed).unwrap_or(false);
+            // Same test the kernel's model selection applies, against the same live config snapshot (#8446).
+            let stable_mode = cfg.mode == librefang_types::config::KernelMode::Stable;
 
             let _ = tx.send(AppEvent::AgentModelRoutingLoaded {
                 mode,
@@ -2619,6 +2629,8 @@ pub fn spawn_fetch_agent_model_routing(
                 default_profile,
                 fixed,
                 available,
+                stable_mode,
+                pinned_model: entry.manifest.pinned_model.clone(),
             });
         }
     });

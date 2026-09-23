@@ -9,7 +9,7 @@ use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::{Alignment, Constraint, Flex, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Padding, Paragraph};
+use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Padding, Paragraph, Wrap};
 use ratatui::Frame;
 
 /// Available built-in tools for the custom agent builder.
@@ -129,6 +129,10 @@ pub struct AgentSelectState {
     /// on save for the same reason as `router_default_profile` (#7781
     /// review).
     pub router_fixed: bool,
+    /// The kernel runs in Stable mode, so no router runs and the editor must say its settings are inert (#8446).
+    pub routing_stable_mode: bool,
+    /// `agent.toml: pinned_model`, named in the Stable-mode warning as the model that actually runs; `None` means the manifest model.
+    pub router_pinned_model: Option<String>,
     /// Set only by `AgentModelRoutingLoaded`. `Enter` in the routing editor
     /// is a no-op while this is `false` — a fetch that failed after `r` was
     /// pressed must not let a save write the reset placeholder values (or,
@@ -302,6 +306,8 @@ impl AgentSelectState {
             cost_budget_idx: 0,
             router_default_profile: None,
             router_fixed: false,
+            routing_stable_mode: false,
+            router_pinned_model: None,
             routing_loaded: false,
             spawned_toml: None,
             status_msg: String::new(),
@@ -673,6 +679,8 @@ impl AgentSelectState {
                     self.cost_budget_idx = 0;
                     self.router_default_profile = None;
                     self.router_fixed = false;
+                    self.routing_stable_mode = false;
+                    self.router_pinned_model = None;
                     self.routing_loaded = false;
                     self.sub = AgentSubScreen::EditModelRouting;
                     return AgentAction::FetchAgentModelRouting(id);
@@ -2028,6 +2036,8 @@ fn draw_edit_model_routing(f: &mut Frame, area: Rect, state: &AgentSelectState) 
 
     let chunks = Layout::vertical([
         Constraint::Length(3),
+        // #8446: Stable-mode warning row, collapsed while routing is live.
+        Constraint::Length(if state.routing_stable_mode { 2 } else { 0 }),
         Constraint::Min(3),
         Constraint::Length(2),
         Constraint::Length(1),
@@ -2052,17 +2062,33 @@ fn draw_edit_model_routing(f: &mut Frame, area: Rect, state: &AgentSelectState) 
         chunks[0],
     );
 
+    if state.routing_stable_mode {
+        // Shown in both modes: Stable mode also replaces a fixed agent's model with `pinned_model`.
+        let warning = match state.router_pinned_model.as_deref() {
+            Some(model) => {
+                crate::i18n::t_args("tui-agents-label-routing-stable-inert", &[("model", model)])
+            }
+            None => crate::i18n::t("tui-agents-label-routing-stable-inert-manifest"),
+        };
+        f.render_widget(
+            Paragraph::new(warning)
+                .style(Style::default().fg(theme::YELLOW))
+                .wrap(Wrap { trim: true }),
+            chunks[1],
+        );
+    }
+
     if !flexible {
         // Nothing below applies while the agent is pinned to its own model;
         // showing a disabled picker would imply the values still matter.
         f.render_widget(
             widgets::empty_state(&crate::i18n::t("tui-agents-label-routing-fixed-explainer")),
-            chunks[1],
+            chunks[2],
         );
     } else if state.router_profiles.is_empty() {
         f.render_widget(
             widgets::empty_state(&crate::i18n::t("tui-agents-label-no-router-profiles")),
-            chunks[1],
+            chunks[2],
         );
     } else {
         let items: Vec<ListItem> = state
@@ -2081,7 +2107,7 @@ fn draw_edit_model_routing(f: &mut Frame, area: Rect, state: &AgentSelectState) 
                 ListItem::new(format!("  {check} {name}")).style(style)
             })
             .collect();
-        f.render_widget(List::new(items), chunks[1]);
+        f.render_widget(List::new(items), chunks[2]);
     }
 
     let budget_label = crate::i18n::t(COST_BUDGET_OPTIONS[state.cost_budget_idx].0);
@@ -2102,13 +2128,13 @@ fn draw_edit_model_routing(f: &mut Frame, area: Rect, state: &AgentSelectState) 
             "tui-agents-line-routing-summary",
             &[("budget", &budget_label), ("allowed", &allowlist_summary)],
         )),
-        chunks[2],
+        chunks[3],
     );
 
     f.render_widget(
         Paragraph::new(crate::i18n::t("tui-agents-hints-model-routing"))
             .style(Style::default().fg(theme::DIM)),
-        chunks[3],
+        chunks[4],
     );
 }
 
@@ -2346,6 +2372,8 @@ mod tests {
         state.cost_budget_idx = 2;
         state.router_default_profile = Some("coder".to_string());
         state.router_fixed = true;
+        state.routing_stable_mode = true;
+        state.router_pinned_model = Some("pinned-model".to_string());
         state.routing_loaded = true;
 
         state.handle_detail(key(KeyCode::Char('r')));
@@ -2356,6 +2384,8 @@ mod tests {
         assert_eq!(state.cost_budget_idx, 0);
         assert_eq!(state.router_default_profile, None);
         assert!(!state.router_fixed);
+        assert!(!state.routing_stable_mode);
+        assert_eq!(state.router_pinned_model, None);
         assert!(
             !state.routing_loaded,
             "re-entering must require a fresh AgentModelRoutingLoaded before Enter can save"
@@ -2388,6 +2418,54 @@ mod tests {
         assert!(
             !state.status_msg.is_empty(),
             "the operator needs to know why Enter did nothing"
+        );
+    }
+
+    fn render_model_routing(state: &AgentSelectState) -> String {
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 30)).unwrap();
+        terminal
+            .draw(|f| draw_edit_model_routing(f, f.area(), state))
+            .expect("the routing editor must render");
+        terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect()
+    }
+
+    /// #8446: Stable mode runs no router, so the routing editor must say its settings are inert and name the model that runs, in either mode.
+    #[test]
+    fn routing_editor_warns_in_stable_mode() {
+        for mode in ["flexible", "fixed"] {
+            let mut state = AgentSelectState::new();
+            state.model_mode = mode.to_string();
+            state.router_profiles = vec![("coder".to_string(), true)];
+            state.routing_stable_mode = true;
+            state.router_pinned_model = Some("pinned-test-model".to_string());
+            state.routing_loaded = true;
+
+            let rendered = render_model_routing(&state);
+            assert!(
+                rendered.contains("Stable mode") && rendered.contains("pinned-test-model"),
+                "{mode}: the Stable-mode warning must render and name the pinned model.\nrendered:\n{rendered}"
+            );
+        }
+
+        let mut live = AgentSelectState::new();
+        live.model_mode = "flexible".to_string();
+        live.router_profiles = vec![("coder".to_string(), true)];
+        live.routing_loaded = true;
+        let rendered = render_model_routing(&live);
+        assert!(
+            !rendered.contains("Stable mode"),
+            "no warning while routing is live.\nrendered:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("coder"),
+            "the profile list must still render"
         );
     }
 }

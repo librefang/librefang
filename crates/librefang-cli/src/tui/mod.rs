@@ -488,6 +488,8 @@ impl App {
                 default_profile,
                 fixed,
                 available,
+                stable_mode,
+                pinned_model,
             } => {
                 // Populate the routing editor from the agent's real stored
                 // state, not from whatever the previous screen left behind.
@@ -506,6 +508,8 @@ impl App {
                     .unwrap_or(0);
                 self.agents.router_default_profile = default_profile;
                 self.agents.router_fixed = fixed;
+                self.agents.routing_stable_mode = stable_mode;
+                self.agents.router_pinned_model = pinned_model;
                 self.agents.routing_loaded = true;
             }
             AppEvent::AgentModelRoutingUpdated(id) => {
