@@ -3,6 +3,7 @@
 use super::AppState;
 use axum::extract::{Query, State};
 use axum::response::IntoResponse;
+use librefang_kernel::audit::AuditAction;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -16,7 +17,7 @@ pub fn router() -> axum::Router<Arc<AppState>> {
 ///
 /// Streams new audit entries as Server-Sent Events. Accepts optional query
 /// parameters for filtering:
-///   - `level`  — filter by classified level (info, warn, error)
+///   - `level`  — filter by classified level (info, warn, error, debug), classified from the entry's `outcome` (leading `error` / `fail` / `denied` or a status code ending `_failed` / `_error` / `_denied` such as `db_remove_failed`, `warn`, `debug`), falling back to the action so `PermissionDenied` and `BudgetExceeded` are errors; each event carries the classification as `level`
 ///   - `filter` — text substring filter across action/detail/agent_id
 ///
 /// A heartbeat ping is sent every 15 seconds to keep the connection alive.
@@ -89,31 +90,16 @@ pub async fn logs_stream(
             };
 
             for entry in &entries {
-                let action_str = format!("{:?}", entry.action);
-                let action_lower = if level_filter.is_empty() && text_filter.is_empty() {
-                    None
-                } else {
-                    Some(action_str.to_ascii_lowercase())
-                };
-
-                // Apply level filter
-                if !level_filter.is_empty() {
-                    let classified = classify_lowercase_audit_level(
-                        action_lower
-                            .as_deref()
-                            .expect("filter requires lowercase action"),
-                    );
-                    if classified != level_filter {
-                        continue;
-                    }
+                let level = classify_audit_level(&entry.action, &entry.outcome);
+                if !level_filter.is_empty() && level != level_filter {
+                    continue;
                 }
+
+                let action_str = format!("{:?}", entry.action);
 
                 // Apply text filter
                 if !text_filter.is_empty() {
-                    let action_matches = action_lower
-                        .as_deref()
-                        .expect("filter requires lowercase action")
-                        .contains(&text_filter);
+                    let action_matches = action_str.to_ascii_lowercase().contains(&text_filter);
                     let detail_matches = contains_lowercase_filter(&entry.detail, &text_filter);
                     let agent_matches = if action_matches || detail_matches {
                         false
@@ -132,6 +118,7 @@ pub async fn logs_stream(
                     "action": action_str,
                     "detail": entry.detail,
                     "outcome": entry.outcome,
+                    "level": level,
                     "hash": entry.hash,
                 });
                 let data = match serde_json::to_string(&json) {
@@ -187,18 +174,70 @@ pub async fn logs_stream(
         .into_response()
 }
 
-/// Classify an already-lowercase audit action into a level (info, warn, error).
-fn classify_lowercase_audit_level(action: &str) -> &'static str {
-    if action.contains("error")
-        || action.contains("fail")
-        || action.contains("crash")
-        || action.contains("denied")
+/// Classify an audit entry into a level (error, warn, debug, info).
+///
+/// The outcome decides first, because it is the field that records whether the action went wrong: `AuditEntry.outcome` is "ok", "denied" or an error message, while the action name is the same string whether a `ToolInvoke` succeeded or failed (#8270).
+/// An outcome leading with `error` / `fail` / `denied` is an error, and so is one whose leading snake_case status code ends in `_failed` / `_error` / `_denied`: the kernel records a kill whose database removal failed as `db_remove_failed` and a config write whose reload failed as `saved_reload_failed`, and those are stored in audit rows that cannot be rewritten.
+/// An outcome leading with `warn` is a warning, one leading with `debug` is debug.
+/// Any other outcome falls back to the action, and only the actions that are failures by definition classify as errors that way — a refusal (`PermissionDenied`) or a spend cap being hit (`BudgetExceeded`) is exactly what an operator filtering for `error` is looking for.
+/// `AgentKill` is deliberately not among them: a kill is an intentional operation, and its outcome (`ok` or `db_remove_failed`) says whether it failed.
+///
+/// The dashboard's `auditLogLevel` (`dashboard/src/pages/LogsPage.tsx`) implements the same rule, so the Logs page badge and this stream's `level` filter agree on every entry; the two test tables pin that.
+fn classify_audit_level(action: &AuditAction, outcome: &str) -> &'static str {
+    let outcome = outcome.trim_start();
+    let leads_with = |prefix: &str| {
+        outcome
+            .as_bytes()
+            .get(..prefix.len())
+            .is_some_and(|head| head.eq_ignore_ascii_case(prefix.as_bytes()))
+    };
+    // The leading snake_case status code: `db_remove_failed` out of `db_remove_failed`, `ok` out of `ok: failed_over`.
+    let code = &outcome[..outcome
+        .bytes()
+        .position(|b| !(b.is_ascii_alphanumeric() || b == b'_'))
+        .unwrap_or(outcome.len())];
+    let code_ends_with = |suffix: &str| {
+        code.len() >= suffix.len()
+            && code.as_bytes()[code.len() - suffix.len()..].eq_ignore_ascii_case(suffix.as_bytes())
+    };
+    if leads_with("error")
+        || leads_with("fail")
+        || leads_with("denied")
+        || code_ends_with("_failed")
+        || code_ends_with("_error")
+        || code_ends_with("_denied")
     {
-        "error"
-    } else if action.contains("warn") || action.contains("block") || action.contains("kill") {
-        "warn"
-    } else {
-        "info"
+        return "error";
+    }
+    if leads_with("warn") {
+        return "warn";
+    }
+    if leads_with("debug") {
+        return "debug";
+    }
+    // Exhaustive on purpose: a new variant has to be placed on one side of this line before it compiles.
+    match action {
+        AuditAction::PermissionDenied | AuditAction::BudgetExceeded => "error",
+        AuditAction::ToolInvoke
+        | AuditAction::CapabilityCheck
+        | AuditAction::AgentSpawn
+        | AuditAction::AgentKill
+        | AuditAction::AgentMessage
+        | AuditAction::MemoryAccess
+        | AuditAction::FileAccess
+        | AuditAction::NetworkAccess
+        | AuditAction::ShellExec
+        | AuditAction::AuthAttempt
+        | AuditAction::WireConnect
+        | AuditAction::ConfigChange
+        | AuditAction::DreamConsolidation
+        | AuditAction::UserLogin
+        | AuditAction::RoleChange
+        | AuditAction::RetentionTrim
+        | AuditAction::A2aDiscovered
+        | AuditAction::A2aTrusted
+        | AuditAction::ChainReanchored
+        | AuditAction::McpConnect => "info",
     }
 }
 
@@ -260,11 +299,99 @@ mod tests {
             .expect("sender should observe a dropped SSE receiver");
     }
 
+    /// Every `AuditAction` variant. Kept next to the classifier's exhaustive `match`, which fails to compile when a variant is added; add it here too so the exhaustive test below keeps covering the whole enum.
+    const ALL_ACTIONS: [AuditAction; 22] = [
+        AuditAction::ToolInvoke,
+        AuditAction::CapabilityCheck,
+        AuditAction::AgentSpawn,
+        AuditAction::AgentKill,
+        AuditAction::AgentMessage,
+        AuditAction::MemoryAccess,
+        AuditAction::FileAccess,
+        AuditAction::NetworkAccess,
+        AuditAction::ShellExec,
+        AuditAction::AuthAttempt,
+        AuditAction::WireConnect,
+        AuditAction::ConfigChange,
+        AuditAction::DreamConsolidation,
+        AuditAction::UserLogin,
+        AuditAction::RoleChange,
+        AuditAction::PermissionDenied,
+        AuditAction::BudgetExceeded,
+        AuditAction::RetentionTrim,
+        AuditAction::A2aDiscovered,
+        AuditAction::A2aTrusted,
+        AuditAction::ChainReanchored,
+        AuditAction::McpConnect,
+    ];
+
+    /// The same table is pinned in the dashboard's `LogsPage.test.tsx` (`auditLogLevel`), so the SSE `level` filter and the Logs page badge give one answer per entry (#8270).
     #[test]
-    fn audit_level_uses_the_reused_lowercase_action() {
-        assert_eq!(classify_lowercase_audit_level("permissiondenied"), "error");
-        assert_eq!(classify_lowercase_audit_level("processkilled"), "warn");
-        assert_eq!(classify_lowercase_audit_level("configchange"), "info");
+    fn audit_level_reads_the_outcome_first_with_an_action_fallback() {
+        let cases: &[(AuditAction, &str, &str)] = &[
+            (AuditAction::ToolInvoke, "ok", "info"),
+            (AuditAction::ToolInvoke, "error: boom", "error"),
+            (
+                AuditAction::ToolInvoke,
+                "  Error: padded and capitalised",
+                "error",
+            ),
+            (AuditAction::ConfigChange, "failed", "error"),
+            (AuditAction::DreamConsolidation, "fail", "error"),
+            (AuditAction::DreamConsolidation, "aborted", "info"),
+            (AuditAction::McpConnect, "error: connect failed", "error"),
+            (AuditAction::PermissionDenied, "denied", "error"),
+            (AuditAction::PermissionDenied, "ok", "error"),
+            (AuditAction::BudgetExceeded, "ok", "error"),
+            (AuditAction::BudgetExceeded, "", "error"),
+            (AuditAction::CapabilityCheck, "denied", "error"),
+            (AuditAction::AgentKill, "ok", "info"),
+            (AuditAction::AgentKill, "error: agent not found", "error"),
+            (AuditAction::AgentKill, "db_remove_failed", "error"),
+            (
+                AuditAction::AgentMessage,
+                "failed: no LLM provider configured — configure via dashboard settings",
+                "error",
+            ),
+            (AuditAction::ConfigChange, "saved_reload_failed", "error"),
+            (
+                AuditAction::AgentMessage,
+                "failed after 3 attempt(s): timeout",
+                "error",
+            ),
+            (AuditAction::ToolInvoke, "remote_error: 502", "error"),
+            (AuditAction::ConfigChange, "applied_partial", "info"),
+            (AuditAction::ConfigChange, "no_changes", "info"),
+            (AuditAction::ToolInvoke, "ok: failed_over to backup", "info"),
+            (AuditAction::ToolInvoke, "warning: nearing limit", "warn"),
+            (AuditAction::ToolInvoke, "debug: cache miss", "debug"),
+            (AuditAction::PermissionDenied, "warn: soft deny", "warn"),
+            (AuditAction::AgentSpawn, "completed", "info"),
+            (AuditAction::ToolInvoke, "", "info"),
+        ];
+        for (action, outcome, expected) in cases {
+            assert_eq!(
+                classify_audit_level(action, outcome),
+                *expected,
+                "action={action:?} outcome={outcome:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn only_failure_by_definition_actions_are_errors_when_the_outcome_is_ok() {
+        let not_info: Vec<(String, &str)> = ALL_ACTIONS
+            .iter()
+            .map(|action| (format!("{action:?}"), classify_audit_level(action, "ok")))
+            .filter(|(_, level)| *level != "info")
+            .collect();
+        assert_eq!(
+            not_info,
+            [
+                ("PermissionDenied".to_string(), "error"),
+                ("BudgetExceeded".to_string(), "error"),
+            ]
+        );
     }
 
     #[test]

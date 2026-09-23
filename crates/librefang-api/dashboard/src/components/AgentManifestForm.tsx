@@ -3,6 +3,7 @@ import { useTranslation } from "react-i18next";
 import { AlertTriangle, ChevronDown, Plus, Trash2, X } from "lucide-react";
 import { CAPABILITY_ROUTING_KEYS, generateUid } from "../lib/agentManifest";
 import type { ManifestExtras, ManifestFormState } from "../lib/agentManifest";
+import type { ModelRoutingInertReason } from "../api";
 
 /// The tri-state caption for a memory capability field (#7749 review):
 /// `null` is the omitted key (unrestricted), `[]` is the declared-empty deny.
@@ -128,6 +129,11 @@ interface AgentManifestFormProps {
    *   which one wins.
    */
   nameField?: "editable" | "readonly" | "hidden";
+  /**
+   * Why the kernel will not run the tier router this section configures (#8446).
+   * `"stable_mode"` shows a warning in the Routing section; absent or `null` means routing is live.
+   */
+  routingInertReason?: ModelRoutingInertReason | null;
 }
 
 export function AgentManifestForm({
@@ -141,6 +147,7 @@ export function AgentManifestForm({
   toolCatalog,
   mcpCatalog,
   nameField = "editable",
+  routingInertReason,
 }: AgentManifestFormProps) {
   const { t } = useTranslation();
 
@@ -1006,6 +1013,11 @@ export function AgentManifestForm({
       </CollapsibleSection>
 
       <CollapsibleSection title={t("agents.form.routing")} defaultOpen={false}>
+        {routingInertReason === "stable_mode" && (
+          <div className="mb-2">
+            <ExtrasOverrideHint message={t("agents.form.routing_stable_inert")} />
+          </div>
+        )}
         <Toggle
           label={t("agents.form.routing_enabled")}
           checked={value.routing.enabled}

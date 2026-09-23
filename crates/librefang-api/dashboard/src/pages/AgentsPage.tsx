@@ -60,6 +60,7 @@ import { useProviders } from "../lib/queries/providers";
 import { useModels } from "../lib/queries/models";
 import { useSkills } from "../lib/queries/skills";
 import { useMcpServers } from "../lib/queries/mcp";
+import { useModelRoutingInertReason } from "../lib/queries/config";
 import { AgentManifestForm } from "../components/AgentManifestForm";
 import { AgentModelParamFields } from "../components/AgentModelParamFields";
 import { selectModelLimits } from "../lib/modelLimits";
@@ -190,6 +191,28 @@ function DetailRow({ label, children }: { label: React.ReactNode; children: Reac
       <span className="text-text-dim text-sm">{label}</span>
       <span className="text-sm text-right min-w-0">{children}</span>
     </div>
+  );
+}
+
+/**
+ * The existing-agent "Edit full configuration" form (#8446).
+ *
+ * An existing agent carries the kernel's answer on its detail payload as `routing_inert_reason`, so the Routing section warns from that rather than from a second config fetch.
+ * Split out of the drawer so a test can render it without AgentsPage's ~20 hooks.
+ */
+export function ManifestEditorForm({
+  agent,
+  ...formProps
+}: { agent: Pick<AgentDetail, "routing_inert_reason"> } & Omit<
+  React.ComponentProps<typeof AgentManifestForm>,
+  "nameField" | "routingInertReason"
+>) {
+  return (
+    <AgentManifestForm
+      {...formProps}
+      nameField="readonly"
+      routingInertReason={agent.routing_inert_reason ?? null}
+    />
   );
 }
 
@@ -1146,6 +1169,10 @@ export function AgentsPage() {
         : undefined,
     [mcpServersQuery.data],
   );
+  // #8446: a new agent has no detail payload to carry `routing_inert_reason`, so the form's Routing section reads the kernel mode off the shared config cache, fetched only while the form is open.
+  const routingInertReasonQuery = useModelRoutingInertReason({
+    enabled: showCreate && createMode === "form",
+  });
   const serializedFormToml = useMemo(
     () => serializeManifestForm(formState, formExtras),
     [formState, formExtras],
@@ -3786,7 +3813,8 @@ export function AgentsPage() {
               </p>
             ) : (
               <div className="max-h-[65vh] overflow-y-auto pr-1">
-                <AgentManifestForm
+                <ManifestEditorForm
+                  agent={detailAgent}
                   value={manifestEditorFormState}
                   onChange={setManifestEditorFormState}
                   providers={formProviderOptions}
@@ -3796,7 +3824,6 @@ export function AgentsPage() {
                   skillCatalog={skillCatalogForForm}
                   toolCatalog={toolCatalogForForm}
                   mcpCatalog={mcpCatalogForForm}
-                  nameField="readonly"
                 />
               </div>
             )}
@@ -4036,6 +4063,7 @@ export function AgentsPage() {
                 skillCatalog={skillCatalogForForm}
                 toolCatalog={toolCatalogForForm}
                 mcpCatalog={mcpCatalogForForm}
+                routingInertReason={routingInertReasonQuery.data}
               />
               <div className="space-y-2">
                 <div className="flex items-center justify-between gap-2">

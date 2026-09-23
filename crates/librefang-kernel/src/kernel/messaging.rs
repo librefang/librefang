@@ -1350,7 +1350,7 @@ impl LibreFangKernel {
                             agent_id.to_string(),
                             librefang_runtime::audit::AuditAction::AgentMessage,
                             "agent loop skipped",
-                            "No LLM provider configured — configure via dashboard settings",
+                            "failed: no LLM provider configured — configure via dashboard settings",
                         );
                     }
                     return Ok(result);
