@@ -3799,7 +3799,7 @@ async fn handle_send_error<F, Fut>(
 struct RouteResolution {
     /// Resolved agent, or `None` when no eligible agent exists.
     agent_id: Option<AgentId>,
-    /// The message explicitly named this agent — an `@`-mention the adapter surfaced, or a match against the agent's own declared alias.
+    /// The message explicitly named this agent — an `@`-mention the adapter surfaced, or a match against the agent's own declared alias — or the conversation's explicit `/agent` override selected it.
     /// The conversation-ownership gate treats an addressed dispatch as a re-claim so a user can hand the thread from one agent to another mid-conversation (#5323).
     /// A continuation that merely inherits the sticky holder is *not* addressed.
     addressed: bool,
@@ -3995,15 +3995,15 @@ async fn resolve_or_fallback(
     }
 
     // Explicit per-conversation `/agent` override (#5671, upper binding level).
-    // A deliberate user command, so it outranks the #5323 sticky holder below:
-    // a fresh `/agent` must be able to re-point a conversation that already has
-    // a sticky claim. Applies to DMs and groups alike (not gated on is_group).
+    // A deliberate user command, so it outranks the #5323 sticky holder below: a fresh `/agent` must be able to re-point a conversation that already has a sticky claim.
+    // Applies to DMs and groups alike (not gated on is_group).
+    // Returned as `addressed` so the conversation-ownership gate re-claims for it: resolution never falls through to the sticky holder while an override exists, so a plain result would leave the previous agent's live claim in place and the gate would silently suppress every message after `/agent` until that claim's TTL ran out (#7140).
     if let Some((instance, conversation_id)) = binding_keys {
         if let Some(id) = handle
             .resolve_conversation_override(instance, conversation_id)
             .await
         {
-            return RouteResolution::plain(id);
+            return RouteResolution::addressed(id);
         }
     }
 
@@ -9222,6 +9222,26 @@ mod tests {
             resolved.agent_id,
             Some(overridden),
             "the explicit per-conversation override must outrank the sticky holder"
+        );
+
+        // `dispatch_message` runs the ownership gate on the resolved agent next (#7140).
+        // Resolving to the override is not enough if the gate then suppresses it because the previous agent still holds a live claim: the message after `/agent` would be dropped silently instead of reaching the selected agent.
+        assert!(
+            conversation_ownership_allows(
+                &msg,
+                &handle,
+                &thread_ownership,
+                None,
+                overridden,
+                resolved.addressed,
+            )
+            .await,
+            "the ownership gate must let the override agent through despite the sticky claim"
+        );
+        assert_eq!(
+            thread_ownership.current_holder(&build_thread_key(&msg).unwrap()),
+            Some(overridden),
+            "the override agent takes the claim over, so the sticky holder cannot re-suppress it"
         );
     }
 
