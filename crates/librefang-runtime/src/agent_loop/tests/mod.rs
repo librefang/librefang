@@ -968,6 +968,7 @@ fn silent_response_single_source_of_truth() {
 
 mod integration;
 mod recovery;
+mod sampling_params;
 mod sender;
 mod utilities;
 mod vision_gate;

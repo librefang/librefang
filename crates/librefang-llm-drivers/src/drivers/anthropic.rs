@@ -502,6 +502,15 @@ fn build_anthropic_request(request: &CompletionRequest) -> ApiRequest {
     // `request.temperature` is always populated — the resolver fills in a system default when nobody chose one — whereas `top_p` is present only when an operator set it, so an explicit `top_p` is the stronger signal and wins.
     let top_p = request.top_p.filter(|_| sampling_allowed);
     let temperature = (sampling_allowed && top_p.is_none()).then_some(request.temperature);
+    if top_p.is_some() {
+        // The same "I set it and nothing changed" question as the drops below, for the one parameter `top_p` displaces.
+        debug!(
+            provider = "anthropic",
+            model = %request.model,
+            temperature = request.temperature,
+            "top_p is set; temperature not sent, because this model rejects both in one request"
+        );
+    }
     // The Messages API has no penalty parameters at all (#8290); sending them would be a 400 on every turn.
     super::sampling::log_dropped(
         "anthropic",
