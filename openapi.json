@@ -12704,7 +12704,7 @@
           "skills"
         ],
         "summary": "GET /api/skills — List installed skills.",
-        "description": "`categories` always reflects all skills regardless of the `?category=` filter.",
+        "description": "`categories` always reflects all skills regardless of the `?category=` filter.\n\nEach item carries both directions of a skill's tool relationship, named so they cannot be confused (#8445): `tools_count` counts the tools the skill *provides*, while `required_tools` / `required_tools_count` / `required_capabilities` echo the manifest's `[requirements]` table, i.e. what the agent must be granted for the skill to run.\nThe `required_*` lists are always present; a skill that declares nothing reports empty lists, which is a different fact from \"unknown\".",
         "operationId": "list_skills",
         "responses": {
           "200": {
@@ -13089,6 +13089,7 @@
           "skills"
         ],
         "summary": "Get detailed information about a specific skill, including linked files,\ntags, evolution history, and readiness status.",
+        "description": "`tools` lists the tools the skill *provides*; `required_tools` and `required_capabilities` list what it *needs* from the host, from the manifest's `[requirements]` table (#8445).\nBoth `required_*` lists are always present and empty when the skill declares nothing.",
         "operationId": "get_skill_detail",
         "parameters": [
           {
