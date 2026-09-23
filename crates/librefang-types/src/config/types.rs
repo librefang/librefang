@@ -1791,6 +1791,9 @@ pub enum RegistryPromotionMode {
 /// owns the token, the fork's own default branch as the PR base, a
 /// path-derived head-branch prefix, and no explicit commit author.
 ///
+/// `api_base_url` and `release_org` are also read by the release path — `librefang skill publish` and the GitHub-releases fallback of `librefang skill search` / `install` (`librefang-skills::marketplace`) — so one setting points both flows at the same GitHub, GitHub Enterprise Server included (#8180).
+/// That path creates a release on a repository and uploads an asset to it rather than opening a pull request, and ignores every other field here.
+///
 /// The GitHub token is deliberately *not* configured here.
 /// It continues to resolve from the `GITHUB_TOKEN` environment variable and
 /// then the vault, so no credential is readable back out of `GET /api/config`.
@@ -1815,6 +1818,13 @@ pub struct RegistryPromotionConfig {
     /// Ignored in `direct_push` mode, where there is no fork.
     #[serde(default)]
     pub fork_owner: Option<String>,
+    /// GitHub organisation or account that holds one repository per skill, which `librefang skill publish` creates its releases on and the marketplace install fallback downloads them from.
+    /// Defaults to `librefang-skills`.
+    /// Only the default repository is derived from it: `skill publish --repo owner/name` still names the repository outright.
+    /// Unused by the promotion flow, which targets `skills.registry_repo`.
+    /// Like `api_base_url` it is not writable through `POST /api/config/set`, because it picks the repository the operator's GitHub token uploads release assets to (#8180).
+    #[serde(default)]
+    pub release_org: Option<String>,
     /// Branch the pull request targets on the upstream registry, and the
     /// branch the head branch is cut from.
     /// Defaults to the default branch of the repository being pushed to.

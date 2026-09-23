@@ -631,6 +631,18 @@ librefang skill publish
 
 This validates the manifest, packages the skill, and uploads it to the FangHub registry.
 
+The release is created on `librefang-skills/<skill-name>` on `api.github.com` unless `--repo owner/name` names another repository.
+Both halves of that default come from `[skills.promotion]` in `config.toml`, the same section the "Propose to Registry" flow reads, so one setting points both at a GitHub Enterprise Server installation:
+
+```toml
+[skills.promotion]
+api_base_url = "https://github.example.com/api/v3"  # GitHub REST API root; https only (http for loopback)
+release_org = "acme-skills"                         # owner of the per-skill release repositories
+```
+
+The GitHub-releases fallback of `librefang skill search` / `install` reads the same two fields.
+Neither can be set through `POST /api/config/set`, because the GitHub token is sent to the destination they name; edit `config.toml` on disk.
+
 ---
 
 ## CLI Commands

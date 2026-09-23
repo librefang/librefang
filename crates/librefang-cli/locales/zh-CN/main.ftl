@@ -2292,6 +2292,7 @@ skill-render-candidate-failed = 将候选项渲染为 TOML 失败：{ $error }
 skill-approve-candidate-failed = 批准失败：{ $error }
 skill-reject-candidate-failed = 拒绝失败：{ $error }
 skill-publish-failed = 发布失败：{ $error }
+skill-marketplace-config-invalid = config.toml 中的 [skills.promotion] 配置无效：{ $error }
 skill-evolution-label = 技能：{ $name }
 skill-version-label = 当前版本：{ $version }
 skill-use-count-label = 使用次数：{ $count }

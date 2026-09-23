@@ -1237,6 +1237,7 @@ skill-render-candidate-failed = Failed to render candidate as TOML: { $error }
 skill-approve-candidate-failed = Approve failed: { $error }
 skill-reject-candidate-failed = Reject failed: { $error }
 skill-publish-failed = Publish failed: { $error }
+skill-marketplace-config-invalid = Invalid [skills.promotion] in config.toml: { $error }
 skill-evolution-label = Skill: { $name }
 skill-version-label = Current version: { $version }
 skill-use-count-label = Use count: { $count }

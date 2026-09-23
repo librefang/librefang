@@ -97,13 +97,40 @@ pub(crate) fn resolve_skills_dir(hand: Option<&str>) -> PathBuf {
     }
 }
 
+/// Marketplace config built from `[skills.promotion]` in `config.toml` (#8180).
+///
+/// `api_base_url` and `release_org` name the GitHub host and organisation the release path talks to, so `skill publish` and the GitHub-releases fallback of search / install can reach a GitHub Enterprise Server installation.
+/// An unreadable config falls back to defaults with the same warning other commands print; an unsafe value in the section is fatal, because the publish path attaches the GitHub token to every request built from it.
+fn marketplace_config() -> librefang_skills::marketplace::MarketplaceConfig {
+    let config = load_config(None).unwrap_or_else(|e| {
+        eprintln!(
+            "{}",
+            i18n::t_args(
+                "common-warning-config-default",
+                &[("error", &e.to_string())]
+            )
+        );
+        librefang_types::config::KernelConfig::default()
+    });
+    librefang_skills::marketplace::MarketplaceConfig::from_promotion(&config.skills.promotion)
+        .unwrap_or_else(|e| {
+            eprintln!(
+                "{}",
+                i18n::t_args(
+                    "skill-marketplace-config-invalid",
+                    &[("error", &e.to_string())]
+                )
+            );
+            std::process::exit(1);
+        })
+}
+
 /// Marketplace config pointed at the synced registry checkout (#6569).
 ///
 /// `~/.librefang/registry` is maintained by `registry_sync` and honours `registry.registry_host`, so this works against a Codeberg mirror as well as GitHub.
-/// Without it, search and install fall back to the `librefang-skills` GitHub org, which does not exist.
+/// Without it, search and install fall back to the GitHub releases of `skills.promotion.release_org` (default `librefang-skills`, which does not exist).
 fn marketplace_config_with_registry() -> librefang_skills::marketplace::MarketplaceConfig {
-    librefang_skills::marketplace::MarketplaceConfig::default()
-        .with_registry_dir(librefang_home().join("registry"))
+    marketplace_config().with_registry_dir(librefang_home().join("registry"))
 }
 
 pub(crate) fn cmd_skill_install(source: &str, hand: Option<&str>) {
@@ -709,7 +736,8 @@ pub(crate) fn cmd_skill_publish(
         )
     );
 
-    let repo = repo.unwrap_or_else(|| format!("librefang-skills/{}", packaged.manifest.skill.name));
+    let marketplace_cfg = marketplace_config();
+    let repo = repo.unwrap_or_else(|| marketplace_cfg.default_repo(&packaged.manifest.skill.name));
     let tag = tag.unwrap_or_else(|| format!("v{}", packaged.manifest.skill.version));
 
     if dry_run {
@@ -743,9 +771,7 @@ pub(crate) fn cmd_skill_publish(
     let mut sp = progress::auto(&sp_title, None);
     sp.tick(1);
     let rt = tokio::runtime::Runtime::new().unwrap();
-    let client = librefang_skills::marketplace::MarketplaceClient::new(
-        librefang_skills::marketplace::MarketplaceConfig::default(),
-    );
+    let client = librefang_skills::marketplace::MarketplaceClient::new(marketplace_cfg);
     let published = rt
         .block_on(
             client.publish_bundle(librefang_skills::marketplace::MarketplacePublishRequest {

@@ -6,6 +6,7 @@
 use crate::openclaw_compat;
 use crate::supply_chain;
 use crate::SkillError;
+use librefang_types::config::RegistryPromotionConfig;
 use reqwest::StatusCode;
 use serde_json::json;
 use std::io::{Cursor, Read};
@@ -114,17 +115,50 @@ pub struct MarketplaceConfig {
     pub registry_dir: Option<PathBuf>,
 }
 
+/// GitHub organisation used for per-skill release repositories when `skills.promotion.release_org` is unset.
+pub const DEFAULT_MARKETPLACE_ORG: &str = "librefang-skills";
+
 impl Default for MarketplaceConfig {
     fn default() -> Self {
         Self {
-            registry_url: "https://api.github.com".to_string(),
-            github_org: "librefang-skills".to_string(),
+            registry_url: crate::registry_pr::DEFAULT_GITHUB_API.to_string(),
+            github_org: DEFAULT_MARKETPLACE_ORG.to_string(),
             registry_dir: None,
         }
     }
 }
 
 impl MarketplaceConfig {
+    /// Build the config from `[skills.promotion]`, the one place an operator names "our GitHub" (#8180).
+    ///
+    /// `api_base_url` becomes [`Self::registry_url`] through the same resolution and https/loopback rule the promotion flow applies, because `publish_bundle` attaches the GitHub token to every request built from it.
+    /// `release_org` becomes [`Self::github_org`].
+    /// Each unset or blank value falls back to today's compiled-in default, so an untouched config reproduces [`MarketplaceConfig::default`] exactly.
+    pub fn from_promotion(cfg: &RegistryPromotionConfig) -> Result<Self, SkillError> {
+        let registry_url = crate::registry_pr::resolve_api_base(cfg)?;
+        let github_org = match cfg.release_org.as_deref().map(str::trim) {
+            Some(org) if !org.is_empty() => {
+                if !crate::registry_pr::is_valid_owner(org) {
+                    return Err(SkillError::InvalidConfig(format!(
+                        "Invalid skills.promotion.release_org '{org}' (expected a GitHub login or org name)"
+                    )));
+                }
+                org.to_string()
+            }
+            _ => DEFAULT_MARKETPLACE_ORG.to_string(),
+        };
+        Ok(Self {
+            registry_url,
+            github_org,
+            registry_dir: None,
+        })
+    }
+
+    /// `<github_org>/<skill>` — the repository a skill's releases live on when the caller names none.
+    pub fn default_repo(&self, skill: &str) -> String {
+        format!("{}/{}", self.github_org, skill)
+    }
+
     /// Point the client at a synced registry checkout (`~/.librefang/registry`).
     pub fn with_registry_dir(mut self, dir: impl Into<PathBuf>) -> Self {
         self.registry_dir = Some(dir.into());
@@ -399,7 +433,7 @@ impl MarketplaceClient {
                 return self.install_from_registry_dir(&source, skill_name, target_dir);
             }
         }
-        let repo = format!("{}/{}", self.config.github_org, skill_name);
+        let repo = self.config.default_repo(skill_name);
         let url = format!(
             "{}/repos/{}/releases/latest",
             self.config.registry_url, repo
@@ -1349,6 +1383,158 @@ mod tests {
             std::fs::read_to_string(dir.path().join("ok.txt")).unwrap(),
             "hello world"
         );
+    }
+
+    // ---------------------------------------------------------------------
+    // #8180 — the release path reads `[skills.promotion]`
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn from_promotion_with_nothing_configured_is_todays_default() {
+        let cfg = MarketplaceConfig::from_promotion(&RegistryPromotionConfig::default()).unwrap();
+        assert_eq!(cfg.registry_url, "https://api.github.com");
+        assert_eq!(cfg.github_org, "librefang-skills");
+        assert!(cfg.registry_dir.is_none());
+        let default = MarketplaceConfig::default();
+        assert_eq!(cfg.registry_url, default.registry_url);
+        assert_eq!(cfg.github_org, default.github_org);
+        assert_eq!(cfg.default_repo("demo"), "librefang-skills/demo");
+
+        // Blank values are unset, not an empty host or org.
+        let blank = MarketplaceConfig::from_promotion(&RegistryPromotionConfig {
+            api_base_url: Some("  ".to_string()),
+            release_org: Some(" ".to_string()),
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(blank.registry_url, "https://api.github.com");
+        assert_eq!(blank.github_org, "librefang-skills");
+    }
+
+    #[test]
+    fn from_promotion_takes_the_enterprise_host_and_org() {
+        let cfg = MarketplaceConfig::from_promotion(&RegistryPromotionConfig {
+            api_base_url: Some("https://github.example.invalid/api/v3/".to_string()),
+            release_org: Some(" acme ".to_string()),
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(cfg.registry_url, "https://github.example.invalid/api/v3");
+        assert_eq!(cfg.github_org, "acme");
+        assert_eq!(cfg.default_repo("demo"), "acme/demo");
+    }
+
+    #[test]
+    fn from_promotion_rejects_unsafe_values() {
+        // The token is attached to every release request, so the base gets the promotion flow's https/loopback rule.
+        for bad in [
+            "http://attacker.example/api/v3",
+            "ftp://example.invalid",
+            "api.github.com",
+        ] {
+            let err = MarketplaceConfig::from_promotion(&RegistryPromotionConfig {
+                api_base_url: Some(bad.to_string()),
+                ..Default::default()
+            })
+            .unwrap_err();
+            assert!(matches!(err, SkillError::InvalidConfig(_)), "{bad}: {err}");
+        }
+        // The org is one path segment of `/repos/{org}/{skill}`.
+        for bad in ["acme/evil", "acme bots", "..", "acme?x=1", "acme#frag"] {
+            let err = MarketplaceConfig::from_promotion(&RegistryPromotionConfig {
+                release_org: Some(bad.to_string()),
+                ..Default::default()
+            })
+            .unwrap_err();
+            assert!(
+                matches!(&err, SkillError::InvalidConfig(msg) if msg.contains("release_org")),
+                "{bad:?}: {err}"
+            );
+        }
+    }
+
+    /// The injection-site test: the configured host and organisation must reach the outgoing requests, not merely be stored.
+    /// Both mocks are `expect(1)`, so a request built from the compiled-in `api.github.com` or `librefang-skills` fails the test when the server verifies on drop.
+    #[tokio::test]
+    async fn publish_bundle_sends_to_the_configured_host_and_org() {
+        use wiremock::matchers::{header, method, path, query_param};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/repos/acme/demo/releases/tags/v1"))
+            .and(header("authorization", "Bearer t0ken"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "upload_url": format!("{}/upload{{?name,label}}", server.uri()),
+                "html_url": "https://github.example.invalid/acme/demo/releases/tag/v1",
+                "assets": []
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/upload"))
+            .and(query_param("name", "demo-1.zip"))
+            .and(header("authorization", "Bearer t0ken"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(json!({})))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let cfg = MarketplaceConfig::from_promotion(&RegistryPromotionConfig {
+            api_base_url: Some(server.uri()),
+            release_org: Some("acme".to_string()),
+            ..Default::default()
+        })
+        .unwrap();
+        let repo = cfg.default_repo("demo");
+        let dir = TempDir::new().unwrap();
+        let bundle = dir.path().join("demo-1.zip");
+        std::fs::write(&bundle, b"PK\x05\x06").unwrap();
+
+        let published = MarketplaceClient::new(cfg)
+            .publish_bundle(MarketplacePublishRequest {
+                repo: &repo,
+                tag: "v1",
+                bundle_path: &bundle,
+                release_name: "demo 1",
+                release_notes: "notes",
+                token: "t0ken",
+            })
+            .await
+            .expect("publish succeeds against the configured host");
+        assert_eq!(published.repo, "acme/demo");
+        assert_eq!(published.asset_name, "demo-1.zip");
+        server.verify().await;
+    }
+
+    /// The install fallback builds its request from the same config, so the configured organisation reaches it too.
+    #[tokio::test]
+    async fn install_fallback_queries_the_configured_host_and_org() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/repos/acme/demo/releases/latest"))
+            .respond_with(ResponseTemplate::new(404))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let cfg = MarketplaceConfig::from_promotion(&RegistryPromotionConfig {
+            api_base_url: Some(server.uri()),
+            release_org: Some("acme".to_string()),
+            ..Default::default()
+        })
+        .unwrap();
+        let target = TempDir::new().unwrap();
+        let err = MarketplaceClient::new(cfg)
+            .install("demo", target.path())
+            .await
+            .unwrap_err();
+        assert!(matches!(err, SkillError::NotFound(_)), "{err}");
+        server.verify().await;
     }
 
     #[test]

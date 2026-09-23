@@ -1251,6 +1251,7 @@ skill-render-candidate-failed = Не вдалося згенерувати ка�
 skill-approve-candidate-failed = Помилка апруву: { $error }
 skill-reject-candidate-failed = Помилка відхилення: { $error }
 skill-publish-failed = Помилка публікації: { $error }
+skill-marketplace-config-invalid = Некоректний розділ [skills.promotion] у config.toml: { $error }
 skill-evolution-label = Скіл: { $name }
 skill-version-label = Поточна версія: { $version }
 skill-use-count-label = Кількість використання: { $count }

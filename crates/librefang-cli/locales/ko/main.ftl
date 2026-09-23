@@ -1237,6 +1237,7 @@ skill-render-candidate-failed = 후보를 TOML로 렌더링하는 데 실패했�
 skill-approve-candidate-failed = 승인에 실패했습니다: { $error }
 skill-reject-candidate-failed = 거부에 실패했습니다: { $error }
 skill-publish-failed = 게시에 실패했습니다: { $error }
+skill-marketplace-config-invalid = config.toml의 [skills.promotion] 설정이 잘못되었습니다: { $error }
 skill-evolution-label = 스킬: { $name }
 skill-version-label = 현재 버전: { $version }
 skill-use-count-label = 사용 횟수: { $count }
