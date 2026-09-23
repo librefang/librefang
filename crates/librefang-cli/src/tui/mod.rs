@@ -1377,14 +1377,18 @@ impl App {
                 }
                 _ => {}
             }
-            // Tab cycling: Tab / Shift+Tab
-            if key.code == KeyCode::Tab && key.modifiers.is_empty() {
-                self.next_tab();
-                return;
-            }
-            if key.code == KeyCode::BackTab {
-                self.prev_tab();
-                return;
+            // Tab cycling: Tab / Shift+Tab — except on a screen that moves field focus with them (the workflow step editor, #7724), where F-keys, Alt+digit and Ctrl+arrows still switch tabs.
+            let screen_owns_tab =
+                self.active_tab == Tab::Workflows && self.workflows.owns_tab_key();
+            if !screen_owns_tab {
+                if key.code == KeyCode::Tab && key.modifiers.is_empty() {
+                    self.next_tab();
+                    return;
+                }
+                if key.code == KeyCode::BackTab {
+                    self.prev_tab();
+                    return;
+                }
             }
             // Tab cycling: Ctrl+Left/Right
             if key.modifiers.contains(KeyModifiers::CONTROL) {
@@ -3828,5 +3832,51 @@ mod fetch_error_routing_tests {
         app.handle_event(AppEvent::CommsTaskResult("Task posted".into()));
         app.handle_event(topology());
         assert_eq!(app.comms.status_msg, "Task posted");
+    }
+}
+
+#[cfg(test)]
+mod workflow_step_editor_tab_tests {
+    use super::*;
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    fn app_on_the_workflows_tab() -> App {
+        let (tx, _rx) = mpsc::channel();
+        let mut app = App::new(None, tx);
+        app.phase = Phase::Main;
+        app.active_tab = Tab::Workflows;
+        app
+    }
+
+    /// The step editor moves field focus with Tab and Shift-Tab and has no other way to reach the agent and prompt fields, so the global tab cycling must not swallow those keys on the steps page (#7724).
+    /// Driving `App::handle_key` rather than `WorkflowState::handle_key` is the point: the screen-level tests never pass through the global handler.
+    #[test]
+    fn tab_moves_focus_in_the_step_editor_instead_of_switching_tabs() {
+        let mut app = app_on_the_workflows_tab();
+        app.workflows.list_state.select(Some(0)); // no workflows, so row 0 is "Create new"
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.workflows.create_step, 2, "must be on the steps page");
+        assert_eq!(app.workflows.step_focus, workflows::StepEditorFocus::Name);
+
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert!(
+            app.active_tab == Tab::Workflows,
+            "Tab on the steps page must not leave the Workflows tab"
+        );
+        assert_eq!(app.workflows.step_focus, workflows::StepEditorFocus::Source);
+
+        app.handle_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT));
+        assert!(app.active_tab == Tab::Workflows);
+        assert_eq!(app.workflows.step_focus, workflows::StepEditorFocus::Name);
+    }
+
+    /// Off the steps page Tab still cycles tabs, so the exemption is scoped to the one page that needs it.
+    #[test]
+    fn tab_still_switches_tabs_from_the_workflow_list() {
+        let mut app = app_on_the_workflows_tab();
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert!(app.active_tab != Tab::Workflows);
     }
 }

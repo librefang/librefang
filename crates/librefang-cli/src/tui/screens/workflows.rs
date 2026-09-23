@@ -416,6 +416,13 @@ impl WorkflowState {
             && self.poll_tick.is_multiple_of(40)
     }
 
+    /// Whether Tab and Shift-Tab belong to this screen rather than to the global tab cycling in `App::handle_key`.
+    ///
+    /// The steps page of the create wizard moves field focus with them, and it has no other way to reach the agent and prompt fields, so the global handler must let them through there; everywhere else they keep cycling tabs.
+    pub fn owns_tab_key(&self) -> bool {
+        self.sub == WorkflowSubScreen::Create && self.create_step == 2
+    }
+
     pub fn handle_key(&mut self, key: KeyEvent) -> WorkflowAction {
         if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
             return WorkflowAction::Continue;
