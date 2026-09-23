@@ -294,6 +294,40 @@ mod identity_file_list_tests {
         );
     }
 
+    /// A delete of IDENTITY.md takes the same lock as a write, so a front-matter edit between its read and its rename cannot put the file back.
+    #[test]
+    fn identity_md_delete_waits_for_the_front_matter_lock() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().to_path_buf();
+        std::fs::create_dir(workspace.join(".identity")).unwrap();
+        let identity_md = workspace.join(".identity/IDENTITY.md");
+        std::fs::write(&identity_md, "before").unwrap();
+
+        let guard = librefang_kernel::kernel::lock_identity_front_matter();
+
+        let (done_tx, done_rx) = mpsc::channel();
+        let ws = workspace.clone();
+        let delete = std::thread::spawn(move || {
+            delete_identity_file(&ws, "IDENTITY.md").expect("delete must succeed");
+            done_tx.send(()).unwrap();
+        });
+        assert!(
+            done_rx.recv_timeout(Duration::from_millis(300)).is_err(),
+            "the IDENTITY.md delete must wait while the lock is held"
+        );
+        assert!(identity_md.exists());
+
+        drop(guard);
+        done_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the delete must proceed once the lock is released");
+        delete.join().unwrap();
+        assert!(!identity_md.exists());
+    }
+
     /// Once `.identity/<name>` exists it is the copy the read path prefers, so
     /// writes must keep landing there and leave a stale root fallback alone.
     #[test]
@@ -623,6 +657,9 @@ fn delete_identity_file(
     workspace: &std::path::Path,
     filename: &str,
 ) -> Result<(), IdentityFileMutationError> {
+    // Same reason as `write_identity_file`: a front-matter edit that read the file before this delete would otherwise rename its copy back into place afterwards, undoing the delete while both requests answer success.
+    let _front_matter_guard =
+        (filename == "IDENTITY.md").then(librefang_kernel::kernel::lock_identity_front_matter);
     let path = resolve_identity_file(workspace, filename)?;
     std::fs::remove_file(path).map_err(IdentityFileMutationError::Io)
 }
