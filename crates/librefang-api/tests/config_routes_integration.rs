@@ -2530,6 +2530,7 @@ async fn config_set_writes_skills_promotion_leaf_and_reaches_the_kernel() {
 /// edit-on-disk side (#8179 review, finding 2), which for the scrub list
 /// means each leaf is refused and a wholesale section payload containing any
 /// of them is refused too.
+/// `release_org` joins them for the same reason on the release path (#8180): `librefang skill publish` uploads assets with the token to repositories under that organisation.
 #[tokio::test(flavor = "multi_thread")]
 async fn config_set_rejects_skills_promotion_destination_fields() {
     let h = boot_router_with_api_key(API_KEY).await;
@@ -2545,6 +2546,10 @@ async fn config_set_rejects_skills_promotion_destination_fields() {
         (
             "base_branch",
             serde_json::Value::String("attacker-branch".to_string()),
+        ),
+        (
+            "release_org",
+            serde_json::Value::String("attacker-org".to_string()),
         ),
     ] {
         let (status, body) = send(
@@ -2682,6 +2687,7 @@ async fn skills_promotion_exposes_no_credential_field() {
             "fork_owner",
             "head_branch_prefix",
             "mode",
+            "release_org",
         ]
     );
 }

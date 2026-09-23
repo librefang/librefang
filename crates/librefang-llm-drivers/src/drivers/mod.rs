@@ -19,6 +19,7 @@ pub mod gemini_cli;
 pub mod ollama;
 pub mod openai;
 pub mod qwen_code;
+pub(crate) mod sampling;
 pub mod token_rotation;
 pub(crate) mod trace_headers;
 pub mod vertex_ai;

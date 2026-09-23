@@ -311,6 +311,13 @@ librefang update --channel rc       # 本次使用 rc 频道
 librefang update --version v0.7.0   # 安装指定版本
 ```
 
+**macOS 隐私权限：**
+
+macOS 发行版二进制使用 LibreFang 的 Developer ID 证书签名，因此在「系统设置 → 隐私与安全性」中授予的权限（完全磁盘访问权限、自动化）会在更新后继续对 `librefang` 和 `librefang-sidecar-telegram` 生效。
+此前发布的版本是 ad-hoc 签名，每个版本的代码身份都不同，macOS 会在每次更新后丢弃这些授权。
+从 ad-hoc 版本首次更新到 Developer ID 版本时，代码身份会最后变化一次：更新后需重新授予一次完全磁盘访问权限和自动化权限（删除旧的 `librefang` 条目，添加 `~/.librefang/bin/` 中更新后的二进制，然后重启守护进程）。
+之后的更新会保留这些授权。
+
 ---
 
 ### librefang dashboard

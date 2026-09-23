@@ -17,6 +17,7 @@ use librefang_types::goal::{
 };
 
 use super::{LibreFangKernel, SYSTEM_CHANNEL_AUTONOMOUS};
+use crate::goal_runner::GoalRunStart;
 use crate::registry::AgentRegistry;
 use crate::MemorySubsystemApi;
 
@@ -40,7 +41,7 @@ impl LibreFangKernel {
         verify_agent_id: Option<AgentId>,
         verify_max_retries: Option<u32>,
         evaluator_model: Option<String>,
-    ) -> bool {
+    ) -> GoalRunStart {
         let substrate = self.substrate_ref().clone();
 
         // The tick closure drives a real agent turn, which needs an owned
@@ -50,7 +51,7 @@ impl LibreFangKernel {
             Some(k) => k,
             None => {
                 tracing::warn!(%goal_id, "Cannot start goal run: kernel self-handle unset");
-                return false;
+                return GoalRunStart::Unavailable;
             }
         };
 
@@ -142,13 +143,14 @@ impl LibreFangKernel {
             );
         };
 
-        // #7785 review: `GoalRunner::start` returns false when the goal
+        // #7785 review: `GoalRunner::start` refuses when the goal
         // vanished between the caller's load and the runner's own
         // (`load_goal` in the spawn), and `goal_run_start` — therefore
         // `KernelApi::start_goal_run`, whose doc reads as fallible — must
         // propagate that refusal instead of hardcoding success. The old
         // `true` made the caller's own `!started` check dead code: every
         // caller reported a started run that did not exist.
+        // It also refuses, distinctly, when it could not read the goal or its pause checkpoint (#8427), which is a fault on this host rather than a missing goal.
         self.workflows.goal_runner.start(
             goal_id,
             agent_id,
@@ -235,7 +237,7 @@ impl LibreFangKernel {
         verify_agent_id: Option<AgentId>,
         verify_max_retries: Option<u32>,
         evaluator_model: Option<String>,
-    ) -> bool {
+    ) -> GoalRunStart {
         self.goal_run_start(
             goal_id,
             agent_id,

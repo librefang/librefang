@@ -657,6 +657,14 @@ struct OaiRequest {
     max_completion_tokens: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     temperature: Option<f32>,
+    /// Typed sampling preferences (#8290), omitted for the models whose sampling is fixed — see [`sampling_is_fixed`].
+    /// An `extra_body` entry of the same name still overrides them, as it does every other standard field.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    top_p: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    frequency_penalty: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    presence_penalty: Option<f32>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     tools: Vec<OaiTool>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -977,6 +985,14 @@ fn rejects_temperature(model: &str) -> bool {
 fn temperature_must_be_one(model: &str) -> bool {
     let m = model.to_lowercase();
     m.starts_with("kimi-k2") || m == "kimi-k2.5" || m == "kimi-k2.5-0711"
+}
+
+/// Whether `top_p` / `frequency_penalty` / `presence_penalty` must be left off for this model (#8290).
+///
+/// The reasoning models that reject `temperature` reject the rest of the sampling set with the same `unsupported_parameter` 400, and the Kimi K2 line pins every sampler to a fixed value and errors on any other.
+/// Both are the same fact — this model's sampling is not tunable — so both predicates feed one gate rather than each parameter growing its own model list.
+fn sampling_is_fixed(model: &str) -> bool {
+    rejects_temperature(model) || temperature_must_be_one(model)
 }
 
 #[derive(Debug, Serialize)]
@@ -1498,6 +1514,20 @@ impl OpenAIDriver {
 
         let extra_body = request.extra_body.clone();
 
+        let sampling_fixed = sampling_is_fixed(&request.model);
+        if sampling_fixed {
+            super::sampling::log_dropped(
+                "openai",
+                &request.model,
+                &[
+                    ("top_p", request.top_p),
+                    ("frequency_penalty", request.frequency_penalty),
+                    ("presence_penalty", request.presence_penalty),
+                ],
+            );
+        }
+        let sampling = |value: Option<f32>| value.filter(|_| !sampling_fixed);
+
         // Per-provider reasoning translation (#7946). The mode reaching here is
         // already resolved (per-call > per-agent > global > compiled default) —
         // the kernel folds all three layers into `manifest.thinking` before
@@ -1526,6 +1556,9 @@ impl OpenAIDriver {
             } else {
                 Some(request.temperature)
             },
+            top_p: sampling(request.top_p),
+            frequency_penalty: sampling(request.frequency_penalty),
+            presence_penalty: sampling(request.presence_penalty),
             tools: oai_tools,
             tool_choice,
             stream: false,
@@ -4677,6 +4710,9 @@ mod tests {
             max_tokens: Some(4096),
             max_completion_tokens: None,
             temperature: Some(0.7),
+            top_p: None,
+            frequency_penalty: None,
+            presence_penalty: None,
             tools: vec![],
             tool_choice: None,
             stream: false,
@@ -4730,6 +4766,9 @@ mod tests {
                 max_tokens: Some(4096),
                 max_completion_tokens: None,
                 temperature: Some(0.7),
+                top_p: None,
+                frequency_penalty: None,
+                presence_penalty: None,
                 tools: vec![],
                 tool_choice: None,
                 stream: false,
@@ -4770,6 +4809,77 @@ mod tests {
         );
     }
 
+    /// A `CompletionRequest` with every typed sampling parameter set, for the #8290 wire tests.
+    fn sampling_request(model: &str) -> librefang_llm_driver::CompletionRequest {
+        librefang_llm_driver::CompletionRequest {
+            model: model.to_string(),
+            messages: std::sync::Arc::new(vec![librefang_types::message::Message::user("hi")]),
+            max_tokens: 128,
+            temperature: 0.7,
+            top_p: Some(0.9),
+            frequency_penalty: Some(0.5),
+            presence_penalty: Some(-0.25),
+            ..Default::default()
+        }
+    }
+
+    /// The wire body exactly as `complete()` / `stream()` send it: serialized, then `extra_body` merged on top.
+    fn sent_body(req: &librefang_llm_driver::CompletionRequest) -> serde_json::Value {
+        let driver = OpenAIDriver::new(String::new(), "https://api.openai.com/v1".to_string());
+        let oai = driver.build_request(req).expect("build_request");
+        let mut body = serde_json::to_value(&oai).unwrap();
+        merge_extra_body(&oai.extra_body, &mut body);
+        body
+    }
+
+    /// #8290: the typed sampling parameters are top-level Chat Completions fields.
+    #[test]
+    fn sampling_params_are_top_level_fields() {
+        let body = sent_body(&sampling_request("gpt-4o"));
+        assert_eq!(body["top_p"], serde_json::json!(0.9_f32));
+        assert_eq!(body["frequency_penalty"], serde_json::json!(0.5_f32));
+        assert_eq!(body["presence_penalty"], serde_json::json!(-0.25_f32));
+        assert_eq!(body["temperature"], serde_json::json!(0.7_f32));
+
+        // Unset stays off the wire rather than serializing as null.
+        let body = sent_body(&librefang_llm_driver::CompletionRequest {
+            top_p: None,
+            frequency_penalty: None,
+            presence_penalty: None,
+            ..sampling_request("gpt-4o")
+        });
+        for key in ["top_p", "frequency_penalty", "presence_penalty"] {
+            assert!(body.get(key).is_none(), "{key}: {body}");
+        }
+    }
+
+    /// Reasoning models reject the whole sampling set with a 400, and the Kimi K2 line errors on any non-default sampler.
+    /// While these parameters travelled in `extra_body` they were forwarded to both unfiltered.
+    #[test]
+    fn sampling_params_are_dropped_for_models_with_fixed_sampling() {
+        for model in ["o3-mini", "o1", "o4-mini", "gpt-5-mini", "kimi-k2.5"] {
+            let body = sent_body(&sampling_request(model));
+            for key in ["top_p", "frequency_penalty", "presence_penalty"] {
+                assert!(body.get(key).is_none(), "{model} got {key}: {body}");
+            }
+        }
+    }
+
+    /// `extra_params` stays the escape hatch: an explicit entry still wins over the typed value, as it does for every other standard field.
+    #[test]
+    fn extra_body_still_overrides_typed_sampling_params() {
+        let mut extra = BTreeMap::new();
+        extra.insert("top_p".to_string(), serde_json::json!(0.3));
+        extra.insert("enable_memory".to_string(), serde_json::json!(true));
+        let body = sent_body(&librefang_llm_driver::CompletionRequest {
+            extra_body: Some(extra),
+            ..sampling_request("qwen3.6")
+        });
+        assert_eq!(body["top_p"], serde_json::json!(0.3));
+        assert_eq!(body["enable_memory"], serde_json::json!(true));
+        assert_eq!(body.to_string().matches("\"top_p\"").count(), 1, "{body}");
+    }
+
     #[test]
     fn test_oai_request_extra_body_none_skipped() {
         let req = OaiRequest {
@@ -4784,6 +4894,9 @@ mod tests {
             max_tokens: Some(100),
             max_completion_tokens: None,
             temperature: Some(0.5),
+            top_p: None,
+            frequency_penalty: None,
+            presence_penalty: None,
             tools: vec![],
             tool_choice: None,
             stream: false,

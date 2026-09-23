@@ -91,6 +91,7 @@ describe("useAgentTemplates", () => {
         model: "claude-sonnet-4",
         source: "agent-type" as const,
         editable: true,
+        from_registry: true,
       },
     ];
     vi.mocked(httpClient.listAgentTemplates).mockResolvedValue(mockTemplates);
@@ -125,6 +126,7 @@ describe("useAgentTemplates", () => {
         model: "claude-sonnet-4",
         source: "agent-type" as const,
         editable: true,
+        from_registry: true,
       },
     ];
     vi.mocked(httpClient.listAgentTemplates).mockResolvedValue(mockTemplates);

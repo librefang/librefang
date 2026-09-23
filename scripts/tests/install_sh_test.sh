@@ -724,4 +724,68 @@ fi
 [ ! -e "$RB_FRESH.bak" ] || fail "broken fresh install should not leave a backup behind"
 pass "install_binary_with_rollback removes a broken fresh install"
 
+# --- macOS signing: keep a Developer ID signature, ad-hoc sign otherwise (#8234) ---
+# Re-signing a Developer ID build ad hoc swaps its stable code identity for a per-build hash, and macOS then drops the Full Disk Access / Automation grants keyed on it at every update.
+# The mock answers `--verify` and `-dv` the way the real codesign does for each state, and logs every call so the test can see whether a re-sign happened.
+SIGN_DIR=$(mktemp -d)
+SIGN_FAKE_BIN="$SIGN_DIR/bin"
+mkdir -p "$SIGN_FAKE_BIN"
+cat > "$SIGN_FAKE_BIN/codesign" <<'CS_EOF'
+#!/bin/sh
+echo "$*" >> "$FAKE_CODESIGN_LOG"
+case "$1" in
+  --verify)
+    [ "$FAKE_CODESIGN_STATE" != "unsigned" ]
+    exit $?
+    ;;
+  -dv)
+    case "$FAKE_CODESIGN_STATE" in
+      unsigned) echo "$2: code object is not signed at all" >&2; exit 1 ;;
+      adhoc) printf 'Identifier=librefang\nSignature=adhoc\nTeamIdentifier=not set\n' >&2 ;;
+      devid) printf 'Identifier=ai.librefang.cli\nAuthority=Developer ID Application: Example (TEAM123456)\nTeamIdentifier=TEAM123456\n' >&2 ;;
+    esac
+    exit 0
+    ;;
+  --force) exit 0 ;;
+esac
+exit 1
+CS_EOF
+chmod +x "$SIGN_FAKE_BIN/codesign"
+SIGN_TARGET="$SIGN_DIR/librefang"
+: > "$SIGN_TARGET"
+
+for state in unsigned adhoc devid; do
+    SIGN_LOG="$SIGN_DIR/$state.log"
+    : > "$SIGN_LOG"
+    PATH="$SIGN_FAKE_BIN:$PATH" FAKE_CODESIGN_STATE=$state FAKE_CODESIGN_LOG=$SIGN_LOG \
+        INSTALLER_PATH="$INSTALLER_PATH" LIBREFANG_INSTALLER_SOURCE_ONLY=1 \
+        sh -c '. "$INSTALLER_PATH"; macos_ensure_signature "$1"' sh "$SIGN_TARGET" \
+        || fail "macos_ensure_signature should succeed for a $state binary"
+    if grep -q -- "--force --sign - $SIGN_TARGET" "$SIGN_LOG"; then
+        RESIGNED=yes
+    else
+        RESIGNED=no
+    fi
+    case "$state" in
+        devid) [ "$RESIGNED" = "no" ] || fail "a valid Developer ID signature must not be replaced by an ad-hoc one" ;;
+        *) [ "$RESIGNED" = "yes" ] || fail "a $state binary must be ad-hoc signed so Apple Silicon will run it" ;;
+    esac
+done
+pass "macos_ensure_signature keeps a Developer ID signature and ad-hoc signs unsigned or ad-hoc binaries"
+
+# A failing ad-hoc sign must reach the caller, which prints the manual-recovery hint.
+cat > "$SIGN_FAKE_BIN/codesign" <<'CS_EOF'
+#!/bin/sh
+case "$1" in
+  --verify) exit 1 ;;
+esac
+exit 1
+CS_EOF
+chmod +x "$SIGN_FAKE_BIN/codesign"
+if PATH="$SIGN_FAKE_BIN:$PATH" INSTALLER_PATH="$INSTALLER_PATH" LIBREFANG_INSTALLER_SOURCE_ONLY=1 \
+    sh -c '. "$INSTALLER_PATH"; macos_ensure_signature "$1"' sh "$SIGN_TARGET" 2>/dev/null; then
+    fail "macos_ensure_signature should report a failed ad-hoc sign"
+fi
+pass "macos_ensure_signature reports a failed ad-hoc sign"
+
 echo "All install.sh tests passed."

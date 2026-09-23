@@ -847,6 +847,10 @@ async fn run_agent_loop_streaming_inner(
             // Same resolution as the non-streaming loop.
             max_tokens: manifest.model.effective_max_tokens(),
             temperature: manifest.model.effective_temperature(),
+            // Typed, not smuggled through `extra_body` (#8290): each driver places these where its wire expects them, or drops them for a model that rejects them.
+            top_p: manifest.model.top_p,
+            frequency_penalty: manifest.model.frequency_penalty,
+            presence_penalty: manifest.model.presence_penalty,
             // Clone from pre-built snapshot (same rationale as non-streaming loop).
             system: Some(system_prompt_snapshot.clone()),
             thinking: manifest.thinking.clone(),

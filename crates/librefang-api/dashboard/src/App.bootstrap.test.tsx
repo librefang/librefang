@@ -118,7 +118,7 @@ describe("DashboardApp authed bootstrap", () => {
     // `/api/auth/dashboard-check` never echoes the username to a caller
     // either — the daemon's identity comes from the authenticated
     // `/api/authz/whoami` instead.
-    vi.mocked(getWhoami).mockResolvedValue({ name: "daemon-user" });
+    vi.mocked(getWhoami).mockResolvedValue({ name: "daemon-user", role: "admin" });
   });
 
   it("shows the daemon's username in the avatar after logging in", async () => {
@@ -141,13 +141,47 @@ describe("DashboardApp authed bootstrap", () => {
 
     await logIn();
 
-    // `roleLine` joins the auth mode and the hostname and is rendered by both
-    // `UserMenuPanel` sites, hence `getAllByText`. An empty hostname is dropped
-    // by the `.filter(Boolean)`, leaving the bare mode — the pre-fix rendering.
+    // The sidebar row joins the caller's role and the hostname.
+    // An empty hostname is dropped by the `.filter(Boolean)`, leaving the bare role.
     await waitFor(() =>
-      expect(screen.getAllByText("credentials · myhost").length).toBeGreaterThan(0),
+      expect(screen.getAllByText("admin · myhost").length).toBeGreaterThan(0),
     );
-    expect(screen.queryByText("credentials")).not.toBeInTheDocument();
+    expect(screen.queryByText("admin")).not.toBeInTheDocument();
+  });
+
+  // #8092: both panels used to build this line from the auth mode, so a `hybrid` deployment labelled every user `hybrid · myhost` — a fact about how the daemon accepts credentials, not about who is signed in.
+  // The role is the RBAC level `/api/authz/whoami` resolved for this credential.
+  it("shows the caller's role, not the auth mode, in both user panels", async () => {
+    vi.mocked(checkDashboardAuthMode).mockResolvedValue("hybrid");
+    render(<App />);
+
+    await logIn();
+
+    await waitFor(() =>
+      expect(screen.getAllByText("admin · myhost")).toHaveLength(1),
+    );
+
+    // Open the topbar avatar's menu: its `UserMenuPanel` header must match the sidebar row rather than disagree with it.
+    await userEvent.setup().click(screen.getByRole("button", { name: "nav.user_center" }));
+
+    await waitFor(() =>
+      expect(screen.getAllByText("admin · myhost")).toHaveLength(2),
+    );
+    expect(screen.queryByText(/hybrid/)).not.toBeInTheDocument();
+  });
+
+  // A rejected whoami leaves the role empty; the line must drop it rather than fall back to the auth mode.
+  it("falls back to the hostname alone when whoami cannot answer", async () => {
+    vi.mocked(checkDashboardAuthMode).mockResolvedValue("hybrid");
+    vi.mocked(getWhoami).mockRejectedValue(new Error("401"));
+    render(<App />);
+
+    await logIn();
+
+    await waitFor(() => expect(screen.getAllByText("myhost")).toHaveLength(1));
+    await userEvent.setup().click(screen.getByRole("button", { name: "nav.user_center" }));
+    await waitFor(() => expect(screen.getAllByText("myhost")).toHaveLength(2));
+    expect(screen.queryByText(/hybrid/)).not.toBeInTheDocument();
   });
 
   it("does not re-run the auth probe after a login succeeds", async () => {

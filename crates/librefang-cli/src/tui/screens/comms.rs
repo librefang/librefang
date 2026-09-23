@@ -69,6 +69,10 @@ pub struct CommsState {
     pub task_field: usize,
     // Status
     pub status_msg: String,
+    /// Whether `status_msg` holds a fetch failure rather than a send or task result.
+    ///
+    /// The tab polls, so a failure has to retire on the next successful load, but a send result must survive the refresh that the send itself triggers.
+    pub status_is_fetch_error: bool,
 }
 
 pub enum CommsAction {
@@ -108,6 +112,7 @@ impl CommsState {
             task_assign: String::new(),
             task_field: 0,
             status_msg: String::new(),
+            status_is_fetch_error: false,
         }
     }
 

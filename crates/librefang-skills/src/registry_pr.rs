@@ -417,20 +417,39 @@ fn validate_repo_slug(slug: &str) -> Result<(), SkillError> {
 /// `head`, so the same characters `validate_repo_slug` allows per segment are
 /// the ones allowed here.
 fn validate_owner(owner: &str) -> Result<(), SkillError> {
-    let ok = !owner.is_empty()
+    if is_valid_owner(owner) {
+        Ok(())
+    } else {
+        Err(SkillError::InvalidConfig(format!(
+            "Invalid skills.promotion.fork_owner '{owner}' (expected a GitHub login or org name)"
+        )))
+    }
+}
+
+/// Whether `owner` is a clean GitHub login or organisation name, safe to interpolate as one segment of an API path.
+///
+/// Shared by `skills.promotion.fork_owner` and `skills.promotion.release_org` (the marketplace release path), which land in the same position of a `/repos/{owner}/…` URL.
+pub(crate) fn is_valid_owner(owner: &str) -> bool {
+    !owner.is_empty()
         // A segment that is entirely dots (`.` / `..`) would be normalised out
         // of the API path this is interpolated into, silently retargeting the
         // request (#8179 review).
         && !owner.chars().all(|c| c == '.')
         && owner
             .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.');
-    if ok {
-        Ok(())
-    } else {
-        Err(SkillError::InvalidConfig(format!(
-            "Invalid skills.promotion.fork_owner '{owner}' (expected a GitHub login or org name)"
-        )))
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
+}
+
+/// Resolve `skills.promotion.api_base_url` to the REST API root every request is built from: trimmed, validated, without a trailing slash, and [`DEFAULT_GITHUB_API`] when unset or blank.
+///
+/// Shared by the promotion flow and the marketplace release path (`librefang skill publish`), so the two cannot disagree about which host a configured value names or which values are safe to send the token to (#8180).
+pub(crate) fn resolve_api_base(cfg: &RegistryPromotionConfig) -> Result<String, SkillError> {
+    match cfg.api_base_url.as_deref().map(str::trim) {
+        Some(url) if !url.is_empty() => {
+            validate_api_base_url(url)?;
+            Ok(url.trim_end_matches('/').to_string())
+        }
+        _ => Ok(DEFAULT_GITHUB_API.to_string()),
     }
 }
 
@@ -677,13 +696,7 @@ struct RegistryGithubClient {
 
 impl RegistryGithubClient {
     fn new(token: String, cfg: &RegistryPromotionConfig) -> Result<Self, SkillError> {
-        let api_base = match cfg.api_base_url.as_deref().map(str::trim) {
-            Some(url) if !url.is_empty() => {
-                validate_api_base_url(url)?;
-                url.trim_end_matches('/').to_string()
-            }
-            _ => DEFAULT_GITHUB_API.to_string(),
-        };
+        let api_base = resolve_api_base(cfg)?;
         let commit_identity = resolve_commit_identity(cfg);
         Ok(Self {
             // Local timeouts (not on the shared `client_builder` default, which
@@ -1193,6 +1206,8 @@ mod tests {
         let cfg = RegistryPromotionConfig {
             api_base_url: Some(server.uri()),
             fork_owner: Some("acme-bots".to_string()),
+            // Belongs to the release path (`skill publish`); set here only to prove it never leaks into a promotion request.
+            release_org: Some("acme-releases".to_string()),
             base_branch: Some("release".to_string()),
             head_branch_prefix: Some("promo".to_string()),
             commit_author_name: Some("LibreFang Bot".to_string()),
@@ -1208,6 +1223,11 @@ mod tests {
         assert!(
             !reqs.is_empty(),
             "no request reached the configured API base"
+        );
+        // release_org: the promotion flow targets `skills.registry_repo`, never the release organisation.
+        assert!(
+            reqs.iter().all(|r| !r.url.path().contains("acme-releases")),
+            "release_org leaked into a promotion request"
         );
         // fork_owner: the destination reaches the fork request itself. Without
         // `organization` GitHub forks into the token owner's account, and the

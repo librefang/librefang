@@ -313,6 +313,13 @@ librefang update --channel rc       # Use rc channel for this update
 librefang update --version v0.7.0   # Install a specific version
 ```
 
+**macOS privacy permissions:**
+
+macOS release binaries are signed with LibreFang's Developer ID certificate, so permissions you grant in System Settings → Privacy & Security (Full Disk Access, Automation) stay attached to `librefang` and `librefang-sidecar-telegram` across updates.
+Builds released before this change were signed ad hoc, which gave every release a new code identity and made macOS drop those grants on each update.
+The first update from an ad-hoc build to a Developer ID build changes the identity one last time: re-grant Full Disk Access and Automation once afterwards (remove the old `librefang` entry, add the updated binary from `~/.librefang/bin/`, then restart the daemon).
+Later updates keep the grants.
+
 ---
 
 ### librefang dashboard

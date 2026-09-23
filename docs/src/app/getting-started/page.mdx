@@ -68,6 +68,8 @@ Environment variables:
 - `LIBREFANG_VERSION` — specific version (default: latest)
 - `LIBREFANG_AUTO_START` — auto-start daemon (default: 1)
 
+On macOS the release binaries are Developer ID signed, so Full Disk Access and Automation grants survive updates; when upgrading from an older ad-hoc-signed build, re-grant them once (see [`librefang update`](/integrations/cli#librefang-update)).
+
 **Windows EXE (Manual)**
 
 If you prefer manual installation or the script doesn't work in your environment:

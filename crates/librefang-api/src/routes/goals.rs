@@ -27,6 +27,7 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::Json;
+use librefang_kernel::goal_runner::GoalRunStart;
 use librefang_types::agent::AgentId;
 use librefang_types::goal::GoalId;
 use std::collections::HashSet;
@@ -221,6 +222,14 @@ pub async fn resume_goal_run(
     start_or_resume(state, id, body, true).await
 }
 
+/// The 500 a start or resume answers when the goal's stored run state could not be read, or the kernel cannot drive a run yet (#8427).
+fn unreadable_run_state_response(id: &str) -> JsonResponse {
+    ApiErrorResponse::internal(format!(
+        "The run for goal '{id}' could not start: its stored state could not be read or the kernel is not ready. Any paused progress is kept; see the daemon log, then retry."
+    ))
+    .into_json_tuple()
+}
+
 /// Shared body of [`start_goal_run`] and [`resume_goal_run`].
 ///
 /// `require_paused` is the only difference between the two: the kernel
@@ -283,6 +292,15 @@ async fn start_or_resume(
         .filter(|run| run.phase == librefang_types::goal::GoalRunPhase::Paused);
 
     if require_paused && paused_run.is_none() {
+        // `goal_run_state` answers `None` for a paused run whose checkpoint the substrate could not read, because it has no other source for one (#8427).
+        // Rendering that as "no paused run, use /start" sends the operator away from a checkpoint that may well exist, so ask the checkpoint key directly and refuse with the same 500 a start gets over the same failure.
+        if let Err(e) = state.kernel.memory_substrate().structured_get(
+            goals_shared_agent_id(),
+            &librefang_kernel::goal_runner::goal_pause_key(goal_id),
+        ) {
+            tracing::warn!(goal_id = %id, error = %e, "Cannot resume goal run: its pause checkpoint could not be read");
+            return unreadable_run_state_response(&id);
+        }
         return (
             StatusCode::CONFLICT,
             Json(serde_json::json!({
@@ -409,15 +427,20 @@ async fn start_or_resume(
             evaluator_model,
         )
     };
-    if !started {
-        // #7785 review: the only way `start_goal_run` refuses is the goal
-        // vanishing between the read above and the runner's own reload —
-        // a delete racing this request. That is "the goal is gone", a 404,
-        // not the 500 an internal-fault response implies.
-        return ApiErrorResponse::not_found(format!(
-            "Goal '{id}' was deleted before its run could start"
-        ))
-        .into_json_tuple();
+    match started {
+        GoalRunStart::Started => {}
+        // #7785 review: the goal vanished between the read above and the
+        // runner's own reload — a delete racing this request. That is "the
+        // goal is gone", a 404, not the 500 an internal-fault response implies.
+        GoalRunStart::GoalNotFound => {
+            return ApiErrorResponse::not_found(format!(
+                "Goal '{id}' was deleted before its run could start"
+            ))
+            .into_json_tuple();
+        }
+        // The runner could not read the goal or its pause checkpoint, or the kernel cannot drive a run yet (#8427).
+        // Reporting that as a deleted goal sent the operator to re-create a goal that exists; the runner has logged the cause with the goal id, and has left any checkpoint in place for a retry.
+        GoalRunStart::Unavailable => return unreadable_run_state_response(&id),
     }
 
     // Flip the goal to in_progress so the dashboard reflects the active run.

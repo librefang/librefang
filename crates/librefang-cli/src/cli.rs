@@ -825,7 +825,7 @@ pub(crate) enum SkillCommands {
     Publish {
         /// Skill directory, skill.toml, SKILL.md, or package.json. Defaults to the current directory.
         path: Option<PathBuf>,
-        /// Target GitHub repo in owner/name form. Defaults to librefang-skills/<skill-name>.
+        /// Target GitHub repo in owner/name form. Defaults to <skills.promotion.release_org>/<skill-name>, i.e. librefang-skills/<skill-name> unless configured.
         #[arg(long)]
         repo: Option<String>,
         /// Release tag to create or update. Defaults to v<skill-version>.

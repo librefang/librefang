@@ -484,17 +484,35 @@ jobs:
             sdk/rust/librefang-sidecar
       - name: Sidecar — fmt, clippy, test, build
         working-directory: sdk/rust/librefang-sidecar-telegram
+        # `--locked` on every cargo call in this job: an unlocked call rewrites a stale Cargo.lock on disk, and the MSRV step below would then pass `--locked` against the rewritten file instead of the committed one (#8124).
         run: |
           cargo fmt --check
-          cargo clippy --all-targets -- -D warnings
-          cargo test
-          cargo build --release
+          cargo clippy --locked --all-targets -- -D warnings
+          cargo test --locked
+          cargo build --release --locked
+      - name: Sidecar + SDK — check at declared rust-version (locked)
+        # Both crates sit outside the kernel workspace, so the MSRV job never compiles them (#8124).
+        # The toolchain is read from each crate's own `rust-version`, so CI checks exactly what the manifest claims.
+        # `--locked` against the committed Cargo.lock keeps this deterministic: a fresh resolve under resolver v2 picks the newest dependencies regardless of the floor, and would turn this gate red whenever a transitive crate published a release.
+        run: |
+          set -euo pipefail
+          for dir in sdk/rust/librefang-sidecar sdk/rust/librefang-sidecar-telegram; do
+            msrv=$(sed -n 's/^rust-version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "$dir/Cargo.toml")
+            if [ -z "$msrv" ]; then
+              echo "::error file=$dir/Cargo.toml::no rust-version declared"
+              exit 1
+            fi
+            echo "::group::$dir at Rust $msrv"
+            rustup toolchain install "$msrv" --profile minimal --no-self-update
+            (cd "$dir" && cargo "+$msrv" check --locked --all-targets)
+            echo "::endgroup::"
+          done
       - name: Install cross
         run: cargo install cross --locked
       - name: Sidecar — cross build (aarch64-musl, sibling path dep)
         # Mirrors the release pipeline's cross step. Proves `cross` can mount
         # and resolve the out-of-workspace `../librefang-sidecar` path dep.
-        run: cross build --release --target aarch64-unknown-linux-musl --manifest-path sdk/rust/librefang-sidecar-telegram/Cargo.toml
+        run: cross build --release --locked --target aarch64-unknown-linux-musl --manifest-path sdk/rust/librefang-sidecar-telegram/Cargo.toml
 
   # ── Python SDK + sidecar adapter test suite ────────────────────────────────────
   # `sdk/python/tests/` holds ~1900 pytest cases covering the HTTP client and every stdlib-only sidecar channel adapter (slack, discord, telegram, mastodon, …), and until #6741 no workflow ran a single one of them — `grep -rn pytest .github/workflows/` came back empty.

@@ -1,0 +1,3 @@
+A binary built from a checkout now reports the commit it was actually built from, instead of the one the build script captured on its first run.
+`cargo:rerun-if-env-changed` covered only the CI-supplied SHAs, and a plain commit moves `HEAD` and the branch ref without touching a single file inside the package — so the script was never re-run and the stale id was baked into `librefang --version` and the status endpoints.
+Both `librefang-api` and `librefang-cli` now declare the refs git rewrites when the commit moves, asked of git through `rev-parse --git-path` so a linked worktree is covered as well as a normal checkout. (#8422) (@DaBlitzStein)

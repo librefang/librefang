@@ -87,7 +87,11 @@ pub(crate) fn upload_access_allowed(
     }
 }
 
-fn format_upload_limit(bytes: usize) -> String {
+/// Renders a byte limit for a translated error message (`api-error-file-too-large`).
+///
+/// `pub(super)` so the sibling identity-file handler in `files.rs` can reuse it
+/// instead of re-deriving the same "32 KiB" formatting.
+pub(super) fn format_upload_limit(bytes: usize) -> String {
     const KIB: usize = 1024;
     const MIB: usize = 1024 * KIB;
     if bytes >= MIB && bytes.is_multiple_of(MIB) {
