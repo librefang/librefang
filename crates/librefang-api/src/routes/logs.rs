@@ -348,6 +348,11 @@ mod tests {
             (AuditAction::AgentKill, "ok", "info"),
             (AuditAction::AgentKill, "error: agent not found", "error"),
             (AuditAction::AgentKill, "db_remove_failed", "error"),
+            (
+                AuditAction::AgentMessage,
+                "failed: no LLM provider configured — configure via dashboard settings",
+                "error",
+            ),
             (AuditAction::ConfigChange, "saved_reload_failed", "error"),
             (
                 AuditAction::AgentMessage,

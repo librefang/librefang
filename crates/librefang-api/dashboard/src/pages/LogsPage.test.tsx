@@ -174,6 +174,7 @@ describe("LogsPage", () => {
     ["AgentKill", "ok", "info"],
     ["AgentKill", "error: agent not found", "error"],
     ["AgentKill", "db_remove_failed", "error"],
+    ["AgentMessage", "failed: no LLM provider configured — configure via dashboard settings", "error"],
     ["ConfigChange", "saved_reload_failed", "error"],
     ["AgentMessage", "failed after 3 attempt(s): timeout", "error"],
     ["ToolInvoke", "remote_error: 502", "error"],
