@@ -69,6 +69,21 @@ describe("AgentModelParamFields", () => {
     ).toEqual({ top_p: 0.9 });
   });
 
+  it("routes a local-model sampler rung to its own key", () => {
+    // Three new rows beside the penalties are exactly where a copy-pasted handler writes the neighbour's key.
+    const { onChange } = renderFields();
+
+    within(group("repeat_penalty")).getByRole("button", { name: "1.1" }).click();
+    within(group("top_k")).getByRole("button", { name: "40" }).click();
+    within(group("min_p")).getByRole("button", { name: "0.05" }).click();
+
+    expect(onChange.mock.calls).toEqual([
+      ["repeat_penalty", "1.1"],
+      ["top_k", "40"],
+      ["min_p", "0.05"],
+    ]);
+  });
+
   it("gives every parameter its own control", () => {
     renderFields();
     for (const param of MODEL_NUMERIC_FIELDS) {
@@ -88,6 +103,9 @@ describe("AgentModelParamFields", () => {
       "top_p",
       "frequency_penalty",
       "presence_penalty",
+      "top_k",
+      "min_p",
+      "repeat_penalty",
       "context_window",
       "max_output_tokens",
     ] as const) {

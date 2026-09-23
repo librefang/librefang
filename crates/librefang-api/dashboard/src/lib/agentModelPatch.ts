@@ -25,13 +25,13 @@ import {
  *
  * What a field may hold lives in `MODEL_PARAM_RANGES` next to the control that renders it, and
  * `isValidParamValue` is the one function that answers it — the same answer the create form and the
- * model settings already get. A table here would be a second opinion about the same seven fields,
+ * model settings already get. A table here would be a second opinion about the same fields,
  * free to drift from the `min`/`max`/`step` the operator's own input box enforces.
  *
  * The shared bounds are what `patch_agent_config` validates on `PatchAgentConfigRequest`
- * (`routes/agents/config.rs`): a range table covers the four float fields, and the integer ones are
- * rejected at zero. `max_tokens` is the one with a real ceiling, because the route types it `u32` —
- * above that serde answers 400. Sending a value outside them is a 400, so catching it here is the
+ * (`routes/agents/config.rs`): a range table covers the float fields, and the integer ones are
+ * rejected at zero. `max_tokens` and `top_k` are the ones with a real ceiling, because the route types them `u32` —
+ * above that serde rejects the body. Sending a value outside them is a 400, so catching it here is the
  * difference between a disabled Save and a failed request.
  */
 export type ModelNumericField = ModelParamName;
@@ -47,6 +47,9 @@ export interface PersistedModel {
   top_p?: number | null;
   frequency_penalty?: number | null;
   presence_penalty?: number | null;
+  top_k?: number | null;
+  min_p?: number | null;
+  repeat_penalty?: number | null;
   context_window?: number | null;
   max_output_tokens?: number | null;
 }
@@ -60,6 +63,9 @@ export interface ModelDraft {
   top_p: string;
   frequency_penalty: string;
   presence_penalty: string;
+  top_k: string;
+  min_p: string;
+  repeat_penalty: string;
   context_window: string;
   max_output_tokens: string;
 }
@@ -73,6 +79,9 @@ export interface ModelConfigPatch {
   top_p?: number | null;
   frequency_penalty?: number | null;
   presence_penalty?: number | null;
+  top_k?: number | null;
+  min_p?: number | null;
+  repeat_penalty?: number | null;
   context_window?: number | null;
   max_output_tokens?: number | null;
 }

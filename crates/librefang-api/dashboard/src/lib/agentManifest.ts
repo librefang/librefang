@@ -43,6 +43,9 @@ export interface ManifestFormState {
     top_p: string;
     frequency_penalty: string;
     presence_penalty: string;
+    top_k: string;
+    min_p: string;
+    repeat_penalty: string;
     // Endpoint limits rather than sampling preferences: what the model can
     // read and emit, not how it should sound.
     context_window: string;
@@ -217,6 +220,9 @@ export const emptyManifestForm = (): ManifestFormState => ({
     top_p: "",
     frequency_penalty: "",
     presence_penalty: "",
+    top_k: "",
+    min_p: "",
+    repeat_penalty: "",
     context_window: "",
     max_output_tokens: "",
     api_key_env: "",
@@ -380,6 +386,9 @@ const FORM_MODEL_KEYS = new Set([
   "top_p",
   "frequency_penalty",
   "presence_penalty",
+  "top_k",
+  "min_p",
+  "repeat_penalty",
   "context_window",
   "max_output_tokens",
   "api_key_env",
@@ -703,6 +712,9 @@ export const serializeManifestForm = (
   writeNumberScalar(modelBody, "top_p", parseFloatish(form.model.top_p));
   writeNumberScalar(modelBody, "frequency_penalty", parseSignedFloat(form.model.frequency_penalty));
   writeNumberScalar(modelBody, "presence_penalty", parseSignedFloat(form.model.presence_penalty));
+  writeNumberScalar(modelBody, "top_k", parseInteger(form.model.top_k));
+  writeNumberScalar(modelBody, "min_p", parseFloatish(form.model.min_p));
+  writeNumberScalar(modelBody, "repeat_penalty", parseFloatish(form.model.repeat_penalty));
   writeNumberScalar(modelBody, "context_window", parseInteger(form.model.context_window));
   writeNumberScalar(modelBody, "max_output_tokens", parseInteger(form.model.max_output_tokens));
   writeStringScalar(modelBody, "api_key_env", form.model.api_key_env.trim());
@@ -1261,6 +1273,9 @@ export const parseManifestToml = (toml: string): ParseResult | ParseError => {
   form.model.top_p = asNumberString(modelTable.top_p);
   form.model.frequency_penalty = asNumberString(modelTable.frequency_penalty);
   form.model.presence_penalty = asNumberString(modelTable.presence_penalty);
+  form.model.top_k = asNumberString(modelTable.top_k);
+  form.model.min_p = asNumberString(modelTable.min_p);
+  form.model.repeat_penalty = asNumberString(modelTable.repeat_penalty);
   form.model.context_window = asNumberString(modelTable.context_window);
   form.model.max_output_tokens = asNumberString(modelTable.max_output_tokens);
   form.model.api_key_env = asString(modelTable.api_key_env);
