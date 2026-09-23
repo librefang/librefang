@@ -2,6 +2,7 @@
 
 use crate::tui::theme;
 use crate::tui::widgets;
+use librefang_types::agent::SessionMode;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
@@ -108,6 +109,164 @@ pub fn run_progress_label(run: &WorkflowRun) -> String {
     format!("{} {}/{}", bar, done, total)
 }
 
+// ── Step editor ─────────────────────────────────────────────────────────────
+
+/// Which of the three routing keys a drafted step binds its agent through.
+///
+/// `POST /api/workflows` requires exactly one of `agent_id`, `agent_name` and `agent_type` per step and rejects a step carrying two, so the editor holds the choice as one value rather than three optional fields that could all be set at once.
+/// The cycle order is the order the keys are documented in: id, name, type.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum StepAgentSource {
+    /// A concrete running agent, by UUID.
+    Id,
+    /// An agent by its name. The default, because it is the one binding an operator can type without looking anything up.
+    #[default]
+    Name,
+    /// An agent template; the kernel spawns one when nothing of that type is running.
+    Type,
+}
+
+impl StepAgentSource {
+    /// The step key this source serializes under.
+    pub fn key(self) -> &'static str {
+        match self {
+            StepAgentSource::Id => "agent_id",
+            StepAgentSource::Name => "agent_name",
+            StepAgentSource::Type => "agent_type",
+        }
+    }
+
+    fn next(self) -> Self {
+        match self {
+            StepAgentSource::Id => StepAgentSource::Name,
+            StepAgentSource::Name => StepAgentSource::Type,
+            StepAgentSource::Type => StepAgentSource::Id,
+        }
+    }
+
+    fn prev(self) -> Self {
+        match self {
+            StepAgentSource::Id => StepAgentSource::Type,
+            StepAgentSource::Name => StepAgentSource::Id,
+            StepAgentSource::Type => StepAgentSource::Name,
+        }
+    }
+
+    fn label(self) -> String {
+        crate::i18n::t(match self {
+            StepAgentSource::Id => "tui-workflows-source-id",
+            StepAgentSource::Name => "tui-workflows-source-name",
+            StepAgentSource::Type => "tui-workflows-source-type",
+        })
+    }
+
+    fn placeholder(self) -> String {
+        crate::i18n::t(match self {
+            StepAgentSource::Id => "tui-workflows-placeholder-agent-id",
+            StepAgentSource::Name => "tui-workflows-placeholder-agent-name",
+            StepAgentSource::Type => "tui-workflows-placeholder-agent-type",
+        })
+    }
+}
+
+/// One workflow step as the operator is authoring it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct WorkflowStepDraft {
+    pub name: String,
+    pub source: StepAgentSource,
+    /// The id, name or type the step binds to — which one is `source`.
+    pub agent: String,
+    pub prompt: String,
+    pub session_mode: SessionMode,
+}
+
+impl WorkflowStepDraft {
+    /// The name the step is submitted under: what was typed, or `step-<n>` (1-based) when the field was left blank.
+    ///
+    /// The API would otherwise name every blank step `step`, and step names are what `depends_on` and the run output refer to, so two blank steps would be indistinguishable.
+    fn effective_name(&self, index: usize) -> String {
+        let typed = self.name.trim();
+        if typed.is_empty() {
+            format!("step-{}", index + 1)
+        } else {
+            typed.to_string()
+        }
+    }
+
+    /// The step object `POST /api/workflows` parses.
+    ///
+    /// Exactly one routing key is written, the one `source` names.
+    /// `session_mode` is written only for `New`: `Persistent` is what an absent key already resolves to, and leaving it out keeps the agent manifest's own `session_mode` in charge rather than overriding it with the default.
+    pub fn to_json(&self, index: usize) -> serde_json::Value {
+        let mut step = serde_json::Map::new();
+        step.insert("name".to_string(), self.effective_name(index).into());
+        step.insert(self.source.key().to_string(), self.agent.trim().into());
+        step.insert("prompt".to_string(), self.prompt.clone().into());
+        if self.session_mode == SessionMode::New {
+            step.insert(
+                "session_mode".to_string(),
+                serde_json::to_value(SessionMode::New).unwrap_or_default(),
+            );
+        }
+        serde_json::Value::Object(step)
+    }
+}
+
+/// Where keystrokes go on the steps page of the create wizard.
+///
+/// `List` is the step list itself, and is the only stop where `a` and `d` add and delete steps: every other stop is either a text field, where those letters are text, or a selector.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StepEditorFocus {
+    List,
+    Name,
+    Source,
+    Agent,
+    Prompt,
+    SessionMode,
+}
+
+impl StepEditorFocus {
+    const ORDER: [StepEditorFocus; 6] = [
+        StepEditorFocus::List,
+        StepEditorFocus::Name,
+        StepEditorFocus::Source,
+        StepEditorFocus::Agent,
+        StepEditorFocus::Prompt,
+        StepEditorFocus::SessionMode,
+    ];
+
+    fn position(self) -> usize {
+        Self::ORDER.iter().position(|f| *f == self).unwrap_or(0)
+    }
+
+    fn next(self) -> Self {
+        Self::ORDER[(self.position() + 1) % Self::ORDER.len()]
+    }
+
+    fn prev(self) -> Self {
+        Self::ORDER[(self.position() + Self::ORDER.len() - 1) % Self::ORDER.len()]
+    }
+
+    fn is_text(self) -> bool {
+        matches!(
+            self,
+            StepEditorFocus::Name | StepEditorFocus::Agent | StepEditorFocus::Prompt
+        )
+    }
+
+    fn is_selector(self) -> bool {
+        matches!(self, StepEditorFocus::Source | StepEditorFocus::SessionMode)
+    }
+}
+
+/// Why the drafted steps cannot be submitted yet. Indices are 0-based.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum StepDraftError {
+    NoSteps,
+    MissingAgent(usize),
+    MissingPrompt(usize),
+}
+
 // ── State ───────────────────────────────────────────────────────────────────
 
 #[derive(Clone, PartialEq, Eq)]
@@ -156,10 +315,13 @@ pub struct WorkflowState {
     pub runs: Vec<WorkflowRun>,
     pub runs_list_state: ListState,
     // Create wizard
-    pub create_step: usize, // 0=name, 1=desc, 2=steps_json, 3=review
+    pub create_step: usize, // 0=name, 1=desc, 2=steps, 3=review
     pub create_name: String,
     pub create_desc: String,
-    pub create_steps: String,
+    pub create_steps: Vec<WorkflowStepDraft>,
+    /// The step the editor has selected.
+    pub step_cursor: usize,
+    pub step_focus: StepEditorFocus,
     // Run — declared parameters fetched from the workflow's `input_schema`
     pub run_params: Vec<WorkflowParamField>,
     pub param_cursor: usize,
@@ -193,6 +355,7 @@ pub enum WorkflowAction {
     CreateWorkflow {
         name: String,
         description: String,
+        /// The serialized steps array, built by [`WorkflowState::build_create_steps`] and so always a JSON array.
         steps_json: String,
     },
     RunWorkflow {
@@ -213,7 +376,9 @@ impl WorkflowState {
             create_step: 0,
             create_name: String::new(),
             create_desc: String::new(),
-            create_steps: String::new(),
+            create_steps: Vec::new(),
+            step_cursor: 0,
+            step_focus: StepEditorFocus::Name,
             run_params: Vec::new(),
             param_cursor: 0,
             run_input: String::new(),
@@ -290,7 +455,11 @@ impl WorkflowState {
                         self.create_step = 0;
                         self.create_name.clear();
                         self.create_desc.clear();
-                        self.create_steps.clear();
+                        // One blank step to start from, with the cursor in its name field, so the steps page takes typing the way the name and description pages do.
+                        self.create_steps = vec![WorkflowStepDraft::default()];
+                        self.step_cursor = 0;
+                        self.step_focus = StepEditorFocus::Name;
+                        self.status_msg.clear();
                         self.sub = WorkflowSubScreen::Create;
                     }
                 }
@@ -351,6 +520,7 @@ impl WorkflowState {
     fn handle_create(&mut self, key: KeyEvent) -> WorkflowAction {
         match key.code {
             KeyCode::Esc => {
+                self.status_msg.clear();
                 if self.create_step == 0 {
                     self.sub = WorkflowSubScreen::List;
                 } else {
@@ -358,23 +528,29 @@ impl WorkflowState {
                 }
             }
             KeyCode::Enter => {
+                // The steps are checked when leaving their page, so the error lands where it can be fixed, and again at submit, which is the gate.
+                if self.create_step >= 2 {
+                    if let Err(e) = self.build_create_steps() {
+                        self.report_step_error(e);
+                        return WorkflowAction::Continue;
+                    }
+                }
                 if self.create_step < 3 {
                     self.create_step += 1;
-                } else {
-                    // Submit
+                } else if let Ok(steps) = self.build_create_steps() {
                     let action = WorkflowAction::CreateWorkflow {
                         name: self.create_name.clone(),
                         description: self.create_desc.clone(),
-                        steps_json: self.create_steps.clone(),
+                        steps_json: steps.to_string(),
                     };
                     self.sub = WorkflowSubScreen::List;
                     return action;
                 }
             }
+            _ if self.create_step == 2 => self.handle_step_editor(key),
             KeyCode::Char(c) => match self.create_step {
                 0 => self.create_name.push(c),
                 1 => self.create_desc.push(c),
-                2 => self.create_steps.push(c),
                 _ => {}
             },
             KeyCode::Backspace => match self.create_step {
@@ -384,14 +560,160 @@ impl WorkflowState {
                 1 => {
                     self.create_desc.pop();
                 }
-                2 => {
-                    self.create_steps.pop();
-                }
                 _ => {}
             },
             _ => {}
         }
         WorkflowAction::Continue
+    }
+
+    /// Keys on the steps page other than Enter and Esc, which the wizard handles.
+    fn handle_step_editor(&mut self, key: KeyEvent) {
+        if self.create_steps.is_empty() {
+            // Nothing to put a field cursor on; only adding a step makes sense.
+            self.step_focus = StepEditorFocus::List;
+        }
+        let total = self.create_steps.len();
+        let back_tab = key.code == KeyCode::BackTab
+            || (key.code == KeyCode::Tab && key.modifiers.contains(KeyModifiers::SHIFT));
+        match key.code {
+            _ if back_tab && total > 0 => {
+                self.step_focus = self.step_focus.prev();
+            }
+            KeyCode::Tab | KeyCode::BackTab if total == 0 => {}
+            KeyCode::Tab => {
+                self.step_focus = self.step_focus.next();
+            }
+            KeyCode::Up if total > 0 => {
+                self.step_cursor = if self.step_cursor == 0 {
+                    total - 1
+                } else {
+                    self.step_cursor - 1
+                };
+            }
+            KeyCode::Down if total > 0 => {
+                self.step_cursor = (self.step_cursor + 1) % total;
+            }
+            KeyCode::Char('a') if self.step_focus == StepEditorFocus::List => {
+                let at = if total == 0 { 0 } else { self.step_cursor + 1 };
+                self.create_steps.insert(at, WorkflowStepDraft::default());
+                self.step_cursor = at;
+                self.step_focus = StepEditorFocus::Name;
+                self.status_msg.clear();
+            }
+            KeyCode::Char('d') if self.step_focus == StepEditorFocus::List && total > 0 => {
+                self.create_steps.remove(self.step_cursor);
+                self.step_cursor = self
+                    .step_cursor
+                    .min(self.create_steps.len().saturating_sub(1));
+                self.status_msg.clear();
+            }
+            KeyCode::Char(' ') | KeyCode::Left | KeyCode::Right
+                if self.step_focus.is_selector() =>
+            {
+                let backwards = key.code == KeyCode::Left;
+                let focus = self.step_focus;
+                if let Some(step) = self.create_steps.get_mut(self.step_cursor) {
+                    match focus {
+                        StepEditorFocus::Source => {
+                            step.source = if backwards {
+                                step.source.prev()
+                            } else {
+                                step.source.next()
+                            };
+                        }
+                        StepEditorFocus::SessionMode => {
+                            // Two values, so forwards and backwards are the same flip.
+                            step.session_mode = match step.session_mode {
+                                SessionMode::Persistent => SessionMode::New,
+                                SessionMode::New => SessionMode::Persistent,
+                            };
+                        }
+                        _ => {}
+                    }
+                    self.status_msg.clear();
+                }
+            }
+            KeyCode::Char(c) if self.step_focus.is_text() => {
+                if let Some(field) = self.focused_step_text_mut() {
+                    field.push(c);
+                    self.status_msg.clear();
+                }
+            }
+            KeyCode::Backspace if self.step_focus.is_text() => {
+                if let Some(field) = self.focused_step_text_mut() {
+                    field.pop();
+                    self.status_msg.clear();
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn focused_step_text_mut(&mut self) -> Option<&mut String> {
+        let focus = self.step_focus;
+        let step = self.create_steps.get_mut(self.step_cursor)?;
+        match focus {
+            StepEditorFocus::Name => Some(&mut step.name),
+            StepEditorFocus::Agent => Some(&mut step.agent),
+            StepEditorFocus::Prompt => Some(&mut step.prompt),
+            _ => None,
+        }
+    }
+
+    /// Serialize the drafted steps into the array `POST /api/workflows` reads from `steps`.
+    ///
+    /// Refuses, naming the first offending step, when there are no steps or a step has a blank agent value or prompt.
+    /// The API would reject a blank agent value too, but only after the wizard has closed; a blank prompt it would silently replace with `{{input}}`, which is not what an operator who left the field empty by mistake asked for.
+    pub fn build_create_steps(&self) -> Result<serde_json::Value, StepDraftError> {
+        if self.create_steps.is_empty() {
+            return Err(StepDraftError::NoSteps);
+        }
+        for (i, step) in self.create_steps.iter().enumerate() {
+            if step.agent.trim().is_empty() {
+                return Err(StepDraftError::MissingAgent(i));
+            }
+            if step.prompt.trim().is_empty() {
+                return Err(StepDraftError::MissingPrompt(i));
+            }
+        }
+        Ok(serde_json::Value::Array(
+            self.create_steps
+                .iter()
+                .enumerate()
+                .map(|(i, step)| step.to_json(i))
+                .collect(),
+        ))
+    }
+
+    /// Put the wizard on the steps page with the offending field focused and the reason on the status line.
+    fn report_step_error(&mut self, error: StepDraftError) {
+        self.create_step = 2;
+        self.status_msg = match error {
+            StepDraftError::NoSteps => {
+                self.step_focus = StepEditorFocus::List;
+                crate::i18n::t("tui-workflows-steps-none")
+            }
+            StepDraftError::MissingAgent(i) => {
+                self.step_cursor = i;
+                self.step_focus = StepEditorFocus::Agent;
+                crate::i18n::t_args(
+                    "tui-workflows-step-agent-required",
+                    &[
+                        ("step", &(i + 1).to_string()),
+                        ("source", &self.create_steps[i].source.label()),
+                    ],
+                )
+            }
+            StepDraftError::MissingPrompt(i) => {
+                self.step_cursor = i;
+                self.step_focus = StepEditorFocus::Prompt;
+                crate::i18n::t_args(
+                    "tui-workflows-step-prompt-required",
+                    &[("step", &(i + 1).to_string())],
+                )
+            }
+        };
     }
 
     fn handle_run_input(&mut self, key: KeyEvent) -> WorkflowAction {
@@ -774,12 +1096,29 @@ fn draw_create(f: &mut Frame, area: Rect, state: &WorkflowState) {
     ));
     f.render_widget(Paragraph::new(Line::from(step_line)), chunks[2]);
 
+    if state.create_step == 2 {
+        // The step editor needs every row between the progress line and the hint bar.
+        let body = Rect {
+            x: area.x,
+            y: chunks[4].y,
+            width: area.width,
+            height: chunks[8].y.saturating_sub(chunks[4].y),
+        };
+        draw_step_editor(f, body, state);
+        let hints = match state.step_focus {
+            _ if state.create_steps.is_empty() => "tui-workflows-hints-create-steps-list",
+            StepEditorFocus::List => "tui-workflows-hints-create-steps-list",
+            focus if focus.is_selector() => "tui-workflows-hints-create-steps-select",
+            _ => "tui-workflows-hints-create-steps-text",
+        };
+        f.render_widget(widgets::hint_bar(&crate::i18n::t(hints)), chunks[8]);
+        return;
+    }
+
     let label_name = crate::i18n::t("tui-workflows-label-name");
     let placeholder_name = crate::i18n::t("tui-workflows-placeholder-name");
     let label_desc = crate::i18n::t("tui-workflows-label-desc");
     let placeholder_desc = crate::i18n::t("tui-workflows-placeholder-desc");
-    let label_steps = crate::i18n::t("tui-workflows-label-steps");
-    let placeholder_steps = crate::i18n::t("tui-workflows-placeholder-steps");
     let label_review = crate::i18n::t("tui-workflows-label-review");
 
     let (label, value, placeholder) = match state.create_step {
@@ -792,11 +1131,6 @@ fn draw_create(f: &mut Frame, area: Rect, state: &WorkflowState) {
             label_desc.as_str(),
             &state.create_desc,
             placeholder_desc.as_str(),
-        ),
-        2 => (
-            label_steps.as_str(),
-            &state.create_steps,
-            placeholder_steps.as_str(),
         ),
         _ => (label_review.as_str(), &state.create_name, ""),
     };
@@ -851,27 +1185,18 @@ fn draw_create(f: &mut Frame, area: Rect, state: &WorkflowState) {
                     ),
                     Span::styled(&state.create_desc, Style::default().fg(theme::TEXT_PRIMARY)),
                 ]),
+                Line::from(vec![
+                    Span::styled(
+                        crate::i18n::t("tui-workflows-review-steps"),
+                        Style::default().fg(theme::TEXT_SECONDARY),
+                    ),
+                    Span::styled(
+                        state.create_steps.len().to_string(),
+                        Style::default().fg(theme::YELLOW),
+                    ),
+                ]),
             ]),
-            chunks[6],
-        );
-    }
-
-    // The steps field is authored as one raw JSON blob, so the routing keys a
-    // step may carry are not discoverable from any control (#7724).
-    // `agent_type` in particular has no other mention on this screen: the
-    // placeholder can only show one binding at a time, and it shows
-    // `agent_name`.
-    if state.create_step == 2 {
-        f.render_widget(
-            Paragraph::new(Line::from(vec![
-                Span::raw("  "),
-                Span::styled(
-                    crate::i18n::t("tui-workflows-hint-steps"),
-                    Style::default().fg(theme::TEXT_TERTIARY),
-                ),
-            ]))
-            .wrap(Wrap { trim: true }),
-            chunks[7],
+            chunks[6].union(chunks[7]),
         );
     }
 
@@ -881,6 +1206,199 @@ fn draw_create(f: &mut Frame, area: Rect, state: &WorkflowState) {
         crate::i18n::t("tui-workflows-hints-create-next")
     };
     f.render_widget(widgets::hint_bar(&hint_text), chunks[8]);
+}
+
+/// The steps page of the create wizard: the step list, the selected step's fields, and whatever stopped the last Enter.
+fn draw_step_editor(f: &mut Frame, area: Rect, state: &WorkflowState) {
+    const MAX_LIST_ROWS: usize = 6;
+    let list_rows = state.create_steps.len().clamp(1, MAX_LIST_ROWS);
+    let chunks = Layout::vertical([
+        Constraint::Length(1),                // label
+        Constraint::Length(list_rows as u16), // step list
+        Constraint::Length(1),                // spacer
+        Constraint::Length(5),                // fields of the selected step
+        Constraint::Length(1),                // spacer
+        Constraint::Length(1),                // status
+        Constraint::Min(0),                   // routing-key explanation
+    ])
+    .split(area);
+
+    let list_focused = state.step_focus == StepEditorFocus::List || state.create_steps.is_empty();
+    f.render_widget(
+        Paragraph::new(Line::from(vec![Span::styled(
+            format!("  {}", crate::i18n::t("tui-workflows-label-steps")),
+            if list_focused {
+                Style::default()
+                    .fg(theme::ACCENT)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(theme::TEXT_PRIMARY)
+            },
+        )])),
+        chunks[0],
+    );
+
+    if state.create_steps.is_empty() {
+        f.render_widget(
+            Paragraph::new(Span::styled(
+                format!("    {}", crate::i18n::t("tui-workflows-steps-empty")),
+                theme::dim_style(),
+            )),
+            chunks[1],
+        );
+    } else {
+        // Scroll just far enough to keep the selected step on screen.
+        let first = state.step_cursor.saturating_sub(list_rows - 1);
+        let lines: Vec<Line> = state
+            .create_steps
+            .iter()
+            .enumerate()
+            .skip(first)
+            .take(list_rows)
+            .map(|(i, step)| {
+                let selected = i == state.step_cursor;
+                let marker = if selected { "\u{25b8}" } else { " " };
+                let name_style = if selected && list_focused {
+                    Style::default()
+                        .fg(theme::ACCENT)
+                        .add_modifier(Modifier::BOLD)
+                } else if selected {
+                    Style::default().fg(theme::CYAN)
+                } else {
+                    Style::default().fg(theme::TEXT_SECONDARY)
+                };
+                let mut spans = vec![
+                    Span::styled(format!("  {} {:>2}. ", marker, i + 1), name_style),
+                    Span::styled(
+                        format!("{:<20}", widgets::truncate(&step.effective_name(i), 19)),
+                        name_style,
+                    ),
+                    Span::styled(
+                        format!(
+                            " {} {}",
+                            step.source.label(),
+                            widgets::truncate(step.agent.trim(), 24)
+                        ),
+                        Style::default().fg(theme::TEXT_PRIMARY),
+                    ),
+                ];
+                if step.session_mode == SessionMode::New {
+                    spans.push(Span::styled(
+                        format!(
+                            " {} {}",
+                            '\u{00b7}',
+                            crate::i18n::t("tui-workflows-session-new")
+                        ),
+                        Style::default().fg(theme::YELLOW),
+                    ));
+                }
+                Line::from(spans)
+            })
+            .collect();
+        f.render_widget(Paragraph::new(lines), chunks[1]);
+    }
+
+    if let Some(step) = state.create_steps.get(state.step_cursor) {
+        let session_label = crate::i18n::t(match step.session_mode {
+            SessionMode::Persistent => "tui-workflows-session-persistent",
+            SessionMode::New => "tui-workflows-session-new",
+        });
+        let fields = [
+            (
+                StepEditorFocus::Name,
+                crate::i18n::t("tui-workflows-step-field-name"),
+                step.name.clone(),
+                step.effective_name(state.step_cursor),
+            ),
+            (
+                StepEditorFocus::Source,
+                crate::i18n::t("tui-workflows-step-field-source"),
+                step.source.label(),
+                String::new(),
+            ),
+            (
+                StepEditorFocus::Agent,
+                step.source.label(),
+                step.agent.clone(),
+                step.source.placeholder(),
+            ),
+            (
+                StepEditorFocus::Prompt,
+                crate::i18n::t("tui-workflows-step-field-prompt"),
+                step.prompt.clone(),
+                crate::i18n::t("tui-workflows-placeholder-prompt"),
+            ),
+            (
+                StepEditorFocus::SessionMode,
+                crate::i18n::t("tui-workflows-step-field-session"),
+                session_label,
+                String::new(),
+            ),
+        ];
+        let lines: Vec<Line> = fields
+            .into_iter()
+            .map(|(focus, label, value, placeholder)| {
+                let focused = state.step_focus == focus;
+                let label_style = if focused {
+                    Style::default()
+                        .fg(theme::ACCENT)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(theme::TEXT_SECONDARY)
+                };
+                let mut spans = vec![Span::styled(
+                    format!("  {} {:<16}", if focused { "\u{276f}" } else { " " }, label),
+                    label_style,
+                )];
+                if focus.is_selector() {
+                    spans.push(Span::styled(
+                        format!("{} {} {}", '\u{2039}', value, '\u{203a}'),
+                        if focused {
+                            theme::input_style()
+                        } else {
+                            Style::default().fg(theme::TEXT_PRIMARY)
+                        },
+                    ));
+                } else if value.is_empty() {
+                    spans.push(Span::styled(placeholder, theme::dim_style()));
+                } else {
+                    spans.push(Span::styled(value, theme::input_style()));
+                }
+                if focused && focus.is_text() {
+                    spans.push(Span::styled(
+                        "\u{2588}",
+                        Style::default()
+                            .fg(theme::GREEN)
+                            .add_modifier(Modifier::SLOW_BLINK),
+                    ));
+                }
+                Line::from(spans)
+            })
+            .collect();
+        f.render_widget(Paragraph::new(lines), chunks[3]);
+    }
+
+    if !state.status_msg.is_empty() {
+        f.render_widget(
+            Paragraph::new(Span::styled(
+                format!("  {}", state.status_msg),
+                Style::default().fg(theme::YELLOW),
+            )),
+            chunks[5],
+        );
+    }
+
+    f.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::raw("  "),
+            Span::styled(
+                crate::i18n::t("tui-workflows-hint-steps"),
+                Style::default().fg(theme::TEXT_TERTIARY),
+            ),
+        ]))
+        .wrap(Wrap { trim: true }),
+        chunks[6],
+    );
 }
 
 fn draw_run_input(f: &mut Frame, area: Rect, state: &WorkflowState) {
@@ -1410,5 +1928,269 @@ mod step_progress_tests {
             state.tick();
         }
         assert!(!state.should_poll());
+    }
+}
+
+#[cfg(test)]
+mod step_editor_tests {
+    use super::*;
+    use ratatui::backend::TestBackend;
+    use ratatui::crossterm::event::{KeyEvent, KeyModifiers};
+    use ratatui::Terminal;
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    fn type_text(s: &mut WorkflowState, text: &str) {
+        for c in text.chars() {
+            s.handle_key(key(KeyCode::Char(c)));
+        }
+    }
+
+    /// The create wizard opened from the list and advanced to the steps page, the way an operator gets there.
+    fn steps_page() -> WorkflowState {
+        let mut s = WorkflowState::new();
+        s.list_state.select(Some(0)); // no workflows, so row 0 is "Create new"
+        s.handle_key(key(KeyCode::Enter));
+        type_text(&mut s, "nightly");
+        s.handle_key(key(KeyCode::Enter));
+        s.handle_key(key(KeyCode::Enter));
+        assert_eq!(s.create_step, 2, "must be on the steps page");
+        s
+    }
+
+    fn draft(source: StepAgentSource, agent: &str) -> WorkflowStepDraft {
+        WorkflowStepDraft {
+            name: "draft".to_string(),
+            source,
+            agent: agent.to_string(),
+            prompt: "{{input}}".to_string(),
+            session_mode: SessionMode::Persistent,
+        }
+    }
+
+    /// Enter on the review page, returning the steps array the action carries.
+    fn submit(s: &mut WorkflowState) -> serde_json::Value {
+        s.create_step = 3;
+        match s.handle_key(key(KeyCode::Enter)) {
+            WorkflowAction::CreateWorkflow { steps_json, .. } => {
+                serde_json::from_str(&steps_json).expect("steps_json must be JSON")
+            }
+            _ => panic!(
+                "Enter on the review page must submit; status: {}",
+                s.status_msg
+            ),
+        }
+    }
+
+    #[test]
+    fn each_agent_source_serializes_to_its_single_routing_key() {
+        for (source, key_name) in [
+            (StepAgentSource::Id, "agent_id"),
+            (StepAgentSource::Name, "agent_name"),
+            (StepAgentSource::Type, "agent_type"),
+        ] {
+            let step = draft(source, "  writer  ").to_json(0);
+            let obj = step.as_object().unwrap();
+            assert_eq!(
+                obj[key_name], "writer",
+                "{key_name} carries the trimmed value"
+            );
+            let routing: Vec<&str> = ["agent_id", "agent_name", "agent_type"]
+                .into_iter()
+                .filter(|k| obj.contains_key(*k))
+                .collect();
+            assert_eq!(
+                routing,
+                vec![key_name],
+                "exactly one routing key, or the API rejects the step"
+            );
+        }
+    }
+
+    #[test]
+    fn cycling_the_source_moves_the_value_to_the_new_key() {
+        let mut s = steps_page();
+        type_text(&mut s, "draft");
+        s.handle_key(key(KeyCode::Tab)); // Source
+        s.handle_key(key(KeyCode::Right)); // Name -> Type
+        s.handle_key(key(KeyCode::Tab)); // Agent
+        type_text(&mut s, "researcher");
+        s.handle_key(key(KeyCode::Tab)); // Prompt
+        type_text(&mut s, "{{input}}");
+
+        let steps = submit(&mut s);
+        assert_eq!(steps[0]["agent_type"], "researcher");
+        assert!(steps[0].get("agent_name").is_none());
+        assert!(steps[0].get("agent_id").is_none());
+    }
+
+    /// `new` must reach the wire under the spelling the API's `SessionMode` deserializer accepts, and `persistent` must not be written at all, so the agent manifest's own setting still applies.
+    #[test]
+    fn session_mode_new_round_trips_and_persistent_is_omitted() {
+        let mut step = draft(StepAgentSource::Name, "writer");
+        assert!(
+            step.to_json(0).get("session_mode").is_none(),
+            "persistent is the absent-key default and must not override the manifest"
+        );
+
+        step.session_mode = SessionMode::New;
+        let json = step.to_json(0);
+        assert_eq!(json["session_mode"], "new");
+        let parsed: SessionMode = serde_json::from_value(json["session_mode"].clone()).unwrap();
+        assert_eq!(parsed, SessionMode::New);
+    }
+
+    #[test]
+    fn the_session_selector_toggles_with_space() {
+        let mut s = steps_page();
+        s.create_steps[0] = draft(StepAgentSource::Name, "writer");
+        s.step_focus = StepEditorFocus::SessionMode;
+        s.handle_key(key(KeyCode::Char(' ')));
+        assert_eq!(s.create_steps[0].session_mode, SessionMode::New);
+
+        let steps = submit(&mut s);
+        assert_eq!(steps[0]["session_mode"], "new");
+    }
+
+    #[test]
+    fn an_empty_agent_value_blocks_submit_with_a_message() {
+        let mut s = steps_page();
+        s.create_steps = vec![draft(StepAgentSource::Name, "writer")];
+        s.create_steps.push(draft(StepAgentSource::Id, "   "));
+
+        s.create_step = 3;
+        let action = s.handle_key(key(KeyCode::Enter));
+        assert!(
+            matches!(action, WorkflowAction::Continue),
+            "must not submit"
+        );
+        assert!(s.sub == WorkflowSubScreen::Create);
+        assert_eq!(s.create_step, 2, "back on the page where it can be fixed");
+        assert_eq!(s.step_cursor, 1, "the offending step is selected");
+        assert_eq!(s.step_focus, StepEditorFocus::Agent);
+        assert!(
+            s.status_msg.contains('2'),
+            "names the step: {}",
+            s.status_msg
+        );
+    }
+
+    #[test]
+    fn an_empty_prompt_blocks_leaving_the_steps_page() {
+        let mut s = steps_page();
+        s.create_steps[0] = draft(StepAgentSource::Name, "writer");
+        s.create_steps[0].prompt.clear();
+
+        s.handle_key(key(KeyCode::Enter));
+        assert_eq!(s.create_step, 2);
+        assert_eq!(s.step_focus, StepEditorFocus::Prompt);
+        assert!(!s.status_msg.is_empty());
+    }
+
+    #[test]
+    fn no_steps_blocks_submit() {
+        let mut s = steps_page();
+        s.step_focus = StepEditorFocus::List;
+        s.handle_key(key(KeyCode::Char('d')));
+        assert!(s.create_steps.is_empty());
+
+        assert_eq!(s.build_create_steps(), Err(StepDraftError::NoSteps));
+        s.handle_key(key(KeyCode::Enter));
+        assert_eq!(s.create_step, 2);
+        assert!(!s.status_msg.is_empty());
+    }
+
+    /// #7869: `create_workflow` reads `req["steps"].as_array()`, so anything but an array is rejected with `Missing 'steps' array`.
+    #[test]
+    fn the_payload_is_an_array_with_one_object_per_step_in_order() {
+        let mut s = steps_page();
+        s.create_steps = vec![
+            draft(StepAgentSource::Name, "writer"),
+            draft(StepAgentSource::Type, "reviewer"),
+        ];
+        s.create_steps[1].name.clear();
+
+        let steps = submit(&mut s);
+        let array = steps.as_array().expect("steps must be a JSON array");
+        assert_eq!(array.len(), 2);
+        assert_eq!(array[0]["name"], "draft");
+        assert_eq!(
+            array[1]["name"], "step-2",
+            "a blank name gets a distinct default"
+        );
+        assert_eq!(array[1]["prompt"], "{{input}}");
+        // The event layer's parser is the last gate before the wire.
+        assert!(crate::tui::event::parse_workflow_steps_json(&steps.to_string()).is_ok());
+    }
+
+    #[test]
+    fn a_and_d_edit_the_list_only_when_the_list_is_focused() {
+        let mut s = steps_page();
+        // Focus starts in the name field, where `a` and `d` are text.
+        type_text(&mut s, "ad");
+        assert_eq!(s.create_steps.len(), 1);
+        assert_eq!(s.create_steps[0].name, "ad");
+
+        s.handle_key(key(KeyCode::BackTab)); // Name -> List
+        assert_eq!(s.step_focus, StepEditorFocus::List);
+        s.handle_key(key(KeyCode::Char('a')));
+        assert_eq!(s.create_steps.len(), 2);
+        assert_eq!(
+            s.step_cursor, 1,
+            "the new step is inserted after and selected"
+        );
+        assert_eq!(s.step_focus, StepEditorFocus::Name);
+
+        s.handle_key(key(KeyCode::Up));
+        assert_eq!(s.step_cursor, 0);
+        assert_eq!(
+            s.step_focus,
+            StepEditorFocus::Name,
+            "Up/Down keep the field"
+        );
+
+        s.step_focus = StepEditorFocus::List;
+        s.handle_key(key(KeyCode::Char('d')));
+        assert_eq!(s.create_steps.len(), 1);
+        assert!(s.create_steps[0].name.is_empty(), "the selected step went");
+    }
+
+    #[test]
+    fn tab_and_shift_tab_walk_the_fields_and_wrap() {
+        let mut s = steps_page();
+        s.step_focus = StepEditorFocus::List;
+        for expected in [
+            StepEditorFocus::Name,
+            StepEditorFocus::Source,
+            StepEditorFocus::Agent,
+            StepEditorFocus::Prompt,
+            StepEditorFocus::SessionMode,
+            StepEditorFocus::List,
+        ] {
+            s.handle_key(key(KeyCode::Tab));
+            assert_eq!(s.step_focus, expected);
+        }
+        s.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::SHIFT));
+        assert_eq!(s.step_focus, StepEditorFocus::SessionMode);
+    }
+
+    #[test]
+    fn the_steps_page_renders_every_field_without_panicking() {
+        let mut s = steps_page();
+        s.create_steps = vec![draft(StepAgentSource::Type, "researcher")];
+        s.create_steps[0].session_mode = SessionMode::New;
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        terminal.draw(|f| draw(f, f.area(), &mut s)).unwrap();
+        let out: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert!(out.contains("researcher"), "{out}");
+        assert!(out.contains("draft"), "{out}");
     }
 }

@@ -1688,15 +1688,11 @@ impl StepsJsonError {
     }
 }
 
-/// Turn the creator's free-text `steps` field into the array
-/// `POST /api/workflows` expects.
+/// Turn the creator's serialized `steps` into the array `POST /api/workflows` expects.
 ///
-/// The wizard collects the steps as a raw JSON string, and that string used
-/// to be forwarded as a JSON *string*. `create_workflow` reads
-/// `req["steps"].as_array()`, so every submission was rejected with
-/// `Missing 'steps' array` and the TUI could not create a workflow at all.
-/// Parsing here also turns a typo into a message naming the position of the
-/// mistake instead of a bare HTTP failure.
+/// The wizard used to collect the steps as a raw JSON string, and that string was forwarded as a JSON *string*.
+/// `create_workflow` reads `req["steps"].as_array()`, so every submission was rejected with `Missing 'steps' array` and the TUI could not create a workflow at all (#7869).
+/// The per-step editor (#7724) now builds the array itself, so this is the last check before the wire rather than the only one: it still refuses anything that is not an array, so a regression in the editor surfaces as a message naming the problem instead of a bare HTTP failure.
 pub(crate) fn parse_workflow_steps_json(raw: &str) -> Result<serde_json::Value, StepsJsonError> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
