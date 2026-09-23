@@ -523,7 +523,9 @@ fn main() {
         },
         Some(Commands::Migrate(args)) => cmd_migrate(args),
         Some(Commands::Skill(sub)) => match sub {
-            SkillCommands::Install { source, hand } => cmd_skill_install(&source, hand.as_deref()),
+            SkillCommands::Install { source, hand } => {
+                cmd_skill_install(&source, hand.as_deref(), cli.config.as_deref())
+            }
             SkillCommands::List { hand } => cmd_skill_list(hand.as_deref()),
             SkillCommands::Remove { name, hand } => cmd_skill_remove(&name, hand.as_deref()),
             SkillCommands::Search { query } => cmd_skill_search(&query),
@@ -534,7 +536,7 @@ fn main() {
                 tag,
                 output,
                 dry_run,
-            } => cmd_skill_publish(path, repo, tag, output, dry_run),
+            } => cmd_skill_publish(path, repo, tag, output, dry_run, cli.config.as_deref()),
             SkillCommands::Create => cmd_skill_create(),
             SkillCommands::Evolve(sub) => cmd_skill_evolve(sub),
             SkillCommands::Pending(sub) => cmd_skill_pending(sub),

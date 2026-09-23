@@ -32,12 +32,14 @@ api-error-template-parse-failed = Не вдалося розпарсити те�
 api-error-template-required = Необхідно вказати 'manifest_toml' або 'template'
 api-error-template-invalid-manifest = Недійсний маніфест темплейту
 api-error-template-read-failed = Не вдалося прочитати темплейт
+api-error-template-snapshot-failed = Не вдалося зберегти знімок поточного типу агента, тому відновлення скасовано і нічого не перезаписано. Спробуйте ще раз.
 api-error-template-promote-no-token = Токен GitHub не налаштовано. Підключіть GitHub у налаштуваннях або встановіть GITHUB_TOKEN.
 api-error-template-promote-review-required = Цей темплейт досі містить приватні дані, які потрібно видалити перед публікацією. Перегляньте знахідки та відредагуйте маніфест.
 api-error-template-promote-render-failed = Не вдалося відобразити очищений маніфест як TOML: { $error }
 api-error-agent-type-exists = Тип агента '{ $name }' вже існує
 api-error-agent-type-name-taken = '{ $name }' — це назва активного агента; оберіть іншу назву для типу агента
 api-error-agent-type-not-editable = Тип агента '{ $name }' походить із робочої області активного агента й керується через /api/agents
+api-error-registry-type-not-found = Тип агента '{ $name }' не знайдено в реєстрі
 
 # Manifest errors
 api-error-manifest-too-large = Маніфест занадто великий (макс. 1MB)

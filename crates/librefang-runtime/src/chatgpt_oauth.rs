@@ -974,6 +974,37 @@ mod tests {
         assert_eq!(params.get("b"), Some(&"a b".to_string()));
     }
 
+    /// Wait for `address` to come back, up to a few seconds, and require that it does.
+    ///
+    /// The port is a shared resource: `bind("127.0.0.1:0")` hands ephemeral ports to every test in
+    /// this binary at once, so the one freed by the server under test can be handed to another test
+    /// before this runs.
+    ///
+    /// Measured, and it is the whole of the flake: `AddrInUse` (code 98) in two of two full-suite
+    /// runs against thirty isolated runs that all passed, in three tests reaching this through two
+    /// call sites — which is why it is one helper and not a retry at each site.
+    ///
+    /// Retrying asks what these tests mean to ask, "was the listener released", instead of what
+    /// they were asking, "has nobody taken the port yet". A listener that is genuinely still held
+    /// never comes back, so the assertion still fails; it just takes five seconds to say so.
+    async fn assert_listener_released(address: std::net::SocketAddr, what: &str) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            match tokio::net::TcpListener::bind(address).await {
+                Ok(listener) => {
+                    drop(listener);
+                    return;
+                }
+                Err(error) => {
+                    if std::time::Instant::now() >= deadline {
+                        panic!("callback listener should be released after {what}: {error}");
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                }
+            }
+        }
+    }
+
     async fn send_test_callback(path: &str) -> OAuthCallbackResult {
         use tokio::io::AsyncWriteExt;
 
@@ -1000,10 +1031,7 @@ mod tests {
             .unwrap();
         drop(stream);
 
-        let rebound = tokio::net::TcpListener::bind(address)
-            .await
-            .expect("callback listener should be released after a terminal result");
-        drop(rebound);
+        assert_listener_released(address, "a terminal result").await;
         result
     }
 
@@ -1063,10 +1091,7 @@ mod tests {
             result,
             Err("Authentication timed out -- no callback received within 5 minutes".to_string())
         );
-        let rebound = tokio::net::TcpListener::bind(address)
-            .await
-            .expect("callback listener should be released after timeout");
-        drop(rebound);
+        assert_listener_released(address, "timeout").await;
     }
 
     #[test]

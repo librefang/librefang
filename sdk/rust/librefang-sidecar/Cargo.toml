@@ -15,7 +15,9 @@ homepage = "https://librefang.ai"
 keywords = ["librefang", "sidecar", "channel", "agent", "ai"]
 categories = ["api-bindings", "asynchronous"]
 readme = "README.md"
-rust-version = "1.80"
+# Measured against the committed Cargo.lock (#8124): `cargo +1.71 check --locked --all-targets` passes and 1.70 fails inside tokio 1.53 (`build_hasher_simple_hash_one`).
+# CI re-checks this exact version with `--locked`, so a dependency bump that raises the floor has to raise this number in the same PR.
+rust-version = "1.71"
 include = [
     "src/**",
     "examples/**",

@@ -187,7 +187,7 @@ pub trait KernelApi: KernelHandle + Send + Sync {
         verify_agent_id: Option<AgentId>,
         verify_max_retries: Option<u32>,
         evaluator_model: Option<String>,
-    ) -> bool;
+    ) -> crate::goal_runner::GoalRunStart;
     /// Stop an active goal run. Returns whether a run was stopped.
     fn stop_goal_run(&self, goal_id: librefang_types::goal::GoalId) -> bool;
     /// Stop an active goal run from a caller that has already written the goal
@@ -213,7 +213,7 @@ pub trait KernelApi: KernelHandle + Send + Sync {
         verify_agent_id: Option<AgentId>,
         verify_max_retries: Option<u32>,
         evaluator_model: Option<String>,
-    ) -> bool;
+    ) -> crate::goal_runner::GoalRunStart;
     /// Snapshot the observable state of a goal's run, if one is active.
     fn goal_run_state(
         &self,
@@ -378,13 +378,14 @@ pub trait KernelApi: KernelHandle + Send + Sync {
     /// [`ResetScope`] for the agent-wide vs. per-session split (#4868).
     async fn reboot_session(&self, agent_id: AgentId, scope: ResetScope) -> KernelResult<usize>;
     async fn clear_agent_history(&self, agent_id: AgentId) -> KernelResult<()>;
-    /// Delete a single session by id and any process-local side-state keyed
-    /// on it (currently the per-session `file_read_tracker` bucket — see
+    /// Delete a single session by id, cascading to every descendant
+    /// session, and any process-local side-state keyed on the ids removed
+    /// (currently the per-session `file_read_tracker` bucket — see
     /// `librefang_runtime::file_read_tracker::forget_session`). Use this in
     /// preference to calling `memory_substrate().delete_session(...)`
     /// directly so the side-state map does not leak across the daemon's
-    /// lifetime.
-    fn delete_session(&self, session_id: SessionId) -> KernelResult<()>;
+    /// lifetime. Returns every session id actually removed.
+    fn delete_session(&self, session_id: SessionId) -> KernelResult<Vec<SessionId>>;
     fn list_agent_sessions(&self, agent_id: AgentId) -> KernelResult<Vec<serde_json::Value>>;
     fn create_agent_session(
         &self,
@@ -410,6 +411,9 @@ pub trait KernelApi: KernelHandle + Send + Sync {
     fn persist_manifest_to_disk(&self, agent_id: AgentId);
     fn reload_agent_from_disk(&self, agent_id: AgentId) -> KernelResult<()>;
     fn update_manifest(&self, agent_id: AgentId, new_manifest: AgentManifest) -> KernelResult<()>;
+    /// Rename an agent and carry the new name into its IDENTITY.md front matter.
+    /// See [`LibreFangKernel::rename_agent`] for the full contract.
+    fn rename_agent(&self, agent_id: AgentId, new_name: String) -> KernelResult<()>;
     fn set_agent_skills(&self, agent_id: AgentId, skills: Vec<String>) -> KernelResult<()>;
     fn set_agent_mcp_servers(&self, agent_id: AgentId, servers: Vec<String>) -> KernelResult<()>;
     fn set_agent_channels(&self, agent_id: AgentId, channels: Vec<String>) -> KernelResult<()>;
@@ -420,6 +424,14 @@ pub trait KernelApi: KernelHandle + Send + Sync {
         agent_id: AgentId,
         mode: librefang_types::agent::ModelMode,
         router_override: Option<librefang_types::model_profile::AgentRouterOverride>,
+    ) -> KernelResult<()>;
+
+    /// Replace an agent's named-workspace declarations, rewriting its `TOOLS.md`
+    /// so the model is told about an alias the sandbox already accepts.
+    fn set_agent_workspaces(
+        &self,
+        agent_id: AgentId,
+        workspaces: std::collections::HashMap<String, librefang_types::agent::WorkspaceDecl>,
     ) -> KernelResult<()>;
     /// Update an agent's schedule mode and restart its background loop so
     /// the change takes effect immediately, without a daemon restart.
@@ -1026,7 +1038,7 @@ impl KernelApi for LibreFangKernel {
         verify_agent_id: Option<AgentId>,
         verify_max_retries: Option<u32>,
         evaluator_model: Option<String>,
-    ) -> bool {
+    ) -> crate::goal_runner::GoalRunStart {
         self.goal_run_start(
             goal_id,
             agent_id,
@@ -1055,7 +1067,7 @@ impl KernelApi for LibreFangKernel {
         verify_agent_id: Option<AgentId>,
         verify_max_retries: Option<u32>,
         evaluator_model: Option<String>,
-    ) -> bool {
+    ) -> crate::goal_runner::GoalRunStart {
         self.goal_run_resume(
             goal_id,
             agent_id,
@@ -1260,7 +1272,7 @@ impl KernelApi for LibreFangKernel {
     async fn clear_agent_history(&self, agent_id: AgentId) -> KernelResult<()> {
         Self::clear_agent_history(self, agent_id).await
     }
-    fn delete_session(&self, session_id: SessionId) -> KernelResult<()> {
+    fn delete_session(&self, session_id: SessionId) -> KernelResult<Vec<SessionId>> {
         Self::delete_session(self, session_id)
     }
     fn list_agent_sessions(&self, agent_id: AgentId) -> KernelResult<Vec<serde_json::Value>> {
@@ -1306,6 +1318,9 @@ impl KernelApi for LibreFangKernel {
     fn update_manifest(&self, agent_id: AgentId, new_manifest: AgentManifest) -> KernelResult<()> {
         Self::update_manifest(self, agent_id, new_manifest)
     }
+    fn rename_agent(&self, agent_id: AgentId, new_name: String) -> KernelResult<()> {
+        Self::rename_agent(self, agent_id, new_name)
+    }
     fn set_agent_skills(&self, agent_id: AgentId, skills: Vec<String>) -> KernelResult<()> {
         Self::set_agent_skills(self, agent_id, skills)
     }
@@ -1323,6 +1338,14 @@ impl KernelApi for LibreFangKernel {
 
     fn set_agent_channels(&self, agent_id: AgentId, channels: Vec<String>) -> KernelResult<()> {
         Self::set_agent_channels(self, agent_id, channels)
+    }
+
+    fn set_agent_workspaces(
+        &self,
+        agent_id: AgentId,
+        workspaces: std::collections::HashMap<String, librefang_types::agent::WorkspaceDecl>,
+    ) -> KernelResult<()> {
+        Self::set_agent_workspaces(self, agent_id, workspaces)
     }
     fn set_agent_schedule(
         self: Arc<Self>,

@@ -1110,6 +1110,8 @@ impl DeliveryTracker {
 }
 
 pub(crate) mod workspace_setup;
+/// Public so the API's clone route can re-point a copied IDENTITY.md at the clone's name (#8469).
+pub use workspace_setup::reconcile_identity_name;
 use workspace_setup::*;
 
 /// Spawn a fire-and-forget tokio task that logs panics instead of silently

@@ -88,6 +88,8 @@ pub struct UsageState {
     pub model_list: ListState,
     pub agent_list: ListState,
     pub loading: bool,
+    /// The last fetch failure, drawn in place of the key hints until the next successful load clears it.
+    pub status_msg: String,
     pub tick: usize,
 }
 
@@ -106,6 +108,7 @@ impl UsageState {
             model_list: ListState::default(),
             agent_list: ListState::default(),
             loading: false,
+            status_msg: String::new(),
             tick: 0,
         }
     }
@@ -210,7 +213,10 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut UsageState) {
     }
 
     f.render_widget(
-        widgets::hint_bar(&format!("  {}", crate::i18n::t("tui-usage-hints"))),
+        widgets::status_or_hint(
+            &state.status_msg,
+            &format!("  {}", crate::i18n::t("tui-usage-hints")),
+        ),
         chunks[3],
     );
 }

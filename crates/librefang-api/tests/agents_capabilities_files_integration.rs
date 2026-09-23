@@ -314,6 +314,108 @@ async fn test_files_concurrent_writes_leave_one_payload_intact() {
     );
 }
 
+/// The over-size rejection must name the limit. The handler used to call
+/// `t("api-error-file-too-large")` without `t_args`, so the response echoed the
+/// raw locale template — including the literal `{ $max }` placeholder — and the
+/// caller learned neither the limit nor their own size. Asserts on the response
+/// body: a status-only check cannot tell a rendered message from a template.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_files_write_over_size_limit_names_the_limit() {
+    let h = boot().await;
+    let id = spawn_named(&h.state, "files-too-large");
+
+    // 32 KiB is the handler's `MAX_FILE_SIZE`; one byte over trips it.
+    let oversized = "a".repeat(32_768 + 1);
+    let (status, body) = send(
+        h.app.clone(),
+        put_json(
+            &format!("/api/agents/{id}/files/SOUL.md"),
+            serde_json::json!({ "content": oversized }),
+        ),
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::PAYLOAD_TOO_LARGE,
+        "over-size write must be rejected: {body:?}"
+    );
+    let message = body["error"].as_str().expect("error must be a string");
+    assert!(
+        message.contains("32 KiB"),
+        "the error must name the 32 KiB limit; got {message:?}"
+    );
+    assert!(
+        !message.contains("$max"),
+        "the raw locale placeholder must not reach the client; got {message:?}"
+    );
+    assert_ne!(
+        message, "api-error-file-too-large",
+        "the raw locale key must not reach the client"
+    );
+}
+
+/// The read path falls back to the workspace root for a workspace that has not
+/// been migrated yet, so the write path must land in the same file. Writing
+/// unconditionally to `.identity/<name>` created a second copy that the kernel
+/// then preferred, silently orphaning the root file the `GET` had served — the
+/// operator's edit went to a file nobody read.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_files_write_pre_migration_workspace_updates_root_file() {
+    let h = boot().await;
+    let id = spawn_named(&h.state, "files-pre-migration");
+    let workspace = h
+        .state
+        .kernel
+        .agent_registry()
+        .get(id)
+        .and_then(|entry| entry.manifest.workspace.clone())
+        .expect("spawn must set an absolute workspace");
+
+    // Roll the workspace back to the pre-migration layout: SOUL.md at the root,
+    // no `.identity/` copy.
+    std::fs::remove_file(workspace.join(".identity/SOUL.md")).expect("remove generated copy");
+    std::fs::write(workspace.join("SOUL.md"), "legacy").expect("seed root file");
+
+    // The GET already serves the root file...
+    let (status, body) = send(
+        h.app.clone(),
+        get(&format!("/api/agents/{id}/files/SOUL.md")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "read should succeed: {body:?}");
+    assert_eq!(body["content"].as_str(), Some("legacy"));
+
+    // ...so the PUT must update that same file rather than shadow it.
+    let (status, body) = send(
+        h.app.clone(),
+        put_json(
+            &format!("/api/agents/{id}/files/SOUL.md"),
+            serde_json::json!({ "content": "edited" }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "write should succeed: {body:?}");
+    assert_eq!(
+        std::fs::read_to_string(workspace.join("SOUL.md")).unwrap(),
+        "edited",
+        "the write must land in the file the read served"
+    );
+    assert!(
+        !workspace.join(".identity/SOUL.md").exists(),
+        "the write must not create a shadowing .identity/ copy"
+    );
+
+    // Read-back agrees with the file on disk.
+    let (status, body) = send(
+        h.app.clone(),
+        get(&format!("/api/agents/{id}/files/SOUL.md")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "read should succeed: {body:?}");
+    assert_eq!(body["content"].as_str(), Some("edited"));
+}
+
 /// SECURITY (highest-value test): a path-traversal filename must be rejected
 /// with a 4xx — never written, never a 500. The filename whitelist
 /// (`KNOWN_IDENTITY_FILES`) rejects `../../etc/passwd` before any path

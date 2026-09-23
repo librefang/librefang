@@ -375,6 +375,22 @@ install_binary_with_rollback() {
     return 0
 }
 
+# True when macOS binary $1 needs an ad-hoc signature: it has no valid signature, or the one it has is already ad hoc.
+# A valid Developer ID signature is kept, because re-signing it ad hoc replaces its stable code identity with a per-build hash, and macOS drops the Full Disk Access and Automation grants keyed on that identity at every update (#8234).
+macos_needs_adhoc_signature() {
+    if ! codesign --verify --strict "$1" >/dev/null 2>&1; then
+        return 0
+    fi
+    codesign -dv "$1" 2>&1 | grep -q 'Signature=adhoc'
+}
+
+# Ad-hoc sign macOS binary $1 unless it already carries a valid non-ad-hoc signature; Apple Silicon kills an unsigned binary on launch.
+macos_ensure_signature() {
+    if macos_needs_adhoc_signature "$1"; then
+        codesign --force --sign - "$1"
+    fi
+}
+
 detect_user_shell() {
     USER_SHELL=""
 
@@ -619,14 +635,15 @@ install() {
         chmod +x "$NEW_SIDECAR"
     fi
 
-    # Ad-hoc codesign on macOS (prevents SIGKILL on Apple Silicon); sign staged binary before run or install.
+    # On macOS, clear quarantine and make sure the staged binaries carry a signature before they run or get installed (Apple Silicon SIGKILLs unsigned code).
+    # Release builds are Developer ID signed and keep that signature; only unsigned or ad-hoc builds are ad-hoc (re-)signed here.
     if [ "$OS" = "darwin" ]; then
         if command_exists xattr; then
             xattr -cr "$NEW_BIN" 2>/dev/null || true
             [ -f "$NEW_SIDECAR" ] && xattr -cr "$NEW_SIDECAR" 2>/dev/null || true
         fi
         if command_exists codesign; then
-            if ! codesign --force --sign - "$NEW_BIN"; then
+            if ! macos_ensure_signature "$NEW_BIN"; then
                 echo ""
                 echo "  ${C_YELLOW}Warning: ad-hoc code signing failed.${C_RESET}"
                 echo "  On Apple Silicon, the binary may be killed (SIGKILL) by Gatekeeper."
@@ -634,7 +651,7 @@ install() {
                 echo ""
             fi
             if [ -f "$NEW_SIDECAR" ]; then
-                codesign --force --sign - "$NEW_SIDECAR" 2>/dev/null || true
+                macos_ensure_signature "$NEW_SIDECAR" 2>/dev/null || true
             fi
         fi
     fi

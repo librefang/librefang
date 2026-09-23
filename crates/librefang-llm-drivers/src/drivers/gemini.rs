@@ -217,6 +217,9 @@ struct GeminiFunctionDeclaration {
 pub(crate) struct GenerationConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     temperature: Option<f32>,
+    /// Nucleus sampling, serialized as `topP`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    top_p: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     max_output_tokens: Option<u32>,
     /// Structured-output MIME type — `application/json` for `ResponseFormat::Json` / `JsonSchema`.
@@ -650,6 +653,7 @@ pub(crate) fn build_request(
     system_instruction: Option<GeminiContent>,
     tools: Vec<GeminiToolConfig>,
     temperature: Option<f32>,
+    top_p: Option<f32>,
     max_output_tokens: Option<u32>,
     response_format: Option<&ResponseFormat>,
 ) -> GeminiRequest {
@@ -660,11 +664,42 @@ pub(crate) fn build_request(
         tools,
         generation_config: Some(GenerationConfig {
             temperature,
+            top_p,
             max_output_tokens,
             response_mime_type,
             response_schema,
         }),
     }
+}
+
+/// Build the `generateContent` body for `request` — the one place the Gemini and Vertex AI drivers turn a `CompletionRequest` into this wire's shape.
+///
+/// Sampling parameters (#8290): `topP` goes into `generationConfig`, which has it on every Gemini model.
+/// `presencePenalty` / `frequencyPenalty` are declared in the schema too, but support for them varies by model, a model without it answers 400 rather than ignoring them, and nothing in the catalog records which models have it — so they are not sent, and a tuning preference cannot take down every turn.
+/// `provider` only labels the debug line for what was dropped.
+pub(crate) fn build_request_from(
+    provider: &'static str,
+    request: &CompletionRequest,
+) -> GeminiRequest {
+    super::sampling::log_dropped(
+        provider,
+        &request.model,
+        &[
+            ("frequency_penalty", request.frequency_penalty),
+            ("presence_penalty", request.presence_penalty),
+        ],
+    );
+    let (contents, system_instruction) = convert_messages(&request.messages, &request.system);
+    let tools = convert_tools(request);
+    build_request(
+        contents,
+        system_instruction,
+        tools,
+        Some(request.temperature),
+        request.top_p,
+        Some(request.max_tokens),
+        request.response_format.as_ref(),
+    )
 }
 
 /// Parse a JSON response body and convert to CompletionResponse.
@@ -926,17 +961,7 @@ impl LlmDriver for GeminiDriver {
         fields(provider = "gemini", model = %request.model)
     )]
     async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
-        let (contents, system_instruction) = convert_messages(&request.messages, &request.system);
-        let tools = convert_tools(&request);
-
-        let gemini_request = build_request(
-            contents,
-            system_instruction,
-            tools,
-            Some(request.temperature),
-            Some(request.max_tokens),
-            request.response_format.as_ref(),
-        );
+        let gemini_request = build_request_from("gemini", &request);
 
         // Cross-process rate-limit guard.
         let guard_provider = "gemini";
@@ -1084,17 +1109,7 @@ impl LlmDriver for GeminiDriver {
         request: CompletionRequest,
         tx: tokio::sync::mpsc::Sender<StreamEvent>,
     ) -> Result<CompletionResponse, LlmError> {
-        let (contents, system_instruction) = convert_messages(&request.messages, &request.system);
-        let tools = convert_tools(&request);
-
-        let gemini_request = build_request(
-            contents,
-            system_instruction,
-            tools,
-            Some(request.temperature),
-            Some(request.max_tokens),
-            request.response_format.as_ref(),
-        );
+        let gemini_request = build_request_from("gemini", &request);
 
         // Cross-process rate-limit guard (streaming path).
         let guard_provider = "gemini";
@@ -1520,6 +1535,7 @@ mod tests {
             tools: vec![],
             generation_config: Some(GenerationConfig {
                 temperature: Some(0.7),
+                top_p: None,
                 max_output_tokens: Some(1024),
                 response_mime_type: None,
                 response_schema: None,
@@ -1860,6 +1876,7 @@ mod tests {
     fn test_generation_config_serialization() {
         let config = GenerationConfig {
             temperature: Some(0.5),
+            top_p: None,
             max_output_tokens: Some(2048),
             response_mime_type: None,
             response_schema: None,
@@ -1870,6 +1887,47 @@ mod tests {
         // Structured-output fields stay absent when unset.
         assert!(json.get("responseMimeType").is_none());
         assert!(json.get("responseSchema").is_none());
+    }
+
+    /// #8290: `top_p` reaches `generationConfig.topP`; before this the Gemini and Vertex AI drivers never read `extra_body`, so it was dropped without a word.
+    /// The penalties are not sent: support varies by model and a model without it answers 400.
+    #[test]
+    fn sampling_params_land_in_generation_config() {
+        let request = CompletionRequest {
+            model: "gemini-2.5-flash".to_string(),
+            messages: std::sync::Arc::new(vec![Message::user("hi")]),
+            max_tokens: 256,
+            temperature: 0.3,
+            top_p: Some(0.85),
+            frequency_penalty: Some(0.5),
+            presence_penalty: Some(-0.25),
+            ..Default::default()
+        };
+        let body = serde_json::to_value(build_request_from("gemini", &request)).unwrap();
+        let config = &body["generationConfig"];
+        assert_eq!(config["topP"], serde_json::json!(0.85_f32));
+        assert_eq!(config["temperature"], serde_json::json!(0.3_f32));
+        for key in [
+            "presencePenalty",
+            "frequencyPenalty",
+            "presence_penalty",
+            "frequency_penalty",
+            "top_p",
+        ] {
+            assert!(
+                config.get(key).is_none(),
+                "generationConfig has {key}: {config}"
+            );
+            assert!(body.get(key).is_none(), "body has {key}: {body}");
+        }
+
+        // Unset stays off the wire rather than serializing as null.
+        let unset = CompletionRequest {
+            top_p: None,
+            ..request
+        };
+        let body = serde_json::to_value(build_request_from("gemini", &unset)).unwrap();
+        assert!(body["generationConfig"].get("topP").is_none(), "{body}");
     }
 
     #[test]
@@ -1885,6 +1943,7 @@ mod tests {
             vec![],
             None,
             vec![],
+            None,
             None,
             None,
             Some(&ResponseFormat::Json),
@@ -1903,6 +1962,7 @@ mod tests {
             vec![],
             None,
             vec![],
+            None,
             None,
             None,
             Some(&ResponseFormat::JsonSchema {

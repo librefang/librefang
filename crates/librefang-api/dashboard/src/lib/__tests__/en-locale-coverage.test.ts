@@ -8,6 +8,15 @@ const LOCALES_DIR = join(SRC_DIR, "locales");
 const EN_LOCALE = join(LOCALES_DIR, "en.json");
 const PLURAL_SUFFIX_RE = /_(zero|one|two|few|many|other)$/;
 
+// `ConfigPage` builds every field label from a template literal, so no static scan can say which `config.fld_*` keys it reaches (#8425).
+// The reachable set is derived from the real `GET /api/config/schema` response by `crates/librefang-api/tests/config_field_label_keys_golden.rs`, which fails when this fixture goes stale.
+const CONFIG_FIELD_LABEL_PREFIX = "config.fld_";
+const CONFIG_FIELD_LABEL_KEYS = join(
+  __dirname,
+  "fixtures",
+  "config_field_label_keys.golden.json",
+);
+
 type JsonValue =
   | string
   | number
@@ -440,6 +449,27 @@ function keyMatchesDynamicUsage(
   return dynamicPatterns.some(({ pattern }) => pattern.test(key));
 }
 
+// The schema-derived label keys count as used only while dashboard source still composes a `config.fld_` template; if the page stops doing that, every one of them is dead.
+function configFieldLabelKeys(dynamicPatterns: DynamicKeyPattern[]): Set<string> {
+  const composed = dynamicPatterns.some(({ source }) =>
+    source.startsWith(`\`${CONFIG_FIELD_LABEL_PREFIX}`),
+  );
+  if (!composed) return new Set();
+  return new Set(
+    JSON.parse(readFileSync(CONFIG_FIELD_LABEL_KEYS, "utf8")) as string[],
+  );
+}
+
+// `config.fld_*` keys are checked against the schema-derived list instead of the template patterns, which match the whole namespace — and so does the unrelated `config.${fieldKey}_${o}` select-option template.
+function keyIsDynamicallyUsed(
+  key: string,
+  dynamicPatterns: DynamicKeyPattern[],
+  fieldLabelKeys: Set<string>,
+): boolean {
+  if (key.startsWith(CONFIG_FIELD_LABEL_PREFIX)) return fieldLabelKeys.has(key);
+  return keyMatchesDynamicUsage(key, dynamicPatterns);
+}
+
 function normalizeJsxText(value: string): string {
   return value.replace(/\s+/g, " ").trim();
 }
@@ -696,6 +726,7 @@ describe("Dashboard locale coverage", () => {
     const usedKeys = new Set(
       [...keys, ...looseKeys].map(({ key }) => key),
     );
+    const fieldLabelKeys = configFieldLabelKeys(dynamicPatterns);
 
     const deadKeys = localeFiles()
       .flatMap((localeFile) => {
@@ -708,7 +739,7 @@ describe("Dashboard locale coverage", () => {
             return (
               !usedKeys.has(key) &&
               (base === null || !usedKeys.has(base)) &&
-              !keyMatchesDynamicUsage(key, dynamicPatterns)
+              !keyIsDynamicallyUsed(key, dynamicPatterns, fieldLabelKeys)
             );
           })
           .map((key) => `${localeName}: ${key}`);

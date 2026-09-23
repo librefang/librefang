@@ -7,7 +7,6 @@ import { useAgentType, useAgentTypes, useAgentTypeHistory } from "../lib/queries
 import { useAgents, useTools } from "../lib/queries/agents";
 import { useSkills } from "../lib/queries/skills";
 import {
-  useCreateAgentType,
   useDeleteAgentType,
   usePromoteAgentType,
   useRestoreTemplateVersion,
@@ -37,14 +36,16 @@ vi.mock("../lib/queries/agents", () => ({
 
 vi.mock("../lib/queries/skills", () => ({ useSkills: vi.fn() }));
 
-// Both names for the manifest-write hook: `main` exports it as
-// `useUpdateAgentType` and #8028 renames it to `useUpdateAgentTypeToml`.
-// This test only needs it stubbed — it never asserts on it — so the factory
-// provides both and the page gets whichever one it imports. Pinning a single
-// name would break this file on whichever of the two PRs merges second, for a
-// hook that has nothing to do with what is being tested.
+// Both names for the manifest-write and manifest-create hooks: `main` exports
+// them as `useUpdateAgentType` / `useCreateAgentType` and #8028 renames them to
+// `useUpdateAgentTypeToml` / `useCreateAgentTypeFromToml`.
+// This test only needs them stubbed — it never asserts on either — so the
+// factory provides both spellings and the page gets whichever one it imports.
+// Pinning a single name would break this file on whichever of the two PRs
+// merges second, for hooks that have nothing to do with what is being tested.
 vi.mock("../lib/mutations/agentTypes", () => ({
   useCreateAgentType: vi.fn(),
+  useCreateAgentTypeFromToml: vi.fn(),
   useDeleteAgentType: vi.fn(),
   usePromoteAgentType: vi.fn(),
   useRestoreTemplateVersion: vi.fn(),
@@ -118,6 +119,7 @@ const TYPE: AgentTemplate = {
   model: "claude-sonnet-5",
   source: "agent-type",
   editable: true,
+  from_registry: true,
 };
 
 const DETAIL: AgentTypeDetail = {
@@ -146,7 +148,8 @@ const VERSION: TemplateVersionEntry = {
   // Stored naive-UTC, exactly as the history endpoint returns it.
   timestamp: "2026-09-01T10:30:00",
   manifest_toml: 'name = "researcher"\ndescription = "Read papers"\n',
-  change_source: "edit",
+  // A value the server actually writes: `put_agent_type` records a dashboard save as "dashboard".
+  change_source: "dashboard",
 };
 
 const idle = { mutateAsync: vi.fn(), isPending: false };
@@ -168,13 +171,22 @@ type MutationStub = { mutateAsync: ReturnType<typeof vi.fn>; isPending: boolean 
  * Promotion is the mutation every test varies; restore and the history payload
  * are opt-in so the tests that do not open the history modal keep reading as
  * one argument.
+ *
+ * A caller may also replace the template list, and that override landed on the
+ * same positional argument as `extras` — one from each side of this rebase —
+ * so the parameter accepts either spelling rather than rewriting one set of
+ * call sites.
  */
 function renderPage(
   promote: MutationStub,
-  extras: { restore?: MutationStub; versions?: TemplateVersionEntry[] } = {},
+  arg:
+    | { restore?: MutationStub; versions?: TemplateVersionEntry[] }
+    | AgentTemplate[] = {},
 ) {
+  const templates = Array.isArray(arg) ? arg : [TYPE];
+  const extras = Array.isArray(arg) ? {} : arg;
   vi.mocked(useAgentTypes).mockReturnValue(
-    mockQuery([TYPE]) as unknown as ReturnType<typeof useAgentTypes>,
+    mockQuery(templates) as unknown as ReturnType<typeof useAgentTypes>,
   );
   vi.mocked(useAgentType).mockReturnValue(
     mockQuery(DETAIL) as unknown as ReturnType<typeof useAgentType>,
@@ -187,15 +199,17 @@ function renderPage(
   vi.mocked(useAgents).mockReturnValue(mockQuery([]) as unknown as ReturnType<typeof useAgents>);
   vi.mocked(useTools).mockReturnValue(mockQuery([]) as unknown as ReturnType<typeof useTools>);
   vi.mocked(useSkills).mockReturnValue(mockQuery([]) as unknown as ReturnType<typeof useSkills>);
-  // Stub both spellings of the manifest-write hook rather than picking one:
-  // the page calls whichever it imports, and an unstubbed `vi.fn()` returns
-  // `undefined`, which the page then destructures and crashes on.
+  // Stub both spellings of the manifest-write and manifest-create hooks rather
+  // than picking one: the page calls whichever it imports, and an unstubbed
+  // `vi.fn()` returns `undefined`, which the page then destructures and
+  // crashes on.
   const mutations = agentTypeMutations as unknown as Record<string, unknown>;
   for (const hook of [
-    useCreateAgentType,
     useDeleteAgentType,
     useRestoreTemplateVersion,
     useSpawnEphemeral,
+    mutations.useCreateAgentType,
+    mutations.useCreateAgentTypeFromToml,
     mutations.useUpdateAgentType,
     mutations.useUpdateAgentTypeToml,
   ]) {
@@ -317,8 +331,8 @@ describe("AgentTypesPage template history", () => {
     useUIStore.setState({ toasts: [] });
   });
 
-  function openHistory(restore: MutationStub) {
-    renderPage({ mutateAsync: vi.fn(), isPending: false }, { restore, versions: [VERSION] });
+  function openHistory(restore: MutationStub, version: TemplateVersionEntry = VERSION) {
+    renderPage({ mutateAsync: vi.fn(), isPending: false }, { restore, versions: [version] });
     fireEvent.click(screen.getByRole("button", { name: "History" }));
   }
 
@@ -336,7 +350,9 @@ describe("AgentTypesPage template history", () => {
     // and en-US separates the time from AM/PM with U+202F — normalize both sides.
     const stamp = new Date(VERSION.timestamp + "Z").toLocaleString().replace(/\s+/g, " ");
     expect(message).toHaveTextContent(stamp);
-    expect(message).toHaveTextContent("(edit)");
+    // `change_source` is a wire token, not prose: the operator reads its label, in the dialog as in the row's badge (#8394).
+    expect(message).toHaveTextContent("(Dashboard edit)");
+    expect(message).not.toHaveTextContent("(dashboard)");
 
     fireEvent.click(screen.getByRole("button", { name: "Confirm" }));
 
@@ -344,6 +360,29 @@ describe("AgentTypesPage template history", () => {
       expect(mutateAsync).toHaveBeenCalledWith({ name: "researcher", versionId: 7 }),
     );
     expect(useUIStore.getState().toasts.map((t) => t.message)).toContain("Version restored");
+  });
+
+  it("labels the row's change source instead of printing the wire token", () => {
+    openHistory({ mutateAsync: vi.fn(), isPending: false });
+
+    const badge = screen.getByText("Dashboard edit");
+    // The raw value stays reachable for anyone matching a row against the database or the API response.
+    expect(badge).toHaveAttribute("title", "dashboard");
+    expect(screen.queryByText("dashboard")).toBeNull();
+  });
+
+  // A producer the dashboard has not been taught yet (or a row from an older database) must still say where it came from rather than go blank.
+  it("shows an unmapped change source verbatim in the badge and the dialog", () => {
+    openHistory(
+      { mutateAsync: vi.fn(), isPending: false },
+      { ...VERSION, change_source: "some_future_source" },
+    );
+
+    expect(screen.getByText("some_future_source")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Restore" }));
+    const message = screen.getByText(/Restore 'researcher' to the version saved/);
+    expect(message).toHaveTextContent("(some_future_source)");
   });
 
   it("writes nothing when the restore confirmation is cancelled", () => {
@@ -358,5 +397,31 @@ describe("AgentTypesPage template history", () => {
     // The history modal itself stays open — cancelling the dialog is not
     // cancelling the browse.
     expect(screen.getByText(/History: researcher/)).toBeInTheDocument();
+  });
+});
+
+// An `editable` row still may have no registry original — created through
+// `POST /api/templates` or `agent_type_create` rather than promoted from one.
+// Before `from_registry` existed, the restore control rendered identically
+// either way, and its drawer could only answer "this agent type does not
+// exist in the registry" after the click (#8042 review).
+describe("AgentTypesPage restore control", () => {
+  // The two states change the control's own accessible name — that is the
+  // thing under test — so each test finds it by the name it expects, rather
+  // than through a helper that would have to already know which case it is.
+
+  it("is enabled when the type has a registry original", () => {
+    renderPage({ mutateAsync: vi.fn(), isPending: false }, [{ ...TYPE, from_registry: true }]);
+
+    expect(screen.getByRole("button", { name: "Restore from registry" })).toBeEnabled();
+  });
+
+  it("is disabled and explains why when the type has no registry original", () => {
+    renderPage({ mutateAsync: vi.fn(), isPending: false }, [{ ...TYPE, from_registry: false }]);
+
+    expect(
+      screen.getByRole("button", { name: "This agent type does not exist in the registry." }),
+    ).toBeDisabled();
+    expect(screen.queryByRole("button", { name: "Restore from registry" })).toBeNull();
   });
 });

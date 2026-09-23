@@ -87,14 +87,32 @@ async fn boot() -> Harness {
 }
 
 async fn request(h: &Harness, method: &str, path: &str, body: Option<Json>) -> (StatusCode, Json) {
-    let builder = axum::http::Request::builder().method(method).uri(path);
-    let mut req = match body {
-        Some(json) => builder
-            .header("content-type", "application/json")
-            .body(axum::body::Body::from(serde_json::to_vec(&json).unwrap()))
-            .unwrap(),
-        None => builder.body(axum::body::Body::empty()).unwrap(),
-    };
+    send(
+        h,
+        method,
+        path,
+        body.is_some().then_some("application/json"),
+        match &body {
+            Some(json) => serde_json::to_vec(&json).unwrap(),
+            None => Vec::new(),
+        },
+    )
+    .await
+}
+
+/// A raw-body request — the shape `PUT /api/templates/{name}/toml` (`text/plain`) takes.
+async fn send(
+    h: &Harness,
+    method: &str,
+    path: &str,
+    content_type: Option<&str>,
+    body: Vec<u8>,
+) -> (StatusCode, Json) {
+    let mut builder = axum::http::Request::builder().method(method).uri(path);
+    if let Some(ct) = content_type {
+        builder = builder.header("content-type", ct);
+    }
+    let mut req = builder.body(axum::body::Body::from(body)).unwrap();
     // `MockKernelBuilder` leaves `api_key` empty; the auth middleware still requires a loopback
     // origin, and a `oneshot` call attaches no `ConnectInfo` of its own.
     req.extensions_mut()
@@ -144,9 +162,44 @@ fn write_workspace_agent(name: &str, body: &str) {
     std::fs::write(dir.join("agent.toml"), body).expect("write agent.toml");
 }
 
+/// The registry checkout root the diff/restore handlers resolve: `$LIBREFANG_HOME/registry`,
+/// with each agent type stored directory-per-type as `agent-types/{name}/agent.toml`.
+fn registry_agent_type_file(name: &str) -> PathBuf {
+    home()
+        .join("registry")
+        .join("agent-types")
+        .join(name)
+        .join("agent.toml")
+}
+
+fn write_registry_agent_type(name: &str, body: &str) {
+    let file = registry_agent_type_file(name);
+    std::fs::create_dir_all(file.parent().unwrap()).expect("create registry agent-types dir");
+    std::fs::write(file, body).expect("write registry agent type");
+}
+
+/// A minimal but valid manifest, parameterised on `max_history_messages` so a test can vary a
+/// field `diff_manifests` deliberately does not compare (exercising the `unlisted_diffs` figure).
+fn registry_manifest_body(name: &str, description: &str, max_history: usize) -> String {
+    format!(
+        r#"name = "{name}"
+version = "0.1.0"
+description = "{description}"
+module = "builtin:chat"
+max_history_messages = {max_history}
+
+[model]
+provider = "ollama"
+model = "test-model"
+system_prompt = "Seeded."
+"#
+    )
+}
+
 fn cleanup(name: &str) {
     let _ = std::fs::remove_file(agent_type_file(name));
     let _ = std::fs::remove_dir_all(home().join("workspaces").join("agents").join(name));
+    let _ = std::fs::remove_dir_all(home().join("registry").join("agent-types").join(name));
 }
 
 /// The exact body the dashboard's agent-type editor sends on save: seven flat keys, nothing else.
@@ -435,6 +488,58 @@ async fn a_workspace_agent_row_is_readable_but_refuses_the_write_verbs() {
     )
     .unwrap();
     assert!(stored.contains("seeded"), "{stored}");
+
+    cleanup(name);
+}
+
+/// `registry-diff` must refuse a name whose only local content is a live
+/// agent's own workspace manifest, with the same 409 `restore_from_registry`
+/// answers for it — otherwise the diff drawer offers a comparison for a
+/// restore that can never succeed (#8042).
+#[tokio::test(flavor = "multi_thread")]
+async fn registry_diff_refuses_a_name_that_only_resolves_through_a_live_agent() {
+    let _g = lock().lock().await;
+    let name = "at_registry_diff_liveagent";
+    cleanup(name);
+    write_workspace_agent(name, &manifest_with_non_form_fields(name));
+    write_registry_agent_type(name, &registry_manifest_body(name, "from registry", 42));
+
+    let h = boot().await;
+
+    let (status, body) = get(&h, &format!("/api/templates/{name}/registry-diff")).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["code"], "template_not_editable", "{body}");
+
+    cleanup(name);
+}
+
+/// The 409 the test above claims `restore` answers, asserted on `restore`
+/// itself rather than inferred from the diff route.
+///
+/// Both routes reach the refusal through different code — the diff route from
+/// `read_agent_type` returning a `WorkspaceAgent` source, the restore route
+/// from the local read missing and `workspace_agent_manifest_path` existing —
+/// so a change to one leaves the other's guard untested.
+/// Without this, dropping the restore guard turns a refusal into a write that
+/// materialises an agent-type file shadowing a live agent's name, and the
+/// suite stays green (#8054).
+#[tokio::test(flavor = "multi_thread")]
+async fn restore_refuses_a_name_that_only_resolves_through_a_live_agent() {
+    let _g = lock().lock().await;
+    let name = "at_registry_restore_liveagent";
+    cleanup(name);
+    write_workspace_agent(name, &manifest_with_non_form_fields(name));
+    write_registry_agent_type(name, &registry_manifest_body(name, "from registry", 42));
+
+    let h = boot().await;
+
+    let (status, body) = post(&h, &format!("/api/templates/{name}/restore"), json!({})).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["code"], "template_not_editable", "{body}");
+    assert!(
+        !agent_type_file(name).exists(),
+        "a refused restore must not materialise an agent type shadowing the live agent's name"
+    );
 
     cleanup(name);
 }
@@ -951,6 +1056,309 @@ async fn the_tool_reports_the_defaults_it_resolved_rather_than_the_fields_it_was
 }
 
 // ---------------------------------------------------------------------------
+// Registry diff + restore (#8042)
+// ---------------------------------------------------------------------------
+
+/// A registry-diff request for a type that has a local copy but no registry
+/// copy answers 404 with the stable `registry_type_not_found` code, so a
+/// client can tell "not synced" apart from "unknown template".
+#[tokio::test(flavor = "multi_thread")]
+async fn registry_diff_reports_registry_type_not_found_when_the_registry_copy_is_absent() {
+    let _g = lock().lock().await;
+    let name = "at_registry_missing";
+    cleanup(name);
+    write_agent_type(name, &registry_manifest_body(name, "local only", 42));
+
+    let h = boot().await;
+
+    let (status, body) = get(&h, &format!("/api/templates/{name}/registry-diff")).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert_eq!(body["code"], "registry_type_not_found", "{body}");
+
+    cleanup(name);
+}
+
+/// Byte-identical local and registry manifests report `identical: true` with
+/// no diffs — the response must not invent a difference the projection missed.
+#[tokio::test(flavor = "multi_thread")]
+async fn registry_diff_reports_identical_when_local_and_registry_match_exactly() {
+    let _g = lock().lock().await;
+    let name = "at_registry_identical";
+    cleanup(name);
+    let body = registry_manifest_body(name, "same everywhere", 42);
+    write_agent_type(name, &body);
+    write_registry_agent_type(name, &body);
+
+    let h = boot().await;
+
+    let (status, diff) = get(&h, &format!("/api/templates/{name}/registry-diff")).await;
+    assert_eq!(status, StatusCode::OK, "{diff}");
+    assert_eq!(diff["identical"], true, "{diff}");
+    assert_eq!(diff["unlisted_diffs"], 0, "{diff}");
+    assert_eq!(diff["diffs"].as_array().map(Vec::len), Some(0), "{diff}");
+
+    cleanup(name);
+}
+
+/// A field the operator-facing projection does not compare (here
+/// `max_history_messages`) still drives `identical: false`, and the count of
+/// differences outside the projection is reported rather than hidden.
+#[tokio::test(flavor = "multi_thread")]
+async fn registry_diff_marks_a_field_outside_the_projection_as_non_identical() {
+    let _g = lock().lock().await;
+    let name = "at_registry_hidden_diff";
+    cleanup(name);
+    write_agent_type(name, &registry_manifest_body(name, "local", 42));
+    write_registry_agent_type(name, &registry_manifest_body(name, "local", 99));
+
+    let h = boot().await;
+
+    let (status, diff) = get(&h, &format!("/api/templates/{name}/registry-diff")).await;
+    assert_eq!(status, StatusCode::OK, "{diff}");
+    assert_eq!(diff["identical"], false, "{diff}");
+    assert_eq!(
+        diff["diffs"].as_array().map(Vec::len),
+        Some(0),
+        "the projection does not compare max_history_messages: {diff}"
+    );
+    let unlisted = diff["unlisted_diffs"].as_u64().expect("unlisted_diffs");
+    assert!(
+        unlisted > 0,
+        "the out-of-projection difference must be counted: {diff}"
+    );
+
+    cleanup(name);
+}
+
+/// `unlisted_diffs` must not double-count a listed field that happens to be a
+/// list. `tags` is one of the twelve fields the itemised `diffs` table
+/// already covers; when it is the *only* difference, `unlisted_diffs` must
+/// be zero rather than counting each differing array element as an
+/// out-of-projection difference on top of the itemised row that already
+/// shows it.
+#[tokio::test(flavor = "multi_thread")]
+async fn unlisted_diffs_does_not_double_count_a_differing_listed_list_field() {
+    let _g = lock().lock().await;
+    let name = "at_registry_list_field_diff";
+    cleanup(name);
+    let manifest_with_tags = |tags: &str| {
+        format!(
+            r#"name = "{name}"
+description = "same everywhere"
+module = "builtin:chat"
+tags = {tags}
+
+[model]
+provider = "ollama"
+model = "test-model"
+system_prompt = "Seeded."
+"#
+        )
+    };
+    write_agent_type(name, &manifest_with_tags(r#"["a", "b"]"#));
+    write_registry_agent_type(name, &manifest_with_tags(r#"["c", "d"]"#));
+
+    let h = boot().await;
+
+    let (status, diff) = get(&h, &format!("/api/templates/{name}/registry-diff")).await;
+    assert_eq!(status, StatusCode::OK, "{diff}");
+    assert_eq!(diff["identical"], false, "{diff}");
+    assert_eq!(
+        diff["diffs"].as_array().map(Vec::len),
+        Some(1),
+        "tags is the only itemised difference: {diff}"
+    );
+    assert_eq!(
+        diff["unlisted_diffs"], 0,
+        "tags is fully itemised already — its two differing elements must not \
+         also be counted as unlisted: {diff}"
+    );
+
+    cleanup(name);
+}
+
+/// Restore overwrites the local copy with the registry version, and a follow-up
+/// GET returns the registry content rather than the pre-restore local content.
+#[tokio::test(flavor = "multi_thread")]
+async fn restore_overwrites_the_local_copy_and_reads_back_the_registry_version() {
+    let _g = lock().lock().await;
+    let name = "at_registry_restore";
+    cleanup(name);
+    write_agent_type(name, &registry_manifest_body(name, "local", 42));
+    write_registry_agent_type(name, &registry_manifest_body(name, "from registry", 99));
+
+    let h = boot().await;
+
+    let (status, restored) = post(&h, &format!("/api/templates/{name}/restore"), json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{restored}");
+    assert_eq!(
+        restored["manifest"]["description"], "from registry",
+        "{restored}"
+    );
+
+    let (status, detail) = get(&h, &format!("/api/templates/{name}")).await;
+    assert_eq!(status, StatusCode::OK, "{detail}");
+    assert_eq!(
+        detail["manifest"]["description"], "from registry",
+        "{detail}"
+    );
+    assert_eq!(
+        detail["manifest_toml"], restored["manifest_toml"],
+        "{detail}"
+    );
+
+    cleanup(name);
+}
+
+/// The registry restore is the one write path that destroys the local copy by design, so it has to leave a snapshot behind like every other write path does.
+/// A manifest whose current content came from a hand-edit of the file has no history row of its own, so recording only the post-restore content is not enough: the pre-restore content — the thing an operator actually wants back — must itself be recoverable from history, not merely implied by a row existing.
+#[tokio::test(flavor = "multi_thread")]
+async fn restore_from_registry_records_a_recoverable_pre_restore_snapshot() {
+    let _g = lock().lock().await;
+    let name = "at_registry_restore_history";
+    cleanup(name);
+    write_agent_type(
+        name,
+        &registry_manifest_body(name, "hand edited on disk", 42),
+    );
+    write_registry_agent_type(name, &registry_manifest_body(name, "from registry", 99));
+
+    let h = boot().await;
+
+    let (status, restored) = post(&h, &format!("/api/templates/{name}/restore"), json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{restored}");
+
+    let (status, history) = get(&h, &format!("/api/templates/{name}/history")).await;
+    assert_eq!(status, StatusCode::OK, "{history}");
+    let versions = history["versions"].as_array().expect("versions array");
+    assert_eq!(
+        versions.len(),
+        2,
+        "restore must record both the pre-restore and the post-restore content: {history}"
+    );
+
+    // Newest first (`ORDER BY timestamp DESC, id DESC`): the post-restore snapshot lands
+    // after the pre-restore one within the same request, so it sorts first.
+    assert_eq!(versions[0]["template_name"], name, "{history}");
+    assert_eq!(
+        versions[0]["change_source"], "registry-restore",
+        "{history}"
+    );
+    assert!(
+        versions[0]["manifest_toml"]
+            .as_str()
+            .expect("manifest_toml")
+            .contains("from registry"),
+        "the post-restore snapshot must carry the content the restore wrote: {history}"
+    );
+
+    assert_eq!(
+        versions[1]["change_source"], "pre-registry-restore",
+        "{history}"
+    );
+    assert!(
+        versions[1]["manifest_toml"]
+            .as_str()
+            .expect("manifest_toml")
+            .contains("hand edited on disk"),
+        "the pre-restore content — what a restore actually needs to make recoverable — \
+         must be readable back out of history, not just gone from disk: {history}"
+    );
+
+    cleanup(name);
+}
+
+/// A pre-restore snapshot that cannot be recorded has to abort the restore, not proceed without it.
+///
+/// The snapshot is best-effort at every other call site in the handler, and correctly so: those run *after* the write, so losing one costs a history row while the content is still on disk.
+/// Here the ordering inverts it. The content on disk may have come from a hand-edit and exist nowhere else, and the very next statement overwrites it, so a swallowed snapshot failure destroys the operator's configuration and still answers 200.
+///
+/// Dropping `template_versions` is the deterministic stand-in for the failure that actually happens — a `SQLITE_BUSY` from a concurrent writer — and reaches `record_version` as the same `LibreFangError::Memory`.
+#[tokio::test(flavor = "multi_thread")]
+async fn restore_refuses_to_overwrite_when_the_pre_restore_snapshot_fails() {
+    let _g = lock().lock().await;
+    let name = "at_registry_restore_snapshot_failure";
+    cleanup(name);
+    let hand_edited = registry_manifest_body(name, "hand edited on disk", 42);
+    write_agent_type(name, &hand_edited);
+    write_registry_agent_type(name, &registry_manifest_body(name, "from registry", 99));
+
+    let h = boot().await;
+
+    // Break the snapshot store through the pool the substrate already exposes — the same
+    // route `goals_routes_integration.rs` uses to make a substrate read fail from out here.
+    h.state
+        .kernel
+        .memory_substrate()
+        .pool()
+        .get()
+        .expect("pool connection")
+        .execute("DROP TABLE template_versions", [])
+        .expect("drop template_versions");
+
+    let (status, body) = post(&h, &format!("/api/templates/{name}/restore"), json!({})).await;
+    assert_eq!(
+        status,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "a restore that could not snapshot the current content must fail, not answer 200: {body}"
+    );
+
+    // The assertion the finding is about: the operator's content survived.
+    let on_disk = std::fs::read_to_string(agent_type_file(name)).expect("agent type still on disk");
+    assert_eq!(
+        on_disk, hand_edited,
+        "the hand-edited manifest must still be on disk — it was the only copy, and the \
+         snapshot meant to preserve it never landed"
+    );
+
+    cleanup(name);
+}
+
+/// Restoring must pin the manifest's own `name` field to the URL path
+/// segment, the same way `update_agent_type` already does — otherwise a
+/// registry document whose declared `name` disagrees with its directory
+/// (the registry stores each type at `agent-types/<dir>/agent.toml`, and
+/// `AgentManifest::name` is documented as the human-readable display name,
+/// so the two are free to differ) persists that mismatch into the local
+/// catalog.
+#[tokio::test(flavor = "multi_thread")]
+async fn restore_from_registry_pins_the_manifest_name_to_the_url_segment() {
+    let _g = lock().lock().await;
+    let name = "at_registry_restore_name_mismatch";
+    cleanup(name);
+    write_agent_type(name, &registry_manifest_body(name, "local", 42));
+    write_registry_agent_type(
+        name,
+        r#"name = "Some Other Display Name"
+description = "from registry"
+module = "builtin:chat"
+
+[model]
+provider = "ollama"
+model = "test-model"
+system_prompt = "Seeded."
+"#,
+    );
+
+    let h = boot().await;
+
+    let (status, restored) = post(&h, &format!("/api/templates/{name}/restore"), json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{restored}");
+    assert_eq!(
+        restored["manifest"]["name"], name,
+        "the persisted manifest's own `name` must match the URL segment it was \
+         restored through, not the registry document's declared name: {restored}"
+    );
+
+    let stored = std::fs::read_to_string(agent_type_file(name)).unwrap();
+    assert!(
+        stored.contains(&format!("name = \"{name}\"")),
+        "the file on disk must carry the pinned name too: {stored}"
+    );
+
+    cleanup(name);
+}
+
 // POST /api/templates/{name}/promote (#8043)
 // ---------------------------------------------------------------------------
 
@@ -1170,5 +1578,447 @@ async fn restore_rejects_foreign_versions_and_live_agents() {
 
     cleanup(name);
     cleanup(other);
+    cleanup(live);
+}
+// ---------------------------------------------------------------------------
+// The raw-TOML write path (#8028)
+// ---------------------------------------------------------------------------
+
+/// A manifest in the shape the TOML tab saves: sections the flat editor cannot
+/// express, a known-table section, and keys no current schema knows about.
+fn toml_tab_document(name: &str) -> String {
+    format!(
+        r#"name = "{name}"
+description = "raw toml save"
+session_mode = "new"
+mcp_servers = ["github"]
+tool_allowlist = ["file_read"]
+future_field = "unknown to this daemon"
+
+[model]
+provider = "ollama"
+model = "test-model"
+
+[workspaces]
+notes = {{ path = "notes", mode = "rw" }}
+
+[compaction]
+threshold_messages = 7
+
+[[triggers]]
+pattern = "git.push"
+prompt_template = "on push"
+"#
+    )
+}
+
+/// PUT with a text/plain body through the production router.
+async fn put_toml(h: &Harness, path: &str, body: &str) -> (StatusCode, Json) {
+    send(h, "PUT", path, Some("text/plain"), body.as_bytes().to_vec()).await
+}
+
+/// The headline claim of #8028: the whole-document write is not lossy. Review asked
+/// for exactly this round trip — triggers and compaction read back intact.
+#[tokio::test(flavor = "multi_thread")]
+async fn toml_put_round_trips_every_section_the_flat_editor_cannot_express() {
+    let _g = lock().lock().await;
+    let name = "at_toml_roundtrip";
+    cleanup(name);
+    write_agent_type(name, "name = \"seed\"\n");
+
+    let h = boot().await;
+    let doc = toml_tab_document(name);
+    let (status, body) = put_toml(&h, &format!("/api/templates/{name}/toml"), &doc).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let (status, raw) = get(&h, &format!("/api/templates/{name}/toml")).await;
+    assert_eq!(status, StatusCode::OK);
+    let stored: toml::Value = toml::from_str(raw.as_str().unwrap()).unwrap();
+    assert_eq!(stored["session_mode"].as_str(), Some("new"), "{stored}");
+    assert_eq!(
+        stored["mcp_servers"][0].as_str(),
+        Some("github"),
+        "{stored}"
+    );
+    assert_eq!(
+        stored["tool_allowlist"][0].as_str(),
+        Some("file_read"),
+        "{stored}"
+    );
+    assert_eq!(
+        stored["workspaces"]["notes"]["path"].as_str(),
+        Some("notes"),
+        "{stored}"
+    );
+    assert_eq!(
+        stored["compaction"]["threshold_messages"].as_integer(),
+        Some(7),
+        "[compaction] did not survive the save: {stored}"
+    );
+    assert_eq!(
+        stored["triggers"][0]["pattern"].as_str(),
+        Some("git.push"),
+        "{stored}"
+    );
+    assert_eq!(
+        stored["triggers"][0]["prompt_template"].as_str(),
+        Some("on push"),
+        "[[triggers]] did not survive the save: {stored}"
+    );
+
+    cleanup(name);
+}
+
+/// The raw-TOML tab is a write path like create and the flat `PUT`, so it snapshots like one.
+/// Without the record, `GET /api/templates/{name}/history` reports the previous save as current while the file on disk is what this handler just wrote — a history that is silently incomplete rather than absent.
+#[tokio::test(flavor = "multi_thread")]
+async fn toml_put_records_a_version_snapshot() {
+    let _g = lock().lock().await;
+    let name = "at_toml_history";
+    cleanup(name);
+    write_agent_type(name, "name = \"seed\"\n");
+
+    let h = boot().await;
+    let doc = toml_tab_document(name);
+    let (status, body) = put_toml(&h, &format!("/api/templates/{name}/toml"), &doc).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let (status, history) = get(&h, &format!("/api/templates/{name}/history")).await;
+    assert_eq!(status, StatusCode::OK, "{history}");
+    let versions = history["versions"].as_array().expect("versions array");
+    assert_eq!(
+        versions.len(),
+        1,
+        "the raw-TOML save must record exactly one snapshot: {history}"
+    );
+    assert_eq!(versions[0]["template_name"], name, "{history}");
+    assert_eq!(versions[0]["change_source"], "toml", "{history}");
+    assert!(
+        versions[0]["manifest_toml"]
+            .as_str()
+            .expect("manifest_toml")
+            .contains("raw toml save"),
+        "the snapshot must carry the content the save wrote: {history}"
+    );
+
+    cleanup(name);
+}
+
+/// A key the manifest does not recognize is reported in the response and dropped from
+/// the file — the report is what keeps that drop from happening in silence.
+#[tokio::test(flavor = "multi_thread")]
+async fn toml_put_reports_keys_the_manifest_does_not_recognise() {
+    let _g = lock().lock().await;
+    let name = "at_toml_typo";
+    cleanup(name);
+    write_agent_type(name, "name = \"seed\"\n");
+
+    let h = boot().await;
+    let doc = format!("name = \"{name}\"\nsesion_mode = \"new\"\n");
+    let (status, body) = put_toml(&h, &format!("/api/templates/{name}/toml"), &doc).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let unknown = body["unknown_keys"].as_array().expect("unknown_keys array");
+    assert!(
+        unknown.contains(&json!("sesion_mode")),
+        "the typo key was not reported: {body}"
+    );
+
+    // And the stored document confirms what the report says: the unrecognised key is gone.
+    let stored = std::fs::read_to_string(agent_type_file(name)).unwrap();
+    assert!(
+        !stored.contains("sesion_mode"),
+        "the typo key survived the save despite the report: {stored}"
+    );
+
+    cleanup(name);
+}
+
+/// `triggers = []` — the explicit way to clear the list — must not be reported as a
+/// key `AgentManifest` doesn't recognise. `Vec<Trigger>` carries `skip_serializing_if
+/// = "Vec::is_empty"`, so the round-tripped comparison document drops the key exactly
+/// the way it would for a genuinely unknown one; without excluding empty
+/// arrays/tables the report (and its accompanying WARN) told the operator the schema
+/// didn't know a key it understands perfectly well.
+#[tokio::test(flavor = "multi_thread")]
+async fn toml_put_does_not_misreport_an_explicitly_cleared_list_as_unrecognised() {
+    let _g = lock().lock().await;
+    let name = "at_toml_triggers_cleared";
+    cleanup(name);
+    write_agent_type(
+        name,
+        &format!("name = \"{name}\"\n\n[[triggers]]\npattern = \"git.push\"\n"),
+    );
+
+    let h = boot().await;
+    let doc = format!("name = \"{name}\"\ntriggers = []\n");
+    let (status, body) = put_toml(&h, &format!("/api/templates/{name}/toml"), &doc).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let flagged_triggers = body
+        .get("unknown_keys")
+        .and_then(|k| k.as_array())
+        .is_some_and(|arr| arr.contains(&json!("triggers")));
+    assert!(
+        !flagged_triggers,
+        "triggers = [] is an explicit clear, not an unrecognised key: {body}"
+    );
+
+    cleanup(name);
+}
+
+/// A raw-body create — the shape `POST /api/templates/{name}/toml` (`text/plain`) takes.
+async fn post_toml(h: &Harness, path: &str, body: &str) -> (StatusCode, Json) {
+    send(
+        h,
+        "POST",
+        path,
+        Some("text/plain"),
+        body.as_bytes().to_vec(),
+    )
+    .await
+}
+
+/// The dashboard's original create flow was two requests — `POST /api/templates` (a
+/// name+description stub) then `PUT .../toml` (the manifest the operator actually
+/// authored) — which left the stub on disk if the second call failed, with no way to
+/// retry short of reopening the dialog, and recorded two version snapshots for one
+/// user action even when both calls succeeded (#8028). This endpoint takes the full
+/// manifest up front: one write, one snapshot.
+#[tokio::test(flavor = "multi_thread")]
+async fn toml_post_creates_a_type_in_one_write_with_one_snapshot() {
+    let _g = lock().lock().await;
+    let name = "at_toml_post_create";
+    cleanup(name);
+
+    let h = boot().await;
+    let doc = toml_tab_document(name);
+    let (status, body) = post_toml(&h, &format!("/api/templates/{name}/toml"), &doc).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+
+    let (status, raw) = get(&h, &format!("/api/templates/{name}/toml")).await;
+    assert_eq!(status, StatusCode::OK);
+    let stored: toml::Value = toml::from_str(raw.as_str().unwrap()).unwrap();
+    assert_eq!(
+        stored["triggers"][0]["pattern"].as_str(),
+        Some("git.push"),
+        "the manifest sent to create must land in full, not a name+description stub: {stored}"
+    );
+
+    let (status, history) = get(&h, &format!("/api/templates/{name}/history")).await;
+    assert_eq!(status, StatusCode::OK, "{history}");
+    let versions = history["versions"].as_array().expect("versions array");
+    assert_eq!(
+        versions.len(),
+        1,
+        "one user action must record one snapshot, not a phantom stub followed by the real save: {history}"
+    );
+    assert_eq!(versions[0]["change_source"], "create", "{history}");
+
+    cleanup(name);
+}
+
+/// A second create for a name that already has an agent type must refuse, exactly
+/// like the flat-shape create, and must not touch the file that is already there.
+#[tokio::test(flavor = "multi_thread")]
+async fn toml_post_refuses_a_name_that_already_exists() {
+    let _g = lock().lock().await;
+    let name = "at_toml_post_exists";
+    cleanup(name);
+    write_agent_type(
+        name,
+        &format!("name = \"{name}\"\ndescription = \"already here\"\n"),
+    );
+
+    let h = boot().await;
+    let doc = format!("name = \"{name}\"\n");
+    let (status, body) = post_toml(&h, &format!("/api/templates/{name}/toml"), &doc).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["code"], "template_exists", "{body}");
+
+    let stored = std::fs::read_to_string(agent_type_file(name)).unwrap();
+    assert!(
+        stored.contains("already here"),
+        "a refused create must not touch the existing file: {stored}"
+    );
+
+    cleanup(name);
+}
+
+/// A name already claimed by a live agent is refused, exactly like the flat-shape
+/// create, rather than shadowed by a type this catalog would list ahead of the
+/// agent that actually answers to the name.
+#[tokio::test(flavor = "multi_thread")]
+async fn toml_post_refuses_a_name_that_belongs_to_a_live_agent() {
+    let _g = lock().lock().await;
+    let name = "at_toml_post_liveagent";
+    cleanup(name);
+    write_workspace_agent(name, "name = \"seed\"\n");
+
+    let h = boot().await;
+    let doc = format!("name = \"{name}\"\n");
+    let (status, body) = post_toml(&h, &format!("/api/templates/{name}/toml"), &doc).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["code"], "template_name_taken", "{body}");
+
+    cleanup(name);
+}
+
+/// Malformed syntax and a type-violation both refuse with 400 and carry the parser
+/// detail in `details.toml_error` rather than mixing it into the translated message.
+#[tokio::test(flavor = "multi_thread")]
+async fn toml_put_rejects_malformed_toml_with_a_400() {
+    let _g = lock().lock().await;
+    let name = "at_toml_bad";
+    cleanup(name);
+    write_agent_type(name, "name = \"seed\"\n");
+
+    let h = boot().await;
+
+    for doc in [
+        "name = \nbroken[".to_string(),
+        format!("name = \"{name}\"\nmax_history_messages = \"not-a-number\"\n"),
+    ] {
+        let (status, body) = put_toml(&h, &format!("/api/templates/{name}/toml"), &doc).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert_eq!(body["code"], "template_invalid_toml", "{body}");
+        assert!(
+            body["details"]["toml_error"].is_string(),
+            "parser detail missing: {body}"
+        );
+    }
+
+    // The seeded document is untouched by the refusals.
+    let stored = std::fs::read_to_string(agent_type_file(name)).unwrap();
+    assert!(stored.contains("seed"), "{stored}");
+
+    cleanup(name);
+}
+
+/// Unknown template name and live-agent name keep their distinct refusals on this verb too.
+#[tokio::test(flavor = "multi_thread")]
+async fn toml_put_refuses_unknown_and_live_agent_names() {
+    let _g = lock().lock().await;
+    let name = "at_toml_liveagent";
+    cleanup(name);
+    write_workspace_agent(name, "name = \"seed\"\n");
+
+    let h = boot().await;
+
+    let (status, body) =
+        put_toml(&h, "/api/templates/at_toml_missing/toml", "name = \"x\"\n").await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert_eq!(body["code"], "template_not_found", "{body}");
+
+    let (status, body) = put_toml(
+        &h,
+        &format!("/api/templates/{name}/toml"),
+        "name = \"at_toml_liveagent\"\n",
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["code"], "template_not_editable", "{body}");
+
+    cleanup(name);
+}
+
+/// The same 1MB manifest cap the agent spawn path enforces, checked before parsing.
+#[tokio::test(flavor = "multi_thread")]
+async fn toml_put_refuses_an_oversize_body_before_parsing() {
+    let _g = lock().lock().await;
+    let name = "at_toml_oversize";
+    cleanup(name);
+    write_agent_type(name, "name = \"seed\"\n");
+
+    let h = boot().await;
+    let padding = "x".repeat(1024 * 1024);
+    let doc = format!("name = \"{name}\"\ndescription = \"{padding}\"\n");
+    let (status, body) = put_toml(&h, &format!("/api/templates/{name}/toml"), &doc).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["code"], "template_manifest_too_large", "{body}");
+
+    // The seeded document is untouched.
+    let stored = std::fs::read_to_string(agent_type_file(name)).unwrap();
+    assert!(stored.contains("seed"), "{stored}");
+
+    cleanup(name);
+}
+
+/// The name pin is deliberate (the UI copy says the name cannot change); it just has
+/// to be visible. Same shape as `manifest_toml_cannot_rename_an_agent_out_from_under_
+/// the_registry` on the agent side.
+#[tokio::test(flavor = "multi_thread")]
+async fn toml_put_pins_the_name_to_the_url_rather_than_the_body() {
+    let _g = lock().lock().await;
+    let name = "at_toml_pin";
+    let renamed = "at_toml_pin_moved";
+    cleanup(name);
+    cleanup(renamed);
+    write_agent_type(name, "name = \"seed\"\n");
+
+    let h = boot().await;
+    let doc = format!("name = \"{renamed}\"\ndescription = \"kept\"\n");
+    let (status, body) = put_toml(&h, &format!("/api/templates/{name}/toml"), &doc).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["name"], name, "{body}");
+    assert!(
+        !agent_type_file(renamed).exists(),
+        "a body name moved the document out from under the URL that addressed it"
+    );
+    let stored = std::fs::read_to_string(agent_type_file(name)).unwrap();
+    assert!(stored.contains("kept"), "{stored}");
+
+    cleanup(name);
+    cleanup(renamed);
+}
+
+/// The templates list must tell an editable row with a registry original apart
+/// from one that has none, so the dashboard's restore control can be disabled
+/// with an explanation instead of opening a drawer that can only ever answer
+/// "this agent type does not exist in the registry" (#8042 review).
+#[tokio::test(flavor = "multi_thread")]
+async fn templates_list_flags_from_registry_per_row() {
+    let _g = lock().lock().await;
+    let synced = "at_list_from_registry_synced";
+    let unsynced = "at_list_from_registry_unsynced";
+    let live = "at_list_from_registry_live";
+    cleanup(synced);
+    cleanup(unsynced);
+    cleanup(live);
+
+    // An agent type with a registry original.
+    let manifest = registry_manifest_body(synced, "synced with the registry", 42);
+    write_agent_type(synced, &manifest);
+    write_registry_agent_type(synced, &manifest);
+
+    // Created locally with no registry counterpart — e.g. through `POST
+    // /api/templates` or the `agent_type_create` tool.
+    write_agent_type(
+        unsynced,
+        &registry_manifest_body(unsynced, "local only", 42),
+    );
+
+    // A live agent's own manifest: never editable, so never eligible to
+    // restore from the registry either — the row must not even attempt the
+    // lookup a registry-backed name might otherwise accidentally satisfy.
+    write_workspace_agent(live, &registry_manifest_body(live, "a live agent", 42));
+
+    let h = boot().await;
+    let (status, body) = get(&h, "/api/templates").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let templates = body["templates"].as_array().expect("templates array");
+
+    let row = |name: &str| {
+        templates
+            .iter()
+            .find(|r| r["name"] == name)
+            .unwrap_or_else(|| panic!("{name} missing from list: {body}"))
+    };
+
+    assert_eq!(row(synced)["from_registry"], true, "{body}");
+    assert_eq!(row(unsynced)["from_registry"], false, "{body}");
+    assert_eq!(row(live)["editable"], false, "{body}");
+    assert_eq!(row(live)["from_registry"], false, "{body}");
+
+    cleanup(synced);
+    cleanup(unsynced);
     cleanup(live);
 }

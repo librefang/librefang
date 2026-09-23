@@ -47,10 +47,14 @@ use crate::types;
         routes::list_agent_templates,
         routes::get_agent_template,
         routes::get_agent_template_toml,
+        routes::put_agent_template_toml,
+        routes::post_agent_template_toml,
         routes::create_agent_type,
         routes::update_agent_type,
         routes::delete_agent_type,
         routes::promote_agent_type,
+        routes::get_registry_diff,
+        routes::restore_from_registry,
         routes::list_template_history,
         routes::restore_template_version,
         routes::list_commands,
@@ -116,6 +120,7 @@ use crate::types;
         routes::inject_message,
         routes::push_message,
         routes::reload_agent_manifest,
+        routes::get_agent_manifest_toml,
         routes::suspend_agent,
         routes::resume_agent,
         routes::agent_metrics,
@@ -428,6 +433,15 @@ use crate::types;
 
         // ── Inbox ──
         routes::inbox_status,
+
+        // ── Knowledge bases ──
+        routes::knowledge::list_bases,
+        routes::knowledge::create_base,
+        routes::knowledge::delete_base,
+        routes::knowledge::list_documents,
+        routes::knowledge::put_document,
+        routes::knowledge::delete_document,
+        routes::knowledge::set_holders,
 
         // ── Webhooks ──
         routes::webhook_wake,

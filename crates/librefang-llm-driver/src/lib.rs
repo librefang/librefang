@@ -267,6 +267,19 @@ pub struct CompletionRequest {
     pub max_tokens: u32,
     /// Sampling temperature.
     pub temperature: f32,
+    /// Nucleus sampling (`top_p`). `None` = not set, so the provider's default applies.
+    ///
+    /// Typed rather than carried in [`Self::extra_body`] (#8290) because the drivers that do not merge `extra_body` dropped it silently, and the one that does forwarded it to endpoints that reject it.
+    /// Each driver places it where its wire expects it, or drops it with a `debug!` when the target model has no such parameter.
+    pub top_p: Option<f32>,
+    /// OpenAI-family frequency penalty. `None` = not set.
+    ///
+    /// Sent only by the drivers whose wire has the field; see [`Self::top_p`].
+    pub frequency_penalty: Option<f32>,
+    /// OpenAI-family presence penalty. `None` = not set.
+    ///
+    /// Sent only by the drivers whose wire has the field; see [`Self::top_p`].
+    pub presence_penalty: Option<f32>,
     /// System prompt (extracted from messages for APIs that need it separately).
     pub system: Option<String>,
     /// Extended thinking configuration (if supported by the model).

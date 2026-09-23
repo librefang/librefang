@@ -936,6 +936,11 @@ pub(crate) fn is_scrubbed_config_key(key: &str) -> bool {
         "api_base_url",
         "fork_owner",
         "base_branch",
+        // Release-path destination (#8180): `librefang skill publish` creates
+        // releases and uploads assets under this organisation with the same
+        // token, so writing it retargets those uploads the way `fork_owner`
+        // retargets promotion pushes.
+        "release_org",
     ];
     // Round-4 review of #4678: env-var-name redirects. Codebase
     // pervasively uses `*_token_env`, `*_password_env`,

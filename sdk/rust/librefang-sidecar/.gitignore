@@ -1,2 +1,2 @@
-Cargo.lock
+# Cargo.lock is committed (#8124): CI checks this crate with `--locked` at its declared rust-version, which is only deterministic against a fixed dependency set.
 target/

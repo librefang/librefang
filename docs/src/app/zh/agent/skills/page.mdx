@@ -564,6 +564,18 @@ librefang skill publish
 
 此命令会验证清单、打包技能并上传到 FangHub 注册中心。
 
+除非用 `--repo owner/name` 指定其他仓库，发布会在 `api.github.com` 上的 `librefang-skills/<skill-name>` 创建 release。
+这两部分默认值都来自 `config.toml` 的 `[skills.promotion]`，也就是 "Propose to Registry" 流程读取的同一个配置段，因此一处设置即可让两者都指向 GitHub Enterprise Server：
+
+```toml
+[skills.promotion]
+api_base_url = "https://github.example.com/api/v3"  # GitHub REST API 根地址；仅限 https（回环地址可用 http）
+release_org = "acme-skills"                         # 存放每个技能 release 仓库的组织
+```
+
+`librefang skill install` 的 GitHub releases 回退路径（同步的注册中心副本中没有该技能时使用）也读取这两个字段。
+由于 GitHub token 会发送到它们指向的目标，这两个字段不能通过 `POST /api/config/set` 设置，请直接在磁盘上编辑 `config.toml`。
+
 ---
 
 ## CLI 命令

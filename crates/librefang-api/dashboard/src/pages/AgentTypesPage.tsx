@@ -4,20 +4,24 @@ import { Link } from "@tanstack/react-router";
 import { Edit2, ExternalLink, History, LayoutTemplate, Lock, Play, Plus, RotateCcw, Share2, ShieldCheck, Trash2 } from "lucide-react";
 import type {
   AgentTemplate,
-  AgentTypeSpec,
   SpawnEphemeralResult,
   TemplateVersionEntry,
 } from "../api";
-import { useAgentType, useAgentTypes, useAgentTypeHistory } from "../lib/queries/agentTypes";
+import { useAgentType, useAgentTypeRegistryDiff, useAgentTypes, useAgentTypeHistory } from "../lib/queries/agentTypes";
 import { useAgents, useTools } from "../lib/queries/agents";
 import { useSkills } from "../lib/queries/skills";
+import { useProviders } from "../lib/queries/providers";
+import { useModels } from "../lib/queries/models";
+import { useMcpServers } from "../lib/queries/mcp";
 import {
-  useCreateAgentType,
+  useCreateAgentTypeFromToml,
   useDeleteAgentType,
   usePromoteAgentType,
+  useRestoreAgentType,
   useRestoreTemplateVersion,
   useSpawnEphemeral,
-  useUpdateAgentType,
+  useUpdateAgentTypeToml,
+  unknownKeysWarning,
 } from "../lib/mutations/agentTypes";
 import { PageHeader } from "../components/ui/PageHeader";
 import { ListSkeleton } from "../components/ui/Skeleton";
@@ -27,69 +31,26 @@ import { Button } from "../components/ui/Button";
 import { Badge } from "../components/ui/Badge";
 import { Modal } from "../components/ui/Modal";
 import { ConfirmDialog } from "../components/ui/ConfirmDialog";
-import { MultiSelectCmdk } from "../components/ui/MultiSelectCmdk";
+import { AgentManifestForm } from "../components/AgentManifestForm";
+import type { ManifestCatalogEntry } from "../components/AgentManifestForm";
+import {
+  emptyManifestExtras,
+  emptyManifestForm,
+  parseManifestToml,
+  serializeManifestForm,
+  validateManifestForm,
+  type ManifestExtras,
+  type ManifestFormState,
+} from "../lib/agentManifest";
 import { useUIStore } from "../lib/store";
 import { toastErr } from "../lib/errors";
+import { ApiError } from "../lib/http/errors";
 import { copyToClipboard } from "../lib/clipboard";
-
-/**
- * The subset of an agent type this editor writes.
- *
- * `name` is absent on purpose: it identifies the document and the `PUT` route
- * takes it from the URL, so the form cannot rename a type out from under itself.
- */
-interface FormState {
-  description: string;
-  system_prompt: string;
-  provider: string;
-  model: string;
-  tools: string[];
-  skills: string[];
-}
-
-const EMPTY_FORM: FormState = {
-  description: "",
-  system_prompt: "",
-  provider: "",
-  model: "",
-  tools: [],
-  skills: [],
-};
-
-function formFromSpec(spec: AgentTypeSpec): FormState {
-  return {
-    description: spec.description ?? "",
-    system_prompt: spec.system_prompt ?? "",
-    provider: spec.provider ?? "",
-    model: spec.model ?? "",
-    tools: spec.tools ?? [],
-    skills: spec.skills ?? [],
-  };
-}
+import { changeSourceLabel } from "../lib/changeSource";
 
 const inputClass =
   "w-full rounded-lg border border-border-subtle bg-main/40 px-2.5 py-1.5 text-[13px] " +
   "text-text-main placeholder:text-text-dim/50 focus:border-brand/50 focus:outline-none";
-
-/**
- * Union the catalog with what the type already references, so an identifier the
- * registry does not know about (a skill installed on another host, a tool from a
- * plugin that has not loaded yet) still renders as a chip instead of vanishing
- * from the form and, with it, from the saved document.
- */
-function mergeCatalog(
-  catalog: { name: string; description?: string }[] | undefined,
-  selected: string[],
-): { options: string[]; meta: Record<string, { description?: string }> } {
-  const meta: Record<string, { description?: string }> = {};
-  const options = new Set<string>();
-  for (const entry of catalog ?? []) {
-    options.add(entry.name);
-    if (entry.description) meta[entry.name] = { description: entry.description };
-  }
-  for (const name of selected) options.add(name);
-  return { options: [...options].sort(), meta };
-}
 
 function Field({
   label,
@@ -115,7 +76,6 @@ function AgentTypeEditor({
   name,
   onClose,
 }: {
-  /** `null` opens the create form; a string opens the editor for that type. */
   name: string | null;
   onClose: () => void;
 }) {
@@ -124,44 +84,97 @@ function AgentTypeEditor({
   const isCreate = name === null;
 
   const detail = useAgentType(name ?? "", { enabled: !isCreate });
+  const createMutation = useCreateAgentTypeFromToml();
+  const updateTomlMutation = useUpdateAgentTypeToml();
+
+  const providersQuery = useProviders();
+  const modelsQuery = useModels();
   const toolsQuery = useTools();
   const skillsQuery = useSkills();
-  const createMutation = useCreateAgentType();
-  const updateMutation = useUpdateAgentType();
+  const mcpServersQuery = useMcpServers();
 
   const [newName, setNewName] = useState("");
-  const [form, setForm] = useState<FormState>(EMPTY_FORM);
+  const [formState, setFormState] = useState<ManifestFormState>(emptyManifestForm);
+  const [formExtras, setFormExtras] = useState<ManifestExtras>(emptyManifestExtras);
+  const [invalidFields, setInvalidFields] = useState<Set<string>>(new Set());
+  const [parseError, setParseError] = useState<string | null>(null);
+  const [seeded, setSeeded] = useState(false);
 
-  const spec = detail.data?.spec;
   useEffect(() => {
-    setForm(spec ? formFromSpec(spec) : EMPTY_FORM);
-  }, [spec]);
+    if (isCreate || seeded) return;
+    const toml = detail.data?.manifest_toml;
+    if (!toml) return;
+    const parsed = parseManifestToml(toml);
+    if (parsed.ok) {
+      setFormState(parsed.form);
+      setFormExtras(parsed.extras);
+      setParseError(null);
+    } else {
+      setParseError(
+        parsed.message === "json_schema_unsafe_integer"
+          ? t("agents.form.json_schema_unsafe_integer")
+          : parsed.message,
+      );
+    }
+    setSeeded(true);
+  }, [isCreate, seeded, detail.data, t]);
 
-  const toolFinder = useMemo(
-    () => mergeCatalog(toolsQuery.data, form.tools),
-    [toolsQuery.data, form.tools],
-  );
-  const skillFinder = useMemo(
-    () => mergeCatalog(skillsQuery.data, form.skills),
-    [skillsQuery.data, form.skills],
+  const providers = useMemo(
+    () => (providersQuery.data ?? []).map((p) => ({ name: p.id })),
+    [providersQuery.data],
   );
 
-  const saving = createMutation.isPending || updateMutation.isPending;
-  const update = (patch: Partial<FormState>) => setForm((prev) => ({ ...prev, ...patch }));
+  const models = useMemo(
+    () =>
+      (modelsQuery.data?.models ?? []).map((m) => ({
+        provider: m.provider ?? "",
+        id: m.id,
+      })),
+    [modelsQuery.data],
+  );
+
+  const skillCatalog = useMemo<ManifestCatalogEntry[]>(
+    () => (skillsQuery.data ?? []).map((s) => ({ name: s.name, description: s.description })),
+    [skillsQuery.data],
+  );
+
+  const toolCatalog = useMemo<ManifestCatalogEntry[]>(
+    () => (toolsQuery.data ?? []).map((t) => ({ name: t.name, description: t.description })),
+    [toolsQuery.data],
+  );
+
+  const mcpCatalog = useMemo<ManifestCatalogEntry[]>(
+    () =>
+      mcpServersQuery.data
+        ? mcpServersQuery.data.configured.map((s: { name: string }) => ({ name: s.name }))
+        : [],
+    [mcpServersQuery.data],
+  );
+
+  const saving = createMutation.isPending || updateTomlMutation.isPending;
 
   async function handleSave() {
-    // Send exactly the keys this form owns. The server merges them over the
-    // stored manifest, so everything it does not mention — triggers, compaction,
-    // MCP allowlists, session mode — survives the save untouched (#7740).
-    const payload: AgentTypeSpec = { ...form };
+    const errors = validateManifestForm(formState);
+    setInvalidFields(new Set(errors));
+    if (errors.length > 0) return;
+
     try {
-      if (isCreate) {
-        await createMutation.mutateAsync({ ...payload, name: newName.trim() });
-        addToast(t("agentTypes.created"), "success");
-      } else {
-        await updateMutation.mutateAsync({ name: name as string, spec: payload });
-        addToast(t("agentTypes.saved"), "success");
+      const toml = serializeManifestForm(formState, formExtras);
+      // One write either way (#8028): a two-step create (POST the stub, then
+      // PUT the real manifest) leaves the stub on disk if the second call
+      // fails, with no way to retry short of closing and reopening the
+      // dialog. `createMutation` claims the name and writes the full
+      // manifest atomically, so a failure here leaves nothing behind and
+      // the same Save press can simply be retried.
+      const detail = isCreate
+        ? await createMutation.mutateAsync({ name: newName.trim(), toml })
+        : await updateTomlMutation.mutateAsync({ name: name as string, toml });
+
+      const dropped = unknownKeysWarning(detail);
+      if (dropped) {
+        addToast(t("agentTypes.unknown_keys_dropped", { keys: dropped }), "error");
       }
+      addToast(isCreate ? t("agentTypes.created") : t("agentTypes.saved"), "success");
       onClose();
     } catch (err) {
       addToast(toastErr(err, t("agentTypes.save_failed")), "error");
@@ -173,7 +186,7 @@ function AgentTypeEditor({
       isOpen
       onClose={onClose}
       variant="panel-right"
-      size="lg"
+      size="xl"
       overflowVisible
       title={isCreate ? t("agentTypes.create_title") : t("agentTypes.edit_title", { name })}
     >
@@ -181,6 +194,15 @@ function AgentTypeEditor({
         <ListSkeleton rows={4} />
       ) : !isCreate && detail.isError ? (
         <ErrorState message={detail.error?.message} onRetry={() => void detail.refetch()} />
+      ) : parseError ? (
+        <div className="space-y-3">
+          <ErrorState message={parseError} />
+          <div className="flex justify-end">
+            <Button variant="ghost" onClick={onClose}>
+              {t("common.close")}
+            </Button>
+          </div>
+        </div>
       ) : (
         <div className="space-y-4">
           {isCreate && (
@@ -188,7 +210,16 @@ function AgentTypeEditor({
               <input
                 type="text"
                 value={newName}
-                onChange={(e) => setNewName(e.target.value)}
+                onChange={(e) => {
+                  const next = e.target.value;
+                  setNewName(next);
+                  // `AgentManifestForm`'s own Name field is hidden in create
+                  // mode (there is exactly one Name input here, as the
+                  // editor this replaces had), but `validateManifestForm`
+                  // still checks `formState.name` — keep the two in step so
+                  // typing here doesn't leave that check permanently failing.
+                  setFormState((prev) => ({ ...prev, name: next }));
+                }}
                 placeholder={t("agentTypes.name_placeholder")}
                 className={inputClass}
                 autoFocus
@@ -196,74 +227,18 @@ function AgentTypeEditor({
             </Field>
           )}
 
-          <Field label={t("agentTypes.description")}>
-            <input
-              type="text"
-              value={form.description}
-              onChange={(e) => update({ description: e.target.value })}
-              className={inputClass}
-            />
-          </Field>
-
-          <Field label={t("agentTypes.system_prompt")} hint={t("agentTypes.system_prompt_hint")}>
-            <textarea
-              value={form.system_prompt}
-              onChange={(e) => update({ system_prompt: e.target.value })}
-              rows={6}
-              className={`${inputClass} font-mono resize-y`}
-            />
-          </Field>
-
-          <div className="grid grid-cols-2 gap-3">
-            <Field label={t("agentTypes.provider")} hint={t("agentTypes.provider_hint")}>
-              <input
-                type="text"
-                value={form.provider}
-                onChange={(e) => update({ provider: e.target.value })}
-                placeholder={t("agentTypes.inherit_placeholder")}
-                className={inputClass}
-              />
-            </Field>
-            <Field label={t("agentTypes.model")} hint={t("agentTypes.model_hint")}>
-              <input
-                type="text"
-                value={form.model}
-                onChange={(e) => update({ model: e.target.value })}
-                placeholder={t("agentTypes.inherit_placeholder")}
-                className={inputClass}
-              />
-            </Field>
-          </div>
-
-          <Field label={t("agentTypes.tools")} hint={t("agentTypes.tools_hint")}>
-            <MultiSelectCmdk
-              options={toolFinder.options}
-              optionMeta={toolFinder.meta}
-              value={form.tools}
-              onChange={(next) =>
-                update({ tools: typeof next === "function" ? next(form.tools) : next })
-              }
-              placeholder={t("agentTypes.tools_search")}
-              allowFreeText
-            />
-          </Field>
-
-          <Field label={t("agentTypes.skills")} hint={t("agentTypes.skills_hint")}>
-            <MultiSelectCmdk
-              options={skillFinder.options}
-              optionMeta={skillFinder.meta}
-              value={form.skills}
-              onChange={(next) =>
-                update({ skills: typeof next === "function" ? next(form.skills) : next })
-              }
-              placeholder={t("agentTypes.skills_search")}
-              allowFreeText
-            />
-          </Field>
-
-          <p className="rounded-lg border border-border-subtle bg-main/30 px-3 py-2 text-[11px] text-text-dim">
-            {t("agentTypes.preserved_note")}
-          </p>
+          <AgentManifestForm
+            value={formState}
+            onChange={setFormState}
+            providers={providers}
+            models={models}
+            invalidFields={invalidFields}
+            extras={formExtras}
+            skillCatalog={skillCatalog}
+            toolCatalog={toolCatalog}
+            mcpCatalog={mcpCatalog}
+            nameField={isCreate ? "hidden" : "readonly"}
+          />
 
           <div className="flex justify-end gap-2 pt-1">
             <Button variant="ghost" onClick={onClose} disabled={saving}>
@@ -315,9 +290,6 @@ function QuickRunModal({
     [agents.data],
   );
 
-  // Preselect the first agent so the common case is two fields, not three.
-  // Guarded on `parent` staying empty so a refetch never moves a choice the
-  // operator already made.
   useEffect(() => {
     if (parent === "" && candidates.length > 0) setParent(candidates[0].id);
   }, [candidates, parent]);
@@ -523,6 +495,146 @@ function versionTimestamp(v: TemplateVersionEntry): string {
   return new Date(v.timestamp + "Z").toLocaleString();
 }
 
+/**
+ * Render one side of a registry-diff row as text.
+ *
+ * Six of the twelve fields the diff compares are string lists, so the array
+ * case is the common one here, not an edge case: rendering `tools` as
+ * `["read_file","write_file"]` spends most of a 200px truncating cell on
+ * quotes and brackets, where `read_file, write_file` fits.
+ *
+ * An absent `provider` or `model` arrives as JSON `null`, which stringifies to
+ * the literal word `null` and reads as a value the operator set rather than
+ * one that is not there — an em dash, matching the empty-list case, says
+ * "nothing" in the one way the table already uses.
+ *
+ * Anything else falls back to JSON rather than `String(value)`, which would
+ * flatten a structured value to `[object Object]` and hide the difference the
+ * row exists to show.
+ */
+function formatDiffValue(value: unknown): string {
+  if (value === null || value === undefined) return "—";
+  if (Array.isArray(value)) return value.length ? value.join(", ") : "—";
+  if (typeof value === "string") return value;
+  return JSON.stringify(value);
+}
+
+export function RestoreDiffModal({
+  name,
+  onClose,
+}: {
+  name: string;
+  onClose: () => void;
+}) {
+  const { t } = useTranslation();
+  const addToast = useUIStore((s) => s.addToast);
+  const diff = useAgentTypeRegistryDiff(name);
+  const restore = useRestoreAgentType();
+
+  async function handleRestore() {
+    try {
+      await restore.mutateAsync(name);
+      addToast(t("agentTypes.restore_success"), "success");
+      onClose();
+    } catch (err) {
+      addToast(toastErr(err, t("agentTypes.restore_from_registry_failed")), "error");
+    }
+  }
+
+  return (
+    <Modal
+      isOpen
+      onClose={onClose}
+      variant="panel-right"
+      size="lg"
+      title={t("agentTypes.restore_title", { name })}
+    >
+      {diff.isLoading ? (
+        <ListSkeleton rows={4} />
+      ) : diff.isError ? (
+        <div className="space-y-3">
+          <p className="text-[13px] text-text-dim">
+            {/* `registry_type_not_found` is the one failure that is actually a
+                statement about the registry — every other code (an unparseable
+                local manifest, a read failure, a transport error) means something
+                else went wrong and telling the operator "not in the registry" is
+                misleading, or for the unparseable case the opposite of the truth. */}
+            {diff.error instanceof ApiError && diff.error.code === "registry_type_not_found"
+              ? t("agentTypes.restore_no_registry")
+              : toastErr(diff.error, t("agentTypes.restore_from_registry_failed"))}
+          </p>
+          <div className="flex justify-end">
+            <Button variant="ghost" onClick={onClose}>{t("common.close")}</Button>
+          </div>
+        </div>
+      ) : diff.data?.identical ? (
+        <div className="space-y-3">
+          <p className="text-[13px] text-text-dim">
+            {t("agentTypes.restore_identical")}
+          </p>
+          <div className="flex justify-end">
+            <Button variant="ghost" onClick={onClose}>{t("common.close")}</Button>
+          </div>
+        </div>
+      ) : (
+        <div className="space-y-4">
+          <div className="overflow-auto rounded-lg border border-border-subtle">
+            <table className="w-full text-[12px]">
+              <thead>
+                <tr className="border-b border-border-subtle bg-main/30">
+                  <th className="px-3 py-1.5 text-left font-semibold text-text-dim">{t("agentTypes.restore_diff_field")}</th>
+                  <th className="px-3 py-1.5 text-left font-semibold text-text-dim">{t("agentTypes.restore_diff_local")}</th>
+                  <th className="px-3 py-1.5 text-left font-semibold text-text-dim">{t("agentTypes.restore_diff_registry")}</th>
+                </tr>
+              </thead>
+              <tbody>
+                {(diff.data?.diffs ?? []).map((d) => (
+                  <tr key={d.field} className="border-b border-border-subtle last:border-0">
+                    <td className="px-3 py-1.5 font-mono text-text-main">{d.field}</td>
+                    <td className="max-w-[200px] truncate px-3 py-1.5 text-error/80">
+                      {formatDiffValue(d.local)}
+                    </td>
+                    <td className="max-w-[200px] truncate px-3 py-1.5 text-green-500/80">
+                      {formatDiffValue(d.registry)}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          {(diff.data?.unlisted_diffs ?? 0) > 0 && (
+            <p className="text-[11px] text-text-dim">
+              {t("agentTypes.restore_diff_more", {
+                count: diff.data!.unlisted_diffs,
+              })}
+            </p>
+          )}
+
+          <p className="rounded-lg border border-border-subtle bg-main/30 px-3 py-2 text-[11px] text-text-dim">
+            {t("agentTypes.restore_confirm")}
+          </p>
+
+          <div className="flex justify-end gap-2">
+            <Button variant="ghost" onClick={onClose} disabled={restore.isPending}>
+              {t("common.cancel")}
+            </Button>
+            <Button
+              variant="primary"
+              leftIcon={<RotateCcw className="h-3.5 w-3.5" />}
+              onClick={() => void handleRestore()}
+              isLoading={restore.isPending}
+            >
+              {t("agentTypes.restore_from_registry")}
+            </Button>
+          </div>
+        </div>
+      )}
+    </Modal>
+  );
+}
+
+
 function TemplateHistoryModal({
   name,
   onClose,
@@ -586,7 +698,9 @@ function TemplateHistoryModal({
                   <span className="text-[12px] font-medium text-text-main">
                     {versionTimestamp(v)}
                   </span>
-                  <Badge variant="default" className="ml-2">{v.change_source}</Badge>
+                  <Badge variant="default" className="ml-2" title={v.change_source}>
+                    {changeSourceLabel(t, v.change_source)}
+                  </Badge>
                 </div>
                 <div className="flex shrink-0 items-center gap-1">
                   <button
@@ -626,7 +740,7 @@ function TemplateHistoryModal({
         message={t("agentTypes.confirm_restore", {
           name,
           timestamp: pendingRestore ? versionTimestamp(pendingRestore) : "",
-          source: pendingRestore?.change_source ?? "",
+          source: pendingRestore ? changeSourceLabel(t, pendingRestore.change_source) : "",
         })}
         tone="destructive"
       />
@@ -641,6 +755,7 @@ function AgentTypeRow({
   onDelete,
   onPromote,
   onPreviewPromote,
+  onRestore,
   onHistory,
 }: {
   type: AgentTemplate;
@@ -649,6 +764,7 @@ function AgentTypeRow({
   onDelete: () => void;
   onPromote: () => void;
   onPreviewPromote: () => void;
+  onRestore: () => void;
   onHistory: () => void;
 }) {
   const { t } = useTranslation();
@@ -668,10 +784,6 @@ function AgentTypeRow({
       </div>
 
       <div className="flex shrink-0 items-center gap-1">
-        {/* Quick Run is offered on every row, editable or not. Spawnability and
-            writability are different questions: a workspace-sourced row is a live
-            agent's manifest this API refuses to edit, but the spawn engine resolves
-            it by name just as happily as an operator-authored type (#6699). */}
         <button
           type="button"
           onClick={onQuickRun}
@@ -698,9 +810,6 @@ function AgentTypeRow({
           <ShieldCheck className="h-3.5 w-3.5" />
         </button>
 
-        {/* A workspace-sourced row is a live agent's own manifest. The write verbs
-            refuse it by design, so rendering Edit/Delete here would offer a control
-            that cannot succeed — point at the surface that can instead (#7731). */}
         {type.editable ? (
           <>
             <button
@@ -729,6 +838,39 @@ function AgentTypeRow({
               title={t("agentTypes.edit")}
             >
               <Edit2 className="h-3.5 w-3.5" />
+            </button>
+            {/* An `editable` row still may have no registry original — created through
+                `POST /api/templates` or `agent_type_create` rather than promoted from one.
+                Disabling with an explanation beats hiding the control outright: hiding
+                would look identical to "this type can never be restored", when the real
+                answer is "not from the registry, but promoting it would change that"
+                (#8042 review).
+
+                `agentTypes.restore_from_registry` is deliberately not just "Restore":
+                the History modal's per-version button below (`agentTypes.restore_btn`,
+                line ~725) already owns that exact accessible name for a different
+                action — restoring one saved edit, not the registry original — and both
+                controls can be on screen at once. Reusing "Restore" here made
+                `getByRole("button", { name: "Restore" })` ambiguous between them,
+                which is what broke two History-modal tests once this branch merged
+                with one that opens the modal in the same render. */}
+            <button
+              type="button"
+              onClick={onRestore}
+              disabled={!type.from_registry}
+              className="rounded-lg p-1.5 text-text-dim hover:bg-main/50 hover:text-brand disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-transparent disabled:hover:text-text-dim"
+              aria-label={
+                type.from_registry
+                  ? t("agentTypes.restore_from_registry")
+                  : t("agentTypes.restore_no_registry")
+              }
+              title={
+                type.from_registry
+                  ? t("agentTypes.restore_from_registry")
+                  : t("agentTypes.restore_no_registry")
+              }
+            >
+              <RotateCcw className="h-3.5 w-3.5" />
             </button>
             <button
               type="button"
@@ -768,6 +910,7 @@ export function AgentTypesPage() {
   const [promoting, setPromoting] = useState<string | null>(null);
   const [pendingPromote, setPendingPromote] = useState<string | null>(null);
   const [promotedPrUrl, setPromotedPrUrl] = useState<string | null>(null);
+  const [restoring, setRestoring] = useState<string | null>(null);
   const [historyName, setHistoryName] = useState<string | null>(null);
 
   async function confirmDelete() {
@@ -835,6 +978,7 @@ export function AgentTypesPage() {
               onDelete={() => setPendingDelete(type.name)}
               onPromote={() => setPendingPromote(type.name)}
               onPreviewPromote={() => setPromoting(type.name)}
+              onRestore={() => setRestoring(type.name)}
               onHistory={() => setHistoryName(type.name)}
             />
           ))}
@@ -850,6 +994,8 @@ export function AgentTypesPage() {
       {promoting && (
         <PromotionPreviewModal name={promoting} onClose={() => setPromoting(null)} />
       )}
+
+      {restoring && <RestoreDiffModal name={restoring} onClose={() => setRestoring(null)} />}
 
       {historyName && (
         <TemplateHistoryModal name={historyName} onClose={() => setHistoryName(null)} />
