@@ -48,6 +48,10 @@ export function AgentModelRoutingPanel({ agent }: { agent: AgentDetail }) {
 
   const profiles = profilesQuery.data?.profiles ?? [];
   const routerEnabled = profilesQuery.data?.enabled ?? false;
+  // #8446: Stable mode freezes model choice kernel-wide, so nothing this panel saves takes effect until the mode changes.
+  const stableModeInert = saved?.routing_inert_reason === "stable_mode";
+  // What Stable mode runs instead: the pinned model, else the manifest model (already resolved against the default by the detail endpoint).
+  const stableModel = saved?.pinned_model || agent.model?.model;
 
   const isDirty = useMemo(() => {
     if (!saved) return false;
@@ -132,14 +136,41 @@ export function AgentModelRoutingPanel({ agent }: { agent: AgentDetail }) {
             })}
           </p>
         </div>
-        {!routerEnabled && (
-          <Badge variant="warning">
-            {t("agents.routing.disabledKernelWide", {
-              defaultValue: "Router off in config.toml",
-            })}
-          </Badge>
-        )}
+        <div className="flex shrink-0 flex-wrap justify-end gap-2">
+          {stableModeInert && (
+            <Badge variant="warning">
+              {t("agents.routing.stableModeBadge", {
+                defaultValue: "Inert in Stable mode",
+              })}
+            </Badge>
+          )}
+          {!routerEnabled && (
+            <Badge variant="warning">
+              {t("agents.routing.disabledKernelWide", {
+                defaultValue: "Router off in config.toml",
+              })}
+            </Badge>
+          )}
+        </div>
       </div>
+
+      {stableModeInert && (
+        <div className="flex items-start gap-2 rounded-xl border border-warning/20 bg-warning/10 p-3 text-xs text-warning">
+          <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
+          <p>
+            {stableModel
+              ? t("agents.routing.stableModeInert", {
+                  model: stableModel,
+                  defaultValue:
+                    "The kernel runs in Stable mode, which freezes model choice: no router runs, and this agent always uses {{model}}. These settings are saved but have no effect until the kernel leaves Stable mode.",
+                })
+              : t("agents.routing.stableModeInertNoModel", {
+                  defaultValue:
+                    "The kernel runs in Stable mode, which freezes model choice: no router runs, and this agent always uses its manifest model. These settings are saved but have no effect until the kernel leaves Stable mode.",
+                })}
+          </p>
+        </div>
+      )}
 
       {/* #7781 review: `fixed` (the per-agent router opt-out) now survives a
           save instead of getting cleared, so it can persist silently with

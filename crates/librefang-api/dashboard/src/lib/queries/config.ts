@@ -9,7 +9,7 @@ import {
 import { configKeys, registryKeys } from "./keys";
 import { withOverrides, type QueryOverrides } from "./options";
 import { selectMediaModelEndpoints } from "../mediaModelEndpoints";
-import type { MediaModelEndpoint } from "../../api";
+import type { MediaModelEndpoint, ModelRoutingInertReason } from "../../api";
 
 const STALE_MS = 60_000;
 const SCHEMA_STALE_MS = 300_000;
@@ -89,6 +89,19 @@ export function selectAuxiliaryChains(data: unknown): Record<string, string[]> {
   return out;
 }
 
+/**
+ * Narrow `GET /api/config` to the kernel-wide reason no router chooses a model (#8446).
+ *
+ * The kernel runs neither router in Stable mode (`model_selection_path` in `librefang-kernel`), and `mode` is serialised with serde's snake_case encoding, so `"stable"` is the only value that makes routing inert.
+ * An existing agent carries the same answer server-side as `routing_inert_reason`; this projection is for the surfaces that have no agent yet, such as the create form.
+ */
+export function selectModelRoutingInertReason(
+  data: unknown,
+): ModelRoutingInertReason | null {
+  const mode = (data as Record<string, unknown> | undefined)?.mode;
+  return mode === "stable" ? "stable_mode" : null;
+}
+
 export function useFullConfig(options: QueryOverrides = {}) {
   return useQuery(withOverrides(configQueries.full(), options));
 }
@@ -96,6 +109,16 @@ export function useFullConfig(options: QueryOverrides = {}) {
 /** `[llm.auxiliary]` chain map, narrowed off the shared full-config cache entry. */
 export function useAuxiliaryChains() {
   return useQuery({ ...configQueries.full(), select: selectAuxiliaryChains });
+}
+
+/** Kernel-wide routing inert reason, narrowed off the shared full-config cache entry. */
+export function useModelRoutingInertReason(options: QueryOverrides = {}) {
+  return useQuery(
+    withOverrides(
+      { ...configQueries.full(), select: selectModelRoutingInertReason },
+      options,
+    ),
+  );
 }
 
 /**

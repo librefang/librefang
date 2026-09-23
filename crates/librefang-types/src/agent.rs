@@ -2181,7 +2181,11 @@ impl std::fmt::Display for SessionLabel {
     }
 }
 
-/// Visual identity for an agent — emoji, avatar, color, personality.
+/// An agent's appearance — emoji, avatar, colour — as the registry stores it and the dashboard draws it.
+///
+/// Personality is deliberately not here (#8447).
+/// It lives in the front matter of `{workspace}/.identity/IDENTITY.md`, the file the prompt injects, so a copy in the registry could only ever disagree with what the agent sees; see [`AgentPersonality`].
+/// Rows persisted before that split still carry `archetype` / `vibe` / `greeting_style` keys, which deserialize fine and are ignored.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AgentIdentity {
@@ -2191,12 +2195,43 @@ pub struct AgentIdentity {
     pub avatar_url: Option<String>,
     /// Hex color code (e.g., "#FF5C00") for UI accent.
     pub color: Option<String>,
+}
+
+/// An agent's personality: the keys of `{workspace}/.identity/IDENTITY.md`'s front matter that the identity PATCH routes write (#8447).
+///
+/// Unlike [`AgentIdentity`] this is not stored in the registry, because the file is injected into the system prompt and is therefore the only place a personality value has any effect.
+/// `None` means "not provided" and leaves the file's current line alone.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AgentPersonality {
     /// Archetype: "researcher", "coder", "assistant", "writer", "devops", "support", "analyst".
     pub archetype: Option<String>,
     /// Personality vibe: "professional", "friendly", "technical", "creative", "concise", "mentor".
     pub vibe: Option<String>,
     /// Greeting style: "warm", "formal", "playful", "brief".
     pub greeting_style: Option<String>,
+}
+
+impl AgentPersonality {
+    /// The provided fields as `(front-matter key, value)` pairs, always in the same order so the same request produces the same file.
+    pub fn front_matter_fields(&self) -> Vec<(&'static str, &str)> {
+        [
+            ("archetype", &self.archetype),
+            ("vibe", &self.vibe),
+            ("greeting_style", &self.greeting_style),
+        ]
+        .into_iter()
+        .filter_map(|(key, value)| value.as_deref().map(|value| (key, value)))
+        .collect()
+    }
+
+    /// The first provided field whose value contains a line break, which would smuggle a second key into the front matter.
+    pub fn multiline_field(&self) -> Option<&'static str> {
+        self.front_matter_fields()
+            .into_iter()
+            .find(|(_, value)| value.contains(['\n', '\r']))
+            .map(|(key, _)| key)
+    }
 }
 
 /// A registered agent entry in the kernel's registry.
@@ -3031,9 +3066,6 @@ mod tests {
         assert!(id.emoji.is_none());
         assert!(id.avatar_url.is_none());
         assert!(id.color.is_none());
-        assert!(id.archetype.is_none());
-        assert!(id.vibe.is_none());
-        assert!(id.greeting_style.is_none());
     }
 
     #[test]
@@ -3042,14 +3074,46 @@ mod tests {
             emoji: Some("\u{1F916}".to_string()),
             avatar_url: Some("https://example.com/avatar.png".to_string()),
             color: Some("#FF5C00".to_string()),
-            archetype: Some("assistant".to_string()),
-            vibe: Some("friendly".to_string()),
-            greeting_style: Some("warm".to_string()),
         };
         let json = serde_json::to_string(&id).unwrap();
         let back: AgentIdentity = serde_json::from_str(&json).unwrap();
         assert_eq!(back.emoji, Some("\u{1F916}".to_string()));
         assert_eq!(back.color, Some("#FF5C00".to_string()));
+    }
+
+    /// A registry row persisted before #8447 still carries the three personality keys; it must load, keeping its appearance.
+    #[test]
+    fn test_agent_identity_ignores_legacy_personality_keys() {
+        let id: AgentIdentity = serde_json::from_str(
+            r##"{"emoji":"x","color":"#000000","archetype":"coder","vibe":"calm","greeting_style":"brief"}"##,
+        )
+        .unwrap();
+        assert_eq!(id.emoji.as_deref(), Some("x"));
+        assert_eq!(id.color.as_deref(), Some("#000000"));
+    }
+
+    #[test]
+    fn test_agent_personality_front_matter_fields_are_ordered_and_skip_omitted() {
+        let personality = AgentPersonality {
+            greeting_style: Some("brief".to_string()),
+            archetype: Some("coder".to_string()),
+            vibe: None,
+        };
+        assert_eq!(
+            personality.front_matter_fields(),
+            vec![("archetype", "coder"), ("greeting_style", "brief")]
+        );
+        assert!(AgentPersonality::default().front_matter_fields().is_empty());
+    }
+
+    #[test]
+    fn test_agent_personality_multiline_field() {
+        let personality = AgentPersonality {
+            vibe: Some("calm\r\nname: x".to_string()),
+            ..AgentPersonality::default()
+        };
+        assert_eq!(personality.multiline_field(), Some("vibe"));
+        assert_eq!(AgentPersonality::default().multiline_field(), None);
     }
 
     #[test]
@@ -3078,7 +3142,6 @@ mod tests {
                 emoji: Some("\u{1F525}".to_string()),
                 avatar_url: None,
                 color: Some("#00FF00".to_string()),
-                ..Default::default()
             },
             onboarding_completed: false,
             onboarding_completed_at: None,
