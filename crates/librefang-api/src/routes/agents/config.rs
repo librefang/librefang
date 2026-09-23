@@ -812,7 +812,7 @@ pub async fn set_agent_channels(
     tag = "agents",
     params(("id" = String, Path, description = "Agent ID")),
     responses(
-        (status = 200, description = "An agent's model routing mode and router override", body = crate::types::JsonObject),
+        (status = 200, description = "An agent's model routing mode and router override, plus `routing_inert_reason` (`\"stable_mode\"` when the kernel mode makes routing inert, else null) and `pinned_model`", body = crate::types::JsonObject),
         (status = 400, description = "Malformed agent id", body = crate::types::JsonObject),
         (status = 404, description = "Agent not found, or not visible to the caller", body = crate::types::JsonObject)
     )
@@ -868,6 +868,10 @@ pub async fn get_agent_model_routing(
             // per-agent opt-out was write-only before: no surface could
             // know it was set.
             "fixed": router_override.map(|o| o.fixed).unwrap_or(false),
+            // `"stable_mode"` when the kernel will run no router for this agent whatever is stored above; `null` when routing is live (#8446).
+            "routing_inert_reason": super::model_routing_inert_reason(&state),
+            // The model Stable mode applies instead of any routed choice, so a surface reporting the inert reason can name what actually runs; `null` means the manifest model.
+            "pinned_model": entry.manifest.pinned_model,
         })),
     )
 }
@@ -890,7 +894,7 @@ pub async fn get_agent_model_routing(
     params(("id" = String, Path, description = "Agent ID")),
     request_body(content = crate::types::JsonObject, description = "Mode, allowed profiles, cost budget and default profile"),
     responses(
-        (status = 200, description = "Updated model routing settings", body = crate::types::JsonObject),
+        (status = 200, description = "Updated model routing settings, with the same fields as the GET; `routing_inert_reason` is `\"stable_mode\"` when the saved settings have no effect under the current kernel mode, else null", body = crate::types::JsonObject),
         (status = 400, description = "Invalid agent id, mode or cost budget", body = crate::types::JsonObject),
         (status = 404, description = "Agent not found, or not visible to the caller", body = crate::types::JsonObject),
         (status = 423, description = "This agent is provisioned by the deployment; its manifest cannot be changed through the API", body = crate::types::JsonObject)
@@ -1054,6 +1058,11 @@ pub async fn set_agent_model_routing(
                 "default_profile": router_override
                     .as_ref()
                     .and_then(|o| o.default_profile.clone()),
+                // Echoed so the response carries the same fields as the GET: the dashboard seeds its cache from it, and a missing key would briefly hide the opt-out and inert banners after every save.
+                "fixed": router_override.as_ref().map(|o| o.fixed).unwrap_or(false),
+                // The save is valid and persisted, but in Stable mode it has no effect until the mode changes; say so in the response rather than reporting plain success (#8446).
+                "routing_inert_reason": super::model_routing_inert_reason(&state),
+                "pinned_model": entry.manifest.pinned_model,
             })),
         ),
         Err(e) => (

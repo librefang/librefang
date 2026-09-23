@@ -1546,6 +1546,8 @@ export interface AgentDetail {
   source_template?: string;
   /** Tokens the daemon injects into every request for this agent — identity, tools, skills (#7976). */
   injected_footprint_tokens?: number;
+  /** See {@link ModelRoutingInertReason}. `null` when routing is live. */
+  routing_inert_reason?: ModelRoutingInertReason | null;
 }
 
 export async function getAgentDetail(agentId: string): Promise<AgentDetail> {
@@ -2438,7 +2440,16 @@ export interface AgentModelRouting {
   /// touches this agent even in `flexible` mode — surfaced so the panel can
   /// warn an operator their allowlist/budget edits have no effect.
   fixed?: boolean;
+  /** Why the kernel will not route this agent's model whatever is stored here, or `null` when routing is live (#8446).
+   *  Response-only: the server ignores it on a PUT. */
+  routing_inert_reason?: ModelRoutingInertReason | null;
+  /** `agent.toml: pinned_model` — what Stable mode runs instead of any routed choice; `null` means the manifest model. Response-only. */
+  pinned_model?: string | null;
 }
+
+/** Why no router chooses an agent's model (#8446).
+ *  `"stable_mode"`: the kernel runs in Stable mode, which freezes model choice to `pinned_model` (else the manifest model) and runs neither the profile router nor the tier router. */
+export type ModelRoutingInertReason = "stable_mode";
 
 export async function getAgentModelRouting(agentId: string): Promise<AgentModelRouting> {
   return get<AgentModelRouting>(`/api/agents/${encodeURIComponent(agentId)}/model_routing`);

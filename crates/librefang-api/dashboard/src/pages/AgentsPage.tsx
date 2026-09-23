@@ -60,6 +60,7 @@ import { useProviders } from "../lib/queries/providers";
 import { useModels } from "../lib/queries/models";
 import { useSkills } from "../lib/queries/skills";
 import { useMcpServers } from "../lib/queries/mcp";
+import { useModelRoutingInertReason } from "../lib/queries/config";
 import { AgentManifestForm } from "../components/AgentManifestForm";
 import { AgentModelParamFields } from "../components/AgentModelParamFields";
 import { selectModelLimits } from "../lib/modelLimits";
@@ -1146,6 +1147,10 @@ export function AgentsPage() {
         : undefined,
     [mcpServersQuery.data],
   );
+  // #8446: a new agent has no detail payload to carry `routing_inert_reason`, so the form's Routing section reads the kernel mode off the shared config cache, fetched only while the form is open.
+  const routingInertReasonQuery = useModelRoutingInertReason({
+    enabled: showCreate && createMode === "form",
+  });
   const serializedFormToml = useMemo(
     () => serializeManifestForm(formState, formExtras),
     [formState, formExtras],
@@ -4036,6 +4041,7 @@ export function AgentsPage() {
                 skillCatalog={skillCatalogForForm}
                 toolCatalog={toolCatalogForForm}
                 mcpCatalog={mcpCatalogForForm}
+                routingInertReason={routingInertReasonQuery.data}
               />
               <div className="space-y-2">
                 <div className="flex items-center justify-between gap-2">

@@ -257,6 +257,16 @@ pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
         )
 }
 
+/// Why the kernel will not route this agent's model, or `None` when routing is live (#8446).
+///
+/// Stable mode freezes model choice: `agent_execution.rs` resolves neither the profile router (`mode = "flexible"`) nor the tier router (`[routing]` / `[default_routing]`) and applies only `pinned_model`, falling back to the manifest model.
+/// A routing configuration is still valid to store and takes effect once the mode changes, so the surfaces that show or accept one report this reason instead of refusing the write.
+/// Reads the same live config snapshot the execution path reads, because `mode` is a read-live field on `POST /api/config/reload`.
+pub(crate) fn model_routing_inert_reason(state: &AppState) -> Option<&'static str> {
+    (state.kernel.config_ref().mode == librefang_types::config::KernelMode::Stable)
+        .then_some("stable_mode")
+}
+
 /// Refuse a write that would change the *definition* of an agent the deployment provisioned (#6695).
 ///
 /// Returns `None` — proceed — for an agent that does not exist (the handler's own 404 is the better answer) and for every agent the provisioning tree does not declare, which is all of them unless `LIBREFANG_PROVISIONING_PATH` is set.
