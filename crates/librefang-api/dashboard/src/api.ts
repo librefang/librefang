@@ -3390,6 +3390,8 @@ export async function getStatus(): Promise<StatusResponse> {
 
 export interface WhoamiResponse {
   name: string;
+  /** RBAC privilege level: `viewer` / `user` / `admin` / `owner`. */
+  role: string;
 }
 
 /** The calling credential's own resolved identity — `GET /api/authz/whoami`.
