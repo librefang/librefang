@@ -36,6 +36,8 @@ pub struct GroupsState {
     pub groups: Vec<GroupInfo>,
     pub list_state: ListState,
     pub loading: bool,
+    /// The last fetch failure, drawn in place of the key hints until the next successful load clears it.
+    pub status_msg: String,
     pub tick: usize,
     pub poll_tick: usize,
 }
@@ -51,6 +53,7 @@ impl GroupsState {
             groups: Vec::new(),
             list_state: ListState::default(),
             loading: false,
+            status_msg: String::new(),
             tick: 0,
             poll_tick: 0,
         }
@@ -202,7 +205,10 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut GroupsState) {
     }
 
     f.render_widget(
-        widgets::hint_bar(&format!("  {}", crate::i18n::t("tui-groups-hints"))),
+        widgets::status_or_hint(
+            &state.status_msg,
+            &format!("  {}", crate::i18n::t("tui-groups-hints")),
+        ),
         chunks[2],
     );
 }

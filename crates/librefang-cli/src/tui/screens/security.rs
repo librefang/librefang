@@ -144,6 +144,8 @@ pub struct SecurityState {
     pub verify_result: String,
     pub scroll: u16,
     pub loading: bool,
+    /// The last fetch failure, drawn in place of the key hints until the next successful load clears it.
+    pub status_msg: String,
     pub tick: usize,
 }
 
@@ -161,6 +163,7 @@ impl SecurityState {
             verify_result: String::new(),
             scroll: 0,
             loading: false,
+            status_msg: String::new(),
             tick: 0,
         }
     }
@@ -391,7 +394,7 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut SecurityState) {
 
     // ── Hints ──
     f.render_widget(
-        widgets::hint_bar(&crate::i18n::t("tui-security-hints")),
+        widgets::status_or_hint(&state.status_msg, &crate::i18n::t("tui-security-hints")),
         chunks[3],
     );
 }

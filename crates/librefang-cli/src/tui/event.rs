@@ -927,45 +927,51 @@ pub fn spawn_fetch_dashboard(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
         BackendRef::Daemon { base_url, api_key } => {
             let client = make_daemon_client(api_key.as_deref());
 
-            if let Ok(resp) = client.get(format!("{base_url}/api/status")).send() {
-                if let Ok(body) = resp.json::<serde_json::Value>() {
-                    let _ = tx.send(AppEvent::DashboardData {
-                        agent_count: body["agent_count"].as_u64().unwrap_or(0),
-                        uptime_secs: body["uptime_secs"].as_u64().unwrap_or(0),
-                        version: body["version"].as_str().unwrap_or("?").to_string(),
-                        provider: body["provider"].as_str().unwrap_or("").to_string(),
-                        model: body["model"].as_str().unwrap_or("").to_string(),
-                    });
-                }
-            }
+            send_fetched(&tx, || {
+                let body = fetch_json(client.get(format!("{base_url}/api/status")).send(), || {
+                    crate::i18n::t("tui-event-dashboard-status-fetch-failed")
+                })?;
+                Ok(AppEvent::DashboardData {
+                    agent_count: body["agent_count"].as_u64().unwrap_or(0),
+                    uptime_secs: body["uptime_secs"].as_u64().unwrap_or(0),
+                    version: body["version"].as_str().unwrap_or("?").to_string(),
+                    provider: body["provider"].as_str().unwrap_or("").to_string(),
+                    model: body["model"].as_str().unwrap_or("").to_string(),
+                })
+            });
 
             // Try to fetch audit trail
-            if let Ok(resp) = client.get(format!("{base_url}/api/audit/recent")).send() {
-                if let Ok(body) = resp.json::<serde_json::Value>() {
-                    let rows: Vec<AuditRow> = body
-                        .as_array()
-                        .map(|arr| {
-                            arr.iter()
-                                .map(|r| AuditRow {
-                                    timestamp: r["timestamp"].as_str().unwrap_or("").to_string(),
-                                    agent: r["agent"].as_str().unwrap_or("").to_string(),
-                                    action: r["action"].as_str().unwrap_or("").to_string(),
-                                    detail: r["detail"].as_str().unwrap_or("").to_string(),
-                                })
-                                .collect()
-                        })
-                        .unwrap_or_default();
-                    let _ = tx.send(AppEvent::AuditLoaded(rows));
-                }
-            }
+            send_fetched(&tx, || {
+                let body = fetch_json(
+                    client.get(format!("{base_url}/api/audit/recent")).send(),
+                    || crate::i18n::t("tui-event-dashboard-audit-fetch-failed"),
+                )?;
+                let rows: Vec<AuditRow> = body
+                    .as_array()
+                    .map(|arr| {
+                        arr.iter()
+                            .map(|r| AuditRow {
+                                timestamp: r["timestamp"].as_str().unwrap_or("").to_string(),
+                                agent: r["agent"].as_str().unwrap_or("").to_string(),
+                                action: r["action"].as_str().unwrap_or("").to_string(),
+                                detail: r["detail"].as_str().unwrap_or("").to_string(),
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                Ok(AppEvent::AuditLoaded(rows))
+            });
 
             // Try to fetch auto-dream status. Silent skip on any failure —
             // this endpoint is optional and the dashboard should keep
             // working if auto-dream is not wired up.
-            if let Ok(resp) = client
-                .get(format!("{base_url}/api/auto-dream/status"))
-                .send()
-            {
+            // The status is consulted first: a rejection's JSON error body would otherwise decode as `enabled: false`, reporting a failure as "auto-dream is off".
+            if let Ok(resp) = daemon_response(
+                client
+                    .get(format!("{base_url}/api/auto-dream/status"))
+                    .send(),
+                String::new,
+            ) {
                 if let Ok(body) = resp.json::<serde_json::Value>() {
                     let enabled = body
                         .get("enabled")
@@ -1373,24 +1379,26 @@ pub fn spawn_fetch_workflows(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
         BackendRef::Daemon { base_url, api_key } => {
             let client = make_daemon_client(api_key.as_deref());
 
-            if let Ok(resp) = client.get(format!("{base_url}/api/workflows")).send() {
-                if let Ok(body) = resp.json::<serde_json::Value>() {
-                    let workflows: Vec<WorkflowInfo> = body
-                        .as_array()
-                        .map(|arr| {
-                            arr.iter()
-                                .map(|wf| WorkflowInfo {
-                                    id: wf["id"].as_str().unwrap_or("?").to_string(),
-                                    name: wf["name"].as_str().unwrap_or("?").to_string(),
-                                    steps: wf["steps"].as_u64().unwrap_or(0) as usize,
-                                    created: wf["created"].as_str().unwrap_or("").to_string(),
-                                })
-                                .collect()
-                        })
-                        .unwrap_or_default();
-                    let _ = tx.send(AppEvent::WorkflowListLoaded(workflows));
-                }
-            }
+            send_fetched(&tx, || {
+                let body = fetch_json(
+                    client.get(format!("{base_url}/api/workflows")).send(),
+                    || crate::i18n::t("tui-event-workflows-fetch-failed"),
+                )?;
+                let workflows: Vec<WorkflowInfo> = body
+                    .as_array()
+                    .map(|arr| {
+                        arr.iter()
+                            .map(|wf| WorkflowInfo {
+                                id: wf["id"].as_str().unwrap_or("?").to_string(),
+                                name: wf["name"].as_str().unwrap_or("?").to_string(),
+                                steps: wf["steps"].as_u64().unwrap_or(0) as usize,
+                                created: wf["created"].as_str().unwrap_or("").to_string(),
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                Ok(AppEvent::WorkflowListLoaded(workflows))
+            });
         }
         BackendRef::InProcess(_kernel) => {
             // Workflows in in-process mode - return empty for now
@@ -1775,25 +1783,27 @@ pub fn spawn_fetch_triggers(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
         BackendRef::Daemon { base_url, api_key } => {
             let client = make_daemon_client(api_key.as_deref());
 
-            if let Ok(resp) = client.get(format!("{base_url}/api/triggers")).send() {
-                if let Ok(body) = resp.json::<serde_json::Value>() {
-                    let triggers: Vec<TriggerInfo> = body
-                        .as_array()
-                        .map(|arr| {
-                            arr.iter()
-                                .map(|tr| TriggerInfo {
-                                    id: tr["id"].as_str().unwrap_or("?").to_string(),
-                                    agent_id: tr["agent_id"].as_str().unwrap_or("?").to_string(),
-                                    pattern: tr["pattern"].as_str().unwrap_or("?").to_string(),
-                                    fires: tr["fires"].as_u64().unwrap_or(0),
-                                    enabled: tr["enabled"].as_bool().unwrap_or(true),
-                                })
-                                .collect()
-                        })
-                        .unwrap_or_default();
-                    let _ = tx.send(AppEvent::TriggerListLoaded(triggers));
-                }
-            }
+            send_fetched(&tx, || {
+                let body = fetch_json(
+                    client.get(format!("{base_url}/api/triggers")).send(),
+                    || crate::i18n::t("tui-event-triggers-fetch-failed"),
+                )?;
+                let triggers: Vec<TriggerInfo> = body
+                    .as_array()
+                    .map(|arr| {
+                        arr.iter()
+                            .map(|tr| TriggerInfo {
+                                id: tr["id"].as_str().unwrap_or("?").to_string(),
+                                agent_id: tr["agent_id"].as_str().unwrap_or("?").to_string(),
+                                pattern: tr["pattern"].as_str().unwrap_or("?").to_string(),
+                                fires: tr["fires"].as_u64().unwrap_or(0),
+                                enabled: tr["enabled"].as_bool().unwrap_or(true),
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                Ok(AppEvent::TriggerListLoaded(triggers))
+            });
         }
         BackendRef::InProcess(_) => {
             let _ = tx.send(AppEvent::TriggerListLoaded(Vec::new()));
@@ -2833,30 +2843,56 @@ fn daemon_response(
     }
 }
 
+/// Collapse a daemon read into its decoded JSON body or the line to show the operator.
+///
+/// This is [`daemon_response`] plus the decode step every list fetch needs.
+/// A 200 whose body is not JSON (a proxy's login page, a truncated answer) is a failure with its own detail, not an empty list.
+///
+/// `summary` is `Fn` rather than `FnOnce` because either step can fail and both need the same summary line.
+fn fetch_json(
+    outcome: Result<reqwest::blocking::Response, reqwest::Error>,
+    summary: impl Fn() -> String,
+) -> Result<serde_json::Value, String> {
+    daemon_response(outcome, &summary)?
+        .json::<serde_json::Value>()
+        .map_err(|e| with_detail(summary(), transport_detail(&e)))
+}
+
+/// Run a fetch and send exactly one event for it: its success event, or `FetchError` with the reason.
+///
+/// The list fetches in this module each used to decide on their own which event to send, and sending the success event was the path of least resistance: an `if let Ok(...)` with no `else` compiled without complaint and sent nothing at all when the request failed, and a fallback to an empty payload rendered a 500 as "nothing here" (#8154).
+/// Taking the fetch as a closure that returns `Result` moves that decision here, once.
+/// A helper cannot produce its event without also saying what happens when the request fails, and `?` on [`fetch_json`] is the short way to say it.
+fn send_fetched(tx: &mpsc::Sender<AppEvent>, fetch: impl FnOnce() -> Result<AppEvent, String>) {
+    let _ = tx.send(fetch().unwrap_or_else(AppEvent::FetchError));
+}
+
 /// Fetch sessions list.
 pub fn spawn_fetch_sessions(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
     std::thread::spawn(move || match backend {
         BackendRef::Daemon { base_url, api_key } => {
             let client = make_daemon_client(api_key.as_deref());
-            if let Ok(resp) = client.get(format!("{base_url}/api/sessions")).send() {
-                if let Ok(body) = resp.json::<serde_json::Value>() {
-                    let sessions: Vec<SessionInfo> = body
-                        .as_array()
-                        .map(|arr| {
-                            arr.iter()
-                                .map(|s| SessionInfo {
-                                    id: s["id"].as_str().unwrap_or("").to_string(),
-                                    agent_name: s["agent_name"].as_str().unwrap_or("").to_string(),
-                                    agent_id: s["agent_id"].as_str().unwrap_or("").to_string(),
-                                    message_count: s["message_count"].as_u64().unwrap_or(0),
-                                    created: s["created"].as_str().unwrap_or("").to_string(),
-                                })
-                                .collect()
-                        })
-                        .unwrap_or_default();
-                    let _ = tx.send(AppEvent::SessionsLoaded(sessions));
-                }
-            }
+            send_fetched(&tx, || {
+                let body = fetch_json(
+                    client.get(format!("{base_url}/api/sessions")).send(),
+                    || crate::i18n::t("tui-event-sessions-fetch-failed"),
+                )?;
+                let sessions: Vec<SessionInfo> = body
+                    .as_array()
+                    .map(|arr| {
+                        arr.iter()
+                            .map(|s| SessionInfo {
+                                id: s["id"].as_str().unwrap_or("").to_string(),
+                                agent_name: s["agent_name"].as_str().unwrap_or("").to_string(),
+                                agent_id: s["agent_id"].as_str().unwrap_or("").to_string(),
+                                message_count: s["message_count"].as_u64().unwrap_or(0),
+                                created: s["created"].as_str().unwrap_or("").to_string(),
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                Ok(AppEvent::SessionsLoaded(sessions))
+            });
         }
         BackendRef::InProcess(_) => {
             let _ = tx.send(AppEvent::SessionsLoaded(Vec::new()));
@@ -3078,22 +3114,23 @@ pub fn spawn_fetch_memory_agents(backend: BackendRef, tx: mpsc::Sender<AppEvent>
     std::thread::spawn(move || match backend {
         BackendRef::Daemon { base_url, api_key } => {
             let client = make_daemon_client(api_key.as_deref());
-            if let Ok(resp) = client.get(format!("{base_url}/api/agents")).send() {
-                if let Ok(body) = resp.json::<serde_json::Value>() {
-                    let agents: Vec<AgentEntry> = body
-                        .as_array()
-                        .map(|arr| {
-                            arr.iter()
-                                .map(|a| AgentEntry {
-                                    id: a["id"].as_str().unwrap_or("").to_string(),
-                                    name: a["name"].as_str().unwrap_or("").to_string(),
-                                })
-                                .collect()
-                        })
-                        .unwrap_or_default();
-                    let _ = tx.send(AppEvent::MemoryAgentsLoaded(agents));
-                }
-            }
+            send_fetched(&tx, || {
+                let body = fetch_json(client.get(format!("{base_url}/api/agents")).send(), || {
+                    crate::i18n::t("tui-event-agents-fetch-failed")
+                })?;
+                let agents: Vec<AgentEntry> = body
+                    .as_array()
+                    .map(|arr| {
+                        arr.iter()
+                            .map(|a| AgentEntry {
+                                id: a["id"].as_str().unwrap_or("").to_string(),
+                                name: a["name"].as_str().unwrap_or("").to_string(),
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                Ok(AppEvent::MemoryAgentsLoaded(agents))
+            });
         }
         BackendRef::InProcess(kernel) => {
             let agents: Vec<AgentEntry> = kernel
@@ -3115,24 +3152,25 @@ pub fn spawn_fetch_memory_kv(backend: BackendRef, agent_id: String, tx: mpsc::Se
     std::thread::spawn(move || match backend {
         BackendRef::Daemon { base_url, api_key } => {
             let client = make_daemon_client(api_key.as_deref());
-            if let Ok(resp) = client
-                .get(format!("{base_url}/api/memory/agents/{agent_id}/kv"))
-                .send()
-            {
-                if let Ok(body) = resp.json::<serde_json::Value>() {
-                    let pairs: Vec<KvPair> = if let Some(obj) = body.as_object() {
-                        obj.iter()
-                            .map(|(k, v)| KvPair {
-                                key: k.clone(),
-                                value: v.as_str().unwrap_or(&v.to_string()).to_string(),
-                            })
-                            .collect()
-                    } else {
-                        Vec::new()
-                    };
-                    let _ = tx.send(AppEvent::MemoryKvLoaded(pairs));
-                }
-            }
+            send_fetched(&tx, || {
+                let body = fetch_json(
+                    client
+                        .get(format!("{base_url}/api/memory/agents/{agent_id}/kv"))
+                        .send(),
+                    || crate::i18n::t_args("tui-event-kv-fetch-failed", &[("agent_id", &agent_id)]),
+                )?;
+                let pairs: Vec<KvPair> = if let Some(obj) = body.as_object() {
+                    obj.iter()
+                        .map(|(k, v)| KvPair {
+                            key: k.clone(),
+                            value: v.as_str().unwrap_or(&v.to_string()).to_string(),
+                        })
+                        .collect()
+                } else {
+                    Vec::new()
+                };
+                Ok(AppEvent::MemoryKvLoaded(pairs))
+            });
         }
         BackendRef::InProcess(_) => {
             let _ = tx.send(AppEvent::MemoryKvLoaded(Vec::new()));
@@ -3213,27 +3251,25 @@ pub fn spawn_fetch_skills(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
     std::thread::spawn(move || match backend {
         BackendRef::Daemon { base_url, api_key } => {
             let client = make_daemon_client(api_key.as_deref());
-            if let Ok(resp) = client.get(format!("{base_url}/api/skills")).send() {
-                if let Ok(body) = resp.json::<serde_json::Value>() {
-                    let skills: Vec<SkillInfo> = body
-                        .as_array()
-                        .map(|arr| {
-                            arr.iter()
-                                .map(|s| SkillInfo {
-                                    name: s["name"].as_str().unwrap_or("").to_string(),
-                                    runtime: s["runtime"].as_str().unwrap_or("").to_string(),
-                                    source: s["source"].as_str().unwrap_or("").to_string(),
-                                    description: s["description"]
-                                        .as_str()
-                                        .unwrap_or("")
-                                        .to_string(),
-                                })
-                                .collect()
-                        })
-                        .unwrap_or_default();
-                    let _ = tx.send(AppEvent::SkillsLoaded(skills));
-                }
-            }
+            send_fetched(&tx, || {
+                let body = fetch_json(client.get(format!("{base_url}/api/skills")).send(), || {
+                    crate::i18n::t("tui-event-skills-fetch-failed")
+                })?;
+                let skills: Vec<SkillInfo> = body
+                    .as_array()
+                    .map(|arr| {
+                        arr.iter()
+                            .map(|s| SkillInfo {
+                                name: s["name"].as_str().unwrap_or("").to_string(),
+                                runtime: s["runtime"].as_str().unwrap_or("").to_string(),
+                                source: s["source"].as_str().unwrap_or("").to_string(),
+                                description: s["description"].as_str().unwrap_or("").to_string(),
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                Ok(AppEvent::SkillsLoaded(skills))
+            });
         }
         BackendRef::InProcess(_) => {
             let _ = tx.send(AppEvent::SkillsLoaded(Vec::new()));
@@ -3257,12 +3293,13 @@ pub fn spawn_search_clawhub(backend: BackendRef, query: String, tx: mpsc::Sender
                 })
                 .collect();
             let url = format!("{base_url}/api/clawhub/search?q={encoded}");
-            if let Ok(resp) = client.get(&url).send() {
-                if let Ok(body) = resp.json::<serde_json::Value>() {
-                    let results = parse_clawhub_results(&body);
-                    let _ = tx.send(AppEvent::ClawHubLoaded(results));
-                }
-            }
+            send_fetched(&tx, || {
+                let body = fetch_json(client.get(&url).send(), || {
+                    crate::i18n::t("tui-event-clawhub-search-failed")
+                })?;
+                let results = parse_clawhub_results(&body);
+                Ok(AppEvent::ClawHubLoaded(results))
+            });
         }
         BackendRef::InProcess(_) => {
             let _ = tx.send(AppEvent::ClawHubLoaded(Vec::new()));
@@ -3276,12 +3313,13 @@ pub fn spawn_browse_clawhub(backend: BackendRef, sort: String, tx: mpsc::Sender<
         BackendRef::Daemon { base_url, api_key } => {
             let client = make_daemon_client(api_key.as_deref());
             let url = format!("{base_url}/api/clawhub/browse?sort={sort}");
-            if let Ok(resp) = client.get(&url).send() {
-                if let Ok(body) = resp.json::<serde_json::Value>() {
-                    let results = parse_clawhub_results(&body);
-                    let _ = tx.send(AppEvent::ClawHubLoaded(results));
-                }
-            }
+            send_fetched(&tx, || {
+                let body = fetch_json(client.get(&url).send(), || {
+                    crate::i18n::t("tui-event-clawhub-browse-failed")
+                })?;
+                let results = parse_clawhub_results(&body);
+                Ok(AppEvent::ClawHubLoaded(results))
+            });
         }
         BackendRef::InProcess(_) => {
             let _ = tx.send(AppEvent::ClawHubLoaded(Vec::new()));
@@ -3385,23 +3423,25 @@ pub fn spawn_fetch_mcp_servers(backend: BackendRef, tx: mpsc::Sender<AppEvent>) 
     std::thread::spawn(move || match backend {
         BackendRef::Daemon { base_url, api_key } => {
             let client = make_daemon_client(api_key.as_deref());
-            if let Ok(resp) = client.get(format!("{base_url}/api/mcp/servers")).send() {
-                if let Ok(body) = resp.json::<serde_json::Value>() {
-                    let servers: Vec<McpServerInfo> = body
-                        .as_array()
-                        .map(|arr| {
-                            arr.iter()
-                                .map(|s| McpServerInfo {
-                                    name: s["name"].as_str().unwrap_or("").to_string(),
-                                    connected: s["connected"].as_bool().unwrap_or(false),
-                                    tool_count: s["tool_count"].as_u64().unwrap_or(0) as usize,
-                                })
-                                .collect()
-                        })
-                        .unwrap_or_default();
-                    let _ = tx.send(AppEvent::McpServersLoaded(servers));
-                }
-            }
+            send_fetched(&tx, || {
+                let body = fetch_json(
+                    client.get(format!("{base_url}/api/mcp/servers")).send(),
+                    || crate::i18n::t("tui-event-mcp-fetch-failed"),
+                )?;
+                let servers: Vec<McpServerInfo> = body
+                    .as_array()
+                    .map(|arr| {
+                        arr.iter()
+                            .map(|s| McpServerInfo {
+                                name: s["name"].as_str().unwrap_or("").to_string(),
+                                connected: s["connected"].as_bool().unwrap_or(false),
+                                tool_count: s["tool_count"].as_u64().unwrap_or(0) as usize,
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                Ok(AppEvent::McpServersLoaded(servers))
+            });
         }
         BackendRef::InProcess(_) => {
             let _ = tx.send(AppEvent::McpServersLoaded(Vec::new()));
@@ -3552,21 +3592,18 @@ fn parse_api_templates(body: &serde_json::Value) -> Vec<TemplateInfo> {
 ///
 /// The templates screen used to render a compiled-in list and nothing else, so `GET /api/templates` was never called and every agent type an operator created was invisible.
 pub fn spawn_fetch_agent_templates(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
-    std::thread::spawn(move || {
-        let templates = match backend {
-            BackendRef::Daemon { base_url, api_key } => {
-                let client = make_daemon_client(api_key.as_deref());
-                client
-                    .get(format!("{base_url}/api/templates"))
-                    .send()
-                    .ok()
-                    .and_then(|resp| resp.json::<serde_json::Value>().ok())
-                    .map(|body| parse_api_templates(&body))
-                    .unwrap_or_default()
-            }
-            BackendRef::InProcess(_) => local_agent_templates(),
-        };
-        let _ = tx.send(AppEvent::AgentTemplatesLoaded(templates));
+    std::thread::spawn(move || match backend {
+        BackendRef::Daemon { base_url, api_key } => send_fetched(&tx, || {
+            let client = make_daemon_client(api_key.as_deref());
+            let body = fetch_json(
+                client.get(format!("{base_url}/api/templates")).send(),
+                || crate::i18n::t("tui-event-templates-fetch-failed"),
+            )?;
+            Ok(AppEvent::AgentTemplatesLoaded(parse_api_templates(&body)))
+        }),
+        BackendRef::InProcess(_) => {
+            let _ = tx.send(AppEvent::AgentTemplatesLoaded(local_agent_templates()));
+        }
     });
 }
 
@@ -3641,26 +3678,28 @@ pub fn spawn_fetch_template_providers(backend: BackendRef, tx: mpsc::Sender<AppE
     std::thread::spawn(move || match backend {
         BackendRef::Daemon { base_url, api_key } => {
             let client = make_daemon_client(api_key.as_deref());
-            if let Ok(resp) = client.get(format!("{base_url}/api/providers")).send() {
-                if let Ok(body) = resp.json::<serde_json::Value>() {
-                    // API returns { "providers": [...], "total": N }
-                    let arr = body["providers"].as_array();
-                    let providers: Vec<ProviderAuth> = arr
-                        .map(|arr| {
-                            arr.iter()
-                                .map(|p| {
-                                    let auth = p["auth_status"].as_str().unwrap_or("missing");
-                                    ProviderAuth {
-                                        name: p["id"].as_str().unwrap_or("").to_string(),
-                                        configured: auth == "configured" || auth == "not_required",
-                                    }
-                                })
-                                .collect()
-                        })
-                        .unwrap_or_default();
-                    let _ = tx.send(AppEvent::TemplateProvidersLoaded(providers));
-                }
-            }
+            send_fetched(&tx, || {
+                let body = fetch_json(
+                    client.get(format!("{base_url}/api/providers")).send(),
+                    || crate::i18n::t("tui-event-providers-fetch-failed"),
+                )?;
+                // API returns { "providers": [...], "total": N }
+                let arr = body["providers"].as_array();
+                let providers: Vec<ProviderAuth> = arr
+                    .map(|arr| {
+                        arr.iter()
+                            .map(|p| {
+                                let auth = p["auth_status"].as_str().unwrap_or("missing");
+                                ProviderAuth {
+                                    name: p["id"].as_str().unwrap_or("").to_string(),
+                                    configured: auth == "configured" || auth == "not_required",
+                                }
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                Ok(AppEvent::TemplateProvidersLoaded(providers))
+            });
         }
         BackendRef::InProcess(_) => {
             let _ = tx.send(AppEvent::TemplateProvidersLoaded(Vec::new()));
@@ -3673,37 +3712,38 @@ pub fn spawn_fetch_security(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
     std::thread::spawn(move || match backend {
         BackendRef::Daemon { base_url, api_key } => {
             let client = make_daemon_client(api_key.as_deref());
-            if let Ok(resp) = client.get(format!("{base_url}/api/security")).send() {
-                if let Ok(body) = resp.json::<serde_json::Value>() {
-                    let features: Vec<SecurityFeature> = body
-                        .as_array()
-                        .map(|arr| {
-                            arr.iter()
-                                .map(|f| {
-                                    use super::screens::security::SecuritySection;
-                                    let section = match f["section"].as_str().unwrap_or("core") {
-                                        "configurable" => SecuritySection::Configurable,
-                                        "monitoring" => SecuritySection::Monitoring,
-                                        _ => SecuritySection::Core,
-                                    };
-                                    SecurityFeature {
-                                        name: f["name"].as_str().unwrap_or("").to_string(),
-                                        active: f["active"].as_bool().unwrap_or(true),
-                                        description: f["description"]
-                                            .as_str()
-                                            .unwrap_or("")
-                                            .to_string(),
-                                        section,
-                                    }
-                                })
-                                .collect()
-                        })
-                        .unwrap_or_default();
-                    if !features.is_empty() {
-                        let _ = tx.send(AppEvent::SecurityLoaded(features));
-                    }
-                }
-            }
+            send_fetched(&tx, || {
+                let body = fetch_json(
+                    client.get(format!("{base_url}/api/security")).send(),
+                    || crate::i18n::t("tui-event-security-fetch-failed"),
+                )?;
+                let features: Vec<SecurityFeature> = body
+                    .as_array()
+                    .map(|arr| {
+                        arr.iter()
+                            .map(|f| {
+                                use super::screens::security::SecuritySection;
+                                let section = match f["section"].as_str().unwrap_or("core") {
+                                    "configurable" => SecuritySection::Configurable,
+                                    "monitoring" => SecuritySection::Monitoring,
+                                    _ => SecuritySection::Core,
+                                };
+                                SecurityFeature {
+                                    name: f["name"].as_str().unwrap_or("").to_string(),
+                                    active: f["active"].as_bool().unwrap_or(true),
+                                    description: f["description"]
+                                        .as_str()
+                                        .unwrap_or("")
+                                        .to_string(),
+                                    section,
+                                }
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                // An empty answer keeps the builtin defaults. That decision is the handler's, so the spinner still comes down.
+                Ok(AppEvent::SecurityLoaded(features))
+            });
         }
         BackendRef::InProcess(_) => {
             // Use builtin defaults (already loaded in SecurityState::new())
@@ -3751,28 +3791,29 @@ pub fn spawn_fetch_audit(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
     std::thread::spawn(move || match backend {
         BackendRef::Daemon { base_url, api_key } => {
             let client = make_daemon_client(api_key.as_deref());
-            if let Ok(resp) = client
-                .get(format!("{base_url}/api/audit/recent?n=200"))
-                .send()
-            {
-                if let Ok(body) = resp.json::<serde_json::Value>() {
-                    let entries: Vec<AuditEntry> = body
-                        .as_array()
-                        .map(|arr| {
-                            arr.iter()
-                                .map(|e| AuditEntry {
-                                    timestamp: e["timestamp"].as_str().unwrap_or("").to_string(),
-                                    action: e["action"].as_str().unwrap_or("").to_string(),
-                                    agent: e["agent"].as_str().unwrap_or("").to_string(),
-                                    detail: e["detail"].as_str().unwrap_or("").to_string(),
-                                    tip_hash: e["tip_hash"].as_str().unwrap_or("").to_string(),
-                                })
-                                .collect()
-                        })
-                        .unwrap_or_default();
-                    let _ = tx.send(AppEvent::AuditEntriesLoaded(entries));
-                }
-            }
+            send_fetched(&tx, || {
+                let body = fetch_json(
+                    client
+                        .get(format!("{base_url}/api/audit/recent?n=200"))
+                        .send(),
+                    || crate::i18n::t("tui-event-audit-fetch-failed"),
+                )?;
+                let entries: Vec<AuditEntry> = body
+                    .as_array()
+                    .map(|arr| {
+                        arr.iter()
+                            .map(|e| AuditEntry {
+                                timestamp: e["timestamp"].as_str().unwrap_or("").to_string(),
+                                action: e["action"].as_str().unwrap_or("").to_string(),
+                                agent: e["agent"].as_str().unwrap_or("").to_string(),
+                                detail: e["detail"].as_str().unwrap_or("").to_string(),
+                                tip_hash: e["tip_hash"].as_str().unwrap_or("").to_string(),
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                Ok(AppEvent::AuditEntriesLoaded(entries))
+            });
         }
         BackendRef::InProcess(_) => {
             let _ = tx.send(AppEvent::AuditEntriesLoaded(Vec::new()));
@@ -3786,56 +3827,61 @@ pub fn spawn_fetch_usage(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
         BackendRef::Daemon { base_url, api_key } => {
             let client = make_daemon_client(api_key.as_deref());
             // Summary
-            if let Ok(resp) = client.get(format!("{base_url}/api/usage/summary")).send() {
-                if let Ok(body) = resp.json::<serde_json::Value>() {
-                    let _ = tx.send(AppEvent::UsageSummaryLoaded(UsageSummary {
-                        total_input_tokens: body["total_input_tokens"].as_u64().unwrap_or(0),
-                        total_output_tokens: body["total_output_tokens"].as_u64().unwrap_or(0),
-                        total_cost_usd: body["total_cost_usd"].as_f64().unwrap_or(0.0),
-                        total_calls: body["total_calls"].as_u64().unwrap_or(0),
-                    }));
-                }
-            }
+            send_fetched(&tx, || {
+                let body = fetch_json(
+                    client.get(format!("{base_url}/api/usage/summary")).send(),
+                    || crate::i18n::t("tui-event-usage-summary-fetch-failed"),
+                )?;
+                Ok(AppEvent::UsageSummaryLoaded(UsageSummary {
+                    total_input_tokens: body["total_input_tokens"].as_u64().unwrap_or(0),
+                    total_output_tokens: body["total_output_tokens"].as_u64().unwrap_or(0),
+                    total_cost_usd: body["total_cost_usd"].as_f64().unwrap_or(0.0),
+                    total_calls: body["total_calls"].as_u64().unwrap_or(0),
+                }))
+            });
             // By model
-            if let Ok(resp) = client.get(format!("{base_url}/api/usage/by-model")).send() {
-                if let Ok(body) = resp.json::<serde_json::Value>() {
-                    let models: Vec<ModelUsage> = body
-                        .as_array()
-                        .map(|arr| {
-                            arr.iter()
-                                .map(|m| ModelUsage {
-                                    model_id: m["model_id"].as_str().unwrap_or("").to_string(),
-                                    input_tokens: m["input_tokens"].as_u64().unwrap_or(0),
-                                    output_tokens: m["output_tokens"].as_u64().unwrap_or(0),
-                                    cost_usd: m["cost_usd"].as_f64().unwrap_or(0.0),
-                                    calls: m["calls"].as_u64().unwrap_or(0),
-                                })
-                                .collect()
-                        })
-                        .unwrap_or_default();
-                    let _ = tx.send(AppEvent::UsageByModelLoaded(models));
-                }
-            }
+            send_fetched(&tx, || {
+                let body = fetch_json(
+                    client.get(format!("{base_url}/api/usage/by-model")).send(),
+                    || crate::i18n::t("tui-event-usage-by-model-fetch-failed"),
+                )?;
+                let models: Vec<ModelUsage> = body
+                    .as_array()
+                    .map(|arr| {
+                        arr.iter()
+                            .map(|m| ModelUsage {
+                                model_id: m["model_id"].as_str().unwrap_or("").to_string(),
+                                input_tokens: m["input_tokens"].as_u64().unwrap_or(0),
+                                output_tokens: m["output_tokens"].as_u64().unwrap_or(0),
+                                cost_usd: m["cost_usd"].as_f64().unwrap_or(0.0),
+                                calls: m["calls"].as_u64().unwrap_or(0),
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                Ok(AppEvent::UsageByModelLoaded(models))
+            });
             // By agent
-            if let Ok(resp) = client.get(format!("{base_url}/api/usage")).send() {
-                if let Ok(body) = resp.json::<serde_json::Value>() {
-                    let agents: Vec<AgentUsage> = body
-                        .as_array()
-                        .map(|arr| {
-                            arr.iter()
-                                .map(|a| AgentUsage {
-                                    agent_name: a["agent_name"].as_str().unwrap_or("").to_string(),
-                                    agent_id: a["agent_id"].as_str().unwrap_or("").to_string(),
-                                    total_tokens: a["total_tokens"].as_u64().unwrap_or(0),
-                                    cost_usd: a["cost_usd"].as_f64().unwrap_or(0.0),
-                                    tool_calls: a["tool_calls"].as_u64().unwrap_or(0),
-                                })
-                                .collect()
-                        })
-                        .unwrap_or_default();
-                    let _ = tx.send(AppEvent::UsageByAgentLoaded(agents));
-                }
-            }
+            send_fetched(&tx, || {
+                let body = fetch_json(client.get(format!("{base_url}/api/usage")).send(), || {
+                    crate::i18n::t("tui-event-usage-by-agent-fetch-failed")
+                })?;
+                let agents: Vec<AgentUsage> = body
+                    .as_array()
+                    .map(|arr| {
+                        arr.iter()
+                            .map(|a| AgentUsage {
+                                agent_name: a["agent_name"].as_str().unwrap_or("").to_string(),
+                                agent_id: a["agent_id"].as_str().unwrap_or("").to_string(),
+                                total_tokens: a["total_tokens"].as_u64().unwrap_or(0),
+                                cost_usd: a["cost_usd"].as_f64().unwrap_or(0.0),
+                                tool_calls: a["tool_calls"].as_u64().unwrap_or(0),
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                Ok(AppEvent::UsageByAgentLoaded(agents))
+            });
         }
         BackendRef::InProcess(_) => {
             let _ = tx.send(AppEvent::UsageSummaryLoaded(UsageSummary::default()));
@@ -3850,45 +3896,44 @@ pub fn spawn_fetch_providers(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
     std::thread::spawn(move || match backend {
         BackendRef::Daemon { base_url, api_key } => {
             let client = make_daemon_client(api_key.as_deref());
-            if let Ok(resp) = client.get(format!("{base_url}/api/providers")).send() {
-                if let Ok(body) = resp.json::<serde_json::Value>() {
-                    // API returns { "providers": [...], "total": N }
-                    let arr = body["providers"].as_array();
-                    let providers: Vec<ProviderInfo> = arr
-                        .map(|arr| {
-                            arr.iter()
-                                .map(|p| {
-                                    let auth = p["auth_status"].as_str().unwrap_or("missing");
-                                    let key_required = p["key_required"].as_bool().unwrap_or(true);
-                                    let configured = auth == "configured" || auth == "not_required";
-                                    let is_local =
-                                        p["is_local"].as_bool().unwrap_or(false) || !key_required;
-                                    ProviderInfo {
-                                        name: p["id"].as_str().unwrap_or("").to_string(),
-                                        configured,
-                                        env_var: p["api_key_env"]
-                                            .as_str()
-                                            .unwrap_or("")
-                                            .to_string(),
-                                        is_local,
-                                        reachable: if is_local {
-                                            p["reachable"].as_bool()
-                                        } else {
-                                            None
-                                        },
-                                        latency_ms: if is_local {
-                                            p["latency_ms"].as_u64()
-                                        } else {
-                                            None
-                                        },
-                                    }
-                                })
-                                .collect()
-                        })
-                        .unwrap_or_default();
-                    let _ = tx.send(AppEvent::SettingsProvidersLoaded(providers));
-                }
-            }
+            send_fetched(&tx, || {
+                let body = fetch_json(
+                    client.get(format!("{base_url}/api/providers")).send(),
+                    || crate::i18n::t("tui-event-providers-fetch-failed"),
+                )?;
+                // API returns { "providers": [...], "total": N }
+                let arr = body["providers"].as_array();
+                let providers: Vec<ProviderInfo> = arr
+                    .map(|arr| {
+                        arr.iter()
+                            .map(|p| {
+                                let auth = p["auth_status"].as_str().unwrap_or("missing");
+                                let key_required = p["key_required"].as_bool().unwrap_or(true);
+                                let configured = auth == "configured" || auth == "not_required";
+                                let is_local =
+                                    p["is_local"].as_bool().unwrap_or(false) || !key_required;
+                                ProviderInfo {
+                                    name: p["id"].as_str().unwrap_or("").to_string(),
+                                    configured,
+                                    env_var: p["api_key_env"].as_str().unwrap_or("").to_string(),
+                                    is_local,
+                                    reachable: if is_local {
+                                        p["reachable"].as_bool()
+                                    } else {
+                                        None
+                                    },
+                                    latency_ms: if is_local {
+                                        p["latency_ms"].as_u64()
+                                    } else {
+                                        None
+                                    },
+                                }
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                Ok(AppEvent::SettingsProvidersLoaded(providers))
+            });
         }
         BackendRef::InProcess(_) => {
             let _ = tx.send(AppEvent::SettingsProvidersLoaded(Vec::new()));
@@ -3910,26 +3955,27 @@ pub fn spawn_fetch_models(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
     std::thread::spawn(move || match backend {
         BackendRef::Daemon { base_url, api_key } => {
             let client = make_daemon_client(api_key.as_deref());
-            if let Ok(resp) = client.get(format!("{base_url}/api/models")).send() {
-                if let Ok(body) = resp.json::<serde_json::Value>() {
-                    let models: Vec<ModelInfo> = body["models"]
-                        .as_array()
-                        .map(|arr| {
-                            arr.iter()
-                                .map(|m| ModelInfo {
-                                    id: m["id"].as_str().unwrap_or("").to_string(),
-                                    provider: m["provider"].as_str().unwrap_or("").to_string(),
-                                    tier: m["tier"].as_str().unwrap_or("").to_string(),
-                                    context_window: m["context_window"].as_u64().unwrap_or(0),
-                                    cost_input: m["input_cost_per_m"].as_f64().unwrap_or(0.0),
-                                    cost_output: m["output_cost_per_m"].as_f64().unwrap_or(0.0),
-                                })
-                                .collect()
-                        })
-                        .unwrap_or_default();
-                    let _ = tx.send(AppEvent::SettingsModelsLoaded(models));
-                }
-            }
+            send_fetched(&tx, || {
+                let body = fetch_json(client.get(format!("{base_url}/api/models")).send(), || {
+                    crate::i18n::t("tui-event-models-load-failed")
+                })?;
+                let models: Vec<ModelInfo> = body["models"]
+                    .as_array()
+                    .map(|arr| {
+                        arr.iter()
+                            .map(|m| ModelInfo {
+                                id: m["id"].as_str().unwrap_or("").to_string(),
+                                provider: m["provider"].as_str().unwrap_or("").to_string(),
+                                tier: m["tier"].as_str().unwrap_or("").to_string(),
+                                context_window: m["context_window"].as_u64().unwrap_or(0),
+                                cost_input: m["input_cost_per_m"].as_f64().unwrap_or(0.0),
+                                cost_output: m["output_cost_per_m"].as_f64().unwrap_or(0.0),
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                Ok(AppEvent::SettingsModelsLoaded(models))
+            });
         }
         BackendRef::InProcess(_) => {
             let _ = tx.send(AppEvent::SettingsModelsLoaded(Vec::new()));
@@ -4134,25 +4180,23 @@ pub fn spawn_fetch_tools(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
     std::thread::spawn(move || match backend {
         BackendRef::Daemon { base_url, api_key } => {
             let client = make_daemon_client(api_key.as_deref());
-            if let Ok(resp) = client.get(format!("{base_url}/api/tools")).send() {
-                if let Ok(body) = resp.json::<serde_json::Value>() {
-                    let tools: Vec<ToolInfo> = body
-                        .as_array()
-                        .map(|arr| {
-                            arr.iter()
-                                .map(|t| ToolInfo {
-                                    name: t["name"].as_str().unwrap_or("").to_string(),
-                                    description: t["description"]
-                                        .as_str()
-                                        .unwrap_or("")
-                                        .to_string(),
-                                })
-                                .collect()
-                        })
-                        .unwrap_or_default();
-                    let _ = tx.send(AppEvent::SettingsToolsLoaded(tools));
-                }
-            }
+            send_fetched(&tx, || {
+                let body = fetch_json(client.get(format!("{base_url}/api/tools")).send(), || {
+                    crate::i18n::t("tui-event-tools-fetch-failed")
+                })?;
+                let tools: Vec<ToolInfo> = body
+                    .as_array()
+                    .map(|arr| {
+                        arr.iter()
+                            .map(|t| ToolInfo {
+                                name: t["name"].as_str().unwrap_or("").to_string(),
+                                description: t["description"].as_str().unwrap_or("").to_string(),
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                Ok(AppEvent::SettingsToolsLoaded(tools))
+            });
         }
         BackendRef::InProcess(_) => {
             let _ = tx.send(AppEvent::SettingsToolsLoaded(Vec::new()));
@@ -4911,39 +4955,37 @@ pub fn spawn_fetch_groups(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
     std::thread::spawn(move || match backend {
         BackendRef::Daemon { base_url, api_key } => {
             let client = make_daemon_client(api_key.as_deref());
-            if let Ok(resp) = client.get(format!("{base_url}/api/groups")).send() {
-                if let Ok(body) = resp.json::<serde_json::Value>() {
-                    let groups: Vec<GroupInfo> = body
-                        .as_array()
-                        .map(|arr| {
-                            arr.iter()
-                                .map(|g| GroupInfo {
-                                    name: g["name"].as_str().unwrap_or("").to_string(),
-                                    description: g["description"]
-                                        .as_str()
-                                        .unwrap_or("")
-                                        .to_string(),
-                                    member_count: g["member_count"].as_u64().unwrap_or(0),
-                                    roles: g["roles"]
-                                        .as_array()
-                                        .map(|r| {
-                                            r.iter()
-                                                .filter_map(|v| v.as_str())
-                                                .collect::<Vec<_>>()
-                                                .join(",")
-                                        })
-                                        .unwrap_or_default(),
-                                    has_unregistered_members: g["unknown_members"]
-                                        .as_array()
-                                        .map(|u| !u.is_empty())
-                                        .unwrap_or(false),
-                                })
-                                .collect()
-                        })
-                        .unwrap_or_default();
-                    let _ = tx.send(AppEvent::GroupsLoaded(groups));
-                }
-            }
+            send_fetched(&tx, || {
+                let body = fetch_json(client.get(format!("{base_url}/api/groups")).send(), || {
+                    crate::i18n::t("tui-event-groups-fetch-failed")
+                })?;
+                let groups: Vec<GroupInfo> = body
+                    .as_array()
+                    .map(|arr| {
+                        arr.iter()
+                            .map(|g| GroupInfo {
+                                name: g["name"].as_str().unwrap_or("").to_string(),
+                                description: g["description"].as_str().unwrap_or("").to_string(),
+                                member_count: g["member_count"].as_u64().unwrap_or(0),
+                                roles: g["roles"]
+                                    .as_array()
+                                    .map(|r| {
+                                        r.iter()
+                                            .filter_map(|v| v.as_str())
+                                            .collect::<Vec<_>>()
+                                            .join(",")
+                                    })
+                                    .unwrap_or_default(),
+                                has_unregistered_members: g["unknown_members"]
+                                    .as_array()
+                                    .map(|u| !u.is_empty())
+                                    .unwrap_or(false),
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                Ok(AppEvent::GroupsLoaded(groups))
+            });
         }
         // Groups live in `config.toml`, which the in-process backend has no
         // HTTP surface for; the daemon path is the only one that can answer.
@@ -4958,29 +5000,30 @@ pub fn spawn_fetch_peers(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
     std::thread::spawn(move || match backend {
         BackendRef::Daemon { base_url, api_key } => {
             let client = make_daemon_client(api_key.as_deref());
-            if let Ok(resp) = client.get(format!("{base_url}/api/peers")).send() {
-                if let Ok(body) = resp.json::<serde_json::Value>() {
-                    let peers: Vec<PeerInfo> = body
-                        .as_array()
-                        .map(|arr| {
-                            arr.iter()
-                                .map(|p| PeerInfo {
-                                    node_id: p["node_id"].as_str().unwrap_or("").to_string(),
-                                    node_name: p["node_name"].as_str().unwrap_or("").to_string(),
-                                    address: p["address"].as_str().unwrap_or("").to_string(),
-                                    state: p["state"].as_str().unwrap_or("").to_string(),
-                                    agent_count: p["agent_count"].as_u64().unwrap_or(0),
-                                    protocol_version: p["protocol_version"]
-                                        .as_str()
-                                        .unwrap_or("")
-                                        .to_string(),
-                                })
-                                .collect()
-                        })
-                        .unwrap_or_default();
-                    let _ = tx.send(AppEvent::PeersLoaded(peers));
-                }
-            }
+            send_fetched(&tx, || {
+                let body = fetch_json(client.get(format!("{base_url}/api/peers")).send(), || {
+                    crate::i18n::t("tui-event-peers-fetch-failed")
+                })?;
+                let peers: Vec<PeerInfo> = body
+                    .as_array()
+                    .map(|arr| {
+                        arr.iter()
+                            .map(|p| PeerInfo {
+                                node_id: p["node_id"].as_str().unwrap_or("").to_string(),
+                                node_name: p["node_name"].as_str().unwrap_or("").to_string(),
+                                address: p["address"].as_str().unwrap_or("").to_string(),
+                                state: p["state"].as_str().unwrap_or("").to_string(),
+                                agent_count: p["agent_count"].as_u64().unwrap_or(0),
+                                protocol_version: p["protocol_version"]
+                                    .as_str()
+                                    .unwrap_or("")
+                                    .to_string(),
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                Ok(AppEvent::PeersLoaded(peers))
+            });
         }
         BackendRef::InProcess(_) => {
             let _ = tx.send(AppEvent::PeersLoaded(Vec::new()));
@@ -4993,37 +5036,34 @@ pub fn spawn_fetch_logs(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
     std::thread::spawn(move || match backend {
         BackendRef::Daemon { base_url, api_key } => {
             let client = make_daemon_client(api_key.as_deref());
-            if let Ok(resp) = client
-                .get(format!("{base_url}/api/audit/recent?n=200"))
-                .send()
-            {
-                if let Ok(body) = resp.json::<serde_json::Value>() {
-                    let entries: Vec<LogEntry> = body
-                        .as_array()
-                        .map(|arr| {
-                            arr.iter()
-                                .map(|e| {
-                                    let action = e["action"].as_str().unwrap_or("").to_string();
-                                    let detail = e["detail"].as_str().unwrap_or("").to_string();
-                                    let level =
-                                        super::screens::logs::classify_level(&action, &detail);
-                                    LogEntry {
-                                        timestamp: e["timestamp"]
-                                            .as_str()
-                                            .unwrap_or("")
-                                            .to_string(),
-                                        level,
-                                        action,
-                                        detail,
-                                        agent: e["agent"].as_str().unwrap_or("").to_string(),
-                                    }
-                                })
-                                .collect()
-                        })
-                        .unwrap_or_default();
-                    let _ = tx.send(AppEvent::LogsLoaded(entries));
-                }
-            }
+            send_fetched(&tx, || {
+                let body = fetch_json(
+                    client
+                        .get(format!("{base_url}/api/audit/recent?n=200"))
+                        .send(),
+                    || crate::i18n::t("tui-event-logs-fetch-failed"),
+                )?;
+                let entries: Vec<LogEntry> = body
+                    .as_array()
+                    .map(|arr| {
+                        arr.iter()
+                            .map(|e| {
+                                let action = e["action"].as_str().unwrap_or("").to_string();
+                                let detail = e["detail"].as_str().unwrap_or("").to_string();
+                                let level = super::screens::logs::classify_level(&action, &detail);
+                                LogEntry {
+                                    timestamp: e["timestamp"].as_str().unwrap_or("").to_string(),
+                                    level,
+                                    action,
+                                    detail,
+                                    agent: e["agent"].as_str().unwrap_or("").to_string(),
+                                }
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                Ok(AppEvent::LogsLoaded(entries))
+            });
         }
         BackendRef::InProcess(_) => {
             let _ = tx.send(AppEvent::LogsLoaded(Vec::new()));
@@ -5038,20 +5078,21 @@ pub fn spawn_fetch_goals(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
     std::thread::spawn(move || match backend {
         BackendRef::Daemon { base_url, api_key } => {
             let client = make_daemon_client(api_key.as_deref());
-            if let Ok(resp) = client.get(format!("{base_url}/api/goals")).send() {
-                if let Ok(body) = resp.json::<serde_json::Value>() {
-                    // `GET /api/goals` answers with a `PaginatedResponse`
-                    // (`{"items": [...]}`); the bare-array fallback keeps an
-                    // older daemon working.
-                    let goals: Vec<GoalInfo> = body
-                        .get("items")
-                        .and_then(|v| v.as_array())
-                        .or_else(|| body.as_array())
-                        .map(|arr| arr.iter().map(goal_from_json).collect())
-                        .unwrap_or_default();
-                    let _ = tx.send(AppEvent::GoalsLoaded(goals));
-                }
-            }
+            send_fetched(&tx, || {
+                let body = fetch_json(client.get(format!("{base_url}/api/goals")).send(), || {
+                    crate::i18n::t("tui-event-goals-fetch-failed")
+                })?;
+                // `GET /api/goals` answers with a `PaginatedResponse`
+                // (`{"items": [...]}`); the bare-array fallback keeps an
+                // older daemon working.
+                let goals: Vec<GoalInfo> = body
+                    .get("items")
+                    .and_then(|v| v.as_array())
+                    .or_else(|| body.as_array())
+                    .map(|arr| arr.iter().map(goal_from_json).collect())
+                    .unwrap_or_default();
+                Ok(AppEvent::GoalsLoaded(goals))
+            });
         }
         BackendRef::InProcess(_) => {
             let _ = tx.send(AppEvent::GoalsLoaded(Vec::new()));
@@ -5419,31 +5460,27 @@ pub fn spawn_fetch_hands(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
     std::thread::spawn(move || match backend {
         BackendRef::Daemon { base_url, api_key } => {
             let client = make_daemon_client(api_key.as_deref());
-            if let Ok(resp) = client.get(format!("{base_url}/api/hands")).send() {
-                if let Ok(body) = resp.json::<serde_json::Value>() {
-                    let hands: Vec<HandInfo> = body["hands"]
-                        .as_array()
-                        .map(|arr| {
-                            arr.iter()
-                                .map(|h| HandInfo {
-                                    id: h["id"].as_str().unwrap_or("").to_string(),
-                                    name: h["name"].as_str().unwrap_or("").to_string(),
-                                    description: h["description"]
-                                        .as_str()
-                                        .unwrap_or("")
-                                        .to_string(),
-                                    category: h["category"].as_str().unwrap_or("").to_string(),
-                                    icon: h["icon"].as_str().unwrap_or("").to_string(),
-                                    requirements_met: h["requirements_met"]
-                                        .as_bool()
-                                        .unwrap_or(false),
-                                })
-                                .collect()
-                        })
-                        .unwrap_or_default();
-                    let _ = tx.send(AppEvent::HandsLoaded(hands));
-                }
-            }
+            send_fetched(&tx, || {
+                let body = fetch_json(client.get(format!("{base_url}/api/hands")).send(), || {
+                    crate::i18n::t("tui-event-hands-fetch-failed")
+                })?;
+                let hands: Vec<HandInfo> = body["hands"]
+                    .as_array()
+                    .map(|arr| {
+                        arr.iter()
+                            .map(|h| HandInfo {
+                                id: h["id"].as_str().unwrap_or("").to_string(),
+                                name: h["name"].as_str().unwrap_or("").to_string(),
+                                description: h["description"].as_str().unwrap_or("").to_string(),
+                                category: h["category"].as_str().unwrap_or("").to_string(),
+                                icon: h["icon"].as_str().unwrap_or("").to_string(),
+                                requirements_met: h["requirements_met"].as_bool().unwrap_or(false),
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                Ok(AppEvent::HandsLoaded(hands))
+            });
         }
         BackendRef::InProcess(kernel) => {
             let defs = kernel.hand_registry_ref().list_definitions();
@@ -5475,32 +5512,28 @@ pub fn spawn_fetch_active_hands(backend: BackendRef, tx: mpsc::Sender<AppEvent>)
     std::thread::spawn(move || match backend {
         BackendRef::Daemon { base_url, api_key } => {
             let client = make_daemon_client(api_key.as_deref());
-            if let Ok(resp) = client.get(format!("{base_url}/api/hands/active")).send() {
-                if let Ok(body) = resp.json::<serde_json::Value>() {
-                    let instances: Vec<HandInstanceInfo> = body["instances"]
-                        .as_array()
-                        .map(|arr| {
-                            arr.iter()
-                                .map(|i| HandInstanceInfo {
-                                    instance_id: i["instance_id"]
-                                        .as_str()
-                                        .unwrap_or("")
-                                        .to_string(),
-                                    hand_id: i["hand_id"].as_str().unwrap_or("").to_string(),
-                                    status: i["status"].as_str().unwrap_or("").to_string(),
-                                    agent_name: i["agent_name"].as_str().unwrap_or("").to_string(),
-                                    agent_id: i["agent_id"].as_str().unwrap_or("").to_string(),
-                                    activated_at: i["activated_at"]
-                                        .as_str()
-                                        .unwrap_or("")
-                                        .to_string(),
-                                })
-                                .collect()
-                        })
-                        .unwrap_or_default();
-                    let _ = tx.send(AppEvent::ActiveHandsLoaded(instances));
-                }
-            }
+            send_fetched(&tx, || {
+                let body = fetch_json(
+                    client.get(format!("{base_url}/api/hands/active")).send(),
+                    || crate::i18n::t("tui-event-active-hands-fetch-failed"),
+                )?;
+                let instances: Vec<HandInstanceInfo> = body["instances"]
+                    .as_array()
+                    .map(|arr| {
+                        arr.iter()
+                            .map(|i| HandInstanceInfo {
+                                instance_id: i["instance_id"].as_str().unwrap_or("").to_string(),
+                                hand_id: i["hand_id"].as_str().unwrap_or("").to_string(),
+                                status: i["status"].as_str().unwrap_or("").to_string(),
+                                agent_name: i["agent_name"].as_str().unwrap_or("").to_string(),
+                                agent_id: i["agent_id"].as_str().unwrap_or("").to_string(),
+                                activated_at: i["activated_at"].as_str().unwrap_or("").to_string(),
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                Ok(AppEvent::ActiveHandsLoaded(instances))
+            });
         }
         BackendRef::InProcess(kernel) => {
             let instances: Vec<HandInstanceInfo> = kernel
@@ -5710,47 +5743,49 @@ pub fn spawn_fetch_extensions(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
     std::thread::spawn(move || match backend {
         BackendRef::Daemon { base_url, api_key } => {
             let client = make_daemon_client(api_key.as_deref());
-            if let Ok(resp) = client.get(format!("{base_url}/api/mcp/catalog")).send() {
-                if let Ok(body) = resp.json::<serde_json::Value>() {
-                    let extensions: Vec<ExtensionInfo> = body["entries"]
-                        .as_array()
-                        .map(|arr| {
-                            arr.iter()
-                                .map(|e| {
-                                    let id = e["id"].as_str().unwrap_or("").to_string();
-                                    let installed = e["installed"].as_bool().unwrap_or(false);
-                                    ExtensionInfo {
-                                        id: id.clone(),
-                                        name: e["name"].as_str().unwrap_or("").to_string(),
-                                        description: e["description"]
-                                            .as_str()
-                                            .unwrap_or("")
-                                            .to_string(),
-                                        icon: e["icon"].as_str().unwrap_or("").to_string(),
-                                        category: e["category"].as_str().unwrap_or("").to_string(),
-                                        installed,
-                                        status: if installed {
-                                            "installed".to_string()
-                                        } else {
-                                            "available".to_string()
-                                        },
-                                        tags: e["tags"]
-                                            .as_array()
-                                            .map(|t| {
-                                                t.iter()
-                                                    .filter_map(|v| v.as_str().map(String::from))
-                                                    .collect()
-                                            })
-                                            .unwrap_or_default(),
-                                        has_oauth: e["has_oauth"].as_bool().unwrap_or(false),
-                                    }
-                                })
-                                .collect()
-                        })
-                        .unwrap_or_default();
-                    let _ = tx.send(AppEvent::ExtensionsLoaded(extensions));
-                }
-            }
+            send_fetched(&tx, || {
+                let body = fetch_json(
+                    client.get(format!("{base_url}/api/mcp/catalog")).send(),
+                    || crate::i18n::t("tui-event-extensions-fetch-failed"),
+                )?;
+                let extensions: Vec<ExtensionInfo> = body["entries"]
+                    .as_array()
+                    .map(|arr| {
+                        arr.iter()
+                            .map(|e| {
+                                let id = e["id"].as_str().unwrap_or("").to_string();
+                                let installed = e["installed"].as_bool().unwrap_or(false);
+                                ExtensionInfo {
+                                    id: id.clone(),
+                                    name: e["name"].as_str().unwrap_or("").to_string(),
+                                    description: e["description"]
+                                        .as_str()
+                                        .unwrap_or("")
+                                        .to_string(),
+                                    icon: e["icon"].as_str().unwrap_or("").to_string(),
+                                    category: e["category"].as_str().unwrap_or("").to_string(),
+                                    installed,
+                                    status: if installed {
+                                        "installed".to_string()
+                                    } else {
+                                        "available".to_string()
+                                    },
+                                    tags: e["tags"]
+                                        .as_array()
+                                        .map(|t| {
+                                            t.iter()
+                                                .filter_map(|v| v.as_str().map(String::from))
+                                                .collect()
+                                        })
+                                        .unwrap_or_default(),
+                                    has_oauth: e["has_oauth"].as_bool().unwrap_or(false),
+                                }
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                Ok(AppEvent::ExtensionsLoaded(extensions))
+            });
         }
         BackendRef::InProcess(kernel) => {
             let installed_ids: std::collections::HashSet<String> = kernel
@@ -5792,34 +5827,36 @@ pub fn spawn_fetch_extension_health(backend: BackendRef, tx: mpsc::Sender<AppEve
     std::thread::spawn(move || match backend {
         BackendRef::Daemon { base_url, api_key } => {
             let client = make_daemon_client(api_key.as_deref());
-            if let Ok(resp) = client.get(format!("{base_url}/api/mcp/health")).send() {
-                if let Ok(body) = resp.json::<serde_json::Value>() {
-                    let entries: Vec<ExtensionHealthInfo> = body["health"]
-                        .as_array()
-                        .map(|arr| {
-                            arr.iter()
-                                .map(|h| ExtensionHealthInfo {
-                                    id: h["id"].as_str().unwrap_or("").to_string(),
-                                    status: h["status"].as_str().unwrap_or("").to_string(),
-                                    tool_count: h["tool_count"].as_u64().unwrap_or(0) as usize,
-                                    last_ok: h["last_ok"].as_str().unwrap_or("").to_string(),
-                                    last_error: h["last_error"].as_str().unwrap_or("").to_string(),
-                                    consecutive_failures: h["consecutive_failures"]
-                                        .as_u64()
-                                        .unwrap_or(0)
-                                        as u32,
-                                    reconnecting: h["reconnecting"].as_bool().unwrap_or(false),
-                                    connected_since: h["connected_since"]
-                                        .as_str()
-                                        .unwrap_or("")
-                                        .to_string(),
-                                })
-                                .collect()
-                        })
-                        .unwrap_or_default();
-                    let _ = tx.send(AppEvent::ExtensionHealthLoaded(entries));
-                }
-            }
+            send_fetched(&tx, || {
+                let body = fetch_json(
+                    client.get(format!("{base_url}/api/mcp/health")).send(),
+                    || crate::i18n::t("tui-event-extension-health-fetch-failed"),
+                )?;
+                let entries: Vec<ExtensionHealthInfo> = body["health"]
+                    .as_array()
+                    .map(|arr| {
+                        arr.iter()
+                            .map(|h| ExtensionHealthInfo {
+                                id: h["id"].as_str().unwrap_or("").to_string(),
+                                status: h["status"].as_str().unwrap_or("").to_string(),
+                                tool_count: h["tool_count"].as_u64().unwrap_or(0) as usize,
+                                last_ok: h["last_ok"].as_str().unwrap_or("").to_string(),
+                                last_error: h["last_error"].as_str().unwrap_or("").to_string(),
+                                consecutive_failures: h["consecutive_failures"]
+                                    .as_u64()
+                                    .unwrap_or(0)
+                                    as u32,
+                                reconnecting: h["reconnecting"].as_bool().unwrap_or(false),
+                                connected_since: h["connected_since"]
+                                    .as_str()
+                                    .unwrap_or("")
+                                    .to_string(),
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                Ok(AppEvent::ExtensionHealthLoaded(entries))
+            });
         }
         BackendRef::InProcess(kernel) => {
             let health = kernel.health().all_health();
@@ -5950,66 +5987,63 @@ pub fn spawn_fetch_comms(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
         BackendRef::Daemon { base_url, api_key } => {
             let client = make_daemon_client(api_key.as_deref());
             // Fetch topology
-            if let Ok(resp) = client.get(format!("{base_url}/api/comms/topology")).send() {
-                if let Ok(body) = resp.json::<serde_json::Value>() {
-                    let nodes: Vec<CommsNode> = body["nodes"]
-                        .as_array()
-                        .map(|arr| {
-                            arr.iter()
-                                .map(|n| CommsNode {
-                                    id: n["id"].as_str().unwrap_or("").to_string(),
-                                    name: n["name"].as_str().unwrap_or("").to_string(),
-                                    state: n["state"].as_str().unwrap_or("").to_string(),
-                                    model: n["model"].as_str().unwrap_or("").to_string(),
-                                })
-                                .collect()
-                        })
-                        .unwrap_or_default();
-                    let edges: Vec<CommsEdge> = body["edges"]
-                        .as_array()
-                        .map(|arr| {
-                            arr.iter()
-                                .map(|e| CommsEdge {
-                                    from: e["from"].as_str().unwrap_or("").to_string(),
-                                    to: e["to"].as_str().unwrap_or("").to_string(),
-                                    kind: e["kind"].as_str().unwrap_or("").to_string(),
-                                })
-                                .collect()
-                        })
-                        .unwrap_or_default();
-                    let _ = tx.send(AppEvent::CommsTopologyLoaded { nodes, edges });
-                }
-            }
+            send_fetched(&tx, || {
+                let body = fetch_json(
+                    client.get(format!("{base_url}/api/comms/topology")).send(),
+                    || crate::i18n::t("tui-event-comms-topology-fetch-failed"),
+                )?;
+                let nodes: Vec<CommsNode> = body["nodes"]
+                    .as_array()
+                    .map(|arr| {
+                        arr.iter()
+                            .map(|n| CommsNode {
+                                id: n["id"].as_str().unwrap_or("").to_string(),
+                                name: n["name"].as_str().unwrap_or("").to_string(),
+                                state: n["state"].as_str().unwrap_or("").to_string(),
+                                model: n["model"].as_str().unwrap_or("").to_string(),
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let edges: Vec<CommsEdge> = body["edges"]
+                    .as_array()
+                    .map(|arr| {
+                        arr.iter()
+                            .map(|e| CommsEdge {
+                                from: e["from"].as_str().unwrap_or("").to_string(),
+                                to: e["to"].as_str().unwrap_or("").to_string(),
+                                kind: e["kind"].as_str().unwrap_or("").to_string(),
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                Ok(AppEvent::CommsTopologyLoaded { nodes, edges })
+            });
             // Fetch events
-            if let Ok(resp) = client
-                .get(format!("{base_url}/api/comms/events?limit=100"))
-                .send()
-            {
-                if let Ok(body) = resp.json::<serde_json::Value>() {
-                    let events: Vec<CommsEventItem> = body
-                        .as_array()
-                        .map(|arr| {
-                            arr.iter()
-                                .map(|e| CommsEventItem {
-                                    id: e["id"].as_str().unwrap_or("").to_string(),
-                                    timestamp: e["timestamp"].as_str().unwrap_or("").to_string(),
-                                    kind: e["kind"].as_str().unwrap_or("").to_string(),
-                                    source_name: e["source_name"]
-                                        .as_str()
-                                        .unwrap_or("")
-                                        .to_string(),
-                                    target_name: e["target_name"]
-                                        .as_str()
-                                        .unwrap_or("")
-                                        .to_string(),
-                                    detail: e["detail"].as_str().unwrap_or("").to_string(),
-                                })
-                                .collect()
-                        })
-                        .unwrap_or_default();
-                    let _ = tx.send(AppEvent::CommsEventsLoaded(events));
-                }
-            }
+            send_fetched(&tx, || {
+                let body = fetch_json(
+                    client
+                        .get(format!("{base_url}/api/comms/events?limit=100"))
+                        .send(),
+                    || crate::i18n::t("tui-event-comms-events-fetch-failed"),
+                )?;
+                let events: Vec<CommsEventItem> = body
+                    .as_array()
+                    .map(|arr| {
+                        arr.iter()
+                            .map(|e| CommsEventItem {
+                                id: e["id"].as_str().unwrap_or("").to_string(),
+                                timestamp: e["timestamp"].as_str().unwrap_or("").to_string(),
+                                kind: e["kind"].as_str().unwrap_or("").to_string(),
+                                source_name: e["source_name"].as_str().unwrap_or("").to_string(),
+                                target_name: e["target_name"].as_str().unwrap_or("").to_string(),
+                                detail: e["detail"].as_str().unwrap_or("").to_string(),
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                Ok(AppEvent::CommsEventsLoaded(events))
+            });
         }
         BackendRef::InProcess(_) => {
             let _ = tx.send(AppEvent::CommsTopologyLoaded {
@@ -6118,17 +6152,23 @@ pub fn spawn_fetch_agent_model_label(
 ) {
     std::thread::spawn(move || {
         let client = make_daemon_client(api_key.as_deref());
-        if let Ok(resp) = client
-            .get(format!("{base_url}/api/agents/{agent_id}"))
-            .send()
-        {
-            if let Ok(body) = resp.json::<serde_json::Value>() {
-                let provider = body["model_provider"].as_str().unwrap_or("?");
-                let model = body["model_name"].as_str().unwrap_or("?");
-                let label = format!("{provider}/{model}");
-                let _ = tx.send(AppEvent::ChatModelLabelLoaded { agent_id, label });
-            }
-        }
+        send_fetched(&tx, || {
+            let body = fetch_json(
+                client
+                    .get(format!("{base_url}/api/agents/{agent_id}"))
+                    .send(),
+                || {
+                    crate::i18n::t_args(
+                        "tui-event-agent-model-label-fetch-failed",
+                        &[("agent_id", &agent_id)],
+                    )
+                },
+            )?;
+            let provider = body["model_provider"].as_str().unwrap_or("?");
+            let model = body["model_name"].as_str().unwrap_or("?");
+            let label = format!("{provider}/{model}");
+            Ok(AppEvent::ChatModelLabelLoaded { agent_id, label })
+        });
     });
 }
 
@@ -6142,25 +6182,26 @@ pub fn spawn_fetch_models_for_picker(
 ) {
     std::thread::spawn(move || {
         let client = make_daemon_client(api_key.as_deref());
-        if let Ok(resp) = client.get(format!("{base_url}/api/models")).send() {
-            if let Ok(body) = resp.json::<serde_json::Value>() {
-                let models: Vec<super::screens::chat::ModelEntry> = body["models"]
-                    .as_array()
-                    .map(|arr| {
-                        arr.iter()
-                            .filter(|m| m["available"].as_bool().unwrap_or(false))
-                            .map(|m| super::screens::chat::ModelEntry {
-                                id: m["id"].as_str().unwrap_or("").to_string(),
-                                display_name: m["display_name"].as_str().unwrap_or("").to_string(),
-                                provider: m["provider"].as_str().unwrap_or("").to_string(),
-                                tier: m["tier"].as_str().unwrap_or("Balanced").to_string(),
-                            })
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                let _ = tx.send(AppEvent::ChatModelsForPicker(models));
-            }
-        }
+        send_fetched(&tx, || {
+            let body = fetch_json(client.get(format!("{base_url}/api/models")).send(), || {
+                crate::i18n::t("tui-event-models-load-failed")
+            })?;
+            let models: Vec<super::screens::chat::ModelEntry> = body["models"]
+                .as_array()
+                .map(|arr| {
+                    arr.iter()
+                        .filter(|m| m["available"].as_bool().unwrap_or(false))
+                        .map(|m| super::screens::chat::ModelEntry {
+                            id: m["id"].as_str().unwrap_or("").to_string(),
+                            display_name: m["display_name"].as_str().unwrap_or("").to_string(),
+                            provider: m["provider"].as_str().unwrap_or("").to_string(),
+                            tier: m["tier"].as_str().unwrap_or("Balanced").to_string(),
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            Ok(AppEvent::ChatModelsForPicker(models))
+        });
     });
 }
 
@@ -6174,29 +6215,30 @@ pub fn spawn_fetch_agents_for_chat(
 ) {
     std::thread::spawn(move || {
         let client = make_daemon_client(api_key.as_deref());
-        if let Ok(resp) = client.get(format!("{base_url}/api/agents")).send() {
-            if let Ok(body) = resp.json::<serde_json::Value>() {
-                let arr = if let Some(arr) = body.as_array() {
-                    arr.clone()
-                } else if let Some(items) = body.get("items").and_then(|v| v.as_array()) {
-                    items.clone()
-                } else {
-                    Vec::new()
-                };
-                let lines: Vec<String> = arr
-                    .iter()
-                    .map(|a| {
-                        format!(
-                            "{} [{}] {}",
-                            a["name"].as_str().unwrap_or("?"),
-                            a["state"].as_str().unwrap_or("?"),
-                            a["model_name"].as_str().unwrap_or("?"),
-                        )
-                    })
-                    .collect();
-                let _ = tx.send(AppEvent::ChatAgentListLoaded(lines));
-            }
-        }
+        send_fetched(&tx, || {
+            let body = fetch_json(client.get(format!("{base_url}/api/agents")).send(), || {
+                crate::i18n::t("tui-event-agents-fetch-failed")
+            })?;
+            let arr = if let Some(arr) = body.as_array() {
+                arr.clone()
+            } else if let Some(items) = body.get("items").and_then(|v| v.as_array()) {
+                items.clone()
+            } else {
+                Vec::new()
+            };
+            let lines: Vec<String> = arr
+                .iter()
+                .map(|a| {
+                    format!(
+                        "{} [{}] {}",
+                        a["name"].as_str().unwrap_or("?"),
+                        a["state"].as_str().unwrap_or("?"),
+                        a["model_name"].as_str().unwrap_or("?"),
+                    )
+                })
+                .collect();
+            Ok(AppEvent::ChatAgentListLoaded(lines))
+        });
     });
 }
 
@@ -7233,6 +7275,243 @@ mod tests {
                 assert_eq!(outcome, ConfigSaveOutcome::Applied)
             }
             _ => panic!("expected ConfigValueSaved"),
+        }
+    }
+
+    // ── every list fetch reports its failure (#8154) ────────────────────────
+
+    /// The daemon's standard `ApiErrorResponse` envelope, with a reason no helper could invent.
+    const REJECTION: &str = r#"{"error":{"message":"store is locked by another writer"},"message":"store is locked by another writer"}"#;
+
+    /// Every event a fetch thread sends, in order, until the thread exits and drops its sender.
+    fn all_events(rx: &mpsc::Receiver<AppEvent>) -> Vec<AppEvent> {
+        let mut events = Vec::new();
+        loop {
+            match rx.recv_timeout(std::time::Duration::from_secs(10)) {
+                Ok(ev) => events.push(ev),
+                Err(mpsc::RecvTimeoutError::Disconnected) => return events,
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    panic!("the fetch thread did not finish within 10s")
+                }
+            }
+        }
+    }
+
+    /// A 500 answer to a list fetch must come back as `FetchError` carrying the daemon's reason.
+    ///
+    /// `spawn_fetch_sessions` is the clean example of the class that sent nothing: `if let Ok(resp)` then `if let Ok(body)`, no `else` on either, and a 500 with a JSON body decoded happily into "no sessions".
+    #[test]
+    fn sessions_fetch_reports_a_daemon_rejection() {
+        let base = serve(vec![(500, REJECTION)]);
+        let (tx, rx) = mpsc::channel();
+
+        spawn_fetch_sessions(daemon(base), tx);
+
+        match next_event(&rx) {
+            AppEvent::FetchError(message) => assert!(
+                message.contains("store is locked by another writer"),
+                "the daemon's reason is the diagnosis and must reach the operator: {message}"
+            ),
+            AppEvent::SessionsLoaded(_) => {
+                panic!("a 500 must not render as an empty session list")
+            }
+            _ => panic!("expected FetchError"),
+        }
+    }
+
+    /// A refused connection is a different failure from a rejection and must say so.
+    ///
+    /// The port was bound and then released, so nothing is listening on it.
+    #[test]
+    fn sessions_fetch_reports_a_refused_connection() {
+        let port = {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+            listener.local_addr().expect("addr").port()
+        };
+        let (tx, rx) = mpsc::channel();
+
+        spawn_fetch_sessions(daemon(format!("http://127.0.0.1:{port}")), tx);
+
+        match next_event(&rx) {
+            AppEvent::FetchError(message) => assert!(
+                message.contains("/api/sessions"),
+                "the transport failure must name what could not be reached: {message}"
+            ),
+            _ => panic!("a refused connection must produce FetchError"),
+        }
+    }
+
+    /// The `stall` class: a guarded send with no fallback arm, so a failure sent nothing at all.
+    #[test]
+    fn hands_fetch_reports_a_daemon_rejection() {
+        let base = serve(vec![(500, REJECTION)]);
+        let (tx, rx) = mpsc::channel();
+
+        spawn_fetch_hands(daemon(base), tx);
+
+        match next_event(&rx) {
+            AppEvent::FetchError(message) => {
+                assert!(
+                    message.contains("store is locked by another writer"),
+                    "{message}"
+                )
+            }
+            _ => panic!("expected FetchError"),
+        }
+    }
+
+    /// The `both` class: the daemon arm guarded on `if let Ok`, the in-process arm sent an empty list.
+    #[test]
+    fn workflows_fetch_reports_a_daemon_rejection() {
+        let base = serve(vec![(500, REJECTION)]);
+        let (tx, rx) = mpsc::channel();
+
+        spawn_fetch_workflows(daemon(base), tx);
+
+        match next_event(&rx) {
+            AppEvent::FetchError(message) => {
+                assert!(
+                    message.contains("store is locked by another writer"),
+                    "{message}"
+                )
+            }
+            AppEvent::WorkflowListLoaded(_) => {
+                panic!("a 500 must not render as an empty workflow list")
+            }
+            _ => panic!("expected FetchError"),
+        }
+    }
+
+    /// A 200 whose body is not JSON is a failure too, not an empty list.
+    #[test]
+    fn an_undecodable_success_body_is_reported_not_rendered_empty() {
+        let base = serve(vec![(200, "<html>proxy login</html>")]);
+        let (tx, rx) = mpsc::channel();
+
+        spawn_fetch_triggers(daemon(base), tx);
+
+        match next_event(&rx) {
+            AppEvent::FetchError(message) => assert!(!message.is_empty()),
+            AppEvent::TriggerListLoaded(_) => {
+                panic!("an unreadable body must not render as an empty trigger list")
+            }
+            _ => panic!("expected FetchError"),
+        }
+    }
+
+    /// A helper that makes several requests reports each one on its own, so one failing sub-request does not hide the others' data.
+    #[test]
+    fn usage_fetch_reports_a_failed_summary_and_still_loads_the_rest() {
+        let base = serve(vec![(500, REJECTION), (200, "[]"), (200, "[]")]);
+        let (tx, rx) = mpsc::channel();
+
+        spawn_fetch_usage(daemon(base), tx);
+
+        let events = all_events(&rx);
+        assert_eq!(events.len(), 3, "one event per request");
+        assert!(matches!(events[0], AppEvent::FetchError(_)));
+        assert!(matches!(events[1], AppEvent::UsageByModelLoaded(_)));
+        assert!(matches!(events[2], AppEvent::UsageByAgentLoaded(_)));
+    }
+
+    /// The sweep: every list fetch in this module, against a daemon that rejects every request.
+    ///
+    /// Each must send at least one event, and every event it sends must be `FetchError`.
+    /// A helper that returns silently fails the first assertion; one that turns a rejection into an empty list fails the second.
+    /// The dashboard's auto-dream probe is optional by design and stays silent, which this allows: it adds no event.
+    #[test]
+    fn every_list_fetch_reports_a_rejecting_daemon() {
+        type Fetch = Box<dyn Fn(BackendRef, mpsc::Sender<AppEvent>)>;
+        let fetches: Vec<(&str, Fetch)> = vec![
+            ("dashboard", Box::new(spawn_fetch_dashboard)),
+            ("workflows", Box::new(spawn_fetch_workflows)),
+            ("triggers", Box::new(spawn_fetch_triggers)),
+            ("sessions", Box::new(spawn_fetch_sessions)),
+            ("memory_agents", Box::new(spawn_fetch_memory_agents)),
+            (
+                "memory_kv",
+                Box::new(|b, tx| spawn_fetch_memory_kv(b, "a-1".to_string(), tx)),
+            ),
+            ("skills", Box::new(spawn_fetch_skills)),
+            (
+                "search_clawhub",
+                Box::new(|b, tx| spawn_search_clawhub(b, "pdf".to_string(), tx)),
+            ),
+            (
+                "browse_clawhub",
+                Box::new(|b, tx| spawn_browse_clawhub(b, "trending".to_string(), tx)),
+            ),
+            ("mcp_servers", Box::new(spawn_fetch_mcp_servers)),
+            ("agent_templates", Box::new(spawn_fetch_agent_templates)),
+            (
+                "template_providers",
+                Box::new(spawn_fetch_template_providers),
+            ),
+            ("security", Box::new(spawn_fetch_security)),
+            ("audit", Box::new(spawn_fetch_audit)),
+            ("usage", Box::new(spawn_fetch_usage)),
+            ("providers", Box::new(spawn_fetch_providers)),
+            ("models", Box::new(spawn_fetch_models)),
+            ("tools", Box::new(spawn_fetch_tools)),
+            ("groups", Box::new(spawn_fetch_groups)),
+            ("peers", Box::new(spawn_fetch_peers)),
+            ("logs", Box::new(spawn_fetch_logs)),
+            ("goals", Box::new(spawn_fetch_goals)),
+            ("hands", Box::new(spawn_fetch_hands)),
+            ("active_hands", Box::new(spawn_fetch_active_hands)),
+            ("extensions", Box::new(spawn_fetch_extensions)),
+            ("extension_health", Box::new(spawn_fetch_extension_health)),
+            ("comms", Box::new(spawn_fetch_comms)),
+            (
+                "agent_model_label",
+                Box::new(|b, tx| {
+                    let BackendRef::Daemon { base_url, api_key } = b else {
+                        unreachable!()
+                    };
+                    spawn_fetch_agent_model_label(base_url, "a-1".to_string(), api_key, tx)
+                }),
+            ),
+            (
+                "models_for_picker",
+                Box::new(|b, tx| {
+                    let BackendRef::Daemon { base_url, api_key } = b else {
+                        unreachable!()
+                    };
+                    spawn_fetch_models_for_picker(base_url, api_key, tx)
+                }),
+            ),
+            (
+                "agents_for_chat",
+                Box::new(|b, tx| {
+                    let BackendRef::Daemon { base_url, api_key } = b else {
+                        unreachable!()
+                    };
+                    spawn_fetch_agents_for_chat(base_url, api_key, tx)
+                }),
+            ),
+        ];
+
+        for (name, fetch) in fetches {
+            // Three rejections cover the helpers that make several requests.
+            let base = serve(vec![(500, REJECTION), (500, REJECTION), (500, REJECTION)]);
+            let (tx, rx) = mpsc::channel();
+
+            fetch(daemon(base), tx);
+
+            let events = all_events(&rx);
+            assert!(
+                !events.is_empty(),
+                "{name}: a rejected fetch must send an event, not return silently"
+            );
+            for ev in events {
+                match ev {
+                    AppEvent::FetchError(message) => assert!(
+                        message.contains("store is locked by another writer"),
+                        "{name}: the daemon's reason must reach the operator: {message}"
+                    ),
+                    _ => panic!("{name}: a rejected fetch sent a success event"),
+                }
+            }
         }
     }
 }
