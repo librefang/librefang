@@ -27,6 +27,7 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::Json;
+use librefang_kernel::goal_runner::GoalRunStart;
 use librefang_types::agent::AgentId;
 use librefang_types::goal::GoalId;
 use std::collections::HashSet;
@@ -409,15 +410,25 @@ async fn start_or_resume(
             evaluator_model,
         )
     };
-    if !started {
-        // #7785 review: the only way `start_goal_run` refuses is the goal
-        // vanishing between the read above and the runner's own reload —
-        // a delete racing this request. That is "the goal is gone", a 404,
-        // not the 500 an internal-fault response implies.
-        return ApiErrorResponse::not_found(format!(
-            "Goal '{id}' was deleted before its run could start"
-        ))
-        .into_json_tuple();
+    match started {
+        GoalRunStart::Started => {}
+        // #7785 review: the goal vanished between the read above and the
+        // runner's own reload — a delete racing this request. That is "the
+        // goal is gone", a 404, not the 500 an internal-fault response implies.
+        GoalRunStart::GoalNotFound => {
+            return ApiErrorResponse::not_found(format!(
+                "Goal '{id}' was deleted before its run could start"
+            ))
+            .into_json_tuple();
+        }
+        // The runner could not read the goal or its pause checkpoint, or the kernel cannot drive a run yet (#8427).
+        // Reporting that as a deleted goal sent the operator to re-create a goal that exists; the runner has logged the cause with the goal id, and has left any checkpoint in place for a retry.
+        GoalRunStart::Unavailable => {
+            return ApiErrorResponse::internal(format!(
+                "The run for goal '{id}' could not start: its stored state could not be read or the kernel is not ready. Any paused progress is kept; see the daemon log, then retry."
+            ))
+            .into_json_tuple();
+        }
     }
 
     // Flip the goal to in_progress so the dashboard reflects the active run.
