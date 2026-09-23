@@ -288,7 +288,9 @@ fn base_dir(state: &AppState, name: &str) -> Option<PathBuf> {
 
 /// The `path` a manifest declaration carries for a base, as written in `agent.toml`.
 ///
-/// Joined with `/` rather than `Path::join`, which uses `\` on Windows: this string is shown in the API, written into `agent.toml`, and has to read the same on every host. Path comparisons against it are component-wise, so `holders_of` still matches a declaration written with either separator.
+/// Joined with `/` rather than `Path::join`, which uses `\` on Windows: this string is shown in the API, written into `agent.toml`, and has to read the same on every host.
+///
+/// Path comparisons against it are component-wise, so `holders_of` still matches a declaration written with either separator.
 fn decl_path(name: &str) -> PathBuf {
     PathBuf::from(format!("{KNOWLEDGE_PREFIX}/{name}"))
 }
