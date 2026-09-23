@@ -4456,7 +4456,7 @@
     "custom": "Custom",
     "frequency_penalty": "Frequency Penalty",
     "inherit": "inherit default",
-    "local_samplers_hint": "Top-K reaches Anthropic, Gemini, Ollama, vLLM, llama.cpp and LM Studio. Min-p and repetition penalty reach Ollama, vLLM and llama.cpp; LM Studio takes repetition penalty only. Other providers do not receive them.",
+    "local_samplers_hint": "Top-K reaches Anthropic, Gemini, Ollama, vLLM, llama.cpp, LM Studio and OpenRouter. Min-p and repetition penalty reach Ollama, vLLM, llama.cpp and OpenRouter; LM Studio takes repetition penalty only. Other providers do not receive them.",
     "max_output_tokens": "Output Cap",
     "max_output_tokens_placeholder": "tokens the model can emit",
     "max_tokens": "Max Tokens",

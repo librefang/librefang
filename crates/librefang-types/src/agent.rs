@@ -961,7 +961,7 @@ pub struct ModelConfig {
     pub presence_penalty: Option<f32>,
     /// Top-k sampling: consider only the `k` most likely tokens (≥ 1). `None` = inherit.
     ///
-    /// Anthropic, Gemini and llama.cpp-derived runtimes have it; OpenAI does not, so the OpenAI-format driver sends it only to the local servers known to read it (#8290).
+    /// Anthropic, Gemini and llama.cpp-derived runtimes have it; OpenAI does not, so the OpenAI-format driver sends it only to the local servers and gateways known to read it (see `LocalSamplerDialect`) (#8290).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub top_k: Option<u32>,
     /// Minimum-probability (min-p) sampling (0.0–1.0): drop tokens less likely than this fraction of the top token's probability. `None` = inherit.

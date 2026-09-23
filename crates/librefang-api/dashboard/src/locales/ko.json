@@ -4454,7 +4454,7 @@
     "custom": "사용자 지정",
     "frequency_penalty": "빈도 페널티",
     "inherit": "기본값 상속",
-    "local_samplers_hint": "Top-K는 Anthropic, Gemini, Ollama, vLLM, llama.cpp, LM Studio에 전달됩니다. min-p와 반복 페널티는 Ollama, vLLM, llama.cpp에 전달되며, LM Studio는 반복 페널티만 받습니다. 다른 제공자에는 전달되지 않습니다.",
+    "local_samplers_hint": "Top-K는 Anthropic, Gemini, Ollama, vLLM, llama.cpp, LM Studio, OpenRouter에 전달됩니다. min-p와 반복 페널티는 Ollama, vLLM, llama.cpp, OpenRouter에 전달되며, LM Studio는 반복 페널티만 받습니다. 다른 제공자에는 전달되지 않습니다.",
     "max_output_tokens": "출력 상한",
     "max_output_tokens_placeholder": "모델이 생성할 수 있는 토큰",
     "max_tokens": "최대 토큰",

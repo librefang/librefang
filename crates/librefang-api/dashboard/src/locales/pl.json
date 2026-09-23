@@ -4470,7 +4470,7 @@
     "custom": "Własne",
     "frequency_penalty": "Kara za częstotliwość",
     "inherit": "dziedzicz domyślne",
-    "local_samplers_hint": "Top-K trafia do Anthropic, Gemini, Ollama, vLLM, llama.cpp i LM Studio. Min-p i kara za powtórzenia trafiają do Ollama, vLLM i llama.cpp; LM Studio przyjmuje tylko karę za powtórzenia. Inni dostawcy ich nie otrzymują.",
+    "local_samplers_hint": "Top-K trafia do Anthropic, Gemini, Ollama, vLLM, llama.cpp, LM Studio i OpenRouter. Min-p i kara za powtórzenia trafiają do Ollama, vLLM, llama.cpp i OpenRouter; LM Studio przyjmuje tylko karę za powtórzenia. Inni dostawcy ich nie otrzymują.",
     "max_output_tokens": "Limit wyjścia",
     "max_output_tokens_placeholder": "tokeny, które model może wygenerować",
     "max_tokens": "Maks. tokenów",

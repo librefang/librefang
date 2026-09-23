@@ -282,7 +282,7 @@ pub struct CompletionRequest {
     pub presence_penalty: Option<f32>,
     /// Top-k sampling. `None` = not set.
     ///
-    /// Anthropic, Gemini / Vertex AI and Ollama have it; the OpenAI-format driver sends it only to the local servers known to read it. See [`Self::top_p`].
+    /// Anthropic, Gemini / Vertex AI and Ollama have it; the OpenAI-format driver sends it only to the local servers and gateways known to read it (see `LocalSamplerDialect`). See [`Self::top_p`].
     pub top_k: Option<u32>,
     /// Minimum-probability (min-p) sampling. `None` = not set.
     ///

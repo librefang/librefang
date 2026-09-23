@@ -620,7 +620,7 @@ impl OpenAIDriver {
         self
     }
 
-    /// Declare which self-hosted runtime this endpoint is, so the samplers the OpenAI API lacks reach it (#8290).
+    /// Declare which runtime or gateway this endpoint is, so the samplers the OpenAI API lacks reach it (#8290).
     /// See [`LocalSamplerDialect::for_provider`].
     pub fn with_sampler_dialect(mut self, dialect: LocalSamplerDialect) -> Self {
         self.sampler_dialect = dialect;
@@ -628,14 +628,15 @@ impl OpenAIDriver {
     }
 }
 
-/// The self-hosted OpenAI-compatible runtimes that read samplers the OpenAI API does not have (#8290).
+/// The OpenAI-compatible endpoints that read samplers the OpenAI API does not have (#8290).
 ///
 /// `top_k`, `min_p` and `repeat_penalty` are not Chat Completions parameters: `api.openai.com` answers an unknown body field with a 400, and hosted gateways differ in whether they reject, ignore or forward one.
-/// So the OpenAI-format driver sends them only to a runtime known to read them, under the name that runtime reads, and drops them (logged at `debug`) everywhere else.
-/// Hosted gateways that do take some of them are not listed; `extra_params` remains the escape hatch there.
+/// So the OpenAI-format driver sends them only to an endpoint known to read them, under the name that endpoint reads, and drops them (logged at `debug`) everywhere else.
+/// There is no `extra_params` route around that drop: `ModelConfig` parses a `top_k` / `min_p` / `repeat_penalty` key onto its typed field, and `ResolvedInferenceParams::apply_to` removes any copy left in the map.
+/// So an endpoint that is not listed here does not receive them at all, which is why OpenRouter is listed: before these were typed, a `top_k` in an OpenRouter agent's `[model]` table reached it through `extra_params`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum LocalSamplerDialect {
-    /// Not a known local runtime — `api.openai.com` and every hosted gateway. None of the three is sent.
+    /// Not a known local runtime or listed gateway — `api.openai.com` and every other hosted gateway. None of the three is sent.
     #[default]
     Standard,
     /// llama.cpp `llama-server`: its `/v1/chat/completions` accepts the native `/completion` samplers `top_k`, `min_p` and `repeat_penalty`.
@@ -644,16 +645,19 @@ pub enum LocalSamplerDialect {
     LmStudio,
     /// vLLM: `top_k`, `min_p`, and the repetition penalty under its own name, `repetition_penalty`.
     Vllm,
+    /// OpenRouter: documents `top_k`, `min_p` and `repetition_penalty`, and ignores a parameter the routed model does not support rather than rejecting the request.
+    OpenRouter,
 }
 
 impl LocalSamplerDialect {
     /// The dialect for a configured provider name.
     ///
-    /// `vllm` and `lmstudio` are registry providers.
+    /// `vllm`, `lmstudio` and `openrouter` are registry providers.
     /// llama.cpp has no registry entry, so a custom provider whose name says it is llama.cpp (`llamacpp`, `llama.cpp`, `llama-cpp`, `llama_cpp`, `llama-server`) opts in; any other name is [`Self::Standard`].
     pub fn for_provider(provider: &str) -> Self {
         match provider.to_ascii_lowercase().as_str() {
             "vllm" => Self::Vllm,
+            "openrouter" => Self::OpenRouter,
             "lmstudio" => Self::LmStudio,
             "llamacpp" | "llama.cpp" | "llama-cpp" | "llama_cpp" | "llama-server" => Self::LlamaCpp,
             _ => Self::Standard,
@@ -665,7 +669,7 @@ impl LocalSamplerDialect {
     }
 
     fn accepts_min_p(self) -> bool {
-        matches!(self, Self::LlamaCpp | Self::Vllm)
+        matches!(self, Self::LlamaCpp | Self::Vllm | Self::OpenRouter)
     }
 
     /// The wire name of the repetition penalty, when this runtime has one.
@@ -673,7 +677,7 @@ impl LocalSamplerDialect {
         match self {
             Self::Standard => None,
             Self::LlamaCpp | Self::LmStudio => Some(RepeatPenaltyKey::RepeatPenalty),
-            Self::Vllm => Some(RepeatPenaltyKey::RepetitionPenalty),
+            Self::Vllm | Self::OpenRouter => Some(RepeatPenaltyKey::RepetitionPenalty),
         }
     }
 }
@@ -683,7 +687,7 @@ impl LocalSamplerDialect {
 enum RepeatPenaltyKey {
     /// llama.cpp and the runtimes built on it.
     RepeatPenalty,
-    /// vLLM (and Hugging Face `transformers`).
+    /// vLLM (and Hugging Face `transformers`), and OpenRouter.
     RepetitionPenalty,
 }
 
@@ -5063,6 +5067,20 @@ mod tests {
         assert!(body.get("repeat_penalty").is_none(), "{body}");
     }
 
+    /// OpenRouter documents all three, with the penalty under the `repetition_penalty` name, and ignores one the routed model lacks.
+    /// Before the samplers were typed, a `top_k` in an OpenRouter agent's `[model]` table reached it through `extra_params`; the typed path has to keep sending it, because no other path is left.
+    #[test]
+    fn openrouter_gets_all_three_with_the_penalty_as_repetition_penalty() {
+        let body = sent_body_as(
+            LocalSamplerDialect::OpenRouter,
+            &local_sampler_request("meta-llama/llama-3.3-70b-instruct"),
+        );
+        assert_eq!(body["top_k"], serde_json::json!(40));
+        assert_eq!(body["min_p"], serde_json::json!(0.05_f32));
+        assert_eq!(body["repetition_penalty"], serde_json::json!(1.1_f32));
+        assert!(body.get("repeat_penalty").is_none(), "{body}");
+    }
+
     /// The fixed-sampling gate from part 1 covers the new samplers too, whatever the dialect, and unset values stay off the wire.
     #[test]
     fn local_samplers_respect_fixed_sampling_and_unset() {
@@ -5070,6 +5088,7 @@ mod tests {
             LocalSamplerDialect::LlamaCpp,
             LocalSamplerDialect::LmStudio,
             LocalSamplerDialect::Vllm,
+            LocalSamplerDialect::OpenRouter,
         ] {
             let body = sent_body_as(dialect, &local_sampler_request("o3-mini"));
             for key in LOCAL_SAMPLER_KEYS {
@@ -5098,6 +5117,10 @@ mod tests {
             LocalSamplerDialect::for_provider("lmstudio"),
             LocalSamplerDialect::LmStudio
         );
+        assert_eq!(
+            LocalSamplerDialect::for_provider("openrouter"),
+            LocalSamplerDialect::OpenRouter
+        );
         for name in [
             "llamacpp",
             "llama.cpp",
@@ -5112,14 +5135,7 @@ mod tests {
                 "{name}"
             );
         }
-        for name in [
-            "openai",
-            "openrouter",
-            "groq",
-            "together",
-            "azure-openai",
-            "nvidia",
-        ] {
+        for name in ["openai", "groq", "together", "azure-openai", "nvidia"] {
             assert_eq!(
                 LocalSamplerDialect::for_provider(name),
                 LocalSamplerDialect::Standard,

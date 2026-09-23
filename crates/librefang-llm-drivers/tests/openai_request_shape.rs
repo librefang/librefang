@@ -228,7 +228,7 @@ async fn local_sampler_body_for(provider: &str) -> serde_json::Value {
 }
 
 /// #8290 part 2, end to end through the provider factory: the dialect comes from the provider name, so a factory that forgot to declare it would compile and silently send nothing.
-/// vLLM gets `repetition_penalty`, a custom provider named for llama.cpp gets `repeat_penalty`, and `openai` gets none of the three.
+/// vLLM and OpenRouter get `repetition_penalty`, a custom provider named for llama.cpp gets `repeat_penalty`, and `openai` gets none of the three.
 #[tokio::test]
 #[serial_test::serial]
 async fn provider_factory_declares_the_local_sampler_dialect() {
@@ -244,6 +244,12 @@ async fn provider_factory_declares_the_local_sampler_dialect() {
     assert_eq!(llama["top_k"], 40);
     assert_eq!(llama["min_p"], serde_json::json!(0.05_f32));
     assert_eq!(llama["repeat_penalty"], serde_json::json!(1.1_f32));
+
+    let openrouter = local_sampler_body_for("openrouter").await;
+    assert_eq!(openrouter["top_k"], 40);
+    assert_eq!(openrouter["min_p"], serde_json::json!(0.05_f32));
+    assert_eq!(openrouter["repetition_penalty"], serde_json::json!(1.1_f32));
+    assert!(openrouter.get("repeat_penalty").is_none(), "{openrouter}");
 
     let openai = local_sampler_body_for("openai").await;
     for key in ["top_k", "min_p", "repeat_penalty", "repetition_penalty"] {

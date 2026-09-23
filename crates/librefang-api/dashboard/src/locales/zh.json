@@ -4455,7 +4455,7 @@
     "custom": "自定义",
     "frequency_penalty": "频率惩罚",
     "inherit": "继承默认值",
-    "local_samplers_hint": "Top-K 会发送给 Anthropic、Gemini、Ollama、vLLM、llama.cpp 和 LM Studio。min-p 和重复惩罚会发送给 Ollama、vLLM 和 llama.cpp；LM Studio 只接受重复惩罚。其他提供商不会收到这些参数。",
+    "local_samplers_hint": "Top-K 会发送给 Anthropic、Gemini、Ollama、vLLM、llama.cpp、LM Studio 和 OpenRouter。min-p 和重复惩罚会发送给 Ollama、vLLM、llama.cpp 和 OpenRouter；LM Studio 只接受重复惩罚。其他提供商不会收到这些参数。",
     "max_output_tokens": "输出上限",
     "max_output_tokens_placeholder": "模型可生成的令牌数",
     "max_tokens": "最大令牌数",

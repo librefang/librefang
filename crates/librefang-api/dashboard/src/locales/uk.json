@@ -4470,7 +4470,7 @@
     "custom": "Власне",
     "frequency_penalty": "Штраф за частоту",
     "inherit": "успадкувати типове",
-    "local_samplers_hint": "Top-K надсилається до Anthropic, Gemini, Ollama, vLLM, llama.cpp і LM Studio. Min-p і штраф за повторення надсилаються до Ollama, vLLM і llama.cpp; LM Studio приймає лише штраф за повторення. Іншим провайдерам вони не надсилаються.",
+    "local_samplers_hint": "Top-K надсилається до Anthropic, Gemini, Ollama, vLLM, llama.cpp, LM Studio і OpenRouter. Min-p і штраф за повторення надсилаються до Ollama, vLLM, llama.cpp і OpenRouter; LM Studio приймає лише штраф за повторення. Іншим провайдерам вони не надсилаються.",
     "max_output_tokens": "Ліміт виводу",
     "max_output_tokens_placeholder": "токени, які модель може згенерувати",
     "max_tokens": "Макс. токенів",

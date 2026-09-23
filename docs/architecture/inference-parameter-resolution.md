@@ -63,10 +63,15 @@ They are typed fields on `CompletionRequest` too, with the same agent > per-mode
 | OpenAI-format, `vllm` | top-level field | top-level field | top-level **`repetition_penalty`** (vLLM's name) |
 | OpenAI-format, `lmstudio` | top-level field | not sent — not in LM Studio's documented parameters | top-level field |
 | OpenAI-format, custom provider named `llamacpp` / `llama.cpp` / `llama-cpp` / `llama_cpp` / `llama-server` | top-level field | top-level field | top-level field |
-| OpenAI-format, anything else (`openai`, hosted gateways) | not sent | not sent | not sent |
+| OpenAI-format, `openrouter` | top-level field | top-level field | top-level **`repetition_penalty`** (OpenRouter's name) |
+| OpenAI-format, anything else (`openai`, other hosted gateways) | not sent | not sent | not sent |
 
 The OpenAI-format driver decides from the provider name, because that is the only thing that says which runtime is behind the URL (`LocalSamplerDialect::for_provider` in `crates/librefang-llm-drivers/src/drivers/openai.rs`).
-`api.openai.com` answers an unknown body field with a 400, and hosted gateways differ in whether they reject, ignore or forward one, so none of them gets these by default; a gateway that does accept them can still be sent them through `extra_params`.
+`api.openai.com` answers an unknown body field with a 400, and hosted gateways differ in whether they reject, ignore or forward one, so only a listed endpoint gets these.
+OpenRouter is listed because it documents all three and ignores a parameter the routed model does not support instead of rejecting the request.
+There is no `extra_params` route around the list: `ModelConfig` parses a `top_k` / `min_p` / `repeat_penalty` key onto its typed field, and `apply_to` (below) removes any copy left in the map.
+So an agent on an unlisted provider that used to reach it through `extra_params` (a `top_k` for Together, say, or for a custom provider not named for llama.cpp) no longer sends it; the value is dropped with a `debug` line.
+The penalty under vLLM's spelling, `repetition_penalty`, is not one of the typed keys, so it still reaches any OpenAI-format endpoint through `extra_params`.
 The fixed-sampling gate above applies to these three as well.
 Anthropic, like the others, drops `top_k` for the models that removed sampling parameters and on an extended-thinking turn.
 
