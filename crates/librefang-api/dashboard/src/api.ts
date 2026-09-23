@@ -228,7 +228,13 @@ export interface SkillItem {
   runtime?: string;
   enabled?: boolean;
   author?: string;
+  /** Number of tools the skill provides. */
   tools_count?: number;
+  /** Built-in tools the skill needs granted (manifest `[requirements]`); empty when it declares none. */
+  required_tools?: string[];
+  required_tools_count?: number;
+  /** Host capabilities the skill needs granted (manifest `[requirements]`); empty when it declares none. */
+  required_capabilities?: string[];
   tags?: string[];
   source?: {
     type?: string;
@@ -276,7 +282,12 @@ export interface SkillDetail {
   license: string;
   tags: string[];
   runtime: string;
+  /** Tools the skill provides. */
   tools: SkillToolInfo[];
+  /** Built-in tools the skill needs granted (manifest `[requirements]`); empty when it declares none. */
+  required_tools: string[];
+  /** Host capabilities the skill needs granted (manifest `[requirements]`); empty when it declares none. */
+  required_capabilities: string[];
   has_prompt_context: boolean;
   prompt_context_length: number;
   prompt_context?: string | null;

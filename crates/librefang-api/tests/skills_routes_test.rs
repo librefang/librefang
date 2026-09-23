@@ -123,6 +123,26 @@ input_schema = {{ type = "object" }}
     std::fs::write(skill_dir.join("skill.toml"), manifest).expect("write skill.toml");
 }
 
+/// Same as [`install_skill`] (no tags), plus a `[requirements]` table declaring the built-in tools and host capabilities the skill needs (#8445).
+fn install_skill_with_requirements(home: &Path, name: &str, tools: &[&str], caps: &[&str]) {
+    install_skill(home, name, &[]);
+    let quote = |items: &[&str]| -> String {
+        items
+            .iter()
+            .map(|i| format!("\"{i}\""))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let path = home.join("skills").join(name).join("skill.toml");
+    let mut manifest = std::fs::read_to_string(&path).expect("read skill.toml");
+    manifest.push_str(&format!(
+        "\n[requirements]\ntools = [{}]\ncapabilities = [{}]\n",
+        quote(tools),
+        quote(caps)
+    ));
+    std::fs::write(&path, manifest).expect("rewrite skill.toml");
+}
+
 /// Drop a `SKILL.md`-only entry into `<home>/registry/skills/<name>/` so the
 /// `/api/skills/registry` cache walker has something to enumerate.
 fn install_registry_skill(home: &Path, name: &str, description: &str) {
@@ -280,6 +300,100 @@ async fn skills_detail_returns_full_manifest() {
     // Evolution metadata block is always present, even for fresh installs.
     assert!(body["evolution"].is_object(), "{body:?}");
     assert_eq!(body["evolution"]["use_count"], 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn skills_detail_reports_declared_requirements_8445() {
+    let h = boot().await;
+    install_skill_with_requirements(h.home(), "needy", &["web_fetch"], &["NetConnect(*)"]);
+    h._state.kernel.reload_skills();
+
+    let (status, body) = json_request(&h, Method::GET, "/api/skills/needy", None).await;
+    assert_eq!(status, StatusCode::OK, "{body:?}");
+    assert_eq!(
+        body["required_tools"],
+        serde_json::json!(["web_fetch"]),
+        "{body:?}"
+    );
+    assert_eq!(
+        body["required_capabilities"],
+        serde_json::json!(["NetConnect(*)"]),
+        "{body:?}"
+    );
+    // `tools` keeps meaning "provided by the skill" and stays separate from what it needs.
+    let tools = body["tools"].as_array().expect("tools array");
+    assert_eq!(tools.len(), 1, "{body:?}");
+    assert_eq!(tools[0]["name"], "needy_tool");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn skills_list_reports_declared_requirements_8445() {
+    let h = boot().await;
+    install_skill_with_requirements(
+        h.home(),
+        "needy",
+        &["web_fetch", "shell_exec"],
+        &["NetConnect(*)"],
+    );
+    h._state.kernel.reload_skills();
+
+    let (status, body) = json_request(&h, Method::GET, "/api/skills", None).await;
+    assert_eq!(status, StatusCode::OK, "{body:?}");
+    let item = body["items"]
+        .as_array()
+        .expect("items array")
+        .iter()
+        .find(|s| s["name"] == "needy")
+        .unwrap_or_else(|| panic!("needy missing from list: {body:?}"));
+    // Declaration order is preserved: it is the manifest's own list, not a set.
+    assert_eq!(
+        item["required_tools"],
+        serde_json::json!(["web_fetch", "shell_exec"]),
+        "{item:?}"
+    );
+    assert_eq!(item["required_tools_count"], 2, "{item:?}");
+    assert_eq!(
+        item["required_capabilities"],
+        serde_json::json!(["NetConnect(*)"]),
+        "{item:?}"
+    );
+    assert_eq!(
+        item["tools_count"], 1,
+        "provided count is unchanged: {item:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn skills_without_requirements_report_empty_lists_8445() {
+    let h = boot().await;
+    install_skill(h.home(), "plain", &[]);
+    h._state.kernel.reload_skills();
+
+    // "Declared, and it is nothing" must be an empty array, never a missing key or null.
+    let (status, detail) = json_request(&h, Method::GET, "/api/skills/plain", None).await;
+    assert_eq!(status, StatusCode::OK, "{detail:?}");
+    assert_eq!(
+        detail["required_tools"],
+        serde_json::json!([]),
+        "{detail:?}"
+    );
+    assert_eq!(
+        detail["required_capabilities"],
+        serde_json::json!([]),
+        "{detail:?}"
+    );
+
+    let (status, list) = json_request(&h, Method::GET, "/api/skills", None).await;
+    assert_eq!(status, StatusCode::OK, "{list:?}");
+    let item = &list["items"][0];
+    assert_eq!(item["name"], "plain", "{list:?}");
+    assert_eq!(item["required_tools"], serde_json::json!([]), "{item:?}");
+    assert_eq!(item["required_tools_count"], 0, "{item:?}");
+    assert_eq!(
+        item["required_capabilities"],
+        serde_json::json!([]),
+        "{item:?}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
