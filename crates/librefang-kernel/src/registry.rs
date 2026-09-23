@@ -890,7 +890,9 @@ impl AgentRegistry {
     }
 
     /// Update an agent's name (also updates the name index).
-    pub fn update_name(&self, id: AgentId, new_name: String) -> LibreFangResult<()> {
+    ///
+    /// Returns the previous name, read under the same entry lock as the write, so a caller reconciling on-disk state (IDENTITY.md, #8469) compares against the name this call actually replaced rather than one read earlier.
+    pub fn update_name(&self, id: AgentId, new_name: String) -> LibreFangResult<String> {
         // #4980 nit: reject renames into the reserved `_operator:`
         // namespace — synthetic operator-node step-result names would
         // collide with the real agent and make run history ambiguous.
@@ -923,7 +925,7 @@ impl AgentRegistry {
         };
         self.name_index.remove(&old_name);
         self.notify_changed();
-        Ok(())
+        Ok(old_name)
     }
 
     /// Update an agent's description.

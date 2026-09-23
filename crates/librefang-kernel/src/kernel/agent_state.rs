@@ -555,6 +555,29 @@ impl LibreFangKernel {
         Ok(())
     }
 
+    /// Rename a running agent.
+    ///
+    /// The registry rename alone left `{workspace}/.identity/IDENTITY.md` holding the old `name:`, and that file is injected verbatim into the system prompt, so the agent kept presenting itself by its previous name (#8469).
+    /// After the registry accepts the new name this reconciles the file's front-matter key — only when it still equals the old name, so a persona the operator set deliberately survives — and drops the workspace's cached identity files so the next turn reads the new one.
+    pub fn rename_agent(&self, agent_id: AgentId, new_name: String) -> KernelResult<()> {
+        let old_name = self
+            .agents
+            .registry
+            .update_name(agent_id, new_name.clone())
+            .map_err(KernelError::LibreFang)?;
+        let workspace = self
+            .agents
+            .registry
+            .get(agent_id)
+            .and_then(|entry| entry.manifest.workspace);
+        if let Some(workspace) = workspace.as_deref() {
+            if reconcile_identity_name(workspace, &old_name, &new_name) {
+                self.prompt_metadata_cache.workspace.remove(workspace);
+            }
+        }
+        Ok(())
+    }
+
     /// Update an agent's skill allowlist. Empty = all skills (backward compat).
     ///
     /// A name is accepted when it is loaded in the skill registry, or when it is the `[skill].name` of a directory that exists under the skills directory but has not been loaded (#7772).

@@ -411,6 +411,9 @@ pub trait KernelApi: KernelHandle + Send + Sync {
     fn persist_manifest_to_disk(&self, agent_id: AgentId);
     fn reload_agent_from_disk(&self, agent_id: AgentId) -> KernelResult<()>;
     fn update_manifest(&self, agent_id: AgentId, new_manifest: AgentManifest) -> KernelResult<()>;
+    /// Rename an agent and carry the new name into its IDENTITY.md front matter.
+    /// See [`LibreFangKernel::rename_agent`] for the full contract.
+    fn rename_agent(&self, agent_id: AgentId, new_name: String) -> KernelResult<()>;
     fn set_agent_skills(&self, agent_id: AgentId, skills: Vec<String>) -> KernelResult<()>;
     fn set_agent_mcp_servers(&self, agent_id: AgentId, servers: Vec<String>) -> KernelResult<()>;
     fn set_agent_channels(&self, agent_id: AgentId, channels: Vec<String>) -> KernelResult<()>;
@@ -1314,6 +1317,9 @@ impl KernelApi for LibreFangKernel {
     }
     fn update_manifest(&self, agent_id: AgentId, new_manifest: AgentManifest) -> KernelResult<()> {
         Self::update_manifest(self, agent_id, new_manifest)
+    }
+    fn rename_agent(&self, agent_id: AgentId, new_name: String) -> KernelResult<()> {
+        Self::rename_agent(self, agent_id, new_name)
     }
     fn set_agent_skills(&self, agent_id: AgentId, skills: Vec<String>) -> KernelResult<()> {
         Self::set_agent_skills(self, agent_id, skills)

@@ -669,6 +669,8 @@ pub(super) fn backfill_workspace_dir(
 /// User-editable files (SOUL, USER, MEMORY, AGENTS, BOOTSTRAP, IDENTITY) use `create_new`
 /// to preserve manual edits. TOOLS.md is always rewritten so named workspace paths stay
 /// current after the agent manifest is updated.
+///
+/// The one exception is the `name:` key in IDENTITY.md's front matter: a rename rewrites it through [`reconcile_identity_name`] when it still holds the previous name, so the file the prompt injects verbatim does not keep presenting the old identity (#8469).
 pub(super) fn generate_identity_files(
     workspace: &Path,
     manifest: &AgentManifest,
@@ -835,6 +837,91 @@ fn write_or_cleanup<W: std::io::Write>(mut writer: W, path: &Path, content: &[u8
         );
         let _ = std::fs::remove_file(path);
     }
+}
+
+/// Carry a rename into `{workspace}/.identity/IDENTITY.md` (#8469).
+///
+/// IDENTITY.md is written once by [`generate_identity_files`] and never overwritten, yet it is injected verbatim into the system prompt, so without this a renamed agent keeps introducing itself by its old name.
+///
+/// Only the `name:` key inside the leading `---` front matter is touched, and only when its value is still `old_name`.
+/// A value that differs is a persona the operator chose deliberately and is kept.
+/// A `name:` line in the body, a file without front matter, a missing file, and anything that is not a regular file are all left alone.
+/// Every other byte of the file, including line endings, is preserved.
+///
+/// Returns `true` when the file was rewritten.
+pub fn reconcile_identity_name(workspace: &Path, old_name: &str, new_name: &str) -> bool {
+    if old_name == new_name || new_name.contains(['\n', '\r']) {
+        return false;
+    }
+    let path = workspace.join(".identity").join("IDENTITY.md");
+    // `symlink_metadata` so a symlinked IDENTITY.md is not followed out of the workspace; the atomic rename below would also replace the link itself with a regular file.
+    match std::fs::symlink_metadata(&path) {
+        Ok(meta) if meta.file_type().is_file() => {}
+        _ => return false,
+    }
+    let Ok(content) = std::fs::read_to_string(&path) else {
+        return false;
+    };
+    let Some(patched) = rewrite_front_matter_name(&content, old_name, new_name) else {
+        return false;
+    };
+    match super::cron_script::atomic_write_toml(&path, &patched) {
+        Ok(()) => {
+            info!(path = %path.display(), old_name, new_name, "Updated IDENTITY.md name after rename");
+            true
+        }
+        Err(e) => {
+            tracing::warn!(path = %path.display(), error = %e, "Failed to update IDENTITY.md name after rename; the agent keeps its previous name in the prompt");
+            false
+        }
+    }
+}
+
+/// Pure half of [`reconcile_identity_name`]: return `content` with the front-matter `name:` value replaced, or `None` when nothing should change.
+fn rewrite_front_matter_name(content: &str, old_name: &str, new_name: &str) -> Option<String> {
+    fn strip_eol(line: &str) -> &str {
+        line.strip_suffix('\n')
+            .map(|l| l.strip_suffix('\r').unwrap_or(l))
+            .unwrap_or(line)
+    }
+
+    let mut lines = content.split_inclusive('\n');
+    let first = lines.next()?;
+    if strip_eol(first).trim_end() != "---" {
+        return None;
+    }
+    let mut offset = first.len();
+    // Byte range of the matching `name:` line's content, excluding its line ending.
+    let mut target: Option<(usize, usize)> = None;
+    for line in lines {
+        let body = strip_eol(line);
+        if body.trim_end() == "---" {
+            let (start, end) = target?;
+            let mut patched = String::with_capacity(content.len() + new_name.len());
+            patched.push_str(&content[..start]);
+            patched.push_str("name: ");
+            patched.push_str(new_name);
+            patched.push_str(&content[end..]);
+            return Some(patched);
+        }
+        if target.is_none() {
+            if let Some(value) = body.strip_prefix("name:") {
+                let value = value.trim();
+                let unquoted = value
+                    .strip_prefix('"')
+                    .and_then(|v| v.strip_suffix('"'))
+                    .or_else(|| value.strip_prefix('\'').and_then(|v| v.strip_suffix('\'')))
+                    .unwrap_or(value);
+                if unquoted != old_name {
+                    return None;
+                }
+                target = Some((offset, offset + body.len()));
+            }
+        }
+        offset += line.len();
+    }
+    // No closing fence: not front matter, so the `name:` line is operator prose.
+    None
 }
 
 /// Build the TOOLS.md content, injecting named workspace paths and modes.
@@ -1609,5 +1696,147 @@ mod non_ascii_fallback_tests {
             "fallback component must match the spawned workspace directory"
         );
         assert_eq!(fallback_component, agent_id.to_string());
+    }
+}
+
+#[cfg(test)]
+mod identity_rename_tests {
+    //! Regression tests for #8469: a rename must reach the `name:` key in IDENTITY.md's front matter, and nothing else in that file.
+
+    use super::*;
+
+    fn write_identity(workspace: &Path, content: &str) -> PathBuf {
+        let dir = workspace.join(".identity");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("IDENTITY.md");
+        std::fs::write(&path, content).unwrap();
+        path
+    }
+
+    const GENERATED: &str = "---\nname: a\narchetype: assistant\nvibe: helpful\nemoji:\n---\n# Identity\n<!-- Edit these fields freely. -->\nname: a stays in the body\n";
+
+    #[test]
+    fn matching_front_matter_name_is_rewritten_and_the_rest_is_byte_identical() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = write_identity(tmp.path(), GENERATED);
+        assert!(reconcile_identity_name(tmp.path(), "a", "b"));
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            GENERATED.replacen("name: a\n", "name: b\n", 1),
+            "only the front-matter key changes; the body's `name:` line is operator prose"
+        );
+    }
+
+    #[test]
+    fn generated_file_follows_a_rename() {
+        let tmp = tempfile::tempdir().unwrap();
+        let manifest = AgentManifest {
+            name: "a".to_string(),
+            ..AgentManifest::default()
+        };
+        generate_identity_files(tmp.path(), &manifest, &HashMap::new());
+        let path = tmp.path().join(".identity").join("IDENTITY.md");
+        let before = std::fs::read_to_string(&path).unwrap();
+        assert!(before.contains("\nname: a\n"));
+        assert!(reconcile_identity_name(tmp.path(), "a", "b"));
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            before.replacen("\nname: a\n", "\nname: b\n", 1)
+        );
+    }
+
+    #[test]
+    fn deliberately_chosen_name_is_kept() {
+        let tmp = tempfile::tempdir().unwrap();
+        let content = GENERATED.replacen("name: a\n", "name: Jarvis\n", 1);
+        let path = write_identity(tmp.path(), &content);
+        assert!(!reconcile_identity_name(tmp.path(), "a", "b"));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), content);
+    }
+
+    #[test]
+    fn quoted_old_name_is_matched() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = write_identity(tmp.path(), "---\nname: \"a\"\n---\nbody\n");
+        assert!(reconcile_identity_name(tmp.path(), "a", "b"));
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "---\nname: b\n---\nbody\n"
+        );
+    }
+
+    #[test]
+    fn body_name_line_without_front_matter_is_untouched() {
+        let tmp = tempfile::tempdir().unwrap();
+        let content = "# Identity\nname: a\n";
+        let path = write_identity(tmp.path(), content);
+        assert!(!reconcile_identity_name(tmp.path(), "a", "b"));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), content);
+    }
+
+    #[test]
+    fn unterminated_front_matter_is_untouched() {
+        let tmp = tempfile::tempdir().unwrap();
+        let content = "---\nname: a\n# Identity\n";
+        let path = write_identity(tmp.path(), content);
+        assert!(!reconcile_identity_name(tmp.path(), "a", "b"));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), content);
+    }
+
+    #[test]
+    fn indented_name_key_is_not_the_top_level_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        let content = "---\nowner:\n  name: a\n---\n";
+        let path = write_identity(tmp.path(), content);
+        assert!(!reconcile_identity_name(tmp.path(), "a", "b"));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), content);
+    }
+
+    #[test]
+    fn missing_file_is_a_no_op_and_creates_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(!reconcile_identity_name(tmp.path(), "a", "b"));
+        assert!(!tmp.path().join(".identity").exists());
+        assert!(!tmp.path().join("IDENTITY.md").exists());
+    }
+
+    #[test]
+    fn crlf_line_endings_are_preserved() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = write_identity(
+            tmp.path(),
+            "---\r\nname: a\r\nvibe: calm\r\n---\r\n# Identity\r\n",
+        );
+        assert!(reconcile_identity_name(tmp.path(), "a", "b"));
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "---\r\nname: b\r\nvibe: calm\r\n---\r\n# Identity\r\n"
+        );
+    }
+
+    #[test]
+    fn new_name_with_a_line_break_is_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = write_identity(tmp.path(), GENERATED);
+        assert!(!reconcile_identity_name(
+            tmp.path(),
+            "a",
+            "b\narchetype: evil"
+        ));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), GENERATED);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_identity_file_is_not_followed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let target = outside.path().join("IDENTITY.md");
+        std::fs::write(&target, GENERATED).unwrap();
+        let dir = tmp.path().join(".identity");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::os::unix::fs::symlink(&target, dir.join("IDENTITY.md")).unwrap();
+        assert!(!reconcile_identity_name(tmp.path(), "a", "b"));
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), GENERATED);
     }
 }
