@@ -1,6 +1,7 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   spawnAgent,
+  spawnEphemeral,
   cloneAgent,
   stopAgent,
   suspendAgent,
@@ -28,7 +29,7 @@ import {
   setAgentSkills,
   getAgentTemplateToml,
 } from "../http/client";
-import type { AgentSchedulePatch, CloneAgentPayload, PromptExperiment, PromptVersion, SendAgentMessageOptions } from "../../api";
+import type { AgentSchedulePatch, CloneAgentPayload, PromptExperiment, PromptVersion, SendAgentMessageOptions, SpawnEphemeralRequest } from "../../api";
 import { clearChatSessionCacheForAgent } from "../chatSessionCache";
 import {
   agentKeys,
@@ -86,6 +87,30 @@ export function useSpawnAgent() {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: agentKeys.lists() });
       qc.invalidateQueries({ queryKey: overviewKeys.snapshot() });
+    },
+  });
+}
+
+/**
+ * Run one ephemeral worker and return what it produced (#6699).
+ *
+ * The worker leaves nothing behind — no registry entry, no session, no
+ * workspace — so there is no agent list to refresh afterwards. What it does
+ * leave is spend on the *parent's* ledger, which is why usage and budget are
+ * invalidated here: a Quick Run that silently cost money and left the budget
+ * widget showing the pre-run figure is the exact surprise this feature must
+ * not produce. `agentKeys.stats` is invalidated for the same reason and is not
+ * redundant with the two above — the parent's `Cost · 24h` tile on the Agents
+ * page reads from the stats query, and that page is where the run is started.
+ */
+export function useSpawnEphemeral() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (body: SpawnEphemeralRequest) => spawnEphemeral(body),
+    onSettled: (_data, _error, body) => {
+      qc.invalidateQueries({ queryKey: agentKeys.stats(body.parent) });
+      qc.invalidateQueries({ queryKey: usageKeys.all });
+      qc.invalidateQueries({ queryKey: budgetKeys.all });
     },
   });
 }

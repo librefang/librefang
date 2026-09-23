@@ -230,6 +230,21 @@ const canvasRoute = createRoute({
 const agentsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/agents",
+  // `template` carries an agent-type name in from the agent-types page: its Run
+  // button instantiates the type, so the operator lands here with the type
+  // already chosen instead of picking it a second time from the drawer's
+  // dropdown. Modelled on `chatRoute` below, which carries `agentId` the same
+  // way from an agent row into the chat.
+  validateSearch: (search: Record<string, unknown>): { template?: string } => {
+    const out: { template?: string } = {};
+    // An empty value is dropped rather than carried: no agent type can be named
+    // "", and admitting it would open the drawer on an empty picker with Create
+    // disabled and no way back.
+    if (typeof search.template === "string" && search.template !== "") {
+      out.template = search.template;
+    }
+    return out;
+  },
   component: () => <LazyRouteBoundary><AgentsPage /></LazyRouteBoundary>
 });
 
