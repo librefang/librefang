@@ -1,0 +1,3 @@
+The `max_tokens` and `context_window` editors on the providers page decided what to save by comparing the typed number against the model's catalog figure, so a value that matched was read as "same as the default" and the override was refused or deleted.
+It is not the default: an absent override falls through to the daemon's own limit, so a box showing 16384 could silently refuse to save 16384, and choosing the catalog figure over an existing override deleted it.
+The rule now consults no capacity, and the two `max_tokens` hints no longer claim that leaving the field blank uses the catalog value. (#8368) (@DaBlitzStein)
