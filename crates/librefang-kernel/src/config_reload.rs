@@ -1331,6 +1331,20 @@ pub fn validate_config_for_reload(config: &KernelConfig) -> Result<(), Vec<Strin
         errors.push(format!("tool_exec: {e}"));
     }
 
+    // A user's emoji has two authors — `PATCH /api/users/{name}/identity`,
+    // which bounds it, and an operator editing `config.toml` by hand, which did
+    // not. It is rendered into a DOM text node and stored in a file an operator
+    // reads, so an unbounded one is worth refusing at the same place the
+    // `tool_exec` block above chose and for the same reason: this function is
+    // what every config write already funnels through, so the editor, the
+    // reload endpoint and the user writers are all covered without each growing
+    // its own copy (#8339).
+    for user in &config.users {
+        if let Err(e) = librefang_types::config::validate_emoji(user.emoji.as_deref()) {
+            errors.push(format!("user '{}': {e}", user.name));
+        }
+    }
+
     // Network config: if network is enabled, shared_secret must be set
     if config.network_enabled && config.network.shared_secret.is_empty() {
         errors.push("network_enabled is true but network.shared_secret is empty".to_string());
@@ -2473,6 +2487,31 @@ mod tests {
         config.max_cron_jobs = 100_000;
         let err = validate_config_for_reload(&config).unwrap_err();
         assert!(err.iter().any(|e| e.contains("max_cron_jobs")));
+    }
+
+    /// A user's emoji has two authors, and only one of them used to be checked.
+    ///
+    /// `PATCH /api/users/{name}/identity` has always bounded it; an operator
+    /// editing `config.toml` had nothing stopping a value that is stored in a
+    /// file people read and rendered into a DOM text node. The bound lives in
+    /// `librefang_types` beside the field so both paths share one implementation
+    /// rather than two that can drift.
+    #[test]
+    fn test_validate_rejects_a_hand_edited_emoji() {
+        let mut config = default_cfg();
+        config.users.push(librefang_types::config::UserConfig {
+            name: "alice".to_string(),
+            emoji: Some("a".repeat(librefang_types::config::MAX_EMOJI_CHARS + 1)),
+            ..Default::default()
+        });
+
+        let err = validate_config_for_reload(&config).unwrap_err();
+
+        assert!(
+            err.iter()
+                .any(|e| e.contains("alice") && e.contains("emoji")),
+            "the error must name the row it came from, got {err:?}"
+        );
     }
 
     #[test]

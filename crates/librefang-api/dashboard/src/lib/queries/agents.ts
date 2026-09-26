@@ -1,5 +1,8 @@
+import { useObjectUrl } from "../useObjectUrl";
 import { queryOptions, useQuery } from "@tanstack/react-query";
 import {
+  agentAvatarPath,
+  fetchAuthenticatedImage,
   listAgents,
   getAgentDetail,
   getAgentManifest,
@@ -20,6 +23,7 @@ import {
 } from "../http/client";
 import { agentKeys, toolKeys } from "./keys";
 import { withOverrides, type QueryOverrides } from "./options";
+import { AVATAR_STALE_MS } from "./avatar";
 
 const STALE_MS = 30_000;
 const REFRESH_MS = 30_000;
@@ -164,6 +168,23 @@ export const agentQueries = {
       queryFn: listTools,
       staleTime: STALE_MS,
     }),
+  // The avatar image as a Blob (#8339). `GET /api/agents/{id}/avatar` is
+  // authenticated, so an `<img src>` pointed at it sends no bearer token and
+  // gets a 401; the bytes have to be fetched and handed to the tag as an
+  // object URL instead.
+  //
+  // `enabled` is the caller's "this agent has one" — asking otherwise buys a
+  // guaranteed 404 per agent per render. The long `staleTime` leans on the
+  // route's `ETag` + `no-cache`: a revalidation that finds nothing changed is
+  // a bodiless 304, and a re-upload is picked up by the mutations invalidating
+  // this key rather than by polling for it.
+  avatar: (agentId: string, enabled: boolean) =>
+    queryOptions({
+      queryKey: agentKeys.avatar(agentId),
+      queryFn: () => fetchAuthenticatedImage(agentAvatarPath(agentId)),
+      enabled: !!agentId && enabled,
+      staleTime: AVATAR_STALE_MS,
+    }),
 };
 
 export function useAgents(
@@ -231,4 +252,27 @@ export function useAgentManifest(agentId: string, options: QueryOverrides = {}) 
 
 export function useAgentChannels(agentId: string, options: QueryOverrides = {}) {
   return useQuery(withOverrides(agentQueries.channels(agentId), options));
+}
+
+/**
+ * An agent's avatar as an object URL, ready for an `<img src>` (#8339).
+ *
+ * The query caches the *Blob*, which is shared and lives as long as the cache
+ * entry does; the object URL is a document-scoped handle whose lifetime is the
+ * component currently painting it. `useObjectUrl` is what keeps those two
+ * apart, and it is shared with the user avatar rather than copied — the agent
+ * case is where the effect was written, not what makes it specific.
+ *
+ * `hasAvatar` is the caller's answer to "is `identity.avatar_url` set", and it
+ * gates the request: an agent without one would otherwise cost a 404 on every
+ * render of the row that shows its initials.
+ *
+ * Returns `undefined` while loading and when there is nothing to show, which is
+ * exactly what `Avatar`'s `src` wants — it falls back to the emoji and then the
+ * initials on its own, so there is no separate loading state to thread through
+ * the UI.
+ */
+export function useAgentAvatarUrl(agentId: string, hasAvatar: boolean): string | undefined {
+  const { data: blob } = useQuery(agentQueries.avatar(agentId, hasAvatar));
+  return useObjectUrl(blob);
 }

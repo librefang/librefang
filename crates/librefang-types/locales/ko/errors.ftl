@@ -309,7 +309,7 @@ api-error-tool-requires-agent = 도구 '{ $name }'은(는) 사람의 승인이 �
 api-error-validation-content-empty = 콘텐츠는 비워 둘 수 없습니다
 api-error-validation-name-empty = new_name은(는) 비워 둘 수 없습니다
 api-error-validation-title-required = 제목이 필요합니다
-api-error-validation-avatar-url-invalid = 아바타 URL은 http/https 또는 data URI여야 합니다
+api-error-validation-avatar-url-invalid = 아바타 URL은 이 데몬이 해당 에이전트에 대해 제공하는 아바타 경로이거나 비어 있어야 합니다. 링크 대신 이미지를 업로드하세요.
 api-error-validation-color-invalid = 색상은 '#'으로 시작하는 hex 코드여야 합니다
 
 # General errors

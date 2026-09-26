@@ -5,7 +5,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { cloneResultNotice, hasTokenFootprintData, SystemPromptSection, DescriptionSection, ChannelsSection, ManifestEditorForm } from "./AgentsPage";
+import { canEditAgentIdentity, cloneResultNotice, hasTokenFootprintData, SystemPromptSection, DescriptionSection, ChannelsSection, ManifestEditorForm } from "./AgentsPage";
 import { emptyManifestExtras, emptyManifestForm } from "../lib/agentManifest";
 import { usePatchAgent, useSetAgentChannels } from "../lib/mutations/agents";
 import { useBindPromptVersionToAgent } from "../lib/mutations/prompts";
@@ -46,6 +46,29 @@ const useBindMock = useBindPromptVersionToAgent as unknown as ReturnType<typeof 
 const usePromptVersionsMock = usePromptVersions as unknown as ReturnType<typeof vi.fn>;
 const useAgentChannelsMock = useAgentChannels as unknown as ReturnType<typeof vi.fn>;
 const useSetAgentChannelsMock = useSetAgentChannels as unknown as ReturnType<typeof vi.fn>;
+
+// The daemon gates both appearance writes at `role >= UserRole::Admin`, so the
+// floor is the whole content of this predicate: a `user` shown these controls
+// collects a 403, and an `admin` denied them is blocked from work the daemon
+// would accept.
+describe("canEditAgentIdentity", () => {
+  it("lets an admin and an owner through", () => {
+    expect(canEditAgentIdentity("admin")).toBe(true);
+    expect(canEditAgentIdentity("owner")).toBe(true);
+  });
+
+  it("turns away the roles that could only collect a 403", () => {
+    expect(canEditAgentIdentity("user")).toBe(false);
+    expect(canEditAgentIdentity("viewer")).toBe(false);
+  });
+
+  // Silence is not permission. `whoami` has not answered on the first render,
+  // and reading that as "yes" would flash controls that then disappear.
+  it("treats an unanswered whoami as no", () => {
+    expect(canEditAgentIdentity(undefined)).toBe(false);
+    expect(canEditAgentIdentity("")).toBe(false);
+  });
+});
 
 describe("cloneResultNotice", () => {
   const base = { agent_id: "agent-copy", name: "copy" };

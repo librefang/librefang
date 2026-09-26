@@ -211,10 +211,11 @@ async fn patch_appearance_leaves_identity_md_untouched() {
     let before = std::fs::read_to_string(&path).unwrap();
 
     for route in ["identity", "config"] {
+        // `avatar_url` is one of the three appearance fields this test wants the request to carry, but since #8339 it is no longer free text: only this agent's own avatar route (or the empty string) is accepted, and an external URL is a 400 before any write. The subject here is that an appearance write never reaches IDENTITY.md, so the value is the one shape the route accepts rather than an arbitrary URL.
         let status = patch(
             &server,
             &format!("/api/agents/{id}/{route}"),
-            serde_json::json!({"emoji": "🦊", "avatar_url": "https://example.invalid/a.png", "color": "#123456"}),
+            serde_json::json!({"emoji": "🦊", "avatar_url": librefang_types::media::agent_avatar_url(&id), "color": "#123456"}),
         )
         .await;
         assert_eq!(status, 200, "PATCH /{route}");

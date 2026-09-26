@@ -2650,6 +2650,7 @@ purge-removed-workspace =   - workspace directory
 purge-workspace-unresolved =   - NOTE: the workspace directory could not be located. No manifest survives for this agent, so a custom workspace path would not have been found; check the workspaces directory yourself.
 purge-workspace-shared =   - NOTE: the workspace directory was left alone. It resolves to the workspaces root itself, or to a directory another registered agent's manifest also resolves to — deleting it would have destroyed more than this agent's data; check the workspaces directory yourself.
 purge-removed-agent-type =   - agent-type template
+purge-removed-avatar =   - avatar image
 purge-removed-cron-jobs =   - cron jobs
 purge-removed-trigger-jobs =   - event triggers
 purge-removed-channel-bindings =   - channel/conversation routing bindings
