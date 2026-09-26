@@ -1411,6 +1411,84 @@ fn test_merge_accepts_a_partially_reported_capacity() {
     assert!(entry.limits_known);
 }
 
+/// A gateway that declares what its models cost must have that reach the catalog entry; a discovered model used to be recorded as free (`0.0` with `pricing_known`) no matter what the gateway said.
+#[test]
+fn test_merge_records_a_price_the_gateway_declared() {
+    let mut catalog = test_catalog();
+    catalog.merge_discovered_models(
+        "litellm",
+        &[DiscoveredModelInfo {
+            input_cost_per_m: Some(3.0),
+            output_cost_per_m: Some(15.0),
+            ..DiscoveredModelInfo::bare("priced")
+        }],
+    );
+    let entry = catalog.find_model("priced").unwrap();
+    assert!(entry.pricing_known);
+    assert_eq!(entry.input_cost_per_m, 3.0);
+    assert_eq!(entry.output_cost_per_m, 15.0);
+}
+
+/// The gateway is the authority on its own price, so a later declaration replaces an earlier one rather than only ever filling a blank.
+#[test]
+fn test_merge_lets_a_declared_price_replace_an_earlier_one() {
+    let mut catalog = test_catalog();
+    catalog.merge_discovered_models(
+        "litellm",
+        &[DiscoveredModelInfo {
+            input_cost_per_m: Some(3.0),
+            output_cost_per_m: Some(15.0),
+            ..DiscoveredModelInfo::bare("repriced")
+        }],
+    );
+    catalog.merge_discovered_models(
+        "litellm",
+        &[DiscoveredModelInfo {
+            input_cost_per_m: Some(1.0),
+            output_cost_per_m: Some(2.0),
+            ..DiscoveredModelInfo::bare("repriced")
+        }],
+    );
+    let entry = catalog.find_model("repriced").unwrap();
+    assert_eq!(entry.input_cost_per_m, 1.0);
+    assert_eq!(entry.output_cost_per_m, 2.0);
+}
+
+/// A probe that stops declaring a price — the operator turned LiteLLM's `/model/info` extension off — must not erase what an earlier probe learned, the same never-downgrade rule the capacity fields follow.
+#[test]
+fn test_merge_never_erases_a_price_an_earlier_probe_learned() {
+    let mut catalog = test_catalog();
+    catalog.merge_discovered_models(
+        "litellm",
+        &[DiscoveredModelInfo {
+            input_cost_per_m: Some(3.0),
+            output_cost_per_m: Some(15.0),
+            ..DiscoveredModelInfo::bare("still-priced")
+        }],
+    );
+    catalog.merge_discovered_models("litellm", &names_to_info(&["still-priced"]));
+    let entry = catalog.find_model("still-priced").unwrap();
+    assert_eq!(entry.input_cost_per_m, 3.0);
+    assert_eq!(entry.output_cost_per_m, 15.0);
+}
+
+/// Half a price is not a price: recording the declared half against an invented `0.0` counterpart would assert free output for a model nobody priced.
+#[test]
+fn test_merge_ignores_half_a_declared_price() {
+    let mut catalog = test_catalog();
+    catalog.merge_discovered_models(
+        "litellm",
+        &[DiscoveredModelInfo {
+            input_cost_per_m: Some(3.0),
+            ..DiscoveredModelInfo::bare("half-priced")
+        }],
+    );
+    let entry = catalog.find_model("half-priced").unwrap();
+    assert!(!entry.pricing_known);
+    assert_eq!(entry.input_cost_per_m, 0.0);
+    assert_eq!(entry.output_cost_per_m, 0.0);
+}
+
 /// Capacity upgrades follow the same never-downgrade rule as the capability flags: a later probe may fill in an unknown limit, and a probe that stops reporting one must not erase what an earlier probe learned.
 #[test]
 fn test_merge_upgrades_unknown_capacity_but_never_erases_a_known_one() {
