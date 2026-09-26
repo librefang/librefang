@@ -608,7 +608,7 @@ export function PluginsPage() {
                 {detailsPlugin.hooks?.ingest && <Badge variant="brand">{t("plugins.hook_ingest")}</Badge>}
                 {detailsPlugin.hooks?.after_turn && <Badge variant="brand">{t("plugins.hook_after_turn")}</Badge>}
                 {!detailsPlugin.hooks?.ingest && !detailsPlugin.hooks?.after_turn && (
-                  <span className="text-[11px] text-text-dim/50 italic">{t("common.none", { defaultValue: "none" })}</span>
+                  <span className="text-[11px] text-text-dim/50 italic">{t("common.none", { defaultValue: "None" })}</span>
                 )}
               </div>
             </div>
