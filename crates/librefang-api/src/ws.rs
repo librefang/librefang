@@ -1309,6 +1309,30 @@ fn is_liveness_ping(text: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// The sender identity the dashboard chat stamps into a turn's `SenderContext`.
+///
+/// A caller whose credential names a real `[[users]]` entry — a dashboard
+/// session or a per-user api key, anything whose principal resolves — is
+/// attributed by their canonical [`UserId`]: the same id the RBAC tool gate
+/// resolves, so the user's own policy applies to the turn's tool calls instead
+/// of the guest gate (#8409). The unauthenticated paths — loopback without
+/// credentials, the master key, an unattributed legacy session — keep the raw
+/// client IP, which resolves to nothing and gates as a guest exactly as
+/// before; the `ROOT_API_KEY_USER_ID` sentinel names no `[[users]]` entry by
+/// contract (`AuthenticatedApiUser::owner_principal`), which is the check this
+/// helper reuses.
+///
+/// Returns `(sender_id, display_name)`.
+fn webui_sender_identity(
+    authenticated_user: Option<&crate::middleware::AuthenticatedApiUser>,
+    client_ip: IpAddr,
+) -> (String, String) {
+    match authenticated_user.filter(|u| u.owner_principal().is_some()) {
+        Some(user) => (user.user_id.to_string(), user.name.clone()),
+        None => (client_ip.to_string(), "Web UI".to_string()),
+    }
+}
+
 async fn handle_text_message(
     sender: &Arc<Mutex<SplitSink<WebSocket, Message>>>,
     state: &Arc<AppState>,
@@ -1457,10 +1481,14 @@ async fn handle_text_message(
                         };
                     if !image_blocks.is_empty() {
                         has_images = true;
+                        let (webui_sender_id, webui_display_name) = webui_sender_identity(
+                            client.authenticated_user.as_ref(),
+                            client.client_ip,
+                        );
                         let webui_sender = librefang_channels::types::SenderContext {
                             channel: librefang_kernel::SYSTEM_CHANNEL_WEBUI.to_string(),
-                            user_id: client.client_ip.to_string(),
-                            display_name: "Web UI".to_string(),
+                            user_id: webui_sender_id,
+                            display_name: webui_display_name,
                             use_canonical_session: true,
                             ..Default::default()
                         };
@@ -1537,17 +1565,26 @@ async fn handle_text_message(
 
             // Send message to agent with streaming
             let kernel_handle: Arc<dyn KernelHandle> = state.kernel.clone();
+            // Identity precedence: an authenticated caller whose credential
+            // names a `[[users]]` entry is attributed by that identity (the
+            // RBAC tool gate reads it — #8409); the unauthenticated paths keep
+            // the client IP, which resolves to nothing and guest-gates.
+            let (webui_sender_id, webui_display_name) =
+                webui_sender_identity(client.authenticated_user.as_ref(), client.client_ip);
             let sender_ctx = SenderContext {
                 channel: librefang_kernel::SYSTEM_CHANNEL_WEBUI.to_string(),
-                // Behaviour change (`trusted_proxies` + `trust_forwarded_for`):
+                // Authenticated callers: the caller's canonical `UserId`, so
+                // per-user RBAC state — audit attribution, channel-sender
+                // keying, memory peer scoping — keys on the person, not the
+                // network location. Unauthenticated callers: the raw client IP
+                // (behaviour change (`trusted_proxies` + `trust_forwarded_for`):
                 // when both flags are configured AND the TCP peer matches the
                 // allowlist, this is the resolved real client IP, not the proxy
-                // peer. Any kernel-side per-`user_id` state — audit attribution,
-                // channel-sender keying, session continuity that keys on it —
-                // re-keys from proxy IP to real client IP the moment the flags
-                // flip on. No-op when the flags are off (defaults).
-                user_id: client.client_ip.to_string(),
-                display_name: "Web UI".to_string(),
+                // peer. Any kernel-side per-`user_id` state re-keys from proxy
+                // IP to real client IP the moment the flags flip on. No-op when
+                // the flags are off (defaults).)
+                user_id: webui_sender_id,
+                display_name: webui_display_name,
                 is_group: false,
                 was_mentioned: false,
                 thread_id: None,
@@ -2663,6 +2700,57 @@ mod tests {
     fn test_ws_module_loads() {
         // Verify module compiles and loads correctly
         let _ = VerboseLevel::Off;
+    }
+
+    // ── Dashboard chat sender identity (#8409) ──────────────────────────
+
+    fn api_user(name: &str, sentinel: bool) -> crate::middleware::AuthenticatedApiUser {
+        crate::middleware::AuthenticatedApiUser {
+            name: name.to_string(),
+            role: crate::middleware::UserRole::Owner,
+            user_id: if sentinel {
+                librefang_types::agent::UserId(crate::middleware::ROOT_API_KEY_USER_ID)
+            } else {
+                librefang_types::agent::UserId::from_name(name)
+            },
+        }
+    }
+
+    const LOOPBACK: IpAddr = IpAddr::V4(std::net::Ipv4Addr::LOCALHOST);
+
+    /// A per-user api key or dashboard session names a real `[[users]]`
+    /// entry, so the stamped identity is the caller's canonical id — the one
+    /// the RBAC tool gate resolves — and the display name is the person.
+    #[test]
+    fn webui_sender_identity_attributes_an_authenticated_user() {
+        let (sender_id, display_name) =
+            webui_sender_identity(Some(&api_user("alice", false)), LOOPBACK);
+        assert_eq!(
+            sender_id,
+            librefang_types::agent::UserId::from_name("alice").to_string()
+        );
+        assert_eq!(display_name, "alice");
+    }
+
+    /// The root sentinel (master key, loopback no-auth) names no `[[users]]`
+    /// entry by contract, so the raw client IP is kept — resolving the name
+    /// "root" would collide with a real `[users] name = "root"` entry and the
+    /// gate must keep treating this caller as unrecognised.
+    #[test]
+    fn webui_sender_identity_keeps_the_client_ip_for_the_root_sentinel() {
+        let (sender_id, display_name) =
+            webui_sender_identity(Some(&api_user("root", true)), LOOPBACK);
+        assert_eq!(sender_id, LOOPBACK.to_string());
+        assert_eq!(display_name, "Web UI");
+    }
+
+    /// An unattributed legacy session carries no identity at all; same
+    /// fall-through as the sentinel.
+    #[test]
+    fn webui_sender_identity_keeps_the_client_ip_when_unauthenticated() {
+        let (sender_id, display_name) = webui_sender_identity(None, LOOPBACK);
+        assert_eq!(sender_id, LOOPBACK.to_string());
+        assert_eq!(display_name, "Web UI");
     }
 
     #[tokio::test(flavor = "multi_thread")]
