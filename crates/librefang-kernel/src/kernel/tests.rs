@@ -3210,7 +3210,7 @@ async fn resolved_exec_policy_survives_reload_and_update_manifest() {
         .clone();
     replacement.exec_policy = None;
     kernel
-        .update_manifest(agent_id, replacement)
+        .update_manifest(agent_id, replacement, "test")
         .expect("manifest update should succeed");
     assert_eq!(
         resolved_policy("after update_manifest"),
@@ -5063,7 +5063,7 @@ fn concurrent_full_and_mcp_manifest_persists_keep_both_registry_updates() {
             None,
         )
         .expect("spawn");
-    kernel.persist_manifest_to_disk(agent_id);
+    kernel.persist_manifest_to_disk(agent_id, "test");
     register_mcp_server(&kernel, "concurrent-server");
     kernel
         .tools_ref()
@@ -5112,7 +5112,7 @@ fn concurrent_full_and_mcp_manifest_persists_keep_both_registry_updates() {
         .expect("model registry update");
     let full_writer = {
         let kernel = Arc::clone(&kernel);
-        std::thread::spawn(move || kernel.persist_manifest_to_disk(agent_id))
+        std::thread::spawn(move || kernel.persist_manifest_to_disk(agent_id, "test"))
     };
     drop(write_guard);
     mcp_writer.join().unwrap();
@@ -5122,6 +5122,56 @@ fn concurrent_full_and_mcp_manifest_persists_keep_both_registry_updates() {
         toml::from_str(&std::fs::read_to_string(toml_path).unwrap()).unwrap();
     assert_eq!(persisted.model.model, "concurrent-model");
     assert_eq!(persisted.mcp_servers, vec!["concurrent-server"]);
+    kernel.shutdown();
+}
+
+/// `set_agent_mcp_servers` patches the `mcp_servers` line in place instead of
+/// re-serializing the manifest through `persist_full_manifest_at`, so its
+/// history row is recorded on that path alone. Without it the MCP allowlist
+/// would be the one manifest change the History tab never shows.
+#[test]
+fn set_agent_mcp_servers_records_its_own_history_snapshot() {
+    let tmp = tempfile::tempdir().unwrap();
+    let toml_path = tmp.path().join("agent.toml");
+    let kernel = boot_kernel_at(tmp.path());
+    let agent_id = kernel
+        .spawn_agent_inner(
+            AgentManifest {
+                name: "mcp-history-agent".to_string(),
+                source_template: None,
+                ..Default::default()
+            },
+            None,
+            Some(toml_path.clone()),
+            None,
+        )
+        .expect("spawn");
+    // Materialise agent.toml first, so the MCP persist takes the in-place
+    // patch path rather than the missing-file full-serialize fallback.
+    kernel.persist_manifest_to_disk(agent_id, "test");
+    register_mcp_server(&kernel, "history-server");
+
+    kernel
+        .set_agent_mcp_servers(agent_id, vec!["history-server".to_string()])
+        .expect("allowlist update must persist");
+
+    let store = librefang_memory::ManifestVersionStore::new(kernel.memory.substrate.pool());
+    let versions = store.list_for_agent(&agent_id.to_string(), 10).unwrap();
+    let snapshot = versions
+        .iter()
+        .find(|version| version.change_source == "mcp-servers")
+        .unwrap_or_else(|| {
+            panic!("the in-place MCP persist must record its own history row: {versions:?}")
+        });
+    assert_eq!(
+        toml::from_str::<AgentManifest>(&snapshot.manifest_toml)
+            .expect("snapshot TOML parses as a manifest")
+            .mcp_servers,
+        vec!["history-server".to_string()],
+        "the snapshot must carry the new allowlist: {}",
+        snapshot.manifest_toml
+    );
+
     kernel.shutdown();
 }
 

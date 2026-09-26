@@ -1703,7 +1703,7 @@ pub async fn patch_agent_config(
 
     // Write updated manifest to agent.toml on disk so disk doesn't override
     // dashboard changes on next boot (#996, #1018).
-    state.kernel.persist_manifest_to_disk(agent_id);
+    state.kernel.persist_manifest_to_disk(agent_id, "api");
 
     // `200` with a `warnings` array, not `400`: the write happened and the
     // value stands. The array is empty on the ordinary path, so a client that

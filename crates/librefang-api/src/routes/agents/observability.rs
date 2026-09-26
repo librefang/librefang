@@ -687,3 +687,209 @@ pub async fn list_agent_ephemeral_runs(
     })
     .into_response()
 }
+
+// ---------------------------------------------------------------------------
+// Agent manifest version history
+// ---------------------------------------------------------------------------
+
+/// Query parameters for `GET /api/agents/{id}/manifest-history`.
+///
+/// A non-numeric `limit` is rejected at extraction (400) instead of being
+/// silently coerced to the default.
+#[derive(Debug, serde::Deserialize)]
+pub struct ManifestHistoryQuery {
+    #[serde(default = "default_manifest_history_limit")]
+    pub limit: u32,
+}
+
+/// Default page size for the manifest history listing.
+fn default_manifest_history_limit() -> u32 {
+    30
+}
+
+/// GET /api/agents/{id}/manifest-history — how this agent's config changed over time.
+///
+/// Returns an array of manifest snapshots, newest first.
+/// Each entry carries the full TOML so the dashboard can render a diff between
+/// consecutive versions and offer a one-click restore.
+#[utoipa::path(
+    get,
+    path = "/api/agents/{id}/manifest-history",
+    tag = "agents",
+    operation_id = "list_agent_manifest_history",
+    params(
+        ("id" = String, Path, description = "Agent UUID"),
+        ("limit" = Option<u32>, Query, description = "Max entries to return (default 30, max 200)")
+    ),
+    responses(
+        (status = 200, description = "Manifest version history, newest first", body = crate::types::JsonObject),
+        (status = 400, description = "Invalid agent id or limit"),
+        (status = 404, description = "Agent not found or not accessible to the caller")
+    )
+)]
+pub async fn list_agent_manifest_history(
+    State(state): State<Arc<AppState>>,
+    api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
+    Path(id): Path<String>,
+    query: Result<Query<ManifestHistoryQuery>, axum::extract::rejection::QueryRejection>,
+    lang: Option<axum::Extension<RequestLanguage>>,
+) -> impl IntoResponse {
+    let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
+
+    let Query(params) = match query {
+        Ok(q) => q,
+        Err(rejection) => {
+            let reason = rejection.body_text();
+            return ApiErrorResponse::bad_request(
+                t.t_args("api-error-bad-request", &[("reason", &reason)]),
+            )
+            .into_response();
+        }
+    };
+
+    let agent_uuid = match uuid::Uuid::parse_str(&id) {
+        Ok(u) => librefang_types::agent::AgentId(u),
+        Err(_) => {
+            return ApiErrorResponse::bad_request(t.t("api-error-agent-invalid-id"))
+                .with_code("invalid_agent_id")
+                .into_response();
+        }
+    };
+    // A snapshot is the agent's entire `agent.toml` — system prompt, capabilities,
+    // resource budgets, tool/skill/MCP allowlists — so this read is gated the way
+    // every sibling agent-scoped read in this file is rather than merely checking
+    // that the id resolves. The 404 is deliberate: it is what stops id enumeration
+    // from distinguishing "not yours" from "does not exist".
+    if !super::super::can_access_agent(&state, agent_uuid, api_user.as_ref()) {
+        return ApiErrorResponse::not_found(t.t("api-error-agent-not-found"))
+            .with_code("agent_not_found")
+            .into_response();
+    }
+
+    let limit = params.limit.clamp(1, 200) as usize;
+
+    let store = librefang_memory::ManifestVersionStore::new(state.kernel.memory_substrate().pool());
+    match store.list_for_agent(&agent_uuid.0.to_string(), limit) {
+        Ok(versions) => {
+            let items: Vec<serde_json::Value> = versions
+                .iter()
+                .map(|v| {
+                    serde_json::json!({
+                        "id": v.id,
+                        "agent_id": v.agent_id,
+                        "agent_name": v.agent_name,
+                        "timestamp": v.timestamp,
+                        "manifest_toml": v.manifest_toml,
+                        "change_source": v.change_source,
+                    })
+                })
+                .collect();
+            Json(serde_json::json!({ "versions": items })).into_response()
+        }
+        Err(e) => ApiErrorResponse::internal_scrub(e).into_response(),
+    }
+}
+
+/// POST /api/agents/{id}/manifest-history/{version_id}/restore — roll an agent's manifest back to a stored snapshot.
+///
+/// Mirrors `restore_template_version`: the stored TOML is parsed and applied
+/// through `update_manifest`, which re-runs the module-path security check,
+/// preserves the runtime-only fields (name, tags, workspace, resolved
+/// `exec_policy`) and persists the result — the restore itself is recorded in
+/// the history as a fresh `restore` snapshot.
+#[utoipa::path(
+    post,
+    path = "/api/agents/{id}/manifest-history/{version_id}/restore",
+    tag = "agents",
+    operation_id = "restore_agent_manifest_version",
+    params(
+        ("id" = String, Path, description = "Agent UUID"),
+        ("version_id" = i64, Path, description = "Version row id to restore")
+    ),
+    responses(
+        (status = 200, description = "Agent manifest restored", body = crate::types::JsonObject),
+        (status = 400, description = "Invalid agent id or version does not belong to this agent"),
+        (status = 404, description = "Agent or version not found, or not accessible to the caller"),
+        (status = 423, description = "This agent is provisioned by the deployment; its manifest cannot be changed through the API", body = crate::types::JsonObject)
+    )
+)]
+pub async fn restore_agent_manifest_version(
+    State(state): State<Arc<AppState>>,
+    api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
+    Path((id, version_id)): Path<(String, i64)>,
+    lang: Option<axum::Extension<RequestLanguage>>,
+) -> impl IntoResponse {
+    let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
+
+    let agent_uuid = match uuid::Uuid::parse_str(&id) {
+        Ok(u) => librefang_types::agent::AgentId(u),
+        Err(_) => {
+            return ApiErrorResponse::bad_request(t.t("api-error-agent-invalid-id"))
+                .with_code("invalid_agent_id")
+                .into_response();
+        }
+    };
+    if !super::super::can_access_agent(&state, agent_uuid, api_user.as_ref()) {
+        return ApiErrorResponse::not_found(t.t("api-error-agent-not-found"))
+            .with_code("agent_not_found")
+            .into_response();
+    }
+    // A deployment-owned manifest is an input, not a file the API may roll
+    // back: the provisioner re-applies its declaration on the next boot and
+    // would overwrite the restored content, so refuse the same way `patch_agent`
+    // refuses the edit (#6695).
+    if let Some(refusal) = super::guard_provisioned_agent(&state, agent_uuid) {
+        return refusal.into_response();
+    }
+
+    let store = librefang_memory::ManifestVersionStore::new(state.kernel.memory_substrate().pool());
+    let version = match store.get_version(version_id) {
+        Ok(Some(v)) if v.agent_id == agent_uuid.0.to_string() => v,
+        Ok(Some(_)) => {
+            return ApiErrorResponse::bad_request("version does not belong to this agent")
+                .with_code("version_mismatch")
+                .into_response();
+        }
+        Ok(None) => {
+            return ApiErrorResponse::not_found("version not found")
+                .with_code("version_not_found")
+                .into_response();
+        }
+        Err(e) => return ApiErrorResponse::internal_scrub(e).into_response(),
+    };
+
+    // Parse before applying: a snapshot the server cannot deserialize must
+    // fail as its own error rather than half-apply through the kernel.
+    let manifest: AgentManifest = match toml::from_str(&version.manifest_toml) {
+        Ok(m) => m,
+        Err(e) => {
+            tracing::warn!(agent = %id, version_id, "Stored manifest version is unparseable: {e}");
+            return ApiErrorResponse::internal("stored version is corrupt and cannot be restored")
+                .with_code("version_corrupt")
+                .into_response();
+        }
+    };
+
+    match state
+        .kernel
+        .update_manifest(agent_uuid, manifest, "restore")
+    {
+        Ok(()) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "status": "ok",
+                "agent_id": id,
+                "restored_version_id": version_id,
+            })),
+        )
+            .into_response(),
+        Err(e) => match e {
+            // 4xx from the kernel keep their message (e.g. the module-path
+            // security check); 5xx are scrubbed by `From<KernelOpError>`.
+            crate::error::KernelError::LibreFang(inner) => {
+                ApiErrorResponse::from(inner).into_response()
+            }
+            other => ApiErrorResponse::internal_scrub(other).into_response(),
+        },
+    }
+}

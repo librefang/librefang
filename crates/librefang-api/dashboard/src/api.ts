@@ -1603,6 +1603,36 @@ export async function listAgentEvents(
   return data.events ?? [];
 }
 
+/** One snapshot in an agent's manifest version history. */
+export interface ManifestVersionEntry {
+  id: number;
+  agent_id: string;
+  agent_name: string;
+  timestamp: string;
+  manifest_toml: string;
+  // The column is free text on the server, so a producer this list does not
+  // know yet still type-checks and renders verbatim.
+  change_source: string;
+}
+
+export async function getAgentManifestHistory(
+  agentId: string,
+  limit = 30,
+): Promise<ManifestVersionEntry[]> {
+  const data = await get<{ versions?: ManifestVersionEntry[] }>(
+    `/api/agents/${encodeURIComponent(agentId)}/manifest-history?limit=${limit}`,
+  );
+  return data.versions ?? [];
+}
+
+/** POST /api/agents/{id}/manifest-history/{version_id}/restore. */
+export async function restoreAgentManifestVersion(
+  agentId: string,
+  versionId: number,
+): Promise<{ status: string; agent_id: string; restored_version_id: number }> {
+  return post(`/api/agents/${encodeURIComponent(agentId)}/manifest-history/${versionId}/restore`, {});
+}
+
 /**
  * PATCH /api/agents/{id}/config.
  *

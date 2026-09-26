@@ -408,9 +408,20 @@ pub trait KernelApi: KernelHandle + Send + Sync {
         agent_id: AgentId,
         session_id: SessionId,
     ) -> KernelResult<TrajectoryBundle>;
-    fn persist_manifest_to_disk(&self, agent_id: AgentId);
+    /// Persist an agent's manifest to `agent.toml` and record the write in its
+    /// version history under `change_source` (the call site's own tag for what
+    /// changed). See [`LibreFangKernel::persist_manifest_to_disk`].
+    fn persist_manifest_to_disk(&self, agent_id: AgentId, change_source: &str);
     fn reload_agent_from_disk(&self, agent_id: AgentId) -> KernelResult<()>;
-    fn update_manifest(&self, agent_id: AgentId, new_manifest: AgentManifest) -> KernelResult<()>;
+    /// Apply a caller-supplied manifest to a running agent and persist it.
+    /// `change_source` tags the version-history snapshot this write records
+    /// (`api` for the control plane, `restore` for the history-restore route).
+    fn update_manifest(
+        &self,
+        agent_id: AgentId,
+        new_manifest: AgentManifest,
+        change_source: &str,
+    ) -> KernelResult<()>;
     /// Rename an agent and carry the new name into its IDENTITY.md front matter.
     /// See [`LibreFangKernel::rename_agent`] for the full contract.
     fn rename_agent(&self, agent_id: AgentId, new_name: String) -> KernelResult<()>;
@@ -1316,14 +1327,19 @@ impl KernelApi for LibreFangKernel {
     ) -> KernelResult<TrajectoryBundle> {
         Self::export_session_trajectory(self, agent_id, session_id)
     }
-    fn persist_manifest_to_disk(&self, agent_id: AgentId) {
-        Self::persist_manifest_to_disk(self, agent_id);
+    fn persist_manifest_to_disk(&self, agent_id: AgentId, change_source: &str) {
+        Self::persist_manifest_to_disk(self, agent_id, change_source);
     }
     fn reload_agent_from_disk(&self, agent_id: AgentId) -> KernelResult<()> {
         Self::reload_agent_from_disk(self, agent_id)
     }
-    fn update_manifest(&self, agent_id: AgentId, new_manifest: AgentManifest) -> KernelResult<()> {
-        Self::update_manifest(self, agent_id, new_manifest)
+    fn update_manifest(
+        &self,
+        agent_id: AgentId,
+        new_manifest: AgentManifest,
+        change_source: &str,
+    ) -> KernelResult<()> {
+        Self::update_manifest(self, agent_id, new_manifest, change_source)
     }
     fn rename_agent(&self, agent_id: AgentId, new_name: String) -> KernelResult<()> {
         Self::rename_agent(self, agent_id, new_name)

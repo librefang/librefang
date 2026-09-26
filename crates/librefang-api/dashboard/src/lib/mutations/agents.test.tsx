@@ -15,6 +15,7 @@ import {
   useCreateAgentSession,
   useResolveApproval,
   useSendAgentMessage,
+  useRestoreAgentManifestVersion,
 } from "./agents";
 import {
   agentKeys,
@@ -42,6 +43,7 @@ vi.mock("../http/client", () => ({
   createAgentSession: vi.fn().mockResolvedValue({}),
   resolveApproval: vi.fn().mockResolvedValue({}),
   sendAgentMessage: vi.fn().mockResolvedValue({}),
+  restoreAgentManifestVersion: vi.fn().mockResolvedValue({ status: "ok" }),
 }));
 
 describe("useSwitchAgentSession", () => {
@@ -133,6 +135,39 @@ describe("usePatchAgent", () => {
     });
     expect(invalidateSpy).toHaveBeenCalledWith({
       queryKey: agentKeys.detail("agent-1"),
+    });
+  });
+});
+
+describe("useRestoreAgentManifestVersion", () => {
+  it("calls the restore endpoint and invalidates detail + every allowlist read", async () => {
+    const { queryClient, wrapper } = createQueryClientWrapper();
+    const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");
+    vi.mocked(http.restoreAgentManifestVersion).mockClear();
+
+    const { result } = renderHook(() => useRestoreAgentManifestVersion(), {
+      wrapper,
+    });
+
+    await result.current.mutateAsync({ agentId: "agent-1", versionId: 7 });
+
+    expect(http.restoreAgentManifestVersion).toHaveBeenCalledWith("agent-1", 7);
+    // `detail` is what the history key is nested under, so this single
+    // assertion is also the freshness guarantee for the History tab.
+    expect(invalidateSpy).toHaveBeenCalledWith({
+      queryKey: agentKeys.detail("agent-1"),
+    });
+    for (const key of [
+      agentKeys.manifest("agent-1"),
+      agentKeys.mcpServers("agent-1"),
+      agentKeys.skills("agent-1"),
+      agentKeys.tools("agent-1"),
+      agentKeys.channels("agent-1"),
+    ]) {
+      expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: key });
+    }
+    expect(invalidateSpy).toHaveBeenCalledWith({
+      queryKey: agentKeys.lists(),
     });
   });
 });
