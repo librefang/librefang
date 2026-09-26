@@ -1,0 +1,3 @@
+An auto-reply ran its agent turn with no sender identity, so every tool outside the read-only allowlist reached the RBAC gate as an unrecognised sender and was queued for approval instead of executing.
+The auto-reply branch returned before the dispatch path built its `SenderContext`, and the turn was launched through a kernel call that carries no sender — so the manifest was stamped with no `sender_user_id` and no `sender_channel`, and the gate fell straight into `guest_gate`.
+The turn is now launched with the same `SenderContext` every other channel turn carries, which is what the broadcast arm already did under #7140 for the session dimension (#8430) (@DaBlitzStein)

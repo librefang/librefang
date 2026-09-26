@@ -124,6 +124,37 @@ impl ReplyEnvelope {
     }
 }
 
+/// What the auto-reply pre-check decided for one inbound message.
+///
+/// The three states are not "some reply / no reply" collapsed: the engine's
+/// decision to run a turn is itself the state that matters to the caller.
+/// An empty or silent reply means the turn *ran and consumed the message*, so
+/// the ordinary dispatch must not run it again — an `Option<String>` cannot
+/// tell that apart from "the engine never claimed the message", and treating
+/// both as "not fired" re-runs the identical turn in the same channel session,
+/// duplicating the user message in history and paying a second LLM turn.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AutoReplyOutcome {
+    /// The engine did not claim the message (auto-reply disabled, or a
+    /// suppression pattern matched). `dispatch_message` continues to the
+    /// ordinary turn.
+    NotFired,
+    /// The engine claimed the message and its turn already ran: `Some(text)`
+    /// is the reply to deliver, `None` a turn with nothing to say (silent or
+    /// empty response). Either way the message is spent — dispatching it again
+    /// would duplicate it in the same channel session.
+    Fired(Option<String>),
+    /// The engine claimed the message and its turn failed; the failure was
+    /// already logged where it happened. The message is spent for the same
+    /// reason as [`AutoReplyOutcome::Fired`]: re-dispatching would re-run the
+    /// identical turn, and the failure is not evidence that no turn ran.
+    /// The string is the error the turn failed with, so the bridge can tell
+    /// the user (unless the adapter suppresses error responses) and record a
+    /// failed delivery — the two things the ordinary path does on a kernel
+    /// failure.
+    Failed(String),
+}
+
 /// Kernel operations needed by channel adapters.
 ///
 /// Defined here to avoid circular deps (librefang-channels can't depend on librefang-kernel).
@@ -495,9 +526,28 @@ pub trait ChannelBridgeHandle: Send + Sync {
     }
 
     /// Check if auto-reply is enabled and the message should trigger one.
-    /// Returns Some(reply_text) if auto-reply fires, None otherwise.
-    async fn check_auto_reply(&self, _agent_id: AgentId, _message: &str) -> Option<String> {
-        None
+    ///
+    /// Returns [`AutoReplyOutcome::NotFired`] when the engine does not claim
+    /// the message, so `dispatch_message` may run the ordinary turn. Once the
+    /// engine claims it (`Fired` / `Failed`), that turn has consumed the
+    /// message and the caller must not run the ordinary turn as well — see
+    /// [`AutoReplyOutcome`].
+    ///
+    /// `sender` is the same [`SenderContext`] the ordinary dispatch path
+    /// builds for a channel message, and it carries the identity the tool
+    /// authorization gate reads (`channel` + `user_id`). The auto-reply runs
+    /// a full agent turn — tools included — so it must be handed the sender
+    /// it is running on behalf of, exactly as `send_message_with_sender`
+    /// hands it to a normal turn. Dropping it here silently demotes the turn
+    /// to an unidentified sender, which the RBAC gate answers with
+    /// `NeedsApproval` for every tool outside the read-only allowlist.
+    async fn check_auto_reply(
+        &self,
+        _agent_id: AgentId,
+        _message: &str,
+        _sender: &SenderContext,
+    ) -> AutoReplyOutcome {
+        AutoReplyOutcome::NotFired
     }
 
     // ── Automation: workflows, triggers, schedules, approvals ──
@@ -5169,22 +5219,73 @@ async fn dispatch_message(
         return;
     }
 
+    // Build the sender's identity once, ahead of everything below that can branch on it.
+    //
+    // Every turn this function runs from here on — the auto-reply one and the
+    // ordinary one alike — runs on behalf of this sender, and the tool
+    // authorization gate derives its `(channel, sender_id)` pair from this
+    // context. When the construction sat after the auto-reply branch instead,
+    // that branch could return without it: the turn reached the gate with no
+    // channel and no sender, and the gate answered with the guest allowlist —
+    // the seven read-only tools, everything else `NeedsApproval`.
+    let sender_ctx = build_sender_context(message, overrides.as_ref());
+
     // Auto-reply check — if enabled, the engine decides whether to process this message.
     // If auto-reply is enabled but suppressed for this message, skip agent call entirely.
-    if let Some(reply) = handle.check_auto_reply(agent_id, &text).await {
-        let reply = maybe_prefix_response(handle, overrides.as_ref(), agent_id, reply).await;
-        send_response(adapter, &message.sender, reply, thread_id, output_format).await;
-        handle
-            .record_delivery(
-                agent_id,
-                ct_str,
-                &message.sender.platform_id,
-                true,
-                None,
-                thread_id,
-            )
-            .await;
-        return;
+    match handle.check_auto_reply(agent_id, &text, &sender_ctx).await {
+        AutoReplyOutcome::Fired(Some(reply)) => {
+            let reply = maybe_prefix_response(handle, overrides.as_ref(), agent_id, reply).await;
+            send_response(adapter, &message.sender, reply, thread_id, output_format).await;
+            handle
+                .record_delivery(
+                    agent_id,
+                    ct_str,
+                    &message.sender.platform_id,
+                    true,
+                    None,
+                    thread_id,
+                )
+                .await;
+            return;
+        }
+        // The engine claimed the message and the turn already ran with nothing
+        // to say (silent or empty reply): the message is spent, and silence is
+        // not a failure to report.
+        AutoReplyOutcome::Fired(None) => return,
+        // The engine claimed the message and the turn failed. The message is
+        // still spent — falling through would dispatch the identical turn a
+        // second time in the same channel session, duplicating the user message
+        // in history and paying a second LLM turn — but the failure must reach
+        // the user and the delivery metrics the same way the ordinary path's
+        // kernel-failure arm does: an error bubble unless the adapter
+        // suppresses error responses, and a failed delivery record either way.
+        AutoReplyOutcome::Failed(error) => {
+            let err_msg = format!("Agent error: {error}");
+            if !adapter.suppress_error_responses() {
+                send_response(
+                    adapter,
+                    &message.sender,
+                    err_msg.clone(),
+                    thread_id,
+                    output_format,
+                )
+                .await;
+            }
+            handle
+                .record_delivery(
+                    agent_id,
+                    ct_str,
+                    &message.sender.platform_id,
+                    false,
+                    Some(&err_msg),
+                    thread_id,
+                )
+                .await;
+            return;
+        }
+        // The engine did not claim the message — the ordinary dispatch below
+        // handles it.
+        AutoReplyOutcome::NotFired => {}
     }
 
     // --- Group-history drain (gating pass survived all early-return gates) ---
@@ -5276,9 +5377,6 @@ async fn dispatch_message(
 
     upsert_sender_into_roster(handle, message).await;
     upsert_enumerated_members_into_roster(handle, message).await;
-
-    // Build sender context to propagate identity to the agent
-    let sender_ctx = build_sender_context(message, overrides.as_ref());
 
     // Streaming path: if the adapter supports progressive output, pipe text
     // deltas directly to it instead of waiting for the full response.
