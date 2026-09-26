@@ -1374,6 +1374,8 @@ const IDENTICAL_VALUE_EXEMPTIONS: &[IdenticalValueExemption] = &[
             "tui-event-promote-http-error",
             "tui-guide-warn-env",
             "tui-mod-error-symbol",
+            "tui-templates-restore-fail",
+            "tui-templates-restore-ok",
             "tui-triggers-placeholder-agent-id",
             "tui-triggers-placeholder-max-fires",
         ],

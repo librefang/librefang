@@ -1,5 +1,6 @@
 //! Templates screen: browse agent templates and spawn with one click.
 
+use crate::tui::event::TemplateVersionRow;
 use crate::tui::{theme, widgets};
 use librefang_types::agent::ToolProfile;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -205,6 +206,22 @@ pub struct TemplatesState {
     pub loading: bool,
     pub tick: usize,
     pub status_msg: String,
+    pub version_history: Vec<TemplateVersionRow>,
+    pub history_error: Option<String>,
+    pub showing_history: bool,
+    pub history_list: ListState,
+    pub history_name: String,
+    /// Armed by `R` on a registry-backed row: the name the operator aimed at.
+    /// The overwrite it stages is not undoable from here, so it waits for an
+    /// explicit `y`. The name is captured at arm time, not read back from the
+    /// selection on `y` — a list refresh landing behind the prompt re-selects
+    /// row 0, and the confirmation must not land on a row never chosen.
+    pub confirm_restore: Option<String>,
+    /// Armed by `Enter` in the history overlay, which overwrites the agent
+    /// type's manifest with one historical version. `Enter` is the key an
+    /// operator presses to *open* a row, so arming rather than firing is what
+    /// keeps "look at a version" from being "roll back to it".
+    pub confirm_restore_version: bool,
 }
 
 pub enum TemplatesAction {
@@ -217,6 +234,18 @@ pub enum TemplatesAction {
     /// Promote the selected manifest-backed agent type to the registry.
     PromoteTemplate {
         name: String,
+    },
+    RestoreFromRegistry {
+        name: String,
+    },
+    ShowVersionHistory {
+        name: String,
+    },
+    /// Restore the template currently shown in the history overlay to one
+    /// specific historical version, selected there.
+    RestoreTemplateVersion {
+        name: String,
+        version_id: String,
     },
 }
 
@@ -233,6 +262,13 @@ impl TemplatesState {
             loading: false,
             tick: 0,
             status_msg: String::new(),
+            version_history: Vec::new(),
+            history_error: None,
+            showing_history: false,
+            history_list: ListState::default(),
+            history_name: String::new(),
+            confirm_restore: None,
+            confirm_restore_version: false,
         };
         state.list_state.select(Some(0));
         state
@@ -292,6 +328,72 @@ impl TemplatesState {
             return TemplatesAction::Continue;
         }
 
+        if self.showing_history {
+            let total = self.version_history.len();
+            // An armed restore owns the next key: `y` fires it and anything else
+            // cancels. Consuming the key matters as much as the ask does —
+            // letting `↓` through would move the selection under the prompt and
+            // roll back to a version the operator never looked at.
+            if self.confirm_restore_version {
+                if matches!(key.code, KeyCode::Char('y') | KeyCode::Char('Y')) {
+                    self.confirm_restore_version = false;
+                    if let Some(row) = self
+                        .history_list
+                        .selected()
+                        .and_then(|i| self.version_history.get(i))
+                    {
+                        return TemplatesAction::RestoreTemplateVersion {
+                            name: self.history_name.clone(),
+                            version_id: row.id.clone(),
+                        };
+                    }
+                }
+                self.confirm_restore_version = false;
+                return TemplatesAction::Continue;
+            }
+            match key.code {
+                KeyCode::Esc => {
+                    self.showing_history = false;
+                    self.history_error = None;
+                }
+                KeyCode::Up | KeyCode::Char('k') if total > 0 => {
+                    let i = self.history_list.selected().unwrap_or(0);
+                    let next = if i == 0 { total - 1 } else { i - 1 };
+                    self.history_list.select(Some(next));
+                }
+                KeyCode::Down | KeyCode::Char('j') if total > 0 => {
+                    let i = self.history_list.selected().unwrap_or(0);
+                    let next = (i + 1) % total;
+                    self.history_list.select(Some(next));
+                }
+                KeyCode::Enter
+                    if total > 0
+                        && self
+                            .history_list
+                            .selected()
+                            .and_then(|i| self.version_history.get(i))
+                            .is_some() =>
+                {
+                    // Arm, don't fire. `Enter` is how an operator inspects a row,
+                    // and this one overwrites the agent type's manifest with the
+                    // version under the cursor.
+                    self.confirm_restore_version = true;
+                }
+                _ => {}
+            }
+            return TemplatesAction::Continue;
+        }
+
+        // Same two-step as the overlay above, for the `R` on a registry-backed
+        // row: it replaces the agent type's manifest with the registry copy, and
+        // it is one Shift away from `r` (refresh).
+        if let Some(name) = self.confirm_restore.take() {
+            if matches!(key.code, KeyCode::Char('y') | KeyCode::Char('Y')) {
+                return TemplatesAction::RestoreFromRegistry { name };
+            }
+            return TemplatesAction::Continue;
+        }
+
         let total = self.filtered.len();
         match key.code {
             KeyCode::Up | KeyCode::Char('k') if total > 0 => {
@@ -340,6 +442,31 @@ impl TemplatesState {
                 }
             }
             KeyCode::Char('r') => return TemplatesAction::Refresh,
+            KeyCode::Char('R') => {
+                if let Some(sel) = self.list_state.selected() {
+                    if let Some(&idx) = self.filtered.get(sel) {
+                        let t = &self.templates[idx];
+                        if t.source == TemplateSource::Manifest {
+                            self.confirm_restore = Some(t.name.clone());
+                        } else {
+                            self.status_msg = crate::i18n::t("tui-templates-restore-custom-only");
+                        }
+                    }
+                }
+            }
+            KeyCode::Char('v') => {
+                if let Some(sel) = self.list_state.selected() {
+                    if let Some(&idx) = self.filtered.get(sel) {
+                        let t = &self.templates[idx];
+                        if t.source == TemplateSource::Manifest {
+                            return TemplatesAction::ShowVersionHistory {
+                                name: t.name.clone(),
+                            };
+                        }
+                        self.status_msg = crate::i18n::t("tui-templates-history-manifest-only");
+                    }
+                }
+            }
             _ => {}
         }
         TemplatesAction::Continue
@@ -354,6 +481,11 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut TemplatesState) {
         area,
         &format!("{} {}", "\u{25a2}", crate::i18n::t("tui-templates-title")),
     );
+
+    if state.showing_history {
+        draw_version_history(f, inner, state);
+        return;
+    }
 
     let chunks = Layout::vertical([
         Constraint::Length(2), // header + category filter
@@ -509,20 +641,101 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut TemplatesState) {
     }
 
     // ── Hints / status ──
-    if !state.status_msg.is_empty() {
+    // The armed prompt outranks a status message, as it does on Extensions: a
+    // stale "promoted …" line must not hide the question the next key answers.
+    f.render_widget(
+        widgets::confirm_or_status_or_hint(
+            state.confirm_restore.is_some(),
+            &crate::i18n::t("tui-templates-confirm-restore"),
+            &state.status_msg,
+            &crate::i18n::t("tui-templates-hints"),
+        ),
+        chunks[3],
+    );
+}
+
+fn draw_version_history(f: &mut Frame, area: Rect, state: &mut TemplatesState) {
+    let chunks = Layout::vertical([
+        Constraint::Length(2),
+        Constraint::Min(3),
+        Constraint::Length(1),
+    ])
+    .split(area);
+
+    f.render_widget(
+        Paragraph::new(vec![
+            Line::from(vec![Span::styled(
+                format!(
+                    "  {}",
+                    crate::i18n::t_args(
+                        "tui-templates-history-title",
+                        &[("name", &state.history_name)],
+                    )
+                ),
+                Style::default()
+                    .fg(theme::CYAN)
+                    .add_modifier(Modifier::BOLD),
+            )]),
+            Line::from(vec![Span::styled(
+                format!(
+                    "  {:<40} {:<24} {}",
+                    crate::i18n::t("tui-templates-history-col-id"),
+                    crate::i18n::t("tui-templates-history-col-created"),
+                    crate::i18n::t("tui-templates-history-col-source")
+                ),
+                theme::table_header(),
+            )]),
+        ]),
+        chunks[0],
+    );
+
+    if let Some(err) = &state.history_error {
         f.render_widget(
-            Paragraph::new(Line::from(vec![Span::styled(
-                format!("  {}", state.status_msg),
-                Style::default().fg(theme::YELLOW),
-            )])),
-            chunks[3],
+            widgets::empty_state(&crate::i18n::t_args(
+                "tui-templates-history-error",
+                &[("detail", err)],
+            )),
+            chunks[1],
+        );
+    } else if state.version_history.is_empty() {
+        f.render_widget(
+            widgets::empty_state(&crate::i18n::t("tui-templates-history-empty")),
+            chunks[1],
         );
     } else {
-        f.render_widget(
-            widgets::hint_bar(&crate::i18n::t("tui-templates-hints")),
-            chunks[3],
-        );
+        let items: Vec<ListItem> = state
+            .version_history
+            .iter()
+            .map(|row| {
+                ListItem::new(Line::from(vec![
+                    Span::styled(
+                        format!("  {:<40}", widgets::truncate(&row.id, 39)),
+                        Style::default().fg(theme::YELLOW),
+                    ),
+                    Span::styled(
+                        format!(" {:<24}", widgets::truncate(&row.timestamp, 23)),
+                        theme::dim_style(),
+                    ),
+                    Span::styled(
+                        format!(" {}", row.change_source),
+                        Style::default().fg(theme::BLUE),
+                    ),
+                ]))
+            })
+            .collect();
+        let list = widgets::themed_list(items);
+        f.render_stateful_widget(list, chunks[1], &mut state.history_list);
     }
+
+    f.render_widget(
+        widgets::confirm_or_status_or_hint(
+            state.confirm_restore_version,
+            &crate::i18n::t("tui-templates-confirm-restore-version"),
+            "",
+            &crate::i18n::t("tui-templates-history-hints"),
+        ),
+        chunks[2],
+    );
 }
 
 /// `i18n::t` renders an unknown key as `[key]`, so a bare `rendered == key` comparison never fires.
@@ -750,5 +963,388 @@ mod tests {
             "\"default\" means \"inherit the daemon's provider\", not a provider id"
         );
         assert!(!state.provider_configured("openai"));
+    }
+
+    #[test]
+    fn restore_key_on_a_builtin_refuses_and_stays() {
+        let mut state = TemplatesState::new();
+        // `new()` selects the first row, and every builtin row refuses the restore.
+        assert_eq!(
+            state.templates[state.filtered[0]].source,
+            TemplateSource::Builtin
+        );
+        let action = state.handle_key(KeyEvent::new(KeyCode::Char('R'), KeyModifiers::NONE));
+        assert!(matches!(action, TemplatesAction::Continue));
+        assert_eq!(
+            state.status_msg,
+            crate::i18n::t("tui-templates-restore-custom-only")
+        );
+    }
+
+    #[test]
+    fn restore_key_on_a_manifest_row_returns_the_restore_action() {
+        let mut state = TemplatesState::new();
+        state.set_manifest_templates(vec![TemplateInfo {
+            name: "payroll".to_string(),
+            description: "operator type".to_string(),
+            category: MANIFEST_CATEGORY.to_string(),
+            provider: "openai".to_string(),
+            model: "gpt-x".to_string(),
+            source: TemplateSource::Manifest,
+        }]);
+        let idx = state
+            .templates
+            .iter()
+            .position(|t| t.name == "payroll")
+            .expect("manifest row exists");
+        let pos = state
+            .filtered
+            .iter()
+            .position(|&i| i == idx)
+            .expect("payroll is reachable");
+        state.list_state.select(Some(pos));
+        // `R` arms; it does not overwrite on its own. The registry copy replaces
+        // the agent type's manifest, and `R` is one Shift away from `r`.
+        assert!(matches!(
+            state.handle_key(KeyEvent::new(KeyCode::Char('R'), KeyModifiers::NONE)),
+            TemplatesAction::Continue
+        ));
+        assert!(
+            state.confirm_restore.is_some(),
+            "R did not arm the confirmation"
+        );
+
+        match state.handle_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE)) {
+            TemplatesAction::RestoreFromRegistry { name } => assert_eq!(name, "payroll"),
+            _ => panic!("expected RestoreFromRegistry, got a different action"),
+        }
+        assert!(
+            state.confirm_restore.is_none(),
+            "the armed restore survived the confirmation"
+        );
+    }
+
+    /// A background `AgentTemplatesLoaded` calls `set_manifest_templates`,
+    /// which re-selects row 0. The armed restore must still name the row the
+    /// operator aimed at, not whichever row a refresh left under the cursor.
+    #[test]
+    fn an_armed_restore_keeps_its_target_across_a_list_refresh() {
+        let mut state = TemplatesState::new();
+        state.set_manifest_templates(vec![TemplateInfo {
+            name: "payroll".to_string(),
+            description: "operator type".to_string(),
+            category: MANIFEST_CATEGORY.to_string(),
+            provider: "openai".to_string(),
+            model: "gpt-x".to_string(),
+            source: TemplateSource::Manifest,
+        }]);
+        let idx = state
+            .templates
+            .iter()
+            .position(|t| t.name == "payroll")
+            .expect("manifest row exists");
+        let pos = state
+            .filtered
+            .iter()
+            .position(|&i| i == idx)
+            .expect("payroll is reachable");
+        state.list_state.select(Some(pos));
+        state.handle_key(KeyEvent::new(KeyCode::Char('R'), KeyModifiers::NONE));
+        assert!(state.confirm_restore.is_some());
+
+        // `alpha` sorts before `payroll`, so the refresh moves the cursor.
+        state.set_manifest_templates(vec![TemplateInfo {
+            name: "alpha".to_string(),
+            description: "operator type".to_string(),
+            category: MANIFEST_CATEGORY.to_string(),
+            provider: "openai".to_string(),
+            model: "gpt-x".to_string(),
+            source: TemplateSource::Manifest,
+        }]);
+        let selected = state.list_state.selected().expect("a row is selected");
+        assert_ne!(
+            state.templates[state.filtered[selected]].name, "payroll",
+            "the refresh really did move the cursor off payroll"
+        );
+
+        match state.handle_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE)) {
+            TemplatesAction::RestoreFromRegistry { name } => assert_eq!(name, "payroll"),
+            _ => panic!("expected RestoreFromRegistry, got a different action"),
+        }
+    }
+
+    #[test]
+    fn a_restore_armed_but_not_confirmed_writes_nothing() {
+        let mut state = TemplatesState::new();
+        state.set_manifest_templates(vec![TemplateInfo {
+            name: "payroll".to_string(),
+            description: "operator type".to_string(),
+            category: MANIFEST_CATEGORY.to_string(),
+            provider: "openai".to_string(),
+            model: "gpt-x".to_string(),
+            source: TemplateSource::Manifest,
+        }]);
+        let idx = state
+            .templates
+            .iter()
+            .position(|t| t.name == "payroll")
+            .expect("manifest row exists");
+        let pos = state
+            .filtered
+            .iter()
+            .position(|&i| i == idx)
+            .expect("payroll is reachable");
+        state.list_state.select(Some(pos));
+        state.handle_key(KeyEvent::new(KeyCode::Char('R'), KeyModifiers::NONE));
+
+        // Every key except `y` cancels — `n`, `Esc`, and the arrow keys alike.
+        for cancel in [KeyCode::Char('n'), KeyCode::Esc, KeyCode::Down] {
+            state.confirm_restore = Some("payroll".to_string());
+            let action = state.handle_key(KeyEvent::new(cancel, KeyModifiers::NONE));
+            assert!(
+                matches!(action, TemplatesAction::Continue),
+                "{cancel:?} fired the restore instead of cancelling it"
+            );
+            assert!(
+                state.confirm_restore.is_none(),
+                "{cancel:?} left the restore armed"
+            );
+        }
+    }
+
+    /// The prompt is the whole point of the two-step. Rendering it only when
+    /// `status_msg` is empty let a stale "promoted …" line hide an armed
+    /// restore, so the next keystroke looked like it did nothing.
+    #[test]
+    fn an_armed_restore_renders_over_a_stale_status_message() {
+        let mut state = TemplatesState::new();
+        state.set_manifest_templates(vec![TemplateInfo {
+            name: "payroll".to_string(),
+            description: "operator type".to_string(),
+            category: MANIFEST_CATEGORY.to_string(),
+            provider: "openai".to_string(),
+            model: "gpt-x".to_string(),
+            source: TemplateSource::Manifest,
+        }]);
+        let idx = state
+            .templates
+            .iter()
+            .position(|t| t.name == "payroll")
+            .expect("manifest row exists");
+        let pos = state
+            .filtered
+            .iter()
+            .position(|&i| i == idx)
+            .expect("payroll is reachable");
+        state.list_state.select(Some(pos));
+        state.status_msg = "stale status line".to_string();
+        state.handle_key(KeyEvent::new(KeyCode::Char('R'), KeyModifiers::NONE));
+        assert!(
+            state.confirm_restore.is_some(),
+            "R did not arm the confirmation"
+        );
+
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 24)).unwrap();
+        terminal
+            .draw(|f| draw(f, f.area(), &mut state))
+            .expect("the templates screen must render");
+        let rendered: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        let prompt = crate::i18n::t("tui-templates-confirm-restore");
+        assert!(
+            rendered.contains(&prompt),
+            "the armed prompt must outrank the stale status line.\nlooked for: {prompt}\nrendered:\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn a_key_that_arms_a_restore_still_consumes_the_selection() {
+        // The armed prompt owns the next key. If `Down` reached the list, the
+        // confirmation would land on a row the operator never chose.
+        let mut state = TemplatesState::new();
+        state.set_manifest_templates(vec![TemplateInfo {
+            name: "payroll".to_string(),
+            description: "operator type".to_string(),
+            category: MANIFEST_CATEGORY.to_string(),
+            provider: "openai".to_string(),
+            model: "gpt-x".to_string(),
+            source: TemplateSource::Manifest,
+        }]);
+        let idx = state
+            .templates
+            .iter()
+            .position(|t| t.name == "payroll")
+            .expect("manifest row exists");
+        let pos = state
+            .filtered
+            .iter()
+            .position(|&i| i == idx)
+            .expect("payroll is reachable");
+        state.list_state.select(Some(pos));
+        state.handle_key(KeyEvent::new(KeyCode::Char('R'), KeyModifiers::NONE));
+        state.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(state.list_state.selected(), Some(pos), "the cursor moved");
+    }
+
+    #[test]
+    fn history_key_on_a_builtin_refuses_and_stays() {
+        let mut state = TemplatesState::new();
+        // `new()` selects the first row, and every builtin row has no manifest
+        // to read history from.
+        assert_eq!(
+            state.templates[state.filtered[0]].source,
+            TemplateSource::Builtin
+        );
+        let action = state.handle_key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE));
+        assert!(matches!(action, TemplatesAction::Continue));
+        assert_eq!(
+            state.status_msg,
+            crate::i18n::t("tui-templates-history-manifest-only")
+        );
+    }
+
+    #[test]
+    fn history_key_on_a_manifest_row_returns_the_history_action() {
+        let mut state = TemplatesState::new();
+        state.set_manifest_templates(vec![TemplateInfo {
+            name: "payroll".to_string(),
+            description: "operator type".to_string(),
+            category: MANIFEST_CATEGORY.to_string(),
+            provider: "openai".to_string(),
+            model: "gpt-x".to_string(),
+            source: TemplateSource::Manifest,
+        }]);
+        let idx = state
+            .templates
+            .iter()
+            .position(|t| t.name == "payroll")
+            .expect("manifest row exists");
+        let pos = state
+            .filtered
+            .iter()
+            .position(|&i| i == idx)
+            .expect("payroll is reachable");
+        state.list_state.select(Some(pos));
+        assert!(matches!(
+            state.handle_key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE)),
+            TemplatesAction::ShowVersionHistory { .. }
+        ));
+    }
+
+    #[test]
+    fn escape_leaves_history_and_clears_the_error() {
+        let mut state = TemplatesState::new();
+        state.showing_history = true;
+        state.history_error = Some("boom".to_string());
+        state.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(!state.showing_history);
+        assert!(state.history_error.is_none());
+    }
+
+    #[test]
+    fn j_and_k_wrap_inside_version_history() {
+        let mut state = TemplatesState::new();
+        state.showing_history = true;
+        state.version_history = vec![
+            TemplateVersionRow {
+                id: "1".to_string(),
+                timestamp: "t1".to_string(),
+                change_source: "create".to_string(),
+            },
+            TemplateVersionRow {
+                id: "2".to_string(),
+                timestamp: "t2".to_string(),
+                change_source: "update".to_string(),
+            },
+        ];
+        state.history_list.select(Some(0));
+        state.handle_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE));
+        assert_eq!(state.history_list.selected(), Some(1));
+        state.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+        assert_eq!(state.history_list.selected(), Some(0));
+    }
+
+    #[test]
+    fn enter_inside_version_history_restores_the_selected_row() {
+        let mut state = TemplatesState::new();
+        state.showing_history = true;
+        state.history_name = "payroll".to_string();
+        state.version_history = vec![
+            TemplateVersionRow {
+                id: "1".to_string(),
+                timestamp: "t1".to_string(),
+                change_source: "create".to_string(),
+            },
+            TemplateVersionRow {
+                id: "2".to_string(),
+                timestamp: "t2".to_string(),
+                change_source: "update".to_string(),
+            },
+        ];
+        state.history_list.select(Some(1));
+        // `Enter` opens a row everywhere else in the TUI; here it used to
+        // overwrite the agent type's manifest on the same tick. It arms now.
+        let action = state.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(matches!(action, TemplatesAction::Continue));
+        assert!(
+            state.confirm_restore_version,
+            "Enter did not arm the rollback"
+        );
+
+        let action = state.handle_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE));
+        match action {
+            TemplatesAction::RestoreTemplateVersion { name, version_id } => {
+                assert_eq!(name, "payroll");
+                assert_eq!(version_id, "2");
+            }
+            _ => panic!("expected RestoreTemplateVersion, got a different action"),
+        }
+        // The overlay stays open until the daemon confirms the restore.
+        assert!(state.showing_history);
+        assert!(!state.confirm_restore_version);
+    }
+
+    #[test]
+    fn an_armed_rollback_survives_no_key_but_y() {
+        let mut state = TemplatesState::new();
+        state.showing_history = true;
+        state.history_name = "payroll".to_string();
+        state.version_history = vec![TemplateVersionRow {
+            id: "2".to_string(),
+            timestamp: "t2".to_string(),
+            change_source: "update".to_string(),
+        }];
+        state.history_list.select(Some(0));
+
+        for cancel in [KeyCode::Esc, KeyCode::Up, KeyCode::Down, KeyCode::Char('n')] {
+            state.confirm_restore_version = true;
+            let action = state.handle_key(KeyEvent::new(cancel, KeyModifiers::NONE));
+            assert!(
+                matches!(action, TemplatesAction::Continue),
+                "{cancel:?} rolled the type back instead of cancelling"
+            );
+            assert!(
+                !state.confirm_restore_version,
+                "{cancel:?} left the rollback armed"
+            );
+        }
+        // `Esc` still closes the overlay, one key after the cancel above.
+        state.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(!state.showing_history);
+    }
+
+    #[test]
+    fn enter_inside_empty_version_history_does_nothing() {
+        let mut state = TemplatesState::new();
+        state.showing_history = true;
+        state.history_name = "payroll".to_string();
+        let action = state.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(matches!(action, TemplatesAction::Continue));
     }
 }
