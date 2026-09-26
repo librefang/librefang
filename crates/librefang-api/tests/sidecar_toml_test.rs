@@ -459,6 +459,10 @@ fn remove_last_block_drops_the_array_key() {
     assert!(remove_sidecar_block(tmp.path(), "telegram").unwrap());
 
     let content = fs::read_to_string(tmp.path()).unwrap();
+    // This single-file contract drops the key; stating the explicit empty
+    // array is the cross-file decision `remove_sidecar_block_anywhere` makes,
+    // because only it knows whether an included file still declares the
+    // section (a root `[]` would shadow those entries).
     assert!(
         !content.contains("sidecar_channels"),
         "array key dropped: {content}"
@@ -467,4 +471,19 @@ fn remove_last_block_drops_the_array_key() {
         content.contains("[default_model]"),
         "unrelated section preserved"
     );
+}
+
+#[test]
+fn an_explicit_empty_array_is_a_noop_not_a_malformed_section() {
+    // `sidecar_channels = []` is the shape the delete handler writes at the
+    // root when nothing else states the section (see
+    // `remove_sidecar_block_anywhere`), so a repeat removal must read it as
+    // "nothing here" and leave the file alone — treating it as malformed
+    // turned the second DELETE into a 500.
+    let tmp = NamedTempFile::new().unwrap();
+    let original = "sidecar_channels = []\n[default_model]\nprovider = \"ollama\"\n";
+    fs::write(tmp.path(), original).unwrap();
+
+    assert!(!remove_sidecar_block(tmp.path(), "telegram").unwrap());
+    assert_eq!(fs::read_to_string(tmp.path()).unwrap(), original);
 }

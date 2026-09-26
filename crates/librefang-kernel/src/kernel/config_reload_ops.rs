@@ -22,14 +22,15 @@ impl LibreFangKernel {
         let old_cfg = self.config.load();
         use crate::config_reload::{should_store_config, validate_config_for_reload};
 
-        // Read and parse the on-disk config via the strict loader (#4664).
-        // Unlike `crate::config::load_config`, `try_load_config` returns `Err`
-        // on every failure mode (TOML syntax error, broken `include = [...]`
-        // chain, migration failure, deserialize-shape mismatch) instead of
-        // silently falling back to `KernelConfig::default()`. Without this,
-        // the diff-and-apply path below would treat the defaults as the
-        // operator's intent and wipe out their `default_model`,
-        // `provider_api_keys`, channels, etc.
+        // Read and parse the on-disk config via the strict loader (#4664),
+        // loading the document over the live config rather than over the
+        // compiled defaults (#8459). Unlike `crate::config::load_config`,
+        // `try_load_config_over` returns `Err` on every failure mode (TOML
+        // syntax error, broken `include = [...]` chain, migration failure,
+        // deserialize-shape mismatch) instead of silently falling back to
+        // `KernelConfig::default()`. Without this, the diff-and-apply path
+        // below would treat the defaults as the operator's intent and wipe
+        // out their `default_model`, `provider_api_keys`, channels, etc.
         //
         // Surfacing `Err` here lets the watcher's
         // `Err(e) => tracing::warn!("Config hot-reload failed: {e}")` branch
@@ -38,7 +39,13 @@ impl LibreFangKernel {
         // re-introduced the pre-#4664 tolerant path during the mod.rs split;
         // this restores the strict loader.)
         let config_path = self.config_path_boot.clone();
-        let mut new_config = crate::config::try_load_config(&config_path)
+        // The running config is the base, so a field the document does not state keeps its live
+        // value instead of reverting to its compiled default.
+        // `KernelConfig` is `#[serde(default)]` at the container level, and strictness stops at
+        // parseability, so without this a document that parses and is *partial* — which is what the
+        // API's own config writes produce when the file did not exist yet — resets everything it
+        // does not mention: home, data directory, API key. See #8459.
+        let mut new_config = crate::config::try_load_config_over(&config_path, Some(&old_cfg))
             .map_err(|e| format!("Config reload failed; live config unchanged: {e}"))?;
 
         // Clamp bounds on the new config before validating or applying.

@@ -984,6 +984,15 @@ fn sidecar_discovery_rows() -> Vec<serde_json::Value> {
 /// reports `removed` while the channel comes back. Every file that declares
 /// the name is stripped; `false` still means "declared nowhere", which is the
 /// only case that deserves a 404.
+///
+/// When the walk leaves no reachable file stating `sidecar_channels`, it also
+/// states the explicit empty array in the first file it modified. The reload
+/// overlay (#8459/#8460) reads a key the document does not state as "keep the
+/// live value", so the key removal alone would resurrect the channel on the
+/// reload the delete triggers. Writing it only in that case — and with the
+/// section unstated everywhere else — cannot shadow anything; a root-level `[]`
+/// next to an include that still declared entries would drop them, because the
+/// root wins the include merge.
 fn remove_sidecar_block_anywhere(
     config_path: &std::path::Path,
     name: &str,
@@ -1010,9 +1019,15 @@ fn remove_sidecar_block_anywhere(
         .collect::<Result<_, String>>()?;
 
     let mut removed = false;
+    let mut modified: Vec<std::path::PathBuf> = Vec::new();
     for path in &files {
         match super::sidecar_toml::remove_sidecar_block(path, name) {
-            Ok(hit) => removed |= hit,
+            Ok(hit) => {
+                if hit {
+                    modified.push(path.clone());
+                }
+                removed |= hit;
+            }
             Err(error) => {
                 for (snapshot_path, contents) in &snapshots {
                     if let Err(restore_error) = super::sidecar_toml::restore_sidecar_file(
@@ -1030,7 +1045,45 @@ fn remove_sidecar_block_anywhere(
             }
         }
     }
+
+    // With the blocks stripped, state the empty section if nothing on disk
+    // states it any more — see the function docs for why it goes in a file
+    // this walk modified and why it must not run while an include still
+    // declares entries.
+    if removed && !document_states_sidecar_section(config_path)? {
+        if let Some(path) = modified.first() {
+            super::sidecar_toml::state_empty_sidecar_channels(path)?;
+        }
+    }
+
     Ok(removed)
+}
+
+/// Whether any file reachable from `config_path` states a `sidecar_channels` key.
+///
+/// This is the reload overlay's own question (#8459/#8460): a top-level key the
+/// document states replaces the live value wholesale, and one it does not
+/// state keeps the live value. Both delete paths ask it before writing an
+/// explicit empty section — `remove_sidecar_block_anywhere` after stripping
+/// the last block, and the reconcile branch in `delete_sidecar_channel` — because
+/// when the answer is already yes, the document itself expresses the deletion
+/// and a `[]` would instead shadow the entries an included file declares (the
+/// root wins the include merge).
+fn document_states_sidecar_section(config_path: &std::path::Path) -> Result<bool, String> {
+    let root = match std::fs::read_to_string(config_path) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) => return Err(format!("read {}: {error}", config_path.display())),
+    };
+    let root_doc: toml_edit::DocumentMut = root
+        .parse()
+        .map_err(|error| format!("parse {}: {error}", config_path.display()))?;
+    if root_doc.get("sidecar_channels").is_some() {
+        return Ok(true);
+    }
+    // `included_files_with_sidecars_blocking` only reports depth > 0 hits; the
+    // root was handled by the parse above.
+    Ok(!included_files_with_sidecars_blocking(config_path, true)?.is_empty())
 }
 
 /// Request body for `POST /api/channels/sidecar/{name}/configure`.
@@ -1912,11 +1965,12 @@ pub async fn delete_sidecar_channel(
     // Rewrite config.toml under the same lock that gates configure and POST /api/config/set.
     let removed = {
         let _config_guard = state.config_write_lock.lock().await;
-        // `config_path` isn't read again after this block, so move it straight into the
-        // blocking task instead of cloning; `name` is still needed below for the 404 message.
+        // `name` is still needed below for the 404 message, and `config_path` by
+        // the reconcile branch below, so both are cloned into the blocking task.
         let remove_name = name.clone();
+        let remove_path = config_path.clone();
         tokio::task::spawn_blocking(move || {
-            remove_sidecar_block_anywhere(&config_path, &remove_name)
+            remove_sidecar_block_anywhere(&remove_path, &remove_name)
         })
         .await
         .map_err(|e| {
@@ -1984,6 +2038,35 @@ pub async fn delete_sidecar_channel(
                 .kernel
                 .channel_adapters_ref()
                 .retain(|key, _| key != &name && !key.starts_with(&prefix));
+        }
+
+        // Make the deletion expressible through the reload below. With no
+        // block anywhere on disk the document does not state
+        // `sidecar_channels`, and the reload overlay (#8459/#8460) reads a key
+        // the document does not state as "keep the live value" — so the
+        // reload would put the channel straight back and every repeat delete
+        // would take this same branch. State the empty section explicitly,
+        // unless a reachable file already states it: then the document's own
+        // value replaces the live list wholesale on reload, while a
+        // root-level `[]` would instead shadow the included entries (the root
+        // wins the include merge).
+        {
+            let _config_guard = state.config_write_lock.lock().await;
+            let reconcile_path = config_path.clone();
+            tokio::task::spawn_blocking(move || -> Result<(), String> {
+                if document_states_sidecar_section(&reconcile_path)? {
+                    return Ok(());
+                }
+                super::sidecar_toml::state_empty_sidecar_channels(&reconcile_path)
+            })
+            .await
+            .map_err(|e| {
+                ApiErrorResponse::internal_scrub(format!(
+                    "sidecar delete reconcile task failed: {e}"
+                ))
+                .into_json_tuple()
+            })?
+            .map_err(|e| ApiErrorResponse::internal_scrub(e).into_json_tuple())?;
         }
     }
 

@@ -504,3 +504,58 @@ async fn delete_clears_a_stale_adapter_entry_keyed_by_a_real_account_id() {
         "once every key this channel owns is gone, a repeat delete must converge to 404"
     );
 }
+
+/// Deleting a root-declared channel while an included file declares another
+/// must not state a root-level `sidecar_channels = []`.
+///
+/// The empty section the reload overlay (#8459/#8460) needs to express a
+/// deletion is a per-document statement, and the root wins the include merge:
+/// a root-level `[]` written while the include still declares entries would
+/// replace the include's whole list and silently drop a channel whose delete
+/// nobody asked for. The explicit empty belongs in this walk only when no
+/// reachable file states the section any more.
+#[tokio::test(flavor = "multi_thread")]
+async fn delete_from_the_root_does_not_shadow_an_included_channels_sibling() {
+    let h = boot_router().await;
+    let config_path = h.home.join("config.toml");
+    let included_path = h.home.join("channels.toml");
+    std::fs::write(
+        &config_path,
+        format!("include = [\"channels.toml\"]\n{TELEGRAM_BLOCK}"),
+    )
+    .expect("seed config.toml");
+    std::fs::write(&included_path, EMAIL_BLOCK).expect("seed channels.toml");
+
+    let (status, body) = send(h.app.clone(), auth_delete("/api/channels/sidecar/telegram")).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "body: {}",
+        String::from_utf8_lossy(&body)
+    );
+
+    let root = std::fs::read_to_string(&config_path).expect("root config still present");
+    let included = std::fs::read_to_string(&included_path).expect("included file still present");
+    assert!(
+        !root.contains("[[sidecar_channels]]") && !root.contains("name = \"telegram\""),
+        "telegram's block must be gone from the root: {root}"
+    );
+    assert!(
+        !root.contains("sidecar_channels = []"),
+        "a root-level empty array would shadow the include's entries: {root}"
+    );
+    assert!(
+        included.contains("[[sidecar_channels]]") && included.contains("name = \"email\""),
+        "the include's unrelated channel must be untouched on disk: {included}"
+    );
+    assert!(
+        h.state
+            .kernel
+            .config_ref()
+            .sidecar_channels
+            .iter()
+            .any(|sc| sc.name == "email"),
+        "the reload must keep the include's channel live instead of dropping it \
+         behind the deletion's empty section"
+    );
+}

@@ -140,6 +140,16 @@ pub fn upsert_sidecar_block(
     let aot_item = doc
         .entry("sidecar_channels")
         .or_insert_with(|| Item::ArrayOfTables(ArrayOfTables::new()));
+    // `state_empty_sidecar_channels` deliberately leaves `sidecar_channels = []`
+    // behind when the last block is deleted: that is "the section is declared
+    // and empty", not a malformed document. Promote the plain empty array to an
+    // empty array-of-tables so a configure that follows a delete can append;
+    // without this the upsert fails with "not an array-of-tables" and every
+    // retry of the dashboard's add-channel form answers 500 until the operator
+    // hand-edits config.toml.
+    if aot_item.is_value() && aot_item.as_array().is_some_and(|a| a.is_empty()) {
+        *aot_item = Item::ArrayOfTables(ArrayOfTables::new());
+    }
     let aot = aot_item
         .as_array_of_tables_mut()
         .ok_or_else(|| "config.toml: `sidecar_channels` is not an array-of-tables".to_string())?;
@@ -270,6 +280,14 @@ pub fn remove_sidecar_block(path: &Path, name: &str) -> Result<bool, String> {
         let Some(aot_item) = doc.get_mut("sidecar_channels") else {
             return Ok(false);
         };
+        // `sidecar_channels = []` is the shape `state_empty_sidecar_channels`
+        // (and the cross-file walk that calls it) writes to express a
+        // deletion, so it means "the section is stated and empty", not
+        // "malformed" — a repeat removal is a no-op returning `false`, which
+        // the DELETE handler maps to its 404.
+        if aot_item.as_array().is_some_and(|array| array.is_empty()) {
+            return Ok(false);
+        }
         let aot = aot_item.as_array_of_tables_mut().ok_or_else(|| {
             "config.toml: `sidecar_channels` is not an array-of-tables".to_string()
         })?;
@@ -292,13 +310,40 @@ pub fn remove_sidecar_block(path: &Path, name: &str) -> Result<bool, String> {
     if !removed_any {
         return Ok(false);
     }
-    // Drop a now-empty array entirely rather than leaving a bare `sidecar_channels = []`.
+    // Drop a now-empty array rather than leaving a bare `sidecar_channels = []`
+    // behind in this file. The caller (`remove_sidecar_block_anywhere`) owns the
+    // cross-file decision: when no reachable file states the section any more
+    // it writes the explicit empty array once, in the root, so the reload
+    // overlay (#8459/#8460) can express the deletion — a root-level `[]` from
+    // this single file would instead shadow the entries an included file still
+    // declares, because the root wins the include merge.
     if now_empty {
         doc.remove("sidecar_channels");
     }
 
     atomic_write(path, &doc.to_string())?;
     Ok(true)
+}
+
+/// State an empty `sidecar_channels` section in `path` explicitly.
+///
+/// Both delete paths need this when the document would otherwise not state
+/// `sidecar_channels` at all: the reconcile path of
+/// `DELETE /api/channels/sidecar/{name}` deletes a channel that lives only in
+/// the running config (no block to strip anywhere on disk), and
+/// `remove_sidecar_block_anywhere` reaches the same state after stripping the
+/// last block. Without the write, the reload overlay (#8459/#8460) reads the
+/// missing key as "keep the live value" and the channel survives its own
+/// deletion. Callers must have verified that no reachable file already states
+/// the section — a `[]` written while an included file still declares entries
+/// would shadow them, because the root wins the include merge.
+pub fn state_empty_sidecar_channels(path: &Path) -> Result<(), String> {
+    let original = read_existing_or_empty(path)?;
+    let mut doc: DocumentMut = original
+        .parse()
+        .map_err(|e| format!("parse {path:?}: {e}"))?;
+    doc.insert("sidecar_channels", value(Array::new()));
+    atomic_write(path, &doc.to_string())
 }
 
 #[cfg(test)]
@@ -423,5 +468,59 @@ mod tests {
                 "unexpected tempfile name shape: {name}"
             );
         }
+    }
+
+    /// A configure that follows the deletion of the last block must append
+    /// into the state the delete leaves behind.
+    ///
+    /// `state_empty_sidecar_channels` writes `sidecar_channels = []` on purpose
+    /// (the reload overlay reads a missing key as "keep the live value"), so the
+    /// upsert has to treat that plain empty array as "declared and empty" and
+    /// promote it to an array-of-tables. Before it did, the delete → add-channel
+    /// round trip answered 500 on every retry until an operator hand-edited
+    /// `config.toml`.
+    #[test]
+    fn configure_after_a_delete_appends_into_an_explicitly_empty_section() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        fs::write(&path, "sidecar_channels = []\n").unwrap();
+        let env = BTreeMap::new();
+
+        upsert_sidecar_block(
+            &path,
+            "telegram",
+            "telegram",
+            "python",
+            &["-m", "adapter"],
+            &env,
+            &[],
+            None,
+        )
+        .unwrap();
+
+        let written = fs::read_to_string(&path).unwrap();
+        assert!(
+            written.contains("\"telegram\""),
+            "the new block must land in the explicitly empty section: {written}"
+        );
+
+        // A second configure keeps both blocks: the promoted array-of-tables
+        // must survive the next read.
+        upsert_sidecar_block(
+            &path,
+            "email",
+            "email",
+            "python",
+            &["-m", "adapter"],
+            &env,
+            &[],
+            None,
+        )
+        .unwrap();
+        let written = fs::read_to_string(&path).unwrap();
+        assert!(
+            written.contains("\"telegram\"") && written.contains("\"email\""),
+            "both blocks must survive a second configure: {written}"
+        );
     }
 }

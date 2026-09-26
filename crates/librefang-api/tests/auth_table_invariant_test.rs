@@ -37,9 +37,18 @@ impl Drop for Harness {
 /// Serialize a whole `KernelConfig` to the harness's `config.toml`.
 ///
 /// The file is seeded from the very config the kernel booted with, because every reload in these tests re-reads it: a `config.toml` missing `api_key` would answer the follow-up requests under different auth rules than the ones under test, and one missing `home_dir` would let the reloaded config point at the real daemon home.
+///
+/// An empty `users` / `groups` vector is stated explicitly (`users = []`) instead of being skipped the way `KernelConfig`'s `skip_serializing_if` would. The reload overlay (#8459/#8460) reads a top-level key the document does not state as "keep the live value", so a test that *revokes* the last user by rewriting the file must say the section is empty — exactly what the users handler now writes on delete. A missing key still means "keep the live value"; that is the contract for genuinely partial documents.
 fn write_config(home: &std::path::Path, config: &KernelConfig) {
     let rendered = toml::to_string_pretty(config).expect("serialize config");
-    std::fs::write(home.join("config.toml"), rendered).expect("write config.toml");
+    let mut doc: toml_edit::DocumentMut = rendered.parse().expect("parse rendered config");
+    if config.users.is_empty() {
+        doc.insert("users", toml_edit::value(toml_edit::Array::new()));
+    }
+    if config.groups.is_empty() {
+        doc.insert("groups", toml_edit::value(toml_edit::Array::new()));
+    }
+    std::fs::write(home.join("config.toml"), doc.to_string()).expect("write config.toml");
 }
 
 /// Boot a real kernel over a tempdir home, seed `config.toml` from that same config, and mount the full router with its auth middleware.
@@ -128,7 +137,9 @@ fn json(bytes: &[u8]) -> serde_json::Value {
     serde_json::from_slice(bytes).unwrap_or(serde_json::Value::Null)
 }
 
-/// Revoking a per-user API key the documented way — delete the `[[users]]` block from `config.toml`, `POST /api/config/reload` — must stop that bearer authenticating over REST.
+/// Revoking a per-user API key the documented way — delete the `[[users]]` block from `config.toml` (stating `users = []` so the deletion is explicit on disk), `POST /api/config/reload` — must stop that bearer authenticating over REST.
+///
+/// The explicit empty array is part of the contract since #8459/#8460: the reload overlay keeps the live value for a key the document does not state, which is what makes a partial document safe, so deleting the last user by *omitting* the key would keep it alive. `write_config` writes the same shape the users handler writes on delete.
 ///
 /// Before the fix the reload returned 200, the WS and terminal upgrades honoured the revocation (they call `configured_user_api_keys(&auth_snapshot())` per connection), and every `/api/*` request kept accepting the deleted bearer with its full role until the daemon was restarted.
 #[tokio::test(flavor = "multi_thread")]

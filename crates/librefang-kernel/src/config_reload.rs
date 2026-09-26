@@ -1375,13 +1375,16 @@ pub fn should_apply_hot(mode: ReloadMode, plan: &ReloadPlan) -> bool {
 /// swap on `hot_actions` alone made those edits silently no-op while the
 /// reload response reported success.
 ///
+/// A plan that carries only a **restart-required** change stores too, for the reason the `queue` and `registry` splits below already state: an edit that matches no class leaves the plan carrying no change at all, and the whole reloaded document is then discarded — `POST /api/config/reload` answers "no changes detected" against a file that plainly changed.
+/// Whether a restart-required edit reaches the live config must not depend on whether the same edit also touched something hot. `log_level` with no [`crate::log_reload::LogLevelReloader`] installed and `local_backend_timeout` are the remaining instances of that defect; they are absorbed here rather than added to a class one field at a time.
+///
 /// `Off` / `Restart` modes still return `false` — the operator expects no
 /// runtime change until a full restart.
 pub fn should_store_config(mode: ReloadMode, plan: &ReloadPlan) -> bool {
     match mode {
         ReloadMode::Off | ReloadMode::Restart => false,
         ReloadMode::Hot | ReloadMode::Hybrid => {
-            !plan.hot_actions.is_empty() || !plan.noop_changes.is_empty()
+            !plan.hot_actions.is_empty() || !plan.noop_changes.is_empty() || plan.restart_required
         }
     }
 }
@@ -2560,6 +2563,25 @@ mod tests {
         // read-live field takes effect on the next message/request.
         assert!(should_store_config(ReloadMode::Hot, &plan));
         assert!(should_store_config(ReloadMode::Hybrid, &plan));
+    }
+
+    #[test]
+    fn test_should_store_config_restart_only_swaps_in_hot_hybrid() {
+        // Plan with NO hot actions and NO noop changes: the only change is restart-required.
+        let plan = ReloadPlan {
+            restart_required: true,
+            restart_reasons: vec!["api_listen".to_string()],
+            hot_actions: vec![],
+            noop_changes: vec![],
+            config_stored: false,
+        };
+        // Discarding this plan is what let `POST /api/config/reload` answer
+        // "no changes detected" against a file that plainly changed.
+        assert!(should_store_config(ReloadMode::Hot, &plan));
+        assert!(should_store_config(ReloadMode::Hybrid, &plan));
+        // Off / Restart must still withhold the runtime change.
+        assert!(!should_store_config(ReloadMode::Off, &plan));
+        assert!(!should_store_config(ReloadMode::Restart, &plan));
     }
 
     #[test]
