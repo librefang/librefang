@@ -209,6 +209,18 @@ class AgentsResource {
     return this._c._request("PATCH", `/api/agents/${id}`, data, undefined);
   }
 
+  async serveAgentAvatar(id) {
+    return this._c._request("GET", `/api/agents/${id}/avatar`);
+  }
+
+  async uploadAgentAvatar(id, body, contentType) {
+    return this._c._request("POST", `/api/agents/${id}/avatar`, body, undefined, contentType || "application/octet-stream");
+  }
+
+  async deleteAgentAvatar(id) {
+    return this._c._request("DELETE", `/api/agents/${id}/avatar`);
+  }
+
   async getAgentChannels(id) {
     return this._c._request("GET", `/api/agents/${id}/channels`);
   }

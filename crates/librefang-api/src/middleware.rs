@@ -1249,14 +1249,16 @@ pub async fn reject_oversized_upload(
     next.run(request).await
 }
 
-/// Cap how many `POST /api/agents/{id}/upload` requests may be mid-flight at once.
+/// Cap how many raw-body upload requests may be mid-flight at once.
 ///
-/// `upload_file` extracts `axum::body::Bytes`, buffering the whole body into RAM before the
-/// handler runs. Nothing bounds concurrency on that path otherwise: `RequestBodyLimitLayer` and
-/// `DefaultBodyLimit` are both per-request caps, so N parallel uploads at `max_upload_size_bytes`
-/// cost `N * max_upload_size_bytes` in RSS — 40 requests against a 100 MB cap is ~4 GB. Acquiring
-/// the permit here, before `next.run` reaches the extractor, is what makes the cap effective:
-/// gating inside the handler body would run after the buffering already happened.
+/// Two routes take `axum::body::Bytes`, which buffers the whole body into RAM before the handler
+/// runs, and each applies this layer with its own permit pool: `POST /api/agents/{id}/upload`
+/// (sized by `max_upload_size_bytes` / `max_concurrent_uploads`) and `POST /api/agents/{id}/avatar`
+/// ([`crate::routes::agents::avatar::MAX_CONCURRENT_AVATAR_UPLOADS`]). Nothing bounds concurrency on
+/// either path otherwise: `RequestBodyLimitLayer` and `DefaultBodyLimit` are both per-request caps,
+/// so N parallel uploads at the route's cap cost `N * cap` in RSS — 40 requests against a 100 MB cap
+/// is ~4 GB. Acquiring the permit here, before `next.run` reaches the extractor, is what makes the
+/// cap effective: gating inside the handler body would run after the buffering already happened.
 ///
 /// A saturated pool gets a fast 429 rather than queueing, matching `try_acquire_comms_stream_permit`
 /// in `routes/network.rs` — an upload is retriable, and queuing would just hold the connection open

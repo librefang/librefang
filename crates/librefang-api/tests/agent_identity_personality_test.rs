@@ -210,11 +210,16 @@ async fn patch_appearance_leaves_identity_md_untouched() {
     let path = identity_path(&server, &id);
     let before = std::fs::read_to_string(&path).unwrap();
 
+    // `avatar_url` is not free text (#8349): the two accepted spellings are the
+    // empty string ("clear") and this agent's own avatar route, which is the
+    // path the upload endpoint writes. A literal URL here is refused with a 400
+    // before any of this test's assertions are reached.
+    let own_avatar = librefang_types::media::agent_avatar_url(&id);
     for route in ["identity", "config"] {
         let status = patch(
             &server,
             &format!("/api/agents/{id}/{route}"),
-            serde_json::json!({"emoji": "🦊", "avatar_url": "https://example.invalid/a.png", "color": "#123456"}),
+            serde_json::json!({"emoji": "🦊", "avatar_url": own_avatar, "color": "#123456"}),
         )
         .await;
         assert_eq!(status, 200, "PATCH /{route}");

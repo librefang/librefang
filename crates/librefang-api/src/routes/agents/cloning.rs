@@ -169,11 +169,54 @@ pub async fn clone_agent(
         }
     }
 
+    // Carry the avatar across by value (#8349). Copying the identity below
+    // verbatim would leave the clone's `avatar_url` naming the *source's*
+    // route, so the clone rendered the source's picture — and a deleted source
+    // took the clone's face with it. An agent with no avatar is left alone.
+    let mut cloned_identity = source_identity;
+    let source_reference = cloned_identity
+        .avatar_url
+        .as_deref()
+        .is_some_and(|url| !url.is_empty());
+    if source_reference {
+        let avatars_dir = state.kernel.config_snapshot().effective_avatars_dir();
+        match librefang_types::media::find_avatar(&avatars_dir, &agent_id.to_string()) {
+            Some(source_avatar) => {
+                // `find_avatar` only ever returns a name built by `avatar_path`
+                // from the fixed extension table, so this extension is trusted.
+                let ext = source_avatar
+                    .extension()
+                    .and_then(|ext| ext.to_str())
+                    .unwrap_or("png");
+                let destination =
+                    librefang_types::media::avatar_path(&avatars_dir, &new_id.to_string(), ext);
+                match std::fs::copy(&source_avatar, &destination) {
+                    Ok(_) => {
+                        cloned_identity.avatar_url = Some(
+                            librefang_types::media::agent_avatar_url(&new_id.to_string()),
+                        );
+                    }
+                    Err(error) => {
+                        tracing::error!(%error, %new_id, "failed to copy the cloned agent's avatar");
+                        // The reference must not survive the copy that would
+                        // have made it true: it would name the source's route.
+                        cloned_identity.avatar_url = None;
+                        warnings.push("avatar_copy_failed");
+                    }
+                }
+            }
+            // A reference with no file behind it: nothing to duplicate, and
+            // inheriting the pointer would leave the clone rendering the
+            // source's route.
+            None => cloned_identity.avatar_url = None,
+        }
+    }
+
     // Copy identity from source
     if let Err(e) = state
         .kernel
         .agent_registry()
-        .update_identity(new_id, source_identity)
+        .update_identity(new_id, cloned_identity)
     {
         tracing::error!(error = %e, %new_id, "failed to copy cloned agent registry identity");
         warnings.push("registry_identity_copy_failed");
