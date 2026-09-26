@@ -617,15 +617,34 @@ fn request_is_https(
 /// working; any public deployment should be proxied behind TLS *and* have
 /// the proxy address allow-listed via `trusted_proxies` (at which point
 /// `X-Forwarded-Proto` flips the flag on automatically).
+///
+/// `Path=/`, not `Path=/dashboard`: the login page replaces its location with
+/// the SPA shell at `/` once the credentials check out, and `/` is a gated
+/// entry (`is_shell_path` in `middleware.rs`), so a cookie scoped to
+/// `/dashboard` is never sent there — the browser drops it from the request,
+/// the gate finds no session, and the operator is handed the same login page
+/// again. That is a login loop, not a redirect.
+///
+/// This completes #8279: that change widened the shell gate *and* the cookie
+/// lookup to `/`, so a session established at the root would be recognised
+/// there, and left this cookie scoped below `/` — where the widened lookup can
+/// never find it. Half of that intent was unreachable as written.
+///
+/// The scope is not what holds the CSRF posture, and the earlier comment here
+/// said otherwise. `SameSite=Lax` is what keeps the cookie off cross-site
+/// POSTs, and the auth middleware only reads it for shell paths
+/// (`/`, `/dashboard`, `/dashboard/*`) — all of which serve GET-only handlers.
+/// Every `/api/*` route still requires the Bearer token, so a cookie that now
+/// travels with API requests cannot authenticate one.
 fn session_cookie_attrs(
     peer: std::net::IpAddr,
     headers: &axum::http::HeaderMap,
     trusted_proxies: &crate::client_ip::TrustedProxies,
 ) -> &'static str {
     if request_is_https(peer, headers, trusted_proxies) {
-        "Path=/dashboard; HttpOnly; SameSite=Lax; Secure"
+        "Path=/; HttpOnly; SameSite=Lax; Secure"
     } else {
-        "Path=/dashboard; HttpOnly; SameSite=Lax"
+        "Path=/; HttpOnly; SameSite=Lax"
     }
 }
 
@@ -641,8 +660,16 @@ fn session_cookie_attrs(
 /// Modern browsers (Chromium, Firefox, Safari 16.4+) accept `Secure`
 /// on `Max-Age=0` responses regardless of transport.
 /// (audit: logout-no-secure-cookie).
+///
+/// The `Path` has to equal the one the live cookie was issued with, for the
+/// same reason `Secure` does: a cookie is identified by name, domain *and*
+/// path (RFC 6265 §5.3), so a clear that differs on any of the three writes a
+/// second cookie and leaves the first one in the browser. It tracks
+/// [`session_cookie_attrs`] — `/`, the URL the login redirects to — rather
+/// than the narrower `/dashboard` it carried while that scope was still what
+/// the login worked against.
 fn session_cookie_clear_attrs() -> &'static str {
-    "Path=/dashboard; HttpOnly; SameSite=Lax; Secure"
+    "Path=/; HttpOnly; SameSite=Lax; Secure"
 }
 
 /// Dashboard credential login — validates username/password using Argon2id
@@ -916,14 +943,14 @@ pub(crate) async fn dashboard_login(
                 save_sessions(state.kernel.home_dir(), &sessions);
             }
 
-            // Issue a session cookie so subsequent browser navigation to
-            // `/dashboard/*` authenticates without JS sending a header.
-            // Scope to `Path=/dashboard` so the cookie never auto-attaches
-            // to `/api/*` requests — API calls keep using the Bearer token
-            // from localStorage, which neutralises cookie-borne CSRF.
-            // `Secure` is added when the request is HTTPS (direct or via a
-            // TLS-terminating proxy), so the cookie cannot leak across
-            // plaintext fallbacks of the same host.
+            // Issue a session cookie so subsequent browser navigation to the
+            // shell authenticates without JS sending a header. The cookie is
+            // scoped to `/` because the login page navigates to `/` itself and
+            // `/` is a gated shell entry; see `session_cookie_attrs` for why
+            // the narrower `/dashboard` scope broke that, and for what carries
+            // the CSRF posture in its place. `Secure` is added when the request
+            // is HTTPS (direct or via a TLS-terminating proxy), so the cookie
+            // cannot leak across plaintext fallbacks of the same host.
             let cookie = format!(
                 "librefang_session={}; {}; Max-Age={}",
                 token.token,
@@ -4046,7 +4073,70 @@ mod session_cookie_attrs_tests {
         );
         assert!(attrs.contains("HttpOnly"));
         assert!(attrs.contains("SameSite=Lax"));
-        assert!(attrs.contains("Path=/dashboard"));
+        // Exact token, not a substring: `Path=/` is a prefix of
+        // `Path=/dashboard`, so `contains` would pass on the very scope that
+        // broke the login. Split on `;` and compare whole attributes.
+        assert!(attr_tokens(attrs).contains(&"Path=/"));
+        assert!(
+            !attr_tokens(attrs).contains(&"Path=/dashboard"),
+            "the clear must name the same path the live cookie was issued with, \
+             or it writes a second cookie and leaves the first in the browser: {attrs}"
+        );
+    }
+
+    /// The cookie attribute list as whole `;`-separated tokens.
+    fn attr_tokens(attrs: &str) -> Vec<&str> {
+        attrs.split(';').map(str::trim).collect()
+    }
+
+    /// The login cookie has to be sent to the URL the login page navigates to.
+    ///
+    /// `login_page.html` ends a successful sign-in with `location.replace` on
+    /// the SPA shell at `/`, and `/` is a gated shell entry, so the session
+    /// cookie it was just issued has to arrive with that request. A cookie
+    /// scoped to `/dashboard` does not (RFC 6265 §5.1.4): the browser drops it
+    /// from a request for `/`, the middleware finds no session, and the
+    /// operator gets the login page back — the loop this pins shut.
+    ///
+    /// Both transports, because the `Path` is built in both branches and a fix
+    /// applied to one of them is a fix that works on the operator's LAN and
+    /// disappears behind a TLS proxy. The posture that replaces the old
+    /// narrow-scope CSRF argument is pinned here too, so widening the scope
+    /// cannot quietly take `HttpOnly` or `SameSite` with it.
+    #[test]
+    fn session_cookie_covers_the_shell_url_the_login_redirects_to() {
+        let trusted = tp(&["172.19.0.0/16"]);
+        let mut https_headers = HeaderMap::new();
+        https_headers.insert("x-forwarded-proto", "https".parse().unwrap());
+
+        let plain = session_cookie_attrs(ip("203.0.113.7"), &HeaderMap::new(), &tp(&[]));
+        let secure = session_cookie_attrs(ip("172.19.0.5"), &https_headers, &trusted);
+
+        assert!(
+            secure.contains("Secure"),
+            "the HTTPS branch must keep `Secure`: {secure}"
+        );
+        for attrs in [plain, secure] {
+            let tokens = attr_tokens(attrs);
+            assert!(
+                tokens.contains(&"Path=/"),
+                "the cookie must be scoped to `/`, the URL the login page redirects to: {attrs}"
+            );
+            assert!(
+                !tokens.contains(&"Path=/dashboard"),
+                "`/dashboard` does not path-match `/`, so that scope is never sent to \
+                 the shell after the login redirect: {attrs}"
+            );
+            assert!(
+                tokens.contains(&"HttpOnly"),
+                "the session token must stay unreadable to page scripts: {attrs}"
+            );
+            assert!(
+                tokens.contains(&"SameSite=Lax"),
+                "SameSite is what keeps the cookie off cross-site POSTs now that the \
+                 scope no longer is: {attrs}"
+            );
+        }
     }
 
     // ─────────────────────────────────────────────────────────────
