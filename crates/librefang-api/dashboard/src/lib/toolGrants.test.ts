@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import {
+  isGroupAssigned,
   isMcpGroupCardActionable,
   isMcpServerGranted,
   isToolAllowed,
@@ -203,5 +204,49 @@ describe("mcpGroupCardState (#7749 review)", () => {
     expect(isMcpGroupCardActionable("grantable")).toBe(true);
     expect(isMcpGroupCardActionable("wildcard")).toBe(false);
     expect(isMcpGroupCardActionable("hard-disabled")).toBe(false);
+    expect(isMcpGroupCardActionable("hand-controlled")).toBe(false);
+  });
+
+  it("hands the MCP grant to the Hand definition for a hand-derived agent", () => {
+    // `set_agent_mcp_servers` rejects a hand-derived agent with a 400
+    // ("Hand-derived agent MCP servers are controlled by the Hand definition"),
+    // so every card must read as inert — including a card that would otherwise
+    // be `grantable` and offer a `+` that stages a doomed write (#7835 review).
+    expect(
+      mcpGroupCardState({ granted: false, mode: "allowlist", hardDisabled: false, handControlled: true }),
+    ).toBe("hand-controlled");
+    expect(
+      mcpGroupCardState({ granted: true, mode: "allowlist", hardDisabled: false, handControlled: true }),
+    ).toBe("hand-controlled");
+    // The hand flag outranks the other two inert reasons: it is the one the
+    // operator has to fix in the Hand, not on this card.
+    expect(
+      mcpGroupCardState({ granted: true, mode: "all", hardDisabled: true, handControlled: true }),
+    ).toBe("hand-controlled");
+  });
+});
+
+describe("isGroupAssigned", () => {
+  it("reads a builtin group off its active tools", () => {
+    expect(isGroupAssigned({ isMcp: false, granted: false, activeTools: 2 })).toBe(true);
+    expect(isGroupAssigned({ isMcp: false, granted: false, activeTools: 0 })).toBe(false);
+  });
+
+  it("reads an MCP group off its grant, not its tool count", () => {
+    // A granted server whose tools are all filtered by `tool_allowlist` /
+    // `tool_blocklist` has zero active tools and is still granted. Reading it
+    // off the count filed it under Available, where the `+` staged a revoke and
+    // the grant went unmentioned on the whole tab.
+    expect(isGroupAssigned({ isMcp: true, granted: true, activeTools: 0 })).toBe(true);
+    expect(isGroupAssigned({ isMcp: true, granted: true, activeTools: 3 })).toBe(true);
+    expect(isGroupAssigned({ isMcp: true, granted: false, activeTools: 0 })).toBe(false);
+  });
+
+  it("ignores the tool count entirely for an MCP group", () => {
+    // `isToolActive` already requires the grant, so a nonzero count without one
+    // cannot arise today. Pinned anyway: the count is the wrong input here, and
+    // a future change to `isToolActive` must not quietly make it the right one.
+    expect(isGroupAssigned({ isMcp: true, granted: false, activeTools: 5 })).toBe(false);
+    expect(isGroupAssigned({ isMcp: true, granted: true, activeTools: 0 })).toBe(true);
   });
 });

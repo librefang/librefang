@@ -74,9 +74,11 @@ export const agentKeys = {
   // PUT only invalidates the skill read, not the tool read.
   skills: (agentId: string) =>
     [...agentKeys.all, "skills", agentId] as const,
-  // Per-agent MCP server assignment (#7713) — backs the pending-server surface
-  // on the agent detail Tools tab. Its own subtree for the same reason `skills`
-  // is separate from `tools`: an MCP read must not be invalidated by a tool write.
+  // Per-agent MCP server grant (#6565 follow-up) — backs `useAgentMcpServers`,
+  // the live GET the agent detail Tools tab reads for its MCP grant/revoke
+  // sub-view. Kept in its own subtree, distinct from `tools`, so a
+  // tool-capability write (`useUpdateAgentTools`) does not invalidate this
+  // MCP read.
   mcpServers: (agentId: string) =>
     [...agentKeys.all, "mcpServers", agentId] as const,
   // Full manifest as raw TOML (#7742) — backs the dashboard's full manifest

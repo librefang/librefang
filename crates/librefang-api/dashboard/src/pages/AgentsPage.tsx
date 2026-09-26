@@ -18,6 +18,7 @@ import { ConfirmDialog } from "../components/ui/ConfirmDialog";
 import { DrawerPanel } from "../components/ui/DrawerPanel";
 import { Modal } from "../components/ui/Modal";
 import {
+  isGroupAssigned,
   isMcpGroupCardActionable,
   isMcpServerGranted,
   isToolAllowed,
@@ -1215,9 +1216,12 @@ export function AgentsPage() {
     if (next === "form" && manifestToml.trim() && manifestToml !== serializedFormToml) {
       const parsed = parseManifestToml(manifestToml);
       if (!parsed.ok) {
-        const parseMessage = parsed.message === "json_schema_unsafe_integer"
-          ? t("agents.form.json_schema_unsafe_integer")
-          : parsed.message;
+        const parseMessage =
+          parsed.message === "json_schema_unsafe_integer"
+            ? t("agents.form.json_schema_unsafe_integer")
+            : parsed.message === "fallback_models_not_an_array"
+              ? t("agents.form.fallback_models_not_an_array")
+              : parsed.message;
         setTomlParseError(
           parsed.line !== undefined
             ? `Line ${parsed.line}:${parsed.column ?? 0} — ${parseMessage}`
@@ -1276,7 +1280,9 @@ export function AgentsPage() {
       setManifestEditorParseError(
         parsed.message === "json_schema_unsafe_integer"
           ? t("agents.form.json_schema_unsafe_integer")
-          : parsed.message,
+          : parsed.message === "fallback_models_not_an_array"
+            ? t("agents.form.fallback_models_not_an_array")
+            : parsed.message,
       );
     }
     setManifestEditorSeeded(true);
@@ -1284,7 +1290,16 @@ export function AgentsPage() {
 
   const saveManifestEditor = () => {
     if (!detailAgent) return;
-    const errors = validateManifestForm(manifestEditorFormState);
+    // Same preserved-name list the create dialog passes: `[workspaces]` entries
+    // the form can't render (mount-based declarations) are invisible here, so a
+    // form row reusing one of their names validates clean and then serializes a
+    // duplicate key, which the daemon rejects as an unattributable TOML parse
+    // error. `manifestEditorExtras`, not `formExtras` — this handler edits the
+    // detail drawer's state.
+    const errors = validateManifestForm(
+      manifestEditorFormState,
+      preservedWorkspaceNamesFromExtras(manifestEditorExtras),
+    );
     setManifestEditorErrors(new Set(errors));
     if (errors.length > 0) return;
     const toml = serializeManifestForm(manifestEditorFormState, manifestEditorExtras);
@@ -2297,15 +2312,24 @@ export function AgentsPage() {
     // card as grantable.
     const mcpHardDisabled = !!(agent.tools_disabled || agent.mcp_disabled);
     // One source of truth for what an MCP card may do and say, shared by the
-    // all-tools grid and the assigned/available lists (#7749 review).
+    // all-tools grid and the assigned/available lists (#7749 review). A
+    // hand-derived agent is folded into the state itself: the kernel rejects
+    // `set_agent_mcp_servers` for hands, so every card must read as inert
+    // rather than clickable (#7835 review).
     const mcpCardStateOf = (groupName: string) =>
       mcpGroupCardState({
         granted: isMcpGroupGranted(groupName),
         mode: mcpModeEffective,
         hardDisabled: mcpHardDisabled,
+        handControlled: agent.is_hand === true,
       });
     // Never "click to assign" on a card that cannot be clicked.
     const mcpGroupLabel = (state: McpGroupCardState): string => {
+      if (state === "hand-controlled") {
+        return t("agents.detail.tools_mcp_hand_controlled", {
+          defaultValue: "controlled by the Hand definition",
+        });
+      }
       if (state === "hard-disabled") {
         return t("agents.detail.tools_mcp_inert", {
           defaultValue: "not granted — MCP is hard-disabled",
@@ -2364,6 +2388,11 @@ export function AgentsPage() {
         // `mcp_disabled` the kernel skips MCP entirely, so a staged grant
         // would arm a Save that changes nothing visible or effective
         // (#7749 review) — the banner above the cards explains why instead.
+        // A hand-derived agent is the same shape of dead end: its grant is
+        // owned by the Hand definition and `set_agent_mcp_servers` rejects
+        // the write with a 400 (#7835 review), so `mcpCardStateOf` folds the
+        // hand flag into the `hand-controlled` state this guard already
+        // refuses.
         const server = mcpServerByGroup.get(groupName);
         if (!server || !isMcpGroupCardActionable(mcpCardStateOf(groupName))) return;
         setMcpServersDraft((prev) => toggleMcpServerGrant(prev ?? persistedMcpServers, server));
@@ -2462,12 +2491,15 @@ export function AgentsPage() {
       .slice()
       .sort();
 
-    const assignedGroups = sortedGroups.filter(
-      ([name, tools]) => getGroupStatus(name, tools) !== "none",
-    );
-    const availableGroups = sortedGroups.filter(
-      ([name, tools]) => getGroupStatus(name, tools) === "none",
-    );
+    // Which list a group belongs to is not one question — see `isGroupAssigned`.
+    const groupIsAssigned = ([name, tools]: [string, ToolDefinition[]]) =>
+      isGroupAssigned({
+        isMcp: isMcpGroup(name),
+        granted: isMcpGroupGranted(name),
+        activeTools: activeCountIn(name, tools),
+      });
+    const assignedGroups = sortedGroups.filter(groupIsAssigned);
+    const availableGroups = sortedGroups.filter((g) => !groupIsAssigned(g));
 
     // Shared per-tool checklist rendered under an expanded group, for both
     // the assigned and available sections (#6565 follow-up — previously
@@ -2584,6 +2616,16 @@ export function AgentsPage() {
         {!isLoading && mcpHardDisabled && (
           <p className="text-xs text-warning">
             {t("agents.detail.mcp_hard_disabled_note", { defaultValue: "MCP servers are hard-disabled for this agent (tools_disabled or mcp_disabled). Granting one here would change nothing until the hard switch is turned off, so the toggles are inert." })}
+          </p>
+        )}
+
+        {/* Same reason, different gate: a hand-derived agent's MCP grant is
+            owned by the Hand definition and the endpoint rejects an edit, so
+            the cards below render read-only instead of arming a Save that can
+            only answer 400 (#7835 review). */}
+        {!isLoading && agent.is_hand === true && (
+          <p className="text-xs text-warning" data-testid="tools-hand-controlled-note">
+            {t("agents.detail.tools_mcp_hand_note", { defaultValue: "This agent is derived from a Hand: its MCP servers are controlled by the Hand definition and cannot be granted or revoked here." })}
           </p>
         )}
 

@@ -62,6 +62,8 @@ pub enum AgentSubScreen {
     EditModelParams,
     /// Edit model routing (mode, profile allowlist, cost budget) for existing agent
     EditModelRouting,
+    /// Shared folders editor (`[workspaces]`).
+    EditWorkspaces,
     /// Spawning agent (waiting for result)
     Spawning,
 }
@@ -101,6 +103,29 @@ pub struct AgentSelectState {
     // Skill/MCP editor (shared by creation wizard + detail editor)
     pub available_skills: Vec<(String, bool)>,
     pub skill_cursor: usize,
+    // Shared folders editor: (name, path, mode).
+    pub workspaces: Vec<(String, String, String)>,
+    pub ws_cursor: usize,
+    /// `(row, field)` while a cell is being typed into; 0 = name, 1 = path, 2 = mode.
+    pub ws_editing: Option<(usize, u8)>,
+    pub ws_buf: String,
+    /// Set once `AgentWorkspacesLoaded` has populated `workspaces` for the
+    /// agent currently open. While false the editor blocks every key but
+    /// `Esc`, so a slow or failed fetch can't be saved over the wrong
+    /// agent's manifest (or an empty one).
+    pub ws_loaded: bool,
+    /// Bumped every time `w` opens the editor, and stamped into the fetch it
+    /// spawns so the reply can be matched to the session that asked for it.
+    /// `ws_loaded` alone cannot do that: the second `w` resets it to `false`,
+    /// which makes whichever reply arrives first the accepted one and the
+    /// newer one the discarded one.
+    pub ws_generation: u64,
+    /// Set by the first `s` when a half-filled row would be dropped, so the
+    /// save waits for a confirming second press and the warning stays on the
+    /// editor's status line instead of being overwritten by the success
+    /// message before the operator can read it. Any edit to the rows clears
+    /// it, so the warning describes the save it gates.
+    pub ws_drop_confirmed: bool,
     pub available_mcp: Vec<(String, bool)>,
     pub mcp_cursor: usize,
     // Channel allowlist editor. Detail-only: agent creation writes no `channels`
@@ -193,7 +218,19 @@ pub struct AgentTokenUsage {
 }
 
 /// What the agent screen decided.
+#[derive(Debug)]
 pub enum AgentAction {
+    /// Load the agent's `[workspaces]` table for the shared-folders editor.
+    FetchAgentWorkspaces(String),
+    /// Write the edited shared folders back to the agent's manifest.
+    /// `generation` is the edit session that produced the rows, echoed back
+    /// on the reply so a save landing after `Esc` + `w` cannot be mistaken
+    /// for the new session's.
+    UpdateWorkspaces {
+        id: String,
+        workspaces: Vec<(String, String, String)>,
+        generation: u64,
+    },
     /// No action yet, keep rendering.
     Continue,
     /// User created a new agent manifest (TOML).
@@ -313,6 +350,13 @@ impl AgentSelectState {
             routing_loaded: false,
             spawned_toml: None,
             status_msg: String::new(),
+            workspaces: Vec::new(),
+            ws_cursor: 0,
+            ws_editing: None,
+            ws_buf: String::new(),
+            ws_loaded: false,
+            ws_generation: 0,
+            ws_drop_confirmed: false,
         }
     }
 
@@ -529,6 +573,7 @@ impl AgentSelectState {
             AgentSubScreen::EditMcpServers => self.handle_edit_mcp_servers(key),
             AgentSubScreen::EditChannels => self.handle_edit_channels(key),
             AgentSubScreen::EditModelRouting => self.handle_edit_model_routing(key),
+            AgentSubScreen::EditWorkspaces => self.handle_edit_workspaces(key),
             AgentSubScreen::Spawning => AgentAction::Continue,
         }
     }
@@ -649,6 +694,36 @@ impl AgentSelectState {
                     let id = detail.id.clone();
                     self.sub = AgentSubScreen::EditSkills;
                     return AgentAction::FetchAgentSkills(id);
+                }
+            }
+            KeyCode::Char('w') => {
+                // Edit shared folders for this agent. Reset the editor's
+                // state rather than opening it optimistically over
+                // whatever the last agent (or edit) left behind — the fetch
+                // is async, and a stale row, cursor, or in-progress edit
+                // surviving into this agent's editor is how a save ends up
+                // PATCHing the wrong manifest (#7835).
+                if let Some(ref detail) = self.detail {
+                    let id = detail.id.clone();
+                    self.workspaces = Vec::new();
+                    self.ws_cursor = 0;
+                    self.ws_editing = None;
+                    self.ws_buf.clear();
+                    self.ws_loaded = false;
+                    self.ws_drop_confirmed = false;
+                    // A message from the last time this editor was open (or
+                    // from any other pane on this tab) is not about the rows
+                    // being opened now; the editor paints `status_msg`, so
+                    // leaving it would show a stale warning over a freshly
+                    // fetched table (#7835 review).
+                    self.status_msg.clear();
+                    // Bumping here, not at the reply, is what makes the guard
+                    // a late-response one: this `w` and the fetch it spawns
+                    // share the new value, and every earlier fetch keeps the
+                    // one it was spawned under.
+                    self.ws_generation = self.ws_generation.wrapping_add(1);
+                    self.sub = AgentSubScreen::EditWorkspaces;
+                    return AgentAction::FetchAgentWorkspaces(id);
                 }
             }
             KeyCode::Char('m') => {
@@ -1111,6 +1186,217 @@ impl AgentSelectState {
         AgentAction::Continue
     }
 
+    /// The value currently held by one of a row's three fields, used to
+    /// seed `ws_buf` when opening it for editing so committing without
+    /// retyping keeps the field instead of blanking it.
+    fn workspace_field(entry: &(String, String, String), field: u8) -> String {
+        match field {
+            0 => entry.0.clone(),
+            1 => entry.1.clone(),
+            _ => entry.2.clone(),
+        }
+    }
+
+    /// Recognizes both the canonical spelling `GET /api/agents/{id}/manifest`
+    /// renders (`readonly` / `readwrite`) and the deserialize-only
+    /// `WorkspaceMode` aliases (`r`, `rw`, ... — `librefang-types/src/agent.rs`)
+    /// a user might type from habit. Returns `None` for anything else so the
+    /// caller can keep the previous value instead of defaulting to the more
+    /// permissive mode.
+    fn parse_mode_input(v: &str) -> Option<&'static str> {
+        match v {
+            "r" | "read" | "read-only" | "readonly" => Some("readonly"),
+            "rw" | "read-write" | "readwrite" => Some("readwrite"),
+            _ => None,
+        }
+    }
+
+    /// Commit the field editor's buffer into `row`'s declaration.
+    ///
+    /// Shared by the advance (`Tab` / `Enter`) and the retreat (`Shift+Tab`)
+    /// so the two cannot drift on what a commit means — including the rule
+    /// that unrecognized mode input keeps the previous mode rather than
+    /// escalating a read-only folder to read-write by default.
+    fn commit_workspace_field(&mut self, row: usize, field: u8) {
+        let v = std::mem::take(&mut self.ws_buf);
+        // A message left from the last `s` (or from refusing this same field
+        // a keystroke ago) is about the value being replaced now; the refusal
+        // below sets a fresh one.
+        self.status_msg.clear();
+        // Committing edits a row, so an earlier "yes, drop the empty ones" no
+        // longer describes what `s` would send.
+        self.ws_drop_confirmed = false;
+        if let Some(entry) = self.workspaces.get_mut(row) {
+            match field {
+                0 => entry.0 = v,
+                1 => entry.1 = v,
+                _ => {
+                    if let Some(m) = Self::parse_mode_input(&v) {
+                        entry.2 = m.to_string();
+                    } else if !v.trim().is_empty() {
+                        // Keep the previous mode rather than defaulting to the
+                        // more permissive one — but say so, instead of
+                        // discarding the buffer as if it had been accepted
+                        // (#7835 review).
+                        self.status_msg = crate::i18n::t_args(
+                            "tui-agents-workspaces-mode-invalid",
+                            &[("value", v.trim())],
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// Open `field` on `row`, seeding the buffer from the stored value.
+    fn open_workspace_field(&mut self, row: usize, field: u8) {
+        self.ws_editing = Some((row, field));
+        self.ws_buf = self
+            .workspaces
+            .get(row)
+            .map(|e| Self::workspace_field(e, field))
+            .unwrap_or_default();
+    }
+
+    fn handle_edit_workspaces(&mut self, key: KeyEvent) -> AgentAction {
+        if let Some((row, field)) = self.ws_editing {
+            match key.code {
+                KeyCode::Esc => {
+                    self.ws_editing = None;
+                    self.ws_buf.clear();
+                }
+                KeyCode::Enter | KeyCode::Tab => {
+                    // Commit the buffer to the field, then move on.
+                    self.commit_workspace_field(row, field);
+                    if field == 2 {
+                        self.ws_editing = None;
+                    } else {
+                        self.open_workspace_field(row, field + 1);
+                    }
+                }
+                KeyCode::BackTab => {
+                    // The reverse of `Tab`, and the reason the global
+                    // handler exempts this key too: `Tab` is the advance
+                    // documented in `tui-agents-workspaces-help`, so the
+                    // key beside it is the retreat — not a tab switch that
+                    // abandons the buffer mid-edit (#7835).
+                    // Stepping back past the first field stays on it rather
+                    // than closing the editor, because `Tab` off the last
+                    // field means "done" and there is no matching "not yet".
+                    self.commit_workspace_field(row, field);
+                    self.open_workspace_field(row, field.saturating_sub(1));
+                }
+                KeyCode::Backspace => {
+                    self.ws_buf.pop();
+                }
+                KeyCode::Char(c) => self.ws_buf.push(c),
+                _ => {}
+            }
+            return AgentAction::Continue;
+        }
+
+        // The fetch this editor depends on hasn't landed yet (or failed —
+        // `FetchError` never sets `ws_loaded`). Only `Esc` works: adding,
+        // deleting or saving now would act on an editor `workspaces` never
+        // populated for this agent.
+        if !self.ws_loaded {
+            if key.code == KeyCode::Esc {
+                self.sub = AgentSubScreen::AgentDetail;
+            }
+            return AgentAction::Continue;
+        }
+
+        let len = self.workspaces.len();
+        match key.code {
+            KeyCode::Esc => {
+                self.sub = AgentSubScreen::AgentDetail;
+            }
+            KeyCode::Up | KeyCode::Char('k') if self.ws_cursor > 0 => self.ws_cursor -= 1,
+            KeyCode::Down | KeyCode::Char('j') if len > 0 && self.ws_cursor < len - 1 => {
+                self.ws_cursor += 1;
+            }
+            KeyCode::Char('a') => {
+                self.ws_drop_confirmed = false;
+                self.workspaces
+                    .push(("".into(), "".into(), "readwrite".into()));
+                self.ws_cursor = self.workspaces.len() - 1;
+                self.ws_editing = Some((self.ws_cursor, 0));
+            }
+            KeyCode::Char('d') if len > 0 => {
+                self.ws_drop_confirmed = false;
+                self.workspaces.remove(self.ws_cursor);
+                if self.ws_cursor >= self.workspaces.len() && self.ws_cursor > 0 {
+                    self.ws_cursor -= 1;
+                }
+            }
+            KeyCode::Enter if len > 0 => {
+                self.ws_editing = Some((self.ws_cursor, 0));
+                self.ws_buf = self
+                    .workspaces
+                    .get(self.ws_cursor)
+                    .map(|e| Self::workspace_field(e, 0))
+                    .unwrap_or_default();
+            }
+            KeyCode::Char('s') => {
+                if let Some(ref detail) = self.detail {
+                    // A message from an earlier attempt describes that
+                    // attempt, not this one.
+                    self.status_msg.clear();
+                    // A row that is not an abandoned edit but still cannot
+                    // become a declaration the kernel resolves is refused here,
+                    // before the two-request round trip. `resolve_workspace_decl`
+                    // skips an absolute or `..`-bearing `path` with nothing but
+                    // a daemon `WARN`, and `expand_workspace_alias` can never
+                    // match a name carrying punctuation — either way the PATCH
+                    // would answer 200, the TUI would report the folders saved,
+                    // and the agent would silently never get the folder.
+                    if let Some((name, _, _)) = self.workspaces.iter().find(|(n, p, _)| {
+                        let (n, p) = (n.trim(), p.trim());
+                        !n.is_empty()
+                            && !p.is_empty()
+                            && crate::tui::event::workspace_row_is_invalid(n, p)
+                    }) {
+                        self.status_msg = crate::i18n::t_args(
+                            "tui-agents-workspaces-row-invalid",
+                            &[("name", name.trim())],
+                        );
+                        return AgentAction::Continue;
+                    }
+                    // A row with an empty name or path is an abandoned edit,
+                    // not a declaration: sending it would write a broken
+                    // `[workspaces]` entry the kernel then fails to resolve.
+                    let total = self.workspaces.len();
+                    let entries: Vec<(String, String, String)> = self
+                        .workspaces
+                        .iter()
+                        .filter(|(n, p, _)| !n.trim().is_empty() && !p.trim().is_empty())
+                        .map(|(n, p, m)| (n.trim().to_string(), p.trim().to_string(), m.clone()))
+                        .collect();
+                    if entries.len() < total && !self.ws_drop_confirmed {
+                        // The first `s` only warns. Saving right away would
+                        // close the editor and let the success event overwrite
+                        // this message before it could be read — the operator
+                        // would be told the save succeeded and never learn a
+                        // row was dropped. Keeping them in the editor on the
+                        // status line that paints it makes the warning a
+                        // confirmation step instead (#7835 review).
+                        self.ws_drop_confirmed = true;
+                        self.status_msg = crate::i18n::t("tui-agents-workspaces-row-dropped");
+                        return AgentAction::Continue;
+                    }
+                    return AgentAction::UpdateWorkspaces {
+                        id: detail.id.clone(),
+                        workspaces: entries,
+                        generation: self.ws_generation,
+                    };
+                }
+                self.sub = AgentSubScreen::AgentDetail;
+            }
+            _ => {}
+        }
+        AgentAction::Continue
+    }
+
     fn handle_edit_mcp_servers(&mut self, key: KeyEvent) -> AgentAction {
         let len = self.available_mcp.len();
         match key.code {
@@ -1277,6 +1563,10 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut AgentSelectState) {
             draw_edit_model_routing(f, area, state);
             return;
         }
+        AgentSubScreen::EditWorkspaces => {
+            draw_edit_workspaces(f, area, state);
+            return;
+        }
         _ => {}
     }
 
@@ -1287,7 +1577,8 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut AgentSelectState) {
         | AgentSubScreen::EditMcpServers
         | AgentSubScreen::EditChannels
         | AgentSubScreen::EditModelParams
-        | AgentSubScreen::EditModelRouting => unreachable!(),
+        | AgentSubScreen::EditModelRouting
+        | AgentSubScreen::EditWorkspaces => unreachable!(),
         AgentSubScreen::CreateMethod => crate::i18n::t("tui-agents-title-create-method"),
         AgentSubScreen::TemplatePicker => crate::i18n::t("tui-agents-title-templates"),
         AgentSubScreen::CustomName => crate::i18n::t("tui-agents-title-custom-name"),
@@ -1887,6 +2178,55 @@ fn draw_mcp_select(f: &mut Frame, area: Rect, state: &AgentSelectState) {
         state.mcp_cursor,
         &crate::i18n::t("tui-agents-hints-mcp"),
     );
+}
+
+fn draw_edit_workspaces(f: &mut Frame, area: Rect, state: &AgentSelectState) {
+    let mut lines: Vec<Line> = vec![Line::from(Span::styled(
+        crate::i18n::t("tui-agents-workspaces-help"),
+        Style::default().fg(theme::TEXT_SECONDARY),
+    ))];
+    for (i, (name, path, mode)) in state.workspaces.iter().enumerate() {
+        let marker = if i == state.ws_cursor { ">" } else { " " };
+        let mut spans = vec![Span::styled(
+            format!("{} {:<16} {:<28} {}", marker, name, path, mode),
+            if i == state.ws_cursor {
+                Style::default().fg(theme::ACCENT)
+            } else {
+                Style::default()
+            },
+        )];
+        if let Some((row, field)) = state.ws_editing {
+            if row == i {
+                spans.push(Span::styled(
+                    format!("  [{}]", ["name", "path", "mode"][field as usize]),
+                    Style::default().fg(theme::ACCENT),
+                ));
+                spans.push(Span::styled(
+                    format!(" {}", state.ws_buf),
+                    Style::default().add_modifier(Modifier::BOLD),
+                ));
+            }
+        }
+        lines.push(Line::from(spans));
+    }
+    if state.workspaces.is_empty() {
+        let key = if state.ws_loaded {
+            "tui-agents-workspaces-empty"
+        } else {
+            "tui-agents-workspaces-loading"
+        };
+        lines.push(Line::from(crate::i18n::t(key)));
+    }
+    // A failed fetch, a rejected save (duplicate name), or a dropped
+    // half-typed row all land here via `status_msg` — without this the
+    // operator saw nothing distinguish a reject from a save (#7835).
+    if !state.status_msg.is_empty() {
+        lines.push(Line::from(Span::styled(
+            state.status_msg.clone(),
+            Style::default().fg(theme::YELLOW),
+        )));
+    }
+    f.render_widget(Paragraph::new(lines), area);
 }
 
 fn draw_edit_allowlist(f: &mut Frame, area: Rect, state: &AgentSelectState) {
@@ -2529,5 +2869,465 @@ mod tests {
             "the profile list must still render below the warning.\nrendered:\n{}",
             rows.join("\n")
         );
+    }
+}
+
+#[cfg(test)]
+mod workspaces_tests {
+    use super::*;
+    use ratatui::backend::TestBackend;
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use ratatui::Terminal;
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    /// What a terminal sends for Shift+Tab: crossterm reports the shifted
+    /// tab as its own code, carrying the modifier rather than a plain `Tab`.
+    fn back_tab() -> KeyEvent {
+        KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT)
+    }
+
+    /// Renders `draw_edit_workspaces` to an in-memory buffer and returns its
+    /// text content, so a test can assert on what an operator would actually
+    /// see rather than on internal state alone (#7835).
+    fn rendered_edit_workspaces(state: &AgentSelectState) -> String {
+        let backend = TestBackend::new(120, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| draw_edit_workspaces(f, f.area(), state))
+            .unwrap();
+        terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect()
+    }
+
+    fn editing_state() -> AgentSelectState {
+        let mut state = AgentSelectState::new();
+        state.sub = AgentSubScreen::EditWorkspaces;
+        state.ws_loaded = true;
+        state.detail = Some(AgentDetail {
+            id: "agent-1".to_string(),
+            name: String::new(),
+            state: String::new(),
+            model: String::new(),
+            provider: String::new(),
+            created: String::new(),
+            last_active: String::new(),
+            tags: vec![],
+            capabilities: vec![],
+            parent: None,
+            children: vec![],
+            skills: vec![],
+            skills_mode: String::new(),
+            mcp_servers: vec![],
+            mcp_servers_mode: String::new(),
+            channels: vec![],
+            channels_mode: String::new(),
+        });
+        state
+    }
+
+    #[test]
+    fn adding_a_folder_focuses_the_name_field() {
+        let mut state = editing_state();
+        state.handle_key(key(KeyCode::Char('a')));
+        assert_eq!(state.workspaces.len(), 1);
+        assert!(matches!(state.ws_editing, Some((0, 0))));
+    }
+
+    #[test]
+    fn typing_then_tab_fills_name_and_path() {
+        let mut state = editing_state();
+        state.handle_key(key(KeyCode::Char('a')));
+        for c in "library".chars() {
+            state.handle_key(key(KeyCode::Char(c)));
+        }
+        state.handle_key(key(KeyCode::Tab));
+        assert_eq!(state.workspaces[0].0, "library");
+        assert!(matches!(state.ws_editing, Some((0, 1))));
+        for c in "shared/library".chars() {
+            state.handle_key(key(KeyCode::Char(c)));
+        }
+        state.handle_key(key(KeyCode::Tab));
+        assert_eq!(state.workspaces[0].1, "shared/library");
+    }
+
+    #[test]
+    fn back_tab_steps_back_and_keeps_what_was_typed() {
+        let mut state = editing_state();
+        state.handle_key(key(KeyCode::Char('a')));
+        for c in "library".chars() {
+            state.handle_key(key(KeyCode::Char(c)));
+        }
+        state.handle_key(key(KeyCode::Tab));
+        for c in "shared/library".chars() {
+            state.handle_key(key(KeyCode::Char(c)));
+        }
+        state.handle_key(back_tab());
+
+        assert_eq!(state.workspaces[0].0, "library");
+        assert_eq!(state.workspaces[0].1, "shared/library");
+        assert!(matches!(state.ws_editing, Some((0, 0))));
+        // The buffer belongs to the field focus landed on, not to the one
+        // it just committed: leaving the path in it would overwrite the
+        // name on the next keystroke.
+        assert_eq!(state.ws_buf, "library");
+    }
+
+    #[test]
+    fn back_tab_on_the_first_field_stays_on_it() {
+        let mut state = editing_state();
+        state.handle_key(key(KeyCode::Char('a')));
+        assert!(matches!(state.ws_editing, Some((0, 0))));
+
+        state.handle_key(back_tab());
+
+        // `Tab` off the last field means "done", so there is no matching
+        // "not done yet" to step back into — staying put is the only answer
+        // that does not close an editor the operator is still typing in.
+        assert!(matches!(state.ws_editing, Some((0, 0))));
+    }
+
+    #[test]
+    fn deleting_removes_the_selected_row() {
+        let mut state = editing_state();
+        state.workspaces.push(("a".into(), "p".into(), "rw".into()));
+        state.workspaces.push(("b".into(), "q".into(), "r".into()));
+        state.ws_cursor = 1;
+        state.handle_key(key(KeyCode::Char('d')));
+        assert_eq!(state.workspaces.len(), 1);
+        assert_eq!(state.workspaces[0].0, "a");
+    }
+
+    #[test]
+    fn save_emits_only_complete_rows() {
+        let mut state = editing_state();
+        state
+            .workspaces
+            .push(("library".into(), "shared/library".into(), "rw".into()));
+        state.workspaces.push(("".into(), "".into(), "rw".into()));
+        // The first `s` only warns (see the confirmation test below); the
+        // second one is the confirmed save.
+        assert!(matches!(
+            state.handle_key(key(KeyCode::Char('s'))),
+            AgentAction::Continue
+        ));
+        match state.handle_key(key(KeyCode::Char('s'))) {
+            AgentAction::UpdateWorkspaces { id, workspaces, .. } => {
+                assert_eq!(id, "agent-1");
+                assert_eq!(workspaces.len(), 1);
+                assert_eq!(workspaces[0].0, "library");
+            }
+            other => panic!("expected update, got {other:?}"),
+        }
+    }
+
+    /// The first `s` that would drop a half-filled row only warns and stays in
+    /// the editor, where `draw_edit_workspaces` paints the warning. Saving on
+    /// that same keypress let `AgentWorkspacesUpdated` replace `status_msg`
+    /// with the success message while the request was still in flight, so the
+    /// operator was told the save succeeded and never learned a row was left
+    /// out (#7835 review).
+    #[test]
+    fn save_waits_for_a_confirming_press_before_dropping_a_half_typed_row() {
+        let mut state = editing_state();
+        state.workspaces.push((
+            "library".into(),
+            "shared/library".into(),
+            "readwrite".into(),
+        ));
+        state
+            .workspaces
+            .push(("half".into(), "".into(), "readwrite".into()));
+
+        assert!(
+            matches!(
+                state.handle_key(key(KeyCode::Char('s'))),
+                AgentAction::Continue
+            ),
+            "the first `s` must not send a table with a row about to be dropped"
+        );
+        assert!(
+            !state.status_msg.is_empty(),
+            "the operator must be told the row would be dropped"
+        );
+        let rendered = rendered_edit_workspaces(&state);
+        assert!(
+            rendered.contains(state.status_msg.trim()),
+            "the warning must be readable on the editor before the save: {rendered:?}"
+        );
+
+        match state.handle_key(key(KeyCode::Char('s'))) {
+            AgentAction::UpdateWorkspaces { workspaces, .. } => {
+                assert_eq!(
+                    workspaces.len(),
+                    1,
+                    "the confirming press saves the complete row"
+                );
+            }
+            other => panic!("expected the confirmed update, got {other:?}"),
+        }
+    }
+
+    /// A confirmation describes one exact table. Changing the rows (here by
+    /// deleting the dropped one) invalidates it, so the next `s` is judged
+    /// against what is on screen rather than an acknowledgement of something
+    /// else.
+    #[test]
+    fn editing_the_rows_resets_the_drop_confirmation() {
+        let mut state = editing_state();
+        state.workspaces.push((
+            "library".into(),
+            "shared/library".into(),
+            "readwrite".into(),
+        ));
+        state
+            .workspaces
+            .push(("half".into(), "".into(), "readwrite".into()));
+        assert!(matches!(
+            state.handle_key(key(KeyCode::Char('s'))),
+            AgentAction::Continue
+        ));
+
+        state.ws_cursor = 1;
+        state.handle_key(key(KeyCode::Char('d')));
+
+        match state.handle_key(key(KeyCode::Char('s'))) {
+            AgentAction::UpdateWorkspaces { workspaces, .. } => {
+                assert_eq!(workspaces.len(), 1);
+                assert_eq!(workspaces[0].0, "library");
+            }
+            other => panic!("expected a direct update after the rows changed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn save_trims_the_values_it_emits_and_reports_dropped_rows() {
+        let mut state = editing_state();
+        state.workspaces.push((
+            "library ".into(),
+            " shared/library".into(),
+            "readwrite".into(),
+        ));
+        state
+            .workspaces
+            .push(("half".into(), "".into(), "readwrite".into()));
+        // First press: the warning, still painted in the editor.
+        assert!(matches!(
+            state.handle_key(key(KeyCode::Char('s'))),
+            AgentAction::Continue
+        ));
+        assert!(
+            !state.status_msg.is_empty(),
+            "dropping a half-typed row must surface a message, not fail silently"
+        );
+        let rendered = rendered_edit_workspaces(&state);
+        assert!(
+            rendered.contains(state.status_msg.trim()),
+            "the status message must actually be painted, not just set: {rendered:?}"
+        );
+
+        // Confirming press: the trimmed values are what gets sent.
+        match state.handle_key(key(KeyCode::Char('s'))) {
+            AgentAction::UpdateWorkspaces { workspaces, .. } => {
+                assert_eq!(workspaces.len(), 1);
+                assert_eq!(
+                    workspaces[0].0, "library",
+                    "the emitted name must be trimmed"
+                );
+                assert_eq!(
+                    workspaces[0].1, "shared/library",
+                    "the emitted path must be trimmed"
+                );
+            }
+            other => panic!("expected update, got {other:?}"),
+        }
+    }
+
+    /// A row that is not a half-typed edit but still cannot become a
+    /// declaration is refused outright rather than sent. Sending it is the
+    /// worse outcome: the kernel answers `resolve_workspace_decl` with a
+    /// `WARN` and a `None`, so the PATCH returns 200, the TUI reports the
+    /// folders saved, and the agent silently never gets the folder.
+    #[test]
+    fn save_refuses_a_row_whose_name_or_path_the_kernel_would_skip() {
+        for (name, path) in [
+            ("library", "../shared"),
+            ("library", "/srv/data"),
+            ("lib/rary", "shared/library"),
+        ] {
+            let mut state = editing_state();
+            state
+                .workspaces
+                .push((name.into(), path.into(), "readwrite".into()));
+            match state.handle_key(key(KeyCode::Char('s'))) {
+                AgentAction::Continue => {}
+                other => panic!("{name:?} + {path:?} must not be sent, got {other:?}"),
+            }
+            assert!(
+                !state.status_msg.is_empty(),
+                "{name:?} + {path:?} must surface a message, not fail silently"
+            );
+            assert!(
+                state.status_msg.contains(name.trim()),
+                "the message must name the offending folder, not print a Fluent placeholder: {:?}",
+                state.status_msg
+            );
+            // The status line is clipped to the panel width, so comparing the
+            // whole message would fail for the longer locales; a leading
+            // fragment is enough to prove it was painted and not merely set.
+            let painted: String = state.status_msg.trim().chars().take(24).collect();
+            let rendered = rendered_edit_workspaces(&state);
+            assert!(
+                rendered.contains(&painted),
+                "the status message must actually be painted, not just set: {rendered:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn entering_edit_seeds_the_buffer_so_committing_untouched_keeps_the_value() {
+        let mut state = editing_state();
+        state
+            .workspaces
+            .push(("library".into(), "shared/library".into(), "readonly".into()));
+        state.handle_key(key(KeyCode::Enter)); // open the name field
+        state.handle_key(key(KeyCode::Enter)); // commit name untouched, advance to path
+        state.handle_key(key(KeyCode::Enter)); // commit path untouched, advance to mode
+        state.handle_key(key(KeyCode::Enter)); // commit mode untouched, close the row
+
+        assert_eq!(
+            state.workspaces[0],
+            (
+                "library".to_string(),
+                "shared/library".to_string(),
+                "readonly".to_string()
+            ),
+            "committing every field without retyping must not blank any of them"
+        );
+    }
+
+    #[test]
+    fn retyping_the_displayed_readonly_value_does_not_escalate_to_readwrite() {
+        let mut state = editing_state();
+        state
+            .workspaces
+            .push(("library".into(), "shared/library".into(), "readonly".into()));
+        state.handle_key(key(KeyCode::Enter)); // field 0 (name)
+        state.handle_key(key(KeyCode::Tab)); // field 1 (path)
+        state.handle_key(key(KeyCode::Tab)); // field 2 (mode), buf seeded "readonly"
+        for _ in 0.."readonly".len() {
+            state.handle_key(key(KeyCode::Backspace));
+        }
+        for c in "readonly".chars() {
+            state.handle_key(key(KeyCode::Char(c)));
+        }
+        state.handle_key(key(KeyCode::Enter));
+
+        assert_eq!(
+            state.workspaces[0].2, "readonly",
+            "retyping the exact value the row already displays must not grant read-write"
+        );
+    }
+
+    #[test]
+    fn unrecognized_mode_input_keeps_the_previous_value() {
+        let mut state = editing_state();
+        state
+            .workspaces
+            .push(("library".into(), "shared/library".into(), "readonly".into()));
+        state.handle_key(key(KeyCode::Enter));
+        state.handle_key(key(KeyCode::Tab));
+        state.handle_key(key(KeyCode::Tab));
+        for _ in 0.."readonly".len() {
+            state.handle_key(key(KeyCode::Backspace));
+        }
+        for c in "garbage".chars() {
+            state.handle_key(key(KeyCode::Char(c)));
+        }
+        state.handle_key(key(KeyCode::Enter));
+
+        assert_eq!(
+            state.workspaces[0].2, "readonly",
+            "unrecognized mode input must not default to the more permissive read-write"
+        );
+        assert!(
+            state.status_msg.contains("garbage"),
+            "refusing the mode must name the refused value, not silently discard it: {:?}",
+            state.status_msg
+        );
+        let painted: String = state.status_msg.trim().chars().take(24).collect();
+        let rendered = rendered_edit_workspaces(&state);
+        assert!(
+            rendered.contains(&painted),
+            "the refusal must be painted where the operator is looking: {rendered:?}"
+        );
+    }
+
+    /// `w` resets the editor's rows and cursor but used to leave `status_msg`
+    /// alone, so the freshly fetched table opened under a message about the
+    /// previous agent (or about some other pane of the tab) — the editor is
+    /// the only surface that paints `status_msg` here.
+    #[test]
+    fn opening_the_editor_clears_a_stale_status_message() {
+        let mut state = editing_state();
+        state.status_msg = "stale message".to_string();
+        state.sub = AgentSubScreen::AgentDetail;
+
+        state.handle_key(key(KeyCode::Char('w')));
+
+        assert!(
+            state.status_msg.is_empty(),
+            "a message from before the fetch must not hang over the new table: {:?}",
+            state.status_msg
+        );
+        assert!(matches!(state.sub, AgentSubScreen::EditWorkspaces));
+    }
+
+    #[test]
+    fn editor_ignores_every_key_but_esc_until_loaded() {
+        let mut state = editing_state();
+        // A non-empty `workspaces` with `ws_loaded == false` isn't reachable
+        // through the normal `w` reset, but proves the gate itself — not an
+        // empty vector — is what blocks `Enter`/`'d'` below. With an empty
+        // vector both are already no-ops regardless of the gate
+        // (`if len > 0`), so that alone wouldn't distinguish the two.
+        state.workspaces.push((
+            "library".into(),
+            "shared/library".into(),
+            "readwrite".into(),
+        ));
+        state.ws_loaded = false;
+
+        state.handle_key(key(KeyCode::Char('a')));
+        assert_eq!(
+            state.workspaces.len(),
+            1,
+            "adding a row before the fetch lands must not touch the table"
+        );
+        assert!(matches!(
+            state.handle_key(key(KeyCode::Char('s'))),
+            AgentAction::Continue
+        ));
+        state.handle_key(key(KeyCode::Char('d')));
+        assert_eq!(
+            state.workspaces.len(),
+            1,
+            "'d' must not delete a row while the fetch hasn't landed"
+        );
+        state.handle_key(key(KeyCode::Enter));
+        assert!(
+            state.ws_editing.is_none(),
+            "Enter must not open a field for editing while the fetch hasn't landed"
+        );
+
+        state.handle_key(key(KeyCode::Esc));
+        assert!(matches!(state.sub, AgentSubScreen::AgentDetail));
     }
 }

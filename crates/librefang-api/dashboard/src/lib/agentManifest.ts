@@ -1286,9 +1286,15 @@ export const parseManifestToml = (toml: string): ParseResult | ParseError => {
   // so e.g. Qwen's enable_memory survives a TOML→Form→TOML round-trip.
   // `undefined` is the absent key (inherit the global fallback_providers → null);
   // a declared empty array is the disable-all statement and must stay `[]` (#7749).
+  // A present-but-non-array value is neither: the daemon's `toml::from_str`
+  // rejects it, and reading it as disable-all would rewrite `[]` on the next
+  // save — flipping invalid-but-unedited input into a hard deny (#7835 review).
+  if (parsed.fallback_models !== undefined && !Array.isArray(parsed.fallback_models)) {
+    return { ok: false, message: "fallback_models_not_an_array" };
+  }
   form.fallback_models = parsed.fallback_models === undefined
     ? null
-    : (parsed.fallback_models as unknown[])
+    : parsed.fallback_models
         .filter(isTomlTable)
         .map((fb) => ({
       _uid: generateParsedUid(),

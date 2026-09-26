@@ -1265,6 +1265,14 @@ pub async fn list_agent_runtime(
 // The legacy `PUT /api/agents/{id}/update` endpoint was removed in #3748 —
 // callers should send `{"manifest_toml": "..."}` to `PATCH /api/agents/{id}`
 // instead, which now also handles full-manifest replacement.
+//
+// That replacement is whole-file and carries no version or ETag
+// precondition: a caller doing read-modify-write over `GET
+// /api/agents/{id}/manifest` + this PATCH (the TUI shared-folders editor,
+// #7835) can overwrite a manifest written between its read and write with a
+// stale base. Surfaces adopting the pattern inherit that limitation until
+// the endpoint grows a manifest generation counter (also the natural hook
+// for #8047's manifest history work).
 #[utoipa::path(
     patch,
     path = "/api/agents/{id}",

@@ -93,24 +93,56 @@ export function isMcpServerGranted(
  * - `granted` / `grantable` — the grant is a per-server pin in `mcp_servers`, so the card toggles it.
  * - `wildcard` — the grant comes from `mcp_servers = ["*"]`; revoking it means editing the wildcard, not this card.
  * - `hard-disabled` — `tools_disabled` or `mcp_disabled` makes the kernel skip MCP entirely, so a staged grant would arm a save that changes nothing.
+ * - `hand-controlled` — the agent derives from a Hand, and `set_agent_mcp_servers` rejects those outright (`agent_state.rs`: "Hand-derived agent MCP servers are controlled by the Hand definition"). The card must not stage a write the endpoint can only answer with a 400.
  *
  * The three branches that render these cards (the all-tools grid, and the assigned/available lists of the allowlist view) each derived this inline and disagreed, which is how a card ended up inert, clickable and labelled "click to assign" all at once (#7749 review).
  */
-export type McpGroupCardState = "granted" | "grantable" | "wildcard" | "hard-disabled";
+export type McpGroupCardState =
+  | "granted"
+  | "grantable"
+  | "wildcard"
+  | "hard-disabled"
+  | "hand-controlled";
 
 export function mcpGroupCardState(args: {
   granted: boolean;
   mode: McpGrantMode;
   hardDisabled: boolean;
+  /** The agent is hand-derived; its MCP grant belongs to the Hand definition, not this editor. */
+  handControlled?: boolean;
 }): McpGroupCardState {
+  if (args.handControlled) return "hand-controlled";
   if (args.hardDisabled) return "hard-disabled";
   if (args.mode === "all") return "wildcard";
   return args.granted ? "granted" : "grantable";
 }
 
-/** Whether clicking the card stages a change. The two inert states must not arm a save. */
+/** Whether clicking the card stages a change. The inert states (`wildcard`, `hard-disabled`, `hand-controlled`) must not arm a save. */
 export function isMcpGroupCardActionable(state: McpGroupCardState): boolean {
   return state === "granted" || state === "grantable";
+}
+
+/**
+ * Whether a Tools-tab group counts as assigned to the agent.
+ *
+ * For a builtin group the active tool count is the answer. For an MCP group it
+ * is not, and reading it as if it were is what put a granted server under
+ * "Available": `isToolActive` also requires each tool to survive
+ * `tool_allowlist` / `tool_blocklist`, so a granted server whose tools are all
+ * filtered has zero active tools. The card then offered a `+`, whose handler
+ * (`isMcpGroupCardActionable("granted")` is true, correctly — the assigned list
+ * is where you click to revoke) staged a *revoke*. The server also vanished
+ * from "Assigned", so the grant went unmentioned on the whole tab.
+ */
+export function isGroupAssigned(args: {
+  /** Whether the group is an MCP server rather than a builtin capability group. */
+  isMcp: boolean;
+  /** `isMcpGroupGranted` — the grant is a per-server pin in `mcp_servers`. */
+  granted: boolean;
+  /** Tools in the group that are active for display, allow/blocklist included. */
+  activeTools: number;
+}): boolean {
+  return args.isMcp ? args.granted : args.activeTools > 0;
 }
 
 /**
