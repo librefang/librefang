@@ -7,7 +7,8 @@ use crate::MeteringSubsystemApi;
 use futures::stream;
 use librefang_channels::types::{ChannelAdapter, ChannelContent, ChannelType, ChannelUser};
 use librefang_types::approval::{
-    AgentNotificationRule, ApprovalRequest, NotificationConfig, NotificationTarget, RiskLevel,
+    AgentNotificationRule, ApprovalPolicy, ApprovalRequest, NotificationConfig, NotificationTarget,
+    RiskLevel, SecondFactor,
 };
 use librefang_types::config::DefaultModelConfig;
 use std::collections::HashMap;
@@ -644,6 +645,74 @@ async fn test_interactive_approval_notification_reaches_a_named_instance_8055() 
     assert!(
         sent[0].contains("[Approve]") && sent[0].contains("[Reject]"),
         "the interactive path must be taken, not the buttonless plain-text fallback: {sent:?}"
+    );
+
+    kernel.shutdown();
+}
+
+/// `SecondFactor::Both` requires a code on tool approvals exactly as `Totp`
+/// does, so the interactive notification must ask for it — and must not offer
+/// an Approve button.
+///
+/// The branch this exercises reads `ApprovalManager::requires_totp()`, which
+/// compared `second_factor` against `Totp` alone and therefore answered `false`
+/// for `Both`. The approver got the plain escalation text plus an `[Approve]`
+/// button, pressed it, and `resolve` then rejected the approval with "TOTP code
+/// required for approval (second_factor = totp)" — a button inviting an action
+/// that cannot succeed, on the one notification whose entire purpose is that
+/// decision.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_interactive_approval_notification_asks_for_a_code_when_second_factor_is_both() {
+    let dir = tempfile::tempdir().unwrap();
+    let home_dir = dir.path().to_path_buf();
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        approval: librefang_types::approval::ApprovalPolicy {
+            second_factor: librefang_types::approval::SecondFactor::Both,
+            ..Default::default()
+        },
+        ..KernelConfig::default()
+    };
+    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+
+    let adapter = Arc::new(RecordingChannelAdapter::new("slack"));
+    let sent = adapter.sent.clone();
+    kernel
+        .mesh
+        .channel_adapters
+        .insert("slack".to_string(), adapter);
+
+    kernel
+        .push_approval_interactive(
+            &NotificationTarget {
+                channel_type: "slack".to_string(),
+                recipient: "C0BN6UAQ75M".to_string(),
+                thread_id: None,
+            },
+            "agent wants to run `file_write`",
+            "abcdef1234",
+        )
+        .await;
+
+    let sent = sent.lock().unwrap().clone();
+    assert_eq!(
+        sent.len(),
+        1,
+        "the notification must be delivered exactly once: {sent:?}"
+    );
+    assert!(
+        sent[0].contains("TOTP required. Reply: /approve abcdef12 <6-digit-code>"),
+        "second_factor = both verifies a code on approvals, so the notification must ask for it: {sent:?}"
+    );
+    assert!(
+        !sent[0].contains("[Approve]"),
+        "no Approve button may be offered when the code has to be typed — `resolve` rejects that approval: {sent:?}"
+    );
+    assert!(
+        sent[0].contains("[Reject]"),
+        "the Reject button must still be offered: {sent:?}"
     );
 
     kernel.shutdown();
@@ -19048,6 +19117,117 @@ fn boot_warns_that_a_non_local_tool_exec_backend_does_not_route_tool_calls_8221(
     );
 
     kernel.shutdown();
+}
+
+/// Every `second_factor` other than `none` promises a TOTP code on some surface, and with nothing enrolled the daemon serves that surface without one — silently.
+///
+/// `Login` belongs in this list for the same reason as the other two, and it is the variant whose absence costs the most: it is the dashboard login that verifies the code (`server.rs`, under `requires_login_totp()`), and when no secret is confirmed the check is skipped outright, so an operator who set `second_factor = "login"` is back to a password-only login with a clean boot and no line anywhere saying so.
+/// `Both` covers that surface and the approval surface, and had the same silence.
+/// Only `Totp` ever produced the warning, because the check compared against that variant alone.
+///
+/// The warning must also be exact about what happens after it is read, because the surfaces diverge: the login skips the check and asks for no code, while an approval that demands one is rejected with "TOTP code required for approval" and fails closed.
+/// A line claiming "no code is ever asked for" of both is false for the approval path, so each variant is asserted against what it must say and what it must not.
+#[test]
+fn boot_warns_for_every_second_factor_that_demands_a_code() {
+    // Each variant, the fragments the warning has to render for it, and the
+    // fragments it must not, because they describe the other surface and would
+    // misstate this variant's consequence.
+    // Asserting on the rendered text rather than on a predicate, for the reason
+    // the #8221 test above gives: the text is the deliverable, and a line that
+    // does not say which surface will run without a code — or says the wrong
+    // thing about it — leaves the operator to work out what they lost.
+    let cases = [
+        (
+            SecondFactor::Totp,
+            vec![
+                "Tool approvals fail closed",
+                "TOTP code required for approval",
+            ],
+            vec!["no code is ever asked for"],
+        ),
+        (
+            SecondFactor::Login,
+            vec![
+                "Dashboard login skips the check",
+                "no code is ever asked for",
+            ],
+            vec!["fail closed", "TOTP code required for approval"],
+        ),
+        (
+            SecondFactor::Both,
+            vec![
+                "Dashboard login skips the check",
+                "no code is ever asked for",
+                "Tool approvals fail closed",
+                "TOTP code required for approval",
+            ],
+            vec![],
+        ),
+    ];
+
+    let mut failures = Vec::new();
+
+    for (second_factor, expected_fragments, forbidden_fragments) in cases {
+        let tmp = tempfile::tempdir().unwrap();
+        let home_dir = tmp.path().join("librefang-second-factor-warning-test");
+        std::fs::create_dir_all(&home_dir).unwrap();
+        let config = KernelConfig {
+            home_dir: home_dir.clone(),
+            data_dir: home_dir.join("data"),
+            approval: ApprovalPolicy {
+                second_factor,
+                ..Default::default()
+            },
+            ..KernelConfig::default()
+        };
+
+        let logs = CapturedLogs::new();
+        let kernel = {
+            let _g = logs.install();
+            LibreFangKernel::boot_with_config(config).expect(
+                "a configured second factor with no enrollment is a misconfiguration to warn \
+                 about, not a boot failure",
+            )
+        };
+
+        let captured = logs.text();
+        if !captured.contains("not enrolled/confirmed") {
+            failures.push(format!("{second_factor:?}: boot said nothing at all"));
+            kernel.shutdown();
+            continue;
+        }
+        for fragment in expected_fragments {
+            if !captured.contains(fragment) {
+                failures.push(format!(
+                    "{second_factor:?}: the warning never says {fragment:?}"
+                ));
+            }
+        }
+        for fragment in forbidden_fragments {
+            if captured.contains(fragment) {
+                failures.push(format!(
+                    "{second_factor:?}: the warning says {fragment:?}, which is false for this \
+                     variant"
+                ));
+            }
+        }
+        // The line has to echo the value as it is written in `config.toml`, not
+        // the Rust variant name — an operator greps their config for what the
+        // warning quotes.
+        let configured = format!("second_factor = \"{}\"", second_factor.as_str());
+        if !captured.contains(&configured) {
+            failures.push(format!(
+                "{second_factor:?}: the warning does not quote {configured:?}"
+            ));
+        }
+
+        kernel.shutdown();
+    }
+
+    assert!(
+        failures.is_empty(),
+        "boot did not explain what a configured second factor leaves unprotected: {failures:#?}"
+    );
 }
 
 /// #8220: booting with `[docker] mode = "all"` must say out loud that agent tool calls still run on the daemon host.

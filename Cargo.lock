@@ -4496,6 +4496,7 @@ dependencies = [
  "opentelemetry",
  "opentelemetry-otlp",
  "opentelemetry_sdk",
+ "percent-encoding",
  "portable-pty",
  "psl",
  "rand 0.10.2",

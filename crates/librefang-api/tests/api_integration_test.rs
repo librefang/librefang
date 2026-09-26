@@ -3428,6 +3428,414 @@ async fn start_full_router_with_proactive(enabled: bool) -> FullRouterHarness {
     }
 }
 
+/// Boot the production router with a specific approval second-factor policy.
+///
+/// `second_factor` and `totp_tools` are the inputs to the question the auth
+/// rate limiter asks about `/api/approvals/{id}/approve`:
+/// `ApprovalPolicy::tool_requires_totp` short-circuits on the first and is
+/// narrowed per tool by the second, so with `none` (the shipped default) an
+/// approval verifies no code and there is nothing on that path to brute-force,
+/// while under `totp` only the tools inside `totp_tools` (or every tool, when
+/// the list is empty) do.
+async fn start_full_router_with_approval_policy(
+    second_factor: librefang_types::approval::SecondFactor,
+    totp_tools: Vec<String>,
+) -> FullRouterHarness {
+    let tmp = tempfile::tempdir().expect("Failed to create temp dir");
+
+    librefang_kernel::registry_sync::seed_registry_fixture_for_tests(tmp.path());
+
+    let config = KernelConfig {
+        home_dir: tmp.path().to_path_buf(),
+        data_dir: tmp.path().join("data"),
+        approval: librefang_types::approval::ApprovalPolicy {
+            second_factor,
+            totp_tools,
+            ..Default::default()
+        },
+        ..KernelConfig::default()
+    };
+
+    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+    let kernel = Arc::new(kernel);
+    kernel.set_self_handle();
+
+    let (app, state) = server::build_router(
+        kernel,
+        "127.0.0.1:0".parse().expect("listen addr should parse"),
+    )
+    .await;
+
+    FullRouterHarness {
+        app,
+        state,
+        _tmp: tmp,
+    }
+}
+
+/// POST to `uri` as a routable public caller from `peer`.
+///
+/// The `ConnectInfo` peer is deliberately not loopback: `auth_rate_limit_layer`
+/// exempts loopback callers carrying no forwarding header, so a request from
+/// 127.0.0.1 would never be metered and the tests below would pass for the
+/// wrong reason.
+///
+/// `peer` is a parameter rather than a constant because the per-IP bucket
+/// outlives a policy change: a test that flips the policy mid-run has to spend
+/// its phases from different addresses, or the earlier phase's count decides
+/// the later phase's answer.
+fn public_post(uri: &str, peer: [u8; 4]) -> Request<Body> {
+    let mut request = Request::builder()
+        .method("POST")
+        .uri(uri)
+        .header("content-type", "application/json")
+        .body(Body::from("{}"))
+        .unwrap();
+    request
+        .extensions_mut()
+        .insert(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+            peer, 41234,
+        ))));
+    request
+}
+
+/// Register a pending approval for `tool_name` and return its id, ready to be
+/// interpolated into an `/api/approvals/{id}/approve` path.
+///
+/// The gate is answered per request — the tool behind the id decides whether a
+/// code is verified — so the tests must post to a real pending request instead
+/// of the placeholder id they used while the answer was policy-wide.
+fn seed_pending_approval(harness: &FullRouterHarness, tool_name: &str) -> String {
+    let request = librefang_types::approval::ApprovalRequest {
+        id: uuid::Uuid::new_v4(),
+        agent_id: "test-agent".to_string(),
+        tool_name: tool_name.to_string(),
+        description: "test operation".to_string(),
+        action_summary: "test action".to_string(),
+        risk_level: librefang_types::approval::RiskLevel::High,
+        requested_at: chrono::Utc::now(),
+        timeout_secs: 60,
+        sender_id: None,
+        channel: None,
+        chat_id: None,
+        route_to: Vec::new(),
+        escalation_count: 0,
+        session_id: None,
+        tool_use_id: None,
+    };
+    let id = request.id;
+    harness
+        .state
+        .kernel
+        .approvals()
+        .submit_manual_request(request)
+        .expect("pending approval should register");
+    id.to_string()
+}
+
+/// The wiring half of the approvals rate-limit gate: under the shipped-default
+/// `second_factor = none`, a burst of approvals must not be answered with 429
+/// "Too many login attempts" — the reported symptom, since approving was
+/// spending the same per-IP bucket as `dashboard-login`.
+///
+/// `rate_limiter::tests` pins the middleware's decision given a predicate, and
+/// this pins the decision the production router reaches with a policy fixed at
+/// boot. What neither holds up is the *live* read — a `bool` captured while
+/// `server::build_router` runs satisfies both. That claim is
+/// `test_approvals_gate_follows_the_policy_flipped_at_runtime`'s, which flips
+/// the policy on a running router and is the only test here a boot snapshot
+/// fails.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_approvals_are_not_rate_limited_while_policy_requires_no_totp() {
+    let harness = start_full_router_with_approval_policy(
+        librefang_types::approval::SecondFactor::None,
+        Vec::new(),
+    )
+    .await;
+    let limit = harness
+        .state
+        .kernel
+        .config_ref()
+        .rate_limit
+        .auth_rate_limit_per_ip;
+    let approval_id = seed_pending_approval(&harness, "shell_exec");
+
+    // One request past the cap: this is the one an operator's dashboard used to
+    // answer with 429, then refuse for the rest of the fifteen-minute window.
+    for i in 0..=limit {
+        let resp = harness
+            .app
+            .clone()
+            .oneshot(public_post(
+                &format!("/api/approvals/{approval_id}/approve"),
+                [203, 0, 113, 77],
+            ))
+            .await
+            .unwrap();
+        assert_ne!(
+            resp.status(),
+            StatusCode::TOO_MANY_REQUESTS,
+            "approval {} of {} was 429'd while second_factor = none verifies no code",
+            i + 1,
+            limit + 1
+        );
+    }
+}
+
+/// The gate follows the approval policy **at request time**, and this is the
+/// only test here that says so: it flips the policy on a running router and
+/// watches the middleware change its mind, in both directions.
+///
+/// A `bool` captured while `server::build_router` ran satisfies every other test
+/// in this file and fails here, whichever value it captured: a snapshot of `none`
+/// never meters approvals after the policy turns `totp` on, and a snapshot of
+/// `totp` keeps metering after the operator turns the second factor back off —
+/// the lockout this change exists to remove. Neither is hypothetical:
+/// `POST /api/config/reload` swaps the whole policy through
+/// `ApprovalManager::update_policy` (`config_reload_ops.rs:205`) without
+/// rebuilding the router, so the live read is the only thing that keeps the gate
+/// agreeing with the config.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_approvals_gate_follows_the_policy_flipped_at_runtime() {
+    let harness = start_full_router_with_approval_policy(
+        librefang_types::approval::SecondFactor::None,
+        Vec::new(),
+    )
+    .await;
+    let limit = harness
+        .state
+        .kernel
+        .config_ref()
+        .rate_limit
+        .auth_rate_limit_per_ip;
+
+    /// Whether a full burst against `approval_id` from `peer` is metered.
+    /// `limit + 1` requests, so a bucket that is being spent is guaranteed to
+    /// trip.
+    async fn burst_is_metered(
+        harness: &FullRouterHarness,
+        approval_id: &str,
+        peer: [u8; 4],
+        limit: u32,
+    ) -> bool {
+        for _ in 0..=limit {
+            let resp = harness
+                .app
+                .clone()
+                .oneshot(public_post(
+                    &format!("/api/approvals/{approval_id}/approve"),
+                    peer,
+                ))
+                .await
+                .unwrap();
+            if resp.status() == StatusCode::TOO_MANY_REQUESTS {
+                return true;
+            }
+        }
+        false
+    }
+
+    let set_second_factor = |second_factor: librefang_types::approval::SecondFactor| {
+        let mut policy = harness.state.kernel.approvals().policy();
+        policy.second_factor = second_factor;
+        harness.state.kernel.approvals().update_policy(policy);
+    };
+
+    // A distinct peer per phase: the bucket is per IP and long-lived, so a
+    // phase that reused an address would inherit the previous phase's count.
+    // Each phase seeds its own pending request: the gate is answered per
+    // request, and a `none` phase resolves the request it posts to.
+    let none_phase = seed_pending_approval(&harness, "shell_exec");
+    assert!(
+        !burst_is_metered(&harness, &none_phase, [203, 0, 113, 101], limit).await,
+        "with second_factor = none no code is verified, so approvals must not be metered"
+    );
+
+    set_second_factor(librefang_types::approval::SecondFactor::Totp);
+    let totp_phase = seed_pending_approval(&harness, "shell_exec");
+    assert!(
+        burst_is_metered(&harness, &totp_phase, [203, 0, 113, 102], limit).await,
+        "after the policy is flipped to totp at runtime, the same burst must be metered"
+    );
+
+    set_second_factor(librefang_types::approval::SecondFactor::None);
+    let none_again_phase = seed_pending_approval(&harness, "shell_exec");
+    assert!(
+        !burst_is_metered(&harness, &none_again_phase, [203, 0, 113, 103], limit).await,
+        "after the policy is flipped back to none at runtime, the burst must stop being metered"
+    );
+}
+
+/// The control for the test above: the same burst against the same router, with
+/// only `second_factor` changed, must still trip the limiter.
+///
+/// Without this, the silence in the test above would be indistinguishable from
+/// an unreachable route or a dead meter — and it is also the regression guard
+/// for #4020, which put the approve path in the auth limiter because it accepts
+/// 6-digit codes.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_approvals_stay_rate_limited_while_policy_requires_totp() {
+    let harness = start_full_router_with_approval_policy(
+        librefang_types::approval::SecondFactor::Totp,
+        Vec::new(),
+    )
+    .await;
+    let limit = harness
+        .state
+        .kernel
+        .config_ref()
+        .rate_limit
+        .auth_rate_limit_per_ip;
+    let approval_id = seed_pending_approval(&harness, "shell_exec");
+
+    let mut last_status = StatusCode::OK;
+    let mut saw_429 = false;
+    for _ in 0..=limit {
+        let resp = harness
+            .app
+            .clone()
+            .oneshot(public_post(
+                &format!("/api/approvals/{approval_id}/approve"),
+                [203, 0, 113, 78],
+            ))
+            .await
+            .unwrap();
+        last_status = resp.status();
+        if last_status == StatusCode::TOO_MANY_REQUESTS {
+            saw_429 = true;
+            break;
+        }
+    }
+    assert!(
+        saw_429,
+        "approvals must stay metered while second_factor = totp verifies a code; \
+         {} requests (limit {limit}) all answered {last_status}",
+        limit + 1
+    );
+}
+
+/// The review's residual over-metering: a policy that requires TOTP only for
+/// the tools in `totp_tools` must meter exactly those tools' approvals. A tool
+/// outside the list verifies nothing, so a burst one request past the cap must
+/// stay under the bucket; a listed tool's burst must still trip it, which
+/// proves the meter is alive.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_approvals_meter_only_tools_inside_totp_tools() {
+    let harness = start_full_router_with_approval_policy(
+        librefang_types::approval::SecondFactor::Totp,
+        vec!["shell_exec".to_string()],
+    )
+    .await;
+    let limit = harness
+        .state
+        .kernel
+        .config_ref()
+        .rate_limit
+        .auth_rate_limit_per_ip;
+
+    let unlisted_id = seed_pending_approval(&harness, "file_write");
+    for i in 0..=limit {
+        let resp = harness
+            .app
+            .clone()
+            .oneshot(public_post(
+                &format!("/api/approvals/{unlisted_id}/approve"),
+                [203, 0, 113, 121],
+            ))
+            .await
+            .unwrap();
+        assert_ne!(
+            resp.status(),
+            StatusCode::TOO_MANY_REQUESTS,
+            "approval {} of {} was 429'd for a tool outside totp_tools, \
+             which verifies no code",
+            i + 1,
+            limit + 1
+        );
+    }
+
+    let listed_id = seed_pending_approval(&harness, "shell_exec");
+    let mut saw_429 = false;
+    for _ in 0..=limit {
+        let resp = harness
+            .app
+            .clone()
+            .oneshot(public_post(
+                &format!("/api/approvals/{listed_id}/approve"),
+                [203, 0, 113, 122],
+            ))
+            .await
+            .unwrap();
+        if resp.status() == StatusCode::TOO_MANY_REQUESTS {
+            saw_429 = true;
+            break;
+        }
+    }
+    assert!(
+        saw_429,
+        "an approval for a tool inside totp_tools must stay metered (limit {limit})"
+    );
+}
+
+/// The grace half of the review's residual: after a code-verified approval,
+/// the next approvals inside `totp_grace_period_secs` are code-free, so they
+/// must stop spending the login bucket even under `second_factor = totp`.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_approvals_stop_being_metered_inside_the_totp_grace_window() {
+    let harness = start_full_router_with_approval_policy(
+        librefang_types::approval::SecondFactor::Totp,
+        Vec::new(),
+    )
+    .await;
+    let limit = harness
+        .state
+        .kernel
+        .config_ref()
+        .rate_limit
+        .auth_rate_limit_per_ip;
+
+    // Open the grace window the way a code-verified approval does: resolve a
+    // pending request with `totp_verified = true`, under the same `api_admin`
+    // identity the approve handler resolves with.
+    let first_id = seed_pending_approval(&harness, "shell_exec");
+    harness
+        .state
+        .kernel
+        .approvals()
+        .resolve(
+            uuid::Uuid::parse_str(&first_id).expect("seeded id must be a uuid"),
+            librefang_types::approval::ApprovalDecision::Approved,
+            Some("api".to_string()),
+            true,
+            Some("api_admin"),
+        )
+        .expect("a code-verified approval must resolve");
+
+    // The same burst that trips the bucket outside grace must now stay under
+    // it: the middleware cannot see the body, and a request inside the window
+    // is code-free by construction.
+    let grace_id = seed_pending_approval(&harness, "shell_exec");
+    for i in 0..=limit {
+        let resp = harness
+            .app
+            .clone()
+            .oneshot(public_post(
+                &format!("/api/approvals/{grace_id}/approve"),
+                [203, 0, 113, 131],
+            ))
+            .await
+            .unwrap();
+        assert_ne!(
+            resp.status(),
+            StatusCode::TOO_MANY_REQUESTS,
+            "approval {} of {} was 429'd inside the grace window, \
+             where no code is demanded",
+            i + 1,
+            limit + 1
+        );
+    }
+}
+
 /// Build a GET request to `uri` and inject loopback `ConnectInfo` so the
 /// auth middleware treats it as a localhost caller (matching production
 /// dev-UX semantics). Without this, oneshot tests have no `ConnectInfo`
