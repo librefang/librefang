@@ -18,12 +18,20 @@
 //! request body is a faithful readout of the `SenderContext` the kernel resolved — a runtime
 //! assertion that compiles identically before and after the fix rather than a tautology over Rust
 //! types.
+//!
+//! A second, adjacent failure mode lives on the same surface: a request that asserts **no** sender
+//! (`{ message, … }`, the shape the dashboard's REST fallback posts) used to produce no
+//! `SenderContext` at all even under an authenticated bearer, so
+//! `resolve_user_tool_decision(.., None, None)` guest-gated the turn.
+//! `senderless_rest_caller_with_authenticated_credential_does_not_guest_gate_a_tool` pins the
+//! caller-attributed half end to end, over the tool gate rather than the prompt alone.
 
 use axum::Router;
 use librefang_api::middleware;
 use librefang_api::routes::{self, AppState};
 use librefang_testing::{MockKernelBuilder, TestAppState};
 use librefang_types::config::UserConfig;
+use librefang_types::user_policy::UserToolGate;
 use std::sync::Arc;
 use tower_http::cors::CorsLayer;
 
@@ -78,44 +86,99 @@ fn ollama_stub_catalog(base_url: &str) -> librefang_testing::CatalogSeed {
     (providers, models)
 }
 
+/// How the stub provider answers a turn.
+enum ProviderScript {
+    /// Every turn gets the same final `"ack"` answer.
+    Ack,
+    /// The first turn asks for a `memory_store` call — deliberately outside the guest gate's
+    /// read-only allowlist, so the pending-approval count is a faithful readout of which gate the
+    /// turn ran under — and the second turn answers.
+    ToolThenAnswer,
+}
+
+/// One harness user: `(name, role, api_key, channel_bindings)`, where every binding is a
+/// `(channel_type, platform_id)` pair — the tuple `AuthManager::identify` keys on.
+type HarnessUser<'a> = (&'a str, &'a str, &'a str, Vec<(&'a str, &'a str)>);
+
 /// Boot the agents router behind the real auth middleware, with RBAC users wired into both
 /// `KernelConfig.users` (so `AuthManager` resolves them) and `AuthState.user_api_keys` (so the
 /// middleware admits their bearer tokens and populates `AuthenticatedApiUser`).
 ///
-/// Each tuple is `(name, role, api_key)`.
-async fn start_harness(users: Vec<(&str, &str, &str)>) -> Harness {
+/// Each tuple is `(name, role, api_key, channel_bindings)`, where every binding is a
+/// `(channel_type, platform_id)` pair — the tuple `AuthManager::identify` keys on.
+async fn start_harness_with(users: Vec<HarnessUser<'_>>, script: ProviderScript) -> Harness {
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     let llm = MockServer::start().await;
-    Mock::given(method("POST"))
-        .and(path("/api/chat"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "model": "test-model",
-            "message": { "role": "assistant", "content": "ack" },
-            "done": true,
-            "done_reason": "stop",
-            "prompt_eval_count": 7,
-            "eval_count": 2,
-        })))
-        .mount(&llm)
-        .await;
+    match script {
+        ProviderScript::Ack => {
+            Mock::given(method("POST"))
+                .and(path("/api/chat"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "model": "test-model",
+                    "message": { "role": "assistant", "content": "ack" },
+                    "done": true,
+                    "done_reason": "stop",
+                    "prompt_eval_count": 7,
+                    "eval_count": 2,
+                })))
+                .mount(&llm)
+                .await;
+        }
+        ProviderScript::ToolThenAnswer => {
+            // Turn 1: the model asks to store a memory. `done_reason: "tool_calls"` is what the
+            // Ollama driver maps to `StopReason::ToolUse`.
+            Mock::given(method("POST"))
+                .and(path("/api/chat"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "model": "test-model",
+                    "message": {
+                        "role": "assistant",
+                        "content": "",
+                        "tool_calls": [{
+                            "function": {
+                                "name": "memory_store",
+                                "arguments": {"key": "note", "value": "remembered over REST"}
+                            }
+                        }]
+                    },
+                    "done": true,
+                    "done_reason": "tool_calls",
+                    "prompt_eval_count": 7,
+                    "eval_count": 2,
+                })))
+                .up_to_n_times(1)
+                .with_priority(1)
+                .mount(&llm)
+                .await;
+
+            // Turn 2: after the tool result, the model answers and the loop ends.
+            Mock::given(method("POST"))
+                .and(path("/api/chat"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "model": "test-model",
+                    "message": { "role": "assistant", "content": "stored." },
+                    "done": true,
+                    "done_reason": "stop",
+                    "prompt_eval_count": 7,
+                    "eval_count": 2,
+                })))
+                .with_priority(2)
+                .mount(&llm)
+                .await;
+        }
+    }
 
     let mut user_configs: Vec<UserConfig> = Vec::with_capacity(users.len());
     let mut api_user_records: Vec<middleware::ApiUserAuth> = Vec::with_capacity(users.len());
-    for (name, role_str, key) in &users {
+    for (name, role_str, key, bindings) in &users {
         let hash =
             librefang_api::password_hash::hash_password(key).expect("password hash should succeed");
-        // The victim owns a `telegram` binding. Before #7744 an HTTP body naming
-        // `channel_type = "telegram"` + `sender_id = VICTIM_PLATFORM_ID` resolved straight through
-        // `AuthManager::identify` to this user.
-        let mut channel_bindings = std::collections::HashMap::new();
-        if *name == "victim" {
-            channel_bindings.insert("telegram".to_string(), VICTIM_PLATFORM_ID.to_string());
-        }
-        if *name == "attacker" {
-            channel_bindings.insert("api".to_string(), ATTACKER_OWN_REST_ID.to_string());
-        }
+        let channel_bindings: std::collections::HashMap<String, String> = bindings
+            .iter()
+            .map(|(channel, platform_id)| ((*channel).to_string(), (*platform_id).to_string()))
+            .collect();
         user_configs.push(UserConfig {
             name: (*name).to_string(),
             role: (*role_str).to_string(),
@@ -194,6 +257,32 @@ async fn start_harness(users: Vec<(&str, &str, &str)>) -> Harness {
     }
 }
 
+/// [`start_harness_with`] under the fixed bindings the #7744 precedence tests were written against:
+/// the victim owns a `telegram` binding, the attacker their own documented `api` one, and every
+/// turn is answered with `"ack"`.
+async fn start_harness(users: Vec<(&str, &str, &str)>) -> Harness {
+    start_harness_with(
+        users
+            .into_iter()
+            .map(|(name, role, key)| {
+                let mut bindings: Vec<(&str, &str)> = Vec::new();
+                // Before #7744 an HTTP body naming `channel_type = "telegram"` +
+                // `sender_id = VICTIM_PLATFORM_ID` resolved straight through `AuthManager::identify`
+                // to this user.
+                if name == "victim" {
+                    bindings.push(("telegram", VICTIM_PLATFORM_ID));
+                }
+                if name == "attacker" {
+                    bindings.push(("api", ATTACKER_OWN_REST_ID));
+                }
+                (name, role, key, bindings)
+            })
+            .collect(),
+        ProviderScript::Ack,
+    )
+    .await
+}
+
 /// Spawn an agent authored by `author` using the root (Owner) key.
 ///
 /// `can_access_agent` scopes sub-Admin callers to agents whose `manifest.author` matches their
@@ -219,6 +308,36 @@ memory_read = ["*"]
 memory_write = ["self.*"]
 "#
     );
+    spawn_agent_with_manifest(h, &manifest).await
+}
+
+/// The manifest the sender-less RBAC turn spawns: `memory_store` is offered (and not on a global
+/// `[approval] require_approval` list), so whether the call prompts depends entirely on the
+/// sender's gate.
+fn rbac_turn_manifest(author: &str) -> String {
+    format!(
+        r#"
+name = "test-agent"
+version = "0.1.0"
+description = "Integration test agent"
+author = "{author}"
+module = "builtin:chat"
+
+[model]
+provider = "ollama"
+model = "test-model"
+system_prompt = "You are a test agent. Reply concisely."
+
+[capabilities]
+tools = ["memory_store", "file_read"]
+memory_read = ["*"]
+memory_write = ["self.*"]
+"#
+    )
+}
+
+/// Spawn an agent from an explicit manifest.
+async fn spawn_agent_with_manifest(h: &Harness, manifest: &str) -> String {
     let resp = reqwest::Client::new()
         .post(format!("{}/api/agents", h.base_url))
         .bearer_auth(ROOT_KEY)
@@ -409,5 +528,108 @@ async fn sub_admin_caller_may_assert_their_own_declared_binding() {
     assert!(
         prompts.contains(&format!("platform ID: {ATTACKER_OWN_REST_ID}")),
         "a caller asserting their own declared binding must keep it: {prompts}"
+    );
+}
+
+/// The pending approvals `tool_name` raised for `agent_id`, formatted for a failure message.
+///
+/// Scoped to the turn under test: a fresh harness should have none, but an unrelated background
+/// approval — if one were ever introduced — must not be read as this turn's gate decision.
+fn queued_approvals(h: &Harness, agent_id: &str, tool_name: &str) -> Vec<String> {
+    h.state
+        .kernel
+        .approvals()
+        .list_pending()
+        .into_iter()
+        .filter(|r| r.agent_id == agent_id && r.tool_name == tool_name)
+        .map(|r| {
+            format!(
+                "{} (sender {:?}, channel {:?})",
+                r.tool_name, r.sender_id, r.channel
+            )
+        })
+        .collect()
+}
+
+/// A sender-less REST POST from an authenticated credential is attributed to that caller, so the
+/// turn runs under the caller's own gate instead of the guest gate.
+///
+/// The dashboard's REST fallback posts `{ message, … }` with no `sender_id` — the shape the
+/// WebSocket handler covers for its own path — and `request_sender_context` used to return `None`
+/// for it, so `resolve_user_tool_decision(.., None, None)` landed on `guest_gate` and every tool
+/// outside its seven read-only names queued a human approval.
+/// `chatuser` is a registered `owner` carrying the documented `[[users]] channel_bindings.api`
+/// recipe, so the `memory_store` call the model asks for must EXECUTE and leave the queue empty.
+#[tokio::test(flavor = "multi_thread")]
+async fn senderless_rest_caller_with_authenticated_credential_does_not_guest_gate_a_tool() {
+    let h = start_harness_with(
+        vec![(
+            "chatuser",
+            "owner",
+            "chatuser-key",
+            vec![("api", "chatuser")],
+        )],
+        ProviderScript::ToolThenAnswer,
+    )
+    .await;
+    let agent_id = spawn_agent_with_manifest(&h, &rbac_turn_manifest("chatuser")).await;
+
+    let result = reqwest::Client::new()
+        .post(format!("{}/api/agents/{}/message", h.base_url, agent_id))
+        .bearer_auth("chatuser-key")
+        .timeout(std::time::Duration::from_secs(30))
+        .json(&serde_json::json!({ "message": "remember that the dashboard works" }))
+        .send()
+        .await;
+
+    // Asserted before the result is unwrapped: a guest-gated turn queues the deferred tool call
+    // instead of executing it, so the queue is the informative readout when the request cannot
+    // complete.
+    let queued = queued_approvals(&h, &agent_id, "memory_store");
+    assert!(
+        queued.is_empty(),
+        "a sender-less REST turn from an authenticated caller must execute the tool, not queue \
+         an approval; queued: {queued:?}; request result: {result:?}"
+    );
+    let resp = result.expect("the REST turn must complete instead of stalling on approval");
+    assert_eq!(resp.status().as_u16(), 200, "the REST turn must succeed");
+    let body = resp.text().await.expect("drain response body");
+    assert!(
+        body.contains("stored."),
+        "the final answer must reach the client: {body}"
+    );
+
+    let prompts = captured_prompts(&h).await;
+    assert!(
+        prompts.contains("platform ID: chatuser"),
+        "the turn must be attributed to the authenticated caller: {prompts}"
+    );
+    assert!(
+        prompts.contains("Stored value under key 'note'"),
+        "the memory_store call must have EXECUTED — its tool result is what the provider sees; \
+         a deferred approval would carry the approval message instead: {prompts}"
+    );
+    let requests = h
+        .llm
+        .received_requests()
+        .await
+        .expect("wiremock records requests");
+    assert_eq!(
+        requests.len(),
+        2,
+        "the tool must execute and the turn complete (tool call, then answer); prompts: {prompts}"
+    );
+
+    // The fix cannot become a bypass: the same booted kernel still guest-gates a sender pair the
+    // registry cannot resolve.
+    let guest = h.state.kernel.auth_manager().resolve_user_tool_decision(
+        "memory_store",
+        Some("unrecognised-id"),
+        Some("api"),
+        false,
+    );
+    assert!(
+        matches!(guest, UserToolGate::NeedsApproval { .. }),
+        "an unresolvable REST sender must keep the guest gate, got {guest:?}"
     );
 }

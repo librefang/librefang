@@ -601,6 +601,10 @@ const API_SENDER_CHANNEL: &str = "api";
 ///
 /// The precedence rule:
 ///
+/// - No sender asserted, but an authenticated caller that names a real `[[users]]` entry — the caller is the sender.
+///   The dashboard's own chat posts `{ message, … }` with no `sender_id`, so every turn it started arrived with no `SenderContext` at all; `resolve_user_tool_decision(.., None, None)` then falls to `guest_gate`, which admits only the seven read-only tools and routes everything else — `shell_exec` included — to human approval, whatever the global `require_approval` list says.
+///   Issue #3243 records that exact failure for the autonomous tick and repaired it with a synthetic channel sentinel; this is the same hole on the surface that has a real caller to name instead.
+///   The synthetic root credential (loopback, `allow_no_auth`, the master key) is excluded on purpose: it names no `[[users]]` entry, so inventing a sender for it would move its session without giving the gate anything to resolve.
 /// - No authenticated caller (loopback, `allow_no_auth`) — there is no identity to prefer, so the body's assertion stands and behaviour is unchanged.
 /// - `Admin` or above — may assert any sender identity, because an operator impersonating a user for support, or a channel gateway relaying real platform users, is legitimate.
 /// - Below `Admin`, asserting an identity that `identify` resolves back to the *caller themselves* — the body is stating its own true binding, which is not an attack.
@@ -615,7 +619,31 @@ fn request_sender_context(
     api_user: Option<&crate::middleware::AuthenticatedApiUser>,
     auth: &librefang_kernel::auth::AuthManager,
 ) -> Option<SenderContext> {
-    let sender_id = req.sender_id.as_ref()?;
+    // An authenticated caller that asserts no sender identity is still that
+    // caller, and saying nothing must not cost it the identity the rest of the
+    // request already carries (`api_user`, resolved from the bearer token by
+    // the auth middleware, is the same credential the route authorized on).
+    //
+    // Without this the turn reaches the kernel with no `SenderContext`, so the
+    // tool gate calls `resolve_user_tool_decision(.., None, None)` and lands on
+    // `guest_gate` — seven read-only tools, everything else to human approval,
+    // `require_approval` never consulted. The dashboard chat posts exactly this
+    // shape. Issue #3243 records the identical failure for the autonomous tick
+    // and repaired it with a synthetic channel sentinel; this surface has a
+    // real caller to name instead.
+    //
+    // `owner_principal()` is `None` for the synthetic root credential, which
+    // names no `[[users]]` entry: those callers keep the sender-less behaviour
+    // they have today rather than being handed a "root" identity `identify`
+    // cannot resolve.
+    let attributed_to_caller = req.sender_id.is_none();
+    let sender_id: &str = match req.sender_id.as_deref() {
+        Some(asserted) => asserted,
+        None => api_user
+            .filter(|caller| caller.owner_principal().is_some())?
+            .name
+            .as_str(),
+    };
 
     // Audit: cron-channel-name-not-reserved. An HTTP caller supplying
     // `channel_type = "cron"` (or case variant) used to derive the
@@ -643,8 +671,10 @@ fn request_sender_context(
         ),
         None => (
             asserted_channel,
-            sender_id.clone(),
-            req.sender_name.clone().unwrap_or_else(|| sender_id.clone()),
+            sender_id.to_string(),
+            req.sender_name
+                .clone()
+                .unwrap_or_else(|| sender_id.to_string()),
         ),
     };
 
@@ -661,6 +691,15 @@ fn request_sender_context(
         // when the caller (Telegram, direct API) doesn't populate it; the
         // guard then becomes a no-op and cannot produce false positives.
         group_participants: req.group_participants.clone().unwrap_or_default(),
+        // The caller-attributed case is the only one that gains a
+        // `SenderContext` where the request previously produced none, and it
+        // must not move the session: a sender-less POST lands on the `_` arm of
+        // the session resolver (`entry.session_id`), which is the same session
+        // `use_canonical_session = true` selects. Without this the new context
+        // would take the channel-derived branch and start a second history for
+        // the same conversation. The dashboard's WebSocket handler sets the
+        // same flag for the same reason.
+        use_canonical_session: attributed_to_caller,
         ..Default::default()
     })
 }
@@ -1318,9 +1357,10 @@ mod tests {
         assert!(cloned.tools_disabled);
     }
 
-    #[test]
-    fn test_request_sender_context_none_without_sender_id() {
-        let req = MessageRequest {
+    /// A `MessageRequest` that asserts no sender identity — the shape the
+    /// dashboard's own chat posts.
+    fn senderless_request() -> MessageRequest {
+        MessageRequest {
             message: "hello".to_string(),
             attachments: Vec::new(),
             sender_id: None,
@@ -1335,8 +1375,57 @@ mod tests {
             group_participants: None,
             session_id: None,
             incognito: false,
-        };
+        }
+    }
+
+    /// The dashboard's own chat asserts no sender, so this is the shape it posts.
+    /// With no authenticated caller either, there is no identity at all and the
+    /// turn stays sender-less — behaviour unchanged.
+    #[test]
+    fn request_sender_context_is_none_without_a_sender_or_a_caller() {
+        let req = senderless_request();
         assert!(request_sender_context(&req, None, &no_users()).is_none());
+    }
+
+    /// An authenticated caller that asserts no sender identity is still that caller.
+    ///
+    /// Before this, the turn arrived at the kernel with no `SenderContext` and
+    /// `resolve_user_tool_decision(.., None, None)` fell to `guest_gate`: seven
+    /// read-only tools, everything else to human approval, `require_approval`
+    /// never consulted. That is the state the dashboard chat was stuck in.
+    #[test]
+    fn request_sender_context_attributes_an_authenticated_caller_that_asserts_no_sender() {
+        let req = senderless_request();
+        let bob = caller("bob", crate::middleware::UserRole::User);
+
+        let sender = request_sender_context(&req, Some(&bob), &no_users()).expect("sender context");
+
+        assert_eq!(
+            sender.user_id, "bob",
+            "the authenticated caller is the only identity the request carries"
+        );
+        assert_eq!(sender.display_name, "bob");
+        assert_eq!(sender.channel, "api");
+        assert!(
+            sender.use_canonical_session,
+            "the turn must not move: a sender-less POST resolves to `entry.session_id`, \
+             which is the session `use_canonical_session = true` selects"
+        );
+    }
+
+    /// The synthetic root credential names no `[[users]]` entry, so attributing
+    /// the turn to it would move the session without giving the tool gate
+    /// anything to resolve. It keeps the sender-less behaviour it has today.
+    #[test]
+    fn request_sender_context_leaves_the_synthetic_root_credential_sender_less() {
+        let req = senderless_request();
+        let root = crate::middleware::AuthenticatedApiUser {
+            name: "root".to_string(),
+            role: crate::middleware::UserRole::Owner,
+            user_id: librefang_types::agent::UserId(crate::middleware::ROOT_API_KEY_USER_ID),
+        };
+
+        assert!(request_sender_context(&req, Some(&root), &no_users()).is_none());
     }
 
     /// An `AuthManager` with no `[[users]]`, so `identify` never resolves anything.
@@ -1498,14 +1587,24 @@ mod tests {
         assert_eq!(sender.channel, "api");
     }
 
-    /// The pin never *creates* a sender context: a caller who asserts nothing still gets `None`, so the kernel's canonical-session path is untouched for the dashboard and plain `curl`.
+    /// A caller who asserts nothing now gets a context naming *themselves* — and the guarantee this test used to carry, that the kernel's canonical-session path is untouched for the dashboard and plain `curl`, is kept by `use_canonical_session` rather than by returning `None`.
+    ///
+    /// The two are the same session by construction, not by coincidence: the session resolver guards its channel-derived branch with `!ctx.use_canonical_session`, so `None` and `Some(ctx { use_canonical_session: true, .. })` fall through to the *same* `_` arm (`entry.session_id` for a `Persistent` manifest, `SessionId::new()` for a `new` one). Returning `None` was the mechanism that kept the session still; the flag is that mechanism made explicit, and it is what lets the turn carry an identity the tool gate can resolve.
     #[test]
-    fn request_sender_context_stays_none_when_the_body_asserts_nothing() {
+    fn request_sender_context_names_the_caller_without_moving_the_session() {
         let mut req = impersonating_request();
         req.sender_id = None;
         let bob = caller("bob", crate::middleware::UserRole::User);
 
-        assert!(request_sender_context(&req, Some(&bob), &no_users()).is_none());
+        let sender = request_sender_context(&req, Some(&bob), &no_users())
+            .expect("an authenticated caller is a sender even when the body asserts none");
+
+        assert_eq!(sender.user_id, "bob");
+        assert!(
+            sender.use_canonical_session,
+            "without this the session resolver takes its channel-derived branch and the \
+             dashboard's history splits in two"
+        );
     }
 
     /// The streaming route must apply the same precedence as its non-streaming sibling.

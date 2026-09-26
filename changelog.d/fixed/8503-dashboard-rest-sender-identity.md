@@ -1,0 +1,2 @@
+Dashboard chat turns that fall back to the REST path were stamped with the caller's IP and, with no channel-binding sender id, dropped into the guest gate — `memory_store` and other tools were refused for an authenticated owner. The REST path now attributes such a turn to the authenticated caller (the synthetic root credential stays excluded), matching the WebSocket path, while an unresolvable sender still fails closed into the guest gate.
+(#8503) (@DaBlitzStein)
