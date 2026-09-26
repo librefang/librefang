@@ -1028,6 +1028,25 @@ pub trait ChannelAdapter: Send + Sync {
         None
     }
 
+    /// Account identity the adapter's transport itself reported, as distinct
+    /// from the configured [`ChannelAdapter::account_id`] (the value routing
+    /// keys are built from).
+    ///
+    /// This is a **resolution alias only**. A sidecar adapter reports the
+    /// account its subprocess announces in its `ready` event here; that value
+    /// is not a routing identity (no `AgentRouter` key is stored under it),
+    /// but the adapter can stamp it into inbound message metadata, and an
+    /// outbound send auto-filled from that metadata (`channel_send` /
+    /// `channel_dm`) still has to find the instance. The send resolver
+    /// (`resolve_channel_adapter`) therefore matches this value in addition
+    /// to `account_id()` and `name()`.
+    ///
+    /// Default `None`: adapters with no second identity answer to their
+    /// configured identity alone.
+    fn reported_account_id(&self) -> Option<&str> {
+        None
+    }
+
     /// Per-instance channel behaviour overrides carried by the adapter
     /// itself, rather than resolved kernel-side by channel type (#5841).
     ///

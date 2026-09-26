@@ -1,0 +1,3 @@
+A channel binding's `account_id` now matches the sidecar's configured `name` — the identity the router seeds the channel default under and stamps on inbound messages — instead of the optional account id the subprocess reports in its `ready` event.
+Operators with a per-account binding keyed to a reported id must update it to the sidecar's config `name`, or the binding stops matching and approvals for the bound agent are no longer routed to that binding's chat.
+The `ready` account id stays accepted on the wire for protocol compatibility, but it is no longer a routing identity (#8418) (@DaBlitzStein)
