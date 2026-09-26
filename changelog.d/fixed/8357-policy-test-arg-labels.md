@@ -1,0 +1,3 @@
+Corrected 24 `// allowed_skills` positional comments in `tool_runner/tests/policy.rs` that had drifted onto the wrong argument of the 31-argument `execute_tool` call — 3 landed on `web_ctx`, 8 on `mcp_connections`, and 13 on `browser_ctx`.
+A comment naming the wrong parameter is worse than no comment: it misleads exactly the reader trying to count slots correctly when inserting a new argument into one of these calls.
+Also added a test asserting that `goal_runner::run_loop`'s `GOAL_LEARNED:` dedup covers lessons seeded via `initial_learnings`, not only ones captured during the current execution, since the existing 39 direct-call tests all pass an empty seed list and the one test with a non-empty seed never re-emits a seeded lesson (#8357) (@DaBlitzStein)
