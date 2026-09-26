@@ -1306,11 +1306,12 @@ impl LibreFangKernel {
         // will actually be called, not the pre-routing one (e.g. routing may
         // switch sonnet → haiku).
         //
-        // Priority: agent manifest > per-model override > system defaults, for
-        // the sampling preferences. This block used to run the chain the other
-        // way round, which meant tuning the temperature of a shared model
-        // silently overwrote it for every agent using that model — two
-        // instances of one agent type could not hold different temperatures.
+        // Priority: agent manifest > per-model override > registry ceiling
+        // (for `max_tokens`) > system defaults, for the sampling preferences.
+        // This block used to run the chain the other way round, which meant
+        // tuning the temperature of a shared model silently overwrote it for
+        // every agent using that model — two instances of one agent type could
+        // not hold different temperatures.
         // The inversion was load-bearing only because `ModelConfig` had no
         // "inherit" state: every agent carried a concrete 4096 / 0.7, so
         // letting the manifest win would have made per-model overrides
@@ -1323,9 +1324,23 @@ impl LibreFangKernel {
         {
             let override_key = format!("{}:{}", manifest.model.provider, manifest.model.model);
             let catalog = self.llm.model_catalog.load();
+            // The model's *effective* ceiling — the operator's
+            // `model_overrides.json` correction if one exists, otherwise the
+            // matched entry's own `max_output_tokens` (#7774). Reading the raw
+            // entry would ignore the very override that exists to correct it;
+            // `resolve_context_window` below takes the same route for the same
+            // reason. It decides `max_tokens` when neither the manifest nor the
+            // override named one, and the paired source travels with the value
+            // so an operator-corrected ceiling is not reported as a registry
+            // fact (`KnownLimit::from_effective_limits`).
+            let limits = catalog
+                .effective_limits_for_manifest(&manifest.model.provider, &manifest.model.model);
+            let known_max_output =
+                librefang_types::inference_params::KnownLimit::from_effective_limits(&limits);
             let resolved = librefang_types::inference_params::resolve_inference_params(
                 &manifest.model,
                 catalog.get_overrides(&override_key),
+                known_max_output,
             );
             resolved.apply_to(&mut manifest.model);
         }

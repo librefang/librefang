@@ -1,0 +1,7 @@
+An unset `max_tokens` now asks for the model's own registered ceiling — the catalog's `max_output_tokens`, or the operator's per-model `max_output_tokens` limit override when one corrects it — instead of stopping at a fixed 4096 that sat below the documented maximum of most registry entries, so the models with room to spare are no longer the ones handicapped.
+A model whose ceiling nothing vouched for still falls back to the system default.
+That default moves from 4096 to 32768, because an unspecified budget means "as much as the endpoint will give" and a reasoning model has to fit its thinking *and* its reply inside it — one that runs out before emitting any text produces no reply at all rather than a shorter one.
+Two consequences follow from the larger figure.
+The pre-call budget reservation and token hold are sized from it (`messaging.rs:1226,1248`; `:2209,2230` for streaming), so an agent that never pinned a budget reserves eight times as much up front and a small operator cap can surface a `BudgetExceeded` before dispatch; the hold is settled against real usage afterwards, so this is a false positive on a tight cap rather than an actual overspend.
+Request-building paths that run the agent loop without the kernel's per-turn resolution (`agent_loop/mod.rs:1350`, `run_streaming.rs:848`) now also send 32768 instead of 4096 on the wire for models whose catalog entry declares no ceiling.
+(#8502) (@DaBlitzStein)

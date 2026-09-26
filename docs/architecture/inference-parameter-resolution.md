@@ -21,14 +21,17 @@ The specific setting lost to the general one, which is backwards from what anyon
 
 `temperature`, `top_p`, `max_tokens`, `frequency_penalty`, `presence_penalty`, `top_k`, `min_p`, `repeat_penalty`.
 
-Resolution: **agent manifest > per-model override > system default.**
+Resolution: **agent manifest > per-model override > the model's registry ceiling (for `max_tokens` alone) > system default.**
 
 Each is `Option` on `ModelConfig`, and `None` is a real state meaning "this agent has no opinion".
 That state is what makes the ordering possible.
 Before it existed every agent carried a concrete `4096` / `0.7` whether or not anyone chose those numbers, so letting the manifest win would have made per-model overrides unreachable for every agent in existence — the inverted priority was a workaround for the missing state, not a decision about precedence.
 
-System defaults are `DEFAULT_MODEL_MAX_TOKENS` (4096) and `DEFAULT_MODEL_TEMPERATURE` (0.7).
+System defaults are `DEFAULT_MODEL_MAX_TOKENS` (32768) and `DEFAULT_MODEL_TEMPERATURE` (0.7).
 The others have no default: unset means the parameter is simply not sent.
+
+`max_tokens` has one rung the others do not: when neither the agent nor the per-model override names a budget, the model's own registry ceiling answers — the catalog entry's `max_output_tokens`, or the operator's per-model `max_output_tokens` **limit** override when one corrects it — because an unspecified budget means "as much as the endpoint will give".
+The fixed `4096` is now only the last resort for a model whose ceiling nothing vouched for.
 
 ### How the preferences reach the wire
 
