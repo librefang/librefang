@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { AlertTriangle, ChevronDown, Plus, Trash2, X } from "lucide-react";
+import { AlertTriangle, Plus, Trash2, X } from "lucide-react";
 import { CAPABILITY_ROUTING_KEYS, generateUid } from "../lib/agentManifest";
 import type { ManifestExtras, ManifestFormState } from "../lib/agentManifest";
 import type { ModelRoutingInertReason } from "../api";
@@ -53,6 +53,8 @@ import {
   resolveMaxTokensLimit,
   selectModelLimits,
 } from "../lib/modelLimits";
+import { CollapsibleSection } from "./ui/CollapsibleSection";
+import { Field } from "./ui/Field";
 
 /**
  * Catalog entry for the skill/tool finder (#5049). Both fields are
@@ -1507,96 +1509,6 @@ function Section({ title, children }: { title: string; children: React.ReactNode
     <div className="space-y-2.5 rounded-xl border border-border-subtle/60 bg-surface/40 p-3">
       <p className="text-[10px] font-bold uppercase tracking-widest text-text-dim">{title}</p>
       {children}
-    </div>
-  );
-}
-
-function CollapsibleSection({
-  title,
-  children,
-  defaultOpen,
-  invalid,
-}: {
-  title: string;
-  children: React.ReactNode;
-  defaultOpen?: boolean;
-  invalid?: boolean;
-}) {
-  return (
-    <details
-      className="group rounded-xl border border-border-subtle/60 bg-surface/40 overflow-hidden"
-      open={defaultOpen || invalid}
-    >
-      <summary
-        aria-invalid={invalid || undefined}
-        className="flex items-center justify-between p-3 cursor-pointer list-none select-none"
-      >
-        <span
-          className={`text-[10px] font-bold uppercase tracking-widest ${
-            invalid ? "text-error" : "text-text-dim"
-          }`}
-        >
-          {title}
-        </span>
-        <ChevronDown className="w-4 h-4 text-text-dim transition-transform group-open:rotate-180" />
-      </summary>
-      <div className="px-3 pb-3 space-y-2.5">{children}</div>
-    </details>
-  );
-}
-
-function Field({
-  label,
-  hint,
-  required,
-  invalid,
-  error,
-  errorId,
-  children,
-}: {
-  label: string;
-  hint?: string;
-  required?: boolean;
-  invalid?: boolean;
-  error?: string;
-  errorId?: string;
-  children: React.ReactNode;
-}) {
-  // Use a <div> wrapper rather than a <label> (#5246). A <label>
-  // forwards every click within its bounds to its first labelable form
-  // control, which silently steals clicks on composite widgets like
-  // MultiSelectCmdk (cmdk dropdown options): the click that lights up
-  // an item was being redirected to the search input, so picking a
-  // skill / tool from the catalog never reached the option's
-  // onSelect handler and the chip was never added. Switching to <div>
-  // makes each interactive child (input, button, option) receive its
-  // own click as the user intends. The trade-off is that the label
-  // text no longer focuses the input on click — which is a non-issue
-  // here because every field already gets focus via direct click on
-  // its visible control.
-  return (
-    <div className="block">
-      {label && (
-        <span
-          className={`text-[10px] font-bold uppercase block ${
-            invalid ? "text-error" : "text-text-dim"
-          }`}
-        >
-          {label}
-          {required && <span className="ml-0.5 text-error">*</span>}
-        </span>
-      )}
-      <span className={label ? "mt-1 block" : "block"}>{children}</span>
-      {invalid && error && (
-        <span
-          id={errorId}
-          className="mt-1 block text-[10px] text-error"
-          role="alert"
-        >
-          {error}
-        </span>
-      )}
-      {hint && <span className="mt-1 text-[10px] text-text-dim/70 block">{hint}</span>}
     </div>
   );
 }
