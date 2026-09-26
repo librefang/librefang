@@ -214,7 +214,15 @@ async fn patch_appearance_leaves_identity_md_untouched() {
         let status = patch(
             &server,
             &format!("/api/agents/{id}/{route}"),
-            serde_json::json!({"emoji": "🦊", "avatar_url": "https://example.invalid/a.png", "color": "#123456"}),
+            // #8339: `avatar_url` only accepts this agent's own avatar route or
+            // an empty string; an external URL is a 400. The URL is incidental
+            // here — what this test pins is that neither route writes
+            // IDENTITY.md.
+            serde_json::json!({
+                "emoji": "🦊",
+                "avatar_url": librefang_types::media::agent_avatar_url(&id),
+                "color": "#123456"
+            }),
         )
         .await;
         assert_eq!(status, 200, "PATCH /{route}");
