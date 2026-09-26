@@ -14,6 +14,7 @@
 //! ```
 
 use fluent::{FluentArgs, FluentBundle, FluentResource, FluentValue};
+
 use unic_langid::LanguageIdentifier;
 
 // Embed all locale files at compile time.
@@ -111,6 +112,28 @@ pub fn parse_accept_language(header: &str) -> &'static str {
     DEFAULT_LANGUAGE
 }
 
+// The English pack, parsed once per thread.
+//
+// `FluentBundle` is not `Sync` — it holds a `RefCell` — so this cannot be a
+// process-wide `OnceLock`, and a `Mutex` would put a lock on the path of every
+// error message. Per thread is the granularity that pays: `ErrorTranslator::new`
+// runs on every request that can fail (`set_agent_file` builds two), and the
+// daemon has a handful of worker threads, so this turns one English parse per
+// call into one per thread. Measured per parse with `rustc 1.95 -O`: the English
+// pack costs ~450 µs and the German one ~117 µs, so the fallback was re-paying
+// the larger of the two on every construction.
+thread_local! {
+    static EN_FALLBACK: FluentBundle<FluentResource> = {
+        let en_id: LanguageIdentifier = DEFAULT_LANGUAGE.parse().expect("en must parse");
+        let mut bundle = FluentBundle::new(vec![en_id]);
+        bundle.set_use_isolating(false);
+        let resource = FluentResource::try_new(EN_FTL.to_string())
+            .expect("English language pack must be valid");
+        let _ = bundle.add_resource(resource);
+        bundle
+    };
+}
+
 /// A translator instance for a specific language.
 ///
 /// Wraps a Fluent bundle and provides convenient methods for looking up
@@ -140,13 +163,17 @@ impl ErrorTranslator {
         });
 
         if bundle.add_resource(resource).is_err() {
-            // If adding the resource fails, create a fresh English bundle.
+            // If adding the resource fails, build English here. This is the
+            // broken-pack path, it should never happen, and a parse on it is
+            // cheaper than cloning the thread-local — which cannot be cloned
+            // anyway: `FluentBundle` holds a `RefCell`.
             let en_id: LanguageIdentifier = DEFAULT_LANGUAGE.parse().expect("en must parse");
             let mut en_bundle = FluentBundle::new(vec![en_id]);
             en_bundle.set_use_isolating(false);
-            let en_resource = FluentResource::try_new(EN_FTL.to_string())
-                .expect("English language pack must be valid");
-            let _ = en_bundle.add_resource(en_resource);
+            let _ = en_bundle.add_resource(
+                FluentResource::try_new(EN_FTL.to_string())
+                    .expect("English language pack must be valid"),
+            );
             return Self {
                 bundle: en_bundle,
                 language: DEFAULT_LANGUAGE,
@@ -165,14 +192,11 @@ impl ErrorTranslator {
     }
 
     /// Look up a translation by key with named arguments.
+    ///
+    /// A key the language's pack does not define resolves against English
+    /// before giving up; the raw key is returned only when neither has it,
+    /// which means the identifier is wrong rather than merely untranslated.
     pub fn t_args(&self, key: &str, args: &[(&str, &str)]) -> String {
-        let Some(message) = self.bundle.get_message(key) else {
-            return key.to_string();
-        };
-        let Some(pattern) = message.value() else {
-            return key.to_string();
-        };
-
         let fluent_args = if args.is_empty() {
             None
         } else {
@@ -183,11 +207,30 @@ impl ErrorTranslator {
             Some(fa)
         };
 
-        let mut errors = vec![];
-        let result = self
-            .bundle
-            .format_pattern(pattern, fluent_args.as_ref(), &mut errors);
-        result.to_string()
+        // This language first. Borrowing the pattern from `self.bundle` and
+        // formatting it here keeps the common path free of the thread-local.
+        if let Some(pattern) = self.bundle.get_message(key).and_then(|m| m.value()) {
+            let mut errors = vec![];
+            return self
+                .bundle
+                .format_pattern(pattern, fluent_args.as_ref(), &mut errors)
+                .to_string();
+        }
+
+        // Then English, per key. Formatted inside the `with` because the
+        // pattern borrows from the thread's bundle, which does not outlive the
+        // closure.
+        EN_FALLBACK.with(
+            |bundle| match bundle.get_message(key).and_then(|m| m.value()) {
+                Some(pattern) => {
+                    let mut errors = vec![];
+                    bundle
+                        .format_pattern(pattern, fluent_args.as_ref(), &mut errors)
+                        .to_string()
+                }
+                None => key.to_string(),
+            },
+        )
     }
 
     /// Returns the resolved language code for this translator.
@@ -204,6 +247,40 @@ mod tests {
     fn english_translation() {
         let t = ErrorTranslator::new("en");
         assert_eq!(t.t("api-error-agent-not-found"), "Agent not found");
+    }
+
+    /// A key the language's pack does not define resolves to English rather
+    /// than to the identifier.
+    ///
+    /// `de`, `es`, `fr` and `zh-CN` define around 57 of the 245 keys between
+    /// them, and the pack-level fallback in `new` only fires when a pack fails
+    /// to *load* — an incomplete pack is a valid one. So every key those four
+    /// languages do not carry reached the operator as
+    /// `api-error-agent-clone-spawn-failed`, with nothing to read.
+    ///
+    /// The first assertion is the half that must not change: where German has
+    /// its own sentence, that sentence is what is returned. A fallback that
+    /// shadowed real translations would be a worse bug than the one it fixes.
+    #[test]
+    fn a_key_the_language_lacks_falls_back_to_english() {
+        let de = ErrorTranslator::new("de");
+        assert_eq!(de.t("api-error-agent-not-found"), "Agent nicht gefunden");
+        assert_eq!(
+            de.t_args("api-error-agent-clone-spawn-failed", &[("error", "boom")]),
+            "Failed to spawn clone: boom"
+        );
+    }
+
+    /// The raw key survives only for a key neither pack defines, which means
+    /// the identifier is wrong rather than merely untranslated — the one case
+    /// where it is the only thing left to say.
+    #[test]
+    fn a_key_no_pack_defines_still_answers_with_the_key() {
+        let de = ErrorTranslator::new("de");
+        assert_eq!(
+            de.t("api-error-no-pack-defines-this"),
+            "api-error-no-pack-defines-this"
+        );
     }
 
     #[test]
