@@ -27,6 +27,9 @@ pub const OPENROUTER_MODEL_CATALOG_TTL: Duration = Duration::from_secs(15 * 60);
 pub struct ModelCatalog {
     models: Vec<ModelCatalogEntry>,
     aliases: HashMap<String, String>,
+    /// The catalog's providers.
+    ///
+    /// Append through [`ModelCatalog::push_provider`], never directly: it applies the operator's discovery preference, and a provider that skips it is one the preference store has an opinion about and nobody applies (#8407).
     providers: Vec<ProviderInfo>,
     /// Providers whose model list was successfully fetched from their live API during this process.
     /// Kept separately from `available_models` so an empty successful response is distinguishable from "not probed yet".
@@ -35,6 +38,24 @@ pub struct ModelCatalog {
     /// Providers whose fallback/CLI detection is suppressed by the user
     /// (i.e. the user explicitly removed the key via the dashboard).
     suppressed_providers: HashSet<String>,
+    /// Per-provider live-discovery preference, keyed by provider id (#8407).
+    ///
+    /// Operator state rather than catalog metadata: `discover_models` used to live
+    /// only in the provider's own TOML, which the boot-time registry sync rewrites
+    /// from the registry on every start — and no registry file carries that key, so
+    /// the rewrite cleared it and discovery went off behind the operator's back.
+    /// Kept beside the other operator-owned files under `data/` and applied over
+    /// the loaded catalog by [`ModelCatalog::load_discover_prefs`].
+    discover_prefs: BTreeMap<String, bool>,
+    /// `discover_models` as *declared* in each provider file, keyed by provider id.
+    ///
+    /// [`ProviderInfo::discover_models`] defaults to `false`, so once a file has
+    /// been parsed an omitted key and an explicit `false` are the same value.
+    /// The divergence warning in [`Self::load_discover_prefs`] needs exactly
+    /// that difference: a file that says nothing must not be reported as
+    /// disagreeing with the store, while one whose author wrote `false` must
+    /// be. Only files that declare the key appear here.
+    declared_discover_flags: BTreeMap<String, bool>,
     /// Per-model inference parameter overrides, keyed by "provider:model_id".
     overrides: HashMap<String, ModelOverrides>,
 }
@@ -297,6 +318,8 @@ impl ModelCatalog {
             live_model_providers: HashSet::new(),
             live_model_fetched_at: HashMap::new(),
             suppressed_providers: HashSet::new(),
+            discover_prefs: BTreeMap::new(),
+            declared_discover_flags: BTreeMap::new(),
             overrides: HashMap::new(),
         }
     }
@@ -353,6 +376,20 @@ fn merge_provider_record(existing: &mut ProviderCatalogToml, incoming: ProviderC
     // provider keyless makes it keyless, any file opting in enables discovery.
     existing.key_required &= incoming.key_required;
     existing.discover_models |= incoming.discover_models;
+}
+
+/// Read `discover_models` exactly as a provider file declares it, if it declares it at all.
+///
+/// [`ProviderCatalogToml`] defaults the key to `false`, so the parsed value
+/// cannot tell "the author wrote `false`" from "this file never mentions it".
+/// The divergence warning needs that distinction; this reads it back off the
+/// same bytes the catalog is built from, once per file.
+fn declared_discover_models(content: &str) -> Option<bool> {
+    toml::from_str::<toml::Value>(content)
+        .ok()?
+        .get("provider")?
+        .get("discover_models")?
+        .as_bool()
 }
 
 impl ModelCatalog {
@@ -448,6 +485,9 @@ impl ModelCatalog {
         // Accumulated in TOML shape so the merge below can still tell an absent
         // field from a defaulted one; converted to `ProviderInfo` after the loop.
         let mut raw_providers: Vec<(ProviderCatalogToml, bool)> = Vec::new();
+        // What each file *declares* for `discover_models` — see the field's
+        // doc. Keyed by the id in that file's `[provider]` table.
+        let mut declared_discover_flags: BTreeMap<String, bool> = BTreeMap::new();
         for CatalogSource {
             content,
             is_custom,
@@ -466,6 +506,18 @@ impl ModelCatalog {
                 }
             };
             let provider_id = file.provider.as_ref().map(|p| p.id.clone());
+            // Record the declaration itself, not the parsed default: the
+            // divergence warning below has to tell "the author wrote `false`"
+            // from "this file never mentions the key". `true` wins across
+            // files, mirroring the flag's own merge rule.
+            if let Some(id) = provider_id.as_ref() {
+                if let Some(flag) = declared_discover_models(content) {
+                    declared_discover_flags
+                        .entry(id.clone())
+                        .and_modify(|existing| *existing |= flag)
+                        .or_insert(flag);
+                }
+            }
             if let Some(p) = file.provider {
                 match raw_providers
                     .iter_mut()
@@ -555,6 +607,8 @@ impl ModelCatalog {
             live_model_providers: HashSet::new(),
             live_model_fetched_at: HashMap::new(),
             suppressed_providers: HashSet::new(),
+            discover_prefs: BTreeMap::new(),
+            declared_discover_flags,
             overrides: HashMap::new(),
         }
     }
@@ -1110,6 +1164,177 @@ impl ModelCatalog {
         }
     }
 
+    /// Record the operator's discovery preference for a provider and apply it (#8407).
+    ///
+    /// The write half of [`Self::load_discover_prefs`]: the preference is operator state, so it is stored beside the other operator-owned files under `data/` rather than in the provider TOML the registry sync rewrites.
+    /// Returns `false` when the provider is unknown, so the caller can answer 404 instead of persisting a preference nothing reads.
+    pub fn set_provider_discover_preference(&mut self, provider: &str, discover: bool) -> bool {
+        match self.providers.iter_mut().find(|p| p.id == provider) {
+            Some(p) => {
+                p.discover_models = discover;
+                self.discover_prefs.insert(provider.to_string(), discover);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Load per-provider discovery preferences and apply them over the catalog (#8407).
+    ///
+    /// A missing file is not an error — it is the state of every install that never touched the setting.
+    /// A malformed one is reported and ignored rather than falling back to the TOML values, because that silent fallback is the failure this file exists to prevent.
+    /// A stored preference that disagrees with a value the provider file declares is applied anyway — the store has the last word — but logged at `WARN`, naming both values and the way to change the winner; the disagreement is otherwise invisible, and the file reads as if it were in force.
+    pub fn load_discover_prefs(&mut self, path: &std::path::Path) {
+        let data = match std::fs::read_to_string(path) {
+            Ok(d) => d,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
+            Err(e) => {
+                tracing::warn!(path = %path.display(), %e, "provider discovery preferences ignored: read failed");
+                return;
+            }
+        };
+        match serde_json::from_str::<BTreeMap<String, bool>>(&data) {
+            Ok(prefs) => {
+                // The store outranks the files by design, but silently: an
+                // operator who edits `discover_models` in a provider file the
+                // store has an entry for watches the edit do nothing. Name the
+                // disagreement and who wins, so the file does not read as live.
+                for (id, stored) in &prefs {
+                    if let Some(declared) = self.declared_discover_flags.get(id) {
+                        if declared != stored {
+                            tracing::warn!(
+                                "provider {id}: the provider file declares discover_models = \
+                                 {declared}, but {} records {stored}; the stored preference \
+                                 wins, because it is applied after the catalog files. Change it \
+                                 through PUT /api/providers/{id}/discovery, or delete the {id} \
+                                 entry from that file to let the provider file decide again.",
+                                path.display()
+                            );
+                        }
+                    }
+                }
+                self.discover_prefs = prefs;
+                self.apply_discover_prefs();
+            }
+            Err(e) => {
+                tracing::warn!(path = %path.display(), %e, "provider discovery preferences ignored: parse failed");
+            }
+        }
+    }
+
+    /// Persist the discovery preferences to a JSON file, creating its directory if needed.
+    /// Removes the file when nothing is recorded.
+    ///
+    /// Returns the error instead of swallowing it: a preference that fails to reach disk comes back as "discovery off" on the next boot, which is the failure this store exists to prevent.
+    pub fn save_discover_prefs(&self, path: &std::path::Path) -> std::io::Result<()> {
+        if self.discover_prefs.is_empty() {
+            return match std::fs::remove_file(path) {
+                Ok(()) => Ok(()),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                Err(e) => Err(e),
+            };
+        }
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let json =
+            serde_json::to_string_pretty(&self.discover_prefs).map_err(std::io::Error::other)?;
+        std::fs::write(path, json)
+    }
+
+    /// Adopt `discover_models = true` out of the provider files, once per provider (#8407).
+    ///
+    /// An install that enabled discovery before this change carries the flag only in `providers/*.toml`, which the sync rewrites — without this read it would lose the setting on the first boot after upgrading, which is the bug itself.
+    /// A provider already present in the store is left alone, so an explicit `false` is never re-adopted as `true`.
+    /// Each adoption is logged at `WARN`, because it transfers the decision from the file to the store: a hand edit to the flag stops mattering after this, and the message says so and names the supported way to change it.
+    /// The sync can overwrite such a file before this boot read runs — see [`Self::capture_legacy_discover_flag`], which adopts from the bytes at the moment of that overwrite so the read here is never the first to find the declaration gone (#8411).
+    /// Returns how many were adopted, for the caller to log.
+    pub fn adopt_legacy_discover_flags(&mut self, path: &std::path::Path) -> usize {
+        let adopted: Vec<String> = self
+            .providers
+            .iter()
+            .filter(|p| p.discover_models && !self.discover_prefs.contains_key(&p.id))
+            .map(|p| p.id.clone())
+            .collect();
+        if adopted.is_empty() {
+            return 0;
+        }
+        for id in &adopted {
+            tracing::warn!(
+                "provider {id}: adopting the legacy discover_models = true from its provider \
+                 file into {} — no preference was recorded for it. From now on the stored \
+                 preference decides, and editing the provider file no longer changes discovery; \
+                 use PUT /api/providers/{id}/discovery with discover_models = false, or delete \
+                 the {id} entry from that file, to turn discovery off.",
+                path.display()
+            );
+            self.discover_prefs.insert(id.clone(), true);
+        }
+        if let Err(e) = self.save_discover_prefs(path) {
+            // Non-fatal at boot: the adopted values are applied in memory, and the
+            // next boot retries the read from the provider files.
+            tracing::warn!(path = %path.display(), %e, "adopted provider discovery preferences could not be persisted");
+        }
+        adopted.len()
+    }
+
+    /// Capture a legacy `discover_models = true` out of a provider file that is
+    /// about to be overwritten, so the boot adoption cannot lose it (#8411).
+    ///
+    /// [`Self::adopt_legacy_discover_flags`] reads the flag off the provider
+    /// files at boot, but the boot's registry sync runs first and its pre-digest
+    /// adoption replaces the very file that declares it: by the time the catalog
+    /// is loaded the declaration is gone, and the preference was lost with no
+    /// store entry and no warning — the exact failure the adoption exists to
+    /// prevent. `registry_sync` calls this with the bytes of the file it is
+    /// about to replace, before the write.
+    ///
+    /// The flag takes the route it would have taken at boot: the store records
+    /// it once (an existing entry is left alone, so an explicit `false` is never
+    /// re-adopted as `true`), the same `WARN` explains the transfer, and the
+    /// boot's [`Self::load_discover_prefs`] applies it on this same boot.
+    ///
+    /// Returns `true` when an entry was recorded.
+    pub fn capture_legacy_discover_flag(store_path: &std::path::Path, provider_file: &str) -> bool {
+        // Build the same single-file catalog the boot loads, so the adoption
+        // rules — declaration vs. default, WARN, idempotence — are one code
+        // path and cannot drift apart.
+        let mut catalog = Self::from_sources(
+            &[CatalogSource {
+                content: provider_file.to_string(),
+                is_custom: false,
+                origin: "<provider file being overwritten by the registry sync>".to_string(),
+            }],
+            None,
+        );
+        catalog.load_discover_prefs(store_path);
+        catalog.adopt_legacy_discover_flags(store_path) > 0
+    }
+
+    /// Add a provider to the catalog, applying the operator's discovery preference to it.
+    ///
+    /// The one place a provider enters the catalog, and it has to stay that way.
+    /// [`Self::apply_discover_prefs`] only reaches the providers that exist when it runs, and several paths create providers *after* it — the `[provider_urls]` and region overlays through [`Self::set_provider_url`], the EveryAPI wiring, a merged catalog file — so stamping here is what makes "the store has an opinion about this provider" and "this provider carries it" the same statement, whatever creates it and whenever (#8407).
+    /// A provider the store says nothing about keeps whatever the caller built.
+    fn push_provider(&mut self, mut provider: ProviderInfo) {
+        if let Some(discover) = self.discover_prefs.get(&provider.id) {
+            provider.discover_models = *discover;
+        }
+        self.providers.push(provider);
+    }
+
+    /// Push the stored preferences onto the providers currently loaded.
+    fn apply_discover_prefs(&mut self) {
+        // Move the map aside so the loop can hold `providers` mutably; restored below.
+        let prefs = std::mem::take(&mut self.discover_prefs);
+        for p in self.providers.iter_mut() {
+            if let Some(discover) = prefs.get(&p.id) {
+                p.discover_models = *discover;
+            }
+        }
+        self.discover_prefs = prefs;
+    }
+
     /// Load the suppressed-providers list from a JSON file.
     pub fn load_suppressed(&mut self, path: &std::path::Path) {
         let data = match std::fs::read_to_string(path) {
@@ -1371,7 +1596,7 @@ impl ModelCatalog {
         } else {
             // Custom provider — add a new entry so it appears in /api/providers
             let env_var = librefang_types::model_catalog::default_api_key_env(provider);
-            self.providers.push(ProviderInfo {
+            self.push_provider(ProviderInfo {
                 id: provider.to_string(),
                 display_name: provider.to_string(),
                 api_key_env: env_var,
@@ -1422,7 +1647,7 @@ impl ModelCatalog {
             provider.cli_managed = true;
             return true;
         }
-        self.providers.push(ProviderInfo {
+        self.push_provider(ProviderInfo {
             id: PROVIDER_ID.to_string(),
             display_name: "EveryAPI".to_string(),
             api_key_env: "EVERYAPI_API_KEY".to_string(),
@@ -1472,7 +1697,7 @@ impl ModelCatalog {
             provider.cli_managed = false;
             return true;
         }
-        self.providers.push(ProviderInfo {
+        self.push_provider(ProviderInfo {
             id: PROVIDER_ID.to_string(),
             display_name: "EveryAPI".to_string(),
             api_key_env: api_key_env.to_string(),
@@ -1928,7 +2153,7 @@ impl ModelCatalog {
                     existing.cli_managed = false;
                 }
             } else {
-                self.providers.push(prov_toml.into());
+                self.push_provider(prov_toml.into());
             }
         }
 

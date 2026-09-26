@@ -3368,3 +3368,458 @@ fn a_registry_entry_that_omits_the_flag_is_still_a_declaration() {
         VisionSupport::Unsupported
     );
 }
+
+// ---------------------------------------------------------------------------
+// #8407 — the discovery preference lives in `data/`, not in the file the
+// registry sync rewrites.
+// ---------------------------------------------------------------------------
+
+/// What the registry ships for every provider: a `[provider]` table and no `discover_models` key.
+const REGISTRY_SHAPED_PROVIDER: &str =
+    "[provider]\nid = \"deepseek\"\nbase_url = \"https://api.deepseek.com/v1\"\n";
+
+/// The reporter's symptom as an assertion: set the preference, let the boot-time registry sync rewrite the provider file, reboot, and discovery is still on.
+///
+/// The sync is represented by its effect — the bytes it writes — rather than by calling it, so the test stays hermetic while pinning the same contract: the preference is not in that file, so nothing the sync does to it can clear the preference.
+#[test]
+fn a_discovery_preference_survives_a_registry_sync_that_rewrites_the_provider_file() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let providers = dir.path().join("providers");
+    let prefs = dir.path().join("data").join("provider_discovery.json");
+    std::fs::create_dir_all(&providers).unwrap();
+    std::fs::create_dir_all(prefs.parent().unwrap()).unwrap();
+    std::fs::write(providers.join("deepseek.toml"), REGISTRY_SHAPED_PROVIDER).unwrap();
+
+    // Boot 1: the operator turns discovery on.
+    let mut catalog = ModelCatalog::new_from_dir(&providers);
+    assert!(catalog.set_provider_discover_preference("deepseek", true));
+    catalog
+        .save_discover_prefs(&prefs)
+        .expect("the preference must reach disk");
+    assert!(catalog.get_provider("deepseek").unwrap().discover_models);
+
+    // The boot-time registry sync rewrites the file from the registry's copy,
+    // which carries no key for the setting to survive in.
+    std::fs::write(providers.join("deepseek.toml"), REGISTRY_SHAPED_PROVIDER).unwrap();
+
+    // Boot 2: same file as boot 1 — the preference has to come back from `data/`.
+    let mut rebooted = ModelCatalog::new_from_dir(&providers);
+    assert!(
+        !rebooted.get_provider("deepseek").unwrap().discover_models,
+        "the provider file alone no longer carries the setting, which is why it is stored elsewhere"
+    );
+    rebooted.load_discover_prefs(&prefs);
+    assert!(
+        rebooted.get_provider("deepseek").unwrap().discover_models,
+        "the preference must survive the sync rewriting the provider file"
+    );
+}
+
+/// End to end, with the real fan-out running in between: the registry sync installs `providers/` from the fixture, the operator turns discovery on, the next boot's fan-out runs again over the same home, and the setting is still there.
+///
+/// This is the reporter's restart driven through the code that performs it.
+/// The preference survives because it is not in the file the fan-out owns — the digest manifest, which keeps an operator-edited file from being rewritten at all, is covered by the `registry_sync` tests.
+#[test]
+fn a_discovery_preference_survives_a_real_registry_fanout() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let home = dir.path().to_path_buf();
+    let prefs = home.join("data").join("provider_discovery.json");
+
+    // First boot: the fan-out installs `providers/*.toml` from the registry
+    // fixture, exactly like `sync_registry` does.
+    crate::registry_sync::seed_registry_fixture_for_tests(&home);
+    let mut catalog = ModelCatalog::new(&home);
+    assert!(
+        !catalog.get_provider("deepseek").unwrap().discover_models,
+        "the registry ships no `discover_models` key at all"
+    );
+
+    // The operator turns it on.
+    assert!(catalog.set_provider_discover_preference("deepseek", true));
+    catalog
+        .save_discover_prefs(&prefs)
+        .expect("the preference must reach disk");
+
+    // Restart: same fan-out, same cache, then the catalog is rebuilt the way boot does.
+    crate::registry_sync::seed_registry_fixture_for_tests(&home);
+    let mut rebooted = ModelCatalog::new(&home);
+    rebooted.load_discover_prefs(&prefs);
+
+    assert!(
+        rebooted.get_provider("deepseek").unwrap().discover_models,
+        "the preference has to survive a restart with the registry fan-out in between"
+    );
+}
+
+/// The preference store outranks the provider file for discovery, in both directions (#8407).
+///
+/// The registry sync keeps an operator-edited file and says so in a WARN, which reads as "your edit is in force" — and for everything else in that file it is.
+/// Discovery is the exception: it is operator state that lives in the store, and the store is applied after the catalog is loaded from those files, so a hand edit to the flag loses for any provider the store has an entry for.
+/// Pinned here so it is a decision rather than an accident; the WARN says the same thing to whoever reads it.
+#[test]
+fn the_preference_store_outranks_the_provider_file_for_discovery() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let providers = dir.path().join("providers");
+    let prefs = dir.path().join("data").join("provider_discovery.json");
+    std::fs::create_dir_all(&providers).unwrap();
+    std::fs::create_dir_all(prefs.parent().unwrap()).unwrap();
+
+    std::fs::write(
+        providers.join("off-in-file.toml"),
+        "[provider]\nid = \"off-in-file\"\nbase_url = \"http://127.0.0.1:4200/v1\"\ndiscover_models = false\n",
+    )
+    .unwrap();
+    std::fs::write(
+        providers.join("on-in-file.toml"),
+        "[provider]\nid = \"on-in-file\"\nbase_url = \"http://127.0.0.1:4300/v1\"\ndiscover_models = true\n",
+    )
+    .unwrap();
+    std::fs::write(&prefs, r#"{"off-in-file": true, "on-in-file": false}"#).unwrap();
+
+    let mut catalog = ModelCatalog::new_from_dir(&providers);
+    catalog.load_discover_prefs(&prefs);
+
+    assert!(
+        catalog.get_provider("off-in-file").unwrap().discover_models,
+        "the store's `true` outranks the file's `false`: the store is applied after the files are loaded"
+    );
+    assert!(
+        !catalog.get_provider("on-in-file").unwrap().discover_models,
+        "and the store's `false` outranks the file's `true` — the direction a WARN that only says \"kept local\" would have hidden"
+    );
+}
+
+/// A provider created *after* the preference store is applied still receives its preference (#8407).
+///
+/// This is the population the removed TOML writer used to serve: an endpoint registered through `[provider_urls]` or `PUT /api/providers/{name}/url` does not exist on disk, so boot creates it *after* it has applied the store, and `set_provider_url` builds the record with `discover_models: false`.
+/// Applying the store only to the providers loaded from disk stores the setting and applies it to nobody — the same silent revert, for exactly the providers the discovery toggle was added to serve.
+///
+/// The control is in the middle: a provider that is on disk when the store is applied must keep receiving it, so a fix cannot trade one population for the other.
+#[test]
+fn a_provider_created_after_the_preference_load_still_receives_it() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let providers = dir.path().join("providers");
+    let prefs = dir.path().join("data").join("provider_discovery.json");
+    std::fs::create_dir_all(&providers).unwrap();
+    std::fs::write(
+        providers.join("deepseek.toml"),
+        "[provider]\nid = \"deepseek\"\nbase_url = \"https://api.deepseek.com/v1\"\n",
+    )
+    .unwrap();
+
+    // Boot 1: the operator turns discovery on for a provider that is on disk, and
+    // registers a bare endpoint through `[provider_urls]` and turns it on too.
+    let mut first = ModelCatalog::new_from_dir(&providers);
+    assert!(first.set_provider_url("acme-gateway", "http://127.0.0.1:4100/v1"));
+    assert!(first.set_provider_discover_preference("deepseek", true));
+    assert!(first.set_provider_discover_preference("acme-gateway", true));
+    first
+        .save_discover_prefs(&prefs)
+        .expect("the preference must reach disk");
+
+    // Boot 2, in boot's order: the store is applied while only the on-disk
+    // providers exist, and the `[provider_urls]` overlay creates the other one
+    // afterwards.
+    let mut rebooted = ModelCatalog::new_from_dir(&providers);
+    rebooted.load_discover_prefs(&prefs);
+    assert!(
+        rebooted.get_provider("acme-gateway").is_none(),
+        "a bare endpoint lives in config.toml, not in providers/, so it cannot be there yet"
+    );
+    rebooted.apply_url_overrides(&BTreeMap::from([(
+        "acme-gateway".to_string(),
+        "http://127.0.0.1:4100/v1".to_string(),
+    )]));
+
+    // Control: the provider that existed when the store was applied.
+    assert!(
+        rebooted.get_provider("deepseek").unwrap().discover_models,
+        "control: a provider present at load time must keep receiving its preference"
+    );
+    // The hole: the provider creation created after the store was applied.
+    assert!(
+        rebooted
+            .get_provider("acme-gateway")
+            .unwrap()
+            .discover_models,
+        "a provider created after the store was applied must still receive the preference"
+    );
+}
+
+/// The other half of the migration question: a provider whose file says `false` explicitly is honoured, and is **not** adopted into the store.
+///
+/// An absent key and an explicit `false` are indistinguishable once parsed, so adopting every `false` would record an "off" for every provider nobody has expressed an opinion about — and since the store has the last word, that would override a `true` the registry may ship for one of them later.
+/// The asymmetry is the failure's own: losing a `true` turns discovery off, while losing a `false` lands back on the value an absent key already means.
+#[test]
+fn an_explicit_false_in_the_provider_file_is_honoured_but_not_adopted() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let providers = dir.path().join("providers");
+    let prefs = dir.path().join("data").join("provider_discovery.json");
+    std::fs::create_dir_all(&providers).unwrap();
+    std::fs::write(
+        providers.join("litellm.toml"),
+        "[provider]\nid = \"litellm\"\nbase_url = \"https://gateway.internal/v1\"\ndiscover_models = false\n",
+    )
+    .unwrap();
+
+    let mut catalog = ModelCatalog::new_from_dir(&providers);
+    assert!(
+        !catalog.get_provider("litellm").unwrap().discover_models,
+        "the file's explicit false is honoured"
+    );
+    assert_eq!(
+        catalog.adopt_legacy_discover_flags(&prefs),
+        0,
+        "an explicit false is not a legacy opt-in"
+    );
+    assert!(
+        !prefs.exists(),
+        "nothing is recorded, because adopting would write an \"off\" for every provider that merely omits the key"
+    );
+
+    // And the file's own value still reaches the catalog on the next boot.
+    let rebooted = ModelCatalog::new_from_dir(&providers);
+    assert!(!rebooted.get_provider("litellm").unwrap().discover_models);
+}
+
+/// An install that enabled discovery before the preference store existed carries the flag only in its provider file (#8407).
+///
+/// The first boot adopts it into the store, and every later boot leaves what it finds there alone — otherwise a stale `true` in a file would overrule an operator who has since turned the setting off.
+#[test]
+fn a_legacy_discover_flag_is_adopted_once_and_never_re_adopted() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let providers = dir.path().join("providers");
+    let prefs = dir.path().join("data").join("provider_discovery.json");
+    std::fs::create_dir_all(&providers).unwrap();
+    std::fs::create_dir_all(prefs.parent().unwrap()).unwrap();
+    std::fs::write(
+        providers.join("deepseek.toml"),
+        "[provider]\nid = \"deepseek\"\nbase_url = \"https://api.deepseek.com/v1\"\ndiscover_models = true\n",
+    )
+    .unwrap();
+
+    // Boot 1: nothing recorded yet, so the file's flag is adopted.
+    let mut first = ModelCatalog::new_from_dir(&providers);
+    assert_eq!(first.adopt_legacy_discover_flags(&prefs), 1);
+    assert!(first.get_provider("deepseek").unwrap().discover_models);
+
+    // The operator turns it off through the preference store.
+    let mut second = ModelCatalog::new_from_dir(&providers);
+    second.load_discover_prefs(&prefs);
+    assert!(second.set_provider_discover_preference("deepseek", false));
+    second
+        .save_discover_prefs(&prefs)
+        .expect("the preference must reach disk");
+
+    // Boot 2: the file still says `true`, and the store has the last word.
+    let mut third = ModelCatalog::new_from_dir(&providers);
+    third.load_discover_prefs(&prefs);
+    assert_eq!(
+        third.adopt_legacy_discover_flags(&prefs),
+        0,
+        "an explicit preference is never re-adopted from the file"
+    );
+    assert!(
+        !third.get_provider("deepseek").unwrap().discover_models,
+        "turning it off has to stick even while the file still says true"
+    );
+}
+
+/// The boot adoption reads the flag off the provider files, but the boot's
+/// registry sync runs first and its pre-digest adoption overwrites the file —
+/// the declaration was gone before that read could see it (#8411).
+///
+/// The sync captures it from the bytes it is about to replace, and the capture
+/// has to obey the adoption's own rules: record a declared `true` once, and
+/// never re-adopt over a preference the operator has since recorded.
+#[test]
+fn a_flag_captured_before_an_overwrite_is_recorded_once_and_left_alone_after() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let prefs = dir.path().join("data").join("provider_discovery.json");
+    let declaring = "[provider]\nid = \"deepseek\"\nbase_url = \"https://api.deepseek.com/v1\"\ndiscover_models = true\n";
+
+    assert!(
+        ModelCatalog::capture_legacy_discover_flag(&prefs, declaring),
+        "a declared true has to be captured — the file will not exist for the boot adoption"
+    );
+    let stored: std::collections::BTreeMap<String, bool> =
+        serde_json::from_str(&std::fs::read_to_string(&prefs).unwrap()).unwrap();
+    assert_eq!(stored.get("deepseek"), Some(&true));
+
+    // Same idempotence as the boot adoption: once recorded, the file's stale
+    // `true` never overrides what the store says.
+    assert!(!ModelCatalog::capture_legacy_discover_flag(
+        &prefs, declaring
+    ));
+    std::fs::write(&prefs, r#"{"deepseek": false}"#).unwrap();
+    assert!(
+        !ModelCatalog::capture_legacy_discover_flag(&prefs, declaring),
+        "a recorded false must keep the last word over the file"
+    );
+    let stored: std::collections::BTreeMap<String, bool> =
+        serde_json::from_str(&std::fs::read_to_string(&prefs).unwrap()).unwrap();
+    assert_eq!(stored.get("deepseek"), Some(&false));
+}
+
+/// The capture only fires for a genuine legacy opt-in: an absent key and an
+/// explicit `false` are both "no preference", and recording either would write
+/// an "off" for providers nobody has expressed an opinion about — the failure
+/// the adoption itself refuses to make.
+#[test]
+fn capture_ignores_files_without_a_true_declaration() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let prefs = dir.path().join("data").join("provider_discovery.json");
+
+    for (case, body) in [
+        (
+            "absent key",
+            "[provider]\nid = \"deepseek\"\nbase_url = \"https://api.deepseek.com/v1\"\n",
+        ),
+        (
+            "explicit false",
+            "[provider]\nid = \"deepseek\"\nbase_url = \"https://api.deepseek.com/v1\"\ndiscover_models = false\n",
+        ),
+        // Not a provider file at all: nothing to key the preference by.
+        ("no [provider] table", "id = \"deepseek\"\n"),
+    ] {
+        assert!(
+            !ModelCatalog::capture_legacy_discover_flag(&prefs, body),
+            "{case} must not be captured"
+        );
+    }
+    assert!(
+        !prefs.exists(),
+        "nothing to record means no store file, exactly like the boot adoption"
+    );
+}
+
+/// Buffered `tracing` writer for the divergence-warning tests below.
+///
+/// Local to this pair of tests rather than promoted to a shared helper:
+/// `kernel/tests.rs`, `config.rs` and `cron.rs` each carry their own copy, and
+/// factoring them together is a change to files this PR has no other reason to
+/// touch.
+#[derive(Clone)]
+struct CapturedLogs(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for CapturedLogs {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CapturedLogs {
+    type Writer = CapturedLogs;
+    fn make_writer(&'a self) -> Self::Writer {
+        self.clone()
+    }
+}
+
+impl CapturedLogs {
+    fn new() -> Self {
+        Self(std::sync::Arc::new(std::sync::Mutex::new(Vec::new())))
+    }
+
+    /// Install this buffer as the calling thread's subscriber for the duration of the returned guard.
+    fn install(&self) -> tracing::subscriber::DefaultGuard {
+        use tracing_subscriber::layer::SubscriberExt;
+        let layer = tracing_subscriber::fmt::layer()
+            .with_writer(self.clone())
+            .with_ansi(false)
+            .with_target(false);
+        tracing::subscriber::set_default(tracing_subscriber::registry().with(layer))
+    }
+
+    fn text(&self) -> String {
+        String::from_utf8(self.0.lock().unwrap().clone()).expect("utf8")
+    }
+}
+
+/// The silent half the review caught (#8411): once the store has an entry, a hand
+/// edit of `discover_models` in the provider file stops mattering — including the
+/// edit that looks like it turns discovery *off*.
+///
+/// The store still wins, because that is the design; what changes is that the
+/// boot says so. The WARN names the provider, both values, and the supported way
+/// to change the setting, so the file no longer reads as if it were in force.
+#[test]
+fn a_provider_file_that_disagrees_with_the_stored_preference_warns() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let providers = dir.path().join("providers");
+    let prefs = dir.path().join("data").join("provider_discovery.json");
+    std::fs::create_dir_all(&providers).unwrap();
+    std::fs::create_dir_all(prefs.parent().unwrap()).unwrap();
+    std::fs::write(
+        providers.join("gateway.toml"),
+        "[provider]\nid = \"gateway\"\nbase_url = \"https://gateway.internal/v1\"\ndiscover_models = false\n",
+    )
+    .unwrap();
+    std::fs::write(&prefs, r#"{"gateway": true}"#).unwrap();
+
+    let logs = CapturedLogs::new();
+    let _guard = logs.install();
+    let mut catalog = ModelCatalog::new_from_dir(&providers);
+    catalog.load_discover_prefs(&prefs);
+
+    assert!(
+        catalog.get_provider("gateway").unwrap().discover_models,
+        "the store wins, which is exactly why the disagreement has to be logged"
+    );
+    let text = logs.text();
+    assert!(
+        text.contains("declares discover_models = false") && text.contains("records true"),
+        "the WARN must show both values so the inert edit is visible; got: {text}"
+    );
+    assert!(
+        text.contains("stored preference wins"),
+        "the WARN must say which side wins; got: {text}"
+    );
+    assert!(
+        text.contains("/api/providers/gateway/discovery"),
+        "the WARN must say how to change it; got: {text}"
+    );
+}
+
+/// The other direction, and the one the review's scenario walks through: a
+/// `true` still declared in a hand-maintained file is adopted into the store, so
+/// from that boot on the file is inert — an operator turning it off there watches
+/// discovery stay on.
+///
+/// The adoption is a one-time legacy migration, but it is a transfer of control
+/// and now says so: WARN names the provider, the file as the source, the store as
+/// the new decider, and how to turn discovery off.
+#[test]
+fn adopting_a_legacy_discover_flag_warns_that_the_store_now_decides() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let providers = dir.path().join("providers");
+    let prefs = dir.path().join("data").join("provider_discovery.json");
+    std::fs::create_dir_all(&providers).unwrap();
+    std::fs::write(
+        providers.join("deepseek.toml"),
+        "[provider]\nid = \"deepseek\"\nbase_url = \"https://api.deepseek.com/v1\"\ndiscover_models = true\n",
+    )
+    .unwrap();
+
+    let logs = CapturedLogs::new();
+    let _guard = logs.install();
+    let mut catalog = ModelCatalog::new_from_dir(&providers);
+    assert_eq!(catalog.adopt_legacy_discover_flags(&prefs), 1);
+
+    let text = logs.text();
+    assert!(
+        text.contains("adopting the legacy discover_models = true"),
+        "the adoption must say what it read and from where; got: {text}"
+    );
+    assert!(
+        text.contains("stored preference decides"),
+        "the adoption must say who decides afterwards; got: {text}"
+    );
+    assert!(
+        text.contains("/api/providers/deepseek/discovery"),
+        "and how to turn discovery off once the store owns it; got: {text}"
+    );
+}
