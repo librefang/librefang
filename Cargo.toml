@@ -78,7 +78,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "registry"] }
 # `opentelemetry_sdk` / `opentelemetry-http`, which left two copies of
 # `opentelemetry::trace::Tracer` in the dep graph and broke
 # `SdkTracer: Tracer` in telemetry.rs. This commit completes the upgrade.
-opentelemetry = "0.32"
+opentelemetry = "0.33"
 opentelemetry_sdk = { version = "0.32", features = ["rt-tokio"] }
 # `default-features = false` is critical: opentelemetry-otlp's default feature
 # set enables `http-proto` + `reqwest-blocking-client`, which forces
