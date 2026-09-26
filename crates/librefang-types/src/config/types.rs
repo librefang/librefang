@@ -432,6 +432,53 @@ pub struct UserConfig {
     /// `ApprovalPolicy.channel_rules` — both must agree to allow.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub channel_tool_rules: HashMap<String, crate::user_policy::ChannelToolPolicy>,
+    /// A short glyph the operator picked to stand for this user in the dashboard (#8339).
+    ///
+    /// Free-form text rather than an enum or a validated emoji table: the set of glyphs a person may want is not something this daemon should have an opinion about, and the value only ever reaches a DOM text node.
+    /// The write path bounds its length and refuses control characters — the two properties that matter for a value that is stored in `config.toml` and rendered — and nothing else.
+    ///
+    /// `None` (or an absent key) means "no glyph chosen", which the dashboard renders as the user's initial.
+    /// The avatar *image* deliberately does not live here: it is a file on disk, and whether one exists is answered by probing the directory rather than by a second copy of the answer that can fall out of step with it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub emoji: Option<String>,
+}
+
+/// Longest emoji accepted, in `char`s.
+///
+/// A single glyph is one `char` for the common case and several for the ones built by joining or by a variation selector — `👨‍👩‍👧‍👦` is seven code points, `🏳️‍🌈` is six — so the ceiling is set to clear the widest sequence a picker emits with room to spare, and to stay far below the point where the value stops being a glyph and becomes a string someone is smuggling into `config.toml`.
+pub const MAX_EMOJI_CHARS: usize = 32;
+
+/// Normalize a user's identity emoji, or say why it was refused (#8339).
+///
+/// Lives beside the field it constrains rather than in the API crate, because a value reaches [`UserConfig::emoji`] two ways — `PATCH /api/users/{name}/identity`, and an operator editing `config.toml` — and only the first had a check.
+/// `validate_config_for_reload` in the kernel calls this for every row, so a hand-edited file is *reported* as soon as anything reloads it or writes it back through the API, and the two paths cannot drift apart because there is one implementation.
+///
+/// Neither hand-edit door refuses the value (#8339 review follow-up).
+/// A hand-edit that is only ever *loaded*, by `load_config` at boot, is not checked because refusing to start the daemon over a long glyph is a worse outcome than rendering one.
+/// A hand-edit that is rewritten through the API is checked but not refused, because a pre-existing value failing that check blocked every unrelated config write until the file was fixed by hand; the write path that actually owns the field still bounds it before persisting, and an unbounded glyph is stored in a file operators read and rendered into a DOM text node, not interpreted.
+///
+/// `None` and an empty-or-whitespace string both mean "clear the stored emoji".
+///
+/// Nothing here checks that the value *is* an emoji, and that is deliberate: deciding "is this a glyph" needs an emoji table that would go stale against Unicode, and the two properties that actually matter for a value stored in `config.toml` and rendered into a DOM text node are length and the absence of control characters.
+/// A `Z` is therefore accepted as an emoji. It renders as a `Z`.
+pub fn validate_emoji(emoji: Option<&str>) -> Result<Option<String>, String> {
+    let Some(raw) = emoji else {
+        return Ok(None);
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    let len = trimmed.chars().count();
+    if len > MAX_EMOJI_CHARS {
+        return Err(format!(
+            "emoji must be at most {MAX_EMOJI_CHARS} characters; this one is {len}"
+        ));
+    }
+    if trimmed.chars().any(char::is_control) {
+        return Err("emoji must not contain control characters".to_string());
+    }
+    Ok(Some(trimmed.to_string()))
 }
 
 fn default_role() -> String {
@@ -510,6 +557,7 @@ impl Default for UserConfig {
             tool_categories: None,
             memory_access: None,
             channel_tool_rules: HashMap::new(),
+            emoji: None,
         }
     }
 }
@@ -7377,6 +7425,31 @@ impl KernelConfig {
     /// Resolved directory for hand workspaces.
     pub fn effective_hands_workspaces_dir(&self) -> PathBuf {
         self.effective_workspaces_dir().join("hands")
+    }
+
+    /// Resolved directory holding per-agent avatar images (#8339).
+    ///
+    /// Deliberately **not** under [`Self::effective_workspaces_dir`] and **not** under `home_dir/dashboard`, and each exclusion is a security requirement rather than a preference.
+    ///
+    /// An agent can list its own workspace with `file_list`, so an image stored there puts its filename in front of the model on any turn that looks at the directory.
+    /// Everything under `home_dir/dashboard` is reachable at `/dashboard/…`, and `/dashboard/assets/**` is an unauthenticated GET, so writing uploaded bytes there would turn the directory into a way to serve chosen content from the dashboard's own origin.
+    ///
+    /// It is also not the shared upload directory: that one defaults to a subdirectory of the system temp dir and is swept by a 24-hour TTL reaper, which would delete an agent's avatar the day after it was set.
+    ///
+    /// Anchored to `home_dir` rather than to `workspaces_dir` because the latter is operator-overridable and may point anywhere, including into a tree an agent has been granted.
+    pub fn effective_avatars_dir(&self) -> PathBuf {
+        self.home_dir.join("avatars")
+    }
+
+    /// Resolved directory holding per-user avatar images (#8339).
+    ///
+    /// A subdirectory of [`Self::effective_avatars_dir`] rather than a sibling of it, so the two populations cannot be confused for one another: both name their files `{uuid}.{ext}`, and an agent id and a user id are UUIDs drawn from different namespaces that happen to render identically.
+    /// A shared directory would make "which of these is a person" answerable only by running the UUID backwards, and would let a future sweep that assumes agent avatars be confidently wrong about a user's picture.
+    ///
+    /// It inherits every property that makes the parent directory safe — outside the agent workspaces, outside the unauthenticated `/dashboard/**` tree, and outside the TTL-swept upload directory — because it is strictly below it.
+    pub fn effective_user_avatars_dir(&self) -> PathBuf {
+        self.effective_avatars_dir()
+            .join(crate::media::USER_AVATARS_SUBDIR)
     }
 
     /// Parse the TCP port number from `api_listen`.

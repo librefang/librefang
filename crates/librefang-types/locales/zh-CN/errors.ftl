@@ -91,3 +91,6 @@ api-error-rate-limited = 请求频率超限，请稍后重试。
 # typed MemoryRouteError-style helper. Without this key, every `t_args("api-error-generic", …)`
 # call returns the literal key as the response body and `$error` interpolation never runs.
 api-error-generic = 错误: { $error }
+
+api-error-validation-avatar-url-invalid = 头像 URL 必须是此守护进程为该 agent 提供的头像路由，或留空。请上传图片，而不是链接到它。
+api-error-validation-color-invalid = 颜色必须是以 '#' 开头的十六进制代码
