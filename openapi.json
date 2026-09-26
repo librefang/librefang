@@ -18085,7 +18085,7 @@
               "string",
               "null"
             ],
-            "description": "Template name from `~/.librefang/workspaces/agents/{template}/agent.toml`.\nWhen provided and `manifest_toml` is empty, the template is loaded automatically."
+            "description": "Template name, resolved first against the agent-type store\n(`~/.librefang/agent-types/{template}.toml`) and then, for deployments\nthat keep templates there, against the agent instance at\n`~/.librefang/workspaces/agents/{template}/agent.toml`.\nWhen provided and `manifest_toml` is empty, the template is loaded automatically."
           }
         },
         "additionalProperties": false

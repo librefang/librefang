@@ -137,7 +137,7 @@ impl TemplateLoadError {
 ///
 /// Before #6699 only the two directory-per-type sources were searched, so an agent type authored through the dashboard or by `agent_type_create` was invisible to every consumer of [`load_agent_template`] — including the ephemeral spawn engine's `agent_type` field, whose whole purpose is to run one of them.
 ///
-/// `requested` is joined onto each base, so [`validate_type_name`] must have accepted it first — every caller here goes through [`load_agent_template`], which validates before it calls this.
+/// `requested` is joined onto each base, so it must already be validated: [`load_agent_template`] runs [`validate_type_name`] before calling this, and the API path (`routes/agents/lifecycle.rs`) applies the equivalent alphanumeric filter before delegating here.
 pub fn agent_template_candidates(home_dir: &Path, requested: &str) -> Vec<PathBuf> {
     vec![
         librefang_types::agent_type_store::agent_type_path_in(home_dir, requested),
