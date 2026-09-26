@@ -2233,13 +2233,35 @@ pub async fn comms_send(
 }
 
 /// POST /api/comms/task — Post a task to the agent task queue.
+///
+/// The body is typed ([`librefang_types::comms::CommsTaskRequest`]), and that
+/// is what splits the error contract in two:
+///
+/// * **422** — a body that is valid JSON but does not deserialize into the
+///   request type: `"priority": 1.5`, `"timeout_secs": "soon"`, or any other
+///   shape mismatch. The `Json` extractor rejects it before this handler runs,
+///   because a fractional or negative-second limit must not be rounded,
+///   clamped, or dropped on the way to a 201.
+/// * **400** — a body that deserializes but is semantically wrong: an empty
+///   `title`, or an `assigned_to` that names no known agent.
+///
+/// Sibling `POST /api/tasks` carries the same fields but reads them from an
+/// untyped `serde_json::Value`, so every body mistake there — syntax included
+/// — is its own 400. Both routes refuse the same inputs; the status differs
+/// because one body is typed and the other is inspected field by field, and
+/// this note is what makes that difference a contract rather than a surprise.
+///
+/// `priority` and `timeout_secs` are enforced, not merely recorded: they
+/// reach the claim queue's `ORDER BY` and the sweeper's per-row deadline.
 #[utoipa::path(
     post,
     path = "/api/comms/task",
     tag = "network",
     request_body = crate::types::JsonObject,
     responses(
-        (status = 200, description = "Post a task to the agent task queue", body = crate::types::JsonObject)
+        (status = 201, description = "Task enqueued", body = crate::types::JsonObject),
+        (status = 400, description = "Missing title, or an unknown assignee", body = crate::types::JsonObject),
+        (status = 422, description = "Body does not deserialize into the request type (wrong type or out-of-range value)", body = crate::types::JsonObject),
     )
 )]
 pub async fn comms_task(
@@ -2250,6 +2272,15 @@ pub async fn comms_task(
         return ApiErrorResponse::bad_request("Title is required").into_json_tuple();
     }
 
+    // The same per-task controls `task_queue_post_root` honours. Hardcoding
+    // the defaults here made this route answer 201 while silently discarding
+    // a caller's `priority` / `timeout_secs`, which is the one outcome that
+    // leaves the caller unable to tell (#7974 review).
+    let opts = librefang_kernel_handle::TaskPostOptions {
+        priority: req.priority.unwrap_or(0),
+        timeout_secs: req.timeout_secs,
+    };
+
     match state
         .kernel
         .task_post(
@@ -2257,6 +2288,7 @@ pub async fn comms_task(
             &req.description,
             req.assigned_to.as_deref(),
             Some("ui-user"),
+            &opts,
         )
         .await
     {
@@ -2265,6 +2297,15 @@ pub async fn comms_task(
             Json(serde_json::json!({
                 "ok": true,
                 "task_id": task_id,
+            })),
+        ),
+        // Mirrors `task_queue_post_root`: an unresolvable `assigned_to` is a
+        // bad request body, not a server failure, so it is reported as 400
+        // rather than falling through to the generic 500 scrub below.
+        Err(librefang_kernel_handle::KernelOpError::AgentNotFound(name)) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": format!("Field 'assigned_to' names no known agent: '{name}'")
             })),
         ),
         Err(e) => ApiErrorResponse::internal_scrub(e).into_json_tuple(),

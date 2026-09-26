@@ -37,8 +37,18 @@ pub(super) async fn tool_task_post(
     validate_non_empty(description, "description")?;
     let kh = require_kernel_typed(kernel)?;
     let assigned_to = input["assigned_to"].as_str();
+    // The agent-facing tool posts with the neutral defaults: `priority` and
+    // `timeout_secs` are operator controls on the board, and widening this
+    // tool's schema would change every agent's prompt (and so its cache) for
+    // knobs the operator sets from the dashboard.
     let task_id = kh
-        .task_post(title, description, assigned_to, caller_agent_id)
+        .task_post(
+            title,
+            description,
+            assigned_to,
+            caller_agent_id,
+            &librefang_kernel_handle::TaskPostOptions::default(),
+        )
         .await
         .map_err(ToolError::upstream)?;
     Ok(format!("Task created with ID: {task_id}"))

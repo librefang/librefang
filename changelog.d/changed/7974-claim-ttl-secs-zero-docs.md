@@ -1,0 +1,3 @@
+Corrected every place that documented `[task_board] claim_ttl_secs = 0` as disabling the stuck-task sweeper entirely — the struct doc, the field doc, the config reference table, the dashboard help strings in all five locales, and the schema golden fixture all said the opposite of what the sweeper actually does.
+`0` disables the *global* clock only; a task that carries its own `timeout_secs` still expires on schedule.
+An operator relying on the old wording to run a human-in-the-loop board could set `claim_ttl_secs = 0` for that reason and then have an unrelated task's per-task timeout reclaim it from under the human anyway (#7974) (@DaBlitzStein)

@@ -17,15 +17,51 @@ impl kernel_handle::TaskQueue for LibreFangKernel {
         description: &str,
         assigned_to: Option<&str>,
         created_by: Option<&str>,
+        opts: &kernel_handle::TaskPostOptions,
     ) -> Result<String, kernel_handle::KernelOpError> {
         use kernel_handle::KernelOpError;
         // The one place `[queue] max_depth_per_agent` / `max_depth_global` reach the enqueue.
         // Read per post rather than captured at boot so `POST /api/config/reload` moves the cap without a restart, which is how the section's other knobs already behave.
         let caps = librefang_memory::TaskQueueCaps::from(&self.config_ref().queue);
+
+        // An assignee that resolves to nothing is rejected here rather than
+        // stored: `task_claim` already refuses an unknown agent with
+        // `AgentNotFound`, so accepting one at post time only produced a row
+        // that stayed `pending` forever with nothing to say why (the sweeper
+        // does not touch `pending`, and the assignee wake has no agent to
+        // wake). Validating both ends closes that asymmetry.
+        //
+        // Both spellings are accepted because both are stored and matched:
+        // `task_claim` matches `assigned_to` against the canonical UUID *or*
+        // the display name (issue #2841), so narrowing to one here would
+        // reject assignments the claim path handles correctly.
+        //
+        // "Known" means registered, not running: a stopped agent is accepted
+        // on purpose, so a task posted for it waits for the agent to come
+        // back rather than being refused because the worker happens to be
+        // down at post time.
+        if let Some(assignee) = assigned_to.filter(|a| !a.is_empty()) {
+            let known = match AgentId::from_str(assignee) {
+                Ok(parsed) => self.agents.registry.get(parsed).is_some(),
+                Err(_) => self.agents.registry.find_by_name(assignee).is_some(),
+            };
+            if !known {
+                return Err(KernelOpError::AgentNotFound(assignee.to_string()));
+            }
+        }
+
         let task_id = self
             .memory
             .substrate
-            .task_post(title, description, assigned_to, created_by, caps)
+            .task_post(
+                title,
+                description,
+                assigned_to,
+                created_by,
+                opts.priority,
+                opts.timeout_secs,
+                caps,
+            )
             .await
             // A depth cap being reached is the caller's answer, not a kernel fault: flattening it into `Internal` would reach the client as a scrubbed 500 and invite the retry the cap just refused.
             // `QuotaExceeded` maps to 429 in `ApiErrorResponse`.

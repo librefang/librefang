@@ -191,6 +191,18 @@ function TaskCard({ task, isDragTarget, onDragStart, agentsById }: TaskCardProps
             {t("tasks.by")} {task.created_by}
           </span>
         )}
+        {!!task.priority && (
+          <span className="text-[10px] text-text-dim/50 shrink-0">
+            {t("tasks.priority_badge", { priority: task.priority })}
+          </span>
+        )}
+        {task.timeout_secs != null && (
+          <span className="text-[10px] text-text-dim/50 shrink-0">
+            {task.timeout_secs === 0
+              ? t("tasks.timeout_badge_never")
+              : t("tasks.timeout_badge", { secs: task.timeout_secs })}
+          </span>
+        )}
         <span className="ml-auto flex items-center gap-1 text-[10px] text-text-dim/50 shrink-0">
           <Clock className="w-2.5 h-2.5" />
           {relativeTime(task.created_at)}
@@ -360,6 +372,8 @@ function NewTaskModal({ isOpen, onClose, agents }: NewTaskModalProps) {
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
   const [assignee, setAssignee] = useState("");
+  const [priority, setPriority] = useState("");
+  const [timeoutSecs, setTimeoutSecs] = useState("");
 
   function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -368,6 +382,8 @@ function NewTaskModal({ isOpen, onClose, agents }: NewTaskModalProps) {
       title: title.trim(),
       description: description.trim(),
       ...(assignee ? { assigned_to: assignee } : {}),
+      ...(priority.trim() ? { priority: Number(priority) } : {}),
+      ...(timeoutSecs.trim() ? { timeout_secs: Number(timeoutSecs) } : {}),
     });
   }
 
@@ -379,6 +395,8 @@ function NewTaskModal({ isOpen, onClose, agents }: NewTaskModalProps) {
       setTitle("");
       setDescription("");
       setAssignee("");
+      setPriority("");
+      setTimeoutSecs("");
     }
   }, [isOpen]);
 
@@ -444,6 +462,46 @@ function NewTaskModal({ isOpen, onClose, agents }: NewTaskModalProps) {
           )}
         </div>
 
+        <div className="flex gap-3">
+          <div className="flex-1">
+            <label className="block text-xs font-semibold text-text-dim mb-1.5">
+              {t("tasks.field_priority")}
+            </label>
+            {/* `step={1}` is not decoration: the server stores an integer
+                (`priority` is `i64`, `timeout_secs` is `u32`) and rejects a
+                fractional value with a 400, so a number field that lets one
+                through hands the operator an error the browser could have
+                caught. Default step is 1, but only when unset — stating it
+                keeps the field whole-number after any future edit. */}
+            <input
+              type="number"
+              step={1}
+              value={priority}
+              onChange={(e) => setPriority(e.target.value)}
+              placeholder={t("tasks.field_priority_placeholder")}
+              className={INPUT_CLASS}
+            />
+          </div>
+          <div className="flex-1">
+            <label className="block text-xs font-semibold text-text-dim mb-1.5">
+              {t("tasks.field_timeout")}
+            </label>
+            {/* `step={1}` for the same reason as `priority`: seconds are an
+                integer (`u32`), and `min={0}` matches the server's
+                `as_u64()` rejection of negatives. `0` is valid and means
+                "never reclaim". */}
+            <input
+              type="number"
+              step={1}
+              min={0}
+              value={timeoutSecs}
+              onChange={(e) => setTimeoutSecs(e.target.value)}
+              placeholder={t("tasks.field_timeout_placeholder")}
+              className={INPUT_CLASS}
+            />
+          </div>
+        </div>
+
         {createMutation.isError && (
           <p className="text-xs text-error">
             {createMutation.error instanceof Error
@@ -506,7 +564,13 @@ export function TasksPage() {
   // existed, which meant a new agent was unreachable until someone had already
   // assigned it something, a deleted agent lingered forever, and an empty
   // board offered no picker at all.
-  const agentsQuery = useAgents();
+  //
+  // `includeHands: true` because the kernel accepts hand agents as assignees
+  // too, and this list is now a `<select>` rather than a suggestion list — an
+  // agent it omits is not merely unsuggested, it is unreachable. The
+  // default-excluding call would offer strictly less than what a claim can
+  // actually target.
+  const agentsQuery = useAgents({ includeHands: true });
   const agents = useMemo(() => agentsQuery.data ?? [], [agentsQuery.data]);
   const agentsById = useMemo(
     () => new Map(agents.map((a) => [a.id, a])),

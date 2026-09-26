@@ -53,6 +53,7 @@ class LibreFang {
     this.sessions = new SessionsResource(this);
     this.skills = new SkillsResource(this);
     this.system = new SystemResource(this);
+    this.tasks = new TasksResource(this);
     this.tools = new ToolsResource(this);
     this.users = new UsersResource(this);
     this.vault = new VaultResource(this);
@@ -1771,6 +1772,16 @@ class SystemResource {
 
   async apiVersions() {
     return this._c._request("GET", "/api/versions");
+  }
+}
+
+// ── Tasks Resource
+
+class TasksResource {
+  constructor(client) { this._c = client; }
+
+  async taskQueuePostRoot(data) {
+    return this._c._request("POST", "/api/tasks", data, undefined);
   }
 }
 

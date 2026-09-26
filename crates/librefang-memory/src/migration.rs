@@ -5,7 +5,7 @@
 use rusqlite::Connection;
 
 /// Current schema version.
-const SCHEMA_VERSION: u32 = 61;
+const SCHEMA_VERSION: u32 = 62;
 
 /// Run all migrations to bring the database up to date.
 pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
@@ -306,6 +306,19 @@ pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
     // silent and permanent. Other open PRs also want 61; whichever merges
     // first keeps it and the rest renumber to 62, 63, … on rebase.
     run_step!(61, migrate_v61);
+
+    // v62: per-task claim TTL override on the Task Board. `[task_board]
+    // claim_ttl_secs` is one global number, so an installation that mixes a
+    // 30-second health check with a two-hour import has to pick a TTL that is
+    // wrong for one of them. NULL keeps the global, which is what every
+    // existing row means.
+    //
+    // This wanted to be 61 but #7752 took that number first, which is exactly
+    // the case the note above describes: it merged, so this one renumbers
+    // rather than skipping past it. A gap is not an option — `run_step!` gates
+    // on `current_version < N` read once at boot, so a database that reaches N
+    // with a hole below it never runs the skipped step.
+    run_step!(62, migrate_v62);
 
     // Audit-trail consistency (#3538): user_version must match the count
     // of distinct rows in `migrations`. Drift means an earlier migration
@@ -1526,6 +1539,57 @@ fn migrate_v61(conn: &Connection) -> Result<(), rusqlite::Error> {
     conn.execute(
         "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
          VALUES (61, datetime('now'), 'Add sessions.parent_session_id for sub-agent run lineage (#7752)')",
+        [],
+    )?;
+    Ok(())
+}
+
+/// v62: per-task claim TTL override (`task_queue.timeout_secs`).
+///
+/// The stuck-task sweeper reclaims an `in_progress` row once it has been held
+/// longer than `[task_board] claim_ttl_secs`, a single global number.
+/// A board that carries both a 30-second probe and a two-hour import cannot be
+/// served by one value: tuned for the import, a wedged probe sits claimed for
+/// hours; tuned for the probe, the import is torn away from a worker that is
+/// still making progress.
+///
+/// `NULL` means "use the global", which is exactly what every pre-v62 row
+/// means, so the column needs no backfill.
+fn migrate_v62(conn: &Connection) -> Result<(), rusqlite::Error> {
+    // No `table_exists` guard: `task_queue` is created unconditionally by
+    // `migrate_v1`, so it is present on every database that reaches this step.
+    //
+    // `try_column_exists` has to stay (SQLite has no `ADD COLUMN IF NOT
+    // EXISTS`), and the branch it guards for the pre-renumber footprint does
+    // more than tolerate the rerun: a build that ran this step while it was
+    // numbered 61 left the database stamped at 61, so the ladder skipped the
+    // *real* v61 — #7752's `sessions.parent_session_id` — and will never run
+    // it (`run_step!` gates on `current_version < 61`). `migrate_v61` is
+    // idempotent, so applying it here is the only remaining route to that
+    // column; without it the database opens on a valid stamp and fails later,
+    // on the first query that reads a column which is not there.
+    //
+    // The audit row moves with the repair: under the old numbering 61 was
+    // recorded as the timeout migration, and after a renumber that row
+    // describes the wrong step. The timeout history is re-recorded under 62
+    // by the `INSERT` below.
+    if try_column_exists(conn, "task_queue", "timeout_secs")? {
+        migrate_v61(conn)?;
+        conn.execute(
+            "UPDATE migrations SET description = \
+             'Add sessions.parent_session_id for sub-agent run lineage (#7752)' \
+             WHERE version = 61 AND description LIKE '%timeout_secs%'",
+            [],
+        )?;
+    } else {
+        conn.execute(
+            "ALTER TABLE task_queue ADD COLUMN timeout_secs INTEGER DEFAULT NULL",
+            [],
+        )?;
+    }
+    conn.execute(
+        "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
+         VALUES (62, datetime('now'), 'Per-task claim TTL override on task_queue (timeout_secs)')",
         [],
     )?;
     Ok(())
@@ -4830,8 +4894,8 @@ mod tests {
         // If `parent_recorded` did not default to 0, every agent that predates v54 would start positively claiming to be a root agent — a more confident wrong answer than the `null` the bug already produced.
         //
         // Simulates a real pre-v54 database: build the v40-era `agents` table, insert a row, stamp `user_version = 50`, then let the ladder run.
-        // Steps 51-54 all fire from 50, so the fixture also needs the tables 51 and 52 alter — `memories` and `group_roster` — even though this test asserts nothing about them.
-        // Their absence is not a v54 bug; a real database at user_version 50 has both.
+        // Steps 51-62 all fire from 50, so the fixture also needs the tables 51, 52, 61 and 62 alter — `memories`, `group_roster`, `sessions` and `task_queue` — even though this test asserts nothing about them.
+        // Their absence is not a v54 bug; a real database at user_version 50 has all four.
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(
             "
@@ -4864,6 +4928,17 @@ mod tests {
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
+            CREATE TABLE task_queue (
+                id TEXT PRIMARY KEY,
+                agent_id TEXT NOT NULL,
+                task_type TEXT NOT NULL,
+                payload BLOB NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                priority INTEGER NOT NULL DEFAULT 0,
+                scheduled_at TEXT,
+                created_at TEXT NOT NULL,
+                completed_at TEXT
+            );
             CREATE TABLE migrations (
                 version INTEGER PRIMARY KEY,
                 applied_at TEXT NOT NULL,
@@ -4893,6 +4968,129 @@ mod tests {
         assert_eq!(
             parent_recorded, 0,
             "a pre-v54 row must read as UNKNOWN lineage, not as a root agent"
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // v62: per-task claim TTL override (task_queue.timeout_secs)
+    // ---------------------------------------------------------------------
+
+    /// The column has to arrive on a board that already holds tasks — a
+    /// migration that only works on a fresh file has never run where it
+    /// matters. A pre-v62 row means "use the global TTL", which is `NULL`.
+    #[test]
+    fn migrate_v62_adds_timeout_column_to_an_existing_board() {
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO task_queue (id, agent_id, task_type, payload, status, created_at) \
+             VALUES ('existing', 'agent-1', 'work', x'00', 'in_progress', '2026-01-01')",
+            [],
+        )
+        .unwrap();
+
+        assert!(
+            column_exists(&conn, "task_queue", "timeout_secs"),
+            "v62 must add task_queue.timeout_secs"
+        );
+        let timeout: Option<i64> = conn
+            .query_row(
+                "SELECT timeout_secs FROM task_queue WHERE id = 'existing'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(
+            timeout.is_none(),
+            "a pre-existing task must inherit the global TTL, not acquire one of its own"
+        );
+    }
+
+    #[test]
+    fn migrate_v62_is_idempotent() {
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+        // The runner can legitimately replay a step after an interrupted
+        // upgrade, so a duplicate-column rerun must not fail.
+        //
+        // The guard this exercises is `try_column_exists` at the top of
+        // `migrate_v62`, which is the only thing standing between a replay
+        // and `duplicate column name: timeout_secs`. A database that has
+        // climbed past 62 through a caller other than the ladder is stamped
+        // against a table that already has the column, and `run_migrations`
+        // will not call this again — so the rerun has to be issued directly.
+        migrate_v62(&conn).expect("v62 must survive a rerun");
+        assert!(column_exists(&conn, "task_queue", "timeout_secs"));
+    }
+
+    /// The renumber window: a database stamped at 61 by the build that ran
+    /// this step before #7752's v61 took the number.
+    ///
+    /// That database carries `timeout_secs` and reports `user_version = 61`,
+    /// which is also the stamp main's v61 leaves. The ladder gates on
+    /// `current_version < 61`, so `migrate_v61` is skipped for it and *only*
+    /// `migrate_v62` can reconcile `sessions.parent_session_id`; without that
+    /// repair the install boots on a valid-looking stamp and fails later, on
+    /// the first query that reads a column which is not there. The audit row
+    /// has to move with the column, or version 61 keeps describing the wrong
+    /// step for every operator who lists the ladder.
+    #[test]
+    fn migrate_v62_reconciles_a_database_stamped_at_61_by_the_pre_renumber_build() {
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+
+        // Stand where that build left it: the timeout column is present, the
+        // real v61 never ran, and the audit ladder and pragma both say 61.
+        conn.execute("DROP INDEX IF EXISTS idx_sessions_parent", [])
+            .unwrap();
+        conn.execute("ALTER TABLE sessions DROP COLUMN parent_session_id", [])
+            .unwrap();
+        conn.execute("DELETE FROM migrations WHERE version > 60", [])
+            .unwrap();
+        conn.execute(
+            "INSERT INTO migrations (version, applied_at, description) \
+             VALUES (61, datetime('now'), 'Per-task claim TTL override on task_queue (timeout_secs)')",
+            [],
+        )
+        .unwrap();
+        conn.pragma_update(None, "user_version", 61i64).unwrap();
+
+        assert!(
+            !try_column_exists(&conn, "sessions", "parent_session_id").unwrap(),
+            "the fixture must actually be missing the real v61 column"
+        );
+        assert!(try_column_exists(&conn, "task_queue", "timeout_secs").unwrap());
+
+        run_migrations(&conn).expect("a pre-renumber database must still open");
+
+        assert!(
+            try_column_exists(&conn, "sessions", "parent_session_id").unwrap(),
+            "v62 must reconcile the real v61 the renumber skipped"
+        );
+        assert!(try_column_exists(&conn, "task_queue", "timeout_secs").unwrap());
+        assert_eq!(get_schema_version(&conn).unwrap(), SCHEMA_VERSION);
+
+        let d61: String = conn
+            .query_row(
+                "SELECT description FROM migrations WHERE version = 61",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let d62: String = conn
+            .query_row(
+                "SELECT description FROM migrations WHERE version = 62",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(
+            d61.contains("parent_session_id"),
+            "version 61 must describe the step that now owns the number, got: {d61}"
+        );
+        assert!(
+            d62.contains("timeout_secs"),
+            "version 62 must describe the timeout migration, got: {d62}"
         );
     }
 }
