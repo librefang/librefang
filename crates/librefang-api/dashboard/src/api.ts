@@ -1309,7 +1309,16 @@ async function get<T>(path: string): Promise<T> {
   return (await response.json()) as T;
 }
 
-const AUTHENTICATED_IMAGE_PATH_RE = /^\/api\/(?:uploads|media\/artifacts)\/[A-Za-z0-9_-]+$/;
+// Paths whose bytes are an image behind the bearer token, so an `<img src>`
+// cannot reach them and the caller has to fetch a Blob instead.
+//
+// The agent avatar arm is anchored on the literal `/avatar` suffix rather than
+// left open-ended: `[A-Za-z0-9_-]+` already excludes `/` and `.`, so no id can
+// walk out of the segment, and requiring the suffix keeps the allowlist from
+// silently covering some future `/api/agents/{id}/anything` that is not an
+// image at all.
+const AUTHENTICATED_IMAGE_PATH_RE =
+  /^\/api\/(?:(?:uploads|media\/artifacts)\/[A-Za-z0-9_-]+|agents\/[A-Za-z0-9_-]+\/avatar)$/;
 
 export function isAuthenticatedImagePath(path: string): boolean {
   return AUTHENTICATED_IMAGE_PATH_RE.test(path);
@@ -1748,6 +1757,105 @@ export type AgentSchedulePatch =
  * `getAgentManifest` and serialized via `serializeManifestForm`. */
 export async function patchAgent(agentId: string, body: { name?: string; description?: string; system_prompt?: string; model?: string; provider?: string; mcp_servers?: string[]; schedule?: AgentSchedulePatch; manifest_toml?: string; auto_evolve?: boolean }): Promise<ApiActionResponse> {
   return patch<ApiActionResponse>(`/api/agents/${encodeURIComponent(agentId)}`, body);
+}
+
+// --- Agent visual identity: emoji, colour, avatar image (#8339) ------------
+
+/** Largest avatar the daemon stores, mirroring `MAX_AVATAR_BYTES` in
+ *  `crates/librefang-api/src/routes/agents/avatar.rs`.
+ *
+ *  Duplicated here to fail before spending the upload, not to decide: a stale
+ *  copy of this number can only be wrong in the direction of sending bytes the
+ *  server then rejects with a 413 that names the real cap. */
+export const MAX_AGENT_AVATAR_BYTES = 2 * 1024 * 1024;
+
+/** Image types the daemon accepts as an avatar, mirroring
+ *  `librefang_types::media::ALLOWED_IMAGE_TYPES`.
+ *
+ *  SVG is absent on purpose and its absence is load-bearing: an SVG is XML that
+ *  can carry script, and the daemon serves avatars back to a browser. Note the
+ *  server decides by sniffing the bytes and ignores both the `Content-Type` we
+ *  send and the name of the file, so this list is a courtesy to the person
+ *  picking the file — never the check that matters. */
+export const ALLOWED_AGENT_AVATAR_TYPES = [
+  "image/png",
+  "image/jpeg",
+  "image/gif",
+  "image/webp",
+] as const;
+
+/** The one path an agent's avatar can live at, mirroring
+ *  `librefang_types::media::agent_avatar_url`.
+ *
+ *  Derived from the id rather than read out of the stored `avatar_url` on
+ *  purpose. #8349 closed that field to exactly this value or nothing, but it is
+ *  validated on write and not on read, so a row written before that change — or
+ *  restored from an old backup — could still hold an external URL. Building the
+ *  path here means such a row renders the initials instead of sending this
+ *  origin's bearer token somewhere nobody chose. */
+export function agentAvatarPath(agentId: string): string {
+  return `/api/agents/${encodeURIComponent(agentId)}/avatar`;
+}
+
+export interface AgentAvatarUploadResult {
+  status: string;
+  /** Always `/api/agents/{id}/avatar` — the one value `avatar_url` may hold. */
+  avatar_url: string;
+  content_type: string;
+  bytes: number;
+}
+
+/** POST /api/agents/{id}/avatar — store an image as this agent's avatar.
+ *
+ *  The body is the raw bytes and nothing else: no multipart, no filename in a
+ *  header, no name in the path. That is the route's design, not an omission —
+ *  what lands on disk is `{agent_id}.{ext}` where the id is a UUID the daemon
+ *  minted and the extension comes from sniffing the bytes.
+ *
+ *  Rejects with 423 (Locked) for an agent the deployment provisions — every
+ *  identity write to one answers that, not 403 — because setting an avatar
+ *  writes `avatar_url` into the manifest identity and the next reconcile would
+ *  overwrite it (#6695). */
+export async function uploadAgentAvatar(agentId: string, file: Blob): Promise<AgentAvatarUploadResult> {
+  const response = await fetchWithTimeout(`/api/agents/${encodeURIComponent(agentId)}/avatar`, {
+    method: "POST",
+    // The route documents `application/octet-stream` and ignores whatever we
+    // send, so claim the honest thing rather than the browser's guess at the
+    // file's type — the bytes are what get read either way.
+    headers: buildHeaders({ "Content-Type": "application/octet-stream" }),
+    body: file,
+  });
+  if (!response.ok) {
+    throw await parseError(response);
+  }
+  return (await response.json()) as AgentAvatarUploadResult;
+}
+
+/** DELETE /api/agents/{id}/avatar — drop the image and clear `avatar_url`.
+ *
+ *  Succeeds whether or not a file was there: a stored `avatar_url` whose file
+ *  is gone renders as a broken image, and clearing the reference is how that
+ *  state is escaped. */
+export async function deleteAgentAvatar(agentId: string): Promise<ApiActionResponse> {
+  return del<ApiActionResponse>(`/api/agents/${encodeURIComponent(agentId)}/avatar`);
+}
+
+/** PATCH /api/agents/{id}/identity — emoji and colour.
+ *
+ *  Partial by contract since #6608: a field this body omits keeps its stored
+ *  value rather than being cleared, so sending `{ emoji }` alone cannot lose a
+ *  colour someone set. Clearing a field is therefore sending it empty, not
+ *  omitting it.
+ *
+ *  `avatar_url` is deliberately not in the accepted payload here. It may only
+ *  ever hold `/api/agents/{id}/avatar` or nothing, and the upload and delete
+ *  routes above are what write it — an editor for it would be a way to point
+ *  the dashboard's own origin at a URL the operator never asked for. */
+export async function updateAgentIdentity(
+  agentId: string,
+  identity: { emoji?: string; color?: string },
+): Promise<ApiActionResponse> {
+  return patch<ApiActionResponse>(`/api/agents/${encodeURIComponent(agentId)}/identity`, identity);
 }
 
 /** GET /api/agents/{id}/manifest — the agent's full manifest as raw TOML.

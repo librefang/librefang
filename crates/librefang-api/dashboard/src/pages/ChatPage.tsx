@@ -13,7 +13,7 @@ import { useFullConfig } from "../lib/queries/config";
 import { useMediaProviders } from "../lib/queries/media";
 import { useModels } from "../lib/queries/models";
 import { usePendingApprovals } from "../lib/queries/approvals";
-import { agentQueries, useAgents, useAgentSessions } from "../lib/queries/agents";
+import { agentQueries, useAgentAvatarUrl, useAgents, useAgentSessions } from "../lib/queries/agents";
 import { useSessionStream } from "../lib/queries/sessions";
 import { useActiveHandsWhen } from "../lib/queries/hands";
 import { useChatCommands, type ChatCommand } from "../lib/queries/commands";
@@ -49,6 +49,7 @@ import { filterVisible } from "../lib/hiddenModels";
 import { useVoiceInput } from "../lib/useVoiceInput";
 import { Typewriter_v2 } from "../components/Typewriter_v2";
 import { AuthenticatedImage } from "../components/AuthenticatedImage";
+import { AgentAvatar } from "../components/AgentAvatar";
 import { useMathPlugins } from "../lib/hooks/useMathPlugins";
 import {
   useCreateAgentSession,
@@ -1391,6 +1392,23 @@ export function useChatMessages(
 interface MessageBubbleProps {
   message: ChatMessage;
   usageFooter: string;
+  /** The agent this session belongs to — what the bubble's avatar renders.
+   *  Undefined before the agent list resolves, in which case the bubble keeps
+   *  the generic bot icon it used to show.
+   *
+   *  The identity arrives as two primitives rather than as one `AgentIdentity`
+   *  object: this component is memoised against the streaming re-renders, and
+   *  the agent list it is read from is rebuilt every poll, so an object prop
+   *  would be a new reference every 30 s and drop the memo each time.
+   *
+   *  `agentAvatarSrc` is already the object URL, resolved once by `ChatPage`
+   *  for the agent the whole transcript belongs to. Each bubble used to mount
+   *  its own `AgentAvatar` and mint its own URL over the same cached Blob —
+   *  hundreds of live handles for one image on a long conversation. */
+  agentId?: string;
+  agentName?: string;
+  agentAvatarSrc?: string;
+  agentEmoji?: string;
   onCopy?: (messageId: string, content: string) => void;
   copied?: boolean;
   onSpeak?: (messageId: string, content: string) => void;
@@ -1399,7 +1417,7 @@ interface MessageBubbleProps {
   ttsAvailable?: boolean;
 }
 
-const MessageBubble = memo(function MessageBubble({ message, usageFooter, onCopy, copied, onSpeak, isSpeaking, ttsStatus, ttsAvailable }: MessageBubbleProps) {
+const MessageBubble = memo(function MessageBubble({ message, usageFooter, agentId, agentName, agentAvatarSrc, agentEmoji, onCopy, copied, onSpeak, isSpeaking, ttsStatus, ttsAvailable }: MessageBubbleProps) {
   const { t } = useTranslation();
   const isUser = message.role === "user";
   const isSystem = message.role === "system";
@@ -1443,11 +1461,26 @@ const MessageBubble = memo(function MessageBubble({ message, usageFooter, onCopy
       <div className={`flex flex-col min-w-0 w-fit max-w-[90%] sm:max-w-[min(75%,70ch)] ${isUser ? "items-end" : "items-start"}`}>
         {/* Avatar + name */}
         <div className={`flex items-center gap-2 mb-1.5 ${isUser ? "self-end flex-row-reverse" : "self-start"}`}>
-          <div className={`h-7 w-7 rounded-lg flex items-center justify-center ${
-            isUser ? "bg-brand text-white shadow-sm" : "bg-surface border border-border-subtle"
-          }`}>
-            {isUser ? <User className="h-3.5 w-3.5" /> : <Bot className="h-3.5 w-3.5 text-brand" />}
-          </div>
+          {/* The user's own identity is still an icon: the account has no
+              avatar to show yet (#8339 covers agents only). The agent's is
+              real, falling back to its emoji and then to its initials. */}
+          {isUser ? (
+            <div className="h-8 w-8 shrink-0 grid place-items-center rounded-full bg-brand text-white shadow-sm">
+              <User className="h-3.5 w-3.5" />
+            </div>
+          ) : agentId ? (
+            <AgentAvatar
+              agentId={agentId}
+              resolvedSrc={agentAvatarSrc}
+              emoji={agentEmoji}
+              fallback={agentName ?? t("chat.bot")}
+              size="sm"
+            />
+          ) : (
+            <div className="h-8 w-8 shrink-0 grid place-items-center rounded-full bg-surface border border-border-subtle">
+              <Bot className="h-3.5 w-3.5 text-brand" />
+            </div>
+          )}
           <span className={`text-[11px] font-bold uppercase tracking-wider ${isUser ? "text-brand" : "text-text-dim"}`}>
             {isUser ? t("chat.you") : t("chat.bot")}
           </span>
@@ -3409,6 +3442,16 @@ export function ChatPage() {
   const { pendingApprovals, removeApproval } = useApprovalPoller(selectedAgentId || null);
   const selectedAgent = agents.find(a => a.id === selectedAgentId);
 
+  // The transcript's avatar, resolved once here rather than per message. Every
+  // assistant bubble used to mount its own `AgentAvatar`, and each one minted
+  // an object URL over the same cached Blob — a 300-message conversation held
+  // 300 live handles for one image, and any avatar refetch re-minted and
+  // re-revoked all of them at once, changing every `<img src>` in the thread.
+  const selectedAgentAvatarSrc = useAgentAvatarUrl(
+    selectedAgent?.id ?? "",
+    !!selectedAgent?.identity?.avatar_url,
+  );
+
   // Per-agent session list. `activeSessionId` is derived from the URL first
   // (multi-tab safety, issue #2959); if absent, fall back to the server's
   // canonical active session so initial navigation still highlights correctly.
@@ -3560,12 +3603,27 @@ export function ChatPage() {
           : "hover:bg-surface-hover"
       }`}
     >
-      <div className={`relative h-10 w-10 rounded-xl flex items-center justify-center font-black text-lg ${
-        selectedAgentId === agent.id ? "bg-white/20"
-        : (agent.state || "").toLowerCase() === "running" ? "bg-linear-to-br from-brand/20 to-accent/20 text-brand"
-        : "bg-main text-text-dim/40"
-      }`}>
-        {displayName.charAt(0).toUpperCase()}
+      {/* The slot the first letter used to sit in. `size="md"` is the same
+          `h-10 w-10` the chip used, but two things do shift: the silhouette
+          becomes `rounded-full` — identity is a circle everywhere else in the
+          SPA — and the fallback initial drops from `text-lg` to `text-sm`.
+          The three background states are restated because the avatar's own
+          `bg-brand/10 text-brand` is invisible on the `bg-brand` selected row. */}
+      <div className="relative shrink-0">
+        <AgentAvatar
+          agentId={agent.id}
+          avatarUrl={agent.identity?.avatar_url}
+          emoji={agent.identity?.emoji}
+          fallback={displayName}
+          size="md"
+          className={
+            selectedAgentId === agent.id
+              ? "bg-white/20 text-white"
+              : (agent.state || "").toLowerCase() === "running"
+                ? "bg-transparent bg-linear-to-br from-brand/20 to-accent/20 text-brand"
+                : "bg-main text-text-dim/40"
+          }
+        />
         {(agent.state || "").toLowerCase() === "running" ? (
           <span className="absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 rounded-full bg-success border-2 border-white dark:border-surface animate-pulse" />
         ) : (
@@ -3870,6 +3928,10 @@ export function ChatPage() {
                     key={msg.id}
                     message={msg}
                     usageFooter={usageFooter}
+                    agentId={selectedAgent?.id}
+                    agentName={selectedAgent?.name}
+                    agentAvatarSrc={selectedAgentAvatarSrc}
+                    agentEmoji={selectedAgent?.identity?.emoji}
                     onCopy={handleCopy}
                     copied={copiedMessageId === msg.id}
                     onSpeak={ttsAvailable ? tts.toggle : undefined}
