@@ -115,3 +115,53 @@ describe("chat transcript scale", () => {
     expect(useUIStore.getState().chatScale).toBe(MIN_CHAT_SCALE);
   });
 });
+
+describe("chat session tabs", () => {
+  it("keeps a session out of the strip twice and bounds how many accumulate", async () => {
+    const { useUIStore, MAX_CHAT_TABS } = await import("./store");
+    useUIStore.setState({ openChatTabs: {} });
+
+    useUIStore.getState().openChatTab("agent-a", "s1");
+    useUIStore.getState().openChatTab("agent-a", "s1");
+    expect(useUIStore.getState().openChatTabs["agent-a"]).toEqual(["s1"]);
+
+    // Every session ever visited would make a strip too wide to use, and the
+    // oldest is the one least likely to be wanted back.
+    for (let i = 0; i < MAX_CHAT_TABS + 5; i += 1) {
+      useUIStore.getState().openChatTab("agent-a", `bulk-${i}`);
+    }
+    const tabs = useUIStore.getState().openChatTabs["agent-a"];
+    expect(tabs).toHaveLength(MAX_CHAT_TABS);
+    expect(tabs).not.toContain("s1");
+    expect(tabs[tabs.length - 1]).toBe(`bulk-${MAX_CHAT_TABS + 4}`);
+  });
+
+  it("forgets an agent entirely once its last tab closes", async () => {
+    const { useUIStore } = await import("./store");
+    useUIStore.setState({ openChatTabs: {} });
+
+    useUIStore.getState().openChatTab("agent-b", "s1");
+    useUIStore.getState().closeChatTab("agent-b", "s1");
+    // Not an empty array: the persisted object would otherwise grow one entry
+    // per agent ever opened and never shrink.
+    expect(useUIStore.getState().openChatTabs).not.toHaveProperty("agent-b");
+  });
+
+  it("drops tabs for sessions the server no longer has", async () => {
+    const { useUIStore } = await import("./store");
+    useUIStore.setState({ openChatTabs: { "agent-c": ["alive", "deleted"] } });
+
+    useUIStore.getState().pruneChatTabs("agent-c", new Set(["alive"]));
+    expect(useUIStore.getState().openChatTabs["agent-c"]).toEqual(["alive"]);
+  });
+
+  it("refuses a persisted shape that is not a list of strings", async () => {
+    const { migratePersistedUIState } = await import("./store");
+    // localStorage is user-editable; a non-array or a list of objects would
+    // reach the tab strip's `.map` and render `undefined` keys.
+    const migrated = migratePersistedUIState({
+      openChatTabs: { a: "not-an-array", b: ["ok", 42, null], c: [] },
+    });
+    expect(migrated.openChatTabs).toEqual({ b: ["ok"] });
+  });
+});
