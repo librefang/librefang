@@ -101,7 +101,7 @@ jobs:
         # The `conclusion != 'skipped'` guard keeps this quiet when an earlier step failed and no SARIF was ever written, and `continue-on-error` keeps a repository without code scanning enabled from turning a green scan red on the upload alone.
         if: ${{ !cancelled() && steps.scan.conclusion != 'skipped' && github.repository == 'librefang/librefang' }}
         continue-on-error: true
-        uses: github/codeql-action/upload-sarif@1c5b675653bb5c22dbe9b12b556ec555138e09fd # v4.38.1
+        uses: github/codeql-action/upload-sarif@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
         with:
           sarif_file: ${{ runner.temp }}/trivy-reports/main-linux-amd64.sarif
           # Distinct per scanned image: code scanning replaces the previous
