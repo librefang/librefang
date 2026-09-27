@@ -8,7 +8,8 @@ export default defineConfig({
     trace: "on-first-retry"
   },
   webServer: {
-    command: "pnpm dev --host 127.0.0.1 --port 4173",
+    // Run the long-lived server as vite itself, not through `pnpm dev`: pnpm 12 starts script children in their own process group, so Playwright's group kill at teardown misses vite and the run hangs on its open stdout.
+    command: "vite --host 127.0.0.1 --port 4173",
     port: 4173,
     reuseExistingServer: !process.env.CI,
     cwd: "."

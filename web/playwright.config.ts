@@ -11,7 +11,8 @@ export default defineConfig({
     viewport: { width: 1280, height: 720 },
   },
   webServer: {
-    command: 'pnpm build && pnpm preview --host 127.0.0.1 --port 4174',
+    // Run the long-lived server as vite itself, not through `pnpm preview`: pnpm 12 starts script children in their own process group, so Playwright's group kill at teardown misses vite and the run hangs on its open stdout.
+    command: 'pnpm build && vite preview --host 127.0.0.1 --port 4174',
     port: 4174,
     reuseExistingServer: !process.env.CI,
     timeout: 180_000,
