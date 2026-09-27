@@ -1,0 +1,2 @@
+`authenticating_with_a_plaintext_master_key_leaves_an_upgrade_hint` allowed two seconds for a write that is deliberately spawned, which the test lost under a loaded parallel run and reported as a hint the daemon had never written.
+The budget is a scheduling allowance rather than a deadline the daemon is held to, so it is now generous; the loop still breaks on the first 20 ms tick that finds the file, and a real absence names the budget it exhausted instead of only the missing path. (#8370) (@DaBlitzStein)
