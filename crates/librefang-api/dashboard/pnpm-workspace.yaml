@@ -2,6 +2,8 @@ overrides:
   "picomatch@<2.3.2": ">=2.3.2"
   "picomatch@>=4.0.0 <4.0.4": ">=4.0.4"
   brace-expansion: ">=5.0.9"
+  "js-yaml@>=4.0.0 <4.3.2": "^4.3.2"
+  "esbuild@>=0.27.3 <0.28.1": "^0.28.1"
   "@eslint/config-array": ">=0.23.5"
   "chevrotain>lodash-es": "^4.18.1"
   "@chevrotain/cst-dts-gen>lodash-es": "^4.18.1"
@@ -12,5 +14,8 @@ auditConfig:
   ignoreGhsas:
     - GHSA-rmmr-r34h-pfm5
 
-onlyBuiltDependencies:
-  - esbuild
+# Fail installation when a dependency build script is not explicitly approved here.
+strictDepBuilds: true
+
+allowBuilds:
+  esbuild: true

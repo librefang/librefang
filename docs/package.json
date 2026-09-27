@@ -4,7 +4,7 @@
   "type": "module",
   "description": "LibreFang Agent OS Documentation",
   "private": true,
-  "packageManager": "pnpm@10.11.1",
+  "packageManager": "pnpm@12.6.0",
   "scripts": {
     "dev": "next dev --port 3001",
     "build": "next build --webpack",
@@ -66,14 +66,5 @@
   "engines": {
     "node": ">=18.0.0",
     "pnpm": ">=9.0.0"
-  },
-  "pnpm": {
-    "overrides": {
-      "picomatch@<2.3.2": ">=2.3.2",
-      "picomatch@>=4.0.0 <4.0.4": ">=4.0.4",
-      "brace-expansion@>=2.0.0 <2.0.3": "2.0.2",
-      "postcss@<8.5.10": ">=8.5.10",
-      "sharp@<0.35.0": ">=0.35.0"
-    }
   }
 }

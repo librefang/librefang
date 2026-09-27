@@ -1,11 +1,9 @@
 # syntax=docker/dockerfile:1
 
 # Stage 1: Build React dashboard
-# Pinned to a specific minor (not floating `node:20-alpine`) so rebuilds of a
-# tagged release months later produce a bit-for-bit identical builder image.
-# Track Node 20 LTS — CI's setup-node also uses node-version: 20
-# (.github/workflows/ci.yml, .github/workflows/dashboard-build.yml).
-FROM node:20.20.2-alpine AS dashboard-builder
+# Pinned to a specific minor (not floating `node:22-alpine`) so rebuilds of a tagged release months later produce a bit-for-bit identical builder image.
+# Node 22 LTS is the floor pnpm 11+ supports, and 22.12+ is what vite 8 requires.
+FROM node:22.23.3-alpine AS dashboard-builder
 WORKDIR /build
 COPY crates/librefang-api/dashboard ./dashboard
 WORKDIR /build/dashboard
@@ -24,7 +22,7 @@ WORKDIR /build/dashboard
 # optional dependencies, so the dashboard build needs no postinstall code.
 RUN npm install --global corepack@0.34.6 \
     && corepack enable \
-    && corepack prepare pnpm@10.33.0 --activate \
+    && corepack prepare pnpm@12.6.0 --activate \
     && pnpm install --frozen-lockfile --ignore-scripts \
     && pnpm run build
 
