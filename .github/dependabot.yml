@@ -9,6 +9,12 @@ updates:
     labels:
       - "dependencies"
     groups:
+      # The OpenTelemetry crates share one minor and must move together: bumping one alone puts two copies of `opentelemetry` in the graph and breaks the build (#8455–#8458).
+      # 0.x minor bumps are breaking, so `cargo-minor-patch` never catches them; this group takes every update type, and it is listed first because a dependency goes to the first group it matches.
+      opentelemetry:
+        patterns:
+          - "opentelemetry*"
+          - "tracing-opentelemetry"
       cargo-minor-patch:
         update-types:
           - "minor"
