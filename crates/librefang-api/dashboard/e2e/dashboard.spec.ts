@@ -2,7 +2,8 @@ import { expect, test } from "@playwright/test";
 
 test("loads dashboard shell", async ({ page }) => {
   await page.goto("/");
-  await expect(page.getByText("LibreFang")).toBeVisible();
+  // The brand name also appears in the header, the page title and the EveryAPI partner link, so scope to the sidebar's exact wordmark.
+  await expect(page.getByRole("complementary").getByText("librefang", { exact: true })).toBeVisible();
   await expect(page.getByRole("link", { name: "Overview" })).toBeVisible();
   await expect(page.getByRole("link", { name: "Agents" })).toBeVisible();
   await expect(page.getByRole("link", { name: "Sessions" })).toBeVisible();
