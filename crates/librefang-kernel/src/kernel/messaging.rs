@@ -3026,71 +3026,18 @@ impl LibreFangKernel {
                 }
             }
 
-            // Recompute `needs_compact` against the freshly-reloaded session.
-            // Computing it on the pre-lock snapshot was racy: a concurrent
-            // turn that wrote history while we were queued on `session_lock`
-            // could have pushed us across (or back below) the threshold,
-            // causing this turn to either skip a compact that is now due or
-            // re-compact a session another turn just compacted.
-            let needs_compact = {
-                use librefang_runtime::compactor::{
-                    estimate_token_count, needs_compaction as check_compact,
-                    needs_compaction_by_tokens,
-                };
-                let by_messages = check_compact(&session, &compaction_config_snapshot);
-                let estimated = estimate_token_count(
-                    &session.messages,
-                    Some(&manifest.model.system_prompt),
-                    None,
-                );
-                let by_tokens = needs_compaction_by_tokens(estimated, &compaction_config_snapshot);
-                if by_tokens && !by_messages {
-                    info!(
-                        agent_id = %agent_id,
-                        estimated_tokens = estimated,
-                        messages = session.messages.len(),
-                        "Token-based compaction triggered (messages below threshold but tokens above)"
-                    );
-                }
-                by_messages || by_tokens
-            };
-
-            // Auto-compact if the session is large before running the loop.
-            // Pass the in-turn session id so the compactor operates on
-            // the SAME session the outer loop just measured. Using the
-            // plain `compact_agent_session(agent_id)` re-looked up via
-            // `entry.session_id`, which for channel-derived or
-            // `session_mode = "new"` sessions points at a *different*
-            // session — and the compactor ended up inspecting an empty
-            // one and returning "0 messages, threshold 30" while the
-            // real session was 57 messages deep and overflowing.
-            // Fork turns must not trigger auto-compaction. Compaction mutates
-            // the canonical session on disk — so a dream or auto_memorize fork
-            // could compact the user's real conversation, breaking the
-            // ephemeral-fork guarantee. Main turns are unaffected: they hit
-            // the same check and compact as before.
-            if needs_compact && !loop_opts.is_fork {
-                info!(agent_id = %agent_id, messages = session.messages.len(), "Auto-compacting session");
-                match kernel_clone
-                    .compact_agent_session_in_lock_scope(
+            // Decide against the freshly-reloaded session, not the pre-lock snapshot: a concurrent turn that wrote history while this one queued on `session_lock` could have moved it across the threshold in either direction.
+            // Fork turns must not auto-compact: compaction rewrites the canonical session on disk, so a dream or auto_memorize fork would compact the user's real conversation.
+            if !loop_opts.is_fork {
+                kernel_clone
+                    .auto_compact_before_turn(
                         agent_id,
-                        Some(session.id),
-                        false,
+                        &mut session,
+                        &manifest.model.system_prompt,
+                        &compaction_config_snapshot,
                         agent_scoped,
                     )
-                    .await
-                {
-                    Ok(msg) => {
-                        info!(agent_id = %agent_id, "{msg}");
-                        // Reload the session after compaction
-                        if let Ok(Some(reloaded)) = memory.get_session(session.id) {
-                            session = reloaded;
-                        }
-                    }
-                    Err(e) => {
-                        warn!(agent_id = %agent_id, "Auto-compaction failed: {e}");
-                    }
-                }
+                    .await;
             }
 
             let mut skill_snapshot = kernel_clone
@@ -3405,47 +3352,15 @@ impl LibreFangKernel {
                         .registry
                         .set_state(agent_id, AgentState::Running);
 
-                    // Post-loop compaction check: if session now exceeds token threshold,
-                    // trigger compaction in background for the next call.
-                    // Forks skip — compaction rewrites the canonical session
-                    // on disk, which would leak fork context into the user's
-                    // real conversation history.
+                    // Post-loop compaction: if the session is now over the token threshold, compact it in the background for the next call.
+                    // Forks skip, for the same reason as the pre-loop check.
                     if !loop_opts.is_fork {
-                        use librefang_runtime::compactor::{
-                            estimate_token_count, needs_compaction_by_tokens, CompactionConfig,
-                        };
-                        let compact_cfg = kernel_clone.config.load();
-                        // #4976: merge per-agent [compaction] overrides on
-                        // top of the global config. The token threshold
-                        // ratio is the field that primarily gates this
-                        // post-loop check, and it's now per-agent
-                        // tunable.
-                        let config = CompactionConfig::from_toml_with_overrides(
-                            &compact_cfg.compaction,
+                        kernel_clone.spawn_compaction_after_turn(
+                            agent_id,
+                            &session,
                             manifest.compaction.as_ref(),
+                            agent_scoped,
                         );
-                        let estimated = estimate_token_count(&session.messages, None, None);
-                        if needs_compaction_by_tokens(estimated, &config) {
-                            let kc = kernel_clone.clone();
-                            let sid = session.id;
-                            // #3740: spawn_logged so compaction panics surface in logs.
-                            spawn_logged("post_loop_compaction", async move {
-                                info!(agent_id = %agent_id, estimated_tokens = estimated, "Post-loop compaction triggered");
-                                // Pass the session id explicitly (same
-                                // reason as the pre-loop path above).
-                                if let Err(e) = kc
-                                    .compact_agent_session_in_lock_scope(
-                                        agent_id,
-                                        Some(sid),
-                                        false,
-                                        agent_scoped,
-                                    )
-                                    .await
-                                {
-                                    warn!(agent_id = %agent_id, "Post-loop compaction failed: {e}");
-                                }
-                            });
-                        }
                     }
 
                     // Skill evolution hot-reload: mirror the non-streaming

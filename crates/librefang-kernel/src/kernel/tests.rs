@@ -15321,6 +15321,152 @@ async fn streaming_turn_on_non_canonical_session_survives_in_turn_auto_compactio
     kernel.shutdown();
 }
 
+/// Boot a driverless kernel with its self-handle installed, spawn one agent, and seed `session_id` with `messages` user messages owned by it.
+/// Shared by the #8507 non-streaming auto-compaction tests below.
+async fn kernel_with_seeded_session(
+    name: &str,
+    session_id: Option<SessionId>,
+    messages: usize,
+) -> (Arc<LibreFangKernel>, AgentId, SessionId) {
+    use librefang_memory::session::Session as MemSession;
+    use librefang_types::message::Message;
+
+    let dir = tempfile::tempdir().unwrap();
+    let home_dir = dir.path().to_path_buf();
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+    // Same discipline as `reentrant_test_kernel`: keep the tempdir alive until process exit so a background write that outlives `shutdown()` cannot race its teardown.
+    std::mem::forget(dir);
+    let kernel = Arc::new(
+        LibreFangKernel::boot_with_config(KernelConfig {
+            home_dir: home_dir.clone(),
+            data_dir: home_dir.join("data"),
+            default_model: DefaultModelConfig::driverless(),
+            ..KernelConfig::default()
+        })
+        .expect("kernel should boot"),
+    );
+    kernel.set_self_handle();
+    let agent_id = kernel
+        .spawn_agent(test_manifest(
+            name,
+            "non-streaming auto-compaction regression",
+            vec![],
+        ))
+        .expect("spawn should succeed");
+    let session_id = session_id.unwrap_or_else(|| {
+        kernel
+            .agents
+            .registry
+            .get(agent_id)
+            .expect("agent entry")
+            .session_id
+    });
+    kernel
+        .memory
+        .substrate
+        .save_session(&MemSession {
+            id: session_id,
+            agent_id,
+            parent_session_id: None,
+            messages: (0..messages)
+                .map(|i| Message::user(format!("seeded message {i}")))
+                .collect(),
+            context_window_tokens: 0,
+            label: None,
+            model_override: None,
+            messages_generation: 0,
+            last_repaired_generation: None,
+            peer_id: None,
+        })
+        .expect("seeding the over-threshold session should succeed");
+    (kernel, agent_id, session_id)
+}
+
+/// A non-streaming turn on an over-threshold session must auto-compact it before the loop runs (#8507).
+/// Before the fix both automatic compaction sites lived only in the streaming sender, so a session driven through `send_message_full` (channel bridges, cron, `agent_send`, the REST message route) was only ever trimmed and its `compaction_cursor` stayed 0.
+/// This drives the per-session-lock shape: a non-canonical `session_id_override` makes `send_message_full_inner` take `session_msg_locks[sid]`, so the compactor has to recognise that lock as held by this task instead of parking on it, the same hazard `streaming_turn_on_non_canonical_session_survives_in_turn_auto_compaction` pins for the streaming path.
+/// The kernel is driverless (#7743), so the turn itself fails at the LLM call; what is asserted is that it returns and that the compaction ran first.
+#[tokio::test(flavor = "multi_thread")]
+async fn non_streaming_turn_on_non_canonical_session_auto_compacts_without_self_deadlock() {
+    // Past the default `threshold_messages` (30) so the pre-loop check fires, and past `keep_recent` (10) so the compactor trims.
+    const SEEDED_MESSAGES: usize = 40;
+    let pinned = SessionId::new();
+    let (kernel, agent_id, session_id) =
+        kernel_with_seeded_session("nonstream-session-lock", Some(pinned), SEEDED_MESSAGES).await;
+    let canonical = kernel
+        .agents
+        .registry
+        .get(agent_id)
+        .expect("agent entry")
+        .session_id;
+    assert_ne!(
+        session_id, canonical,
+        "test invariant: the override must not collapse onto the canonical session, or the turn takes the per-agent lock instead"
+    );
+
+    let turn = tokio::time::timeout(
+        std::time::Duration::from_secs(60),
+        kernel.send_message_with_session_override(
+            agent_id,
+            "ping",
+            None,
+            None,
+            None,
+            Some(session_id),
+        ),
+    )
+    .await;
+    // The turn's own result is not asserted: a driverless kernel fails it at the LLM call. Returning at all is part of the contract.
+    let _ = turn.expect(
+        "the non-streaming turn must finish; if the compactor re-acquires session_msg_locks[sid] on the task that holds it, this timeout fires",
+    );
+
+    let compacted = kernel
+        .memory
+        .substrate
+        .get_session(session_id)
+        .expect("get_session must not error")
+        .expect("the pinned session must still exist");
+    assert!(
+        compacted.messages.len() < SEEDED_MESSAGES,
+        "the non-streaming pre-loop auto-compaction must have run on the pinned session, but it still holds {} of the {SEEDED_MESSAGES} seeded messages",
+        compacted.messages.len()
+    );
+
+    kernel.shutdown();
+}
+
+/// The per-agent-lock sibling of the test above (#8507): a plain `send_message` on the agent's canonical session takes `agent_msg_locks[agent]`, and the pre-loop auto-compaction must both run and recognise that lock as held.
+#[tokio::test(flavor = "multi_thread")]
+async fn non_streaming_turn_on_canonical_session_auto_compacts_without_self_deadlock() {
+    const SEEDED_MESSAGES: usize = 40;
+    let (kernel, agent_id, session_id) =
+        kernel_with_seeded_session("nonstream-agent-lock", None, SEEDED_MESSAGES).await;
+
+    let turn = tokio::time::timeout(
+        std::time::Duration::from_secs(60),
+        kernel.send_message(agent_id, "ping"),
+    )
+    .await;
+    let _ = turn.expect(
+        "the non-streaming turn must finish; if the compactor re-acquires agent_msg_locks[agent] on the task that holds it, this timeout fires",
+    );
+
+    let compacted = kernel
+        .memory
+        .substrate
+        .get_session(session_id)
+        .expect("get_session must not error")
+        .expect("the canonical session must still exist");
+    assert!(
+        compacted.messages.len() < SEEDED_MESSAGES,
+        "the non-streaming pre-loop auto-compaction must have run on the canonical session, but it still holds {} of the {SEEDED_MESSAGES} seeded messages",
+        compacted.messages.len()
+    );
+
+    kernel.shutdown();
+}
+
 /// `compact_agent_session_with_id` with no explicit session id must not take the per-agent lock twice.
 /// It acquires `agent_msg_locks[agent]` on the caller's behalf and then delegates with `agent_scoped = false`; when `session_id_override` is `None` the helper falls past its session arm into a fallback that reaches for that same mutex.
 /// The `is_held` check guarding that fallback is what lets it through rather than what stops it: a caller arriving through `KernelApi` has no `held_agent_locks::scope`, registration outside one is inert, so `is_held` answers `false` at both acquisitions and the second parks the task on a lock only that task could release.
