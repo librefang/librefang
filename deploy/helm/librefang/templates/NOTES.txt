@@ -10,6 +10,19 @@ Reach the API (the Service is ClusterIP on purpose):
   kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "librefang.fullname" . }} {{ .Values.service.port }}:{{ .Values.service.port }}
   API_KEY=$(kubectl -n {{ .Release.Namespace }} get secret {{ .Values.auth.existingSecret }} -o jsonpath='{.data.{{ .Values.auth.keys.apiKey }}}' | base64 -d)
   curl -H "Authorization: Bearer $API_KEY" http://127.0.0.1:{{ .Values.service.port }}/api/agents
+{{- if or .Values.ingress.enabled .Values.httpRoute.enabled }}
+
+Exposed at:
+{{- range .Values.httpRoute.hostnames }}
+  https://{{ . }}   (HTTPRoute)
+{{- end }}
+{{- range .Values.ingress.hosts }}
+  https://{{ .host }}   (Ingress)
+{{- end }}
+Every /api route except health, ready, version and the A2A agent card answers 401 without the
+API key. Behind a proxy, also set `trusted_proxies` + `trust_forwarded_for` in config.toml so
+the login rate limit sees real client addresses (README: "Exposing the API").
+{{- end }}
 {{- if .Values.managedConfig.enabled }}
 
 Managed configuration is ON. Confirm it took effect (a typo in the mode

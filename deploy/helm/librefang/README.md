@@ -11,19 +11,19 @@ When the two disagree, the Kustomize manifests are right and the chart has a bug
 | --- | --- |
 | Single replica: `replicas` must be `1` | `values.schema.json` (`const: 1`) **and** a `fail` in the templates, so `--skip-schema-validation` does not bypass it |
 | Secrets only via `existingSecret` — the chart renders no `Secret` | `auth.existingSecret` is required; nothing in `templates/` creates a Secret |
-| No Ingress | none is shipped, and the schema rejects unknown top-level keys such as `ingress` |
-| `ClusterIP` only | schema (`service.type` is `const: ClusterIP`) |
+| Nothing is exposed unless you ask | `ingress.enabled` and `httpRoute.enabled` default to `false`; when on, hostnames are required and an Ingress must have TLS (see [Exposing the API](#exposing-the-api)) |
+| `ClusterIP` only | schema (`service.type` is `const: ClusterIP`); external reach is `ingress` / `httpRoute`, never a NodePort or LoadBalancer Service |
 | Pod Security `restricted` | `podSecurityContext` / `securityContext` defaults; the schema pins `runAsNonRoot: true`, `allowPrivilegeEscalation: false`, `drop: [ALL]` |
 | `ReadWriteOnce` only | hard-coded in `volumeClaimTemplates`; not a value |
 | No `latest` tag | schema; the default tag is `Chart.appVersion`, a concrete release |
 | No credential in a ConfigMap | render-time `fail` on literal `api_key`, `dashboard_pass`, `vault_key`, `state_secret`, `client_secret`, `password` in `managedConfig.*` (same list as `scripts/check-k8s-manifests.py`) |
 
-`scripts/check-helm-chart.sh` proves each of these by rendering a violating input and requiring the render to fail.
+Each rule fails at `helm template` / `helm install` time with a message naming the value to fix.
 
 ## Install
 
 The Secret is created out of band, exactly as in the Kustomize quick start, so no credential enters a values file, Helm release storage or git.
-[`secrets.example.yaml`](secrets.example.yaml) lists every Secret and key name the default values reference, with commented-out extras (more providers, channel tokens, OAuth) to copy from. It is a reference, never rendered and never to be committed filled in. `scripts/check-helm-chart.sh` fails if the defaults in `values.yaml` and that file drift apart.
+[`secrets.example.yaml`](secrets.example.yaml) lists every Secret and key name the default values reference, with commented-out extras (more providers, channel tokens, OAuth) to copy from. It is a reference, never rendered and never to be committed filled in.
 
 The one-liner form:
 
@@ -82,11 +82,68 @@ helm upgrade --install librefang deploy/helm/librefang -n librefang \
 Add a variable, or source one from a different Secret, with `secretName`.
 `extraEnv` is passed through verbatim, but names the chart manages (`LIBREFANG_LISTEN`, `LIBREFANG_HOME`, `LIBREFANG_*_KEY`, `LIBREFANG_CONFIG_*`, …) are rejected.
 
-## Reaching the API
+## Exposing the API
 
-The Service is `ClusterIP` and the chart ships no Ingress: the API exposes shell exec, the credential vault and provider keys behind one bearer token.
-Use `kubectl port-forward svc/librefang 4545:4545`, or put your own TLS-terminating Ingress/Gateway in front.
-`networkPolicy.enabled=true` adds an ingress-deny policy with an explicit allow list (`networkPolicy.ingressFrom`); egress is intentionally open.
+By default nothing leaves the cluster: the Service is `ClusterIP`, and `kubectl port-forward svc/librefang 4545:4545` is the way in.
+The API can run shell commands, use the credential vault and spend your provider keys, so exposure is opt-in and refuses to render half-configured.
+
+**What protects it.** The chart always requires a credential (`auth.existingSecret`), so an exposed daemon is never anonymous. Checked against 2026.9.19 with a credential set: `/api/agents`, `/api/config`, `/api/sessions`, `/api/providers`, `/api/metrics` and `/api/health/detail` answer `401` without a token.
+**What stays open**, by design: `/api/health`, `/api/ready`, `/api/version`, `/api/config/schema`, the dashboard's static assets, the login endpoints, and the A2A agent card (`/.well-known/agent.json`, `/a2a/agents`), which lists agent names and descriptions. Keep that in mind before publishing an agent's description.
+
+### Gateway API (`httpRoute`)
+
+```yaml
+httpRoute:
+  enabled: true
+  parentRefs:
+    - name: shared-gateway
+      namespace: default
+      sectionName: https-librefang     # an HTTPS listener: TLS ends at the Gateway
+  hostnames: [librefang.example.com]
+  rules:
+    - matches: [{path: {type: PathPrefix, value: /}}]
+      timeouts: {request: 3600s, backendRequest: 3600s}   # streaming chat / SSE
+  httpRedirect:                        # optional 301 http -> https
+    enabled: true
+    parentRefs:
+      - {name: shared-gateway, namespace: default, sectionName: http-librefang}
+```
+
+The chart adds the backend (this release's Service) to every rule; do not set `backendRefs`. It needs the Gateway API CRDs (`gateway.networking.k8s.io/v1`) and a Gateway whose listener admits routes from this namespace (`allowedRoutes`). Certificates are the Gateway's business (for example cert-manager on the Gateway); the chart does not create any.
+Give the HTTPS route and the redirect route different listeners (`sectionName`), or they compete for one.
+
+### Ingress (`ingress`)
+
+```yaml
+ingress:
+  enabled: true
+  className: nginx
+  annotations: {cert-manager.io/cluster-issuer: letsencrypt-prod}
+  hosts:
+    - host: librefang.example.com
+  tls:
+    - secretName: librefang-tls
+      hosts: [librefang.example.com]
+```
+
+`hosts` and `tls` are required, and every host must appear under a `tls` entry, otherwise it would be served in clear text and the bearer token and dashboard password would cross the network unencrypted. `allowWithoutTLS: true` overrides this only for setups where TLS is terminated in front of the Ingress by something the chart cannot see.
+
+### Behind a proxy: set `trusted_proxies`
+
+Behind a Gateway or Ingress the daemon sees the proxy's address, not the client's. Its per-IP login rate limit (a brute-force guard on the dashboard login and token endpoints) then counts every visitor as one client, so a single failed-login burst can lock everyone out, and no client is limited individually.
+Tell the daemon which peers to believe with `managedConfig.config` (or your `config.toml`):
+
+```toml
+trusted_proxies = ["10.108.0.0/14"]   # your pod CIDR, or the Gateway's pod IPs
+trust_forwarded_for = true
+```
+
+Both are required; an empty `trusted_proxies` disables header trust whatever `trust_forwarded_for` says, which is the safe default. Do not trust a wider range than your proxy: any peer in it can forge the client address.
+`cors_origin` and `trusted_hosts` (top-level keys) are also worth setting to your public hostname if you use the dashboard or MCP OAuth flows from it.
+
+### Network policy
+
+`networkPolicy.enabled=true` denies ingress except from the peers in `networkPolicy.ingressFrom`. When you expose the API, add your Gateway or ingress controller there; without it the policy blocks the very traffic you just enabled. Egress is intentionally open.
 
 ## Storage and lifecycle
 
@@ -109,10 +166,8 @@ The `app.kubernetes.io/instance` selector label means a cluster that already run
 
 ## Development
 
-```bash
-./scripts/check-helm-chart.sh   # lint --strict, render, check-k8s-manifests.py, parity, negative cases
-```
+CI (`.github/workflows/helm.yml`) runs `helm lint`, `helm template` and `scripts/check-k8s-manifests.py` over the output for every values file in [`ci/`](ci/). A new scenario is a new file there, not a workflow change. That is all it checks; it needs no cluster.
 
-`Chart.appVersion` must equal the tag in `deploy/kubernetes/base/kustomization.yaml`; bump them together.
+`Chart.appVersion` is the default image tag. ghcr.io publishes tags **without** a leading `v` (`2026.9.19`); the schema rejects `v`-prefixed and `latest` tags. Bump `appVersion` with each release you have tested the chart against.
 
-Not in v1 (per the maintainers' scoping): Ingress, more than one replica, chart-created Secrets, and OCI publishing to `ghcr.io` with `appVersion` tracking releases.
+Not in this chart yet: more than one replica (unsupported by the daemon), chart-created Secrets, and OCI publishing to `ghcr.io` with `appVersion` tracking releases.

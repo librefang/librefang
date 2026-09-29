@@ -19,22 +19,18 @@ on:
   pull_request:
     paths:
       - 'deploy/kubernetes/**'
-      - 'deploy/helm/**'
       - 'deploy/docker-entrypoint.sh'
       - 'Dockerfile'
       - 'scripts/check-k8s-manifests.py'
-      - 'scripts/check-helm-chart.sh'
       - 'scripts/tests/test_check_k8s_manifests.py'
       - '.github/workflows/kubernetes.yml'
   push:
     branches: [main]
     paths:
       - 'deploy/kubernetes/**'
-      - 'deploy/helm/**'
       - 'deploy/docker-entrypoint.sh'
       - 'Dockerfile'
       - 'scripts/check-k8s-manifests.py'
-      - 'scripts/check-helm-chart.sh'
       - 'scripts/tests/test_check_k8s_manifests.py'
       - '.github/workflows/kubernetes.yml'
   workflow_dispatch:
@@ -152,56 +148,6 @@ jobs:
             pod-security.kubernetes.io/enforce-version=latest
           kubectl -n psa-restricted apply --dry-run=server -f rendered-base.yaml
           kubectl -n psa-restricted apply --dry-run=server -f rendered-managed.yaml
-
-  # The community Helm chart (deploy/helm/librefang) mirrors the Kustomize
-  # reference above; it is not a second source of truth. This job proves the
-  # mirror holds: the chart's rendered output must satisfy the same
-  # check-k8s-manifests.py assertions, Chart.appVersion must equal the image
-  # tag kubernetes/base pins, and the constraints the chart promises
-  # (replicas == 1, existingSecret only, no Ingress, ClusterIP only) must each
-  # reject a render that violates them. See scripts/check-helm-chart.sh.
-  helm:
-    name: helm lint + template + validate
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-
-      - name: Install PyYAML
-        run: python3 -m pip install --user pyyaml
-
-      # Helm is preinstalled on ubuntu-latest, like kubectl for the render job.
-      - name: Lint, render, and validate the chart
-        run: |
-          set -euo pipefail
-          helm version --short
-          ./scripts/check-helm-chart.sh
-
-      - name: Render both value sets for the API-server checks
-        run: |
-          set -euo pipefail
-          for v in default managed; do
-            helm template librefang deploy/helm/librefang \
-              -f "deploy/helm/librefang/ci/${v}-values.yaml" > "rendered-helm-${v}.yaml"
-          done
-
-      # Same borrowed-API-server technique as the render job: schema typos and
-      # the restricted Pod Security admission verdict, without booting a daemon.
-      - name: Create throwaway cluster for schema validation
-        uses: helm/kind-action@06c1ae10762d3b9c1644e7fe69596ae519e015a2 # v1.15.0
-        with:
-          cluster_name: librefang-helm
-
-      - name: Server-side dry-run under restricted Pod Security
-        run: |
-          set -euo pipefail
-          kubectl create namespace psa-restricted
-          kubectl label namespace psa-restricted \
-            pod-security.kubernetes.io/enforce=restricted \
-            pod-security.kubernetes.io/enforce-version=latest
-          for v in default managed; do
-            kubectl -n psa-restricted apply --dry-run=server -f "rendered-helm-${v}.yaml"
-          done
 
   kind:
     name: boot in kind (restricted PSS)

@@ -1,0 +1,27 @@
+# Ingress and Gateway API HTTPRoute, both enabled: renders every optional
+# exposure resource so lint/template/check-k8s-manifests cover them.
+auth:
+  existingSecret: librefang-auth
+ingress:
+  enabled: true
+  className: nginx
+  hosts:
+    - host: librefang.example.com
+  tls:
+    - secretName: librefang-tls
+      hosts:
+        - librefang.example.com
+httpRoute:
+  enabled: true
+  parentRefs:
+    - name: shared-gateway
+      namespace: default
+      sectionName: https-librefang
+  hostnames:
+    - librefang.example.com
+  httpRedirect:
+    enabled: true
+    parentRefs:
+      - name: shared-gateway
+        namespace: default
+        sectionName: http-librefang

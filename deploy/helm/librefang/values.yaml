@@ -173,13 +173,87 @@ managedConfig:
 
 # ── Workload ──────────────────────────────────────────────────────────────
 service:
-  # -- Always ClusterIP. The API exposes shell exec, the credential vault and
-  # provider keys behind one bearer token; reaching it from outside the cluster
-  # must be a deliberate act (port-forward, or your own Ingress/Gateway with
-  # TLS). The chart ships no Ingress. Enforced by the schema.
+  # -- Always ClusterIP. Cluster-external reach goes through `ingress` or
+  # `httpRoute` below, or `kubectl port-forward`; a NodePort/LoadBalancer
+  # Service would bypass the TLS and hostname checks those apply. Enforced by
+  # the schema.
   type: ClusterIP
   port: 4545
   annotations: {}
+
+# ── Exposure (optional, both off by default) ──────────────────────────────
+# The API can run shell commands, read the credential vault and use your
+# provider keys, behind one bearer token / the dashboard login. The chart
+# always requires that credential (`auth.existingSecret`), so exposure is never
+# unauthenticated: with a credential configured, /api/agents, /api/config,
+# /api/sessions, /api/metrics etc. answer 401 without a token (checked on
+# 2026.9.19). What stays open: /api/health, /api/ready, /api/version,
+# /api/config/schema, the dashboard's static assets, the login endpoints, and
+# the A2A agent card (/.well-known/agent.json, /a2a/agents), which lists agent
+# names and descriptions. Read "Exposing the API" in README.md before turning
+# either of these on, in particular the note on `trusted_proxies`.
+#
+# Both refuse to render without explicit hostnames (a route without hostnames
+# would also match every other host on a shared gateway) and without TLS.
+
+ingress:
+  # -- Create an Ingress (networking.k8s.io/v1) for the API.
+  enabled: false
+  className: ""
+  annotations: {}
+  #  cert-manager.io/cluster-issuer: letsencrypt-prod
+  # -- REQUIRED when enabled. `pathType` defaults to Prefix.
+  hosts: []
+  #  - host: librefang.example.com
+  #    paths:
+  #      - path: /
+  #        pathType: Prefix
+  # -- REQUIRED when enabled, unless `allowWithoutTLS`. The bearer token and
+  # dashboard password would otherwise cross the network in clear text.
+  tls: []
+  #  - secretName: librefang-tls
+  #    hosts:
+  #      - librefang.example.com
+  # -- Set only if TLS is terminated in front of the Ingress by something this
+  # chart cannot see (a cloud load balancer configured through `annotations`).
+  allowWithoutTLS: false
+
+httpRoute:
+  # -- Create a Gateway API HTTPRoute (gateway.networking.k8s.io/v1). Needs the
+  # Gateway API CRDs (standard channel) and a Gateway that admits routes from
+  # this namespace.
+  enabled: false
+  annotations: {}
+  # -- REQUIRED when enabled: the Gateway listener(s) to attach to. Point
+  # `sectionName` at an HTTPS listener so TLS terminates at the Gateway.
+  parentRefs: []
+  #  - name: shared-gateway
+  #    namespace: default
+  #    sectionName: https-librefang
+  # -- REQUIRED when enabled.
+  hostnames: []
+  #  - librefang.example.com
+  # -- Rules. The backend (this release's Service) is added to every rule; do
+  # not set `backendRefs`. Streaming chat and SSE need a long request timeout on
+  # most gateways: set `timeouts` (e.g. `request: 3600s`) if replies get cut off.
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+  #    timeouts:
+  #      request: 3600s
+  #      backendRequest: 3600s
+  httpRedirect:
+    # -- Second HTTPRoute that 301-redirects HTTP to HTTPS. Point `parentRefs`
+    # at the HTTP listener (`sectionName`) of the same Gateway.
+    enabled: false
+    parentRefs: []
+    #  - name: shared-gateway
+    #    namespace: default
+    #    sectionName: http-librefang
+    # -- Defaults to `httpRoute.hostnames`.
+    hostnames: []
 
 persistence:
   # -- Size of the /data volume claimed through volumeClaimTemplates.

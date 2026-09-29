@@ -12,7 +12,7 @@ spec:
   # ClusterIP only: the API exposes shell exec, the credential vault and
   # provider keys behind one bearer token. Reach it with
   # `kubectl port-forward svc/{{ include "librefang.fullname" . }} 4545:{{ .Values.service.port }}`
-  # or put your own TLS-terminating Ingress/Gateway in front.
+  # or opt in to `ingress` / `httpRoute` in values.
   type: ClusterIP
   selector:
     {{- include "librefang.selectorLabels" . | nindent 4 }}

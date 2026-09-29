@@ -115,6 +115,45 @@ Hard stops that must hold even when the schema is bypassed with
 {{- end }}
 
 {{/*
+Guards for `ingress` and `httpRoute`. Exposing the daemon is allowed, but never
+half-configured: a route without hostnames also matches every other host on a
+shared Gateway, and an Ingress without TLS would send the bearer token and the
+dashboard password in clear text.
+*/}}
+{{- define "librefang.validateExposure" -}}
+{{- if .Values.ingress.enabled -}}
+{{- if not .Values.ingress.hosts -}}
+{{- fail "ingress.enabled needs at least one entry in ingress.hosts." -}}
+{{- end -}}
+{{- if not .Values.ingress.allowWithoutTLS -}}
+{{- if not .Values.ingress.tls -}}
+{{- fail "ingress.enabled needs ingress.tls: the bearer token and dashboard password would cross the network in clear text. If TLS is terminated in front of the Ingress by something this chart cannot see, set ingress.allowWithoutTLS=true." -}}
+{{- end -}}
+{{- $covered := list -}}
+{{- range .Values.ingress.tls -}}{{- range .hosts -}}{{- $covered = append $covered . -}}{{- end -}}{{- end -}}
+{{- range .Values.ingress.hosts -}}
+{{- if not (has .host $covered) -}}
+{{- fail (printf "ingress host %q is not listed under any ingress.tls[].hosts entry, so it would be served without TLS." .host) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- if .Values.httpRoute.enabled -}}
+{{- if not .Values.httpRoute.parentRefs -}}
+{{- fail "httpRoute.enabled needs httpRoute.parentRefs: the Gateway (and listener, via sectionName) to attach to." -}}
+{{- end -}}
+{{- if not .Values.httpRoute.hostnames -}}
+{{- fail "httpRoute.enabled needs httpRoute.hostnames. A route without hostnames matches every host on the Gateway." -}}
+{{- end -}}
+{{- if .Values.httpRoute.httpRedirect.enabled -}}
+{{- if not .Values.httpRoute.httpRedirect.parentRefs -}}
+{{- fail "httpRoute.httpRedirect.enabled needs httpRoute.httpRedirect.parentRefs pointing at the Gateway's HTTP listener." -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- end }}
+
+{{/*
 Credential-shaped assignments in TOML shipped through a ConfigMap. A ConfigMap
 is unencrypted in etcd and readable by anyone with `get configmaps`, so a
 literal credential there is a leak. Mirrors SECRET_VALUE_KEYS in
