@@ -1,0 +1,26 @@
+{{- if .Values.networkPolicy.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "librefang.fullname" . }}
+  labels:
+    {{- include "librefang.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "librefang.selectorLabels" . | nindent 6 }}
+  # Ingress is default-deny apart from the peers listed below. Egress is not
+  # restricted: the daemon reaches LLM providers, MCP servers and webhooks.
+  policyTypes:
+    - Ingress
+  ingress:
+    {{- with .Values.networkPolicy.ingressFrom }}
+    - from:
+        {{- toYaml . | nindent 8 }}
+      ports:
+        - port: http
+          protocol: TCP
+    {{- else }}
+    []
+    {{- end }}
+{{- end }}

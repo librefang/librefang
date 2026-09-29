@@ -6,6 +6,8 @@ See [Support boundary](#support-boundary) for what breaks and [docs/architecture
 
 The manifests live under `base/` and are Kustomize-based, so `kubectl` applies them with no extra tooling.
 
+A community-maintained Helm chart that mirrors these manifests lives at [`deploy/helm/librefang/`](../helm/librefang/README.md). These Kustomize manifests remain the reference; CI holds the chart to the same assertions.
+
 ## Quick start
 
 ```bash

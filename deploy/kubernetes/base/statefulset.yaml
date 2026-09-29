@@ -55,7 +55,7 @@ spec:
       terminationGracePeriodSeconds: 60
       containers:
         - name: librefang
-          image: ghcr.io/librefang/librefang:v2026.7.31
+          image: ghcr.io/librefang/librefang:2026.9.19
           imagePullPolicy: IfNotPresent
           securityContext:
             allowPrivilegeEscalation: false

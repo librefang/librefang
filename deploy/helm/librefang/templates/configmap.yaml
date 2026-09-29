@@ -1,0 +1,33 @@
+{{- if .Values.managedConfig.enabled }}
+{{- $config := include "librefang.config" . }}
+{{- include "librefang.assertValidToml" (dict "what" "managedConfig.config" "content" $config) }}
+{{- include "librefang.assertNoSecretValues" (dict "what" "managedConfig.config" "content" $config) }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "librefang.configMapName" . }}
+  labels:
+    {{- include "librefang.labels" . | nindent 4 }}
+data:
+  config.toml: |
+    {{- $config | trimSuffix "\n" | nindent 4 }}
+{{- if .Values.managedConfig.agents }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "librefang.agentsConfigMapName" . }}
+  labels:
+    {{- include "librefang.labels" . | nindent 4 }}
+data:
+  {{- range $key, $content := .Values.managedConfig.agents }}
+  {{- if not (hasSuffix ".toml" $key) }}
+  {{- fail (printf "managedConfig.agents key %q must end in .toml; the daemon only reads *.toml from the provisioning directory." $key) }}
+  {{- end }}
+  {{- include "librefang.assertValidToml" (dict "what" (printf "managedConfig.agents[%s]" $key) "content" $content) }}
+  {{- include "librefang.assertNoSecretValues" (dict "what" (printf "managedConfig.agents[%s]" $key) "content" $content) }}
+  {{ $key }}: |
+    {{- include "librefang.agentContent" $content | trimSuffix "\n" | nindent 4 }}
+  {{- end }}
+{{- end }}
+{{- end }}

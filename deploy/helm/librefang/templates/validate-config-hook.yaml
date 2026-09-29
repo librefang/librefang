@@ -1,0 +1,131 @@
+{{- if and .Values.managedConfig.enabled .Values.managedConfig.validate.enabled }}
+{{- /*
+Boots the real daemon, from the image being deployed, against the config being
+deployed, BEFORE Helm touches the StatefulSet. A StatefulSet stops the running
+pod before it starts the replacement, so a config the daemon cannot load would
+otherwise take the working instance down and leave a crash-looping one behind.
+Here a bad config fails `helm upgrade` while the old pod is still serving.
+
+What it proves: the daemon can deserialize the file (wrong types, bad enums,
+missing required fields, unresolved includes) and reaches /api/health. What it
+does not: provider keys and channel tokens are not mounted (least privilege), so
+it cannot tell you a credential is wrong. Unknown keys are only rejected when
+the file itself sets `strict_config = true`, which is the daemon's own rule.
+
+The candidate lives in its own hook ConfigMap because on upgrade the release's
+real ConfigMap still holds the OLD config until the hook has passed.
+*/ -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "librefang.fullname" . }}-config-validate
+  labels:
+    {{- include "librefang.labelsFor" (dict "root" . "component" "config-validate") | nindent 4 }}
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-5"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+data:
+  config.toml: |
+    {{- include "librefang.config" . | trimSuffix "\n" | nindent 4 }}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "librefang.fullname" . }}-config-validate
+  labels:
+    {{- include "librefang.labelsFor" (dict "root" . "component" "config-validate") | nindent 4 }}
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "0"
+    # A failed Job and its log are kept for `kubectl logs job/…`; the next
+    # upgrade removes it first.
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: {{ add .Values.managedConfig.validate.timeoutSeconds 30 }}
+  template:
+    metadata:
+      labels:
+        {{- include "librefang.labelsFor" (dict "root" . "component" "config-validate") | nindent 8 }}
+    spec:
+      restartPolicy: Never
+      # No ServiceAccount is created before a pre-install hook runs, so use the
+      # namespace default and mount no token.
+      automountServiceAccountToken: false
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- range . }}
+        - name: {{ . }}
+        {{- end }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: validate
+          image: {{ include "librefang.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          env:
+            - name: LIBREFANG_HOME
+              value: /scratch
+            - name: LIBREFANG_CONFIG_PATH
+              value: /candidate/config.toml
+            # Loopback in the Job's own network namespace: no auth needed, no
+            # clash with the running daemon.
+            - name: LIBREFANG_LISTEN
+              value: "127.0.0.1:4599"
+            - name: VALIDATE_TIMEOUT
+              value: {{ .Values.managedConfig.validate.timeoutSeconds | quote }}
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              docker-entrypoint.sh librefang start --foreground >/tmp/daemon.log 2>&1 &
+              pid=$!
+              i=0
+              while [ "$i" -lt "$VALIDATE_TIMEOUT" ]; do
+                if ! kill -0 "$pid" 2>/dev/null; then
+                  wait "$pid"; rc=$?
+                  echo "FAIL: the daemon exited with status $rc while loading the new config.toml:" >&2
+                  tail -n 40 /tmp/daemon.log >&2
+                  exit 1
+                fi
+                if curl -fsS -m 2 http://127.0.0.1:4599/api/health >/dev/null 2>&1; then
+                  echo "OK: the daemon loaded the new config.toml and answered /api/health."
+                  kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
+                  exit 0
+                fi
+                i=$((i + 1)); sleep 1
+              done
+              echo "FAIL: no healthy daemon within ${VALIDATE_TIMEOUT}s:" >&2
+              tail -n 40 /tmp/daemon.log >&2
+              kill "$pid" 2>/dev/null
+              exit 1
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              memory: 1Gi
+          volumeMounts:
+            - name: candidate
+              mountPath: /candidate
+              readOnly: true
+            - name: scratch
+              mountPath: /scratch
+            # The daemon writes scratch files outside LIBREFANG_HOME too.
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: candidate
+          configMap:
+            name: {{ include "librefang.fullname" . }}-config-validate
+            defaultMode: 0444
+        - name: scratch
+          emptyDir:
+            sizeLimit: 512Mi
+        - name: tmp
+          emptyDir:
+            sizeLimit: 256Mi
+{{- end }}
