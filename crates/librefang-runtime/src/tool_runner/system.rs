@@ -11,7 +11,9 @@
 
 use super::error::{ToolError, ToolResult};
 
-const IP_API_URL: &str = "https://ip-api.com/json/?fields=status,message,country,regionName,city,zip,lat,lon,timezone,isp,query";
+// ip-api.com serves its keyless free tier over plain HTTP only; the https://
+// host answers 403 "SSL unavailable for this endpoint" unless a paid key is sent.
+const IP_API_URL: &str = "http://ip-api.com/json/?fields=status,message,country,regionName,city,zip,lat,lon,timezone,isp,query";
 const IP_API_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// Look up approximate location via ip-api.com.
