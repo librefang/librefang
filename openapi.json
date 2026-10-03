@@ -11872,10 +11872,10 @@
               "schema": {
                 "oneOf": [
                   {
-                    "type": "null"
+                    "$ref": "#/components/schemas/JsonObject"
                   },
                   {
-                    "$ref": "#/components/schemas/JsonObject"
+                    "type": "null"
                   }
                 ]
               }
