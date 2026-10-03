@@ -617,15 +617,38 @@ fn request_is_https(
 /// working; any public deployment should be proxied behind TLS *and* have
 /// the proxy address allow-listed via `trusted_proxies` (at which point
 /// `X-Forwarded-Proto` flips the flag on automatically).
+///
+/// `Path=/`, not `Path=/dashboard`: the login page replaces its location with
+/// the SPA shell at `/` once the credentials check out, and `/` is a gated
+/// entry (`is_shell_path` in `middleware.rs`), so a cookie scoped to
+/// `/dashboard` is never sent there — the browser drops it from the request,
+/// the gate finds no session, and the operator is handed the same login page
+/// again. That is a login loop, not a redirect.
+///
+/// This completes #8279: that change widened the shell gate *and* the cookie
+/// lookup to `/`, so a session established at the root would be recognised
+/// there, and left this cookie scoped below `/` — where the widened lookup can
+/// never find it. Half of that intent was unreachable as written.
+///
+/// The scope is not what holds the CSRF posture, and the earlier comment here
+/// said otherwise. `SameSite=Lax` is what keeps the cookie off cross-site
+/// POSTs, and the auth middleware only reads it for shell paths
+/// (`/`, `/dashboard`, `/dashboard/*`) — it sets `cookie_session_token` only
+/// under the `is_shell_path` test — all of which serve GET-only handlers.
+/// Every `/api/*` route still requires the Bearer token, so a cookie that now
+/// travels with API requests cannot authenticate one. The one `/api/*` handler
+/// that reads `librefang_session` directly is [`dashboard_logout`], and it uses
+/// the value only to invalidate the server-side session and clear the cookie:
+/// it grants no privilege, so it is not an authentication path (#8416 review).
 fn session_cookie_attrs(
     peer: std::net::IpAddr,
     headers: &axum::http::HeaderMap,
     trusted_proxies: &crate::client_ip::TrustedProxies,
 ) -> &'static str {
     if request_is_https(peer, headers, trusted_proxies) {
-        "Path=/dashboard; HttpOnly; SameSite=Lax; Secure"
+        "Path=/; HttpOnly; SameSite=Lax; Secure"
     } else {
-        "Path=/dashboard; HttpOnly; SameSite=Lax"
+        "Path=/; HttpOnly; SameSite=Lax"
     }
 }
 
@@ -641,8 +664,69 @@ fn session_cookie_attrs(
 /// Modern browsers (Chromium, Firefox, Safari 16.4+) accept `Secure`
 /// on `Max-Age=0` responses regardless of transport.
 /// (audit: logout-no-secure-cookie).
+///
+/// The `Path` has to equal the one the live cookie was issued with, for the
+/// same reason `Secure` does: a cookie is identified by name, domain *and*
+/// path (RFC 6265 §5.3), so a clear that differs on any of the three writes a
+/// second cookie and leaves the first one in the browser. It tracks
+/// [`session_cookie_attrs`] — `/`, the URL the login redirects to — rather
+/// than the narrower `/dashboard` it carried while that scope was still what
+/// the login worked against.
 fn session_cookie_clear_attrs() -> &'static str {
-    "Path=/dashboard; HttpOnly; SameSite=Lax; Secure"
+    "Path=/; HttpOnly; SameSite=Lax; Secure"
+}
+
+/// Clearing `Set-Cookie` values for the legacy pre-#8416 `librefang_session`
+/// cookie, which was scoped to `/dashboard`.
+///
+/// A cookie is identified by name, domain *and* path (RFC 6265 §5.3), so the
+/// `Path=/` clear cannot evict the old scope. On `/dashboard*` the browser sends
+/// the stale `/dashboard` cookie first, and both parsers (`middleware.rs` and
+/// [`dashboard_logout`]) take the first match, so a 30-day stale session
+/// shadows the valid one — the PWA `start_url` is `/dashboard/#/overview`, so
+/// this reappears on every cold start until the old cookie expires (#8416
+/// review). Emit these alongside the login and logout clears for the new scope.
+///
+/// Two variants because the legacy cookie was issued with `Secure` on HTTPS and
+/// without it on plain HTTP, and a response can only overwrite a cookie whose
+/// `Secure` state it matches: the browser ignores a `Secure` `Set-Cookie` on an
+/// insecure connection, and refuses to overwrite a `Secure` cookie from one.
+/// The `Secure` variant covers sessions established through TLS; the `Secure`-
+/// less variant covers a LAN HTTP bind. Both are sent, so either is evicted
+/// regardless of where the clear is delivered.
+fn legacy_session_cookie_clears() -> [&'static str; 2] {
+    [
+        "librefang_session=; Path=/dashboard; HttpOnly; SameSite=Lax; Max-Age=0",
+        "librefang_session=; Path=/dashboard; HttpOnly; SameSite=Lax; Secure; Max-Age=0",
+    ]
+}
+
+/// The three `Set-Cookie` headers shared by login, session mint and logout:
+/// `primary` (the new session or the `Path=/` clear) plus the two legacy
+/// `/dashboard` clears.
+///
+/// [`axum::response::AppendHeaders`] is load-bearing. A bare
+/// `[(HeaderName, String); N]` response-parts impl calls `HeaderMap::insert`,
+/// which *replaces* every value already associated with the name: stacking the
+/// three pairs in a plain tuple array left only the last legacy clear on the
+/// wire, so no login response ever carried the live `librefang_session` cookie
+/// and logout never emitted its `Path=/` clear. `AppendHeaders` uses
+/// `HeaderMap::append` and keeps all three (#8416 CI).
+fn session_cookie_headers(
+    primary: String,
+) -> axum::response::AppendHeaders<[(axum::http::HeaderName, String); 3]> {
+    let [legacy_clear_plain, legacy_clear_secure] = legacy_session_cookie_clears();
+    axum::response::AppendHeaders([
+        (axum::http::header::SET_COOKIE, primary),
+        (
+            axum::http::header::SET_COOKIE,
+            legacy_clear_plain.to_string(),
+        ),
+        (
+            axum::http::header::SET_COOKIE,
+            legacy_clear_secure.to_string(),
+        ),
+    ])
 }
 
 /// Dashboard credential login — validates username/password using Argon2id
@@ -916,14 +1000,14 @@ pub(crate) async fn dashboard_login(
                 save_sessions(state.kernel.home_dir(), &sessions);
             }
 
-            // Issue a session cookie so subsequent browser navigation to
-            // `/dashboard/*` authenticates without JS sending a header.
-            // Scope to `Path=/dashboard` so the cookie never auto-attaches
-            // to `/api/*` requests — API calls keep using the Bearer token
-            // from localStorage, which neutralises cookie-borne CSRF.
-            // `Secure` is added when the request is HTTPS (direct or via a
-            // TLS-terminating proxy), so the cookie cannot leak across
-            // plaintext fallbacks of the same host.
+            // Issue a session cookie so subsequent browser navigation to the
+            // shell authenticates without JS sending a header. The cookie is
+            // scoped to `/` because the login page navigates to `/` itself and
+            // `/` is a gated shell entry; see `session_cookie_attrs` for why
+            // the narrower `/dashboard` scope broke that, and for what carries
+            // the CSRF posture in its place. `Secure` is added when the request
+            // is HTTPS (direct or via a TLS-terminating proxy), so the cookie
+            // cannot leak across plaintext fallbacks of the same host.
             let cookie = format!(
                 "librefang_session={}; {}; Max-Age={}",
                 token.token,
@@ -932,7 +1016,7 @@ pub(crate) async fn dashboard_login(
             );
             (
                 axum::http::StatusCode::OK,
-                [(axum::http::header::SET_COOKIE, cookie)],
+                session_cookie_headers(cookie),
                 axum::response::Json(serde_json::json!({
                     "ok": true,
                     "token": token.token,
@@ -984,7 +1068,7 @@ pub(crate) async fn mint_dashboard_session(
     );
     (
         axum::http::StatusCode::OK,
-        [(axum::http::header::SET_COOKIE, cookie)],
+        session_cookie_headers(cookie),
         axum::response::Json(serde_json::json!({
             "ok": true,
             "token": token.token,
@@ -1114,9 +1198,11 @@ pub(crate) async fn dashboard_logout(
         "librefang_session=; {}; Max-Age=0",
         session_cookie_clear_attrs(),
     );
+    // Also evict the legacy `/dashboard`-scoped cookie, which the `Path=/`
+    // clear above cannot reach (see `legacy_session_cookie_clears`).
     (
         axum::http::StatusCode::OK,
-        [(axum::http::header::SET_COOKIE, expired_cookie)],
+        session_cookie_headers(expired_cookie),
         axum::response::Json(serde_json::json!({"ok": true})),
     )
         .into_response()
@@ -4020,7 +4106,10 @@ fn is_daemon_responding(addr: &str) -> bool {
 
 #[cfg(test)]
 mod session_cookie_attrs_tests {
-    use super::{request_is_https, session_cookie_attrs, session_cookie_clear_attrs};
+    use super::{
+        legacy_session_cookie_clears, request_is_https, session_cookie_attrs,
+        session_cookie_clear_attrs,
+    };
     use crate::client_ip::TrustedProxies;
     use axum::http::HeaderMap;
     use std::net::IpAddr;
@@ -4046,7 +4135,113 @@ mod session_cookie_attrs_tests {
         );
         assert!(attrs.contains("HttpOnly"));
         assert!(attrs.contains("SameSite=Lax"));
-        assert!(attrs.contains("Path=/dashboard"));
+        // Exact token, not a substring: `Path=/` is a prefix of
+        // `Path=/dashboard`, so `contains` would pass on the very scope that
+        // broke the login. Split on `;` and compare whole attributes.
+        assert!(attr_tokens(attrs).contains(&"Path=/"));
+        assert!(
+            !attr_tokens(attrs).contains(&"Path=/dashboard"),
+            "the clear must name the same path the live cookie was issued with, \
+             or it writes a second cookie and leaves the first in the browser: {attrs}"
+        );
+    }
+
+    /// The cookie attribute list as whole `;`-separated tokens.
+    fn attr_tokens(attrs: &str) -> Vec<&str> {
+        attrs.split(';').map(str::trim).collect()
+    }
+
+    /// A pre-upgrade `/dashboard`-scoped cookie is not reachable by the `Path=/`
+    /// clear, so login and logout also emit a clearing `Set-Cookie` for that
+    /// exact scope. Both the `Secure` and non-`Secure` variants are emitted
+    /// because the old build issued one or the other depending on transport,
+    /// and a clear only overwrites a cookie whose `Secure` state it matches.
+    #[test]
+    fn legacy_clear_evicts_the_dashboard_scoped_cookie() {
+        let clears = legacy_session_cookie_clears();
+        assert_eq!(clears.len(), 2, "one clear per legacy `Secure` variant");
+
+        let secure_variants = clears
+            .iter()
+            .filter(|attrs| attr_tokens(attrs).contains(&"Secure"))
+            .count();
+        assert_eq!(
+            secure_variants, 1,
+            "exactly one clear carries `Secure`, matching the old HTTPS-issued \
+             cookie; the other matches the plain-HTTP one: {clears:?}"
+        );
+
+        for attrs in legacy_session_cookie_clears() {
+            let tokens = attr_tokens(attrs);
+            assert!(
+                tokens.contains(&"Path=/dashboard"),
+                "the legacy clear must name the old scope or it cannot evict it: {attrs}"
+            );
+            assert!(
+                !tokens.contains(&"Path=/"),
+                "`Path=/` would write a second cookie instead of evicting the legacy one: {attrs}"
+            );
+            assert!(
+                tokens.contains(&"Max-Age=0"),
+                "a clear must expire immediately: {attrs}"
+            );
+        }
+    }
+
+    /// The login cookie has to be sent to the URL the login page navigates to.
+    ///
+    /// `login_page.html` ends a successful sign-in with `location.replace` on
+    /// the SPA shell at `/`, and `/` is a gated shell entry, so the session
+    /// cookie it was just issued has to arrive with that request. A cookie
+    /// scoped to `/dashboard` does not (RFC 6265 §5.1.4): the browser drops it
+    /// from a request for `/`, the middleware finds no session, and the
+    /// operator gets the login page back — the loop this pins shut.
+    ///
+    /// Both transports, because the `Path` is built in both branches and a fix
+    /// applied to one of them is a fix that works on the operator's LAN and
+    /// disappears behind a TLS proxy. The posture that replaces the old
+    /// narrow-scope CSRF argument is pinned here too, so widening the scope
+    /// cannot quietly take `HttpOnly` or `SameSite` with it.
+    #[test]
+    fn session_cookie_covers_the_shell_url_the_login_redirects_to() {
+        let trusted = tp(&["172.19.0.0/16"]);
+        let mut https_headers = HeaderMap::new();
+        https_headers.insert("x-forwarded-proto", "https".parse().unwrap());
+
+        let plain = session_cookie_attrs(ip("203.0.113.7"), &HeaderMap::new(), &tp(&[]));
+        let secure = session_cookie_attrs(ip("172.19.0.5"), &https_headers, &trusted);
+
+        assert!(
+            attr_tokens(secure).contains(&"Secure"),
+            "the HTTPS branch must keep `Secure`: {secure}"
+        );
+        assert!(
+            !attr_tokens(plain).contains(&"Secure"),
+            "the plain-HTTP branch must NOT carry `Secure`: the browser drops a `Secure` \
+             cookie over http://, so emitting one here puts the login loop back on the \
+             operator's own LAN bind: {plain}"
+        );
+        for attrs in [plain, secure] {
+            let tokens = attr_tokens(attrs);
+            assert!(
+                tokens.contains(&"Path=/"),
+                "the cookie must be scoped to `/`, the URL the login page redirects to: {attrs}"
+            );
+            assert!(
+                !tokens.contains(&"Path=/dashboard"),
+                "`/dashboard` does not path-match `/`, so that scope is never sent to \
+                 the shell after the login redirect: {attrs}"
+            );
+            assert!(
+                tokens.contains(&"HttpOnly"),
+                "the session token must stay unreadable to page scripts: {attrs}"
+            );
+            assert!(
+                tokens.contains(&"SameSite=Lax"),
+                "SameSite is what keeps the cookie off cross-site POSTs now that the \
+                 scope no longer is: {attrs}"
+            );
+        }
     }
 
     // ─────────────────────────────────────────────────────────────
