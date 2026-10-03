@@ -398,10 +398,17 @@ impl AgentRouter {
     ///    inbound resolver already logs that case, and dropping them here
     ///    avoids double-noise.
     /// 2. `match_rule.channel` is either unset or equals `channel_str`.
-    /// 3. `match_rule.account_id` is either unset or equals `account_id`.
-    ///    Note: this matches the inbound semantics — a binding with no
-    ///    `account_id` constraint applies to every adapter on that channel
-    ///    type, including multi-bot adapters.
+    /// 3. `match_rule.account_id` is either unset, equals `account_id` (the
+    ///    adapter's configured routing identity — the sidecar config `name`),
+    ///    or equals `reported_account_id` (the alias the transport itself
+    ///    announced, i.e. the sidecar's `ready` account id). The alias counts
+    ///    because inbound messages from adapters that stamp their own
+    ///    `metadata["account_id"]` (dingtalk / email / google_chat) reach the
+    ///    inbound resolver under that id, while the approval listener only has
+    ///    the adapter; without accepting both, a binding keyed to the
+    ///    reported id matches inbound and misses approvals for the same
+    ///    agent. Note: a binding with no `account_id` constraint applies to
+    ///    every adapter on that channel type, including multi-bot adapters.
     /// 4. `match_rule.peer_id` is `Some(_)`. A binding without a `peer_id`
     ///    names no chat to deliver to and is useless for fan-out (it would
     ///    just route inbound messages from anyone to the agent). It does
@@ -418,6 +425,7 @@ impl AgentRouter {
         agent_id: AgentId,
         channel_str: &str,
         account_id: Option<&str>,
+        reported_account_id: Option<&str>,
     ) -> Vec<String> {
         let bindings = self.lock_bindings();
         let mut out = Vec::new();
@@ -437,11 +445,17 @@ impl AgentRouter {
                     continue;
                 }
             }
-            // Rule 3: account_id constraint.
+            // Rule 3: account_id constraint. The configured routing identity
+            // (`account_id`) and the transport-reported alias
+            // (`reported_account_id`) are two names for one instance, and
+            // inbound messages stamped with the adapter's own
+            // `metadata["account_id"]` (dingtalk / email / google_chat) match
+            // bindings through the alias. Either identity satisfies the
+            // constraint; neither widens it to a different adapter.
             if let Some(ref acc) = binding.match_rule.account_id {
-                match account_id {
-                    Some(ctx_acc) if ctx_acc == acc.as_str() => {}
-                    _ => continue,
+                let acc = acc.as_str();
+                if account_id != Some(acc) && reported_account_id != Some(acc) {
+                    continue;
                 }
             }
             // Rule 4: peer_id must be set to be a delivery target.
@@ -1216,6 +1230,64 @@ mod tests {
             None,
             "no sidecar should claim the unqualified `telegram` default \
              when each carries a distinct account_id"
+        );
+    }
+
+    /// #8418: a sidecar's routing identity is its config `name`, but adapters
+    /// that stamp their own `metadata["account_id"]` on inbound messages
+    /// (dingtalk / email / google_chat) are matched by the inbound resolver
+    /// under the id they reported in `ready`. The approval listener only has
+    /// the adapter, so `bound_recipients_for_agent` must accept that reported
+    /// alias as well or a binding keyed to it matches inbound messages while
+    /// its approvals are silently dropped.
+    #[test]
+    fn bound_recipients_match_a_binding_keyed_by_the_reported_account_id() {
+        use librefang_types::config::BindingMatchRule;
+
+        let router = AgentRouter::new();
+        let agent = AgentId::new();
+        router.register_agent("mailer".to_string(), agent);
+        router.load_bindings(&[
+            AgentBinding {
+                agent: "mailer".to_string(),
+                match_rule: BindingMatchRule {
+                    channel: Some("email".to_string()),
+                    account_id: Some("acct-1".to_string()),
+                    peer_id: Some("inbox-1".to_string()),
+                    ..Default::default()
+                },
+            },
+            AgentBinding {
+                agent: "mailer".to_string(),
+                match_rule: BindingMatchRule {
+                    channel: Some("email".to_string()),
+                    account_id: Some("mail".to_string()),
+                    peer_id: Some("inbox-2".to_string()),
+                    ..Default::default()
+                },
+            },
+        ]);
+
+        // Config name "mail", ready-reported alias "acct-1": both bindings
+        // are reachable from the one adapter.
+        assert_eq!(
+            router.bound_recipients_for_agent(agent, "email", Some("mail"), Some("acct-1")),
+            vec!["inbox-1".to_string(), "inbox-2".to_string()],
+            "a binding keyed by the reported id must be a recipient when the \
+             adapter carries that alias"
+        );
+
+        // The alias is an alternative, not a wildcard: without it the
+        // reported-id binding stays unmatched.
+        assert_eq!(
+            router.bound_recipients_for_agent(agent, "email", Some("mail"), None),
+            vec!["inbox-2".to_string()],
+            "without the reported alias only the config-name binding matches"
+        );
+        assert_eq!(
+            router.bound_recipients_for_agent(agent, "email", Some("mail"), Some("other")),
+            vec!["inbox-2".to_string()],
+            "an unrelated reported id must not satisfy the binding"
         );
     }
 }

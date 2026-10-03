@@ -1951,6 +1951,15 @@ impl BridgeManager {
                                     // thing.
                                     let mut covered_by_any_adapter = false;
                                     let mut skipped: Vec<SkippedApprovalAdapter> = Vec::new();
+                                    // Adapters the #8228 narrowing suppressed,
+                                    // with the index of their `skipped` entry
+                                    // so a failed fallback below can re-label
+                                    // the reason. See the fallback after the
+                                    // loop.
+                                    let mut narrow_suppressed: Vec<(
+                                        Arc<dyn ChannelAdapter>,
+                                        usize,
+                                    )> = Vec::new();
 
                                     // #4985 / PR #4994 follow-up: scope
                                     // delivery to adapters bound to the
@@ -1982,6 +1991,16 @@ impl BridgeManager {
                                     // listener has no such fallback
                                     // semantics — each adapter must
                                     // match on its own configured key.
+                                    //
+                                    // `reported_account_id()` is passed
+                                    // alongside for the same reason
+                                    // `resolve_channel_adapter` matches
+                                    // it: adapters that stamp their own
+                                    // `metadata["account_id"]` on inbound
+                                    // (dingtalk / email / google_chat)
+                                    // are bound by that id, and the
+                                    // listener has no inbound metadata to
+                                    // fall back on.
                                     let adapter_routing = |adapter: &Arc<dyn ChannelAdapter>| {
                                         let channel_type = adapter.channel_type();
                                         let ct_str = channel_type_str(&channel_type);
@@ -1995,6 +2014,7 @@ impl BridgeManager {
                                             requesting_agent,
                                             ct_str,
                                             adapter.account_id(),
+                                            adapter.reported_account_id(),
                                         );
                                         (bound_agent, binding_peers)
                                     };
@@ -2198,6 +2218,20 @@ impl BridgeManager {
                                                 channel: ct_str.to_string(),
                                                 reason: ApprovalSkipReason::NoRouting,
                                             });
+                                            // #8418: this adapter was
+                                            // suppressed only because *some
+                                            // sibling* routes the agent. That
+                                            // evidence is routing config, not
+                                            // membership: the sibling may not
+                                            // be in the originating chat, while
+                                            // this suppressed adapter is the
+                                            // one that carried the message.
+                                            if narrow_direct_route {
+                                                narrow_suppressed.push((
+                                                    Arc::clone(adapter),
+                                                    skipped.len() - 1,
+                                                ));
+                                            }
                                             continue;
                                         }
 
@@ -2315,6 +2349,77 @@ impl BridgeManager {
                                                 channel: ct_str.to_string(),
                                                 reason: ApprovalSkipReason::DeliveryFailed,
                                             });
+                                        }
+                                    }
+
+                                    // #8418: narrowing must not turn into a
+                                    // silent drop. The narrow check only sees
+                                    // routing *config*; an agent reached by an
+                                    // explicit @-mention in a chat served by a
+                                    // bot whose own default points elsewhere
+                                    // routes through a mechanism the check
+                                    // cannot see, and the sibling that does
+                                    // show a route may not be a member of that
+                                    // chat at all. When the routing adapters
+                                    // delivered nothing, retry the direct route
+                                    // through the adapters narrowing
+                                    // suppressed: an extra attempt — in the
+                                    // limit, the pre-#8228 N-1 warnings — is a
+                                    // smaller failure than a silently dropped
+                                    // approval.
+                                    if !covered_by_any_adapter && narrow_direct_route {
+                                        if let (Some(src_sender), Some(src_channel)) = (
+                                            approval.sender_id.as_deref(),
+                                            approval.channel.as_deref(),
+                                        ) {
+                                            let target_id = approval
+                                                .chat_id
+                                                .as_deref()
+                                                .filter(|c| !c.is_empty())
+                                                .unwrap_or(src_sender)
+                                                .to_string();
+                                            let direct_recipient = ChannelUser {
+                                                platform_id: target_id,
+                                                display_name: String::new(),
+                                                librefang_user: None,
+                                            };
+                                            for (adapter, skip_idx) in &narrow_suppressed {
+                                                if channel_type_str(&adapter.channel_type())
+                                                    != src_channel
+                                                {
+                                                    continue;
+                                                }
+                                                if let Err(e) = adapter
+                                                    .send_interactive(
+                                                        &direct_recipient,
+                                                        &approval_keyboard,
+                                                    )
+                                                    .await
+                                                {
+                                                    warn!(
+                                                        adapter = adapter.name(),
+                                                        request_id = %approval.request_id,
+                                                        recipient = %direct_recipient.platform_id,
+                                                        error = %e,
+                                                        "Failed to deliver approval notification (narrowed-direct-route fallback)"
+                                                    );
+                                                    skipped[*skip_idx].reason =
+                                                        ApprovalSkipReason::DeliveryFailed;
+                                                } else {
+                                                    info!(
+                                                        adapter = adapter.name(),
+                                                        request_id = %approval.request_id,
+                                                        recipient = %direct_recipient.platform_id,
+                                                        "Delivered approval notification (narrowed-direct-route fallback to originating chat)"
+                                                    );
+                                                    covered_by_any_adapter = true;
+                                                    // One delivered keyboard is
+                                                    // the guarantee; stop before
+                                                    // piling duplicates into
+                                                    // sibling chats.
+                                                    break;
+                                                }
+                                            }
                                         }
                                     }
 

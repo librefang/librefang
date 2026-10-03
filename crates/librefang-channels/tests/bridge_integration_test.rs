@@ -2035,6 +2035,10 @@ struct NotifyingAdapter {
     recipients: Vec<ChannelUser>,
     sent: Arc<Mutex<Vec<(String, String)>>>,
     account_id: Option<String>,
+    /// The transport-reported alias (`ready` account id) of a sidecar whose
+    /// config name is `account_id` — the value it may stamp into inbound
+    /// `metadata["account_id"]` (#8418).
+    reported_account_id: Option<String>,
     channel_type: ChannelType,
     /// Every `send` fails, the way a Telegram bot that is not a member of the
     /// target chat fails. The attempt is still recorded, so a test can assert
@@ -2050,6 +2054,7 @@ impl NotifyingAdapter {
             recipients,
             sent: Arc::new(Mutex::new(Vec::new())),
             account_id: None,
+            reported_account_id: None,
             channel_type: ChannelType::Telegram,
             fail_sends: false,
         })
@@ -2061,6 +2066,28 @@ impl NotifyingAdapter {
             recipients,
             sent: Arc::new(Mutex::new(Vec::new())),
             account_id: Some(account_id.to_string()),
+            reported_account_id: None,
+            channel_type: ChannelType::Telegram,
+            fail_sends: false,
+        })
+    }
+
+    /// Like `with_account`, but the transport reports a different account id
+    /// in its `ready` event — the dingtalk / email / google_chat shape where
+    /// the config name and the inbound-stamped `metadata["account_id"]`
+    /// diverge (#8418).
+    fn with_reported_account(
+        name: &str,
+        account_id: &str,
+        reported_account_id: &str,
+        recipients: Vec<ChannelUser>,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            name: name.to_string(),
+            recipients,
+            sent: Arc::new(Mutex::new(Vec::new())),
+            account_id: Some(account_id.to_string()),
+            reported_account_id: Some(reported_account_id.to_string()),
             channel_type: ChannelType::Telegram,
             fail_sends: false,
         })
@@ -2073,6 +2100,7 @@ impl NotifyingAdapter {
             recipients: Vec::new(),
             sent: Arc::new(Mutex::new(Vec::new())),
             account_id: Some(account_id.to_string()),
+            reported_account_id: None,
             channel_type: ChannelType::Telegram,
             fail_sends: true,
         })
@@ -2092,6 +2120,7 @@ impl NotifyingAdapter {
             recipients,
             sent: Arc::new(Mutex::new(Vec::new())),
             account_id: Some(account_id.to_string()),
+            reported_account_id: None,
             channel_type,
             fail_sends: false,
         })
@@ -2153,6 +2182,10 @@ impl ChannelAdapter for NotifyingAdapter {
 
     fn account_id(&self) -> Option<&str> {
         self.account_id.as_deref()
+    }
+
+    fn reported_account_id(&self) -> Option<&str> {
+        self.reported_account_id.as_deref()
     }
 }
 
@@ -2896,6 +2929,88 @@ async fn test_approval_listener_falls_back_to_agent_binding_when_default_unset()
     manager.stop().await;
 }
 
+/// #8418: a sidecar whose config `name` differs from the account id its
+/// subprocess reports in `ready`. Inbound messages from such adapters
+/// (dingtalk / email / google_chat) carry the reported id in
+/// `metadata["account_id"]`, so a per-account binding keyed to that id matches
+/// inbound routing. The approval listener only has the adapter — config name
+/// in `account_id()`, reported id in `reported_account_id()` — so it must
+/// match the binding through either identity, or the same binding that routes
+/// inbound messages silently drops every approval for its agent.
+#[tokio::test]
+async fn test_approval_listener_matches_a_binding_keyed_by_the_reported_account_id() {
+    use librefang_types::event::{ApprovalRequestedEvent, Event, EventPayload, EventTarget};
+
+    let (handle, event_tx) = EventBusHandle::new();
+    let handle = Arc::new(handle);
+
+    let agent_x = AgentId::new();
+
+    let router = AgentRouter::new();
+    router.register_agent("binder-mail".to_string(), agent_x);
+    router.load_bindings(&[librefang_types::config::AgentBinding {
+        agent: "binder-mail".to_string(),
+        match_rule: librefang_types::config::BindingMatchRule {
+            channel: Some("telegram".to_string()),
+            // The id the adapter reports in `ready`, not the config name.
+            account_id: Some("acct-1".to_string()),
+            peer_id: Some("chat-mail".to_string()),
+            ..Default::default()
+        },
+    }]);
+    let router = Arc::new(router);
+
+    let adapter = NotifyingAdapter::with_reported_account("mail", "mail", "acct-1", Vec::new());
+    let adapter_ref = adapter.clone();
+
+    let mut manager = BridgeManager::new(handle.clone(), router);
+    manager.start_adapter(adapter).await.unwrap();
+    manager.start_approval_listener().await;
+    wait_until("approval listener subscribed", || {
+        event_tx.receiver_count() >= 1
+    })
+    .await;
+
+    event_tx
+        .send(Arc::new(Event::new(
+            agent_x,
+            EventTarget::System,
+            EventPayload::ApprovalRequested(ApprovalRequestedEvent {
+                request_id: "8418aaaa11112222".to_string(),
+                agent_id: agent_x.0.to_string(),
+                tool_name: "shell_exec".to_string(),
+                description: "rm -rf /tmp/foo".to_string(),
+                risk_level: "high".to_string(),
+                ..Default::default()
+            }),
+        )))
+        .expect("broadcast send");
+
+    wait_until(
+        "approval delivered to the reported-id binding's chat",
+        || !adapter_ref.get_sent().is_empty(),
+    )
+    .await;
+
+    let sent = adapter_ref.get_sent();
+    assert_eq!(
+        sent.len(),
+        1,
+        "expected one notification to the bound chat, got: {sent:?}"
+    );
+    assert_eq!(
+        sent[0].0, "chat-mail",
+        "the binding keyed by the adapter-reported account id must receive the approval"
+    );
+    assert!(
+        sent[0].1.contains("8418aaaa"),
+        "notification body should include the approval id prefix, got: {}",
+        sent[0].1
+    );
+
+    manager.stop().await;
+}
+
 /// #5002 cross-agent guard: same setup as the happy-path test, but the
 /// approval is for a DIFFERENT agent (no binding covering it). The fix must
 /// NOT re-introduce the cross-agent broadcast #4985 closed — even though
@@ -3553,6 +3668,90 @@ async fn test_approval_direct_route_is_scoped_to_the_adapter_routing_the_agent()
     assert!(
         spy.seen().is_empty(),
         "a delivered approval must not warn, got: {:#?}",
+        spy.seen()
+    );
+
+    manager.stop().await;
+}
+
+/// #8418 activation check: `SidecarAdapter::account_id()` now returns the
+/// config name, which is the key the router is seeded with, so the
+/// `channel_default` lookup resolves on sidecar hosts for the first time and
+/// `narrow_direct_route` (#8228) actually engages.
+///
+/// Scenario the narrow check cannot see through: agent-x was reached by
+/// @-mention in `chat-c` through bot-a (whose own default is agent-y), while
+/// agent-x's configured default adapter is sibling bot-b, which is not in
+/// `chat-c`. Pre-#8408 `narrow_direct_route` was always false there, every
+/// same-channel bot attempted the direct send, and bot-a — the one actually
+/// in the chat — delivered. Once bot-b resolves as "routes agent-x", the
+/// narrow set drops bot-a, so delivery would depend on bot-b succeeding in a
+/// chat it is not a member of.
+#[tokio::test]
+async fn test_approval_for_mentioned_agent_still_reaches_the_origin_chat() {
+    let (handle, event_tx) = EventBusHandle::new();
+    let handle = Arc::new(handle);
+
+    let agent_x = AgentId::new();
+    let agent_y = AgentId::new();
+
+    let router = AgentRouter::new();
+    // bot-a carried the @-mention traffic for agent-x; its own default is
+    // agent-y. Agent-x's configured default adapter is the sibling bot-b.
+    router.set_channel_default("telegram:bot-a".to_string(), agent_y);
+    router.set_channel_default("telegram:bot-b".to_string(), agent_x);
+    let router = Arc::new(router);
+
+    // bot-a is in `chat-c` (sends succeed); bot-b is not (every send fails,
+    // the way a bot absent from the target chat fails).
+    let adapter_a = NotifyingAdapter::with_account("telegram-a", "bot-a", Vec::new());
+    let adapter_b = NotifyingAdapter::failing_with_account("telegram-b", "bot-b");
+    let (ref_a, ref_b) = (adapter_a.clone(), adapter_b.clone());
+
+    let mut manager = BridgeManager::new(handle.clone(), router);
+    manager.start_adapter(adapter_a).await.unwrap();
+    manager.start_adapter(adapter_b).await.unwrap();
+
+    let spy = WarnSpy::install();
+    manager.start_approval_listener().await;
+    wait_until("approval listener subscribed", || {
+        event_tx.receiver_count() >= 1
+    })
+    .await;
+
+    event_tx
+        .send(Arc::new(approval_event_from_chat(
+            "8418bbbb33334444",
+            agent_x,
+            Some("chat-c"),
+            Some("telegram"),
+        )))
+        .expect("broadcast send");
+
+    wait_until("approval fan-out settled", || {
+        !ref_a.get_sent().is_empty() || !ref_b.get_sent().is_empty()
+    })
+    .await;
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    assert_eq!(
+        ref_a.get_sent().len(),
+        1,
+        "the bot that carried the @-mention is in the origin chat and must deliver, got: {:?}; \
+         sibling bot attempts: {:?}",
+        ref_a.get_sent(),
+        ref_b.get_sent()
+    );
+    assert_eq!(
+        ref_a.get_sent()[0].0,
+        "chat-c",
+        "the approval must land in the originating chat"
+    );
+    assert!(
+        !spy.seen()
+            .iter()
+            .any(|w| w.contains("Approval reached no channel")),
+        "the approval was delivered, so the aggregate warning must not fire, got: {:#?}",
         spy.seen()
     );
 
