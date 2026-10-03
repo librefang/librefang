@@ -103,6 +103,27 @@ pub fn confirm_or_status_or_hint<'a>(
     status_msg: &'a str,
     hint_text: &'a str,
 ) -> Paragraph<'a> {
+    confirm_or_status_or_hint_styled(
+        confirming,
+        confirm_msg,
+        status_msg,
+        Style::default().fg(theme::GREEN),
+        hint_text,
+    )
+}
+
+/// [`confirm_or_status_or_hint`] with an explicit status color.
+///
+/// Screens whose status line carries failures and refusals as well as successes
+/// keep it yellow, so routing it through the combo widget does not repaint a
+/// failure as a success.
+pub fn confirm_or_status_or_hint_styled<'a>(
+    confirming: bool,
+    confirm_msg: &'a str,
+    status_msg: &'a str,
+    status_style: Style,
+    hint_text: &'a str,
+) -> Paragraph<'a> {
     if confirming {
         Paragraph::new(Line::from(vec![Span::styled(
             confirm_msg,
@@ -111,7 +132,7 @@ pub fn confirm_or_status_or_hint<'a>(
     } else if !status_msg.is_empty() {
         Paragraph::new(Line::from(vec![Span::styled(
             format!("  {status_msg}"),
-            Style::default().fg(theme::GREEN),
+            status_style,
         )]))
     } else {
         hint_bar(hint_text)

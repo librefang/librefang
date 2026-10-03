@@ -905,6 +905,63 @@ impl App {
                     );
                 }
             },
+            AppEvent::RegistryRestoreResult { name, ok, message } => {
+                self.templates.status_msg = if ok {
+                    crate::i18n::t_args(
+                        "tui-templates-restore-ok",
+                        &[("name", &name), ("message", &message)],
+                    )
+                } else {
+                    crate::i18n::t_args(
+                        "tui-templates-restore-fail",
+                        &[("name", &name), ("message", &message)],
+                    )
+                };
+                if ok {
+                    self.refresh_templates();
+                }
+            }
+            AppEvent::TemplateHistoryLoaded { name, result } => {
+                self.templates.history_name = name;
+                self.templates.version_history.clear();
+                self.templates.history_error = None;
+                // The answer retires the "loading version history …" line and
+                // any rollback armed against the previous rows: it would fire
+                // on row 0 of the rows that just replaced them.
+                self.templates.status_msg.clear();
+                self.templates.confirm_restore_version = false;
+                match result {
+                    Ok(rows) => {
+                        self.templates.version_history = rows;
+                    }
+                    Err(message) => {
+                        self.templates.history_error = Some(message);
+                    }
+                }
+                self.templates.showing_history = true;
+                self.templates.history_list = ratatui::widgets::ListState::default();
+                if !self.templates.version_history.is_empty() {
+                    self.templates.history_list.select(Some(0));
+                }
+                self.templates.loading = false;
+            }
+            AppEvent::TemplateVersionRestoreResult { name, ok, message } => {
+                self.templates.status_msg = if ok {
+                    crate::i18n::t_args(
+                        "tui-templates-restore-ok",
+                        &[("name", &name), ("message", &message)],
+                    )
+                } else {
+                    crate::i18n::t_args(
+                        "tui-templates-restore-fail",
+                        &[("name", &name), ("message", &message)],
+                    )
+                };
+                if ok {
+                    self.templates.showing_history = false;
+                    self.refresh_templates();
+                }
+            }
             AppEvent::TemplateProvidersLoaded(providers) => {
                 self.templates.providers = providers;
             }
@@ -1700,7 +1757,13 @@ impl App {
             Tab::Skills => self.refresh_skills(),
             Tab::Hands => self.refresh_hands(),
             Tab::Extensions => self.refresh_extensions(),
-            Tab::Templates => self.refresh_templates(),
+            Tab::Templates => {
+                // The history overlay is a plain field that outlives the tab, same as
+                // Settings' sub-tab below — Esc is not the only way out of it.
+                self.templates.showing_history = false;
+                self.templates.history_error = None;
+                self.refresh_templates();
+            }
             Tab::Security => self.refresh_security(),
             Tab::Audit => self.refresh_audit(),
             Tab::Usage => self.refresh_usage(),
@@ -2622,6 +2685,39 @@ impl App {
                     crate::i18n::t_args("tui-templates-promoting", &[("name", &name)]);
                 if let Some(backend) = self.backend.to_ref() {
                     event::spawn_promote_agent_type(backend, name, self.event_tx.clone());
+                }
+            }
+            templates::TemplatesAction::RestoreFromRegistry { name } => {
+                if let Some(backend) = self.backend.to_ref() {
+                    self.templates.status_msg =
+                        crate::i18n::t_args("tui-templates-restoring", &[("name", &name)]);
+                    event::spawn_restore_from_registry(backend, name, self.event_tx.clone());
+                } else {
+                    self.templates.status_msg = crate::i18n::t("tui-templates-restore-daemon-only");
+                }
+            }
+            templates::TemplatesAction::ShowVersionHistory { name } => {
+                if let Some(backend) = self.backend.to_ref() {
+                    self.templates.status_msg =
+                        crate::i18n::t_args("tui-templates-history-loading", &[("name", &name)]);
+                    self.templates.loading = true;
+                    event::spawn_fetch_template_history(backend, name, self.event_tx.clone());
+                } else {
+                    self.templates.status_msg = crate::i18n::t("tui-templates-history-daemon-only");
+                }
+            }
+            templates::TemplatesAction::RestoreTemplateVersion { name, version_id } => {
+                if let Some(backend) = self.backend.to_ref() {
+                    self.templates.status_msg =
+                        crate::i18n::t_args("tui-templates-version-restoring", &[("name", &name)]);
+                    event::spawn_restore_template_version(
+                        backend,
+                        name,
+                        version_id,
+                        self.event_tx.clone(),
+                    );
+                } else {
+                    self.templates.status_msg = crate::i18n::t("tui-templates-restore-daemon-only");
                 }
             }
         }
@@ -3882,5 +3978,80 @@ mod workflow_step_editor_tab_tests {
         let mut app = app_on_the_workflows_tab();
         app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
         assert!(app.active_tab != Tab::Workflows);
+    }
+}
+
+#[cfg(test)]
+mod template_history_event_tests {
+    use super::*;
+    use crate::tui::event::TemplateVersionRow;
+
+    fn app_on_the_templates_tab() -> App {
+        let (tx, _rx) = mpsc::channel();
+        let mut app = App::new(None, tx);
+        app.phase = Phase::Main;
+        app.active_tab = Tab::Templates;
+        app
+    }
+
+    /// `v` sets a loading status before the request leaves. The answer must
+    /// retire it — otherwise "Loading version history …" hides the `[R]` / `[v]`
+    /// hints — and must disarm a rollback armed against the previous rows, or
+    /// `y` would restore row 0 of the rows this answer installed.
+    #[test]
+    fn a_loaded_history_retires_the_loading_status_and_any_armed_rollback() {
+        let mut app = app_on_the_templates_tab();
+        app.templates.status_msg =
+            crate::i18n::t_args("tui-templates-history-loading", &[("name", "payroll")]);
+        app.templates.confirm_restore_version = true;
+        app.templates.version_history = vec![TemplateVersionRow {
+            id: "1".to_string(),
+            timestamp: "t1".to_string(),
+            change_source: "create".to_string(),
+        }];
+
+        app.handle_event(AppEvent::TemplateHistoryLoaded {
+            name: "payroll".to_string(),
+            result: Ok(vec![TemplateVersionRow {
+                id: "2".to_string(),
+                timestamp: "t2".to_string(),
+                change_source: "update".to_string(),
+            }]),
+        });
+
+        assert!(
+            app.templates.status_msg.is_empty(),
+            "the loading status outlived its answer"
+        );
+        assert!(
+            !app.templates.confirm_restore_version,
+            "a rollback armed against the old rows survived the new ones"
+        );
+        assert_eq!(app.templates.version_history.len(), 1);
+    }
+
+    /// A failed version restore used to be written to a status the open overlay
+    /// never drew, and the overlay only closed on success, so the error only
+    /// appeared after an Esc. It now reaches the overlay bar as it lands.
+    #[test]
+    fn a_failed_version_restore_reports_the_failure_and_keeps_the_overlay() {
+        let mut app = app_on_the_templates_tab();
+        app.templates.showing_history = true;
+
+        app.handle_event(AppEvent::TemplateVersionRestoreResult {
+            name: "payroll".to_string(),
+            ok: false,
+            message: "version mismatch".to_string(),
+        });
+
+        assert!(
+            app.templates.showing_history,
+            "the overlay may stay open — its bar now carries the error"
+        );
+        assert!(
+            app.templates.status_msg.contains("version mismatch"),
+            "the daemon's reason must reach the bar: {}",
+            app.templates.status_msg
+        );
     }
 }
