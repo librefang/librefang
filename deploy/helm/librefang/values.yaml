@@ -1,0 +1,351 @@
+# Default values for the LibreFang chart.
+#
+# The chart mirrors deploy/kubernetes/ (the reference). Where a value below has
+# a counterpart there, the default is the same. See ../../kubernetes/README.md
+# for the reasoning behind each safety property; this file only states it.
+
+# -- Number of replicas. MUST be 1: the daemon holds an exclusive flock on
+# /data/daemon.lock and its cron, trigger dispatch, session ownership, budget
+# enforcement and audit chain are process-local. values.schema.json rejects any
+# other value (`const: 1`) and the templates re-check it, so
+# `--skip-schema-validation` does not bypass the rule.
+replicas: 1
+
+nameOverride: ""
+fullnameOverride: ""
+
+image:
+  repository: ghcr.io/librefang/librefang
+  # -- Image tag, WITHOUT a leading `v` (ghcr.io publishes `2026.9.19`, not
+  # `v2026.9.19`). Empty means `.Chart.AppVersion`, a concrete release, never
+  # `latest`: an image rolled forward under a pod you did not mean to restart
+  # is how a cluster ends up on an untested build.
+  tag: ""
+  # -- Optional content digest (`sha256:…`). Pins by content; the tag is kept as
+  # a readable hint.
+  digest: ""
+  pullPolicy: IfNotPresent
+
+# -- Secret names of image pull credentials (created out of band).
+imagePullSecrets: []
+
+# ── Credentials ───────────────────────────────────────────────────────────
+# The chart never renders a Secret. Credentials live only in Secrets that you
+# create out of band, so they cannot land in values files, Helm release
+# storage or version control.
+#
+# `secrets.example.yaml` (next to this file) lists every Secret and key name
+# this file references, with placeholders. Copy it, fill it in, and apply it
+# with `kubectl apply` — or create the Secrets with `kubectl create secret`
+# (see README.md). Never commit the filled-in copy.
+auth:
+  # -- REQUIRED. Name of an existing Secret holding the authentication material.
+  # The daemon binds 0.0.0.0 in the pod and refuses to start on a non-loopback
+  # bind without configured authentication, so this is not optional hardening.
+  # A missing Secret or key fails at the kubelet (CreateContainerConfigError),
+  # which is deliberate: better than silently running open.
+  #   existingSecret: librefang-auth
+  existingSecret: ""
+  # Key names inside that Secret. Same names as deploy/kubernetes/secrets.example.yaml.
+  keys:
+    apiKey: api-key
+    # Must base64-decode to exactly 32 bytes: `openssl rand -base64 32`.
+    vaultKey: vault-key
+    dashboardUser: dashboard-user
+    dashboardPass: dashboard-pass
+    # OAuth/OIDC state-signing key, same shape as vaultKey. Optional unless
+    # `[external_auth]` is enabled, when the daemon refuses to boot without it.
+    stateSecret: state-secret
+
+providers:
+  # -- Provider credentials, each read from a Secret key and marked
+  # `optional: true` so a local-model-only cluster boots without them.
+  # `secretName` on an entry overrides this default Secret.
+  existingSecret: librefang-providers
+  env:
+    - name: ANTHROPIC_API_KEY
+      key: anthropic-api-key
+    - name: OPENAI_API_KEY
+      key: openai-api-key
+    - name: OPENROUTER_API_KEY
+      key: openrouter-api-key
+    - name: GROQ_API_KEY
+      key: groq-api-key
+    # More providers. Uncomment the ones you use, add the matching key to the
+    # `librefang-providers` Secret (see secrets.example.yaml), and name the
+    # variable in config.toml with `api_key_env = "…"`.
+    # - name: GEMINI_API_KEY
+    #   key: gemini-api-key
+    # - name: MISTRAL_API_KEY
+    #   key: mistral-api-key
+    # - name: DEEPSEEK_API_KEY
+    #   key: deepseek-api-key
+    # - name: XAI_API_KEY
+    #   key: xai-api-key
+    # - name: TOGETHER_API_KEY
+    #   key: together-api-key
+    # - name: FIREWORKS_API_KEY
+    #   key: fireworks-api-key
+    # - name: COHERE_API_KEY
+    #   key: cohere-api-key
+    # - name: PERPLEXITY_API_KEY
+    #   key: perplexity-api-key
+    # - name: TAVILY_API_KEY          # web-search tool
+    #   key: tavily-api-key
+    # - name: BRAVE_API_KEY           # web-search tool
+    #   key: brave-api-key
+    # An entry can come from a different Secret:
+    # - name: GOOGLE_OAUTH_CLIENT_SECRET
+    #   key: oauth-client-secret
+    #   secretName: librefang-oauth
+
+# -- Extra env vars. Names the chart manages (LIBREFANG_LISTEN, LIBREFANG_HOME,
+# LIBREFANG_*_KEY, LIBREFANG_CONFIG_*, …) are rejected. Use this for anything
+# `providers.env` does not fit, e.g. channel tokens. Prefer
+# `valueFrom.secretKeyRef` over a literal `value` for anything sensitive.
+extraEnv: []
+#  - name: TELEGRAM_BOT_TOKEN
+#    valueFrom:
+#      secretKeyRef:
+#        name: librefang-channels        # see secrets.example.yaml
+#        key: telegram-bot-token
+#        optional: true
+#  - name: DISCORD_BOT_TOKEN
+#    valueFrom:
+#      secretKeyRef:
+#        name: librefang-channels
+#        key: discord-bot-token
+#        optional: true
+#  - name: SLACK_BOT_TOKEN
+#    valueFrom:
+#      secretKeyRef:
+#        name: librefang-channels
+#        key: slack-bot-token
+#        optional: true
+#  - name: SLACK_APP_TOKEN
+#    valueFrom:
+#      secretKeyRef:
+#        name: librefang-channels
+#        key: slack-app-token
+#        optional: true
+
+# ── Managed configuration (overlays/managed-config) ───────────────────────
+managedConfig:
+  # -- Render config.toml into a ConfigMap, mount it read-only outside the PVC
+  # and lock it server-side (LIBREFANG_CONFIG_MODE=managed). Needs an image
+  # >= 2026.8.30. Off by default, matching the Kustomize base, which is mutable.
+  enabled: false
+  # -- Full config.toml. Empty means the file shipped in the chart
+  # (files/config.toml, identical to the Kustomize overlay's config.toml).
+  # NO CREDENTIAL BELONGS HERE: a ConfigMap is unencrypted in etcd. Name the
+  # environment variable with `api_key_env = "…"` and supply it from a Secret.
+  # Literal `api_key`, `dashboard_pass`, `vault_key`, `state_secret`,
+  # `client_secret` and `password` values are rejected at render time.
+  config: ""
+  # -- Declarative agents, keyed by file name (must end in `.toml`). Each is
+  # reconciled at boot and then locked individually (423 resource_provisioned).
+  # The resource identifier is the manifest's `name`, not the key. Empty means
+  # provisioning is off.
+  agents: {}
+  #  researcher.toml: |
+  #    name = "researcher"
+  #    description = "Deployment-provisioned research agent"
+  #    module = "builtin:chat"
+  #    [model]
+  #    provider = "default"
+  #    model = "default"
+  # -- `keep` releases an agent whose declaration is removed (default);
+  # `delete` removes it. Only the exact word `delete` is destructive.
+  prune: keep
+  # Pre-flight check of the config being deployed (a Helm pre-install and
+  # pre-upgrade hook). It boots the real daemon from the image being deployed
+  # against the new config.toml in a throwaway Job and requires /api/health;
+  # if it fails, `helm upgrade` aborts BEFORE the running pod is stopped. That
+  # matters because a StatefulSet stops the old pod first, so a config the
+  # daemon rejects would otherwise leave you with a crash-looping instance.
+  # It covers what only the daemon knows (types, enums, required fields,
+  # includes); provider keys are not mounted, so it cannot check credentials.
+  validate:
+    enabled: true
+    # -- Seconds to wait for the daemon to become healthy. A bad file exits in
+    # about a second; this only bounds a slow boot.
+    timeoutSeconds: 60
+
+# ── Workload ──────────────────────────────────────────────────────────────
+service:
+  # -- Always ClusterIP. Cluster-external reach goes through `ingress` or
+  # `httpRoute` below, or `kubectl port-forward`; a NodePort/LoadBalancer
+  # Service would bypass the TLS and hostname checks those apply. Enforced by
+  # the schema.
+  type: ClusterIP
+  port: 4545
+  annotations: {}
+
+# ── Exposure (optional, both off by default) ──────────────────────────────
+# The API can run shell commands, read the credential vault and use your
+# provider keys, behind one bearer token / the dashboard login. The chart
+# always requires that credential (`auth.existingSecret`), so exposure is never
+# unauthenticated: with a credential configured, /api/agents, /api/config,
+# /api/sessions, /api/metrics etc. answer 401 without a token (checked on
+# 2026.9.19). What stays open: /api/health, /api/ready, /api/version,
+# /api/config/schema, the dashboard's static assets, the login endpoints, and
+# the A2A agent card (/.well-known/agent.json, /a2a/agents), which lists agent
+# names and descriptions. Read "Exposing the API" in README.md before turning
+# either of these on, in particular the note on `trusted_proxies`.
+#
+# Both refuse to render without explicit hostnames (a route without hostnames
+# would also match every other host on a shared gateway) and without TLS.
+
+ingress:
+  # -- Create an Ingress (networking.k8s.io/v1) for the API.
+  enabled: false
+  className: ""
+  annotations: {}
+  #  cert-manager.io/cluster-issuer: letsencrypt-prod
+  # -- REQUIRED when enabled. `pathType` defaults to Prefix.
+  hosts: []
+  #  - host: librefang.example.com
+  #    paths:
+  #      - path: /
+  #        pathType: Prefix
+  # -- REQUIRED when enabled, unless `allowWithoutTLS`. The bearer token and
+  # dashboard password would otherwise cross the network in clear text.
+  tls: []
+  #  - secretName: librefang-tls
+  #    hosts:
+  #      - librefang.example.com
+  # -- Set only if TLS is terminated in front of the Ingress by something this
+  # chart cannot see (a cloud load balancer configured through `annotations`).
+  allowWithoutTLS: false
+
+httpRoute:
+  # -- Create a Gateway API HTTPRoute (gateway.networking.k8s.io/v1). Needs the
+  # Gateway API CRDs (standard channel) and a Gateway that admits routes from
+  # this namespace.
+  enabled: false
+  annotations: {}
+  # -- REQUIRED when enabled: the Gateway listener(s) to attach to. Point
+  # `sectionName` at an HTTPS listener so TLS terminates at the Gateway.
+  parentRefs: []
+  #  - name: shared-gateway
+  #    namespace: default
+  #    sectionName: https-librefang
+  # -- REQUIRED when enabled.
+  hostnames: []
+  #  - librefang.example.com
+  # -- Rules. The backend (this release's Service) is added to every rule; do
+  # not set `backendRefs`. Streaming chat and SSE need a long request timeout on
+  # most gateways: set `timeouts` (e.g. `request: 3600s`) if replies get cut off.
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+  #    timeouts:
+  #      request: 3600s
+  #      backendRequest: 3600s
+  httpRedirect:
+    # -- Second HTTPRoute that 301-redirects HTTP to HTTPS. Point `parentRefs`
+    # at the HTTP listener (`sectionName`) of the same Gateway.
+    enabled: false
+    parentRefs: []
+    #  - name: shared-gateway
+    #    namespace: default
+    #    sectionName: http-librefang
+    # -- Defaults to `httpRoute.hostnames`.
+    hostnames: []
+
+persistence:
+  # -- Size of the /data volume claimed through volumeClaimTemplates.
+  size: 10Gi
+  # -- StorageClass. Empty uses the cluster default; "-" disables dynamic
+  # provisioning (`storageClassName: ""`).
+  storageClass: ""
+  # ReadWriteOnce only, and not configurable: SQLite WAL and the daemon.lock
+  # flock need POSIX locking that NFS/CIFS commonly get wrong, and RWX would
+  # only let a second pod mount the data — the one thing that must not happen.
+  # -- PVC retention on `helm uninstall` / scale-down. Retain keeps agent state.
+  # StatefulSet field, on by default from Kubernetes 1.27 (GA 1.32).
+  retentionPolicy:
+    whenDeleted: Retain
+    whenScaled: Retain
+  annotations: {}
+
+# -- UID/GID the daemon runs as. 1001 is what the image creates; the
+# entrypoint detects the non-root start and skips chown/gosu.
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1001
+  runAsGroup: 1001
+  # fsGroup makes the kubelet chgrp a fresh PVC to 1001 at mount time. Drivers
+  # with fsGroupPolicy: None (most NFS/CIFS) ignore it — see the README.
+  fsGroup: 1001
+  fsGroupChangePolicy: OnRootMismatch
+  seccompProfile:
+    type: RuntimeDefault
+
+# readOnlyRootFilesystem is deliberately not set: the daemon writes outside
+# /data (python venv for MCP servers, plugin installs, $TMPDIR scratch).
+securityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+
+# -- SQLite WAL checkpoint plus any in-flight agent turn. The schema enforces >= 30.
+terminationGracePeriodSeconds: 60
+
+# Three probes, two contracts. Only timing is tunable; the paths are fixed
+# because liveness must never target /api/ready (a recoverable outage would
+# restart-loop the pod).
+probes:
+  startup:
+    periodSeconds: 5
+    timeoutSeconds: 5
+    # 5s x 24 = 120s: first boot runs `librefang init` on a cold PVC.
+    failureThreshold: 24
+  liveness:
+    periodSeconds: 15
+    timeoutSeconds: 5
+    failureThreshold: 4
+  readiness:
+    periodSeconds: 10
+    timeoutSeconds: 5
+    failureThreshold: 3
+
+# Starting values, not tuned recommendations. No CPU limit: throttling the
+# reactor during an LLM stream shows up as latency, not a clean failure.
+resources:
+  requests:
+    cpu: 250m
+    memory: 512Mi
+  limits:
+    memory: 2Gi
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+  # -- The daemon does not call the Kubernetes API, so no token is mounted.
+  automountServiceAccountToken: false
+
+podAnnotations: {}
+podLabels: {}
+nodeSelector: {}
+tolerations: []
+affinity: {}
+topologySpreadConstraints: []
+priorityClassName: ""
+
+networkPolicy:
+  # -- Create a NetworkPolicy restricting ingress to the daemon port. Egress is
+  # left open on purpose: the daemon calls LLM providers, MCP servers and
+  # webhooks whose addresses cannot be enumerated here. Needs a CNI that
+  # enforces NetworkPolicy.
+  enabled: false
+  # -- Additional `from` peers allowed to reach the API, e.g. an ingress
+  # controller namespace. Same-namespace pods are NOT allowed implicitly.
+  ingressFrom: []
+  #  - namespaceSelector:
+  #      matchLabels:
+  #        kubernetes.io/metadata.name: ingress-nginx

@@ -1,0 +1,640 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "LibreFang chart values",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "replicas": {
+      "description": "Must be exactly 1. The daemon holds an exclusive flock on /data/daemon.lock and its cron, trigger dispatch, session ownership, budget enforcement and audit chain are process-local. See docs/architecture/multi-replica-rfc.md.",
+      "const": 1
+    },
+    "nameOverride": {
+      "type": "string"
+    },
+    "fullnameOverride": {
+      "type": "string"
+    },
+    "image": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "repository": {
+          "type": "string",
+          "minLength": 1
+        },
+        "tag": {
+          "description": "Empty means Chart.appVersion. 'latest' is rejected: an image that moves under a pod you did not mean to restart is an untested build. A leading 'v' is rejected too: ghcr.io tags are published without it (2026.9.19, not v2026.9.19), so such a tag can never be pulled.",
+          "type": "string",
+          "not": {
+            "anyOf": [
+              {
+                "enum": [
+                  "latest"
+                ]
+              },
+              {
+                "pattern": "^v[0-9]"
+              }
+            ]
+          }
+        },
+        "digest": {
+          "type": "string",
+          "pattern": "^(sha256:[a-f0-9]{64})?$"
+        },
+        "pullPolicy": {
+          "enum": [
+            "Always",
+            "IfNotPresent",
+            "Never"
+          ]
+        }
+      }
+    },
+    "imagePullSecrets": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "auth": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "existingSecret"
+      ],
+      "properties": {
+        "existingSecret": {
+          "description": "Name of a pre-existing Secret. The chart never renders a Secret, so no credential can enter values, release storage or version control.",
+          "type": "string",
+          "minLength": 1
+        },
+        "keys": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "apiKey": {
+              "type": "string",
+              "minLength": 1
+            },
+            "vaultKey": {
+              "type": "string",
+              "minLength": 1
+            },
+            "dashboardUser": {
+              "type": "string",
+              "minLength": 1
+            },
+            "dashboardPass": {
+              "type": "string",
+              "minLength": 1
+            },
+            "stateSecret": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        }
+      }
+    },
+    "providers": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "existingSecret": {
+          "type": "string"
+        },
+        "env": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "name",
+              "key"
+            ],
+            "properties": {
+              "name": {
+                "type": "string",
+                "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
+              },
+              "key": {
+                "type": "string",
+                "minLength": 1
+              },
+              "secretName": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          }
+        }
+      }
+    },
+    "extraEnv": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
+          }
+        }
+      }
+    },
+    "managedConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "config": {
+          "type": "string"
+        },
+        "agents": {
+          "type": "object",
+          "propertyNames": {
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*\\.toml$"
+          },
+          "additionalProperties": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "prune": {
+          "enum": [
+            "keep",
+            "delete"
+          ]
+        },
+        "validate": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "timeoutSeconds": {
+              "type": "integer",
+              "minimum": 10,
+              "maximum": 600
+            }
+          }
+        }
+      }
+    },
+    "service": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "description": "ClusterIP only. Cluster-external reach goes through `ingress` or `httpRoute`, which enforce hostnames and TLS; a NodePort/LoadBalancer Service would bypass both.",
+          "const": "ClusterIP"
+        },
+        "port": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        },
+        "annotations": {
+          "type": "object"
+        }
+      }
+    },
+    "persistence": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "size": {
+          "type": "string",
+          "pattern": "^[1-9][0-9]*(\\.[0-9]+)?(Ki|Mi|Gi|Ti|Pi|Ei|k|M|G|T|P|E)?$"
+        },
+        "storageClass": {
+          "type": "string"
+        },
+        "retentionPolicy": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "whenDeleted": {
+              "enum": [
+                "Retain",
+                "Delete"
+              ]
+            },
+            "whenScaled": {
+              "enum": [
+                "Retain",
+                "Delete"
+              ]
+            }
+          }
+        },
+        "annotations": {
+          "type": "object"
+        }
+      }
+    },
+    "podSecurityContext": {
+      "type": "object",
+      "properties": {
+        "runAsNonRoot": {
+          "description": "Pod Security Standard 'restricted' requires this.",
+          "const": true
+        },
+        "runAsUser": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "runAsGroup": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "fsGroup": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "fsGroupChangePolicy": {
+          "enum": [
+            "OnRootMismatch",
+            "Always"
+          ]
+        },
+        "seccompProfile": {
+          "type": "object",
+          "required": [
+            "type"
+          ],
+          "properties": {
+            "type": {
+              "enum": [
+                "RuntimeDefault",
+                "Localhost"
+              ]
+            }
+          }
+        }
+      },
+      "required": [
+        "runAsNonRoot",
+        "runAsUser",
+        "runAsGroup",
+        "fsGroup",
+        "seccompProfile"
+      ]
+    },
+    "securityContext": {
+      "type": "object",
+      "properties": {
+        "allowPrivilegeEscalation": {
+          "const": false
+        },
+        "capabilities": {
+          "type": "object",
+          "required": [
+            "drop"
+          ],
+          "properties": {
+            "drop": {
+              "const": [
+                "ALL"
+              ]
+            }
+          }
+        },
+        "privileged": {
+          "const": false
+        },
+        "readOnlyRootFilesystem": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "allowPrivilegeEscalation",
+        "capabilities"
+      ]
+    },
+    "terminationGracePeriodSeconds": {
+      "description": "At least 30s: the SQLite WAL checkpoint and any in-flight agent turn must finish.",
+      "type": "integer",
+      "minimum": 30
+    },
+    "probes": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "startup": {
+          "$ref": "#/definitions/probeTiming"
+        },
+        "liveness": {
+          "$ref": "#/definitions/probeTiming"
+        },
+        "readiness": {
+          "$ref": "#/definitions/probeTiming"
+        }
+      }
+    },
+    "resources": {
+      "type": "object",
+      "required": [
+        "requests",
+        "limits"
+      ],
+      "properties": {
+        "requests": {
+          "type": "object",
+          "required": [
+            "cpu",
+            "memory"
+          ]
+        },
+        "limits": {
+          "type": "object",
+          "required": [
+            "memory"
+          ]
+        }
+      }
+    },
+    "serviceAccount": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "create": {
+          "type": "boolean"
+        },
+        "name": {
+          "type": "string"
+        },
+        "annotations": {
+          "type": "object"
+        },
+        "automountServiceAccountToken": {
+          "type": "boolean"
+        }
+      }
+    },
+    "podAnnotations": {
+      "type": "object"
+    },
+    "podLabels": {
+      "type": "object"
+    },
+    "nodeSelector": {
+      "type": "object"
+    },
+    "tolerations": {
+      "type": "array"
+    },
+    "affinity": {
+      "type": "object"
+    },
+    "topologySpreadConstraints": {
+      "type": "array"
+    },
+    "priorityClassName": {
+      "type": "string"
+    },
+    "networkPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "ingressFrom": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          }
+        }
+      }
+    },
+    "ingress": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "className": {
+          "type": "string"
+        },
+        "annotations": {
+          "type": "object"
+        },
+        "hosts": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "host"
+            ],
+            "properties": {
+              "host": {
+                "type": "string",
+                "minLength": 1,
+                "not": {
+                  "const": "*"
+                }
+              },
+              "paths": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "path"
+                  ],
+                  "properties": {
+                    "path": {
+                      "type": "string",
+                      "pattern": "^/"
+                    },
+                    "pathType": {
+                      "enum": [
+                        "Prefix",
+                        "Exact",
+                        "ImplementationSpecific"
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "tls": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "hosts"
+            ],
+            "properties": {
+              "secretName": {
+                "type": "string"
+              },
+              "hosts": {
+                "type": "array",
+                "minItems": 1,
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "not": {
+                    "const": "*"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "allowWithoutTLS": {
+          "type": "boolean"
+        }
+      }
+    },
+    "httpRoute": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "annotations": {
+          "type": "object"
+        },
+        "parentRefs": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "name"
+            ],
+            "properties": {
+              "name": {
+                "type": "string",
+                "minLength": 1
+              },
+              "namespace": {
+                "type": "string"
+              },
+              "sectionName": {
+                "type": "string"
+              },
+              "port": {
+                "type": "integer"
+              },
+              "kind": {
+                "type": "string"
+              },
+              "group": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "hostnames": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "not": {
+              "const": "*"
+            }
+          }
+        },
+        "rules": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "not": {
+              "required": [
+                "backendRefs"
+              ]
+            },
+            "description": "backendRefs is set by the chart (this release's Service) and must not be given."
+          }
+        },
+        "httpRedirect": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "parentRefs": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": [
+                  "name"
+                ],
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "namespace": {
+                    "type": "string"
+                  },
+                  "sectionName": {
+                    "type": "string"
+                  },
+                  "port": {
+                    "type": "integer"
+                  },
+                  "kind": {
+                    "type": "string"
+                  },
+                  "group": {
+                    "type": "string"
+                  }
+                }
+              }
+            },
+            "hostnames": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "not": {
+                  "const": "*"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "definitions": {
+    "probeTiming": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "periodSeconds": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "timeoutSeconds": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "failureThreshold": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    }
+  }
+}

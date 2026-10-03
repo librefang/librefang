@@ -1,0 +1,41 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "librefang.fullname" . }}
+  labels:
+    {{- include "librefang.labels" . | nindent 4 }}
+  {{- with .Values.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  # ClusterIP only: the API exposes shell exec, the credential vault and
+  # provider keys behind one bearer token. Reach it with
+  # `kubectl port-forward svc/{{ include "librefang.fullname" . }} 4545:{{ .Values.service.port }}`
+  # or opt in to `ingress` / `httpRoute` in values.
+  type: ClusterIP
+  selector:
+    {{- include "librefang.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ .Values.service.port }}
+      targetPort: http
+      protocol: TCP
+---
+# Governing Service named by StatefulSet.spec.serviceName. Must be headless: it
+# gives the pod its stable per-pod DNS name.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "librefang.headlessName" . }}
+  labels:
+    {{- include "librefang.labels" . | nindent 4 }}
+spec:
+  clusterIP: None
+  selector:
+    {{- include "librefang.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: http
+      port: 4545
+      targetPort: http
+      protocol: TCP
