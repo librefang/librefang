@@ -1,0 +1,3 @@
+Dashboard turns now attribute the authenticated user to the memory ACL, so a restricted `memory_access` policy applies in the Web UI instead of the fail-open `None` that skipped the per-user guard.
+A dashboard user whose `memory_access` is declared empty (or otherwise narrower than their previous unrestricted access) loses the memory features the Web UI had allowed, because the declared block now resolves through the same role-default sentinel the bound-channel path already uses.
+Unresolvable senders (raw client IPs, the root sentinel, unknown UUIDs) and deployments with RBAC off keep the fail-open behaviour. (#8431) (@DaBlitzStein)
