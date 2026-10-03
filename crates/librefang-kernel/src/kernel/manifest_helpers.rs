@@ -729,7 +729,7 @@ fn is_system_tag(tag: &str) -> bool {
 ///
 /// Ordering is `live` system tags first, then `incoming` operator tags in submitted order, de-duplicated.
 /// That is deterministic for a given pair of inputs, which matters because `manifest.tags` is stringified into the router's agent summary (`librefang-kernel-router`) and a reordering there would invalidate provider prompt caches for no reason (#3298).
-pub(super) fn merge_agent_tags(live: &[String], incoming: &[String]) -> Vec<String> {
+pub(crate) fn merge_agent_tags(live: &[String], incoming: &[String]) -> Vec<String> {
     let mut merged: Vec<String> = live
         .iter()
         .filter(|tag| is_system_tag(tag))

@@ -117,7 +117,9 @@ function AgentTypeEditor({
       setParseError(
         parsed.message === "json_schema_unsafe_integer"
           ? t("agents.form.json_schema_unsafe_integer")
-          : parsed.message,
+          : parsed.message === "fallback_models_not_an_array"
+            ? t("agents.form.fallback_models_not_an_array")
+            : parsed.message,
       );
     }
     setSeeded(true);

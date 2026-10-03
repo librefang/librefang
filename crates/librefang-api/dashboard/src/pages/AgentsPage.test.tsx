@@ -171,11 +171,20 @@ function renderDescription(description: string) {
   const qc = new QueryClient({
     defaultOptions: { queries: { retry: false, staleTime: 0 } },
   });
-  render(
+  const view = render(
     <QueryClientProvider client={qc}>
       <DescriptionSection agentId="agent-1" description={description} />
     </QueryClientProvider>,
   );
+  return {
+    ...view,
+    rerenderDescription: (next: string) =>
+      view.rerender(
+        <QueryClientProvider client={qc}>
+          <DescriptionSection agentId="agent-1" description={next} />
+        </QueryClientProvider>,
+      ),
+  };
 }
 
 describe("DescriptionSection (#7742)", () => {
@@ -210,6 +219,43 @@ describe("DescriptionSection (#7742)", () => {
   it("allows setting a description from empty (the field is no longer hidden when blank)", () => {
     renderDescription("");
     expect(screen.getByRole("textbox")).toHaveValue("");
+  });
+
+  it("keeps an unsaved draft when the persisted description changes under it (#7835 review)", () => {
+    // The full manifest editor PATCHes the same manifest and refreshes the
+    // detail, so an unrelated save used to reseed this textarea and silently
+    // discard text the operator had typed but not saved.
+    const view = renderDescription("original description");
+    fireEvent.change(screen.getByRole("textbox"), { target: { value: "typed but unsaved" } });
+
+    view.rerenderDescription("changed elsewhere");
+
+    expect(screen.getByRole("textbox")).toHaveValue("typed but unsaved");
+  });
+
+  it("still follows a server-side change while the draft is pristine", () => {
+    const view = renderDescription("original description");
+
+    view.rerenderDescription("changed elsewhere");
+
+    expect(screen.getByRole("textbox")).toHaveValue("changed elsewhere");
+  });
+
+  it("follows a server-side change after this section's own save (#7835 re-gate)", () => {
+    // Full sequence: local edit → the parent refresh moves `current` to the
+    // saved text (draft === current, pristine by intent) → another client
+    // changes the description. The seed used to stay anchored to the pre-edit
+    // text, so the dirty guard was permanently true and the section never
+    // followed; the next save would then write the stale draft back.
+    const view = renderDescription("original description");
+    fireEvent.change(screen.getByRole("textbox"), { target: { value: "updated description" } });
+    view.rerenderDescription("updated description"); // post-save refresh
+
+    view.rerenderDescription("changed elsewhere");
+
+    expect(screen.getByRole("textbox")).toHaveValue("changed elsewhere");
+    // Followed, therefore clean again: no Save is offered over the fresh text.
+    expect(screen.getByRole("button", { name: /common\.save/i })).toBeDisabled();
   });
 });
 

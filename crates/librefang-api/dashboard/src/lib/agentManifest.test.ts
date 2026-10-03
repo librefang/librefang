@@ -203,6 +203,8 @@ describe("agentManifest validator", () => {
   it("flags a missing name", () => {
     const errors = validateManifestForm(emptyManifestForm());
     expect(errors).toContain("name");
+    expect(errors).not.toContain("model.provider");
+    expect(errors).not.toContain("model.model");
   });
 
   // #8028: a blank provider/model is the documented way an agent inherits
@@ -874,6 +876,19 @@ reasoning_mode = "max"
     const out = serializeManifestForm(result.form, result.extras);
     expect(out).not.toContain("[thinking]");
     expect(out).not.toContain("reasoning_mode");
+  });
+
+  it("refuses a present-but-non-array fallback_models instead of reading it as disable-all", () => {
+    // #7835 review: a string/table value is neither the absent key (inherit)
+    // nor `[]` (disable all). Mapping it to `[]` let the form open on invalid
+    // input and then write the explicit deny-all statement on the next save.
+    const parsed = parseManifestToml(`name = "agent"
+description = "test"
+fallback_models = "gpt-4"
+`);
+    expect(parsed.ok).toBe(false);
+    if (parsed.ok) return;
+    expect(parsed.message).toBe("fallback_models_not_an_array");
   });
 
   it("round-trips a declared fallback_models = [] without re-enabling global fallbacks", () => {

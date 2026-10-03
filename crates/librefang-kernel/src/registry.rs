@@ -1,5 +1,6 @@
 //! Agent registry — tracks all agents, their state, and indexes.
 
+use crate::kernel::merge_agent_tags;
 use dashmap::mapref::entry::Entry;
 use dashmap::DashMap;
 use librefang_types::agent::{AgentEntry, AgentId, AgentMode, AgentState, ResourceQuota};
@@ -478,6 +479,13 @@ impl AgentRegistry {
     /// `entry.manifest.tags` (what gets persisted to `agent.toml`), and the
     /// `tag_index` all in sync (#7742).
     ///
+    /// The incoming list is merged over the tags the agent is running with via
+    /// [`merge_agent_tags`], the same rule `update_manifest` applies: the
+    /// system-owned `hand:*` half is taken from the live entry and cannot be
+    /// dropped or forged through this API (#7835 review). The registry cannot
+    /// recompute `entry.is_hand` here, so a blind replace would leave the flag
+    /// pointing at tags that no longer exist.
+    ///
     /// `replace_manifest`'s doc comment explains why a blind manifest swap
     /// leaves tags alone: `entry.tags` and `tag_index` are a snapshot taken
     /// at spawn time, and nothing upstream serializes tag writes for a
@@ -498,10 +506,11 @@ impl AgentRegistry {
                 .get_mut(&id)
                 .ok_or_else(|| LibreFangError::AgentNotFound(id.to_string()))?;
             let inner = Arc::make_mut(slot.value_mut());
-            let old_tags = std::mem::replace(&mut inner.tags, tags.clone());
-            inner.manifest.tags = tags.clone();
+            let merged = merge_agent_tags(&inner.tags, &tags);
+            let old_tags = std::mem::replace(&mut inner.tags, merged.clone());
+            inner.manifest.tags = merged.clone();
             inner.last_active = chrono::Utc::now();
-            (old_tags, tags)
+            (old_tags, merged)
         };
         for tag in old_tags.iter().filter(|t| !tags.contains(t)) {
             if let Entry::Occupied(mut bucket) = self.tag_index.entry(tag.clone()) {
@@ -1299,6 +1308,48 @@ mod tests {
         assert!(
             !registry.tag_index.contains_key("solo"),
             "removing the last tag must prune the bucket it occupied"
+        );
+    }
+
+    /// #7835 review: the first caller to write tags through `update_tags`
+    /// must not be able to strip or forge the system-owned `hand:*` half —
+    /// the merge `update_manifest` applies has to hold here too.
+    #[test]
+    fn update_tags_keeps_live_system_tags_and_drops_forged_ones() {
+        let registry = AgentRegistry::new();
+        let mut entry = test_entry("hand-tag-update-agent");
+        entry.tags = vec![
+            "hand:demo".to_string(),
+            "hand_role:worker".to_string(),
+            "alpha".to_string(),
+        ];
+        entry.manifest.tags = entry.tags.clone();
+        let id = entry.id;
+        registry.register(entry).unwrap();
+
+        registry
+            .update_tags(id, vec!["hand_role:forged".to_string(), "beta".to_string()])
+            .unwrap();
+
+        let refreshed = registry.get(id).unwrap();
+        assert_eq!(
+            refreshed.tags,
+            vec![
+                "hand:demo".to_string(),
+                "hand_role:worker".to_string(),
+                "beta".to_string(),
+            ],
+            "live system tags stay pinned while the operator half is replaced"
+        );
+        assert_eq!(refreshed.manifest.tags, refreshed.tags);
+        assert!(
+            !registry.tag_index.contains_key("hand_role:forged"),
+            "a submitted system tag must not reach the index"
+        );
+        assert_eq!(registry.tag_index.get("beta").unwrap().as_slice(), &[id]);
+        assert!(
+            !registry.tag_index.contains_key("alpha"),
+            "the replaced operator tag is pruned from the index"
         );
     }
 

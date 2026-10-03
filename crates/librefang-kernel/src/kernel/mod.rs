@@ -1182,6 +1182,10 @@ fn warn_invalid_group_trigger_patterns(manifest: &AgentManifest, agent_name: &st
 
 mod manifest_helpers;
 use manifest_helpers::*;
+// `AgentRegistry::update_tags` applies the same system-tag merge as
+// `update_manifest`, so the one implementation stays reachable from
+// `crate::registry` without widening the helper module itself (#7835 review).
+pub(crate) use manifest_helpers::merge_agent_tags;
 
 // ── Background skill review helpers ────────────────────────────────
 //
