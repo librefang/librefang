@@ -2640,6 +2640,75 @@ fn an_unknown_model_with_no_override_resolves_to_nothing() {
     assert_eq!(lim.max_output_tokens, None);
 }
 
+/// The catalog rung of the `max_tokens` chain, driven through the same method `agent_execution.rs` calls: when neither the agent nor the per-model preference names a budget, the *effective* ceiling decides it, so an operator's `max_output_tokens` correction of a registry figure is what the turn asks for — not the figure it corrects.
+/// Reading the raw entry instead would ignore the override that exists to correct it, and assembling the rung by hand would keep passing even if the execution path stopped asking the catalog at all.
+#[test]
+fn an_operator_override_beats_the_catalog_ceiling_for_an_unset_budget() {
+    use librefang_types::agent::ModelConfig;
+
+    let mut catalog = test_catalog();
+    catalog.add_custom_model(ModelCatalogEntry {
+        id: "capped".to_string(),
+        provider: "litellm".to_string(),
+        context_window: 200_000,
+        max_output_tokens: 16_384,
+        limits_known: true,
+        ..Default::default()
+    });
+    catalog.set_overrides(
+        "litellm:capped".to_string(),
+        ModelOverrides {
+            max_output_tokens: Some(8_192),
+            ..Default::default()
+        },
+    );
+
+    let limits = catalog.effective_limits_for_manifest("litellm", "capped");
+    assert_eq!(
+        limits.max_output_tokens,
+        Some(8_192),
+        "the override is the effective ceiling"
+    );
+
+    let agent = ModelConfig {
+        provider: "litellm".to_string(),
+        model: "capped".to_string(),
+        ..Default::default()
+    };
+    let resolved = catalog.resolve_turn_inference_params(&agent);
+    assert_eq!(
+        resolved.max_tokens, 8_192,
+        "an unset budget takes the correction, not the registry's 16_384"
+    );
+}
+
+/// A model with no override anywhere still answers an unset budget from its own catalog ceiling — 4096 is only the fallback for a model nothing knows.
+#[test]
+fn a_catalog_ceiling_answers_an_unset_budget_through_the_execution_method() {
+    use librefang_types::agent::ModelConfig;
+
+    let mut catalog = test_catalog();
+    catalog.add_custom_model(ModelCatalogEntry {
+        id: "capped".to_string(),
+        provider: "litellm".to_string(),
+        context_window: 200_000,
+        max_output_tokens: 65_536,
+        limits_known: true,
+        ..Default::default()
+    });
+
+    let agent = ModelConfig {
+        provider: "litellm".to_string(),
+        model: "capped".to_string(),
+        ..Default::default()
+    };
+    let resolved = catalog.resolve_turn_inference_params(&agent);
+    assert_eq!(
+        resolved.max_tokens, 65_536,
+        "the turn must ask the endpoint for its registered ceiling"
+    );
+}
+
 /// Refs #7774 / #6423. When the catalog reconciles a bare manifest model to a
 /// prefixed entry id, the key the operator typed — the manifest's own
 /// `provider:model` — is honoured, and the entry's key still works as the

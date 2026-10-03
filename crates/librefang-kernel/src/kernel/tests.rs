@@ -19542,3 +19542,112 @@ async fn set_agent_personality_drops_cached_identity_so_the_next_turn_sees_it() 
 
     kernel.shutdown();
 }
+
+/// #8502 — the whole path, not just the resolver: with `max_tokens` unset and a model whose catalog entry declares a 65536 ceiling, the value that reaches the provider on the wire must be 65536, and the pre-call token hold for a tight hourly quota must not refuse the first message.
+///
+/// The agent is the shape of `examples/custom-agent/agent.toml`: `max_llm_tokens_per_hour = 50000` gives a 10000/min burst cap, below the 32768 system default.
+/// Before the fix the reservation compared `0 + 32768 > 10000` and returned `QuotaExceeded` on a zero-usage quota; the test drives `send_message` end to end so both the scheduler clamp and the per-turn resolution are exercised by their production call sites rather than re-assembled by hand.
+#[tokio::test(flavor = "multi_thread")]
+async fn unset_max_tokens_reaches_the_wire_as_the_catalog_ceiling() {
+    use librefang_types::agent::ResourceQuota;
+    use librefang_types::model_catalog::ModelCatalogEntry;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let backend = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "id": "chatcmpl-8502",
+            "object": "chat.completion",
+            "choices": [{
+                "index": 0,
+                "message": { "role": "assistant", "content": "ok" },
+                "finish_reason": "stop"
+            }],
+            "usage": { "prompt_tokens": 5, "completion_tokens": 3, "total_tokens": 8 }
+        })))
+        .mount(&backend)
+        .await;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().to_path_buf();
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        // Nothing may dial a real provider from this host.
+        default_model: DefaultModelConfig::driverless(),
+        ..KernelConfig::default()
+    };
+    let kernel = Arc::new(LibreFangKernel::boot_with_config(config).expect("boot"));
+    // `send_message` materializes the kernel handle, which panics unless the bootstrap completed the way production's daemon boot does.
+    LibreFangKernel::set_self_handle(&kernel);
+
+    // An unrecognised provider plus a custom `base_url` builds the OpenAI-compatible driver against the mock without any credential.
+    kernel.model_catalog_update(|cat| {
+        cat.add_custom_model(ModelCatalogEntry {
+            id: "catalog-capped".to_string(),
+            display_name: "Catalog Capped".to_string(),
+            provider: "testprov".to_string(),
+            context_window: 200_000,
+            max_output_tokens: 65_536,
+            limits_known: true,
+            ..Default::default()
+        });
+    });
+
+    let manifest = AgentManifest {
+        name: "catalog-ceiling-wire-agent".to_string(),
+        description: "unset max_tokens must reach the wire as the catalog ceiling".to_string(),
+        author: "test".to_string(),
+        module: "builtin:chat".to_string(),
+        model: ModelConfig {
+            provider: "testprov".to_string(),
+            model: "catalog-capped".to_string(),
+            base_url: Some(backend.uri()),
+            max_tokens: None,
+            ..Default::default()
+        },
+        resources: ResourceQuota {
+            max_llm_tokens_per_hour: Some(50_000),
+            max_tool_calls_per_minute: 0,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let agent_id = kernel.spawn_agent(manifest).expect("spawn");
+
+    let result = kernel
+        .send_message(agent_id, "hello")
+        .await
+        .expect("the first message of a 50000/hour agent must not be refused");
+    assert_eq!(result.response, "ok");
+
+    let requests = backend
+        .received_requests()
+        .await
+        .expect("recorded requests");
+    // The turn also fires the web-augmentation query generator through the agent's own driver; only the agent-loop request carries the turn's `max_tokens` (the generator pins its own 200), so select it out.
+    let turn_requests: Vec<serde_json::Value> = requests
+        .iter()
+        .filter_map(|request| serde_json::from_slice::<serde_json::Value>(&request.body).ok())
+        .filter(|body| !body.to_string().contains("search query generator"))
+        .collect();
+    assert_eq!(
+        turn_requests.len(),
+        1,
+        "exactly one agent-loop call; bodies: {requests:?}"
+    );
+    let body = &turn_requests[0];
+    assert_eq!(
+        body["model"], "catalog-capped",
+        "the turn must target the agent's model; body: {body}"
+    );
+    assert_eq!(
+        body["max_tokens"], 65_536,
+        "an unset max_tokens must reach the driver as the catalog ceiling, not 4096; body: {body}"
+    );
+
+    kernel.shutdown();
+}

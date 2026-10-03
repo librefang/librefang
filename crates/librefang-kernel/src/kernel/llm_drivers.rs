@@ -421,6 +421,8 @@ impl LibreFangKernel {
                 String::new(),
                 agent_provider.clone(),
             )];
+            // Per-slot output ceilings, parallel to `chain`. The primary's request budget is already resolved for the primary model, so it stays `None`; each fallback slot clamps to its own catalog ceiling (see `with_slot_max_tokens_caps`).
+            let mut slot_caps: Vec<Option<u32>> = vec![None];
             for fb in &effective_fallbacks {
                 // A sentinel model inherits the authoritative default provider/model pair; an explicit fallback model may infer its provider. This uses the same hot-reloadable default snapshot as the primary slot.
                 let (fb_provider, fb_model) = resolve_fallback_target(
@@ -521,7 +523,19 @@ impl LibreFangKernel {
                     self.llm.driver_cache.get_or_create(&config)
                 };
                 match fallback_driver {
-                    Ok(d) => chain.push((d, fb_model, fb_provider.clone())),
+                    Ok(d) => {
+                        // The fallback model's own output ceiling, so a failover that rewrites only `req.model` cannot carry the primary's larger budget above it (#8502 review).
+                        // `None` when the catalog knows no ceiling for the slot.
+                        let max_tokens_cap = self
+                            .llm
+                            .model_catalog
+                            .load()
+                            .effective_limits_for_manifest(&fb_provider, &fb_model)
+                            .max_output_tokens
+                            .and_then(|tokens| u32::try_from(tokens).ok());
+                        chain.push((d, fb_model, fb_provider.clone()));
+                        slot_caps.push(max_tokens_cap);
+                    }
                     Err(e) => {
                         warn!("Fallback driver '{}' failed to init: {e}", fb_provider);
                     }
@@ -536,7 +550,8 @@ impl LibreFangKernel {
                 let fb =
                     librefang_runtime::drivers::fallback::FallbackDriver::with_models_and_providers(
                         chain,
-                    );
+                    )
+                    .with_slot_max_tokens_caps(slot_caps);
                 let fb = match self.metering.engine.exhaustion_store() {
                     Some(store) => fb.with_exhaustion_store(store),
                     None => fb,
