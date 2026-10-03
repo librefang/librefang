@@ -1,5 +1,8 @@
+import { useEffect, useState } from "react";
 import { queryOptions, useQuery } from "@tanstack/react-query";
 import {
+  agentAvatarPath,
+  fetchAuthenticatedImage,
   listAgents,
   getAgentDetail,
   getAgentManifest,
@@ -26,6 +29,7 @@ const REFRESH_MS = 30_000;
 const LIVE_STALE_MS = 10_000;
 const STATS_STALE_MS = 15_000;
 const LIVE_REFRESH_MS = 15_000;
+const AVATAR_STALE_MS = 300_000;
 
 export const agentQueries = {
   list: (opts: { includeHands?: boolean } = {}) =>
@@ -164,6 +168,23 @@ export const agentQueries = {
       queryFn: listTools,
       staleTime: STALE_MS,
     }),
+  // The avatar image as a Blob (#8339). `GET /api/agents/{id}/avatar` is
+  // authenticated, so an `<img src>` pointed at it sends no bearer token and
+  // gets a 401; the bytes have to be fetched and handed to the tag as an
+  // object URL instead.
+  //
+  // `enabled` is the caller's "this agent has one" — asking otherwise buys a
+  // guaranteed 404 per agent per render. The long `staleTime` leans on the
+  // route's `ETag` + `no-cache`: a revalidation that finds nothing changed is
+  // a bodiless 304, and a re-upload is picked up by the mutations invalidating
+  // this key rather than by polling for it.
+  avatar: (agentId: string, enabled: boolean) =>
+    queryOptions({
+      queryKey: agentKeys.avatar(agentId),
+      queryFn: () => fetchAuthenticatedImage(agentAvatarPath(agentId)),
+      enabled: !!agentId && enabled,
+      staleTime: AVATAR_STALE_MS,
+    }),
 };
 
 export function useAgents(
@@ -231,4 +252,46 @@ export function useAgentManifest(agentId: string, options: QueryOverrides = {}) 
 
 export function useAgentChannels(agentId: string, options: QueryOverrides = {}) {
   return useQuery(withOverrides(agentQueries.channels(agentId), options));
+}
+
+/**
+ * An agent's avatar as an object URL, ready for an `<img src>` (#8339).
+ *
+ * Two things are being kept apart here. The query caches the *Blob*, which is
+ * shared and lives as long as the cache entry does; this hook owns the *object
+ * URL*, which is a document-scoped handle that leaks until revoked. So the URL
+ * is minted in an effect keyed on the Blob and revoked in that effect's
+ * cleanup — on unmount, and on every switch to another agent, which is the
+ * case a drawer that stays mounted while the selection changes would otherwise
+ * leak on.
+ *
+ * `hasAvatar` is the caller's answer to "is `identity.avatar_url` set", and it
+ * gates the request: an agent without one would otherwise cost a 404 on every
+ * render of the row that shows its initials.
+ *
+ * Returns `undefined` while loading and when there is nothing to show, which is
+ * exactly what `Avatar`'s `src` wants — it falls back to the initials on its
+ * own, so there is no separate loading state to thread through the UI.
+ */
+export function useAgentAvatarUrl(agentId: string, hasAvatar: boolean): string | undefined {
+  const { data: blob } = useQuery(agentQueries.avatar(agentId, hasAvatar));
+  const [objectUrl, setObjectUrl] = useState<string | undefined>(undefined);
+
+  useEffect(() => {
+    if (!blob) {
+      setObjectUrl(undefined);
+      return;
+    }
+    const url = URL.createObjectURL(blob);
+    setObjectUrl(url);
+    return () => {
+      URL.revokeObjectURL(url);
+      // Without this the next paint still points an `<img>` at a URL that has
+      // just been revoked, which renders as a broken image rather than as the
+      // initials the fallback is there to give.
+      setObjectUrl(undefined);
+    };
+  }, [blob]);
+
+  return objectUrl;
 }

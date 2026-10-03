@@ -90,6 +90,13 @@ export const agentKeys = {
   // configured on this instance".
   channels: (agentId: string) =>
     [...agentKeys.all, "channels", agentId] as const,
+  // The avatar image itself (#8339), cached as a Blob because
+  // `GET /api/agents/{id}/avatar` is authenticated and an `<img src>` carries
+  // no bearer token. Its own subtree rather than a leaf under `detail(id)`:
+  // the agent detail is refetched on a timer and re-downloading an image on
+  // every poll is the one thing this key exists to avoid.
+  avatar: (agentId: string) =>
+    [...agentKeys.all, "avatar", agentId] as const,
 };
 
 // Central prompt repository (#6160). The fleet-wide overview

@@ -2470,6 +2470,7 @@ purge-removed-workspace =   - 工作区目录
 purge-workspace-unresolved =   - 注意：无法定位工作区目录。该代理的清单已不存在，因此无法找到自定义的工作区路径；请自行检查工作区目录。
 purge-workspace-shared =   - 注意：工作区目录被保留未删除。它解析为工作区根目录本身，或解析为另一个已注册代理的清单也指向的目录——删除它会破坏超出该代理自身数据的内容；请自行检查工作区目录。
 purge-removed-agent-type =   - 代理类型模板
+purge-removed-avatar =   - 头像图片
 purge-removed-cron-jobs =   - 定时任务
 purge-removed-trigger-jobs =   - 事件触发器
 purge-removed-channel-bindings =   - 频道/对话路由绑定
