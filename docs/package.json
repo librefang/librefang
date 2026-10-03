@@ -15,7 +15,7 @@
     "format": "biome format src --write"
   },
   "dependencies": {
-    "@algolia/autocomplete-core": "1.19.11",
+    "@algolia/autocomplete-core": "1.19.12",
     "@giscus/react": "^3.1.0",
     "@headlessui/react": "2.2.10",
     "@mdx-js/loader": "3.1.1",
@@ -28,11 +28,11 @@
     "flexsearch": "^0.8.205",
     "focus-visible": "^5.2.1",
     "hast-util-from-html": "^2.0.3",
-    "lucide-react": "^1.47.0",
+    "lucide-react": "^1.48.0",
     "marked": "18.0.14",
     "mdast-util-to-string": "^4.0.0",
     "mdx-annotations": "^0.1.4",
-    "motion": "13.4.2",
+    "motion": "13.4.4",
     "next": "16.3.6",
     "next-themes": "^0.4.6",
     "prism-react-renderer": "^2.4.1",
@@ -51,7 +51,7 @@
   "devDependencies": {
     "@tailwindcss/postcss": "^4.3.3",
     "@types/mdx": "^2.0.14",
-    "@types/node": "^26.6.2",
+    "@types/node": "^26.6.3",
     "@types/react": "19.3.0",
     "@types/react-dom": "19.3.0",
     "@types/react-highlight-words": "^0.20.0",

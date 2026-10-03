@@ -600,6 +600,30 @@ fn pieces_of(text: RichText) -> Vec<RichText> {
     }
 }
 
+/// Whether a block's text carries no characters a reader could see, looking *inside* styled
+/// spans.
+///
+/// `RichText::is_empty` deliberately says `false` for any `Styled(_)`, and for a paragraph
+/// that is right: `sendRichMessage` accepts a paragraph whose text is an empty `italic` span,
+/// which is what a dropped image leaves behind. For a heading it is not: the same empty span
+/// in a heading has the API refuse the whole message, so `## ![](x)` — and with it any prose
+/// that followed — was lost to the fallback. Measured on both, one shape each way.
+fn carries_no_text(text: &RichText) -> bool {
+    match text {
+        RichText::Plain(s) => s.is_empty(),
+        RichText::Seq(parts) => parts.iter().all(carries_no_text),
+        RichText::Styled(styled) => carries_no_text(match styled {
+            Styled::Bold { text }
+            | Styled::Italic { text }
+            | Styled::Strikethrough { text }
+            | Styled::Code { text }
+            | Styled::Url { text, .. }
+            | Styled::Spoiler { text }
+            | Styled::Marked { text } => text,
+        }),
+    }
+}
+
 /// Convert an agent's Markdown into rich blocks.
 ///
 /// Never fails. Anything the converter does not model becomes the text it was written as,
@@ -1003,21 +1027,41 @@ impl Builder {
             }
             TagEnd::Heading(level) => {
                 let text = self.take_inline();
-                self.push_block(Block::Heading {
-                    text,
-                    size: heading_size(level),
-                });
+                // The flush has to happen whether or not the block does. `push_block` calls
+                // it, so skipping the push used to skip the flush as well, and the loose text
+                // on either side of a dropped block inside a tight list item ran together:
+                // `- a\n  ## \n  b` came out as one paragraph reading `ab`.
+                self.flush_implicit_run();
+                // `sendRichMessage` refuses a heading with no text — the whole payload comes
+                // back `RICH_MESSAGE_CONTENT_REQUIRED` — and Telegram refuses its own
+                // `## ` as well. A lone `## ` is something a model writes, and so is
+                // `## ![](x)`, whose dropped image leaves an empty span behind: the emptiness
+                // is checked inside styled spans, which `is_empty` does not do.
+                if !carries_no_text(&text) {
+                    self.push_block(Block::Heading {
+                        text,
+                        size: heading_size(level),
+                    });
+                }
             }
             TagEnd::CodeBlock => {
                 let text = self.take_inline_literal();
                 let language = self.code_language.take().flatten();
-                self.push_block(Block::Pre {
-                    text: trim_trailing_newline(text),
-                    language,
-                });
+                let text = trim_trailing_newline(text);
+                self.flush_implicit_run();
+                // Same refusal, with or without a language on the fence: an empty
+                // ```` ```rust ```` block is refused too. A model that opens a block and
+                // closes it without writing the sample produced one.
+                if !carries_no_text(&text) {
+                    self.push_block(Block::Pre { text, language });
+                }
             }
             TagEnd::List(_) => {
                 if let Some(Frame::ListItems { items, .. }) = self.frames.pop() {
+                    // No emptiness check here on purpose. `list must be non-empty` is a real
+                    // refusal with its own message, but `pulldown-cmark` never opens a list
+                    // without an item — a fuzz of 40 000 inputs produced none — so a check
+                    // would be state no test could kill.
                     self.push_block(Block::List { items });
                 }
             }
@@ -1037,6 +1081,17 @@ impl Builder {
                 };
                 if let Some(Frame::ListItems { items, next_value }) = self.frames.last_mut() {
                     let value = next_value.inspect(|v| *next_value = Some(v + 1));
+                    // An item that collected nothing is refused with the rest of the payload,
+                    // so it carries an empty paragraph instead — which is exactly what
+                    // Telegram's own parse of `- a\n- \n- b` puts there. Dropping the item
+                    // would renumber an ordered list and lose a line the reader can see.
+                    let blocks = if blocks.is_empty() {
+                        vec![Block::Paragraph {
+                            text: RichText::Plain(String::new()),
+                        }]
+                    } else {
+                        blocks
+                    };
                     items.push(ListItem {
                         blocks,
                         value,
@@ -1050,7 +1105,12 @@ impl Builder {
             }
             TagEnd::BlockQuote(_) => {
                 if let Some(Frame::Blocks(blocks)) = self.frames.pop() {
-                    self.push_block(Block::Quote { blocks });
+                    self.flush_implicit_run();
+                    // A quote with nothing in it is refused as well, and `> ` on its own is
+                    // how a model starts a quote and then changes its mind.
+                    if !blocks.is_empty() {
+                        self.push_block(Block::Quote { blocks });
+                    }
                 }
             }
             TagEnd::Table => {
@@ -1629,10 +1689,12 @@ mod tests {
             let _ = markdown_to_blocks(input);
         }
         // Observable proxy for the invariant: a later span must still wrap the right text.
+        // The first item holds an empty paragraph rather than nothing — an item with no
+        // blocks is refused by `sendRichMessage` along with the whole message.
         assert_eq!(
             json("- ![](x)\n- **bold**"),
             serde_json::json!([{"type": "list", "items": [
-                {"blocks": []},
+                {"blocks": [{"type": "paragraph", "text": ""}]},
                 {"blocks": [{"type": "paragraph", "text": {"type": "bold", "text": "bold"}}]},
             ]}])
         );
@@ -1642,7 +1704,7 @@ mod tests {
     /// `telegram_oracle.json` was sent to a live bot as `rich_message.markdown` and the parse
     /// `sendRichMessage` echoes back was written down verbatim. This test is the diff.
     ///
-    /// Of 196 recorded forms, 146 match byte for byte. The other 50 are named in
+    /// Of 197 recorded forms, 146 match byte for byte. The other 51 are named in
     /// `DIVERGENCES`, and for the 30 that are not content-level the difference is *checked*
     /// rather than described: same characters, same multiset of styles, written down
     /// differently. That check is the point. An earlier version of this test listed 23
@@ -2315,6 +2377,14 @@ mod tests {
     /// unnoticed, and every one outside `CONTENT_DIVERGENCES` is additionally checked to
     /// carry Telegram's own text and Telegram's own set of styles.
     const DIVERGENCES: &[(&str, &str)] = &[
+        (
+            "- a\n  > \n  b",
+            "Telegram reads the `b` after an empty quote marker as a lazy continuation and puts \
+             it inside the quote; `pulldown-cmark` closes the quote at the blank marker and \
+             leaves `b` beside it. Both keep the text and the same characters — the difference \
+             is which container holds the second line, and it is the Markdown parser's, not the \
+             scan's",
+        ),
         ("&#32;||a||", "equal-range styles, serialised in Telegram's order rather than the source's"),
         ("&vert;&vert;a&vert;&vert;", "Telegram decodes numeric character references and leaves named ones alone, so it shows `&vert;` as written; CommonMark decodes both. Neither side makes markup of it â the difference is the text, and it is `pulldown-cmark`'s, not the scan's"),
         ("<b>||a||</b>", "a run holding raw HTML or an autolink is not scanned at all, so the pairs elsewhere in it are lost. Telegram makes them; the alternative — being precise about which characters are not prose — is what hid a paragraph behind a spoiler, and losing a spoiler is not in the same class as losing text"),
@@ -2392,6 +2462,203 @@ mod tests {
         "||секрет\\||b||",
         "Тег <input value=\"a||b\"> и ||секрет||",
     ];
+
+    /// What counts as "no content" is Telegram's answer, not a reading of the schema. Every
+    /// row here is one probe against the live API, and the predicate is asserted against it:
+    ///
+    /// | heading text | API |
+    /// |---|---|
+    /// | empty `italic` (a dropped image) | refused |
+    /// | empty `bold`, `code`, `spoiler` | refused |
+    /// | `bold` around an empty `italic` | refused |
+    /// | two empty spans in a sequence | refused |
+    /// | the same two with a space between | accepted |
+    /// | a single space | accepted |
+    ///
+    /// So the rule is "no visible character anywhere inside", and a space is visible. The
+    /// same probe run says a *paragraph* with an empty span is accepted, which is why
+    /// `RichText::is_empty` is left alone and this predicate exists beside it.
+    #[test]
+    fn emptiness_is_what_telegram_calls_empty() {
+        let empty = |kind: fn(Box<RichText>) -> Styled| {
+            RichText::Styled(kind(Box::new(RichText::Plain(String::new()))))
+        };
+        for text in [
+            RichText::Plain(String::new()),
+            empty(|text| Styled::Italic { text }),
+            empty(|text| Styled::Bold { text }),
+            empty(|text| Styled::Code { text }),
+            empty(|text| Styled::Spoiler { text }),
+            empty(|text| Styled::Marked { text }),
+            RichText::Styled(Styled::Bold {
+                text: Box::new(empty(|text| Styled::Italic { text })),
+            }),
+            RichText::Seq(vec![
+                empty(|text| Styled::Italic { text }),
+                empty(|text| Styled::Italic { text }),
+            ]),
+        ] {
+            assert!(
+                carries_no_text(&text),
+                "Telegram отвергает это как пустое: {text:?}"
+            );
+        }
+        for text in [
+            RichText::Plain(" ".to_string()),
+            RichText::Seq(vec![
+                empty(|text| Styled::Italic { text }),
+                RichText::Plain(" ".to_string()),
+                empty(|text| Styled::Italic { text }),
+            ]),
+            RichText::Styled(Styled::Code {
+                text: Box::new(RichText::Plain("x".to_string())),
+            }),
+        ] {
+            assert!(
+                !carries_no_text(&text),
+                "Telegram это принимает, выбрасывать нельзя: {text:?}"
+            );
+        }
+    }
+
+    /// No block this converter emits may be one `sendRichMessage` refuses for having no
+    /// content: a heading with no *visible* text — its emptiness has to be checked inside
+    /// styled spans, because `## ![](x)` leaves an empty `italic` behind — an empty fenced
+    /// block with or without a language, an empty blockquote, or a list item that collected
+    /// nothing. Each has the API refuse the whole message with `RICH_MESSAGE_CONTENT_REQUIRED`.
+    ///
+    /// The name is narrower than "every block is accepted" on purpose: a message whose only
+    /// block is a divider (`---` alone) comes back `RICH_MESSAGE_EMPTY`, and so does Telegram's
+    /// own parse of that source — a shape neither side represents, out of scope here.
+    ///
+    /// The expectations are Telegram's own parse of the same Markdown, probed: it drops the
+    /// heading, the fence and the quote, and puts an empty paragraph inside the empty item.
+    /// Dropping the item instead would renumber an ordered list and lose a line the reader
+    /// can see.
+    ///
+    /// Not every empty thing is refused, and the difference is measured rather than assumed:
+    /// a paragraph with empty text, a paragraph holding an empty `italic` or `url` span (what
+    /// a dropped image or an empty link label leaves behind) and a table cell with empty text
+    /// are all accepted. They are left alone.
+    ///
+    /// The class was missed for three weeks because every check on this converter compared
+    /// *our parse with Telegram's parse of the same source*. That question never asks whether
+    /// our output is valid input.
+    #[test]
+    fn no_block_is_emitted_without_content() {
+        assert_eq!(
+            json("- a\n- \n- b"),
+            serde_json::json!([{"type": "list", "items": [
+                {"blocks": [{"type": "paragraph", "text": "a"}]},
+                {"blocks": [{"type": "paragraph", "text": ""}]},
+                {"blocks": [{"type": "paragraph", "text": "b"}]},
+            ]}])
+        );
+        assert_eq!(
+            json("## \n\nтекст"),
+            serde_json::json!([{"type": "paragraph", "text": "текст"}])
+        );
+        assert_eq!(
+            json("текст\n\n```\n```\n\nещё"),
+            serde_json::json!([
+                {"type": "paragraph", "text": "текст"},
+                {"type": "paragraph", "text": "ещё"},
+            ])
+        );
+        assert_eq!(
+            json("> \n\nтекст"),
+            serde_json::json!([{"type": "paragraph", "text": "текст"}])
+        );
+        // Dropping a block must not drop the flush that goes with it. `push_block` closes the
+        // open loose-text run, so skipping the push skipped the flush too, and the text on
+        // either side of the dropped block ran together inside a tight list item: these came
+        // out as one paragraph reading `ab`. Telegram's own parse of both is two paragraphs,
+        // `a` and `b`, which is what these assert.
+        //
+        // `- a\n  > \n  b` is deliberately absent: Telegram reads the `b` as a lazy
+        // continuation and puts it *inside* the quote, where this converter keeps it outside.
+        // Both keep the text, so that is a divergence rather than this defect.
+        for source in ["- a\n  ## \n  b", "- a\n  ```\n  ```\n  b"] {
+            assert_eq!(
+                json(source),
+                serde_json::json!([{"type": "list", "items": [{"blocks": [
+                    {"type": "paragraph", "text": "a"},
+                    {"type": "paragraph", "text": "b"},
+                ]}]}]),
+                "{source:?}"
+            );
+        }
+        // The rule rather than the examples, walked over the parsed tree: a string `contains`
+        // is not up to this, because `serde_json` orders keys lexicographically and
+        // `{"size":2,"text":"","type":"heading"}` does not contain `{"text":"","type":"heading"`
+        // — the first version of this loop asserted nothing at all, and an empty `pre` with a
+        // language would have slipped past it too.
+        for source in [
+            "- a\n- \n- b",
+            "## ",
+            "#\n\nтекст",
+            "```\n```",
+            "```rust\n```",
+            "> ",
+            "- ![](x)",
+            "1. a\n2. \n3. b",
+            "- [ ] \n- [x] сделано",
+            "- a\n  ## \n  b",
+            "текст\n\n> \n\nещё",
+            // A heading whose only content is dropped: the image or the empty link label
+            // leaves an empty styled span, which `RichText::is_empty` calls non-empty.
+            "## ![](x)",
+            "## [](https://e.com)",
+            "# ![](x)\n\nтекст",
+            "- a\n  ## ![](x)\n  b",
+            "### ![](x) ",
+            // A heading whose text is a *sequence* of empty spans: `carries_no_text` has to
+            // walk the sequence too. With a space between the two images the heading carries
+            // one visible character and the API accepts it — measured both ways.
+            "## ![](x)![](y)",
+        ] {
+            assert_no_contentless_block(&json(source), source);
+        }
+    }
+
+    /// Walk a block tree and fail on anything `sendRichMessage` refuses to accept.
+    fn assert_no_contentless_block(value: &serde_json::Value, source: &str) {
+        match value {
+            serde_json::Value::Array(items) => {
+                items
+                    .iter()
+                    .for_each(|v| assert_no_contentless_block(v, source));
+            }
+            serde_json::Value::Object(fields) => {
+                let kind = fields.get("type").and_then(serde_json::Value::as_str);
+                if matches!(kind, Some("heading") | Some("pre")) {
+                    // Not `as_str`: a heading's text can be an *object* — the empty `italic`
+                    // span a dropped image leaves behind — and that is exactly the shape the
+                    // API refuses. Two versions of this check in a row were blind to the shape
+                    // they existed for: the first compared substrings of the serialised JSON
+                    // and could never fire at all, the second asked `as_str` and then let every
+                    // object through on `is_none_or(None)`.
+                    let text = fields.get("text").unwrap_or(&serde_json::Value::Null);
+                    assert!(
+                        !visible(text).is_empty(),
+                        "{source:?}: {kind:?} без видимого текста — payload отвергнут целиком"
+                    );
+                }
+                for (key, nested) in fields {
+                    if matches!(key.as_str(), "blocks" | "items") {
+                        assert!(
+                            nested.as_array().is_none_or(|a| !a.is_empty()),
+                            "{source:?}: пустой {key} — payload будет отвергнут целиком"
+                        );
+                    }
+                    if matches!(key.as_str(), "text" | "blocks" | "items" | "cells") {
+                        assert_no_contentless_block(nested, source);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
 
     #[test]
     fn edge_inputs_do_not_panic() {
