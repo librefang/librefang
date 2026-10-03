@@ -1,11 +1,12 @@
-// Tests SystemPromptSection / DescriptionSection / ChannelsSection directly
-// — AgentsPage has no render harness (~20 hooks).
+// Tests AgentsPage's pure helpers and sections directly — the ~20-hook page
+// itself is exercised by the full-page harness in AgentsPage.quickRun.test.tsx,
+// which is the wrong place to pin these narrow rules.
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { cloneResultNotice, hasTokenFootprintData, SystemPromptSection, DescriptionSection, ChannelsSection, ManifestEditorForm } from "./AgentsPage";
+import { cloneResultNotice, resolveDrawerSeed, hasTokenFootprintData, SystemPromptSection, DescriptionSection, ChannelsSection, ManifestEditorForm } from "./AgentsPage";
 import { emptyManifestExtras, emptyManifestForm } from "../lib/agentManifest";
 import { usePatchAgent, useSetAgentChannels } from "../lib/mutations/agents";
 import { useBindPromptVersionToAgent } from "../lib/mutations/prompts";
@@ -46,6 +47,39 @@ const useBindMock = useBindPromptVersionToAgent as unknown as ReturnType<typeof 
 const usePromptVersionsMock = usePromptVersions as unknown as ReturnType<typeof vi.fn>;
 const useAgentChannelsMock = useAgentChannels as unknown as ReturnType<typeof vi.fn>;
 const useSetAgentChannelsMock = useSetAgentChannels as unknown as ReturnType<typeof vi.fn>;
+
+// The receiving half of the agent-types Run round trip. The full-page harness
+// (AgentsPage.quickRun.test.tsx) renders the seed effect end to end, but this is
+// the only thing pinning the mapping itself; the param name is the contract
+// with the sender on /agent-types.
+describe("resolveDrawerSeed", () => {
+  it("opens the drawer on the template tab with a type the list knows", () => {
+    expect(resolveDrawerSeed("researcher", ["researcher", "analyst"])).toEqual({
+      kind: "template",
+      templateName: "researcher",
+    });
+  });
+
+  it("opens nothing when the param is absent", () => {
+    expect(resolveDrawerSeed(undefined, ["researcher"])).toEqual({ kind: "none" });
+  });
+
+  // No agent type can be named "", and admitting it would open the drawer on an
+  // empty picker with Create disabled and no way back.
+  it("opens nothing for an empty value", () => {
+    expect(resolveDrawerSeed("", ["researcher"])).toEqual({ kind: "none" });
+  });
+
+  // A stale bookmark, a renamed or deleted type, or a typo. The drawer still
+  // opens, but on the blank form tab with a notice, not on a `<select>` whose
+  // value matches no option.
+  it("reports an unknown name so the caller can degrade visibly", () => {
+    expect(resolveDrawerSeed("ghost", ["researcher", "analyst"])).toEqual({
+      kind: "unknown",
+      templateName: "ghost",
+    });
+  });
+});
 
 describe("cloneResultNotice", () => {
   const base = { agent_id: "agent-copy", name: "copy" };
