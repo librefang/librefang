@@ -201,9 +201,11 @@ pub async fn send_text_counting(
 ///
 /// Blocks first: Telegram runs no parser over a block's text, so quoted content cannot turn
 /// itself into markup and code samples keep their angle brackets. The sanitised Markdown
-/// string is kept only as a guard — if the converter ever returned nothing for text that was
-/// not empty, sending it would deliver an empty message, and a lower-fidelity message beats a
-/// blank one. `None` means the text does not fit the rich limit at all and the caller should
+/// string is the fallback when the converter returns nothing for text that was not empty:
+/// that guards against a converter bug, and it is also the reachable path for text whose whole
+/// content is a construct Telegram refuses to receive empty (a bare `## `, an empty fence, a
+/// lone `> `) — see `prepare_rich_blocks`. Telegram refuses the `markdown` body for those too,
+/// so they end on the HTML path; a lower-fidelity message still beats a blank one. `None` means the text does not fit the rich limit at all and the caller should
 /// chunk it through the legacy pipeline.
 pub(crate) fn rich_message_body(text: &str) -> Option<serde_json::Value> {
     if let Some(blocks) = crate::format::prepare_rich_blocks(text) {
