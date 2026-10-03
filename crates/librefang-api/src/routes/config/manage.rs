@@ -1007,7 +1007,7 @@ fn redacted_config_json(
 // ---------------------------------------------------------------------------
 // Config Reload endpoint
 // ---------------------------------------------------------------------------
-/// `has_warnings` covers everything that makes a nominally successful reload less than complete — a channel bridge that failed to restart, or a plan the kernel declined to apply because `[reload] mode` withholds runtime changes.
+/// `has_warnings` covers everything that makes a nominally successful reload less than complete — a channel bridge that failed to restart, a plan the kernel declined to apply because `[reload] mode` withholds runtime changes, or a restart-only plan deliberately left unswapped.
 fn config_reload_status(
     restart_required: bool,
     has_changes: bool,
@@ -1079,13 +1079,20 @@ pub async fn config_reload(
                 }
             }
 
-            // A plan the kernel declined to apply is a preview of what a restart would do, not a record of what happened: under `[reload] mode = "off"` / `"restart"` the config is read and validated but never swapped in, and `apply_hot_actions_inner` runs inside that same branch.
+            // A plan the kernel declined to apply is a preview of what a restart would do, not a record of what happened.
+            // Two shapes reach here: under `[reload] mode = "off"` / `"restart"` the config is read and validated but never swapped in, and a restart-only plan in `hot` / `hybrid` is deliberately not swapped so no live reader sees a value boot never wired (`should_store_config`).
             // Reporting `hot_actions_applied: ["ReloadAuth"]` there is the identical misleading-success shape this endpoint's auth refresh exists to close, one mode over — the operator sees a 200 naming the action and believes the revocation landed.
             if plan.has_changes() && !plan.config_stored {
-                warnings.push(
+                let restart_only = plan.restart_required
+                    && plan.hot_actions.is_empty()
+                    && plan.noop_changes.is_empty();
+                warnings.push(if restart_only {
+                    "Nothing was applied: the only change needs a restart, so the live config was left as the running process has it wired. Restart the daemon to pick it up."
+                        .to_string()
+                } else {
                     "Nothing was applied: the configured `[reload] mode` withholds runtime changes, so the new config was read and validated but not swapped in. Restart the daemon to pick it up."
-                        .to_string(),
-                );
+                        .to_string()
+                });
             }
 
             let status = config_reload_status(
@@ -1375,6 +1382,26 @@ fn ensure_table_like(item: &mut toml_edit::Item) {
     }
 }
 
+/// The compiled default of a top-level `KernelConfig` field, rendered as a TOML item.
+///
+/// `POST /api/config/set`'s single-segment remove path uses it: dropping the
+/// key would erase the document's statement about the field, and the reload
+/// overlay (#8459/#8460) reads an absent top-level key as "keep the live
+/// value", so the delete would no-op while the handler still answered success.
+/// Stating the default is the same shape `persist_identity_sections` writes for
+/// `users = []` (#8459).
+///
+/// `None` when the default does not serialize a value for `key` — every
+/// `skip_serializing_if` field whose default satisfies the predicate, e.g. the
+/// `Option`-valued `max_history_messages` and `agent_max_iterations`. There is
+/// no TOML spelling of `None`, so the caller falls back to dropping the key,
+/// and the response then stops claiming an apply that did not happen.
+fn config_default_top_level_item(key: &str) -> Option<toml_edit::Item> {
+    let rendered = toml::to_string(&librefang_types::config::KernelConfig::default()).ok()?;
+    let defaults: toml_edit::DocumentMut = rendered.parse().ok()?;
+    defaults.get(key).cloned()
+}
+
 /// POST /api/config/set — Set a single config value and persist to config.toml.
 ///
 /// Accepts JSON `{ "path": "section.key", "value": "..." }`.
@@ -1563,7 +1590,24 @@ pub async fn config_set(
     match parts.len() {
         1 => {
             if is_remove {
-                doc.remove(parts[0]);
+                // A single-segment path names a top-level `KernelConfig` field,
+                // and removing the key would erase the document's statement
+                // about it: the reload overlay (#8459/#8460) reads an absent
+                // top-level key as "keep the live value", so the delete would
+                // no-op and the handler would still answer success. State the
+                // compiled default explicitly — see
+                // `config_default_top_level_item`. Remove-then-insert so an
+                // existing table header's formatting decor cannot leak into
+                // the rendered key.
+                match config_default_top_level_item(parts[0]) {
+                    Some(default_item) => {
+                        doc.remove(parts[0]);
+                        doc.insert(parts[0], default_item);
+                    }
+                    None => {
+                        doc.remove(parts[0]);
+                    }
+                }
             } else {
                 doc[parts[0]] = toml_edit::Item::Value(json_to_toml_edit_value(&value));
             }
@@ -1689,7 +1733,17 @@ pub async fn config_set(
     let (reload_status, reload_error): (&'static str, Option<String>) =
         match state.kernel.reload_config().await {
             Ok(plan) => {
-                let s = if plan.restart_required {
+                // A plan with no changes is not "applied": the write landed on
+                // disk, but nothing in the live config moved. The single-segment
+                // remove path lands here when the field's default is not
+                // TOML-representable (`config_default_top_level_item`), so the
+                // reload overlay reads the dropped key as "keep the live value"
+                // — and any other write whose value already equals the live one
+                // lands here too. Reporting success there is the
+                // misleading-success shape this response exists to avoid.
+                let s = if !plan.has_changes() {
+                    "no_changes"
+                } else if plan.restart_required {
                     "applied_partial"
                 } else {
                     "applied"

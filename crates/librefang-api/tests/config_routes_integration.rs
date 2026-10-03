@@ -701,6 +701,10 @@ async fn config_export_requires_auth_when_key_set() {
 #[tokio::test(flavor = "multi_thread")]
 async fn config_set_writes_allowlisted_path_to_tempdir_toml() {
     let h = boot_router_with_api_key(API_KEY).await;
+    // A `log_level` edit with no log reloader installed is restart-required,
+    // and `should_store_config` deliberately does not swap a restart-only plan
+    // into the live config: the running process keeps the value boot wired.
+    let live_before = h.state.kernel.config_ref().log_level.clone();
     // `log_level` is a real top-level KernelConfig field on the allowlist; it round-trips through the schema validator AND survives the post-write kernel reload (which re-serializes the in-memory config).
     // `ui.theme` used to be named here as the counter-example of an allowlisted path the kernel does not model; #6605 removed those four `ui.*` entries from the allowlist, so the write path no longer accepts any such path.
     let (status, body) = send(
@@ -719,6 +723,10 @@ async fn config_set_writes_allowlisted_path_to_tempdir_toml() {
     );
     let response: serde_json::Value = serde_json::from_slice(&body).expect("response is JSON");
     let response_status = response["status"].as_str().expect("status string");
+    assert_eq!(
+        response_status, "applied_partial",
+        "a restart-only edit must be reported as partial, not applied: {response}"
+    );
 
     // Verify the write landed in the tempdir's config.toml — NOT the user's
     // real ~/.librefang/config.toml. (kernel.home_dir is the tempdir.)
@@ -727,8 +735,14 @@ async fn config_set_writes_allowlisted_path_to_tempdir_toml() {
     let log_level = parsed.get("log_level").and_then(|v| v.as_str());
     assert_eq!(log_level, Some("debug"), "wrote: {written}");
 
-    // And the in-memory kernel config reflects it (post-reload).
-    assert_eq!(h.state.kernel.config_ref().log_level, "debug");
+    // The file changed, but the live config must not: no live reader applies a
+    // log-level change without a reloader, so swapping it in would show a value
+    // the tracing filter never took.
+    assert_eq!(
+        h.state.kernel.config_ref().log_level,
+        live_before,
+        "a restart-only edit must not swap the live config"
+    );
 
     let audit = h
         .state
@@ -739,6 +753,77 @@ async fn config_set_writes_allowlisted_path_to_tempdir_toml() {
         .find(|entry| entry.detail == "config set: log_level")
         .expect("config set audit entry");
     assert_eq!(audit.outcome, response_status);
+}
+
+/// `POST /api/config/set` with `value: null` on a single-segment path must
+/// state the field's compiled default, not drop the key.
+///
+/// The reload overlay (#8459/#8460) reads an absent top-level key as "keep the
+/// live value", so `doc.remove(parts[0])` left the plan empty and the handler
+/// still answered "applied" while the live value never moved and the default
+/// silently waited for the next restart.
+#[tokio::test(flavor = "multi_thread")]
+async fn config_set_null_on_a_single_segment_path_restates_the_default() {
+    let h = boot_router_with_api_key(API_KEY).await;
+
+    // `language` is a writable top-level scalar classified as a read-live
+    // noop, so setting it swaps the live config and `es` is observably live.
+    let (status, body) = send(
+        h.app.clone(),
+        auth_post_json(
+            "/api/config/set",
+            serde_json::json!({"path": "language", "value": "es"}),
+        ),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "language is allowlisted; got {status}: {}",
+        String::from_utf8_lossy(&body)
+    );
+    let response: serde_json::Value = serde_json::from_slice(&body).expect("response is JSON");
+    assert_eq!(response["status"], "applied", "body: {response}");
+    assert_eq!(h.state.kernel.config_ref().language, "es");
+
+    // `null` removes the key. The handler must state `language = "en"` on disk
+    // instead of dropping it, or the overlay keeps the live `es`.
+    let (status, body) = send(
+        h.app.clone(),
+        auth_post_json(
+            "/api/config/set",
+            serde_json::json!({"path": "language", "value": null}),
+        ),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "got {status}: {}",
+        String::from_utf8_lossy(&body)
+    );
+
+    let written = std::fs::read_to_string(h.home.join("config.toml")).expect("toml exists");
+    let parsed: toml::Value = toml::from_str(&written).expect("valid toml");
+    assert_eq!(
+        parsed.get("language").and_then(|v| v.as_str()),
+        Some("en"),
+        "the field's default must be stated explicitly, not the key dropped: {written}"
+    );
+
+    // The default is live again and the read payload shows it.
+    assert_eq!(
+        h.state.kernel.config_ref().language,
+        "en",
+        "the removal must swap the default back into the live config"
+    );
+    let (status, body) = send(h.app.clone(), auth_get("/api/config")).await;
+    assert_eq!(status, StatusCode::OK);
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("response is JSON");
+    assert_eq!(
+        json["language"], "en",
+        "GET /api/config must show the restored default: {json}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -832,6 +917,10 @@ async fn config_set_rejects_a_zero_local_backend_timeout() {
 #[tokio::test(flavor = "multi_thread")]
 async fn config_set_accepts_a_nonzero_local_backend_timeout() {
     let h = boot_router_with_api_key(API_KEY).await;
+    // `[tool_exec]` is restart-required and has no live reader (the resolved
+    // backend never reaches dispatch, #8221), so `should_store_config` leaves
+    // the live config alone; the write lands on disk for the next boot.
+    let live_before = h.state.kernel.config_ref().tool_exec.default_timeout_secs;
     let (status, body) = send(
         h.app.clone(),
         auth_post_json(
@@ -859,8 +948,9 @@ async fn config_set_accepts_a_nonzero_local_backend_timeout() {
     );
     assert_eq!(
         h.state.kernel.config_ref().tool_exec.default_timeout_secs,
-        Some(45),
-        "and the live config picked it up on the post-write reload"
+        live_before,
+        "a restart-only edit must not swap the live config; the value is \
+         persisted for the next boot, not shown as applied"
     );
 }
 
