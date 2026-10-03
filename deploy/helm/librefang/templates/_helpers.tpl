@@ -201,6 +201,9 @@ the bytes the daemon will actually read.
 */}}
 {{- define "librefang.config" -}}
 {{- $c := .Values.managedConfig.config | default (.Files.Get "files/config.toml") -}}
+{{- if not (trim $c) -}}
+{{- fail "managed config resolved to an empty config.toml: managedConfig.config is empty and files/config.toml is missing or empty in the chart. An empty file makes the daemon boot on compiled defaults (weaker exec_policy, no [reload] mode, no config_version)." -}}
+{{- end -}}
 {{- printf "%s\n" (regexReplaceAll `\s+$` $c "") -}}
 {{- end }}
 
