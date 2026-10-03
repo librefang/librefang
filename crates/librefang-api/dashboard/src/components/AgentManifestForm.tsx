@@ -380,21 +380,25 @@ export function AgentManifestForm({
             param="temperature"
             value={value.model.temperature}
             onChange={(next) => updateModel({ temperature: next })}
+            invalid={invalidFields.has("model.temperature")}
           />
           <ModelParamField
             param="top_p"
             value={value.model.top_p}
             onChange={(next) => updateModel({ top_p: next })}
+            invalid={invalidFields.has("model.top_p")}
           />
           <ModelParamField
             param="frequency_penalty"
             value={value.model.frequency_penalty}
             onChange={(next) => updateModel({ frequency_penalty: next })}
+            invalid={invalidFields.has("model.frequency_penalty")}
           />
           <ModelParamField
             param="presence_penalty"
             value={value.model.presence_penalty}
             onChange={(next) => updateModel({ presence_penalty: next })}
+            invalid={invalidFields.has("model.presence_penalty")}
           />
         </div>
         <p className="text-[11px] text-text-dim">{t("model_param.local_samplers_hint")}</p>
@@ -403,16 +407,19 @@ export function AgentManifestForm({
             param="top_k"
             value={value.model.top_k}
             onChange={(next) => updateModel({ top_k: next })}
+            invalid={invalidFields.has("model.top_k")}
           />
           <ModelParamField
             param="min_p"
             value={value.model.min_p}
             onChange={(next) => updateModel({ min_p: next })}
+            invalid={invalidFields.has("model.min_p")}
           />
           <ModelParamField
             param="repeat_penalty"
             value={value.model.repeat_penalty}
             onChange={(next) => updateModel({ repeat_penalty: next })}
+            invalid={invalidFields.has("model.repeat_penalty")}
           />
         </div>
         <ModelParamField
@@ -421,6 +428,7 @@ export function AgentManifestForm({
           onChange={(next) => updateModel({ max_tokens: next })}
           cap={selectedModelLimits.maxOutputTokens}
           warning={maxTokensWarning}
+          invalid={invalidFields.has("model.max_tokens")}
         />
         {/*
           Endpoint limits, not preferences. These describe what the model can
@@ -433,11 +441,13 @@ export function AgentManifestForm({
           value={value.model.context_window}
           onChange={(next) => updateModel({ context_window: next })}
           warning={contextWindowWarning}
+          invalid={invalidFields.has("model.context_window")}
         />
         <ModelParamField
           param="max_output_tokens"
           value={value.model.max_output_tokens}
           onChange={(next) => updateModel({ max_output_tokens: next })}
+          invalid={invalidFields.has("model.max_output_tokens")}
         />
         <div className="grid grid-cols-2 gap-3">
           <Field label={t("agents.form.api_key_env")} hint={t("agents.form.api_key_env_hint")}>

@@ -480,9 +480,14 @@ impl kernel_handle::AgentControl for LibreFangKernel {
         name: &str,
         spec: librefang_types::agent_type::AgentTypeSpec,
     ) -> Result<kernel_handle::AgentTypeSummary, kernel_handle::KernelOpError> {
-        use librefang_types::agent_type_store::{create_agent_type, CreateAgentTypeError};
+        use librefang_types::agent_type_store::{create_agent_type_in, CreateAgentTypeError};
 
-        let created = create_agent_type(name, spec).map_err(|e| match e {
+        // #8112: against this kernel's own `home_dir`, not the process-wide
+        // `LIBREFANG_HOME` env var — the same store the HTTP `POST /api/templates`
+        // handler now writes through, so the two writers can't disagree about
+        // where the file lands.
+        let home_dir = self.config_ref().home_dir.clone();
+        let created = create_agent_type_in(&home_dir, name, spec).map_err(|e| match e {
             // A name the store refuses is something the caller can fix by sending another one, so the reason travels rather than being flattened into an opaque internal failure.
             CreateAgentTypeError::InvalidName => {
                 kernel_handle::KernelOpError::InvalidInput(e.to_string())

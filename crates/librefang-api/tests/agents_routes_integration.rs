@@ -3264,3 +3264,131 @@ async fn test_spawn_without_template_leaves_source_template_unset() {
         "an agent spawned from an inline manifest must not report a source_template: {detail}"
     );
 }
+
+/// Every manifest-resolution failure must report the same status regardless of the
+/// caller's language.
+///
+/// These statuses used to be recovered by matching English substrings of an
+/// already-translated message, so a Spanish client got `400 invalid_manifest` for all
+/// of them. The signature case is the one that mattered most: "malformed request" is
+/// not what the server meant by a rejected signature.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_manifest_errors_keep_their_status_in_a_non_english_locale() {
+    let h = boot(TEST_TOKEN).await;
+
+    let spanish = |body: serde_json::Value| {
+        Request::builder()
+            .method(Method::POST)
+            .uri("/api/agents")
+            .header("content-type", "application/json")
+            .header("authorization", format!("Bearer {}", TEST_TOKEN))
+            .header("accept-language", "es")
+            .body(Body::from(body.to_string()))
+            .unwrap()
+    };
+
+    // Missing template → 404, not 400.
+    let (status, body) = send(
+        h.app.clone(),
+        spanish(serde_json::json!({ "template": "no-such-template-here" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert_eq!(body["code"].as_str(), Some("template_not_found"), "{body}");
+
+    // Oversized manifest → 413, not 400.
+    let huge = format!(
+        "name = \"huge\"\nversion = \"0.1.0\"\nmodule = \"builtin:chat\"\ndescription = \"{}\"\n",
+        "x".repeat(1024 * 1024 + 1)
+    );
+    let (status, body) = send(
+        h.app.clone(),
+        spanish(serde_json::json!({ "manifest_toml": huge })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE, "{body}");
+    assert_eq!(body["code"].as_str(), Some("manifest_too_large"), "{body}");
+
+    // Rejected signature → 403, not 400. A client that only reads the status must not
+    // be told its request was malformed when the server refused to trust it.
+    let (status, body) = send(
+        h.app.clone(),
+        spanish(serde_json::json!({
+            "manifest_toml": "name = \"signed\"\nversion = \"0.1.0\"\nmodule = \"builtin:chat\"\ndescription = \"d\"\n\n[model]\nprovider = \"default\"\nmodel = \"default\"\n",
+            "signed_manifest": "{\"not\":\"a valid signed envelope\"}",
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert_eq!(body["code"].as_str(), Some("signature_invalid"), "{body}");
+}
+
+/// An unreadable template is a server-side fault, not a malformed request, and it
+/// must report that in every locale.
+///
+/// The status used to be decided by `contains()` on `ManifestError::message`, which
+/// is already translated — so the arm only ever matched English and every other
+/// locale fell through to `400 invalid_manifest`, telling the operator their request
+/// was wrong. This test sends `Accept-Language: es` precisely because that is the
+/// case the substring match could not see.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn test_spawn_with_unreadable_template_reports_a_server_fault_in_any_locale() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let h = boot(TEST_TOKEN).await;
+
+    let tmpl_dir = h
+        .state
+        .kernel
+        .config_ref()
+        .home_dir
+        .join("workspaces")
+        .join("agents")
+        .join("unreadable-tmpl");
+    std::fs::create_dir_all(&tmpl_dir).expect("create template dir");
+    let path = tmpl_dir.join("agent.toml");
+    std::fs::write(&path, "name = \"unreadable-tmpl\"\n").expect("write agent.toml");
+    // Chmod 000: the file exists, so this is not a not-found.
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000))
+        .expect("drop read permission");
+
+    // Running as root defeats the permission bits entirely — the read would succeed
+    // and the test would assert nothing. Skip rather than pass vacuously.
+    if std::fs::read_to_string(&path).is_ok() {
+        eprintln!("skipping: this process can read a 0o000 file (running as root?)");
+        return;
+    }
+
+    let request = Request::builder()
+        .method(Method::POST)
+        .uri("/api/agents")
+        .header("content-type", "application/json")
+        .header("authorization", format!("Bearer {}", TEST_TOKEN))
+        .header("accept-language", "es")
+        .body(Body::from(
+            serde_json::json!({ "template": "unreadable-tmpl" }).to_string(),
+        ))
+        .unwrap();
+    let (status, body) = send(h.app.clone(), request).await;
+
+    assert_eq!(
+        status,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "an unreadable template must not be reported as a client error: {body}"
+    );
+    assert_eq!(
+        body["code"].as_str(),
+        Some("template_read_failed"),
+        "the code must name the real fault, not template_not_found or invalid_manifest: {body}"
+    );
+    // The message is Spanish here, which is the whole point: the status and code
+    // must not depend on the response text the operator happens to receive.
+    assert!(
+        !body["error"].as_str().unwrap_or_default().is_empty(),
+        "the error message should still be rendered in the requested locale: {body}"
+    );
+
+    // Restore so the temp dir can be cleaned up.
+    let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644));
+}
