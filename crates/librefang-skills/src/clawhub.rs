@@ -927,11 +927,25 @@ fn prepare_staging_dir(path: &Path) -> std::io::Result<StagingCleanup> {
     Ok(cleanup)
 }
 
-fn promote_staged_skill(staged: &Path, target: &Path) -> std::io::Result<()> {
-    static PROMOTION_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    let _guard = PROMOTION_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+/// Serializes every skill promotion in this process.
+///
+/// Two installs of the same slug can both pass an `is_installed` probe before either
+/// has promoted anything, so the existence check and the `rename` that follows it must
+/// happen as one critical section. Without the lock, the second `rename` lands on a
+/// non-empty directory and fails with `ENOTEMPTY` — a filesystem detail for what is
+/// really the same conflict the probe reports.
+///
+/// The lock is process-wide only: a second daemon (or a CLI install) over the same
+/// home takes its own lock, so that cross-process race still surfaces as `ENOTEMPTY`
+/// and the callers' scrubbed 500. That is pre-existing and out of scope here.
+static PROMOTION_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Swap `staged` into `target`, moving any existing target aside first.
+///
+/// Callers hold [`PROMOTION_LOCK`] for the whole check-and-swap. The prior directory is
+/// renamed out of the way and only removed once the new one has landed, so a failed swap
+/// restores it and a successful one leaves no backup behind.
+fn swap_staged_into_place(staged: &Path, target: &Path) -> std::io::Result<()> {
     let target_exists = match std::fs::symlink_metadata(target) {
         Ok(_) => true,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
@@ -970,6 +984,49 @@ fn promote_staged_skill(staged: &Path, target: &Path) -> std::io::Result<()> {
             ))),
         },
     }
+}
+
+fn promote_staged_skill(staged: &Path, target: &Path) -> std::io::Result<()> {
+    let _guard = PROMOTION_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    swap_staged_into_place(staged, target)
+}
+
+/// Move a complete staged directory into place, refusing to replace an installed target.
+///
+/// Public for callers outside this crate that pre-check `is_installed` and must not
+/// overwrite the result of that check: serialized on the same process-wide promotion
+/// lock as `promote_staged_skill`, so the existence probe and the move are one
+/// critical section against every other promotion in this process. The loser of that
+/// race gets `AlreadyExists` — the condition its caller's own probe reports — instead
+/// of the `ENOTEMPTY` a bare `rename` raises when the destination appeared in between.
+///
+/// "Installed" is the probe's condition, not bare existence: `ClawHubClient::is_installed`
+/// requires a `skill.toml`, so a manifestless `<slug>` directory — an interrupted uninstall,
+/// or leftovers from a manual edit — reads as absent to the caller and must not be refused
+/// here, or every reinstall would answer `AlreadyExists` for a skill the probe calls missing.
+/// A manifestless target is therefore treated as absent and swapped out with the same
+/// backup-and-swap `promote_staged_skill` uses, so a non-empty remnant cannot fail the
+/// promotion with `ENOTEMPTY` (on Windows, any existing directory would refuse the rename).
+pub fn promote_staged_skill_if_absent(staged: &Path, target: &Path) -> std::io::Result<()> {
+    let _guard = PROMOTION_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let installed = match std::fs::symlink_metadata(target) {
+        // Same criterion as the caller's pre-check (`is_installed`): only a target that
+        // carries `skill.toml` is an install to refuse.
+        Ok(_) => target.join("skill.toml").is_file(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => return Err(error),
+    };
+    if installed {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            format!("{} already exists", target.display()),
+        ));
+    }
+    swap_staged_into_place(staged, target)
 }
 
 /// RFC 3986 percent-encoding for query parameters.
@@ -1455,6 +1512,99 @@ mod tests {
             .map(|entry| entry.unwrap().file_name())
             .collect::<Vec<_>>();
         assert_eq!(entries, vec![std::ffi::OsString::from("skill")]);
+    }
+
+    #[test]
+    fn promotion_if_absent_refuses_to_replace_an_existing_install() {
+        let dir = tempfile::tempdir().unwrap();
+        let staged = dir.path().join("staged");
+        let target = dir.path().join("skill");
+        std::fs::create_dir(&staged).unwrap();
+        std::fs::write(staged.join("version"), "new").unwrap();
+        std::fs::write(staged.join("skill.toml"), "name = \"new\"\n").unwrap();
+        std::fs::create_dir(&target).unwrap();
+        std::fs::write(target.join("version"), "old").unwrap();
+        // An install is a `<slug>` directory with a manifest; that is what the caller's
+        // `is_installed` probe checks before calling this.
+        std::fs::write(target.join("skill.toml"), "name = \"old\"\n").unwrap();
+
+        let error = promote_staged_skill_if_absent(&staged, &target)
+            .expect_err("an existing install must not be replaced");
+        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(
+            std::fs::read_to_string(target.join("version")).unwrap(),
+            "old"
+        );
+        assert_eq!(
+            std::fs::read_to_string(target.join("skill.toml")).unwrap(),
+            "name = \"old\"\n"
+        );
+        assert!(
+            staged.join("version").is_file(),
+            "the losing candidate stays staged for its caller's cleanup guard"
+        );
+    }
+
+    #[test]
+    fn promotion_if_absent_replaces_a_manifestless_remnant() {
+        let dir = tempfile::tempdir().unwrap();
+        let staged = dir.path().join("staged");
+        let target = dir.path().join("skill");
+        std::fs::create_dir(&staged).unwrap();
+        std::fs::write(staged.join("skill.toml"), "name = \"new\"\n").unwrap();
+        // The residue an interrupted uninstall leaves: the `<slug>` directory is still there
+        // but carries no `skill.toml`, so the `is_installed` probe reports the skill as
+        // absent. Refusing the promotion here would wedge every reinstall.
+        std::fs::create_dir(&target).unwrap();
+
+        promote_staged_skill_if_absent(&staged, &target)
+            .expect("a manifestless remnant must not block the reinstall");
+
+        assert!(target.join("skill.toml").is_file());
+        assert!(
+            !staged.exists(),
+            "the staged candidate must have moved into place"
+        );
+    }
+
+    #[test]
+    fn promotion_if_absent_replaces_a_nonempty_manifestless_remnant() {
+        let dir = tempfile::tempdir().unwrap();
+        let staged = dir.path().join("staged");
+        let target = dir.path().join("skill");
+        std::fs::create_dir(&staged).unwrap();
+        std::fs::write(staged.join("skill.toml"), "name = \"new\"\n").unwrap();
+        // What an interrupted uninstall or a manual edit can leave: the `<slug>` directory
+        // still holds content but no `skill.toml`, so the probe calls the skill absent. A
+        // bare `rename` onto it fails with `ENOTEMPTY`, so the reinstall takes the
+        // backup-and-swap path instead of answering 500.
+        std::fs::create_dir(&target).unwrap();
+        std::fs::write(target.join("leftover"), "old\n").unwrap();
+
+        promote_staged_skill_if_absent(&staged, &target)
+            .expect("a non-empty manifestless remnant must not block the reinstall");
+
+        assert_eq!(
+            std::fs::read_to_string(target.join("skill.toml")).unwrap(),
+            "name = \"new\"\n"
+        );
+        assert!(
+            !target.join("leftover").exists(),
+            "the remnant must be swapped out, not merged with the new install"
+        );
+        assert!(
+            !staged.exists(),
+            "the staged candidate must have moved into place"
+        );
+        let entries = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            entries,
+            vec![std::ffi::OsString::from("skill")],
+            "the swapped-out remnant must not survive as a backup directory"
+        );
     }
 
     #[test]
