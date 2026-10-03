@@ -56,6 +56,7 @@ type Client struct {
 	Sessions *SessionsResource
 	Skills *SkillsResource
 	System *SystemResource
+	Tasks *TasksResource
 	Tools *ToolsResource
 	Users *UsersResource
 	Vault *VaultResource
@@ -95,6 +96,7 @@ func New(baseURL string) *Client {
 		c.Sessions = &SessionsResource{client: c}
 		c.Skills = &SkillsResource{client: c}
 		c.System = &SystemResource{client: c}
+		c.Tasks = &TasksResource{client: c}
 		c.Tools = &ToolsResource{client: c}
 		c.Users = &UsersResource{client: c}
 		c.Vault = &VaultResource{client: c}
@@ -1895,6 +1897,14 @@ func (r *SystemResource) Version() (interface{}, error) {
 
 func (r *SystemResource) ApiVersions() (interface{}, error) {
 	return r.client.request("GET", "/api/versions", nil, nil)
+}
+
+// ── Tasks Resource
+
+type TasksResource struct{ client *Client }
+
+func (r *TasksResource) TaskQueuePostRoot(data map[string]interface{}) (interface{}, error) {
+	return r.client.request("POST", "/api/tasks", data, nil)
 }
 
 // ── Tools Resource

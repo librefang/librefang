@@ -114,6 +114,7 @@ impl TaskQueue for OverrideKernel {
         _: &str,
         _: Option<&str>,
         _: Option<&str>,
+        _opts: &librefang_kernel_handle::TaskPostOptions,
     ) -> Result<String, librefang_kernel_handle::KernelOpError> {
         Err("stub".into())
     }

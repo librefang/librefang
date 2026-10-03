@@ -1747,6 +1747,8 @@ mod task_board_reconcile_tests {
                 "body",
                 Some(&agent.to_string()),
                 Some("boss"),
+                0,
+                None,
                 librefang_memory::TaskQueueCaps::UNLIMITED,
             )
             .await
@@ -1781,6 +1783,8 @@ mod task_board_reconcile_tests {
                 "body",
                 Some(&agent.to_string()),
                 Some("boss"),
+                0,
+                None,
                 librefang_memory::TaskQueueCaps::UNLIMITED,
             )
             .await
@@ -1812,6 +1816,8 @@ mod task_board_reconcile_tests {
                 "stuck",
                 "body",
                 Some(&agent.to_string()),
+                None,
+                0,
                 None,
                 librefang_memory::TaskQueueCaps::UNLIMITED,
             )
@@ -1863,6 +1869,8 @@ mod task_board_reconcile_tests {
                 "body",
                 Some(&agent.to_string()),
                 None,
+                0,
+                None,
                 librefang_memory::TaskQueueCaps::UNLIMITED,
             )
             .await
@@ -1895,6 +1903,8 @@ mod task_board_reconcile_tests {
                 "body",
                 Some(&agent.to_string()),
                 None,
+                0,
+                None,
                 librefang_memory::TaskQueueCaps::UNLIMITED,
             )
             .await
@@ -1924,6 +1934,8 @@ mod task_board_reconcile_tests {
                 "body",
                 None,
                 None,
+                0,
+                None,
                 librefang_memory::TaskQueueCaps::UNLIMITED,
             )
             .await
@@ -1952,6 +1964,8 @@ mod task_board_reconcile_tests {
                 "stranded",
                 "body",
                 Some(&agent.to_string()),
+                None,
+                0,
                 None,
                 librefang_memory::TaskQueueCaps::UNLIMITED,
             )
@@ -1990,6 +2004,8 @@ mod task_board_reconcile_tests {
                 "addressed only",
                 "body",
                 Some(&addressed.to_string()),
+                None,
+                0,
                 None,
                 librefang_memory::TaskQueueCaps::UNLIMITED,
             )
@@ -2033,6 +2049,8 @@ mod task_board_reconcile_tests {
                 "body",
                 Some(&agent.to_string()),
                 None,
+                0,
+                None,
                 librefang_memory::TaskQueueCaps::UNLIMITED,
             )
             .await
@@ -2044,6 +2062,8 @@ mod task_board_reconcile_tests {
                 "older",
                 "body",
                 Some(&agent.to_string()),
+                None,
+                0,
                 None,
                 librefang_memory::TaskQueueCaps::UNLIMITED,
             )
@@ -2111,6 +2131,8 @@ mod task_board_reconcile_tests {
                 "body",
                 Some(&agent.to_string()),
                 None,
+                0,
+                None,
                 librefang_memory::TaskQueueCaps::UNLIMITED,
             )
             .await
@@ -2159,6 +2181,8 @@ mod task_board_reconcile_tests {
                 "never claimed",
                 "body",
                 Some(&agent.to_string()),
+                None,
+                0,
                 None,
                 librefang_memory::TaskQueueCaps::UNLIMITED,
             )
@@ -2209,6 +2233,8 @@ mod task_board_reconcile_tests {
                 "slow turn",
                 "body",
                 Some(&agent.to_string()),
+                None,
+                0,
                 None,
                 librefang_memory::TaskQueueCaps::UNLIMITED,
             )

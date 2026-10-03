@@ -149,6 +149,7 @@ impl TaskQueue for CapturingKernel {
         _: &str,
         _: Option<&str>,
         created_by: Option<&str>,
+        _opts: &librefang_kernel_handle::TaskPostOptions,
     ) -> Result<String, librefang_kernel_handle::KernelOpError> {
         self.task_post_calls
             .lock()
