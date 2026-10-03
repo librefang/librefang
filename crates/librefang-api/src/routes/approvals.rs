@@ -365,7 +365,10 @@ async fn claim_totp_code(
 
 /// POST /api/approvals/{id}/approve — Approve a pending request.
 ///
-/// When TOTP is enabled, the request body must include a `totp_code` field.
+/// When this specific request verifies a TOTP or recovery code — the tool is
+/// inside `approval.totp_tools` and the caller is outside the grace window a
+/// previous successful verification opened — the body must include a
+/// `totp_code` field.
 #[derive(serde::Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ApproveRequestBody {
@@ -391,23 +394,20 @@ pub async fn approve_request(
         }
     };
 
-    // Verify TOTP code or recovery code if this specific tool requires it.
-    // Use per-tool check so tools not in totp_tools skip TOTP (and lockout)
-    // even when second_factor = totp is enabled globally.
-    let totp_issuer = state.kernel.approvals().policy().totp_issuer.clone();
+    // Verify a code only when this request actually has one to verify: the
+    // tool must be inside `totp_tools` and the caller outside the grace window
+    // a previous successful verification opened. `would_verify_totp` is the
+    // same per-request question the auth rate limiter gates `/approve` on, so
+    // the handler and the limiter stay in step: a code sent inside grace is
+    // neither verified nor counted as a failure, and a request the limiter
+    // metered is exactly one that can record failures. A missing or
+    // already-resolved request verifies nothing either.
     let tool_requires_totp = state
         .kernel
         .approvals()
-        .get_pending(uuid)
-        .map(|req| {
-            state
-                .kernel
-                .approvals()
-                .policy()
-                .tool_requires_totp(&req.tool_name)
-        })
-        .unwrap_or(false);
+        .would_verify_totp(uuid, "api_admin");
     let totp_verified = if tool_requires_totp {
+        let totp_issuer = state.kernel.approvals().policy().totp_issuer.clone();
         if state.kernel.approvals().is_totp_locked_out("api_admin") {
             return ApiErrorResponse::bad_request(
                 "Too many failed TOTP attempts. Try again later.",

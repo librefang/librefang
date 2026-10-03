@@ -58,6 +58,11 @@ reqwest = { workspace = true }
 flate2 = { workspace = true }
 tar = { workspace = true }
 url = { workspace = true }
+# Used directly by `rate_limiter.rs` to percent-decode the `{id}` segment of
+# an `/api/approvals/{id}/approve` path exactly the way axum's `Path<String>`
+# extractor does — the middleware sees the raw path (still encoded) while the
+# handler binds the decoded segment, and both must parse the same id.
+percent-encoding = "2.3"
 psl = { workspace = true }
 zip = { workspace = true }
 walkdir = { workspace = true }

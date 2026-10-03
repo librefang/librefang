@@ -205,10 +205,16 @@ async fn concurrent_approvals_consume_totp_code_exactly_once() {
     let (setup_status, _) = post(&h.app, "/api/approvals/totp/setup", serde_json::json!({})).await;
     assert_eq!(setup_status, StatusCode::OK);
 
-    // Require TOTP for the tool under test.
+    // Require TOTP for the tool under test, with the grace window disabled.
+    // A successful claim opens grace for `api_admin`, and inside it the
+    // handler now skips verification entirely (that is the point of grace) —
+    // so a late request would approve without consuming the code and this test
+    // would race the window instead of pinning the single-use claim. With
+    // `totp_grace_period_secs = 0` every request must still verify.
     let mut policy = h.state.kernel.approvals().policy();
     policy.second_factor = SecondFactor::Totp;
     policy.totp_tools = vec!["shell_exec".to_string()];
+    policy.totp_grace_period_secs = 0;
     h.state.kernel.approvals().update_policy(policy);
 
     // Seed N distinct pending approvals for that TOTP-gated tool, each under a

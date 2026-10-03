@@ -350,8 +350,13 @@ impl LibreFangKernel {
             );
         }
 
-        // Check TOTP configuration consistency
-        if config.approval.second_factor == librefang_types::approval::SecondFactor::Totp {
+        // Check TOTP configuration consistency.
+        // `requires_any_totp`, not a comparison against one variant: `login`
+        // demands a code on the dashboard login (verified in `server.rs` under
+        // `requires_login_totp()`) and `both` demands one there and on tool
+        // approvals, and both used to boot silently while the surface they
+        // configure served requests with no code at all.
+        if config.approval.second_factor.requires_any_totp() {
             let vault_path = config.home_dir.join("vault.enc");
             let mut vault = librefang_extensions::vault::CredentialVault::new(vault_path);
             let totp_ready = vault.unlock().is_ok()
@@ -360,10 +365,34 @@ impl LibreFangKernel {
                     .map(|v| v.as_str() == "true")
                     .unwrap_or(false);
             if !totp_ready {
+                // Spell out what each surface this variant covers actually does
+                // without a secret, because the two differ and the line must be
+                // exact about both: the dashboard login skips the check
+                // (`server.rs`), while tool approvals fail closed — the handler
+                // answers 400 "TOTP not configured" to a supplied code and
+                // `resolve` rejects a code-less approval with "TOTP code
+                // required for approval", so an approval that demands one
+                // cannot succeed until enrollment.
+                let mut effects = Vec::new();
+                if config.approval.second_factor.requires_login_totp() {
+                    effects.push(
+                        "Dashboard login skips the TOTP check, so the login half of the second \
+                         factor is not enforced there.",
+                    );
+                }
+                if config.approval.second_factor.requires_approval_totp() {
+                    effects.push(
+                        "Tool approvals fail closed: a supplied code answers 400 \"TOTP not \
+                         configured\" and a code-less approval is rejected with \"TOTP code \
+                         required for approval\", so those tools cannot be approved until \
+                         enrollment.",
+                    );
+                }
                 warn!(
-                    "Config: second_factor = \"totp\" but TOTP is not enrolled/confirmed in vault. \
-                     Approvals will require TOTP but no secret is configured. \
-                     Run POST /api/approvals/totp/setup to enroll."
+                    "Config: second_factor = \"{}\" but TOTP is not enrolled/confirmed in vault. \
+                     {} Run POST /api/approvals/totp/setup to enroll.",
+                    config.approval.second_factor.as_str(),
+                    effects.join(" ")
                 );
             }
         }
