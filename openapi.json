@@ -18085,7 +18085,7 @@
               "string",
               "null"
             ],
-            "description": "Template name from `~/.librefang/workspaces/agents/{template}/agent.toml`.\nWhen provided and `manifest_toml` is empty, the template is loaded automatically."
+            "description": "Template name, resolved in order against the agent-type store\n(`~/.librefang/agent-types/{template}.toml`), the agent instance at\n`~/.librefang/workspaces/agents/{template}/agent.toml`, and the\nread-only registry checkout at\n`~/.librefang/registry/agents/{template}/agent.toml`.\nWhen provided and `manifest_toml` is empty, the template is loaded automatically."
           }
         },
         "additionalProperties": false
