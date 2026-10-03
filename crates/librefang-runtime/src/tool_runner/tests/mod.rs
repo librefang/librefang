@@ -1634,9 +1634,18 @@ async fn workflow_run_depth_refusal_is_permission_denied_not_upstream() {
 
 // ── channel_send mirror tests ────────────────────────────────────────────
 
+/// One recorded send: `(channel, recipient, account_id)`.
+///
+/// Aliased because the recorder field and the test helper's return type would
+/// otherwise repeat the full `Arc<Mutex<Vec<…>>>` spelling and trip
+/// `clippy::type_complexity`.
+type SentLog = Arc<std::sync::Mutex<Vec<(String, String, Option<String>)>>>;
+
 /// A minimal kernel for mirror tests.
 ///
-/// - `send_channel_message` always succeeds (returns Ok).
+/// - `send_channel_message`, `send_channel_media` and `send_channel_file_data`
+///   always succeed and record `(channel, recipient, account_id)` into `sent`,
+///   so tests can assert which bot account a send resolved through.
 /// - `resolve_channel_owner` returns the configured `owner_id`.
 /// - `append_to_session` records the `(SessionId, Message)` pair into `appended`; the session id is recorded because which session the mirror lands in is the thing #8243 got wrong.
 /// - `fail_append` makes `append_to_session` simulate a save failure (warn path).
@@ -1650,6 +1659,7 @@ struct MirrorKernel {
             )>,
         >,
     >,
+    sent: SentLog,
     fail_append: bool,
 }
 
@@ -1826,9 +1836,53 @@ impl ChannelSender for MirrorKernel {
         recipient: &str,
         _message: &str,
         _thread_id: Option<&str>,
-        _account_id: Option<&str>,
+        account_id: Option<&str>,
     ) -> Result<String, librefang_kernel_handle::KernelOpError> {
+        self.sent.lock().unwrap().push((
+            channel.to_string(),
+            recipient.to_string(),
+            account_id.map(str::to_string),
+        ));
         Ok(format!("sent to {recipient} on {channel}"))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn send_channel_media(
+        &self,
+        channel: &str,
+        recipient: &str,
+        _media_type: &str,
+        _media_url: &str,
+        _caption: Option<&str>,
+        _filename: Option<&str>,
+        _thread_id: Option<&str>,
+        account_id: Option<&str>,
+    ) -> Result<String, librefang_kernel_handle::KernelOpError> {
+        self.sent.lock().unwrap().push((
+            channel.to_string(),
+            recipient.to_string(),
+            account_id.map(str::to_string),
+        ));
+        Ok(format!("media sent to {recipient} on {channel}"))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn send_channel_file_data(
+        &self,
+        channel: &str,
+        recipient: &str,
+        _data: bytes::Bytes,
+        _filename: &str,
+        _mime_type: &str,
+        _thread_id: Option<&str>,
+        account_id: Option<&str>,
+    ) -> Result<String, librefang_kernel_handle::KernelOpError> {
+        self.sent.lock().unwrap().push((
+            channel.to_string(),
+            recipient.to_string(),
+            account_id.map(str::to_string),
+        ));
+        Ok(format!("file sent to {recipient} on {channel}"))
     }
 
     fn resolve_channel_owner(
@@ -1882,6 +1936,7 @@ async fn channel_send_mirror_renames_a_reserved_channel_before_deriving_the_sess
         let kernel: Arc<dyn KernelHandle> = Arc::new(MirrorKernel {
             owner_id: Some(owner),
             appended: Arc::clone(&appended),
+            sent: Arc::new(std::sync::Mutex::new(Vec::new())),
             fail_append: false,
         });
 
@@ -1947,6 +2002,7 @@ async fn test_channel_send_mirrors_to_channel_owner_session() {
     let kernel: Arc<dyn KernelHandle> = Arc::new(MirrorKernel {
         owner_id: Some(owner),
         appended: Arc::clone(&appended),
+        sent: Arc::new(std::sync::Mutex::new(Vec::new())),
         fail_append: false,
     });
 
@@ -2000,6 +2056,7 @@ async fn test_channel_send_mirrors_when_caller_is_channel_owner() {
     let kernel: Arc<dyn KernelHandle> = Arc::new(MirrorKernel {
         owner_id: Some(owner),
         appended: Arc::clone(&appended),
+        sent: Arc::new(std::sync::Mutex::new(Vec::new())),
         fail_append: false,
     });
 
@@ -2042,6 +2099,7 @@ async fn test_channel_send_succeeds_even_when_mirror_fails() {
     let kernel: Arc<dyn KernelHandle> = Arc::new(MirrorKernel {
         owner_id: Some(owner),
         appended: Arc::clone(&appended),
+        sent: Arc::new(std::sync::Mutex::new(Vec::new())),
         fail_append: true, // simulates a save error
     });
 
@@ -2072,6 +2130,169 @@ async fn test_channel_send_succeeds_even_when_mirror_fails() {
     // fail_append returns without pushing — confirm nothing was appended.
     let msgs = appended.lock().unwrap();
     assert!(msgs.is_empty(), "no message appended on simulated failure");
+}
+
+// ── #8525 channel_send defaults to the conversation's own bot account ─────
+//
+// On a daemon running several sidecar instances of one channel type, an
+// unqualified `channel_send` used to hand the kernel no `account_id` at all,
+// so `resolve_channel_adapter` picked the first adapter registered under the
+// channel string. When one of those instances is *named* after the type (the
+// legacy `"telegram"` bot), an agent on another instance had its reply
+// delivered through that other agent's bot.
+//
+// The fix is scoped to the turn: a send that targets the channel the turn
+// arrived on inherits the turn's own `sender_account_id`; a send to a
+// different channel, or an out-of-band call, stays account-less. These tests
+// assert on the account the tool actually hands the kernel via the
+// `MirrorKernel` recorder.
+
+fn send_recording_kernel() -> (Arc<dyn KernelHandle>, SentLog) {
+    let owner = librefang_types::agent::AgentId(
+        uuid::Uuid::parse_str("85250000-0000-0000-0000-000000000000").unwrap(),
+    );
+    let sent = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let kernel: Arc<dyn KernelHandle> = Arc::new(MirrorKernel {
+        owner_id: Some(owner),
+        appended: Arc::new(std::sync::Mutex::new(Vec::new())),
+        sent: Arc::clone(&sent),
+        fail_append: false,
+    });
+    (kernel, sent)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn channel_send_inherits_the_turns_bot_account_8525() {
+    let (kernel, sent) = send_recording_kernel();
+    let input = serde_json::json!({
+        "channel": "telegram",
+        "recipient": "42",
+        "message": "reply on my own bot",
+    });
+    tool_channel_send(
+        &input,
+        Some(&kernel),
+        None,
+        Some("42"),
+        Some("telegram"), // the turn arrived on the telegram channel type...
+        None,             // ...in a DM...
+        Some("laforge"),  // ...through the "laforge" bot account
+        Some("agent-b"),
+        &[],
+    )
+    .await
+    .expect("send should succeed");
+
+    let sent = sent.lock().unwrap().clone();
+    assert_eq!(sent.len(), 1, "exactly one send must be recorded: {sent:?}");
+    assert_eq!(sent[0].0, "telegram");
+    assert_eq!(sent[0].1, "42");
+    assert_eq!(
+        sent[0].2.as_deref(),
+        Some("laforge"),
+        "an unqualified reply must route through the bot account the turn arrived on, \
+         not whichever adapter happens to be registered under the channel name"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn channel_send_explicit_account_still_wins_8525() {
+    let (kernel, sent) = send_recording_kernel();
+    let input = serde_json::json!({
+        "channel": "telegram",
+        "recipient": "42",
+        "message": "explicit account",
+        "account_id": "laforge",
+    });
+    tool_channel_send(
+        &input,
+        Some(&kernel),
+        None,
+        Some("42"),
+        Some("telegram"),
+        None,
+        Some("laforge"),
+        Some("agent-b"),
+        &[],
+    )
+    .await
+    .expect("send should succeed");
+
+    let sent = sent.lock().unwrap().clone();
+    assert_eq!(sent.len(), 1);
+    assert_eq!(
+        sent[0].2.as_deref(),
+        Some("laforge"),
+        "an explicit account_id keeps winning over the turn's account"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn channel_send_does_not_inherit_the_account_across_channels_8525() {
+    let (kernel, sent) = send_recording_kernel();
+    let input = serde_json::json!({
+        "channel": "email",
+        "recipient": "ops@example.com",
+        "message": "cross-channel send",
+    });
+    tool_channel_send(
+        &input,
+        Some(&kernel),
+        None,
+        Some("42"),
+        Some("telegram"), // turn arrived on telegram / laforge...
+        None,
+        Some("laforge"),
+        Some("agent-b"),
+        &[],
+    )
+    .await
+    .expect("send should succeed");
+
+    let sent = sent.lock().unwrap().clone();
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0].0, "email");
+    assert_eq!(
+        sent[0].2, None,
+        "the turn's telegram account must not leak into a send on another channel"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn channel_send_file_inherits_the_turns_bot_account_8525() {
+    let (kernel, sent) = send_recording_kernel();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("note.txt");
+    std::fs::write(&path, b"hello").expect("write fixture");
+
+    let input = serde_json::json!({
+        "channel": "telegram",
+        "recipient": "42",
+        "message": "file reply",
+        "file_path": path.to_string_lossy(),
+    });
+    tool_channel_send(
+        &input,
+        Some(&kernel),
+        Some(dir.path()),
+        Some("42"),
+        Some("telegram"),
+        None,
+        Some("laforge"),
+        Some("agent-b"),
+        &[],
+    )
+    .await
+    .expect("file send should succeed");
+
+    let sent = sent.lock().unwrap().clone();
+    assert_eq!(sent.len(), 1, "exactly one file send must be recorded");
+    assert_eq!(sent[0].0, "telegram");
+    assert_eq!(
+        sent[0].2.as_deref(),
+        Some("laforge"),
+        "the file path must inherit the turn's bot account exactly like a text send"
+    );
 }
 
 // ── end channel_send mirror tests ────────────────────────────────────────

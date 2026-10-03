@@ -28,9 +28,13 @@ use super::super::LibreFangKernel;
 /// Inbound turns, meanwhile, are stamped with the *channel type* (`"slack"`, via `channel_type_str(adapter.channel_type())` in `librefang_channels::bridge`).
 /// Under the common `<adapter>-<team>` naming convention the two never meet, so steps 1 and 2 both missed and the post-approval reply path, `channel_dm`, and every auto-filled `channel_send` failed with `Channel 'slack' with account_id 'slack-hr' not found. Available: ["slack-hr", "slack-hr:slack-hr"]` — the agent's reply was produced, persisted, and never delivered.
 ///
+/// The bare key in step 2 keeps its pre-existing meaning: it names the instance the bridge registered under the channel string, and callers with no account context — approval notifications, owner notify, cron and binding targets — must keep resolving through it even when several adapters share the channel type (#8525 review).
+/// The #8525 wrong-instance capture is closed at the send site, where `channel_send` defaults an unqualified send to the turn's own `sender_account_id`, not by refusing the key here.
+///
 /// Two adapters of one channel type are two different tenants, so ambiguity is an error rather than an arbitrary pick:
 ///
-/// * With an `account_id`, a candidate must actually carry it — as its own `account_id()`, or as its registration `name`, which is where the bridge reads the value from (`channel_bridge.rs`: `Some(sidecar_config.name.clone())`) and which is populated even before a sidecar's `ready` event has filled the `account_id()` `OnceLock`.
+/// * With an `account_id`, a candidate must actually carry it — as its own `account_id()`, as its registration `name` (which is where the bridge reads the value from: `channel_bridge.rs` passes `Some(sidecar_config.name.clone())`), or as the transport-reported alias `ChannelAdapter::reported_account_id()`.
+///   The alias is the sidecar's `ready` account id, which adapters stamp into inbound `metadata["account_id"]`; because `account_id()` answers the config `name` since #8408, a `channel_send` / `channel_dm` auto-filled from that metadata would otherwise stop resolving whenever the reported id differs from the name.
 /// * Without one, the scan resolves only when exactly one adapter of that channel type is registered.
 ///   A bare `"slack"` on a two-workspace daemon keeps erroring instead of choosing a tenant at random.
 ///
@@ -54,28 +58,21 @@ pub(in crate::kernel) fn resolve_channel_adapter(
             }
         }
         None => {
+            // The bare key is authoritative when present: it names the instance the bridge registered under the channel string, and account-less callers (approval notifications, owner notify, cron targets) depend on it even while sibling instances of the type exist (#8525 review).
+            // An agent reply on a multi-instance daemon no longer reaches this path with an empty account, because the runtime's `channel_send` inherits the turn's own `sender_account_id` first.
             if let Some(hit) = adapters.get(channel) {
                 return Ok(hit.clone());
             }
         }
     }
 
-    let mut candidates: Vec<Arc<dyn ChannelAdapter>> = Vec::new();
-    for entry in adapters.iter() {
-        let adapter = entry.value();
-        if librefang_channels::router::channel_type_to_str(&adapter.channel_type()) != channel {
-            continue;
-        }
-        if let Some(aid) = account_id {
-            if adapter.account_id() != Some(aid) && adapter.name() != aid {
-                continue;
-            }
-        }
-        // One adapter is registered under both its bare and its qualified key, so identity — not name — is what distinguishes "seen twice" from "two instances that happen to share a name".
-        if candidates.iter().any(|c| Arc::ptr_eq(c, adapter)) {
-            continue;
-        }
-        candidates.push(Arc::clone(adapter));
+    let mut candidates = adapters_of_type(adapters, channel);
+    if let Some(aid) = account_id {
+        candidates.retain(|adapter| {
+            adapter.account_id() == Some(aid)
+                || adapter.name() == aid
+                || adapter.reported_account_id() == Some(aid)
+        });
     }
 
     if candidates.len() == 1 {
@@ -87,6 +84,30 @@ pub(in crate::kernel) fn resolve_channel_adapter(
         account_id,
         candidates.len(),
     ))
+}
+
+/// All distinct adapters whose `channel_type` string equals `channel`, in
+/// `DashMap` iteration order.
+///
+/// One adapter is registered under both its bare and its qualified key, so
+/// identity — not name or key count — is what distinguishes "seen twice" from
+/// "two instances that happen to share a name".
+fn adapters_of_type(
+    adapters: &DashMap<String, Arc<dyn ChannelAdapter>>,
+    channel: &str,
+) -> Vec<Arc<dyn ChannelAdapter>> {
+    let mut seen: Vec<Arc<dyn ChannelAdapter>> = Vec::new();
+    for entry in adapters.iter() {
+        let adapter = entry.value();
+        if librefang_channels::router::channel_type_to_str(&adapter.channel_type()) != channel {
+            continue;
+        }
+        if seen.iter().any(|c| Arc::ptr_eq(c, adapter)) {
+            continue;
+        }
+        seen.push(Arc::clone(adapter));
+    }
+    seen
 }
 
 /// Render the miss from [`resolve_channel_adapter`] as an operator-readable message.

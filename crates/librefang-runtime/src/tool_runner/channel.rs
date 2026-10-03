@@ -480,6 +480,30 @@ pub(super) async fn tool_channel_send(
     let thread_id = trim_opt_string(input["thread_id"].as_str());
     let account_id = trim_opt_string(input["account_id"].as_str());
 
+    // The account every send below actually routes through. An explicit
+    // `account_id` always wins; otherwise a send that targets the channel the
+    // turn arrived on inherits the turn's own bot account (#8525). Without
+    // this, a reply with a bare `channel = "telegram"` on a daemon running
+    // several Telegram instances resolved through `resolve_channel_adapter`'s
+    // bare-key path — and when one instance happens to be *named* `"telegram"`
+    // (the legacy name of another agent's bot), that key captured the send and
+    // delivered it through the wrong agent's bot. The #6443 guard below still
+    // reads the explicit `account_id`, so the cross-account refusal is
+    // unchanged; this only picks the account for sends the guard permits.
+    let send_account_id = match account_id {
+        Some(explicit) => Some(explicit),
+        None => match (sender_channel, sender_account_id) {
+            (Some(turn_channel), Some(turn_account))
+                if !turn_channel.is_empty()
+                    && !turn_account.is_empty()
+                    && channel_base(turn_channel).eq_ignore_ascii_case(channel_base(&channel)) =>
+            {
+                Some(turn_account)
+            }
+            _ => None,
+        },
+    };
+
     // #6443 cross-account (cross-tenant) dispatch guard. `account_id` selects
     // which registered bot instance the send routes through. On a multi-tenant
     // daemon (several bot accounts on one daemon, each with its own
@@ -537,7 +561,14 @@ pub(super) async fn tool_channel_send(
             recipient,
             caption.unwrap_or(url),
             kh.send_channel_media(
-                &channel, recipient, "image", url, caption, None, thread_id, account_id,
+                &channel,
+                recipient,
+                "image",
+                url,
+                caption,
+                None,
+                thread_id,
+                send_account_id,
             )
             .await
             .map_err(|e| e.to_string()),
@@ -560,7 +591,14 @@ pub(super) async fn tool_channel_send(
             recipient,
             caption.unwrap_or(url),
             kh.send_channel_media(
-                &channel, recipient, "file", url, caption, filename, thread_id, account_id,
+                &channel,
+                recipient,
+                "file",
+                url,
+                caption,
+                filename,
+                thread_id,
+                send_account_id,
             )
             .await
             .map_err(|e| e.to_string()),
@@ -642,7 +680,7 @@ pub(super) async fn tool_channel_send(
                 &filename,
                 mime_type,
                 thread_id,
-                account_id,
+                send_account_id,
             )
             .await
             .map_err(|e| e.to_string()),
@@ -719,7 +757,7 @@ pub(super) async fn tool_channel_send(
             correct_option_id,
             explanation,
             thread_id,
-            account_id,
+            send_account_id,
         )
         .await
         .map_err(|e| e.to_string())?;
@@ -768,9 +806,15 @@ pub(super) async fn tool_channel_send(
         &channel,
         recipient,
         &final_message,
-        kh.send_channel_message(&channel, recipient, &final_message, thread_id, account_id)
-            .await
-            .map_err(|e| e.to_string()),
+        kh.send_channel_message(
+            &channel,
+            recipient,
+            &final_message,
+            thread_id,
+            send_account_id,
+        )
+        .await
+        .map_err(|e| e.to_string()),
     )
     .await
 }
