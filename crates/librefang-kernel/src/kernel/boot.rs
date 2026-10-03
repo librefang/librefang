@@ -1164,9 +1164,8 @@ impl LibreFangKernel {
         // Initialize git repo for config version control (first boot)
         init_git_if_missing(&config.home_dir);
 
-        // Auto-sync registry content on first boot or after upgrade when
-        // Sync registry: downloads if cache is stale, pre-installs providers/agents/integrations.
-        // Skips download if cache is fresh; skips copy if files already exist.
+        // Sync registry content on boot: downloads when the cache is stale, then pre-installs providers/, channels/, the MCP catalog, agent types and workflow templates.
+        // Those are two separate steps — a fresh cache skips the download only, and the fan-out runs on every boot regardless, rewriting a file while its bytes are still the ones the sync wrote and keeping one the operator has edited (#8407).
         // `[registry] auto_sync = false` freezes `~/.librefang/registry/`: the sync fast-forwards that checkout with `git reset --hard origin/main`, which destroys every local modification under it — including the ones `PUT /api/hands/{id}/manifest` writes for a registry-shipped hand.
         // Explicit operator actions (`librefang init`, `POST /api/catalog/update`) still fetch; `POST /api/hands/reload` only reloads whatever is already on disk and never fetched from upstream, so it is unaffected either way.
         if config.registry.auto_sync {
@@ -1200,6 +1199,17 @@ impl LibreFangKernel {
                 .join("suppressed_providers.json"),
         );
         model_catalog.load_overrides(&config.home_dir.join("data").join("model_overrides.json"));
+        // Operator-owned discovery preference (#8407), applied over the catalog the registry sync maintains — the setting used to live in the provider TOML the sync rewrites, which is how a reboot turned discovery off.
+        let discover_prefs_path = config.home_dir.join("data").join("provider_discovery.json");
+        model_catalog.load_discover_prefs(&discover_prefs_path);
+        // Adopt the flag out of `providers/*.toml` for installs that set it before this store existed, once; a provider already recorded here is left alone.
+        let adopted = model_catalog.adopt_legacy_discover_flags(&discover_prefs_path);
+        if adopted > 0 {
+            info!(
+                "adopted {adopted} provider discovery preference(s) out of providers/*.toml into {}",
+                discover_prefs_path.display()
+            );
+        }
         model_catalog.detect_auth();
         // Apply region selections first (lower priority than explicit provider_urls)
         if !config.provider_regions.is_empty() {

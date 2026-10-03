@@ -6522,6 +6522,89 @@ system_prompt = "Test"
     kernel.shutdown();
 }
 
+/// #8411: the first boot after an upgrade must not lose a `discover_models = true`
+/// pending in a pre-digest provider file.
+///
+/// The trap is the boot order — the registry sync runs before the model catalog
+/// is built. Its pre-digest adoption replaces the operator's `providers/acme.toml`
+/// with the registry copy, which carries no flag, and only then does the catalog
+/// load the files and run `adopt_legacy_discover_flags`. Without a capture at
+/// the overwrite the declaration is gone by the time adoption reads, and the
+/// preference disappears with no store entry and no WARN — the mechanism of
+/// #8407 defeated for its own target case.
+///
+/// The fresh `.sync_marker` keeps the boot's sync network-free while still
+/// running its fan-out, which is the half that overwrites the file.
+#[test]
+fn boot_keeps_a_pre_digest_discover_flag_despite_the_sync_overwriting_the_file() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().to_path_buf();
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+
+    // The refreshed registry checkout: the copy the sync installs has no flag.
+    let registry_providers = home_dir.join("registry").join("providers");
+    std::fs::create_dir_all(&registry_providers).unwrap();
+    let registry_toml = "[provider]\nid = \"acme\"\nbase_url = \"https://api.acme.test/v1\"\n";
+    std::fs::write(registry_providers.join("acme.toml"), registry_toml).unwrap();
+    // Fresh marker: `should_refresh` says no, so no fetch — but
+    // `fanout_registry_content` still installs the registry copy below.
+    std::fs::write(home_dir.join("registry").join(".sync_marker"), "").unwrap();
+
+    // The upgraded install: the operator's file declares discovery on, and the
+    // manifest records the name by bare name (no digest) — the migration window.
+    let providers = home_dir.join("providers");
+    std::fs::create_dir_all(&providers).unwrap();
+    std::fs::write(
+        providers.join("acme.toml"),
+        "[provider]\nid = \"acme\"\nbase_url = \"https://api.acme.test/v1\"\ndiscover_models = true\n",
+    )
+    .unwrap();
+    // `.registry-managed` is `registry_sync::REGISTRY_MANAGED_MANIFEST`; a bare
+    // name is what a manifest written before digests existed looks like.
+    std::fs::write(providers.join(".registry-managed"), "acme.toml\n").unwrap();
+
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+
+    // Precondition: the sync did adopt the pre-digest file and destroy the
+    // declaration — otherwise the assertions below would pass for free.
+    assert_eq!(
+        std::fs::read_to_string(providers.join("acme.toml")).unwrap(),
+        registry_toml,
+        "the boot sync must have overwritten the pre-digest provider file; \
+         without that this test does not exercise the loss"
+    );
+
+    // The flag the overwrite would have destroyed is in the store the catalog
+    // reads...
+    let store = home_dir.join("data").join("provider_discovery.json");
+    let raw = std::fs::read_to_string(&store).expect(
+        "the first boot must record the pending discover_models = true; the sync \
+         overwrote the only file that declared it",
+    );
+    let stored: std::collections::BTreeMap<String, bool> = serde_json::from_str(&raw)
+        .unwrap_or_else(|e| panic!("store must be a preference map ({e}); got: {raw}"));
+    assert_eq!(
+        stored.get("acme"),
+        Some(&true),
+        "the pending flag has to survive into the store; got: {raw}"
+    );
+
+    // ...and it was applied on this same boot, not just persisted.
+    assert!(
+        kernel.model_catalog_update(|catalog| catalog
+            .get_provider("acme")
+            .is_some_and(|provider| provider.discover_models)),
+        "the captured preference must be in force on the boot that captured it"
+    );
+
+    kernel.shutdown();
+}
+
 /// Regression: hand `## Reference Knowledge` and `## Your Team` tails must
 /// survive a daemon restart (issue #3143).
 ///

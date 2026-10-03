@@ -779,11 +779,10 @@ mod tests {
         std::fs::create_dir_all(home.join("workspaces").join("agents")).unwrap();
         std::fs::create_dir_all(home.join("workspaces").join("hands")).unwrap();
 
-        // Pre-touch the sync marker so `registry_sync::sync_registry` treats
-        // the registry cache as fresh and skips the download + fan-out step.
-        // Without this, `sync_flat_files` removes any TOML in `providers/` that
-        // does not exist in the (empty) registry cache, nuking our fixture before
-        // the catalog is loaded. See the same pattern in kernel/tests.rs.
+        // Pre-touch the sync marker so `registry_sync::sync_registry` treats the registry cache as fresh and does not fetch: this test must not touch the network.
+        // It does NOT skip the fan-out — `sync_registry` calls `fanout_registry_content` after that gate rather than behind it, so the fan-out runs on every call, marker or not (`registry_sync.rs`).
+        // What actually keeps the fixture safe is that the fan-out only visits a `registry/providers/` that exists (absent here), and that a local file with no `.registry-managed` record is never pruned (#5823) or overwritten (#8407).
+        // See the same pattern in kernel/tests.rs.
         let registry_dir = home.join("registry");
         std::fs::create_dir_all(&registry_dir).unwrap();
         std::fs::write(registry_dir.join(".sync_marker"), "").unwrap();
