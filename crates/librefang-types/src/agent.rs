@@ -910,8 +910,11 @@ impl ToolProfile {
     }
 }
 
-/// System default for [`ModelConfig::max_tokens`] when neither the agent nor the model sets one.
-pub const DEFAULT_MODEL_MAX_TOKENS: u32 = 4096;
+/// System default for [`ModelConfig::max_tokens`] when neither the agent, the per-model override, nor the model's own registry entry sets one.
+///
+/// The registry entry is asked first — see [`crate::inference_params::resolve_inference_params`] — so this figure decides only the case the catalog cannot answer.
+/// It is 32768 rather than something smaller because an unspecified output budget means "as much as the endpoint will give me", and a reasoning model has to fit its thinking *and* its reply inside it: a budget that runs out before any text is emitted yields no reply rather than a short one.
+pub const DEFAULT_MODEL_MAX_TOKENS: u32 = 32_768;
 
 /// System default for [`ModelConfig::temperature`] when neither the agent nor the model sets one.
 pub const DEFAULT_MODEL_TEMPERATURE: f32 = 0.7;

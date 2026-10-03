@@ -3,6 +3,10 @@
 //! Provides a comprehensive catalog of 130+ builtin models across 28 providers,
 //! with alias resolution, auth status detection, and pricing lookups.
 
+use librefang_types::agent::ModelConfig;
+use librefang_types::inference_params::{
+    resolve_inference_params, KnownLimit, ResolvedInferenceParams,
+};
 use librefang_types::model_catalog::{
     AliasesCatalogFile, AuthStatus, EffectiveCapabilities, EffectiveLimits, LimitSource,
     ModelCatalogEntry, ModelCatalogFile, ModelOverrides, ModelTier, ProviderCatalogToml,
@@ -1318,6 +1322,18 @@ impl ModelCatalog {
             max_output_tokens,
             max_output_tokens_source,
         }
+    }
+
+    /// Resolve a model's per-turn inference parameters against this catalog.
+    ///
+    /// Wraps [`resolve_inference_params`] with the two lookups that need the catalog: the `provider:model` override key and the model's effective output ceiling ([`KnownLimit::from_effective_limits`]).
+    /// `execute_llm_agent` resolves the turn with this method, and the pre-call budget holds in `messaging.rs` size themselves from the same answer, so the estimate and the request agree on the `max_tokens` this turn will send.
+    /// Pure and side-effect-free: reading the catalog is all it does, and the caller decides whether to apply the result.
+    pub fn resolve_turn_inference_params(&self, model: &ModelConfig) -> ResolvedInferenceParams {
+        let override_key = format!("{}:{}", model.provider, model.model);
+        let limits = self.effective_limits_for_manifest(&model.provider, &model.model);
+        let known_max_output = KnownLimit::from_effective_limits(&limits);
+        resolve_inference_params(model, self.get_overrides(&override_key), known_max_output)
     }
 
     /// Load model overrides from a JSON file.

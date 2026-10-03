@@ -50,6 +50,11 @@ struct DriverEntry {
     /// that were not registered against the store (legacy constructors,
     /// tests).
     provider_name: String,
+    /// The slot model's own output ceiling, if known.
+    ///
+    /// `max_tokens` on the request is resolved once, against the primary model, and `FallbackModel` carries no budget of its own — so a failover that only rewrites `req.model` hands the fallback a budget above its ceiling, which the provider rejects.
+    /// `None` leaves the request's own value alone (no known ceiling, or legacy callers).
+    max_tokens_cap: Option<u32>,
     /// Exponentially weighted moving average latency in ms.
     ewma_latency_ms: AtomicU64,
     /// Consecutive error count. Reset to 0 on success or after the
@@ -91,6 +96,7 @@ impl FallbackDriver {
                     driver: d,
                     model_name: String::new(),
                     provider_name: String::new(),
+                    max_tokens_cap: None,
                     ewma_latency_ms: AtomicU64::new(0),
                     consecutive_errors: AtomicU64::new(0),
                     last_failure_at_ms: AtomicU64::new(0),
@@ -116,6 +122,7 @@ impl FallbackDriver {
                     driver: d,
                     model_name: m,
                     provider_name: String::new(),
+                    max_tokens_cap: None,
                     ewma_latency_ms: AtomicU64::new(0),
                     consecutive_errors: AtomicU64::new(0),
                     last_failure_at_ms: AtomicU64::new(0),
@@ -145,6 +152,7 @@ impl FallbackDriver {
                     driver: d,
                     model_name: model,
                     provider_name: provider,
+                    max_tokens_cap: None,
                     ewma_latency_ms: AtomicU64::new(0),
                     consecutive_errors: AtomicU64::new(0),
                     last_failure_at_ms: AtomicU64::new(0),
@@ -162,6 +170,22 @@ impl FallbackDriver {
     /// [`Self::set_provider_names`] are gated.
     pub fn with_exhaustion_store(mut self, store: ProviderExhaustionStore) -> Self {
         self.exhaustion_store = Some(store);
+        self
+    }
+
+    /// Cap the `max_tokens` sent to each slot at that slot's own output ceiling.
+    ///
+    /// The request's `max_tokens` is resolved once, for the agent's primary model, and a [`librefang_types::agent::FallbackModel`] carries no budget of its own, so a failover rewrites only `req.model`.
+    /// Without a per-slot cap a primary with a 64k-128k output ceiling hands the same oversized budget to a smaller fallback model and the provider rejects the request.
+    /// `None` for a slot means no known ceiling: the request's own value is sent unchanged.
+    /// Slots beyond the iterator's length keep `None`.
+    pub fn with_slot_max_tokens_caps<I>(mut self, caps: I) -> Self
+    where
+        I: IntoIterator<Item = Option<u32>>,
+    {
+        for (entry, cap) in self.drivers.iter_mut().zip(caps) {
+            entry.max_tokens_cap = cap;
+        }
         self
     }
 
@@ -349,6 +373,9 @@ impl LlmDriver for FallbackDriver {
             if !entry.model_name.is_empty() {
                 req.model = entry.model_name.clone();
             }
+            if let Some(cap) = entry.max_tokens_cap {
+                req.max_tokens = req.max_tokens.min(cap);
+            }
 
             let start = std::time::Instant::now();
             match entry.driver.complete(req).await {
@@ -433,6 +460,9 @@ impl LlmDriver for FallbackDriver {
             let mut req = request.clone();
             if !entry.model_name.is_empty() {
                 req.model = entry.model_name.clone();
+            }
+            if let Some(cap) = entry.max_tokens_cap {
+                req.max_tokens = req.max_tokens.min(cap);
             }
 
             // Intercept the event stream so we can tell whether any observable content has already reached the caller before deciding whether failover is safe.
@@ -575,6 +605,55 @@ mod tests {
                 actual_provider: None,
                 actual_model: None,
             })
+        }
+    }
+
+    /// Serves every request successfully and keeps each one it was handed.
+    #[derive(Default)]
+    struct RecordingOkDriver {
+        seen: std::sync::Mutex<Vec<CompletionRequest>>,
+    }
+
+    impl RecordingOkDriver {
+        fn seen(&self) -> Vec<CompletionRequest> {
+            self.seen.lock().unwrap().clone()
+        }
+    }
+
+    fn ok_response() -> CompletionResponse {
+        CompletionResponse {
+            content: vec![ContentBlock::Text {
+                text: "OK".to_string(),
+                provider_metadata: None,
+            }],
+            stop_reason: StopReason::EndTurn,
+            tool_calls: vec![],
+            usage: TokenUsage {
+                input_tokens: 10,
+                output_tokens: 5,
+                ..Default::default()
+            },
+            actual_provider: None,
+            actual_model: None,
+        }
+    }
+
+    #[async_trait]
+    impl LlmDriver for RecordingOkDriver {
+        async fn complete(
+            &self,
+            request: CompletionRequest,
+        ) -> Result<CompletionResponse, LlmError> {
+            self.seen.lock().unwrap().push(request);
+            Ok(ok_response())
+        }
+        async fn stream(
+            &self,
+            request: CompletionRequest,
+            _tx: tokio::sync::mpsc::Sender<StreamEvent>,
+        ) -> Result<CompletionResponse, LlmError> {
+            self.seen.lock().unwrap().push(request);
+            Ok(ok_response())
         }
     }
 
@@ -778,6 +857,107 @@ mod tests {
         let result = driver.complete(test_request()).await;
         assert!(result.is_ok());
         assert_eq!(result.unwrap().text(), "OK");
+    }
+
+    /// A failover must not carry the primary's output ceiling into a smaller fallback model.
+    /// `FallbackModel` has no `max_tokens` and the slot rewrite replaces only `req.model`, so without the per-slot cap the fallback receives a budget above its own ceiling and the provider rejects the request.
+    /// The primary's 65536 is clamped to the fallback's 8192.
+    #[tokio::test]
+    async fn fallback_slot_clamps_max_tokens_to_its_own_ceiling() {
+        let recorder = Arc::new(RecordingOkDriver::default());
+        let fb = FallbackDriver::with_models_and_providers(vec![
+            (
+                Arc::new(FailDriver) as Arc<dyn LlmDriver>,
+                String::new(),
+                "primary".to_string(),
+            ),
+            (
+                recorder.clone() as Arc<dyn LlmDriver>,
+                "small-model".to_string(),
+                "small".to_string(),
+            ),
+        ])
+        .with_slot_max_tokens_caps([None, Some(8_192)]);
+
+        let mut request = test_request();
+        request.max_tokens = 65_536;
+        let response = fb
+            .complete(request)
+            .await
+            .expect("the healthy fallback must serve the request");
+        assert_eq!(response.text(), "OK");
+
+        let seen = recorder.seen();
+        assert_eq!(seen.len(), 1, "only the fallback slot may record");
+        assert_eq!(seen[0].model, "small-model");
+        assert_eq!(
+            seen[0].max_tokens, 8_192,
+            "the primary's 65536 ceiling must be clamped to the fallback model's 8192"
+        );
+    }
+
+    /// The streaming path rewrites the request the same way and must clamp the same field; otherwise a failover after a transient error would still reject on the smaller model.
+    #[tokio::test]
+    async fn fallback_slot_clamps_max_tokens_on_the_streaming_path_too() {
+        let recorder = Arc::new(RecordingOkDriver::default());
+        let fb = FallbackDriver::with_models_and_providers(vec![
+            (
+                Arc::new(FailDriver) as Arc<dyn LlmDriver>,
+                String::new(),
+                "primary".to_string(),
+            ),
+            (
+                recorder.clone() as Arc<dyn LlmDriver>,
+                "small-model".to_string(),
+                "small".to_string(),
+            ),
+        ])
+        .with_slot_max_tokens_caps([None, Some(8_192)]);
+
+        let mut request = test_request();
+        request.max_tokens = 65_536;
+        let (tx, _rx) = tokio::sync::mpsc::channel(8);
+        fb.stream(request, tx)
+            .await
+            .expect("the healthy fallback must serve the stream");
+
+        let seen = recorder.seen();
+        assert_eq!(seen.len(), 1, "only the fallback slot may record");
+        assert_eq!(
+            seen[0].max_tokens, 8_192,
+            "the streaming failover must clamp the budget too"
+        );
+    }
+
+    /// A slot with no known ceiling keeps the request's own budget: the cap is per slot, not a blanket rewrite of every request.
+    #[tokio::test]
+    async fn fallback_slot_without_a_ceiling_keeps_the_request_budget() {
+        let recorder = Arc::new(RecordingOkDriver::default());
+        let fb = FallbackDriver::with_models_and_providers(vec![
+            (
+                Arc::new(FailDriver) as Arc<dyn LlmDriver>,
+                String::new(),
+                "primary".to_string(),
+            ),
+            (
+                recorder.clone() as Arc<dyn LlmDriver>,
+                "small-model".to_string(),
+                "small".to_string(),
+            ),
+        ])
+        .with_slot_max_tokens_caps([None, None]);
+
+        let mut request = test_request();
+        request.max_tokens = 65_536;
+        fb.complete(request)
+            .await
+            .expect("the healthy fallback must serve the request");
+
+        assert_eq!(
+            recorder.seen()[0].max_tokens,
+            65_536,
+            "an unknown ceiling must not clamp the request"
+        );
     }
 
     #[tokio::test]

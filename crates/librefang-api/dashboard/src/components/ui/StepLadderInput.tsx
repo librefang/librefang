@@ -95,7 +95,10 @@ export function StepLadderInput({
   const pick = (next: string): void => {
     setCustomMode(false);
     setDraft(null);
-    onChange(next);
+    // Pressing the rung that is already selected is a no-op, and emitting
+    // `onChange` for it would arm a caller's dirty flag without the operator
+    // having chosen anything — the call sites that persist write on that flag.
+    if (next !== value) onChange(next);
   };
 
   const rungClass = (selected: boolean): string =>
@@ -147,7 +150,14 @@ export function StepLadderInput({
           onClick={() => {
             setCustomMode(true);
             setDraft(null);
-            if (numeric !== null) onChange(String(numeric));
+            // Seed the field from the current preset so the operator edits a
+            // number rather than an empty box — but only emit when that is a
+            // real change. Pressing "custom" on a field already showing 16384
+            // emitted `onChange("16384")`, which is a no-op for the value but
+            // an edit as far as a dirty flag is concerned, and at the call
+            // sites that persist it armed Save with nothing chosen. Entering
+            // custom from `inherit` emitted nothing before and still does not.
+            if (numeric !== null && String(numeric) !== value) onChange(String(numeric));
           }}
         >
           {customLabel}
