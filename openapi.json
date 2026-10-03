@@ -1796,6 +1796,115 @@
         }
       }
     },
+    "/api/agents/{id}/manifest-history": {
+      "get": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "GET /api/agents/{id}/manifest-history — how this agent's config changed over time.",
+        "description": "Returns an array of manifest snapshots, newest first.\nEach entry carries the full TOML so the dashboard can render a diff between\nconsecutive versions and offer a one-click restore.",
+        "operationId": "list_agent_manifest_history",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Agent UUID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Max entries to return (default 30, max 200)",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Manifest version history, newest first",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid agent id or limit"
+          },
+          "404": {
+            "description": "Agent not found or not accessible to the caller"
+          }
+        }
+      }
+    },
+    "/api/agents/{id}/manifest-history/{version_id}/restore": {
+      "post": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "POST /api/agents/{id}/manifest-history/{version_id}/restore — roll an agent's manifest back to a stored snapshot.",
+        "description": "Mirrors `restore_template_version`: the stored TOML is parsed and applied\nthrough `update_manifest`, which re-runs the module-path security check,\npreserves the runtime-only fields (name, tags, workspace, resolved\n`exec_policy`) and persists the result — the restore itself is recorded in\nthe history as a fresh `restore` snapshot.",
+        "operationId": "restore_agent_manifest_version",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Agent UUID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "version_id",
+            "in": "path",
+            "description": "Version row id to restore",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Agent manifest restored",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid agent id or version does not belong to this agent"
+          },
+          "404": {
+            "description": "Agent or version not found, or not accessible to the caller"
+          },
+          "423": {
+            "description": "This agent is provisioned by the deployment; its manifest cannot be changed through the API",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/agents/{id}/mcp_servers": {
       "get": {
         "tags": [

@@ -299,6 +299,12 @@ class _AgentsResource(_Resource):
     def get_agent_manifest_toml(self, id: str):
         return self._c._request("GET", f"/api/agents/{id}/manifest")
 
+    def list_agent_manifest_history(self, id: str, limit: Any = None):
+        return self._c._request("GET", f"/api/agents/{id}/manifest-history", None, query={"limit": limit})
+
+    def restore_agent_manifest_version(self, id: str, version_id: str):
+        return self._c._request("POST", f"/api/agents/{id}/manifest-history/{version_id}/restore")
+
     def get_agent_mcp_servers(self, id: str):
         return self._c._request("GET", f"/api/agents/{id}/mcp_servers")
 
