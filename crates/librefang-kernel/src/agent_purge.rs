@@ -18,7 +18,9 @@ use crate::triggers::TriggerEngine;
 use librefang_memory::agent_tables::AGENT_SCOPED_TABLES;
 use librefang_memory::MemorySubstrate;
 use librefang_types::agent::{AgentEntry, AgentId};
-use librefang_types::agent_type_store::{agent_type_path_in, validate_agent_type_name};
+use librefang_types::agent_type_store::{
+    agent_type_path_in, validate_agent_type_name, SAVED_FROM_AGENT_METADATA_KEY,
+};
 use librefang_types::config::KernelConfig;
 use std::collections::HashSet;
 use std::ffi::OsStr;
@@ -145,6 +147,29 @@ pub struct PurgeOutcome {
     pub report: PurgeReport,
     /// Every step that failed, with the reason.
     pub failures: Vec<String>,
+}
+
+/// Whether `path` is an agent type the operator saved from `agent_name`.
+///
+/// `save-as-agent-type` records the source agent's name in the saved type's
+/// manifest `metadata` ([`SAVED_FROM_AGENT_METADATA_KEY`]). Such a type shares
+/// its source's name by design, so [`plan_purge`] must not treat it as a shadow
+/// of the agent and delete it.
+///
+/// A file that is absent, unreadable or not a manifest reports `false` and stays
+/// on the delete path, exactly as before this provenance existed.
+fn is_saved_agent_type_snapshot(path: &Path, agent_name: &str) -> bool {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return false;
+    };
+    let Ok(value) = toml::from_str::<toml::Value>(&text) else {
+        return false;
+    };
+    value
+        .get("metadata")
+        .and_then(|metadata| metadata.get(SAVED_FROM_AGENT_METADATA_KEY))
+        .and_then(toml::Value::as_str)
+        == Some(agent_name)
 }
 
 /// Read-only preview of what [`purge_agent`] would remove for `agent_name`.
@@ -373,10 +398,15 @@ pub fn plan_purge(substrate: &MemorySubstrate, cfg: &KernelConfig, agent_name: &
     // `validate_agent_type_name` governs filenames in the agent-type store, so
     // a name it rejects cannot name a file there. That is not a purge failure:
     // there is simply nothing to look for, and the rest of the purge runs.
+    //
+    // A type the operator saved *from* this agent is exempt: `save-as-agent-type`
+    // lets it share the agent's name on purpose (the type is the reusable copy,
+    // not a shadow), and it records that origin in its manifest metadata. Purging
+    // the agent must not delete the copy the operator made from it.
     let agent_type = validate_agent_type_name(agent_name)
         .ok()
         .map(|()| agent_type_path_in(home, agent_name))
-        .filter(|p| p.is_file());
+        .filter(|p| p.is_file() && !is_saved_agent_type_snapshot(p, agent_name));
     if agent_type.is_some() {
         preview.agent_type_removed = true;
     }
@@ -860,6 +890,53 @@ mod tests {
         assert!(outcome.report.agent_type_removed);
         assert!(!home.path().join("workspaces/agents/alpha").exists());
         assert!(!agent_type_path_in(home.path(), "alpha").exists());
+    }
+
+    /// A type the operator saved from this agent (`save-as-agent-type`) records
+    /// its origin in the manifest metadata and deliberately shares the agent's
+    /// name. Purge must leave it: it is the reusable copy, not a trace of the
+    /// agent, and the same-name deletion below exists for a shadowing type.
+    #[test]
+    fn it_keeps_an_agent_type_saved_from_the_agent() {
+        let home = home_with(&["alpha"]);
+        let saved = agent_type_path_in(home.path(), "alpha");
+        std::fs::write(
+            &saved,
+            format!("[metadata]\n{SAVED_FROM_AGENT_METADATA_KEY} = \"alpha\"\n"),
+        )
+        .unwrap();
+        let substrate = MemorySubstrate::open_in_memory(0.01).unwrap();
+
+        let outcome = purge_agent(&substrate, &cfg_for(&home), "alpha");
+
+        assert!(outcome.failures.is_empty(), "{:?}", outcome.failures);
+        assert!(outcome.report.workspace_removed);
+        assert!(
+            !outcome.report.agent_type_removed,
+            "a snapshot saved from the agent must survive its purge"
+        );
+        assert!(saved.exists());
+    }
+
+    /// The exemption is keyed to the source agent: a type saved from *another*
+    /// agent is still removed, so the guard cannot be widened by putting any
+    /// provenance in the file.
+    #[test]
+    fn a_type_saved_from_a_different_agent_is_still_removed() {
+        let home = home_with(&["alpha"]);
+        let saved = agent_type_path_in(home.path(), "alpha");
+        std::fs::write(
+            &saved,
+            format!("[metadata]\n{SAVED_FROM_AGENT_METADATA_KEY} = \"beta\"\n"),
+        )
+        .unwrap();
+        let substrate = MemorySubstrate::open_in_memory(0.01).unwrap();
+
+        let outcome = purge_agent(&substrate, &cfg_for(&home), "alpha");
+
+        assert!(outcome.failures.is_empty(), "{:?}", outcome.failures);
+        assert!(outcome.report.agent_type_removed);
+        assert!(!saved.exists());
     }
 
     #[test]

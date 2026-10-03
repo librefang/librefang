@@ -46,6 +46,7 @@ api-error-manifest-too-large = Маніфест занадто великий (�
 api-error-manifest-invalid-format = Недійсний формат маніфесту
 api-error-manifest-signature-mismatch = Підписаний вміст маніфесту не відповідає manifest_toml
 api-error-manifest-signature-failed = Помилка перевірки підпису маніфесту
+api-error-manifest-signed-template-conflict = signed_manifest не можна поєднувати з template; підпишіть вбудований manifest_toml
 api-error-manifest-invalid = Недійсний маніфест: { $error }
 
 # Auth errors

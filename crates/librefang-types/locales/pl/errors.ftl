@@ -46,6 +46,7 @@ api-error-manifest-too-large = Manifest jest za duży (maks. 1 MB)
 api-error-manifest-invalid-format = Nieprawidłowy format manifestu
 api-error-manifest-signature-mismatch = Treść podpisanego manifestu nie zgadza się z manifest_toml
 api-error-manifest-signature-failed = Weryfikacja podpisu manifestu nie powiodła się
+api-error-manifest-signed-template-conflict = signed_manifest nie może być łączony z template; podpisz wbudowany manifest_toml
 api-error-manifest-invalid = Nieprawidłowy manifest: { $error }
 
 # Auth errors

@@ -33,6 +33,7 @@ api-error-manifest-too-large = 清单文件过大（最大 1MB）
 api-error-manifest-invalid-format = 无效的清单格式
 api-error-manifest-signature-mismatch = 签名清单内容与 manifest_toml 不匹配
 api-error-manifest-signature-failed = 清单签名验证失败
+api-error-manifest-signed-template-conflict = signed_manifest 不能与 template 同时使用；请改为对内联 manifest_toml 签名
 
 # Auth errors
 api-error-auth-invalid-key = 无效的 API 密钥

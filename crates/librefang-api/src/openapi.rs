@@ -110,6 +110,7 @@ use crate::types;
         routes::patch_hand_agent_runtime_config,
         routes::delete_hand_agent_runtime_config,
         routes::clone_agent,
+        routes::save_agent_as_agent_type,
         routes::list_agent_files,
         routes::get_agent_file,
         routes::set_agent_file,

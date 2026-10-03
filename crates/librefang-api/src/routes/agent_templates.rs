@@ -1580,7 +1580,10 @@ pub async fn promote_agent_type(
 /// The failure is returned as well as logged because it is not equally harmless at every call site.
 /// A snapshot taken *after* a write costs one history row when it fails, and the content it describes is still on disk — those callers discard the `Result` on purpose.
 /// The `pre-registry-restore` snapshot in [`restore_from_registry`] is the opposite case: it is the only copy of content the very next line overwrites, so it has to be able to refuse.
-fn record_template_version(
+///
+/// `pub(crate)` so `save_agent_as_agent_type` can record the same baseline every
+/// other agent-type write path records.
+pub(crate) fn record_template_version(
     state: &AppState,
     name: &str,
     toml: &str,

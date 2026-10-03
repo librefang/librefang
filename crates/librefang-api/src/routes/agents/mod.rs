@@ -220,6 +220,10 @@ pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
             axum::routing::post(clone_agent),
         )
         .route(
+            "/agents/{id}/save-as-agent-type",
+            axum::routing::post(save_agent_as_agent_type),
+        )
+        .route(
             "/agents/{id}/reload",
             axum::routing::post(reload_agent_manifest),
         )
