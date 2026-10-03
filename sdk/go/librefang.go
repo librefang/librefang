@@ -357,6 +357,22 @@ func (r *AgentsResource) PatchAgent(id string, data map[string]interface{}) (int
 	return r.client.request("PATCH", fmt.Sprintf("/api/agents/%s", id), data, nil)
 }
 
+func (r *AgentsResource) ServeAgentAvatar(id string) (interface{}, error) {
+	return r.client.request("GET", fmt.Sprintf("/api/agents/%s/avatar", id), nil, nil)
+}
+
+// UploadAgentAvatar sends a raw application/octet-stream body. An empty contentType defaults to it.
+func (r *AgentsResource) UploadAgentAvatar(id string, body []byte, contentType string) (interface{}, error) {
+	if contentType == "" {
+		contentType = "application/octet-stream"
+	}
+	return r.client.requestRaw("POST", fmt.Sprintf("/api/agents/%s/avatar", id), body, contentType)
+}
+
+func (r *AgentsResource) DeleteAgentAvatar(id string) (interface{}, error) {
+	return r.client.request("DELETE", fmt.Sprintf("/api/agents/%s/avatar", id), nil, nil)
+}
+
 func (r *AgentsResource) GetAgentChannels(id string) (interface{}, error) {
 	return r.client.request("GET", fmt.Sprintf("/api/agents/%s/channels", id), nil, nil)
 }
