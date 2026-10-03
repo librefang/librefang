@@ -4014,6 +4014,7 @@ async fn test_effective_permissions_admin_returns_200_with_full_payload() {
             delete_allowed: true,
         }),
         channel_tool_rules: alice_channel_rules,
+        emoji: None,
     };
 
     let server =

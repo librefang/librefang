@@ -1159,6 +1159,20 @@ async fn dashboard_snapshot_inner(state: &Arc<AppState>) -> serde_json::Value {
     (*payload).clone()
 }
 
+/// Evict the memoized dashboard payload for `state`, so the next request
+/// rebuilds it.
+///
+/// The TTL is short (900 ms), but it is long enough to swallow the refetch a
+/// dashboard mutation itself triggers: the identity and avatar writes
+/// invalidate the snapshot key the moment they answer, and a memoized entry
+/// from the last poll would hand that refetch the pre-write payload — the row
+/// would then keep the old emoji or image until the next 5 s tick (#8371
+/// review). These writes are rare and user-initiated, so dropping the entry
+/// costs one recompute and nothing else.
+pub(crate) fn invalidate_dashboard_snapshot(state: &AppState) {
+    dashboard_snapshot_cache().remove(&(state as *const AppState as usize));
+}
+
 async fn dashboard_snapshot_compute(state: &Arc<AppState>) -> serde_json::Value {
     let (memory_used_mb, hostname) = tokio::join!(current_process_rss_mb(), system_hostname());
     // Health (same logic as /api/health)

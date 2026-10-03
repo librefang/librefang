@@ -85,3 +85,6 @@ api-error-rate-limited = Limite de requêtes dépassée. Veuillez réessayer plu
 # typed MemoryRouteError-style helper. Without this key, every `t_args("api-error-generic", …)`
 # call returns the literal key as the response body and `$error` interpolation never runs.
 api-error-generic = Erreur : { $error }
+
+api-error-validation-avatar-url-invalid = L'URL de l'avatar doit être la route d'avatar que ce démon sert pour l'agent, ou être vide. Téléversez l'image au lieu de la lier.
+api-error-validation-color-invalid = La couleur doit être un code hexadécimal commençant par '#'

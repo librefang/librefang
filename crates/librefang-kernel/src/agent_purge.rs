@@ -62,6 +62,14 @@ pub struct PurgeReport {
     pub workspace_shared: bool,
     /// An agent-type template of the same name was deleted.
     pub agent_type_removed: bool,
+    /// A stored avatar image under `<home>/avatars/` was deleted (#8339).
+    ///
+    /// Keyed by `AgentId`, and the default id is derived deterministically
+    /// from the agent's name — so without this, a new agent later spawned
+    /// under the purged name would inherit the old agent's picture, which is
+    /// the same name-collision failure [`Self::cron_jobs_removed`] exists to
+    /// prevent and rather more visible.
+    pub avatar_removed: bool,
     /// Cron jobs owned by the purged agent id(s) were removed from
     /// `<home>/data/cron_jobs.json`.
     ///
@@ -381,6 +389,12 @@ pub fn plan_purge(substrate: &MemorySubstrate, cfg: &KernelConfig, agent_name: &
         preview.agent_type_removed = true;
     }
 
+    // Same id set the execution pass uses, so `--dry-run` and the run agree.
+    let avatars_dir = cfg.effective_avatars_dir();
+    preview.avatar_removed = purge_ids
+        .iter()
+        .any(|id| librefang_types::media::find_avatar(&avatars_dir, &id.to_string()).is_some());
+
     PurgePlan {
         preview,
         failures,
@@ -547,7 +561,42 @@ pub fn purge_agent(
         }
     }
 
+    // Every id this purge attributed to the name, not just the roster one:
+    // an avatar set by an earlier incarnation of the same name is residue of
+    // exactly the kind this command exists to clear, and the deterministic
+    // `AgentId::from_name` means the next agent of that name would find it.
+    let avatars_dir = cfg.effective_avatars_dir();
+    for id in avatar_purge_ids(&plan) {
+        let (removed, errors) =
+            librefang_types::media::remove_avatars_reporting(&avatars_dir, &id.to_string());
+        if removed > 0 {
+            report.avatar_removed = true;
+        }
+        // Recorded like every other step above: "nothing was stored" and "the
+        // directory would not give the file up" both leave `avatar_removed`
+        // false, and only these lines tell the operator which one happened.
+        // `plan_purge` predicts from `find_avatar` alone, so a refusal here is
+        // exactly where a `--dry-run` and the run would otherwise disagree
+        // with nothing said.
+        for (path, error) in errors {
+            failures.push(format!("remove avatar {}: {error}", path.display()));
+        }
+    }
+
     PurgeOutcome { report, failures }
+}
+
+/// Every agent id whose avatar this purge should clear.
+///
+/// The roster id plus every orphan id the plan attributed to the name, deduplicated because a roster entry spawned under the name-derived UUID appears in both.
+fn avatar_purge_ids(plan: &PurgePlan) -> Vec<AgentId> {
+    let mut ids: Vec<AgentId> = plan.roster_agent_id.into_iter().collect();
+    for id in &plan.orphan_agent_ids {
+        if !ids.contains(id) {
+            ids.push(*id);
+        }
+    }
+    ids
 }
 
 /// Reject a name that would not stay put when joined onto a directory.
@@ -860,6 +909,39 @@ mod tests {
         assert!(outcome.report.agent_type_removed);
         assert!(!home.path().join("workspaces/agents/alpha").exists());
         assert!(!agent_type_path_in(home.path(), "alpha").exists());
+    }
+
+    /// A filesystem that refuses the unlink is reported, not swallowed.
+    ///
+    /// `plan_purge` predicts the avatar from `find_avatar` alone, so a refusal
+    /// here is exactly where a `--dry-run` and the run disagree and the operator
+    /// gets no line explaining why — the failure this pins. The avatar path is a
+    /// non-empty directory so `remove_file` refuses it portably (EISDIR)
+    /// whatever the test user's privileges, which a `chmod` would not.
+    ///
+    /// Sabotage: reverting to `remove_avatars` (which drops the error) leaves
+    /// `failures` empty and fails the assertion below.
+    #[test]
+    fn a_refused_avatar_removal_is_reported() {
+        let home = home_with(&["alpha"]);
+        let substrate = MemorySubstrate::open_in_memory(0.01).unwrap();
+        let id = AgentId::from_name("alpha");
+        seed_agent_rows(&substrate, "alpha", id);
+        delete_roster_row_only(&substrate, id);
+
+        let cfg = cfg_for(&home);
+        let avatars_dir = cfg.effective_avatars_dir();
+        std::fs::create_dir_all(&avatars_dir).unwrap();
+        let blocked = librefang_types::media::avatar_path(&avatars_dir, &id.to_string(), "png");
+        std::fs::create_dir_all(blocked.join("keep")).unwrap();
+
+        let outcome = purge_agent(&substrate, &cfg, "alpha");
+
+        assert!(
+            outcome.failures.iter().any(|f| f.contains("remove avatar")),
+            "a refused avatar removal must be reported, got {:?}",
+            outcome.failures
+        );
     }
 
     #[test]
