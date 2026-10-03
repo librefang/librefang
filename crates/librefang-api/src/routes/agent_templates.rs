@@ -219,7 +219,7 @@ fn promote_error_messages(lang: &str) -> (String, String) {
 /// Only the first is a file this API owns.
 /// The second belongs to a running agent and is edited through `/api/agents/{id}`, so a write verb aimed at it is refused rather than silently creating a shadowing copy — and the row carries `editable: false` so a client can render it as managed elsewhere instead of offering a control that cannot work (#7731).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TemplateSource {
+pub(crate) enum TemplateSource {
     /// `~/.librefang/agent-types/{name}.toml` — created and edited through this API.
     AgentType,
     /// `~/.librefang/workspaces/agents/{name}/agent.toml` — a live agent's manifest.
@@ -239,36 +239,64 @@ impl TemplateSource {
     }
 }
 
+use librefang_types::agent_type_store::agent_type_path_in;
 use librefang_types::agent_type_store::{
-    agent_type_path, agent_types_dir, workspace_agent_manifest_path, workspace_agents_dir,
+    agent_types_dir_in, workspace_agent_manifest_path_in, workspace_agents_dir_in,
 };
+
+/// Fold "the file does not exist" into `Ok(None)`, leaving every other I/O
+/// failure (permissions, `ENOTDIR`, …) as a real `Err` — the distinction
+/// [`read_agent_type_in`] needs to tell "absent" apart from "broken".
+fn as_optional(result: std::io::Result<String>) -> std::io::Result<Option<String>> {
+    match result {
+        Ok(content) => Ok(Some(content)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e),
+    }
+}
 
 /// Read one agent type by name from whichever source holds it.
 ///
 /// `agent-types/` wins a name collision because it is the source the write verbs act on: if `Edit` loaded a live agent's manifest and `Save` wrote the agent-type file, the operator would be editing one document and saving another.
 /// A collision can still arise after the fact — an agent spawned under a name an agent type already uses — so it is logged rather than passed over in silence.
-async fn read_agent_type(name: &str) -> std::io::Result<Option<(TemplateSource, String)>> {
-    let own = match tokio::fs::read_to_string(agent_type_path(name)).await {
-        Ok(content) => Some(content),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-        Err(e) => return Err(e),
-    };
-    let workspace = match tokio::fs::read_to_string(workspace_agent_manifest_path(name)).await {
-        Ok(content) => Some(content),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-        Err(e) => return Err(e),
-    };
+///
+/// The two sources are read independently, and a hard failure on one (not a
+/// mere absence — permissions, a restored backup with the wrong owner, or
+/// `agent-types` existing as a plain file) does not veto a value the other
+/// source can still supply: `POST /api/agents {"template": name}` must not
+/// hard-fail on an unreadable `agent-types/` entry when the same name is a
+/// perfectly readable live agent under `workspaces/agents/` (#8112). Only
+/// when *both* sources fail for a reason other than absence is an `Err`
+/// the honest verdict, and it is the agent-type read's error that surfaces —
+/// that is the source this API's write verbs actually own.
+pub(crate) async fn read_agent_type_in(
+    home_dir: &std::path::Path,
+    name: &str,
+) -> std::io::Result<Option<(TemplateSource, String)>> {
+    let own = as_optional(tokio::fs::read_to_string(agent_type_path_in(home_dir, name)).await);
+    let workspace = as_optional(
+        tokio::fs::read_to_string(workspace_agent_manifest_path_in(home_dir, name)).await,
+    );
 
     match (own, workspace) {
-        (Some(content), Some(_)) => {
+        (Ok(Some(content)), Ok(Some(_))) => {
             tracing::warn!(
                 "agent type '{name}' and a live agent workspace share a name; serving the agent type, which is the copy this API can write"
             );
             Ok(Some((TemplateSource::AgentType, content)))
         }
-        (Some(content), None) => Ok(Some((TemplateSource::AgentType, content))),
-        (None, Some(content)) => Ok(Some((TemplateSource::WorkspaceAgent, content))),
-        (None, None) => Ok(None),
+        (Ok(Some(content)), _) => Ok(Some((TemplateSource::AgentType, content))),
+        (Err(e), Ok(Some(content))) => {
+            tracing::warn!(
+                name = %name, error = %e,
+                "agent-type read failed for a reason other than absence; falling back to the workspace agent manifest"
+            );
+            Ok(Some((TemplateSource::WorkspaceAgent, content)))
+        }
+        (Ok(None), Ok(Some(content))) => Ok(Some((TemplateSource::WorkspaceAgent, content))),
+        (Ok(None), Ok(None)) => Ok(None),
+        (Err(e), _) => Err(e),
+        (Ok(None), Err(e)) => Err(e),
     }
 }
 
@@ -278,10 +306,14 @@ async fn read_agent_type(name: &str) -> std::io::Result<Option<(TemplateSource, 
 
 /// GET /api/templates — List available agent templates.
 #[utoipa::path(get, path = "/api/templates", tag = "system", operation_id = "list_agent_templates", responses((status = 200, description = "List templates", body = Vec<serde_json::Value>)))]
-pub async fn list_agent_templates() -> impl IntoResponse {
+pub async fn list_agent_templates(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let mut rows: Vec<(String, TemplateSource, AgentManifest)> = Vec::new();
+    // #8112: same `home_dir` the detail routes and the spawn path resolve
+    // against — not the process-wide `LIBREFANG_HOME` env var, which an
+    // embedder's `KernelConfig` can point somewhere else entirely.
+    let home_dir = state.kernel.config_ref().home_dir.clone();
 
-    match load_agent_type_files(&agent_types_dir()).await {
+    match load_agent_type_files(&agent_types_dir_in(&home_dir)).await {
         Ok(found) => rows.extend(
             found
                 .into_iter()
@@ -289,7 +321,7 @@ pub async fn list_agent_templates() -> impl IntoResponse {
         ),
         Err(e) => return ApiErrorResponse::internal_scrub(e).into_json_tuple(),
     }
-    match load_agent_templates(&workspace_agents_dir()).await {
+    match load_agent_templates(&workspace_agents_dir_in(&home_dir)).await {
         Ok(found) => rows.extend(
             found
                 .into_iter()
@@ -539,6 +571,7 @@ fn agent_type_detail(
 /// GET /api/templates/:name — Get template details.
 #[utoipa::path(get, path = "/api/templates/{name}", tag = "system", operation_id = "get_agent_template", params(("name" = String, Path, description = "Template name")), responses((status = 200, description = "Template details, plus the flat editor projection and a read-only privacy pass over the manifest for registry promotion", body = crate::types::JsonObject)))]
 pub async fn get_agent_template(
+    State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
     lang: Option<axum::Extension<RequestLanguage>>,
 ) -> impl IntoResponse {
@@ -551,7 +584,8 @@ pub async fn get_agent_template(
         return ApiErrorResponse::not_found(not_found).into_json_tuple();
     }
 
-    match read_agent_type(&name).await {
+    let home_dir = state.kernel.config_ref().home_dir.clone();
+    match read_agent_type_in(&home_dir, &name).await {
         Ok(Some((source, content))) => match toml::from_str::<AgentManifest>(&content) {
             Ok(manifest) => (
                 StatusCode::OK,
@@ -573,6 +607,7 @@ pub async fn get_agent_template(
 /// GET /api/templates/:name/toml — Get the raw TOML content of a template.
 #[utoipa::path(get, path = "/api/templates/{name}/toml", tag = "system", operation_id = "get_agent_template_toml", params(("name" = String, Path, description = "Template name")), responses((status = 200, description = "Template TOML content as plain text", body = String)))]
 pub async fn get_agent_template_toml(
+    State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
     lang: Option<axum::Extension<RequestLanguage>>,
 ) -> impl IntoResponse {
@@ -588,7 +623,8 @@ pub async fn get_agent_template_toml(
             .into_response();
     }
 
-    match read_agent_type(&name).await {
+    let home_dir = state.kernel.config_ref().home_dir.clone();
+    match read_agent_type_in(&home_dir, &name).await {
         Ok(Some((_source, content))) => (
             StatusCode::OK,
             [(
@@ -656,8 +692,9 @@ pub async fn put_agent_template_toml(
             .into_json_tuple();
     }
 
-    if !agent_type_path(&name).exists() {
-        return if workspace_agent_manifest_path(&name).exists() {
+    let home_dir = state.kernel.config_ref().home_dir.clone();
+    if !agent_type_path_in(&home_dir, &name).exists() {
+        return if workspace_agent_manifest_path_in(&home_dir, &name).exists() {
             ApiErrorResponse::conflict(managed_elsewhere)
                 .with_code("template_not_editable")
                 .into_json_tuple()
@@ -688,7 +725,7 @@ pub async fn put_agent_template_toml(
         );
     }
 
-    match persist_agent_type(&name, &manifest) {
+    match persist_agent_type_in(&home_dir, &name, &manifest) {
         Ok(rendered) => {
             let _ = record_template_version(&state, &name, &rendered, "toml");
             let mut detail =
@@ -760,7 +797,12 @@ pub async fn post_agent_template_toml(
         );
     }
 
-    match store_create_from_manifest(&name, &manifest) {
+    // #8112: the same `home_dir` the detail routes, the catalog and the `POST /api/templates`
+    // create all resolve against — the ambient `LIBREFANG_HOME` would land this document in a
+    // directory none of them read. This is a plain create, so no name is exempt from the
+    // live-agent shadow check (`None`).
+    let home_dir = state.kernel.config_ref().home_dir.clone();
+    match store_create_from_manifest(&home_dir, &name, &manifest, None) {
         Ok(rendered) => {
             let _ = record_template_version(&state, &name, &rendered, "create");
             let mut detail =
@@ -821,10 +863,13 @@ fn parse_manifest_toml_body(
 
 // Serializing a manifest over an existing agent type, and creating a new one, both live in `librefang_types::agent_type_store`.
 // The `agent_type_create` tool (#7722) writes into the same directory, so the atomic rename, the `File::create_new` claim and the live-agent shadow check are shared rather than reimplemented per surface — which is the divergence that made the pre-#7740 design lose data on one path while the other was correct.
+// The `_in` spellings resolve against `state.kernel.config_ref().home_dir` rather than the
+// process-wide `LIBREFANG_HOME` env var — same reasoning as `read_agent_type_in` above (#8112):
+// the tool writes through the kernel's own `home_dir` too (`kernel::handles::agent_control`), so
+// all three writers of `agent-types/` agree on where the file lands.
 use librefang_types::agent_type_store::{
-    create_agent_type as store_create,
-    create_agent_type_from_manifest as store_create_from_manifest, persist_agent_type,
-    CreateAgentTypeError,
+    create_agent_type_from_manifest_in as store_create_from_manifest,
+    create_agent_type_in as store_create_in, persist_agent_type_in, CreateAgentTypeError,
 };
 
 /// POST /api/templates — Create an operator-authored agent type.
@@ -848,7 +893,8 @@ pub async fn create_agent_type(
         )
     };
 
-    match store_create(&name, spec) {
+    let home_dir = state.kernel.config_ref().home_dir.clone();
+    match store_create_in(&home_dir, &name, spec) {
         Ok(created) => {
             let _ =
                 record_template_version(&state, &created.name, &created.manifest_toml, "create");
@@ -913,13 +959,14 @@ pub async fn update_agent_type(
     // path that addressed it and leave the file name and the manifest's own `name` disagreeing.
     spec.name = None;
 
-    let stored = match tokio::fs::read_to_string(agent_type_path(&name)).await {
+    let home_dir = state.kernel.config_ref().home_dir.clone();
+    let stored = match tokio::fs::read_to_string(agent_type_path_in(&home_dir, &name)).await {
         Ok(content) => content,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             // Distinguish "no such agent type" from "that name is a live agent". The second is the
             // dual-source gap #7731 asks about, and answering a bare 404 for it tells the operator
             // nothing about why the row they can see refuses to save.
-            return if workspace_agent_manifest_path(&name).exists() {
+            return if workspace_agent_manifest_path_in(&home_dir, &name).exists() {
                 ApiErrorResponse::conflict(managed_elsewhere)
                     .with_code("template_not_editable")
                     .into_json_tuple()
@@ -948,7 +995,7 @@ pub async fn update_agent_type(
     spec.apply_to(&mut manifest);
     manifest.name = name.clone();
 
-    match persist_agent_type(&name, &manifest) {
+    match persist_agent_type_in(&home_dir, &name, &manifest) {
         Ok(rendered) => {
             let _ = record_template_version(&state, &name, &rendered, "dashboard");
             (
@@ -994,7 +1041,8 @@ pub async fn delete_agent_type(
             .into_json_tuple();
     }
 
-    match tokio::fs::remove_file(agent_type_path(&name)).await {
+    let home_dir = state.kernel.config_ref().home_dir.clone();
+    match tokio::fs::remove_file(agent_type_path_in(&home_dir, &name)).await {
         Ok(()) => {
             // Best-effort cascade: delete version history for the removed template.
             let store =
@@ -1008,7 +1056,7 @@ pub async fn delete_agent_type(
             )
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            if workspace_agent_manifest_path(&name).exists() {
+            if workspace_agent_manifest_path_in(&home_dir, &name).exists() {
                 ApiErrorResponse::conflict(managed_elsewhere)
                     .with_code("template_not_editable")
                     .into_json_tuple()
@@ -1193,12 +1241,13 @@ fn json_diff_count(a: &serde_json::Value, b: &serde_json::Value) -> usize {
     operation_id = "get_agent_type_registry_diff",
     params(("name" = String, Path, description = "Agent type name")),
     responses(
-        (status = 200, description = "Diff between local and registry versions", body = crate::types::JsonObject),
+        (status = 200, description = "Diff between local and registry versions"),
         (status = 404, description = "Agent type or registry version not found"),
         (status = 409, description = "The name belongs to a live agent"),
     )
 )]
 pub async fn get_registry_diff(
+    State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
     lang: Option<axum::Extension<RequestLanguage>>,
 ) -> impl IntoResponse {
@@ -1216,9 +1265,10 @@ pub async fn get_registry_diff(
         return ApiErrorResponse::not_found(not_found).into_json_tuple();
     }
 
+    let home_dir = state.kernel.config_ref().home_dir.clone();
     // Read local version. Only an agent-type file is in scope — a live agent's own
     // manifest is refused with the same 409 `restore_from_registry` answers for it.
-    let local_content = match read_agent_type(&name).await {
+    let local_content = match read_agent_type_in(&home_dir, &name).await {
         Ok(Some((TemplateSource::WorkspaceAgent, _))) => {
             return ApiErrorResponse::conflict(managed_elsewhere)
                 .with_code("template_not_editable")
@@ -1301,7 +1351,7 @@ pub async fn get_registry_diff(
     operation_id = "restore_agent_type_from_registry",
     params(("name" = String, Path, description = "Agent type name")),
     responses(
-        (status = 200, description = "Agent type restored from registry", body = crate::types::JsonObject),
+        (status = 200, description = "Agent type restored from registry"),
         (status = 404, description = "Agent type or registry version not found"),
         (status = 409, description = "The name belongs to a live agent"),
         (status = 500, description = "The pre-restore snapshot could not be recorded; nothing was overwritten"),
@@ -1327,26 +1377,28 @@ pub async fn restore_from_registry(
         return ApiErrorResponse::not_found(not_found).into_json_tuple();
     }
 
+    let home_dir = state.kernel.config_ref().home_dir.clone();
     // Only agent-type files can be restored — a live agent is managed elsewhere.
     // Read (not just stat) so the pre-restore content can be snapshotted below.
-    let pre_restore_content = match tokio::fs::read_to_string(agent_type_path(&name)).await {
-        Ok(content) => content,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return if workspace_agent_manifest_path(&name).exists() {
-                ApiErrorResponse::conflict(managed_elsewhere)
-                    .with_code("template_not_editable")
-                    .into_json_tuple()
-            } else {
-                ApiErrorResponse::not_found(not_found)
-                    .with_code("template_not_found")
-                    .into_json_tuple()
-            };
-        }
-        Err(e) => {
-            tracing::warn!("Failed to check agent type '{name}': {e}");
-            return ApiErrorResponse::internal(read_failed).into_json_tuple();
-        }
-    };
+    let pre_restore_content =
+        match tokio::fs::read_to_string(agent_type_path_in(&home_dir, &name)).await {
+            Ok(content) => content,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return if workspace_agent_manifest_path_in(&home_dir, &name).exists() {
+                    ApiErrorResponse::conflict(managed_elsewhere)
+                        .with_code("template_not_editable")
+                        .into_json_tuple()
+                } else {
+                    ApiErrorResponse::not_found(not_found)
+                        .with_code("template_not_found")
+                        .into_json_tuple()
+                };
+            }
+            Err(e) => {
+                tracing::warn!("Failed to check agent type '{name}': {e}");
+                return ApiErrorResponse::internal(read_failed).into_json_tuple();
+            }
+        };
 
     // Read the registry version.
     let registry_content = match read_registry_agent_type(&name).await {
@@ -1393,7 +1445,7 @@ pub async fn restore_from_registry(
     }
 
     // Write via the shared persist path (atomic rename).
-    match persist_agent_type(&name, &manifest) {
+    match persist_agent_type_in(&home_dir, &name, &manifest) {
         Ok(rendered) => {
             let _ = record_template_version(&state, &name, &rendered, "registry-restore");
             (
@@ -1457,7 +1509,8 @@ pub async fn promote_agent_type(
     }
 
     // Read the manifest.
-    let manifest = match read_agent_type(&name).await {
+    let home_dir = state.kernel.config_ref().home_dir.clone();
+    let manifest = match read_agent_type_in(&home_dir, &name).await {
         Ok(Some((_source, content))) => match toml::from_str::<AgentManifest>(&content) {
             Ok(m) => m,
             Err(e) => {
@@ -1624,7 +1677,13 @@ pub async fn list_template_history(
     }
 
     // Verify the template exists on disk (either source).
-    if read_agent_type(&name).await.ok().flatten().is_none() {
+    let home_dir = state.kernel.config_ref().home_dir.clone();
+    if read_agent_type_in(&home_dir, &name)
+        .await
+        .ok()
+        .flatten()
+        .is_none()
+    {
         return ApiErrorResponse::not_found(format!("Template '{name}' not found"))
             .with_code("template_not_found")
             .into_json_tuple();
@@ -1687,9 +1746,10 @@ pub async fn restore_template_version(
             .into_json_tuple();
     }
 
+    let home_dir = state.kernel.config_ref().home_dir.clone();
     // Only operator-authored templates can be restored (not live agents).
-    if !agent_type_path(&name).exists() {
-        if workspace_agent_manifest_path(&name).exists() {
+    if !agent_type_path_in(&home_dir, &name).exists() {
+        if workspace_agent_manifest_path_in(&home_dir, &name).exists() {
             return ApiErrorResponse::conflict(
                 "that name belongs to a live agent; restore it through /api/agents",
             )
@@ -1728,7 +1788,7 @@ pub async fn restore_template_version(
         }
     };
 
-    match persist_agent_type(&name, &manifest) {
+    match persist_agent_type_in(&home_dir, &name, &manifest) {
         Ok(rendered) => {
             let _ = record_template_version(&state, &name, &rendered, "restore");
             (
@@ -1745,6 +1805,82 @@ pub async fn restore_template_version(
             tracing::error!("{e}");
             ApiErrorResponse::internal_scrub(e).into_json_tuple()
         }
+    }
+}
+
+#[cfg(test)]
+mod read_agent_type_in_tests {
+    use super::{read_agent_type_in, TemplateSource};
+
+    /// #8112: the `agent-types/` read failing for a real reason (here,
+    /// `agent-types` existing as a plain file — the ENOTDIR case cited in the
+    /// review) must not veto a value the independently-readable workspace
+    /// manifest can still supply. Before the fix, any non-`NotFound` error on
+    /// the first source short-circuited the whole function with `return
+    /// Err(e)`, so `POST /api/agents {"template": name}` hard-failed even
+    /// though the same name was a perfectly readable live agent.
+    #[tokio::test]
+    async fn broken_agent_type_read_falls_back_to_the_workspace_manifest() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path();
+
+        // `agent-types/{name}.toml` becomes unreadable for a reason other
+        // than absence: the parent `agent-types` is a file, not a directory.
+        tokio::fs::write(home.join("agent-types"), "not a directory")
+            .await
+            .unwrap();
+
+        let workspace_dir = home.join("workspaces").join("agents").join("researcher");
+        tokio::fs::create_dir_all(&workspace_dir).await.unwrap();
+        tokio::fs::write(workspace_dir.join("agent.toml"), "name = \"researcher\"\n")
+            .await
+            .unwrap();
+
+        let (source, content) = read_agent_type_in(home, "researcher")
+            .await
+            .expect("a broken agent-types read must not veto the readable workspace manifest")
+            .expect("the workspace manifest must be found");
+        assert_eq!(source, TemplateSource::WorkspaceAgent);
+        assert_eq!(content, "name = \"researcher\"\n");
+    }
+
+    /// Only when *both* sources fail for a reason other than absence is an
+    /// `Err` the honest verdict.
+    #[tokio::test]
+    async fn both_sources_broken_returns_an_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path();
+
+        tokio::fs::write(home.join("agent-types"), "not a directory")
+            .await
+            .unwrap();
+        // `workspaces/agents/researcher` as a file, not a directory, makes
+        // `.../researcher/agent.toml` ENOTDIR too.
+        tokio::fs::create_dir_all(home.join("workspaces").join("agents"))
+            .await
+            .unwrap();
+        tokio::fs::write(
+            home.join("workspaces").join("agents").join("researcher"),
+            "not a directory either",
+        )
+        .await
+        .unwrap();
+
+        let result = read_agent_type_in(home, "researcher").await;
+        assert!(
+            result.is_err(),
+            "both sources broken for a reason other than absence must surface as Err, got {result:?}"
+        );
+    }
+
+    /// Absence (the ordinary "no such template" case) must still resolve to
+    /// `Ok(None)`, not an error — the fallback logic must not turn a mere
+    /// absence into a false positive for "broken".
+    #[tokio::test]
+    async fn both_sources_absent_returns_ok_none() {
+        let tmp = tempfile::tempdir().unwrap();
+        let result = read_agent_type_in(tmp.path(), "nobody-home").await;
+        assert!(matches!(result, Ok(None)), "got {result:?}");
     }
 }
 

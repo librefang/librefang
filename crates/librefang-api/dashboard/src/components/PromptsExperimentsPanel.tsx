@@ -3,7 +3,6 @@ import { useTranslation } from "react-i18next";
 import { AnimatePresence, motion } from "motion/react";
 import { tabContent } from "../lib/motion";
 import {
-  X,
   Plus,
   Check,
   FlaskConical,
@@ -50,14 +49,25 @@ function metricBadgeVariant(
   return "default";
 }
 
-export function PromptsExperimentsModal({
+/**
+ * An agent's prompt versions and A/B experiments, as a surface rather than a
+ * dialog.
+ *
+ * This was `PromptsExperimentsModal`, opened from a button at the bottom of the
+ * Configure drawer: two internal tabs, a close button and a backdrop wrapped
+ * around content that has nowhere else to be. Promoted to a panel so it can be
+ * the "prompts" sub-tab of "logs & info" — the versions *are* the agent's
+ * prompt history, which is a thing to read, and reading is what that tab is
+ * for.
+ *
+ * The two internal tabs keep their ids and their `aria-controls` wiring: they
+ * are a nested tablist inside the "logs & info" sub-tab, and `agents-panel-*`
+ * / `agents-tab-*` are not names the outer bar uses.
+ */
+export function PromptsExperimentsPanel({
   agentId,
-  agentName,
-  onClose,
 }: {
   agentId: string;
-  agentName: string;
-  onClose: () => void;
 }) {
   const { t } = useTranslation();
   const [activeTab, setActiveTab] = useState<"versions" | "experiments">(
@@ -93,42 +103,11 @@ export function PromptsExperimentsModal({
   const metrics = metricsQuery.data ?? [];
 
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/40 backdrop-blur-xl"
-      onClick={(event) => {
-        if (event.target === event.currentTarget) onClose();
-      }}
-    >
-      <div
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="prompts-experiments-dialog-title"
-        className="bg-surface rounded-t-2xl sm:rounded-2xl shadow-2xl border border-border-subtle w-full sm:w-[640px] sm:max-w-[90vw] max-h-[85vh] overflow-hidden flex flex-col"
-        onClick={(e) => e.stopPropagation()}
-      >
-        <div className="px-6 py-4 border-b border-border-subtle flex items-center justify-between shrink-0">
-          <div>
-            <h3
-              id="prompts-experiments-dialog-title"
-              className="text-lg font-black"
-            >
-              {agentName}
-            </h3>
-            <p className="text-xs text-text-dim">{t("agents.prompts_experiments.title")}</p>
-          </div>
-          <button
-            onClick={onClose}
-            className="p-2 rounded-xl hover:bg-main"
-            aria-label={t("common.close", { defaultValue: "Close" })}
-          >
-            <X className="w-4 h-4" />
-          </button>
-        </div>
-
+    <div className="flex flex-col gap-3">
         <div
           role="tablist"
           aria-label={t("agents.prompts_experiments.title")}
-          className="px-6 py-3 border-b border-border-subtle flex gap-2 shrink-0"
+          className="flex gap-2 shrink-0"
         >
           <button
             id="agents-tab-versions"
@@ -154,7 +133,7 @@ export function PromptsExperimentsModal({
           </button>
         </div>
 
-        <div className="flex-1 overflow-y-auto p-6">
+        <div>
           <AnimatePresence mode="wait">
             <motion.div
               key={activeTab}
@@ -708,7 +687,6 @@ export function PromptsExperimentsModal({
             </motion.div>
           </AnimatePresence>
         </div>
-      </div>
       <ConfirmDialog
         isOpen={versionToDelete !== null}
         title={t("agents.prompts_experiments.delete_version_title")}

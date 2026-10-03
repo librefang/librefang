@@ -62,6 +62,14 @@ pub struct PurgeReport {
     pub workspace_shared: bool,
     /// An agent-type template of the same name was deleted.
     pub agent_type_removed: bool,
+    /// A stored avatar image under `<home>/avatars/` was deleted (#8339).
+    ///
+    /// Keyed by `AgentId`, and the default id is derived deterministically
+    /// from the agent's name — so without this, a new agent later spawned
+    /// under the purged name would inherit the old agent's picture, which is
+    /// the same name-collision failure [`Self::cron_jobs_removed`] exists to
+    /// prevent and rather more visible.
+    pub avatar_removed: bool,
     /// Cron jobs owned by the purged agent id(s) were removed from
     /// `<home>/data/cron_jobs.json`.
     ///
@@ -381,6 +389,12 @@ pub fn plan_purge(substrate: &MemorySubstrate, cfg: &KernelConfig, agent_name: &
         preview.agent_type_removed = true;
     }
 
+    // Same id set the execution pass uses, so `--dry-run` and the run agree.
+    let avatars_dir = cfg.effective_avatars_dir();
+    preview.avatar_removed = purge_ids
+        .iter()
+        .any(|id| librefang_types::media::find_avatar(&avatars_dir, &id.to_string()).is_some());
+
     PurgePlan {
         preview,
         failures,
@@ -547,7 +561,31 @@ pub fn purge_agent(
         }
     }
 
+    // Every id this purge attributed to the name, not just the roster one:
+    // an avatar set by an earlier incarnation of the same name is residue of
+    // exactly the kind this command exists to clear, and the deterministic
+    // `AgentId::from_name` means the next agent of that name would find it.
+    let avatars_dir = cfg.effective_avatars_dir();
+    for id in avatar_purge_ids(&plan) {
+        if librefang_types::media::remove_avatars(&avatars_dir, &id.to_string()) > 0 {
+            report.avatar_removed = true;
+        }
+    }
+
     PurgeOutcome { report, failures }
+}
+
+/// Every agent id whose avatar this purge should clear.
+///
+/// The roster id plus every orphan id the plan attributed to the name, deduplicated because a roster entry spawned under the name-derived UUID appears in both.
+fn avatar_purge_ids(plan: &PurgePlan) -> Vec<AgentId> {
+    let mut ids: Vec<AgentId> = plan.roster_agent_id.into_iter().collect();
+    for id in &plan.orphan_agent_ids {
+        if !ids.contains(id) {
+            ids.push(*id);
+        }
+    }
+    ids
 }
 
 /// Reject a name that would not stay put when joined onto a directory.

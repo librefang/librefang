@@ -9,6 +9,7 @@ overrides:
   "@chevrotain/cst-dts-gen>lodash-es": "^4.18.1"
   "@chevrotain/gast>lodash-es": "^4.18.1"
   "dagre-d3-es>lodash-es": "^4.18.1"
+  dompurify: ">=3.4.16"
 
 auditConfig:
   ignoreGhsas:

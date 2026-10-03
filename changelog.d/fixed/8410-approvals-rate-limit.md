@@ -1,0 +1,3 @@
+Approving a batch of tool calls no longer answers `429 Too many login attempts` and locks the operator out of their own dashboard for the rest of the fifteen-minute window.
+  The per-IP auth limiter counts requests before the handler runs, so it was spending the operator's login budget on approvals that had already succeeded, and `approve_request` only verifies a TOTP or recovery code when the approval policy requires one (`approval.second_factor`) — with the default `none` there was no credential on that path to brute-force.
+  `/api/approvals/{id}/approve` is now metered only while that policy actually demands a code, which keeps the #4020 protection exactly where it applies (#8410) (@DaBlitzStein)

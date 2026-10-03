@@ -117,12 +117,26 @@ pub struct Attachment {
 }
 
 /// Request body for POST /api/comms/task.
+///
+/// Carries the same per-task queue controls as `POST /api/tasks`
+/// (`task_queue_post_root`). They are typed rather than absent so a client
+/// that sends them learns what happened: an absent field takes the neutral
+/// default, and a present field of the wrong type is rejected by the
+/// deserializer instead of being dropped on the way to a 201 for a task the
+/// queue would order as if the client had said nothing.
 #[derive(Debug, Clone, Deserialize)]
 pub struct CommsTaskRequest {
     pub title: String,
     pub description: String,
     #[serde(default)]
     pub assigned_to: Option<String>,
+    /// Claim-queue ordering key — higher is served first. Absent is `0`.
+    #[serde(default)]
+    pub priority: Option<i64>,
+    /// Per-task override for `[task_board] claim_ttl_secs`, in seconds.
+    /// Absent inherits the global TTL; `0` means "never reclaim".
+    #[serde(default)]
+    pub timeout_secs: Option<u32>,
 }
 
 #[cfg(test)]

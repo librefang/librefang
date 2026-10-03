@@ -544,6 +544,7 @@ admin_role = "admin"
             tool_categories: None,
             memory_access: None,
             channel_tool_rules: std::collections::HashMap::new(),
+            emoji: None,
         };
         let json = serde_json::to_string(&uc).unwrap();
         let back: UserConfig = serde_json::from_str(&json).unwrap();
@@ -587,6 +588,7 @@ admin_role = "admin"
                 delete_allowed: true,
             }),
             channel_tool_rules: channel_rules,
+            emoji: None,
         };
 
         // JSON roundtrip
@@ -926,6 +928,7 @@ admin_role = "admin"
                     tool_categories: None,
                     memory_access: None,
                     channel_tool_rules: std::collections::HashMap::new(),
+                    emoji: None,
                 },
                 UserConfig {
                     name: "Negative".into(),
@@ -940,6 +943,7 @@ admin_role = "admin"
                     tool_categories: None,
                     memory_access: None,
                     channel_tool_rules: std::collections::HashMap::new(),
+                    emoji: None,
                 },
                 UserConfig {
                     name: "NaN".into(),
@@ -954,6 +958,7 @@ admin_role = "admin"
                     tool_categories: None,
                     memory_access: None,
                     channel_tool_rules: std::collections::HashMap::new(),
+                    emoji: None,
                 },
                 UserConfig {
                     name: "InRange".into(),
@@ -968,6 +973,7 @@ admin_role = "admin"
                     tool_categories: None,
                     memory_access: None,
                     channel_tool_rules: std::collections::HashMap::new(),
+                    emoji: None,
                 },
             ],
             ..KernelConfig::default()
@@ -1020,6 +1026,7 @@ admin_role = "admin"
                     tool_categories: None,
                     channel_tool_rules: std::collections::HashMap::new(),
                     budget: None,
+                    emoji: None,
                 },
                 UserConfig {
                     name: "ProperlyConfigured".into(),
@@ -1035,6 +1042,7 @@ admin_role = "admin"
                     tool_categories: None,
                     channel_tool_rules: std::collections::HashMap::new(),
                     budget: None,
+                    emoji: None,
                 },
             ],
             ..KernelConfig::default()
@@ -1087,6 +1095,7 @@ admin_role = "admin"
                     tool_categories: None,
                     channel_tool_rules: std::collections::HashMap::new(),
                     budget: None,
+                    emoji: None,
                 },
                 // Properly configured for delete: has writable + flag.
                 // Must NOT trigger the new warning.
@@ -1105,6 +1114,7 @@ admin_role = "admin"
                     tool_categories: None,
                     channel_tool_rules: std::collections::HashMap::new(),
                     budget: None,
+                    emoji: None,
                 },
             ],
             ..KernelConfig::default()

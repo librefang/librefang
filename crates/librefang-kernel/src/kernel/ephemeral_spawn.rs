@@ -290,6 +290,15 @@ impl LibreFangKernel {
         if let Some(over) = request.model.as_ref() {
             apply_model_override(&mut manifest, over);
         }
+        // #8112: same resolution `execute_llm_agent` runs — without it, a
+        // `top_p` / `frequency_penalty` / `presence_penalty` set as a
+        // per-model catalog override never reached an ephemeral worker's
+        // turn. Placed after the request-level model override above so it
+        // resolves against the model the worker will actually call.
+        super::manifest_helpers::apply_resolved_inference_params(
+            &self.llm.model_catalog.load(),
+            &mut manifest.model,
+        );
 
         // ── System prompt ───────────────────────────────────────────────────
         let (granted_tool_names, granted_tool_hints) =
@@ -682,6 +691,29 @@ impl LibreFangKernel {
     }
 }
 
+#[cfg(test)]
+mod ephemeral_session_tests {
+    use super::new_ephemeral_session;
+    use librefang_types::agent::AgentId;
+
+    /// Regression for #7991 review: the ephemeral worker's session is
+    /// `incognito`, so `save_session` is never called on it — nothing
+    /// downstream can ever read a `parent_session_id` stamped here. Pins
+    /// the value at the point of construction, since no round-trip
+    /// through the database can distinguish the two (both leave
+    /// `sessions` untouched either way).
+    #[test]
+    fn ephemeral_session_has_no_parent_session_id() {
+        let session = new_ephemeral_session(AgentId::new(), "test mission".to_string());
+        assert!(
+            session.parent_session_id.is_none(),
+            "an ephemeral worker's session is never persisted (incognito=true \
+             suppresses save_session), so a parent pointer here is a write \
+             nobody reads and falsely implies lineage `children_of` could find"
+        );
+    }
+}
+
 /// Apply an `EphemeralModelOverride` to the worker's manifest.
 ///
 /// With no `agent_type` the worker manifest is `parent.manifest.clone()`, so
@@ -982,29 +1014,6 @@ mod model_override_tests {
             manifest.model.extra_params.is_empty(),
             "OpenAI's reasoning_effort posted to anthropic, got: {:?}",
             manifest.model.extra_params
-        );
-    }
-}
-
-#[cfg(test)]
-mod ephemeral_session_tests {
-    use super::new_ephemeral_session;
-    use librefang_types::agent::AgentId;
-
-    /// Regression for #7991 review: the ephemeral worker's session is
-    /// `incognito`, so `save_session` is never called on it — nothing
-    /// downstream can ever read a `parent_session_id` stamped here. Pins
-    /// the value at the point of construction, since no round-trip
-    /// through the database can distinguish the two (both leave
-    /// `sessions` untouched either way).
-    #[test]
-    fn ephemeral_session_has_no_parent_session_id() {
-        let session = new_ephemeral_session(AgentId::new(), "test mission".to_string());
-        assert!(
-            session.parent_session_id.is_none(),
-            "an ephemeral worker's session is never persisted (incognito=true \
-             suppresses save_session), so a parent pointer here is a write \
-             nobody reads and falsely implies lineage `children_of` could find"
         );
     }
 }

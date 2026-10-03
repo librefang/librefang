@@ -90,6 +90,22 @@ export const agentKeys = {
   // configured on this instance".
   channels: (agentId: string) =>
     [...agentKeys.all, "channels", agentId] as const,
+  // The avatar image itself (#8339), cached as a Blob because
+  // `GET /api/agents/{id}/avatar` is authenticated and an `<img src>` carries
+  // no bearer token. Its own subtree rather than a leaf under `detail(id)`:
+  // the agent detail is refetched on a timer and re-downloading an image on
+  // every poll is the one thing this key exists to avoid.
+  avatar: (agentId: string) =>
+    [...agentKeys.all, "avatar", agentId] as const,
+  // Nested under `detail(agentId)`, not a sibling of `details()`: the history
+  // of one agent's manifest is a property of that agent, and every write that
+  // produces a new snapshot already invalidates its detail. As a sibling it
+  // needed each of those mutations to remember a second, explicit
+  // invalidation — and the ones that only invalidate `lists()` (suspend,
+  // resume) could not reach it at all, so the History tab sat stale after the
+  // very write that added a row. Same shape as `agentTypeKeys.registryDiff`.
+  manifestHistory: (agentId: string) =>
+    [...agentKeys.detail(agentId), "manifestHistory"] as const,
 };
 
 // Central prompt repository (#6160). The fleet-wide overview
@@ -132,15 +148,11 @@ export const modelKeys = {
 };
 
 // Profile-based model routing. `profiles()` is the kernel-wide catalog
-// (builtin asset + `~/.librefang/model_profiles.toml`); `agent(id)` is one
-// agent's mode + router override. Both hang off `all` so a mutation can
-// invalidate the whole domain in a single call.
+// (builtin asset + `~/.librefang/model_profiles.toml`).
 export const modelRouterKeys = {
   all: ["modelRouter"] as const,
   lists: () => [...modelRouterKeys.all, "list"] as const,
   profiles: () => [...modelRouterKeys.lists(), "profiles"] as const,
-  details: () => [...modelRouterKeys.all, "detail"] as const,
-  agent: (agentId: string) => [...modelRouterKeys.details(), agentId] as const,
 };
 
 export const providerKeys = {
@@ -483,6 +495,17 @@ export const userKeys = {
     [...userKeys.lists(), filters] as const,
   details: () => [...userKeys.all, "detail"] as const,
   detail: (name: string) => [...userKeys.details(), name] as const,
+  // The signed-in user's avatar image (#8339), cached as a Blob because
+  // `GET /api/users/me/avatar` is authenticated and an `<img src>` carries no
+  // bearer token. Its own subtree for the reason the agent one has: the user
+  // detail is refetched on a timer and re-downloading an image on every poll is
+  // what this key exists to avoid.
+  //
+  // Keyed by the *name* even though the path says `me`. The path is literal so
+  // that a name never becomes a path segment, but the cache entry still has to
+  // change when the name does — otherwise signing in as somebody else on the
+  // same page would go on serving the previous user's picture from cache.
+  avatar: (name: string) => [...userKeys.all, "avatar", name] as const,
 };
 
 // #7745 — user groups. `memberships(user)` hangs off the same root so a
@@ -526,6 +549,16 @@ export const authzKeys = {
   all: ["authz"] as const,
   effectives: () => [...authzKeys.all, "effective"] as const,
   effective: (name: string) => [...authzKeys.effectives(), name] as const,
+  // The calling credential's own identity. A sibling of `effectives()` rather
+  // than a member of it: every `effective` key is one per named subject, and
+  // "who am I" takes no subject argument.
+  //
+  // The user mutations invalidate this one — the emoji patch, both image
+  // writes, and the bulk import through `authzKeys.all` — because `emoji` and
+  // `has_avatar` are answers only this read carries. It is also `gcTime: 0` (see
+  // `authzQueries.whoami`), which keeps a stale copy from outliving the page
+  // that read it.
+  whoami: () => [...authzKeys.all, "whoami"] as const,
 };
 
 export const mediaKeys = {

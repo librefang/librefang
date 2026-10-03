@@ -19,6 +19,9 @@ import {
   importUsers,
   rotateUserKey,
   updateUserPolicy,
+  uploadUserAvatar,
+  deleteUserAvatar,
+  updateUserIdentity,
   type UserUpsertPayload,
   type PermissionPolicyUpdate,
   type BulkImportResult,
@@ -164,6 +167,104 @@ export function useUpdateUserPolicy() {
       qc.invalidateQueries({
         queryKey: authzKeys.effective(variables.name),
       });
+    },
+  });
+}
+
+// --- Avatar image and emoji (#8339) ------------------------------------------
+
+/**
+ * POST /api/users/{name}/avatar — store an image as this user's avatar.
+ *
+ * Raw bytes with no multipart and no filename, like the agent route: the daemon
+ * sniffs the format, and the file it writes is named after a UUID it derives
+ * from the name rather than after anything a caller sent.
+ *
+ * The avatar key is invalidated in `onSuccess` rather than `onSettled` for the
+ * reason `useUploadAgentAvatar` documents: the handler places the new image
+ * before clearing the superseded ones, so an upload that fails leaves the
+ * previous picture exactly as it was, and refetching after one would only
+ * arrive back at the bytes already cached.
+ */
+export function useUploadUserAvatar() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ name, file }: { name: string; file: Blob }) =>
+      uploadUserAvatar(name, file),
+    onSuccess: (_data, variables) => {
+      qc.invalidateQueries({ queryKey: userKeys.avatar(variables.name) });
+      // The reads that report whether this user has a picture. It is not a
+      // stored field — it is the file's existence — so the moment the file
+      // changes, every cached copy of that answer is wrong.
+      qc.invalidateQueries({ queryKey: userKeys.detail(variables.name) });
+      qc.invalidateQueries({ queryKey: userKeys.lists() });
+      // Neither of those can actually carry that answer: `UserItem` declares no
+      // `has_avatar`, so the detail and list responses the two lines above
+      // refresh have nothing to say about it. The read that does report it is
+      // `whoami`, and the appearance section drives its buttons straight off
+      // that. Left stale, it draws the picture the upload just stored and still
+      // offers "Upload" with no Remove — the operator has to close and reopen
+      // the drawer to remove what they can already see.
+      qc.invalidateQueries({ queryKey: authzKeys.whoami() });
+    },
+  });
+}
+
+/**
+ * DELETE /api/users/{name}/avatar — drop the image.
+ *
+ * The avatar key is **removed** rather than invalidated, exactly as
+ * `useDeleteAgentAvatar` does: a refetch after a delete spends a request to be
+ * told there is nothing there, and the answer to "is there a picture" is
+ * already known.
+ */
+export function useDeleteUserAvatar() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (name: string) => deleteUserAvatar(name),
+    onSuccess: (_data, name) => {
+      qc.removeQueries({ queryKey: userKeys.avatar(name) });
+      qc.invalidateQueries({ queryKey: userKeys.detail(name) });
+      qc.invalidateQueries({ queryKey: userKeys.lists() });
+      // Same reason as the upload above: `whoami` is the only read that reports
+      // whether a picture exists, and the section's controls read it. Without
+      // this they keep offering Remove for a picture that is no longer there.
+      qc.invalidateQueries({ queryKey: authzKeys.whoami() });
+    },
+  });
+}
+
+/**
+ * PATCH /api/users/{name}/identity — the user's emoji.
+ *
+ * Not partial, unlike the agent twin: the daemon documents `emoji` as "absent is
+ * treated as `null`" and assigns the validated value straight onto the row, so
+ * a body that omits the key clears the glyph rather than leaving it alone.
+ *
+ * This is the one avatar write that goes through the config file. The daemon
+ * rewrites the `[[users]]` table with `toml_edit` — comments and unrelated
+ * sections preserved — backs the file up, validates it and reloads the kernel
+ * before this resolves. The image above never touches it: an image is a file.
+ */
+export function useUpdateUserIdentity() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ name, emoji }: { name: string; emoji?: string }) =>
+      updateUserIdentity(name, { emoji }),
+    onSuccess: (_data, variables) => {
+      qc.invalidateQueries({ queryKey: userKeys.detail(variables.name) });
+      qc.invalidateQueries({ queryKey: userKeys.lists() });
+      // The chat bubble draws the caller's emoji out of `whoami`, which is a
+      // different key from the two above and which no user mutation would
+      // otherwise touch.
+      //
+      // Invalidated unconditionally rather than only when the edited name turns
+      // out to be the caller's: this hook is addressed by name and has no way to
+      // know whose name it was handed, and the cost of guessing wrong is one
+      // small request rather than a bubble that goes on showing the old emoji.
+      // The two image writes do the same, for the same underlying reason: both
+      // `emoji` and `has_avatar` are answers only this read carries.
+      qc.invalidateQueries({ queryKey: authzKeys.whoami() });
     },
   });
 }

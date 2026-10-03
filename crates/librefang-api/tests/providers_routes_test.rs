@@ -2938,11 +2938,11 @@ async fn the_model_list_does_not_probe_a_provider_that_never_opted_in() {
     );
 }
 
-/// `PUT /api/providers/{name}/discovery` flips the flag, reports it back on
-/// `/api/providers`, and persists it into the provider's own TOML so the
-/// opt-in survives a daemon restart.
+/// `PUT /api/providers/{name}/discovery` flips the flag, reports it back on `/api/providers`, and records it in the operator-owned preference file so the opt-in survives a daemon restart (#8407).
+///
+/// It deliberately does not write the provider's own TOML: the boot-time registry sync rewrites those files from the registry, and no registry-shipped file carries `discover_models` at all, so a toggle stored there was cleared by the next restart.
 #[tokio::test(flavor = "multi_thread")]
-async fn set_provider_discovery_flips_flag_and_persists_to_the_provider_file() {
+async fn set_provider_discovery_flips_flag_and_persists_outside_the_provider_file() {
     let h = boot_with_provider(ProviderInfo {
         id: "acme-toggle".to_string(),
         display_name: "ACME Toggle".to_string(),
@@ -2977,49 +2977,64 @@ async fn set_provider_discovery_flips_flag_and_persists_to_the_provider_file() {
         "the list endpoint must report the new setting; body: {after}"
     );
 
-    let provider_file = h
-        ._state
-        .kernel
-        .home_dir()
-        .join("providers")
-        .join("acme-toggle.toml");
-    let persisted = std::fs::read_to_string(&provider_file).unwrap_or_else(|e| {
+    // The provider's own file is written the way the registry ships it — no
+    // `discover_models` key — because that file is not where the setting goes.
+    let home = h._state.kernel.home_dir();
+    let providers_dir = home.join("providers");
+    std::fs::create_dir_all(&providers_dir).unwrap();
+    let provider_file = providers_dir.join("acme-toggle.toml");
+    let registry_shaped = concat!(
+        "[provider]\n",
+        "id = \"acme-toggle\"\n",
+        "base_url = \"http://127.0.0.1:59999/v1\"\n",
+    );
+    std::fs::write(&provider_file, registry_shaped).unwrap();
+
+    let (status, body) = json_request(
+        &h,
+        Method::PUT,
+        "/api/providers/acme-toggle/discovery",
+        Some(serde_json::json!({ "discover_models": true })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+
+    // The preference lands in `data/`, next to the operator's other provider state.
+    let prefs_file = home.join("data").join("provider_discovery.json");
+    let prefs = std::fs::read_to_string(&prefs_file).unwrap_or_else(|e| {
         panic!(
-            "provider file must exist at {}: {e}",
-            provider_file.display()
+            "preference file must exist at {}: {e}",
+            prefs_file.display()
         )
     });
     assert!(
-        persisted.contains("discover_models = true"),
-        "the opt-in must survive a restart; file content:\n{persisted}"
+        prefs.contains("\"acme-toggle\": true"),
+        "the opt-in must be recorded in the preference file; file content:\n{prefs}"
     );
 
-    // The assertion above is not enough on its own: the file used to be written
-    // with `id` + `discover_models` and nothing else, which failed the catalog
-    // loader's required fields, so the loader discarded it whole and the flag
-    // reverted on every boot (#7776). Reload the way the daemon does at boot and
-    // assert the record actually comes back.
-    let reloaded = librefang_runtime::model_catalog::ModelCatalog::new_from_dir(
-        &h._state.kernel.home_dir().join("providers"),
+    // And the provider file is untouched, byte for byte: this is the file the
+    // registry sync rewrites, which is why the setting does not live in it.
+    assert_eq!(
+        std::fs::read_to_string(&provider_file).unwrap(),
+        registry_shaped,
+        "the toggle must not rewrite the file the registry sync owns"
     );
-    let round_tripped = reloaded.get_provider("acme-toggle").unwrap_or_else(|| {
-        panic!("the persisted file must load back as a provider; file content:\n{persisted}")
-    });
+
+    // Reload the way the daemon boots: catalog from `providers/`, preferences
+    // applied over it. The provider's record comes from the file, the setting
+    // from `data/`.
+    let mut reloaded = librefang_runtime::model_catalog::ModelCatalog::new_from_dir(&providers_dir);
+    reloaded.load_discover_prefs(&prefs_file);
+    let round_tripped = reloaded
+        .get_provider("acme-toggle")
+        .unwrap_or_else(|| panic!("the provider must load back from its file; prefs:\n{prefs}"));
     assert!(
         round_tripped.discover_models,
-        "the reloaded catalog must carry the opt-in; file content:\n{persisted}"
+        "a reboot must carry the opt-in; prefs:\n{prefs}"
     );
-    assert_eq!(
-        round_tripped.base_url, "http://127.0.0.1:59999/v1",
-        "the endpoint has to be written too, or the probe loop has nothing to poll"
-    );
-    assert_eq!(round_tripped.display_name, "ACME Toggle");
-    assert_eq!(
-        round_tripped.api_key_env,
-        "LIBREFANG_TEST_ACME_TOGGLE_API_KEY"
-    );
+    assert_eq!(round_tripped.base_url, "http://127.0.0.1:59999/v1");
 
-    // Turning it back off rewrites the same key rather than appending a second one.
+    // Turning it back off rewrites the same entry rather than appending a second one.
     let (status, _) = json_request(
         &h,
         Method::PUT,
@@ -3028,12 +3043,17 @@ async fn set_provider_discovery_flips_flag_and_persists_to_the_provider_file() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    let persisted = std::fs::read_to_string(&provider_file).expect("provider file still readable");
-    assert!(persisted.contains("discover_models = false"), "{persisted}");
+    let prefs = std::fs::read_to_string(&prefs_file).expect("preference file still readable");
+    assert!(prefs.contains("\"acme-toggle\": false"), "{prefs}");
     assert_eq!(
-        persisted.matches("discover_models").count(),
+        prefs.matches("acme-toggle").count(),
         1,
-        "the key is updated in place, not appended; file content:\n{persisted}"
+        "the entry is updated in place, not appended; file content:\n{prefs}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&provider_file).unwrap(),
+        registry_shaped,
+        "turning it off must not touch the provider file either"
     );
 }
 

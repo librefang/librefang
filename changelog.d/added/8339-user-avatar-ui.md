@@ -1,0 +1,5 @@
+An operator can now set their own emoji and avatar image from the dashboard, in the user form's edit drawer.
+The daemon could already store both, and nothing in the web UI mentioned either, so the user's side of a chat bubble fell back to a generic icon and the user list drew the name alone, whatever the identity said.
+The editor is drawn for the caller's own row and no other, and that falls out of the two reads underneath it rather than being a policy choice.
+The only user-avatar path the dashboard may fetch is the literal `/api/users/me/avatar`, because a user name does not fit the authenticated-image allowlist's character class — `encodeURIComponent("Juan Pérez")` carries a `%`, and widening the class to accept `%XX` would readmit `%2F`, which decodes to the `/` that allowlist exists to stop — and `UserItem` is the one user-shaped type the dashboard declares without `emoji` on it, so there is no list-shaped read to seed a draft from.
+Over another operator's row the editor would have drawn the signed-in user's own picture beside that user's name and seeded the field from the signed-in user's glyph. (#8339) (@DaBlitzStein)

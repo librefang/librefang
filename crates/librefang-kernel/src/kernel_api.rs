@@ -432,7 +432,6 @@ pub trait KernelApi: KernelHandle + Send + Sync {
         mode: librefang_types::agent::ModelMode,
         router_override: Option<librefang_types::model_profile::AgentRouterOverride>,
     ) -> KernelResult<()>;
-
     /// Replace an agent's named-workspace declarations, rewriting its `TOOLS.md`
     /// so the model is told about an alias the sandbox already accepts.
     fn set_agent_workspaces(

@@ -1,0 +1,3 @@
+Suspending or resuming an agent now refreshes the Version History tab, which previously kept showing the list from before the request that had just added a row to it.
+Suspend and resume rewrite `agent.toml` and record their own manifest snapshot, but the dashboard only invalidated the agent list, and the history query key sat outside the agent's own subtree where no invalidation could reach it.
+Nesting that key under the agent detail fixes the same staleness for the clear-hand-override action, and removes the two hand-written invalidations that manifest edits needed to remember. (#8041) (@DaBlitzStein)

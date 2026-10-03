@@ -56,6 +56,7 @@ type Client struct {
 	Sessions *SessionsResource
 	Skills *SkillsResource
 	System *SystemResource
+	Tasks *TasksResource
 	Tools *ToolsResource
 	Users *UsersResource
 	Vault *VaultResource
@@ -95,6 +96,7 @@ func New(baseURL string) *Client {
 		c.Sessions = &SessionsResource{client: c}
 		c.Skills = &SkillsResource{client: c}
 		c.System = &SystemResource{client: c}
+		c.Tasks = &TasksResource{client: c}
 		c.Tools = &ToolsResource{client: c}
 		c.Users = &UsersResource{client: c}
 		c.Vault = &VaultResource{client: c}
@@ -357,6 +359,22 @@ func (r *AgentsResource) PatchAgent(id string, data map[string]interface{}) (int
 	return r.client.request("PATCH", fmt.Sprintf("/api/agents/%s", id), data, nil)
 }
 
+func (r *AgentsResource) ServeAgentAvatar(id string) (interface{}, error) {
+	return r.client.request("GET", fmt.Sprintf("/api/agents/%s/avatar", id), nil, nil)
+}
+
+// UploadAgentAvatar sends a raw application/octet-stream body. An empty contentType defaults to it.
+func (r *AgentsResource) UploadAgentAvatar(id string, body []byte, contentType string) (interface{}, error) {
+	if contentType == "" {
+		contentType = "application/octet-stream"
+	}
+	return r.client.requestRaw("POST", fmt.Sprintf("/api/agents/%s/avatar", id), body, contentType)
+}
+
+func (r *AgentsResource) DeleteAgentAvatar(id string) (interface{}, error) {
+	return r.client.request("DELETE", fmt.Sprintf("/api/agents/%s/avatar", id), nil, nil)
+}
+
 func (r *AgentsResource) GetAgentChannels(id string) (interface{}, error) {
 	return r.client.request("GET", fmt.Sprintf("/api/agents/%s/channels", id), nil, nil)
 }
@@ -429,6 +447,10 @@ func (r *AgentsResource) GetAgentManifestToml(id string) (interface{}, error) {
 	return r.client.request("GET", fmt.Sprintf("/api/agents/%s/manifest", id), nil, nil)
 }
 
+func (r *AgentsResource) ListAgentManifestHistory(id string, query map[string]string) (interface{}, error) {
+	return r.client.request("GET", fmt.Sprintf("/api/agents/%s/manifest-history", id), nil, query)
+}
+
 func (r *AgentsResource) GetAgentMcpServers(id string) (interface{}, error) {
 	return r.client.request("GET", fmt.Sprintf("/api/agents/%s/mcp_servers", id), nil, nil)
 }
@@ -479,6 +501,10 @@ func (r *AgentsResource) ResumeAgent(id string) (interface{}, error) {
 
 func (r *AgentsResource) ListAgentRuntime(id string) (interface{}, error) {
 	return r.client.request("GET", fmt.Sprintf("/api/agents/%s/runtime", id), nil, nil)
+}
+
+func (r *AgentsResource) SaveAgentAsAgentType(id string, data map[string]interface{}) (interface{}, error) {
+	return r.client.request("POST", fmt.Sprintf("/api/agents/%s/save-as-agent-type", id), data, nil)
 }
 
 func (r *AgentsResource) GetAgentSession(id string, query map[string]string) (interface{}, error) {
@@ -1897,6 +1923,14 @@ func (r *SystemResource) ApiVersions() (interface{}, error) {
 	return r.client.request("GET", "/api/versions", nil, nil)
 }
 
+// ── Tasks Resource
+
+type TasksResource struct{ client *Client }
+
+func (r *TasksResource) TaskQueuePostRoot(data map[string]interface{}) (interface{}, error) {
+	return r.client.request("POST", "/api/tasks", data, nil)
+}
+
 // ── Tools Resource
 
 type ToolsResource struct{ client *Client }
@@ -1921,6 +1955,10 @@ func (r *UsersResource) ImportUsers(data map[string]interface{}) (interface{}, e
 	return r.client.request("POST", "/api/users/import", data, nil)
 }
 
+func (r *UsersResource) ServeMyAvatar() (interface{}, error) {
+	return r.client.request("GET", "/api/users/me/avatar", nil, nil)
+}
+
 func (r *UsersResource) GetUser(name string) (interface{}, error) {
 	return r.client.request("GET", fmt.Sprintf("/api/users/%s", name), nil, nil)
 }
@@ -1931,6 +1969,26 @@ func (r *UsersResource) UpdateUser(name string, data map[string]interface{}) (in
 
 func (r *UsersResource) DeleteUser(name string) (interface{}, error) {
 	return r.client.request("DELETE", fmt.Sprintf("/api/users/%s", name), nil, nil)
+}
+
+func (r *UsersResource) ServeUserAvatar(name string) (interface{}, error) {
+	return r.client.request("GET", fmt.Sprintf("/api/users/%s/avatar", name), nil, nil)
+}
+
+// UploadUserAvatar sends a raw application/octet-stream body. An empty contentType defaults to it.
+func (r *UsersResource) UploadUserAvatar(name string, body []byte, contentType string) (interface{}, error) {
+	if contentType == "" {
+		contentType = "application/octet-stream"
+	}
+	return r.client.requestRaw("POST", fmt.Sprintf("/api/users/%s/avatar", name), body, contentType)
+}
+
+func (r *UsersResource) DeleteUserAvatar(name string) (interface{}, error) {
+	return r.client.request("DELETE", fmt.Sprintf("/api/users/%s/avatar", name), nil, nil)
+}
+
+func (r *UsersResource) UpdateUserIdentity(name string, data map[string]interface{}) (interface{}, error) {
+	return r.client.request("PATCH", fmt.Sprintf("/api/users/%s/identity", name), data, nil)
 }
 
 func (r *UsersResource) GetUserPolicy(name string) (interface{}, error) {

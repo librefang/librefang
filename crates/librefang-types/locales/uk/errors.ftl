@@ -309,7 +309,7 @@ api-error-tool-requires-agent = Тула '{ $name }' потребує підтв
 api-error-validation-content-empty = Вміст не може бути порожнім
 api-error-validation-name-empty = new_name не може бути порожнім
 api-error-validation-title-required = Заголовок (title) є обов'язковим
-api-error-validation-avatar-url-invalid = URL аватара має бути http/https або data URI
+api-error-validation-avatar-url-invalid = URL аватара має бути шляхом аватара, який цей демон надає для цього агента, або порожнім. Завантажте зображення замість посилання.
 api-error-validation-color-invalid = Колір має бути шістнадцятковим кодом (hex), що починається з '#'
 
 # General errors

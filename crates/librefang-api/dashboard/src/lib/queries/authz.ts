@@ -7,7 +7,7 @@
 // without inline fetch handling.
 
 import { queryOptions, useQuery } from "@tanstack/react-query";
-import { ApiError, getEffectivePermissions } from "../http/client";
+import { ApiError, getEffectivePermissions, getWhoami } from "../http/client";
 import { authzKeys } from "./keys";
 import { withOverrides, type QueryOverrides } from "./options";
 
@@ -29,6 +29,28 @@ export const authzQueries = {
         return failureCount < 3;
       },
     }),
+  // The calling credential's own identity (#8339) — the name and emoji the chat
+  // draws on the user's side of a message.
+  //
+  // `staleTime: 0` and `gcTime: 0`, deliberately, where the queries above use
+  // long windows. What this answers is a property of the *credential*, and the
+  // credential changes while the page is loaded: `App.tsx` renders the login
+  // dialog in place of the router once `authNeeded` is set (see its
+  // `setOnUnauthorized`), and again on a re-login. Either way every page that
+  // reads this unmounts, and with nothing cached there is nothing for the next
+  // mount to inherit — so the previous user's name cannot end up on the current
+  // user's messages.
+  //
+  // Retrying is wrong in no-auth mode, where the route answers 401 and the
+  // caller is legitimate.
+  whoami: () =>
+    queryOptions({
+      queryKey: authzKeys.whoami(),
+      queryFn: () => getWhoami(),
+      staleTime: 0,
+      gcTime: 0,
+      retry: false,
+    }),
 };
 
 export function useEffectivePermissions(
@@ -39,4 +61,8 @@ export function useEffectivePermissions(
     ...options,
     enabled: Boolean(name) && options.enabled !== false,
   }));
+}
+
+export function useWhoami(options: QueryOverrides = {}) {
+  return useQuery(withOverrides(authzQueries.whoami(), options));
 }

@@ -1,0 +1,3 @@
+Opening an agent in the dashboard's manifest editor and pressing Save no longer deletes the `[autonomous]` and `[routing]` keys the form has no field for.
+`block_stall_degrade_after` was one of them, and the runtime reads it, so an agent configured with a loop-guard threshold came back from an unrelated edit with the guard gone and nothing said about it.
+Both sections now carry the extras slot `[thinking]` already had — the same loss, fixed there for `reasoning_mode` (#7946) — including its conditional shape, so switching a section off still deletes the whole table deliberately (#8401, #8402) (@DaBlitzStein)

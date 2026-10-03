@@ -1,0 +1,5 @@
+The TUI agent-types screen gains two registry-backed actions, both gated to manifest-backed rows the same way the existing `p` (promote) already is: `Shift+R` restores the agent type to its original registry definition through `POST /api/templates/{name}/restore`, and `v` opens a version-history table fed by `GET /api/templates/{name}/history`. `Shift+R`'s endpoint ships separately and this PR's TUI half stays a no-op until that lands.
+Inside the history table, `Enter` restores the template to the selected row's version through the history's own `POST /api/templates/{name}/history/{version_id}/restore` — already live on the daemon — closing the table and refreshing the list on success.
+A failed history fetch now reports the daemon's status and reason in place, instead of rendering every failure — a 404, a 500, a connection refused — as an indistinguishable empty list.
+Leaving the Templates tab and coming back closes a still-open history table instead of leaving it stale.
+All three keys are advertised in their screen's hint bar (#8073) (@DaBlitzStein)

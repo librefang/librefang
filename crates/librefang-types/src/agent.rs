@@ -2514,6 +2514,25 @@ pub struct ExperimentVariantMetrics {
 mod tests {
     use super::*;
 
+    // The dashboard's schedule-preservation reasoning cites this rejection:
+    // an unknown key anywhere inside [schedule] is a document the daemon
+    // refuses to load, so what the editor preserves there is never a field
+    // it was reading — the slot exists for forward compatibility and the
+    // editor's fidelity duty, not for config the daemon reads today. Pinned
+    // here because the wording is load-bearing for that comment.
+    #[test]
+    fn schedule_variant_rejects_unknown_keys() {
+        let err = toml::from_str::<AgentManifest>(
+            "name = \"x\"\n\n[schedule.periodic]\ncron = \"0 9 * * *\"\nzz = 7\n",
+        )
+        .expect_err("an unknown key inside a schedule variant must be rejected");
+        assert!(
+            err.to_string()
+                .contains("unexpected keys in table: zz, available keys: cron"),
+            "unexpected message: {err}"
+        );
+    }
+
     #[test]
     fn test_agent_id_uniqueness() {
         let id1 = AgentId::new();

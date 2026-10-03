@@ -11,12 +11,20 @@
 //! seeds `[[triggers]]`, `tool_allowlist`, `mcp_servers`, `max_history_messages`, `session_mode`
 //! and `[compaction]` first, then saves through the exact body the dashboard sends.
 //!
-//! ### `LIBREFANG_HOME`
+//! ### Two home directories, and why both exist
 //!
-//! The handlers resolve their storage under `librefang_home()`, which reads `LIBREFANG_HOME` live
-//! on every call. One tempdir is pinned for the whole binary via `OnceLock`, the env var is set
-//! exactly once, and the tests serialise behind a `Mutex` so listing assertions do not observe a
-//! sibling test's fixtures. Same approach as `profiles_templates_routes_integration.rs`.
+//! The handlers resolve *agent-type* storage under `state.kernel.config_ref().home_dir` (#8112) —
+//! NOT the process-wide `LIBREFANG_HOME` env var, which is what an embedder's `KernelConfig` can
+//! point somewhere else entirely. Each [`boot`] call gets a fresh `MockKernelBuilder` tempdir as
+//! its own `home_dir`, so fixtures are seeded under *that* harness's own directory, after `boot()`
+//! returns it, rather than into one directory shared by the whole test binary.
+//!
+//! The *registry* side is the other spelling: `registry_cache_dir()` — which the registry-diff and
+//! restore handlers call — reads the ambient `LIBREFANG_HOME`, not the kernel's `home_dir`. So
+//! [`home`] pins that variable to a tempdir once ([`boot`] forces the init) and
+//! [`write_registry_agent_type`] seeds there. Those ambient fixtures *are* shared by the whole
+//! binary, which is what [`lock`] serialises; the per-harness paths need no lock, because each
+//! harness is already isolated.
 
 use axum::http::StatusCode;
 use librefang_api::server;
@@ -32,6 +40,15 @@ use tower::ServiceExt;
 // Harness
 // ---------------------------------------------------------------------------
 
+/// The process-wide home the *ambient* agent-type APIs resolve through
+/// (`librefang_types::agent_type_store::registry_cache_dir`, used by the registry-diff and
+/// restore handlers). Set once, to a tempdir, **before** the first kernel boots, so nothing
+/// in this binary can reach the developer's real `~/.librefang`.
+///
+/// Kept alongside the per-harness [`home_dir`] because the two spellings answer different
+/// questions: [#8112]'s `_in` functions take the kernel's own `home_dir`, while the ambient
+/// helpers that other PRs' fixtures use read `LIBREFANG_HOME`. Both exist in the file because
+/// both exist in production.
 fn home() -> PathBuf {
     static HOME: OnceLock<TempDir> = OnceLock::new();
     let dir = HOME.get_or_init(|| {
@@ -45,17 +62,23 @@ fn home() -> PathBuf {
     dir.path().to_path_buf()
 }
 
-fn agent_types_dir() -> PathBuf {
-    home().join("agent-types")
-}
-
-fn agent_type_file(name: &str) -> PathBuf {
-    agent_types_dir().join(format!("{name}.toml"))
-}
-
+/// Serialises the tests that write into the ambient [`home`] directory. The per-harness
+/// paths need no lock — each `boot()` is its own tempdir — but the ambient registry fixtures
+/// are shared, and `write_registry_agent_type` lands in one directory for the whole binary.
 fn lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))
+}
+
+/// Remove what a test seeded under the ambient [`home`] directory.
+///
+/// The path is built here rather than through [`agent_type_file`] because that helper now
+/// takes a `&Harness`: its `home_dir` is the kernel's tempdir, which is a *different*
+/// directory from this one (see the module note on per-harness homes).
+fn cleanup(name: &str) {
+    let _ = std::fs::remove_file(home().join("agent-types").join(format!("{name}.toml")));
+    let _ = std::fs::remove_dir_all(home().join("workspaces").join("agents").join(name));
+    let _ = std::fs::remove_dir_all(home().join("registry").join("agent-types").join(name));
 }
 
 struct Harness {
@@ -70,7 +93,10 @@ impl Drop for Harness {
 }
 
 async fn boot() -> Harness {
-    // Force the home init before the kernel boots so nothing reaches the developer's `~/.librefang`.
+    // Force the ambient home init before the kernel boots so nothing reaches the developer's
+    // `~/.librefang`. The kernel gets its own tempdir from `MockKernelBuilder` regardless; this
+    // pins the *ambient* spelling the registry helpers and the handlers' `registry_cache_dir()`
+    // resolve through.
     let _ = home();
     let test = TestAppState::with_builder(MockKernelBuilder::new().with_config(|cfg| {
         cfg.default_model.provider = "ollama".to_string();
@@ -84,6 +110,21 @@ async fn boot() -> Harness {
     let (app, _state) =
         server::build_router(state.kernel.clone(), "127.0.0.1:0".parse().unwrap()).await;
     Harness { app, state }
+}
+
+/// This harness kernel's own home directory — where [`write_agent_type`] /
+/// [`write_workspace_agent`] seed fixtures, matching what the write verbs
+/// and the tool actually resolve against (#8112).
+fn home_dir(h: &Harness) -> PathBuf {
+    h.state.kernel.config_ref().home_dir.clone()
+}
+
+fn agent_types_dir(h: &Harness) -> PathBuf {
+    librefang_types::agent_type_store::agent_types_dir_in(&home_dir(h))
+}
+
+fn agent_type_file(h: &Harness, name: &str) -> PathBuf {
+    agent_types_dir(h).join(format!("{name}.toml"))
 }
 
 async fn request(h: &Harness, method: &str, path: &str, body: Option<Json>) -> (StatusCode, Json) {
@@ -151,13 +192,13 @@ async fn delete(h: &Harness, path: &str) -> (StatusCode, Json) {
     request(h, "DELETE", path, None).await
 }
 
-fn write_agent_type(name: &str, body: &str) {
-    std::fs::create_dir_all(agent_types_dir()).expect("create agent-types dir");
-    std::fs::write(agent_type_file(name), body).expect("write agent type");
+fn write_agent_type(h: &Harness, name: &str, body: &str) {
+    std::fs::create_dir_all(agent_types_dir(h)).expect("create agent-types dir");
+    std::fs::write(agent_type_file(h, name), body).expect("write agent type");
 }
 
-fn write_workspace_agent(name: &str, body: &str) {
-    let dir = home().join("workspaces").join("agents").join(name);
+fn write_workspace_agent(h: &Harness, name: &str, body: &str) {
+    let dir = home_dir(h).join("workspaces").join("agents").join(name);
     std::fs::create_dir_all(&dir).expect("create agent workspace");
     std::fs::write(dir.join("agent.toml"), body).expect("write agent.toml");
 }
@@ -194,12 +235,6 @@ model = "test-model"
 system_prompt = "Seeded."
 "#
     )
-}
-
-fn cleanup(name: &str) {
-    let _ = std::fs::remove_file(agent_type_file(name));
-    let _ = std::fs::remove_dir_all(home().join("workspaces").join("agents").join(name));
-    let _ = std::fs::remove_dir_all(home().join("registry").join("agent-types").join(name));
 }
 
 /// The exact body the dashboard's agent-type editor sends on save: seven flat keys, nothing else.
@@ -252,12 +287,10 @@ prompt_template = "on push"
 
 #[tokio::test(flavor = "multi_thread")]
 async fn update_preserves_every_field_the_dashboard_form_never_sends() {
-    let _g = lock().lock().await;
     let name = "at_preserve";
-    cleanup(name);
-    write_agent_type(name, &manifest_with_non_form_fields(name));
-
     let h = boot().await;
+    write_agent_type(&h, name, &manifest_with_non_form_fields(name));
+
     let (status, body) = put(
         &h,
         &format!("/api/templates/{name}"),
@@ -276,7 +309,7 @@ async fn update_preserves_every_field_the_dashboard_form_never_sends() {
     // …and nothing the form could not express went with it. Each of these was reset to its
     // default by the rebuild-from-body implementation this endpoint replaces.
     let stored: toml::Value =
-        toml::from_str(&std::fs::read_to_string(agent_type_file(name)).unwrap()).unwrap();
+        toml::from_str(&std::fs::read_to_string(agent_type_file(&h, name)).unwrap()).unwrap();
     assert_eq!(
         stored["max_history_messages"].as_integer(),
         Some(42),
@@ -307,8 +340,6 @@ async fn update_preserves_every_field_the_dashboard_form_never_sends() {
         Some(1),
         "[[triggers]] did not survive the save: {stored}"
     );
-
-    cleanup(name);
 }
 
 // ---------------------------------------------------------------------------
@@ -317,12 +348,10 @@ async fn update_preserves_every_field_the_dashboard_form_never_sends() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn update_writes_blank_fields_through_instead_of_substituting_canned_text() {
-    let _g = lock().lock().await;
     let name = "at_blank";
-    cleanup(name);
-    write_agent_type(name, &manifest_with_non_form_fields(name));
-
     let h = boot().await;
+    write_agent_type(&h, name, &manifest_with_non_form_fields(name));
+
     let (status, body) = put(
         &h,
         &format!("/api/templates/{name}"),
@@ -335,7 +364,7 @@ async fn update_writes_blank_fields_through_instead_of_substituting_canned_text(
     .await;
     assert_eq!(status, StatusCode::OK, "{body}");
 
-    let stored = std::fs::read_to_string(agent_type_file(name)).unwrap();
+    let stored = std::fs::read_to_string(agent_type_file(&h, name)).unwrap();
     let parsed: toml::Value = toml::from_str(&stored).unwrap();
     assert_eq!(parsed["model"]["system_prompt"].as_str(), Some(""));
     assert_eq!(parsed["model"]["provider"].as_str(), Some(""));
@@ -344,16 +373,11 @@ async fn update_writes_blank_fields_through_instead_of_substituting_canned_text(
         !stored.contains("You are a helpful AI agent."),
         "a deliberately blank system prompt was replaced with canned text: {stored}"
     );
-
-    cleanup(name);
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn create_writes_a_blank_system_prompt_through_unchanged() {
-    let _g = lock().lock().await;
     let name = "at_blank_create";
-    cleanup(name);
-
     let h = boot().await;
     let (status, body) = post(
         &h,
@@ -363,7 +387,7 @@ async fn create_writes_a_blank_system_prompt_through_unchanged() {
     .await;
     assert_eq!(status, StatusCode::CREATED, "{body}");
 
-    let stored = std::fs::read_to_string(agent_type_file(name)).unwrap();
+    let stored = std::fs::read_to_string(agent_type_file(&h, name)).unwrap();
     assert!(
         !stored.contains("You are a helpful AI agent."),
         "create substituted canned text for an explicitly blank prompt: {stored}"
@@ -371,8 +395,6 @@ async fn create_writes_a_blank_system_prompt_through_unchanged() {
     // A key the caller omitted entirely still gets the manifest's own documented default, which is
     // the sentinel the kernel resolves against `[default_model]`.
     assert_eq!(body["spec"]["provider"], "default");
-
-    cleanup(name);
 }
 
 // ---------------------------------------------------------------------------
@@ -381,10 +403,7 @@ async fn create_writes_a_blank_system_prompt_through_unchanged() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn skills_round_trip_through_the_editor_shape() {
-    let _g = lock().lock().await;
     let name = "at_skills";
-    cleanup(name);
-
     let h = boot().await;
     let (status, created) = post(
         &h,
@@ -427,8 +446,6 @@ async fn skills_round_trip_through_the_editor_shape() {
     .await;
     assert_eq!(status, StatusCode::OK, "{saved}");
     assert_eq!(saved["spec"]["skills"], json!([]));
-
-    cleanup(name);
 }
 
 // ---------------------------------------------------------------------------
@@ -437,12 +454,9 @@ async fn skills_round_trip_through_the_editor_shape() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_workspace_agent_row_is_readable_but_refuses_the_write_verbs() {
-    let _g = lock().lock().await;
     let name = "at_liveagent";
-    cleanup(name);
-    write_workspace_agent(name, &manifest_with_non_form_fields(name));
-
     let h = boot().await;
+    write_workspace_agent(&h, name, &manifest_with_non_form_fields(name));
 
     // The catalog still lists it — that is the dual-source behaviour clients depend on — but the
     // row says up front that this API cannot write it, so a client renders "managed elsewhere"
@@ -480,7 +494,7 @@ async fn a_workspace_agent_row_is_readable_but_refuses_the_write_verbs() {
 
     // The live agent's manifest is untouched.
     let stored = std::fs::read_to_string(
-        home()
+        home_dir(&h)
             .join("workspaces")
             .join("agents")
             .join(name)
@@ -488,8 +502,6 @@ async fn a_workspace_agent_row_is_readable_but_refuses_the_write_verbs() {
     )
     .unwrap();
     assert!(stored.contains("seeded"), "{stored}");
-
-    cleanup(name);
 }
 
 /// `registry-diff` must refuse a name whose only local content is a live
@@ -501,10 +513,10 @@ async fn registry_diff_refuses_a_name_that_only_resolves_through_a_live_agent() 
     let _g = lock().lock().await;
     let name = "at_registry_diff_liveagent";
     cleanup(name);
-    write_workspace_agent(name, &manifest_with_non_form_fields(name));
     write_registry_agent_type(name, &registry_manifest_body(name, "from registry", 42));
 
     let h = boot().await;
+    write_workspace_agent(&h, name, &manifest_with_non_form_fields(name));
 
     let (status, body) = get(&h, &format!("/api/templates/{name}/registry-diff")).await;
     assert_eq!(status, StatusCode::CONFLICT, "{body}");
@@ -528,16 +540,16 @@ async fn restore_refuses_a_name_that_only_resolves_through_a_live_agent() {
     let _g = lock().lock().await;
     let name = "at_registry_restore_liveagent";
     cleanup(name);
-    write_workspace_agent(name, &manifest_with_non_form_fields(name));
     write_registry_agent_type(name, &registry_manifest_body(name, "from registry", 42));
 
     let h = boot().await;
+    write_workspace_agent(&h, name, &manifest_with_non_form_fields(name));
 
     let (status, body) = post(&h, &format!("/api/templates/{name}/restore"), json!({})).await;
     assert_eq!(status, StatusCode::CONFLICT, "{body}");
     assert_eq!(body["code"], "template_not_editable", "{body}");
     assert!(
-        !agent_type_file(name).exists(),
+        !agent_type_file(&h, name).exists(),
         "a refused restore must not materialise an agent type shadowing the live agent's name"
     );
 
@@ -546,21 +558,17 @@ async fn restore_refuses_a_name_that_only_resolves_through_a_live_agent() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn create_refuses_a_name_that_belongs_to_a_live_agent() {
-    let _g = lock().lock().await;
     let name = "at_shadow";
-    cleanup(name);
-    write_workspace_agent(name, &manifest_with_non_form_fields(name));
-
     let h = boot().await;
+    write_workspace_agent(&h, name, &manifest_with_non_form_fields(name));
+
     let (status, body) = post(&h, "/api/templates", json!({ "name": name })).await;
     assert_eq!(status, StatusCode::CONFLICT, "{body}");
     assert_eq!(body["code"], "template_name_taken", "{body}");
     assert!(
-        !agent_type_file(name).exists(),
+        !agent_type_file(&h, name).exists(),
         "a refused create still wrote a file"
     );
-
-    cleanup(name);
 }
 
 /// A name held by both sources lists once, as the writable copy (#8016).
@@ -572,13 +580,13 @@ async fn create_refuses_a_name_that_belongs_to_a_live_agent() {
 /// A dedup that kept the workspace row instead would still show one entry and would still be wrong, offering a control that cannot work (#7731).
 #[tokio::test(flavor = "multi_thread")]
 async fn a_name_held_by_both_sources_lists_once_as_the_writable_copy() {
-    let _g = lock().lock().await;
     let name = "at_collision";
-    cleanup(name);
+    let h = boot().await;
 
     // Both sources hold the name.
     // The descriptions differ so the assertion can tell which row survived, rather than only that one did.
     write_agent_type(
+        &h,
         name,
         &manifest_with_non_form_fields(name).replace(
             r#"description = "seeded""#,
@@ -586,14 +594,13 @@ async fn a_name_held_by_both_sources_lists_once_as_the_writable_copy() {
         ),
     );
     write_workspace_agent(
+        &h,
         name,
         &manifest_with_non_form_fields(name).replace(
             r#"description = "seeded""#,
             r#"description = "a live agent's own manifest""#,
         ),
     );
-
-    let h = boot().await;
     let (status, list) = get(&h, "/api/templates").await;
     assert_eq!(status, StatusCode::OK, "{list}");
 
@@ -626,8 +633,6 @@ async fn a_name_held_by_both_sources_lists_once_as_the_writable_copy() {
         list["templates"].as_array().expect("templates array").len(),
         "total must count the rows actually served: {list}"
     );
-
-    cleanup(name);
 }
 
 // ---------------------------------------------------------------------------
@@ -636,10 +641,7 @@ async fn a_name_held_by_both_sources_lists_once_as_the_writable_copy() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn crud_lifecycle_through_the_production_router() {
-    let _g = lock().lock().await;
     let name = "at_lifecycle";
-    cleanup(name);
-
     let h = boot().await;
 
     let (status, created) = post(
@@ -677,7 +679,7 @@ async fn crud_lifecycle_through_the_production_router() {
     let (status, body) = post(&h, "/api/templates", json!({ "name": name })).await;
     assert_eq!(status, StatusCode::CONFLICT, "{body}");
     assert_eq!(body["code"], "template_exists", "{body}");
-    let after_refusal = std::fs::read_to_string(agent_type_file(name)).unwrap();
+    let after_refusal = std::fs::read_to_string(agent_type_file(&h, name)).unwrap();
     assert!(
         after_refusal.contains("Be terse."),
         "a refused duplicate create overwrote the existing document: {after_refusal}"
@@ -694,13 +696,10 @@ async fn crud_lifecycle_through_the_production_router() {
     assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
     let (status, body) = delete(&h, &format!("/api/templates/{name}")).await;
     assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
-
-    cleanup(name);
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn write_verbs_reject_names_that_would_escape_the_agent_types_directory() {
-    let _g = lock().lock().await;
     let h = boot().await;
 
     let (status, body) = post(&h, "/api/templates", json!({ "name": "../../etc/passwd" })).await;
@@ -718,12 +717,10 @@ async fn write_verbs_reject_names_that_would_escape_the_agent_types_directory() 
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_typo_in_a_save_body_is_rejected_rather_than_silently_ignored() {
-    let _g = lock().lock().await;
     let name = "at_typo";
-    cleanup(name);
-    write_agent_type(name, &manifest_with_non_form_fields(name));
-
     let h = boot().await;
+    write_agent_type(&h, name, &manifest_with_non_form_fields(name));
+
     // Under patch semantics an unrecognised key would deserialize to "field absent", which reads as
     // "keep the old value" — the edit would be dropped and the response would still be 200.
     let (status, body) = put(
@@ -736,20 +733,16 @@ async fn a_typo_in_a_save_body_is_rejected_rather_than_silently_ignored() {
     // `deny_unknown_fields` raises) as 422, reserving 400 for malformed JSON.
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
 
-    let stored = std::fs::read_to_string(agent_type_file(name)).unwrap();
+    let stored = std::fs::read_to_string(agent_type_file(&h, name)).unwrap();
     assert!(stored.contains("Seeded prompt."), "{stored}");
-
-    cleanup(name);
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn update_pins_identity_to_the_url_rather_than_the_body() {
-    let _g = lock().lock().await;
     let name = "at_identity";
-    cleanup(name);
-    write_agent_type(name, &manifest_with_non_form_fields(name));
-
     let h = boot().await;
+    write_agent_type(&h, name, &manifest_with_non_form_fields(name));
+
     let (status, body) = put(
         &h,
         &format!("/api/templates/{name}"),
@@ -760,12 +753,9 @@ async fn update_pins_identity_to_the_url_rather_than_the_body() {
     assert_eq!(body["name"], name);
     assert_eq!(body["spec"]["name"], name);
     assert!(
-        !agent_type_file("somewhere-else").exists(),
+        !agent_type_file(&h, "somewhere-else").exists(),
         "a body `name` moved the document out from under the URL that addressed it"
     );
-
-    cleanup(name);
-    cleanup("somewhere-else");
 }
 
 // ---------------------------------------------------------------------------
@@ -828,10 +818,7 @@ async fn call_agent_type_create(h: &Harness, payload: Json) -> librefang_types::
 /// catalog serves, byte for byte the same document.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_type_the_tool_creates_is_the_type_the_api_serves() {
-    let _g = lock().lock().await;
     let name = "at_tool_created";
-    cleanup(name);
-
     let h = boot().await;
 
     let result = call_agent_type_create(
@@ -887,8 +874,6 @@ async fn a_type_the_tool_creates_is_the_type_the_api_serves() {
         .unwrap_or_else(|| panic!("tool-created type missing from the catalog: {list}"));
     assert_eq!(row["source"], "agent-type");
     assert_eq!(row["editable"], true);
-
-    cleanup(name);
 }
 
 /// An operator's document is not something an agent may overwrite by guessing its name.
@@ -896,12 +881,9 @@ async fn a_type_the_tool_creates_is_the_type_the_api_serves() {
 /// reason it holds for `POST` — which is exactly what routing both through one store buys.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_tool_refuses_a_name_already_taken_without_clobbering_it() {
-    let _g = lock().lock().await;
     let name = "at_tool_dupe";
-    cleanup(name);
-    write_agent_type(name, &manifest_with_non_form_fields(name));
-
     let h = boot().await;
+    write_agent_type(&h, name, &manifest_with_non_form_fields(name));
 
     let result = call_agent_type_create(
         &h,
@@ -924,11 +906,9 @@ async fn the_tool_refuses_a_name_already_taken_without_clobbering_it() {
     let (status, detail) = get(&h, &format!("/api/templates/{name}")).await;
     assert_eq!(status, StatusCode::OK, "{detail}");
     assert_eq!(detail["spec"]["system_prompt"], "Seeded prompt.");
-    let raw = std::fs::read_to_string(agent_type_file(name)).unwrap();
+    let raw = std::fs::read_to_string(agent_type_file(&h, name)).unwrap();
     assert!(raw.contains("max_history_messages = 42"), "{raw}");
     assert!(raw.contains("[[triggers]]"), "{raw}");
-
-    cleanup(name);
 }
 
 /// A name that would escape the store directory has to be refused before it is ever joined onto a
@@ -936,7 +916,6 @@ async fn the_tool_refuses_a_name_already_taken_without_clobbering_it() {
 /// fix it.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_tool_rejects_a_name_that_would_escape_the_store_directory() {
-    let _g = lock().lock().await;
     let h = boot().await;
 
     for bad in ["../escape", "has space", "", &"a".repeat(65)] {
@@ -954,7 +933,7 @@ async fn the_tool_rejects_a_name_that_would_escape_the_store_directory() {
     }
 
     assert!(
-        !home().join("escape.toml").exists(),
+        !home_dir(&h).join("escape.toml").exists(),
         "a traversal attempt wrote a file outside the agent-types directory"
     );
 }
@@ -964,10 +943,7 @@ async fn the_tool_rejects_a_name_that_would_escape_the_store_directory() {
 /// value" — the tool inherits that rather than re-deriving its own idea of the shape.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_tool_rejects_a_spec_carrying_a_field_that_does_not_exist() {
-    let _g = lock().lock().await;
     let name = "at_tool_typo";
-    cleanup(name);
-
     let h = boot().await;
 
     let result = call_agent_type_create(
@@ -992,20 +968,15 @@ async fn the_tool_rejects_a_spec_carrying_a_field_that_does_not_exist() {
         StatusCode::NOT_FOUND,
         "a rejected spec must not have created anything: {body}"
     );
-
-    cleanup(name);
 }
 
 /// A name that belongs to a live agent is refused for the tool the same way it is for `POST`:
 /// an agent type shadowing it would win every later catalog read and make the agent unreachable.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_tool_refuses_a_name_that_belongs_to_a_live_agent() {
-    let _g = lock().lock().await;
     let name = "at_tool_shadow";
-    cleanup(name);
-    write_workspace_agent(name, &manifest_with_non_form_fields(name));
-
     let h = boot().await;
+    write_workspace_agent(&h, name, &manifest_with_non_form_fields(name));
 
     let result = call_agent_type_create(&h, json!({ "name": name })).await;
     assert!(
@@ -1019,11 +990,9 @@ async fn the_tool_refuses_a_name_that_belongs_to_a_live_agent() {
         result.content
     );
     assert!(
-        !agent_type_file(name).exists(),
+        !agent_type_file(&h, name).exists(),
         "a refused create left a file behind"
     );
-
-    cleanup(name);
 }
 
 /// Omitting provider and model is legal and resolves to the `"default"` sentinel the kernel later
@@ -1031,10 +1000,7 @@ async fn the_tool_refuses_a_name_that_belongs_to_a_live_agent() {
 /// so a model that omitted them can see what it actually got.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_tool_reports_the_defaults_it_resolved_rather_than_the_fields_it_was_given() {
-    let _g = lock().lock().await;
     let name = "at_tool_defaults";
-    cleanup(name);
-
     let h = boot().await;
 
     let result = call_agent_type_create(&h, json!({ "name": name })).await;
@@ -1051,8 +1017,6 @@ async fn the_tool_reports_the_defaults_it_resolved_rather_than_the_fields_it_was
         "the tool must report the provider the catalog will serve: {detail}"
     );
     assert_eq!(detail["spec"]["model"], tool_view["model"], "{detail}");
-
-    cleanup(name);
 }
 
 // ---------------------------------------------------------------------------
@@ -1067,9 +1031,9 @@ async fn registry_diff_reports_registry_type_not_found_when_the_registry_copy_is
     let _g = lock().lock().await;
     let name = "at_registry_missing";
     cleanup(name);
-    write_agent_type(name, &registry_manifest_body(name, "local only", 42));
 
     let h = boot().await;
+    write_agent_type(&h, name, &registry_manifest_body(name, "local only", 42));
 
     let (status, body) = get(&h, &format!("/api/templates/{name}/registry-diff")).await;
     assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
@@ -1086,10 +1050,10 @@ async fn registry_diff_reports_identical_when_local_and_registry_match_exactly()
     let name = "at_registry_identical";
     cleanup(name);
     let body = registry_manifest_body(name, "same everywhere", 42);
-    write_agent_type(name, &body);
     write_registry_agent_type(name, &body);
 
     let h = boot().await;
+    write_agent_type(&h, name, &body);
 
     let (status, diff) = get(&h, &format!("/api/templates/{name}/registry-diff")).await;
     assert_eq!(status, StatusCode::OK, "{diff}");
@@ -1108,10 +1072,10 @@ async fn registry_diff_marks_a_field_outside_the_projection_as_non_identical() {
     let _g = lock().lock().await;
     let name = "at_registry_hidden_diff";
     cleanup(name);
-    write_agent_type(name, &registry_manifest_body(name, "local", 42));
     write_registry_agent_type(name, &registry_manifest_body(name, "local", 99));
 
     let h = boot().await;
+    write_agent_type(&h, name, &registry_manifest_body(name, "local", 42));
 
     let (status, diff) = get(&h, &format!("/api/templates/{name}/registry-diff")).await;
     assert_eq!(status, StatusCode::OK, "{diff}");
@@ -1155,10 +1119,10 @@ system_prompt = "Seeded."
 "#
         )
     };
-    write_agent_type(name, &manifest_with_tags(r#"["a", "b"]"#));
     write_registry_agent_type(name, &manifest_with_tags(r#"["c", "d"]"#));
 
     let h = boot().await;
+    write_agent_type(&h, name, &manifest_with_tags(r#"["a", "b"]"#));
 
     let (status, diff) = get(&h, &format!("/api/templates/{name}/registry-diff")).await;
     assert_eq!(status, StatusCode::OK, "{diff}");
@@ -1184,10 +1148,10 @@ async fn restore_overwrites_the_local_copy_and_reads_back_the_registry_version()
     let _g = lock().lock().await;
     let name = "at_registry_restore";
     cleanup(name);
-    write_agent_type(name, &registry_manifest_body(name, "local", 42));
     write_registry_agent_type(name, &registry_manifest_body(name, "from registry", 99));
 
     let h = boot().await;
+    write_agent_type(&h, name, &registry_manifest_body(name, "local", 42));
 
     let (status, restored) = post(&h, &format!("/api/templates/{name}/restore"), json!({})).await;
     assert_eq!(status, StatusCode::OK, "{restored}");
@@ -1217,13 +1181,14 @@ async fn restore_from_registry_records_a_recoverable_pre_restore_snapshot() {
     let _g = lock().lock().await;
     let name = "at_registry_restore_history";
     cleanup(name);
-    write_agent_type(
-        name,
-        &registry_manifest_body(name, "hand edited on disk", 42),
-    );
     write_registry_agent_type(name, &registry_manifest_body(name, "from registry", 99));
 
     let h = boot().await;
+    write_agent_type(
+        &h,
+        name,
+        &registry_manifest_body(name, "hand edited on disk", 42),
+    );
 
     let (status, restored) = post(&h, &format!("/api/templates/{name}/restore"), json!({})).await;
     assert_eq!(status, StatusCode::OK, "{restored}");
@@ -1280,10 +1245,10 @@ async fn restore_refuses_to_overwrite_when_the_pre_restore_snapshot_fails() {
     let name = "at_registry_restore_snapshot_failure";
     cleanup(name);
     let hand_edited = registry_manifest_body(name, "hand edited on disk", 42);
-    write_agent_type(name, &hand_edited);
     write_registry_agent_type(name, &registry_manifest_body(name, "from registry", 99));
 
     let h = boot().await;
+    write_agent_type(&h, name, &hand_edited);
 
     // Break the snapshot store through the pool the substrate already exposes — the same
     // route `goals_routes_integration.rs` uses to make a substrate read fail from out here.
@@ -1304,7 +1269,8 @@ async fn restore_refuses_to_overwrite_when_the_pre_restore_snapshot_fails() {
     );
 
     // The assertion the finding is about: the operator's content survived.
-    let on_disk = std::fs::read_to_string(agent_type_file(name)).expect("agent type still on disk");
+    let on_disk =
+        std::fs::read_to_string(agent_type_file(&h, name)).expect("agent type still on disk");
     assert_eq!(
         on_disk, hand_edited,
         "the hand-edited manifest must still be on disk — it was the only copy, and the \
@@ -1326,7 +1292,6 @@ async fn restore_from_registry_pins_the_manifest_name_to_the_url_segment() {
     let _g = lock().lock().await;
     let name = "at_registry_restore_name_mismatch";
     cleanup(name);
-    write_agent_type(name, &registry_manifest_body(name, "local", 42));
     write_registry_agent_type(
         name,
         r#"name = "Some Other Display Name"
@@ -1341,6 +1306,7 @@ system_prompt = "Seeded."
     );
 
     let h = boot().await;
+    write_agent_type(&h, name, &registry_manifest_body(name, "local", 42));
 
     let (status, restored) = post(&h, &format!("/api/templates/{name}/restore"), json!({})).await;
     assert_eq!(status, StatusCode::OK, "{restored}");
@@ -1350,7 +1316,7 @@ system_prompt = "Seeded."
          restored through, not the registry document's declared name: {restored}"
     );
 
-    let stored = std::fs::read_to_string(agent_type_file(name)).unwrap();
+    let stored = std::fs::read_to_string(agent_type_file(&h, name)).unwrap();
     assert!(
         stored.contains(&format!("name = \"{name}\"")),
         "the file on disk must carry the pinned name too: {stored}"
@@ -1367,7 +1333,6 @@ system_prompt = "Seeded."
 /// This is the network-free contract we can assert deterministically in CI.
 #[tokio::test(flavor = "multi_thread")]
 async fn promote_unknown_template_returns_404() {
-    let _g = lock().lock().await;
     let h = boot().await;
 
     let (status, body) = post(&h, "/api/templates/at_promote_ghost/promote", json!({})).await;
@@ -1395,12 +1360,10 @@ async fn promote_without_token_returns_401() {
     {
         return;
     }
-    let _g = lock().lock().await;
     let name = "at_promote_no_token";
-    cleanup(name);
-    write_agent_type(name, &manifest_with_non_form_fields(name));
-
     let h = boot().await;
+    write_agent_type(&h, name, &manifest_with_non_form_fields(name));
+
     let (status, body) = post(&h, &format!("/api/templates/{name}/promote"), json!({})).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED, "{body:?}");
     assert!(
@@ -1412,8 +1375,6 @@ async fn promote_without_token_returns_401() {
             .contains("github"),
         "error must mention GitHub: {body:?}"
     );
-
-    cleanup(name);
 }
 
 // Template version history + restore (#8047)
@@ -1421,10 +1382,7 @@ async fn promote_without_token_returns_401() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn history_and_restore_round_trip() {
-    let _g = lock().lock().await;
     let name = "at_history";
-    cleanup(name);
-
     let h = boot().await;
     let (status, created) = post(
         &h,
@@ -1473,8 +1431,6 @@ async fn history_and_restore_round_trip() {
         restored["spec"]["description"], "first version",
         "{restored}"
     );
-
-    cleanup(name);
 }
 
 /// The server-side privacy gate: a manifest whose system prompt still
@@ -1482,10 +1438,10 @@ async fn history_and_restore_round_trip() {
 /// refused with 409 and the findings returned, not published.
 #[tokio::test(flavor = "multi_thread")]
 async fn promote_refuses_a_manifest_with_retained_private_details() {
-    let _g = lock().lock().await;
     let name = "at_promote_pii";
-    cleanup(name);
+    let h = boot().await;
     write_agent_type(
+        &h,
         name,
         &format!(
             r#"name = "{name}"
@@ -1500,7 +1456,6 @@ system_prompt = "Escalate to priya.rao@acme.example when unsure."
         ),
     );
 
-    let h = boot().await;
     let (status, body) = post(&h, &format!("/api/templates/{name}/promote"), json!({})).await;
     assert_eq!(status, StatusCode::CONFLICT, "{body:?}");
     assert_eq!(body["code"], "review_required", "{body:?}");
@@ -1511,20 +1466,13 @@ system_prompt = "Escalate to priya.rao@acme.example when unsure."
         findings.iter().any(|f| f["removed_by_sanitizer"] == false),
         "a retained finding must be present: {findings:#?}"
     );
-
-    cleanup(name);
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn restore_rejects_foreign_versions_and_live_agents() {
-    let _g = lock().lock().await;
     let name = "at_history_neg";
     let other = "at_history_other";
     let live = "at_history_live";
-    cleanup(name);
-    cleanup(other);
-    cleanup(live);
-
     let h = boot().await;
 
     post(
@@ -1565,7 +1513,7 @@ async fn restore_rejects_foreign_versions_and_live_agents() {
     assert_eq!(body["code"], "version_not_found", "{body}");
 
     // A live agent's name is not editable through this route.
-    write_workspace_agent(live, &manifest_with_non_form_fields(live));
+    write_workspace_agent(&h, live, &manifest_with_non_form_fields(live));
     let (status, body) = request(
         &h,
         "POST",
@@ -1575,10 +1523,6 @@ async fn restore_rejects_foreign_versions_and_live_agents() {
     .await;
     assert_eq!(status, StatusCode::CONFLICT, "{body}");
     assert_eq!(body["code"], "template_not_editable", "{body}");
-
-    cleanup(name);
-    cleanup(other);
-    cleanup(live);
 }
 // ---------------------------------------------------------------------------
 // The raw-TOML write path (#8028)
@@ -1624,9 +1568,10 @@ async fn toml_put_round_trips_every_section_the_flat_editor_cannot_express() {
     let _g = lock().lock().await;
     let name = "at_toml_roundtrip";
     cleanup(name);
-    write_agent_type(name, "name = \"seed\"\n");
 
     let h = boot().await;
+    write_agent_type(&h, name, "name = \"seed\"\n");
+
     let doc = toml_tab_document(name);
     let (status, body) = put_toml(&h, &format!("/api/templates/{name}/toml"), &doc).await;
     assert_eq!(status, StatusCode::OK, "{body}");
@@ -1676,9 +1621,10 @@ async fn toml_put_records_a_version_snapshot() {
     let _g = lock().lock().await;
     let name = "at_toml_history";
     cleanup(name);
-    write_agent_type(name, "name = \"seed\"\n");
 
     let h = boot().await;
+    write_agent_type(&h, name, "name = \"seed\"\n");
+
     let doc = toml_tab_document(name);
     let (status, body) = put_toml(&h, &format!("/api/templates/{name}/toml"), &doc).await;
     assert_eq!(status, StatusCode::OK, "{body}");
@@ -1711,9 +1657,10 @@ async fn toml_put_reports_keys_the_manifest_does_not_recognise() {
     let _g = lock().lock().await;
     let name = "at_toml_typo";
     cleanup(name);
-    write_agent_type(name, "name = \"seed\"\n");
 
     let h = boot().await;
+    write_agent_type(&h, name, "name = \"seed\"\n");
+
     let doc = format!("name = \"{name}\"\nsesion_mode = \"new\"\n");
     let (status, body) = put_toml(&h, &format!("/api/templates/{name}/toml"), &doc).await;
     assert_eq!(status, StatusCode::OK, "{body}");
@@ -1724,7 +1671,7 @@ async fn toml_put_reports_keys_the_manifest_does_not_recognise() {
     );
 
     // And the stored document confirms what the report says: the unrecognised key is gone.
-    let stored = std::fs::read_to_string(agent_type_file(name)).unwrap();
+    let stored = std::fs::read_to_string(agent_type_file(&h, name)).unwrap();
     assert!(
         !stored.contains("sesion_mode"),
         "the typo key survived the save despite the report: {stored}"
@@ -1744,12 +1691,14 @@ async fn toml_put_does_not_misreport_an_explicitly_cleared_list_as_unrecognised(
     let _g = lock().lock().await;
     let name = "at_toml_triggers_cleared";
     cleanup(name);
+
+    let h = boot().await;
     write_agent_type(
+        &h,
         name,
         &format!("name = \"{name}\"\n\n[[triggers]]\npattern = \"git.push\"\n"),
     );
 
-    let h = boot().await;
     let doc = format!("name = \"{name}\"\ntriggers = []\n");
     let (status, body) = put_toml(&h, &format!("/api/templates/{name}/toml"), &doc).await;
     assert_eq!(status, StatusCode::OK, "{body}");
@@ -1823,18 +1772,20 @@ async fn toml_post_refuses_a_name_that_already_exists() {
     let _g = lock().lock().await;
     let name = "at_toml_post_exists";
     cleanup(name);
+
+    let h = boot().await;
     write_agent_type(
+        &h,
         name,
         &format!("name = \"{name}\"\ndescription = \"already here\"\n"),
     );
 
-    let h = boot().await;
     let doc = format!("name = \"{name}\"\n");
     let (status, body) = post_toml(&h, &format!("/api/templates/{name}/toml"), &doc).await;
     assert_eq!(status, StatusCode::CONFLICT, "{body}");
     assert_eq!(body["code"], "template_exists", "{body}");
 
-    let stored = std::fs::read_to_string(agent_type_file(name)).unwrap();
+    let stored = std::fs::read_to_string(agent_type_file(&h, name)).unwrap();
     assert!(
         stored.contains("already here"),
         "a refused create must not touch the existing file: {stored}"
@@ -1851,9 +1802,10 @@ async fn toml_post_refuses_a_name_that_belongs_to_a_live_agent() {
     let _g = lock().lock().await;
     let name = "at_toml_post_liveagent";
     cleanup(name);
-    write_workspace_agent(name, "name = \"seed\"\n");
 
     let h = boot().await;
+    write_workspace_agent(&h, name, "name = \"seed\"\n");
+
     let doc = format!("name = \"{name}\"\n");
     let (status, body) = post_toml(&h, &format!("/api/templates/{name}/toml"), &doc).await;
     assert_eq!(status, StatusCode::CONFLICT, "{body}");
@@ -1869,9 +1821,9 @@ async fn toml_put_rejects_malformed_toml_with_a_400() {
     let _g = lock().lock().await;
     let name = "at_toml_bad";
     cleanup(name);
-    write_agent_type(name, "name = \"seed\"\n");
 
     let h = boot().await;
+    write_agent_type(&h, name, "name = \"seed\"\n");
 
     for doc in [
         "name = \nbroken[".to_string(),
@@ -1887,7 +1839,7 @@ async fn toml_put_rejects_malformed_toml_with_a_400() {
     }
 
     // The seeded document is untouched by the refusals.
-    let stored = std::fs::read_to_string(agent_type_file(name)).unwrap();
+    let stored = std::fs::read_to_string(agent_type_file(&h, name)).unwrap();
     assert!(stored.contains("seed"), "{stored}");
 
     cleanup(name);
@@ -1899,9 +1851,9 @@ async fn toml_put_refuses_unknown_and_live_agent_names() {
     let _g = lock().lock().await;
     let name = "at_toml_liveagent";
     cleanup(name);
-    write_workspace_agent(name, "name = \"seed\"\n");
 
     let h = boot().await;
+    write_workspace_agent(&h, name, "name = \"seed\"\n");
 
     let (status, body) =
         put_toml(&h, "/api/templates/at_toml_missing/toml", "name = \"x\"\n").await;
@@ -1926,9 +1878,10 @@ async fn toml_put_refuses_an_oversize_body_before_parsing() {
     let _g = lock().lock().await;
     let name = "at_toml_oversize";
     cleanup(name);
-    write_agent_type(name, "name = \"seed\"\n");
 
     let h = boot().await;
+    write_agent_type(&h, name, "name = \"seed\"\n");
+
     let padding = "x".repeat(1024 * 1024);
     let doc = format!("name = \"{name}\"\ndescription = \"{padding}\"\n");
     let (status, body) = put_toml(&h, &format!("/api/templates/{name}/toml"), &doc).await;
@@ -1936,7 +1889,7 @@ async fn toml_put_refuses_an_oversize_body_before_parsing() {
     assert_eq!(body["code"], "template_manifest_too_large", "{body}");
 
     // The seeded document is untouched.
-    let stored = std::fs::read_to_string(agent_type_file(name)).unwrap();
+    let stored = std::fs::read_to_string(agent_type_file(&h, name)).unwrap();
     assert!(stored.contains("seed"), "{stored}");
 
     cleanup(name);
@@ -1952,18 +1905,19 @@ async fn toml_put_pins_the_name_to_the_url_rather_than_the_body() {
     let renamed = "at_toml_pin_moved";
     cleanup(name);
     cleanup(renamed);
-    write_agent_type(name, "name = \"seed\"\n");
 
     let h = boot().await;
+    write_agent_type(&h, name, "name = \"seed\"\n");
+
     let doc = format!("name = \"{renamed}\"\ndescription = \"kept\"\n");
     let (status, body) = put_toml(&h, &format!("/api/templates/{name}/toml"), &doc).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["name"], name, "{body}");
     assert!(
-        !agent_type_file(renamed).exists(),
+        !agent_type_file(&h, renamed).exists(),
         "a body name moved the document out from under the URL that addressed it"
     );
-    let stored = std::fs::read_to_string(agent_type_file(name)).unwrap();
+    let stored = std::fs::read_to_string(agent_type_file(&h, name)).unwrap();
     assert!(stored.contains("kept"), "{stored}");
 
     cleanup(name);
@@ -1984,24 +1938,27 @@ async fn templates_list_flags_from_registry_per_row() {
     cleanup(unsynced);
     cleanup(live);
 
-    // An agent type with a registry original.
+    // An agent type with a registry original. The registry copy is ambient, so it is seeded
+    // before `boot()`; the local copy belongs to the harness and is seeded after.
     let manifest = registry_manifest_body(synced, "synced with the registry", 42);
-    write_agent_type(synced, &manifest);
     write_registry_agent_type(synced, &manifest);
+    let unsynced_manifest = registry_manifest_body(unsynced, "local only", 42);
+    let live_manifest = registry_manifest_body(live, "a live agent", 42);
+
+    let h = boot().await;
+
+    // An agent type with a registry original.
+    write_agent_type(&h, synced, &manifest);
 
     // Created locally with no registry counterpart — e.g. through `POST
     // /api/templates` or the `agent_type_create` tool.
-    write_agent_type(
-        unsynced,
-        &registry_manifest_body(unsynced, "local only", 42),
-    );
+    write_agent_type(&h, unsynced, &unsynced_manifest);
 
     // A live agent's own manifest: never editable, so never eligible to
     // restore from the registry either — the row must not even attempt the
     // lookup a registry-backed name might otherwise accidentally satisfy.
-    write_workspace_agent(live, &registry_manifest_body(live, "a live agent", 42));
+    write_workspace_agent(&h, live, &live_manifest);
 
-    let h = boot().await;
     let (status, body) = get(&h, "/api/templates").await;
     assert_eq!(status, StatusCode::OK, "{body}");
     let templates = body["templates"].as_array().expect("templates array");
@@ -2022,3 +1979,6 @@ async fn templates_list_flags_from_registry_per_row() {
     cleanup(unsynced);
     cleanup(live);
 }
+// ---------------------------------------------------------------------------
+// The raw-TOML write path (#8028)
+// ---------------------------------------------------------------------------

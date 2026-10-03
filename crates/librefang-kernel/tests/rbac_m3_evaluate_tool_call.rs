@@ -85,6 +85,7 @@ fn user(
         tool_categories,
         memory_access: None,
         channel_tool_rules: HashMap::new(),
+        emoji: None,
     }
 }
 
