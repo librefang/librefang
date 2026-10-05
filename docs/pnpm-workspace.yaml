@@ -4,3 +4,8 @@ overrides:
   "brace-expansion@>=2.0.0 <2.0.3": "2.0.2"
   "postcss@<8.5.10": ">=8.5.10"
   "sharp@<0.35.0": ">=0.35.0"
+
+auditConfig:
+  ignoreGhsas:
+    # GHSA-vfj7-8cjw-p6xm (braces <=3.0.3, no patched release): reached only through fast-glob>micromatch, which the docs build calls with the hard-coded pattern "**/*.mdx" (src/mdx/search.mjs, src/app/layout.tsx), so no attacker-controlled pattern can reach it.
+    - GHSA-vfj7-8cjw-p6xm
