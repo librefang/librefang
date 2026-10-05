@@ -18566,6 +18566,37 @@ fn ephemeral_spawn_wires_every_capability_the_permanent_path_wires() {
     );
 }
 
+/// The ephemeral path calls `run_agent_loop` directly and stamps no
+/// `SenderContext`, so it bypasses both strip-before-stamp sites
+/// (`kernel/agent_execution.rs`, `kernel/messaging.rs`) that drop the reserved
+/// `sender_*` keys a manifest declares (#8409 review). Both manifests the
+/// spawn can select — the parent's clone and a loaded agent-type template —
+/// must be stripped.
+///
+/// The transforms themselves are unit-tested in `ephemeral_spawn.rs`
+/// (`worker_manifest_from_parent`, `worker_manifest_from_template`); this pins
+/// the spawn path to them. Reverting a call site to the unstripped manifest
+/// leaves those unit tests — and every capability assertion above — green,
+/// while the declared `sender_channel = "webui"` plus a target's derivable
+/// `UserId` UUID reaches `resolve_webui_sender` on the worker's tool calls.
+#[test]
+fn ephemeral_spawn_strips_declared_sender_metadata_from_the_inherited_manifest() {
+    let ephemeral = include_str!("ephemeral_spawn.rs");
+    assert!(
+        ephemeral.contains("worker_manifest_from_parent(&parent.manifest)"),
+        "the ephemeral worker must inherit the parent's manifest through \
+         `worker_manifest_from_parent`, which strips the reserved `sender_*` \
+         keys before the manifest is handed to `run_agent_loop`"
+    );
+    assert!(
+        ephemeral.contains("worker_manifest_from_template(template)"),
+        "the ephemeral worker spawned from an agent type must run on the \
+         template manifest through `worker_manifest_from_template`, which \
+         strips the reserved `sender_*` keys before the manifest is handed to \
+         `run_agent_loop`"
+    );
+}
+
 /// A worker that spawns a worker is bounded by the same counter `agent_send`
 /// and `run_workflow` use, and the refusal costs nothing — no mission
 /// directory is created for a spawn that is turned away.

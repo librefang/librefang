@@ -70,7 +70,7 @@ hex = { workspace = true }
 rand = { workspace = true }
 zeroize = { workspace = true }
 tracing-subscriber = { workspace = true }
-utoipa = { version = "5", features = ["axum_extras"] }
+utoipa = { version = "6", features = ["axum_extras"] }
 include_dir = "0.7"
 
 # Optional telemetry deps (gated behind `telemetry` feature)

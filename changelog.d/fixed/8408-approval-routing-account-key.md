@@ -1,0 +1,3 @@
+Route approval notifications to a sidecar by the config `name` the router is seeded with, not by the optional `account_id` the sidecar reports in its `ready` event.
+A sidecar that reported none fell back to the bare channel key, which no sidecar is ever registered under, so every approval missed every adapter, stayed queued, and filled the per-agent pending-approval cap until the agent could no longer call a tool at all.
+The seed and the approval lookup now agree; adapters that stamp their own `metadata["account_id"]` (dingtalk / email / google_chat) keep the reported id as a resolution alias, so outbound sends auto-filled from that metadata and `AgentBinding::match_rule.account_id` bindings keyed to it still resolve and still receive approvals (#8418) (@DaBlitzStein)

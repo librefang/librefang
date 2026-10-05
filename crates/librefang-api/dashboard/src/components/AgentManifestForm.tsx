@@ -55,6 +55,19 @@ import {
 } from "../lib/modelLimits";
 import { CollapsibleSection } from "./ui/CollapsibleSection";
 import { Field } from "./ui/Field";
+import { ModelPicker } from "./ui/ModelPicker";
+
+/**
+ * The routing tiers and `pinned_model` hold a bare model name while the picker
+ * speaks in pairs. Adapting at the call site keeps the picker from having to
+ * know that some of its callers discard the provider — and it is also where the
+ * two fields' catalogs part ways: a tier is resolved against the global catalog
+ * by the tier router, which may land on another provider, while Stable mode
+ * applies `pinned_model` to the agent's own provider (the kernel replaces
+ * `manifest.model.model` alone), so that picker gets the provider-narrowed
+ * list.
+ */
+const asModelName = (name: string) => (name ? { provider: "", model: name } : null);
 
 /**
  * Catalog entry for the skill/tool finder (#5049). Both fields are
@@ -88,6 +101,14 @@ interface AgentManifestFormProps {
     max_output_tokens?: number;
     limits_known?: boolean;
   }[];
+  /**
+   * State of the query that produced `models`. Without it a catalog that is
+   * still loading, or failed to load, reads the same as an empty one and the
+   * pickers claim "No models found" instead of showing the spinner or a retry.
+   */
+  modelsFetching?: boolean;
+  modelsError?: boolean;
+  onModelsRetry?: () => void;
   invalidFields: Set<string>;
   // Read-only view of preserved-but-not-form-renderable extras. We show
   // a hint next to dropdowns whose form widget can't represent the
@@ -143,6 +164,9 @@ export function AgentManifestForm({
   onChange,
   providers,
   models,
+  modelsFetching = false,
+  modelsError = false,
+  onModelsRetry,
   invalidFields,
   extras,
   skillCatalog,
@@ -176,10 +200,39 @@ export function AgentManifestForm({
   const updateRouting = (patch: Partial<ManifestFormState["routing"]>): void =>
     onChange({ ...value, routing: { ...value.routing, ...patch } });
 
+  // The main model field holds an id without a provider, so it only offers a
+  // list once a provider is chosen; before that the free-text fallback below
+  // takes over. `pinned_model` lands on the same provider in Stable mode — the
+  // kernel overwrites the model id alone — so its picker shares this list.
+  // `models` may be the unfiltered catalog (the routing tiers and fallbacks
+  // need it whole), so this narrows it back for both fields.
   const filteredModels = useMemo(
-    () => (value.model.provider ? models.filter((m) => m.provider === value.model.provider) : models),
+    () => (value.model.provider ? models.filter((m) => m.provider === value.model.provider) : []),
     [models, value.model.provider],
   );
+
+  // The picker wants `{ id }` rather than `{ name }`. Memoised because it is
+  // passed to every fallback row, and a fresh array each render would defeat
+  // the picker's own memoisation of its provider list.
+  // The picker's "keep the current provider reachable" guard can only fire if
+  // that provider is in the list it is handed. A fallback whose provider was
+  // dropped from discovery — key removed since — must still be re-selectable,
+  // so union the fallbacks' providers in alongside the configured ones.
+  const providerPickerList = useMemo(() => {
+    const names = new Set(providerOptions.map((p) => p.name));
+    for (const fb of value.fallback_models ?? []) {
+      if (fb.provider) names.add(fb.provider);
+    }
+    return [...names].map((id) => ({ id }));
+  }, [providerOptions, value.fallback_models]);
+
+  // Shared by every catalog-backed picker below: a loading or failed catalog
+  // must not render as an empty one.
+  const pickerCatalog = {
+    isFetching: modelsFetching,
+    error: modelsError ? t("chat.unable_to_load_models") : null,
+    onRetry: onModelsRetry,
+  };
 
   // Build {options, meta} pairs for the skill/tool finders (#5049).
   // The catalog is union-ed with the user's current selection so
@@ -847,20 +900,31 @@ export function AgentManifestForm({
               </button>
             </div>
             <div className="grid grid-cols-2 gap-2">
-              <input
-                type="text"
-                value={fb.provider}
-                onChange={(e) => update({ fallback_models: patchListItem(value.fallback_models ?? [], idx, { ...fb, provider: e.target.value }) })}
-                placeholder={t("agents.form.provider")}
-                className={inputClass}
-              />
-              <input
-                type="text"
-                value={fb.model}
-                onChange={(e) => update({ fallback_models: patchListItem(value.fallback_models ?? [], idx, { ...fb, model: e.target.value }) })}
-                placeholder={t("agents.form.model_id")}
-                className={inputClass}
-              />
+              {/* Provider and model are one decision here — which model this
+                  fallback stands for — so they are one control rather than two
+                  boxes to type an id into. `allowCustom` stays on because a
+                  fallback exists precisely for the case where the preferred
+                  provider is not reachable. */}
+              <div className="col-span-2">
+                <ModelPicker
+                  label={`${t("agents.form.model_id")} ${idx + 1}`}
+                  variant="pair"
+                  allowCustom
+                  value={fb.model ? { provider: fb.provider, model: fb.model } : null}
+                  onChange={(next) =>
+                    update({
+                      fallback_models: patchListItem(value.fallback_models ?? [], idx, {
+                        ...fb,
+                        provider: next.provider,
+                        model: next.model,
+                      }),
+                    })
+                  }
+                  models={models}
+                  providers={providerPickerList}
+                  {...pickerCatalog}
+                />
+              </div>
               <input
                 type="text"
                 value={fb.api_key_env}
@@ -1047,27 +1111,39 @@ export function AgentManifestForm({
           <div className="space-y-2 mt-2">
             <div className="grid grid-cols-3 gap-3">
               <Field label={t("agents.form.simple_model")}>
-                <input
-                  type="text"
-                  value={value.routing.simple_model}
-                  onChange={(e) => updateRouting({ simple_model: e.target.value })}
-                  className={inputClass}
+                <ModelPicker
+                  label={t("agents.form.simple_model")}
+                  variant="model"
+                  allowCustom
+                  value={asModelName(value.routing.simple_model)}
+                  onChange={(next) => updateRouting({ simple_model: next.model })}
+                  onClear={() => updateRouting({ simple_model: "" })}
+                  models={models}
+                  {...pickerCatalog}
                 />
               </Field>
               <Field label={t("agents.form.medium_model")}>
-                <input
-                  type="text"
-                  value={value.routing.medium_model}
-                  onChange={(e) => updateRouting({ medium_model: e.target.value })}
-                  className={inputClass}
+                <ModelPicker
+                  label={t("agents.form.medium_model")}
+                  variant="model"
+                  allowCustom
+                  value={asModelName(value.routing.medium_model)}
+                  onChange={(next) => updateRouting({ medium_model: next.model })}
+                  onClear={() => updateRouting({ medium_model: "" })}
+                  models={models}
+                  {...pickerCatalog}
                 />
               </Field>
               <Field label={t("agents.form.complex_model")}>
-                <input
-                  type="text"
-                  value={value.routing.complex_model}
-                  onChange={(e) => updateRouting({ complex_model: e.target.value })}
-                  className={inputClass}
+                <ModelPicker
+                  label={t("agents.form.complex_model")}
+                  variant="model"
+                  allowCustom
+                  value={asModelName(value.routing.complex_model)}
+                  onChange={(next) => updateRouting({ complex_model: next.model })}
+                  onClear={() => updateRouting({ complex_model: "" })}
+                  models={models}
+                  {...pickerCatalog}
                 />
               </Field>
             </div>
@@ -1323,11 +1399,15 @@ export function AgentManifestForm({
             </select>
           </Field>
           <Field label={t("agents.form.pinned_model")}>
-            <input
-              type="text"
-              value={value.pinned_model}
-              onChange={(e) => update({ pinned_model: e.target.value })}
-              className={inputClass}
+            <ModelPicker
+              label={t("agents.form.pinned_model")}
+              variant="model"
+              allowCustom
+              value={asModelName(value.pinned_model)}
+              onChange={(next) => update({ pinned_model: next.model })}
+              onClear={() => update({ pinned_model: "" })}
+              models={filteredModels}
+              {...pickerCatalog}
             />
           </Field>
           <Field label={t("agents.form.workspace")}>
