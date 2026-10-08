@@ -2824,6 +2824,13 @@ impl LibreFangKernel {
         // `sender_user_id` and triggers / `agent_send` produce
         // `[<numeric_id>]: ` instead of `[<friendly_name>]: ` for the same
         // user identity.
+        //
+        // First drop any reserved sender keys the manifest itself declared:
+        // only a turn's verified `SenderContext` may speak for a sender,
+        // otherwise an `agent.toml` could name `webui` plus a target's
+        // derivable `UserId` UUID and assume that user's policy on a
+        // sender-less turn (#8409 review).
+        librefang_types::agent::strip_reserved_sender_metadata(&mut manifest.metadata);
         if let Some(ctx) = sender_context {
             if !ctx.user_id.is_empty() {
                 manifest.metadata.insert(

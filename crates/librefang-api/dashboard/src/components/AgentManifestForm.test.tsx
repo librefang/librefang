@@ -38,6 +38,9 @@ function Harness({
   providers = [{ name: "openai" }],
   nameField,
   routingInertReason,
+  modelsFetching,
+  modelsError,
+  onModelsRetry,
 }: {
   skillCatalog?: ManifestCatalogEntry[];
   toolCatalog?: ManifestCatalogEntry[];
@@ -48,6 +51,9 @@ function Harness({
   providers?: { name: string }[];
   nameField?: "editable" | "readonly" | "hidden";
   routingInertReason?: "stable_mode" | null;
+  modelsFetching?: boolean;
+  modelsError?: boolean;
+  onModelsRetry?: () => void;
 }) {
   const [state, setState] = useState<ManifestFormState>(() => initialState ?? emptyManifestForm());
   return (
@@ -56,6 +62,9 @@ function Harness({
       onChange={setState}
       providers={providers}
       models={models}
+      modelsFetching={modelsFetching}
+      modelsError={modelsError}
+      onModelsRetry={onModelsRetry}
       invalidFields={invalidFields}
       extras={emptyManifestExtras()}
       skillCatalog={skillCatalog}
@@ -66,6 +75,187 @@ function Harness({
     />
   );
 }
+
+describe("AgentManifestForm — complexity routing tiers", () => {
+  const MODELS = [
+    { provider: "openai", id: "gpt-4o" },
+    { provider: "anthropic", id: "claude-sonnet-5" },
+  ];
+
+  async function openRouting(user: ReturnType<typeof userEvent.setup>) {
+    await user.click(screen.getByText("agents.form.routing"));
+    await user.click(screen.getByLabelText("agents.form.routing_enabled"));
+  }
+
+  // The tier fields hold a bare model name — the daemon resolves it against the
+  // global catalog via `ModelCatalog::find_model`, so a `provider/model` string
+  // would not resolve. The picker speaks in pairs, and the adapter between the
+  // two is exactly where a provider could leak into the stored value.
+  it("stores the model name alone when a tier is picked", async () => {
+    const user = userEvent.setup();
+    render(<Harness models={MODELS} />);
+    await openRouting(user);
+
+    await user.click(screen.getByRole("button", { name: "agents.form.simple_model: None" }));
+    await user.click(screen.getByRole("button", { name: "anthropic/claude-sonnet-5" }));
+
+    // The trigger reads back from the form state, so this fails if either the
+    // provider leaked in or the name never reached `simple_model`.
+    expect(
+      screen.getByRole("button", { name: "agents.form.simple_model: claude-sonnet-5" }),
+    ).toBeInTheDocument();
+  });
+
+  it("offers every model in one flat list, with no provider step", async () => {
+    const user = userEvent.setup();
+    render(<Harness models={MODELS} />);
+    await openRouting(user);
+
+    await user.click(screen.getByRole("button", { name: "agents.form.medium_model: None" }));
+
+    // Both providers' models are reachable without drilling in, which is the
+    // point of the flat shape for a field that cannot hold a provider.
+    expect(screen.getByRole("button", { name: "openai/gpt-4o" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "anthropic/claude-sonnet-5" })).toBeInTheDocument();
+  });
+
+  it("accepts a model the catalog has never seen", async () => {
+    const user = userEvent.setup();
+    render(<Harness models={MODELS} />);
+    await openRouting(user);
+
+    await user.click(screen.getByRole("button", { name: "agents.form.complex_model: None" }));
+    await user.click(screen.getByRole("button", { name: "Custom" }));
+    // No provider field in this shape: requiring one would make a valid entry
+    // impossible to commit.
+    await user.type(screen.getByLabelText("Model"), "llama-3.3-70b");
+    await user.click(screen.getByRole("button", { name: "Confirm" }));
+
+    expect(
+      screen.getByRole("button", { name: "agents.form.complex_model: llama-3.3-70b" }),
+    ).toBeInTheDocument();
+  });
+});
+
+describe("AgentManifestForm — catalog state and clearing", () => {
+  const MODELS = [
+    { provider: "openai", id: "gpt-4o" },
+    { provider: "anthropic", id: "claude-sonnet-5" },
+  ];
+
+  async function openRouting(user: ReturnType<typeof userEvent.setup>) {
+    await user.click(screen.getByText("agents.form.routing"));
+    await user.click(screen.getByLabelText("agents.form.routing_enabled"));
+  }
+
+  it("offers the whole catalog to a tier, not just the main provider's models", async () => {
+    const user = userEvent.setup();
+    const state = emptyManifestForm();
+    state.model = { ...state.model, provider: "openai", model: "gpt-4o" };
+    render(<Harness initialState={state} models={MODELS} />);
+    await openRouting(user);
+
+    await user.click(screen.getByRole("button", { name: "agents.form.simple_model: None" }));
+    // The create form fetches this catalog unfiltered (AgentsPage); the form
+    // must not narrow it to the agent's main provider, or a tier could not
+    // route to a model on another provider.
+    expect(screen.getByRole("button", { name: "anthropic/claude-sonnet-5" })).toBeInTheDocument();
+  });
+
+  it("clears a routing tier back to absent with the None row", async () => {
+    const user = userEvent.setup();
+    const state = emptyManifestForm();
+    state.routing = { ...state.routing, enabled: true, simple_model: "gpt-4o" };
+    render(<Harness initialState={state} models={MODELS} />);
+
+    await user.click(screen.getByText("agents.form.routing"));
+    await user.click(screen.getByRole("button", { name: "agents.form.simple_model: gpt-4o" }));
+    await user.click(screen.getByRole("button", { name: "None" }));
+
+    expect(
+      screen.getByRole("button", { name: "agents.form.simple_model: None" }),
+    ).toBeInTheDocument();
+  });
+
+  it("clears pinned_model back to absent", async () => {
+    const user = userEvent.setup();
+    const state = emptyManifestForm();
+    state.pinned_model = "gpt-4o";
+    render(<Harness initialState={state} models={MODELS} />);
+
+    await user.click(screen.getByText("agents.form.lifecycle"));
+    await user.click(screen.getByRole("button", { name: "agents.form.pinned_model: gpt-4o" }));
+    await user.click(screen.getByRole("button", { name: "None" }));
+
+    expect(
+      screen.getByRole("button", { name: "agents.form.pinned_model: None" }),
+    ).toBeInTheDocument();
+  });
+
+  it("lists only the agent's own provider for pinned_model", async () => {
+    const user = userEvent.setup();
+    const state = emptyManifestForm();
+    state.model = { ...state.model, provider: "openai", model: "gpt-4o" };
+    render(<Harness initialState={state} models={MODELS} />);
+
+    await user.click(screen.getByText("agents.form.lifecycle"));
+    await user.click(screen.getByRole("button", { name: "agents.form.pinned_model: None" }));
+
+    // Stable mode applies `pinned_model` by overwriting `manifest.model.model`
+    // and leaving the provider alone, so a foreign id would be sent to this
+    // agent's provider on every turn. Only its own provider's rows are offered.
+    expect(screen.getByRole("button", { name: "openai/gpt-4o" })).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "anthropic/claude-sonnet-5" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("shows the loading state instead of an empty catalog while it is arriving", async () => {
+    const user = userEvent.setup();
+    render(<Harness modelsFetching models={[]} providers={[]} />);
+    await openRouting(user);
+
+    await user.click(screen.getByRole("button", { name: "agents.form.simple_model: None" }));
+    expect(screen.getByText("Loading models...")).toBeInTheDocument();
+    expect(screen.queryByText("No models found")).not.toBeInTheDocument();
+  });
+
+  it("surfaces a catalog failure with a retry, not 'No models found'", async () => {
+    const user = userEvent.setup();
+    const onRetry = vi.fn();
+    render(<Harness modelsError onModelsRetry={onRetry} models={[]} providers={[]} />);
+    await openRouting(user);
+
+    await user.click(screen.getByRole("button", { name: "agents.form.simple_model: None" }));
+    expect(screen.getByText("chat.unable_to_load_models")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Retry" }));
+    expect(onRetry).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("AgentManifestForm — fallback providers", () => {
+  it("offers another fallback's provider, not just the row's own", async () => {
+    const user = userEvent.setup();
+    const state = emptyManifestForm();
+    state.fallback_models = [
+      { _uid: "f1", provider: "groq", model: "llama-3", api_key_env: "", base_url: "", extras: {} },
+      { _uid: "f2", provider: "mistral", model: "mistral-large", api_key_env: "", base_url: "", extras: {} },
+    ];
+    render(
+      <Harness
+        initialState={state}
+        providers={[{ name: "openai" }]}
+        models={[{ provider: "openai", id: "gpt-4o" }]}
+      />,
+    );
+
+    await user.click(screen.getByText("agents.form.fallback_models"));
+    await user.click(screen.getByRole("button", { name: /^agents.form.model_id 1:/ }));
+    // `mistral` is neither configured nor this row's current provider, but it is
+    // another fallback's — without unioning those in it cannot be re-selected.
+    expect(screen.getByRole("button", { name: "mistral" })).toBeInTheDocument();
+  });
+});
 
 describe("AgentManifestForm — provider selection", () => {
   // The caller passes only providers that can serve a request, so an agent

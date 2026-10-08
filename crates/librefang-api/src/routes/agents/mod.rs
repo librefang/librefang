@@ -19,6 +19,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, LazyLock};
 
 mod attachments;
+mod avatar;
 mod cloning;
 mod config;
 mod ephemeral;
@@ -31,6 +32,7 @@ mod sessions;
 mod uploads;
 
 pub use attachments::*;
+pub use avatar::*;
 pub use cloning::*;
 pub use config::*;
 pub use ephemeral::*;
@@ -205,6 +207,33 @@ pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
         .route(
             "/agents/{id}/identity",
             axum::routing::patch(update_agent_identity),
+        )
+        .route(
+            "/agents/{id}/avatar",
+            axum::routing::post(upload_agent_avatar)
+                // On the POST before GET and DELETE are added, so only uploads
+                // draw from the pool (`MethodRouter::layer` covers the methods
+                // present when it runs). The permit is held while the `Bytes`
+                // extractor buffers the body, and a saturated pool answers 429
+                // without spending the memory this bound exists to protect: a
+                // per-request cap cannot do that on its own — N parallel
+                // bodies are N × the cap. See
+                // `avatar::MAX_CONCURRENT_AVATAR_UPLOADS`.
+                .layer(axum::middleware::from_fn_with_state(
+                    avatar::avatar_upload_permits(),
+                    crate::middleware::limit_concurrent_uploads,
+                ))
+                .get(serve_agent_avatar)
+                .delete(delete_agent_avatar)
+                // Without this the `Bytes` extractor cuts at axum's own 2 MiB
+                // default, which is *below* the handler's cap plus its
+                // headroom — so an image between the two would get a bodiless
+                // 413 instead of the message naming the limit, and the
+                // handler's own check would be dead code. See
+                // `avatar::AVATAR_BODY_LIMIT_BYTES`.
+                .layer(axum::extract::DefaultBodyLimit::max(
+                    avatar::AVATAR_BODY_LIMIT_BYTES,
+                )),
         )
         .route(
             "/agents/{id}/config",
@@ -424,6 +453,24 @@ pub(crate) fn effective_default_model(
     override_dm: Option<&librefang_types::config::DefaultModelConfig>,
 ) -> librefang_types::config::DefaultModelConfig {
     override_dm.cloned().unwrap_or_else(|| base.clone())
+}
+
+/// Is `value` an `avatar_url` this daemon is willing to store for `agent_id`?
+///
+/// The only two acceptable answers are "nothing" and "the avatar route for this very agent" (`librefang_types::media::agent_avatar_url`), and this replaces a prefix test for `http://`, `https://` or `data:` (#8339).
+///
+/// That old rule let the field hold arbitrary text, in two ways that mattered.
+/// A remote URL is fetched by the dashboard from its own origin the moment an agent list renders, which is an outbound request per agent that the operator never asked for and a third party can observe.
+/// A `data:` URI carries its payload *inline*, so the field became unbounded storage for arbitrary content inside the agent manifest — the manifest being a file the daemon parses on every boot and hot-reload.
+/// Neither was ever needed for the feature the field exists for, and once the daemon stores the image itself, neither is needed at all.
+///
+/// The empty string stays acceptable because it is the only way a PATCH body can express "clear this" — see [`merge_agent_identity`], whose `None` is already spoken for by "not provided".
+/// `POST` and `DELETE` on the avatar route clear the field properly, with `None`.
+///
+/// Nothing here tolerates a previously stored value, and that is a measured decision rather than an oversight: a search of the whole repository found **zero** `avatar_url` values in any manifest, agent template, profile or example — every occurrence is source, a test, generated OpenAPI, or an unrelated field of the same name on a GitHub OAuth response.
+/// Tolerating a legacy form would therefore be code with no input, and a read path needs no tolerance in any case: this function runs only on *writes*, so a value already on disk keeps being served exactly as it is.
+pub(crate) fn is_own_avatar_reference(agent_id: AgentId, value: &str) -> bool {
+    value.is_empty() || value == librefang_types::media::agent_avatar_url(&agent_id.to_string())
 }
 
 /// Merge a partial appearance update onto an agent's stored identity (#6608).
