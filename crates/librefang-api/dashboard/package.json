@@ -20,8 +20,8 @@
   "dependencies": {
     "@simplewebauthn/browser": "^14.0.0",
     "@tanstack/history": "^1.162.4",
-    "@tanstack/react-query": "^5.104.0",
-    "@tanstack/react-router": "^1.170.40",
+    "@tanstack/react-query": "^5.104.1",
+    "@tanstack/react-router": "^1.170.41",
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/addon-search": "^0.16.0",
     "@xterm/xterm": "^6.0.0",
@@ -30,9 +30,9 @@
     "cmdk": "^1.1.1",
     "i18next": "^26.4.2",
     "i18next-browser-languagedetector": "^8.2.1",
-    "katex": "^0.18.9",
-    "lucide-react": "1.49.0",
-    "mermaid": "12.0.0",
+    "katex": "^0.19.0",
+    "lucide-react": "1.52.0",
+    "mermaid": "12.1.0",
     "motion": "^14.0.0",
     "qrcode": "^1.5.4",
     "react": "^19.3.0",
@@ -61,13 +61,13 @@
     "eslint": "^9.39.4",
     "eslint-plugin-react": "^7.37.5",
     "eslint-plugin-react-hooks": "^5.2.0",
-    "globals": "^17.12.0",
-    "jsdom": "^30.1.1",
+    "globals": "^17.13.0",
+    "jsdom": "^30.1.2",
     "openapi-typescript": "^7.13.0",
     "tailwindcss": "^4.3.3",
     "typescript": "^5.9.2",
     "typescript-eslint": "^8.71.0",
-    "vite": "^8.3.1",
-    "vitest": "^5.0.2"
+    "vite": "^8.3.2",
+    "vitest": "^5.0.3"
   }
 }
