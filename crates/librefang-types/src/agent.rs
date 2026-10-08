@@ -19,6 +19,37 @@ pub const STABLE_PREFIX_MODE_METADATA_KEY: &str = "stable_prefix_mode";
 /// disable the guard with the whole test suite still green.
 pub const SENDER_ACCOUNT_ID_METADATA_KEY: &str = "sender_account_id";
 
+/// Manifest-metadata keys the kernel owns and (re-)stamps on every turn from a
+/// verified `SenderContext`.
+///
+/// They are reserved: an `agent.toml` may declare them, but the kernel strips
+/// them before the runtime reads `manifest.metadata`, so only the identity a
+/// turn's real `SenderContext` carries can ever reach the per-sender tool gate,
+/// the memory ACL and the peer-scoped `peer:{user_id}:` namespace (#8409
+/// review). A forged `sender_channel = "webui"` plus a target's derivable
+/// `UserId::from_name` UUID would otherwise re-introduce, for the `webui`
+/// channel, exactly the sender-identity forgery #7744 closed for the REST body
+/// path.
+pub const RESERVED_SENDER_METADATA_KEYS: &[&str] = &[
+    "sender_user_id",
+    "sender_channel",
+    "sender_chat_id",
+    "sender_chat_scope",
+    "sender_display_name",
+    SENDER_ACCOUNT_ID_METADATA_KEY,
+];
+
+/// Remove every [`RESERVED_SENDER_METADATA_KEYS`] entry from a manifest's
+/// metadata.
+///
+/// Call immediately before stamping a turn's verified `SenderContext`, so a
+/// value left on the manifest cannot survive a sender-less turn.
+pub fn strip_reserved_sender_metadata(metadata: &mut HashMap<String, serde_json::Value>) {
+    for key in RESERVED_SENDER_METADATA_KEYS {
+        metadata.remove(*key);
+    }
+}
+
 /// Stable namespace for deriving deterministic [`UserId`] values from
 /// [`UserConfig::name`]. Generated once and frozen — changing this constant
 /// rotates every existing `UserId` and breaks audit-log correlation across
@@ -2513,6 +2544,47 @@ pub struct ExperimentVariantMetrics {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #8409 review: an `agent.toml` that declares a reserved sender key must
+    /// not keep it — the kernel strips these before the runtime reads manifest
+    /// metadata, so a forged `sender_channel = "webui"` plus a target's
+    /// derivable `UserId` UUID cannot assume that user's policy. Remove the
+    /// loop in `strip_reserved_sender_metadata` and this test fails.
+    #[test]
+    fn strip_reserved_sender_metadata_removes_forged_identity() {
+        let mut metadata = HashMap::new();
+        metadata.insert(
+            "sender_channel".to_string(),
+            serde_json::Value::String("webui".to_string()),
+        );
+        metadata.insert(
+            "sender_user_id".to_string(),
+            serde_json::Value::String(UserId::from_name("victim").to_string()),
+        );
+        metadata.insert(
+            SENDER_ACCOUNT_ID_METADATA_KEY.to_string(),
+            serde_json::Value::String("acct".to_string()),
+        );
+        // A non-reserved key is left alone.
+        metadata.insert(
+            "keep_me".to_string(),
+            serde_json::Value::String("yes".to_string()),
+        );
+
+        strip_reserved_sender_metadata(&mut metadata);
+
+        for key in RESERVED_SENDER_METADATA_KEYS {
+            assert!(
+                !metadata.contains_key(*key),
+                "reserved sender key `{key}` survived the strip"
+            );
+        }
+        assert_eq!(
+            metadata.get("keep_me").and_then(|v| v.as_str()),
+            Some("yes"),
+            "the strip must only touch reserved sender keys"
+        );
+    }
 
     #[test]
     fn test_agent_id_uniqueness() {

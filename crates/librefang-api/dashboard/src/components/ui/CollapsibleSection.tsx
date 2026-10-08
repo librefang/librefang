@@ -44,7 +44,13 @@ export function CollapsibleSection({
   return (
     <details
       ref={ref}
-      className="group overflow-hidden rounded-xl border border-border-subtle/60 bg-surface/40"
+      // `overflow-hidden` trims the body to the rounded corners while folded,
+      // but it also clips an absolutely-positioned popover rendered by a child
+      // (the model pickers in the manifest editor). Release the clip once the
+      // section is open — the `open:` variant matches this element itself
+      // (`group-open:` would target descendants, per Tailwind) — and keep it
+      // for the folded state.
+      className="group overflow-hidden rounded-xl border border-border-subtle/60 bg-surface/40 open:overflow-visible"
       open={defaultOpen || undefined}
     >
       <summary

@@ -9,11 +9,11 @@
 
 use async_trait::async_trait;
 use futures::Stream;
-use librefang_channels::bridge::{BridgeManager, ChannelBridgeHandle};
+use librefang_channels::bridge::{AutoReplyOutcome, BridgeManager, ChannelBridgeHandle};
 use librefang_channels::router::AgentRouter;
 use librefang_channels::types::{
     AgentPhase, ChannelAdapter, ChannelContent, ChannelMessage, ChannelType, ChannelUser,
-    LifecycleReaction,
+    LifecycleReaction, SenderContext,
 };
 use librefang_types::agent::AgentId;
 use librefang_types::config::ChannelOverrides;
@@ -59,6 +59,9 @@ struct MockAdapter {
     /// Per-instance overrides the bridge reads via `channel_overrides()`.
     /// `None` mirrors a sidecar with no command policy (allow-all fallback).
     overrides: Option<ChannelOverrides>,
+    /// What `suppress_error_responses()` answers. False mirrors the in-process
+    /// adapters; true mirrors a public feed that must not receive error text.
+    suppress_errors: bool,
 }
 
 impl MockAdapter {
@@ -77,7 +80,15 @@ impl MockAdapter {
         channel_type: ChannelType,
         overrides: Option<ChannelOverrides>,
     ) -> (Arc<Self>, mpsc::Sender<ChannelMessage>) {
-        Self::build(name, channel_type, overrides, 256)
+        Self::build(name, channel_type, overrides, 256, false)
+    }
+
+    /// Like `new`, but the adapter declines error responses (a public feed).
+    fn new_suppressing_error_responses(
+        name: &str,
+        channel_type: ChannelType,
+    ) -> (Arc<Self>, mpsc::Sender<ChannelMessage>) {
+        Self::build(name, channel_type, None, 256, true)
     }
 
     /// Like `new`, but the adapter's inbound channel is bounded at `capacity`
@@ -88,7 +99,7 @@ impl MockAdapter {
         channel_type: ChannelType,
         capacity: usize,
     ) -> (Arc<Self>, mpsc::Sender<ChannelMessage>) {
-        Self::build(name, channel_type, None, capacity)
+        Self::build(name, channel_type, None, capacity, false)
     }
 
     fn build(
@@ -96,6 +107,7 @@ impl MockAdapter {
         channel_type: ChannelType,
         overrides: Option<ChannelOverrides>,
         capacity: usize,
+        suppress_errors: bool,
     ) -> (Arc<Self>, mpsc::Sender<ChannelMessage>) {
         let (tx, rx) = mpsc::channel(capacity);
         let (shutdown_tx, _shutdown_rx) = watch::channel(false);
@@ -107,6 +119,7 @@ impl MockAdapter {
             sent: Arc::new(Mutex::new(Vec::new())),
             shutdown_tx,
             overrides,
+            suppress_errors,
         });
         (adapter, tx)
     }
@@ -179,6 +192,10 @@ impl ChannelAdapter for MockAdapter {
     fn channel_overrides(&self) -> Option<ChannelOverrides> {
         self.overrides.clone()
     }
+
+    fn suppress_error_responses(&self) -> bool {
+        self.suppress_errors
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -189,6 +206,23 @@ struct MockHandle {
     agents: Mutex<Vec<(AgentId, String)>>,
     /// Records all messages sent to agents: (agent_id, message).
     received: Arc<Mutex<Vec<(AgentId, String)>>>,
+    /// When true, `check_auto_reply` fires for every message. Off by default
+    /// so the dispatch tests that predate auto-reply keep their no-auto-reply
+    /// path.
+    auto_reply: bool,
+    /// When set, `check_auto_reply` reports exactly this outcome after
+    /// recording the claimed turn. Used to drive the arms where the engine
+    /// claims the message but has no reply to deliver (`Fired(None)`) or the
+    /// turn failed (`Failed`) — the states the bridge must not mistake for
+    /// "auto-reply did not fire".
+    auto_reply_outcome: Option<AutoReplyOutcome>,
+    /// Records the `SenderContext` the bridge handed to `check_auto_reply`,
+    /// so a test can assert what identity the auto-reply turn was launched
+    /// on behalf of.
+    auto_reply_sender: Arc<Mutex<Option<SenderContext>>>,
+    /// Captures every `record_delivery` call as `(success, error)` so a test
+    /// can assert how the bridge booked the turn.
+    deliveries: DeliveryLog,
 }
 
 impl MockHandle {
@@ -196,6 +230,34 @@ impl MockHandle {
         Self {
             agents: Mutex::new(agents),
             received: Arc::new(Mutex::new(Vec::new())),
+            auto_reply: false,
+            auto_reply_outcome: None,
+            auto_reply_sender: Arc::new(Mutex::new(None)),
+            deliveries: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    /// A copy of every `record_delivery` call as `(success, error)`.
+    fn deliveries(&self) -> Vec<(bool, Option<String>)> {
+        self.deliveries.lock().unwrap().clone()
+    }
+
+    /// Like `new`, but `check_auto_reply` fires and records the `SenderContext`
+    /// it is given.
+    fn with_auto_reply(agents: Vec<(AgentId, String)>) -> Self {
+        Self {
+            auto_reply: true,
+            ..Self::new(agents)
+        }
+    }
+
+    /// Like `with_auto_reply`, but the claimed turn reports `outcome` instead
+    /// of the sender-echoing reply — the silent / failed shapes.
+    fn with_auto_reply_outcome(agents: Vec<(AgentId, String)>, outcome: AutoReplyOutcome) -> Self {
+        Self {
+            auto_reply: true,
+            auto_reply_outcome: Some(outcome),
+            ..Self::new(agents)
         }
     }
 }
@@ -210,6 +272,33 @@ impl ChannelBridgeHandle for MockHandle {
         Ok(format!("Echo: {message}"))
     }
 
+    /// Mirrors the production handle: the auto-reply decision and the turn it
+    /// launches both belong to the sender the message arrived from. The identity
+    /// is echoed into the reply text so a test can follow it end-to-end, and
+    /// recorded so it can be asserted directly.
+    async fn check_auto_reply(
+        &self,
+        agent_id: AgentId,
+        message: &str,
+        sender: &SenderContext,
+    ) -> AutoReplyOutcome {
+        if !self.auto_reply {
+            return AutoReplyOutcome::NotFired;
+        }
+        *self.auto_reply_sender.lock().unwrap() = Some(sender.clone());
+        self.received
+            .lock()
+            .unwrap()
+            .push((agent_id, format!("auto-reply: {message}")));
+        if let Some(outcome) = &self.auto_reply_outcome {
+            return outcome.clone();
+        }
+        AutoReplyOutcome::Fired(Some(format!(
+            "auto-reply to {}/{}",
+            sender.channel, sender.user_id
+        )))
+    }
+
     async fn find_agent_by_name(&self, name: &str) -> Result<Option<AgentId>, String> {
         let agents = self.agents.lock().unwrap();
         Ok(agents.iter().find(|(_, n)| n == name).map(|(id, _)| *id))
@@ -221,6 +310,21 @@ impl ChannelBridgeHandle for MockHandle {
 
     async fn spawn_agent_by_name(&self, _manifest_name: &str) -> Result<AgentId, String> {
         Err("mock: spawn not implemented".to_string())
+    }
+
+    async fn record_delivery(
+        &self,
+        _agent_id: AgentId,
+        _channel: &str,
+        _recipient: &str,
+        success: bool,
+        error: Option<&str>,
+        _thread_id: Option<&str>,
+    ) {
+        self.deliveries
+            .lock()
+            .unwrap()
+            .push((success, error.map(String::from)));
     }
     fn record_consumer_lag(&self, _n: u64, _ctx: &'static str) {
         // Test mock: no event bus to forward to.
@@ -324,6 +428,319 @@ async fn test_bridge_dispatch_text_message() {
         assert_eq!(received[0].0, agent_id);
         assert_eq!(received[0].1, "Hello agent!");
     }
+
+    manager.stop().await;
+}
+
+/// Regression: an auto-reply turn must be launched with the sender's identity.
+///
+/// The auto-reply branch used to `return` before `build_sender_context`, so the
+/// turn ran with no `SenderContext` at all. The tool authorization gate derives
+/// its `(channel, sender_id)` pair from that context — with neither, every tool
+/// outside the guest read-only allowlist resolves to `NeedsApproval`, i.e. an
+/// agent that can execute nothing.
+///
+/// This asserts the two values the gate reads (`channel` + `user_id`) actually
+/// reach the handle that runs the turn.
+#[tokio::test]
+async fn auto_reply_turn_carries_sender_identity() {
+    let agent_id = AgentId::new();
+    let handle = Arc::new(MockHandle::with_auto_reply(vec![(
+        agent_id,
+        "coder".to_string(),
+    )]));
+    let router = Arc::new(AgentRouter::new());
+
+    // The platform id the production incident carried: a Telegram DM sender.
+    router.set_user_default("34387719".to_string(), agent_id);
+
+    let (adapter, tx) = MockAdapter::new("test-adapter", ChannelType::Telegram);
+    let adapter_ref = adapter.clone();
+
+    let mut manager = BridgeManager::new(handle.clone(), router);
+    manager.start_adapter(adapter.clone()).await.unwrap();
+
+    tx.send(make_text_msg(ChannelType::Telegram, "34387719", "status?"))
+        .await
+        .unwrap();
+
+    wait_until("auto-reply dispatch", || !adapter_ref.get_sent().is_empty()).await;
+
+    let sender = handle
+        .auto_reply_sender
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("auto-reply fired without ever receiving a SenderContext");
+
+    assert_eq!(
+        sender.user_id, "34387719",
+        "the auto-reply turn lost the sender id — the tool gate reads this as an \
+         unrecognised sender and forces every non-read-only tool into approval"
+    );
+    assert_eq!(
+        sender.channel, "telegram",
+        "the auto-reply turn lost the channel — the tool gate needs it to resolve \
+         the sender's RBAC binding"
+    );
+    assert_eq!(
+        sender.chat_id.as_deref(),
+        Some("34387719"),
+        "the DM chat id must ride along so the turn addresses the conversation it \
+         arrived on"
+    );
+
+    // The identity survived all the way to the reply delivered to the user.
+    let sent = adapter_ref.get_sent();
+    assert_eq!(sent.len(), 1, "expected 1 auto-reply, got {}", sent.len());
+    assert_eq!(sent[0].0, "34387719");
+    assert_eq!(sent[0].1, "auto-reply to telegram/34387719");
+
+    manager.stop().await;
+}
+
+/// Regression: a silent auto-reply turn must not be re-dispatched through the
+/// ordinary turn, and must not deliver an empty bubble.
+///
+/// `check_auto_reply` answered `Option<String>`, so a turn that ran but was
+/// silent (`Ok("")`) came back as the same `None` the bridge reads as "the
+/// engine never claimed the message". It then ran the ordinary turn on top of
+/// the auto-reply one — the same user message landed in the same channel
+/// session twice and cost a second LLM turn. A *failed* turn gets its own test
+/// (`failed_auto_reply_reports_the_error_without_re_dispatching`): it must
+/// surface the failure rather than stay silent.
+///
+/// The claim itself is observable at the handle: the mock records the auto-reply
+/// turn when `check_auto_reply` runs, and the ordinary turn when `send_message`
+/// runs. Exactly one of those records may exist.
+///
+/// The silent turn still counts as a delivery: the ordinary fallback books the
+/// same shape as successful (it skips only the send for an empty response), so
+/// the two paths must agree on the metric.
+#[tokio::test]
+async fn claimed_auto_reply_without_a_reply_is_not_re_dispatched() {
+    let agent_id = AgentId::new();
+    let handle = Arc::new(MockHandle::with_auto_reply_outcome(
+        vec![(agent_id, "coder".to_string())],
+        AutoReplyOutcome::Fired(None),
+    ));
+    let router = Arc::new(AgentRouter::new());
+    router.set_user_default("34387719".to_string(), agent_id);
+
+    let (adapter, tx) = MockAdapter::new("test-adapter", ChannelType::Telegram);
+    let adapter_ref = adapter.clone();
+
+    let mut manager = BridgeManager::new(handle.clone(), router);
+    manager.start_adapter(adapter.clone()).await.unwrap();
+
+    tx.send(make_text_msg(ChannelType::Telegram, "34387719", "status?"))
+        .await
+        .unwrap();
+
+    // The engine must have claimed the message...
+    wait_until("auto-reply claimed the message", || {
+        !handle.received.lock().unwrap().is_empty()
+    })
+    .await;
+
+    // ...and the ordinary turn must never run on top of it. A re-dispatched
+    // turn is a synchronous mock call, so give it a bounded window to show
+    // up and fail fast if it does; the fixed path stays quiet.
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(200);
+    while tokio::time::Instant::now() < deadline {
+        let received = handle.received.lock().unwrap().clone();
+        assert_eq!(
+            received.len(),
+            1,
+            "the claimed auto-reply turn was re-dispatched as the ordinary \
+             turn, so the user message lands in the same channel session twice and \
+             costs a second LLM turn; handle calls: {received:?}"
+        );
+        assert!(
+            !received[0].1.starts_with("Echo:"),
+            "the record is the ordinary turn, not the auto-reply claim: {received:?}"
+        );
+        let sent = adapter_ref.get_sent();
+        assert!(
+            sent.is_empty(),
+            "a silent auto-reply must deliver nothing; got {sent:?}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+
+    assert_eq!(
+        handle.deliveries(),
+        vec![(true, None)],
+        "a silent auto-reply must record a successful delivery — the ordinary \
+         fallback books the same shape, and the metrics must not read as if no \
+         turn ran"
+    );
+
+    manager.stop().await;
+}
+
+/// Regression: a failed auto-reply turn must reach the user and the delivery
+/// metrics — and must not be re-dispatched through the ordinary turn.
+///
+/// `Failed` used to share the silent arm's bare `return`, so the error bubble
+/// and the `record_delivery(false)` the ordinary path books on a kernel failure
+/// were both dropped: the user saw nothing and delivery metrics read as if no
+/// turn had been attempted. The message is spent either way; what must not come
+/// back is the second dispatch.
+#[tokio::test]
+async fn failed_auto_reply_reports_the_error_without_re_dispatching() {
+    for suppress_errors in [false, true] {
+        let agent_id = AgentId::new();
+        let error = "agent 'coder' is not available".to_string();
+        let handle = Arc::new(MockHandle::with_auto_reply_outcome(
+            vec![(agent_id, "coder".to_string())],
+            AutoReplyOutcome::Failed(error.clone()),
+        ));
+        let router = Arc::new(AgentRouter::new());
+        router.set_user_default("34387719".to_string(), agent_id);
+
+        let (adapter, tx) = if suppress_errors {
+            MockAdapter::new_suppressing_error_responses("test-adapter", ChannelType::Telegram)
+        } else {
+            MockAdapter::new("test-adapter", ChannelType::Telegram)
+        };
+        let adapter_ref = adapter.clone();
+
+        let mut manager = BridgeManager::new(handle.clone(), router);
+        manager.start_adapter(adapter.clone()).await.unwrap();
+
+        tx.send(make_text_msg(ChannelType::Telegram, "34387719", "status?"))
+            .await
+            .unwrap();
+
+        // The engine claimed the message and the bridge booked the failure.
+        wait_until("failed auto-reply delivery record", || {
+            !handle.deliveries().is_empty()
+        })
+        .await;
+
+        // The ordinary turn must never run on top of the claim: exactly one
+        // handle call, the auto-reply one.
+        let received = handle.received.lock().unwrap().clone();
+        assert_eq!(
+            received.len(),
+            1,
+            "the failed auto-reply turn was re-dispatched as the ordinary turn, \
+             duplicating the user message and paying a second LLM turn; handle \
+             calls: {received:?}"
+        );
+        assert!(
+            !received[0].1.starts_with("Echo:"),
+            "the record is the ordinary turn, not the auto-reply claim: {received:?}"
+        );
+
+        let expected = format!("Agent error: {error}");
+        let deliveries = handle.deliveries();
+        assert_eq!(
+            deliveries.len(),
+            1,
+            "expected exactly one record_delivery call, got {deliveries:?}"
+        );
+        assert!(
+            !deliveries[0].0,
+            "a failed auto-reply turn must record the delivery as failed, got {deliveries:?}"
+        );
+        assert_eq!(
+            deliveries[0].1.as_deref(),
+            Some(expected.as_str()),
+            "the delivery record must carry the error string"
+        );
+
+        let sent = adapter_ref.get_sent();
+        if suppress_errors {
+            assert!(
+                sent.is_empty(),
+                "a suppress_error_responses adapter must not receive the error bubble; \
+                 got {sent:?}"
+            );
+        } else {
+            assert_eq!(
+                sent,
+                vec![("34387719".to_string(), expected)],
+                "the failed auto-reply turn must deliver the error bubble"
+            );
+        }
+
+        manager.stop().await;
+    }
+}
+
+/// Regression: a failed auto-reply whose channel default is stale must
+/// re-resolve the agent by name and retry, like the ordinary kernel-failure
+/// arm does.
+///
+/// The auto-reply failure arm used to format the error and book the failed
+/// delivery itself, so `try_reresolution` never ran. Once the channel's default
+/// agent was respawned under a new id, every inbound message got
+/// `Agent error: Agent not found: <old id>` and the router kept pointing at the
+/// dead id forever.
+#[tokio::test]
+async fn failed_auto_reply_re_resolves_a_stale_channel_default() {
+    let stale_id = AgentId::new();
+    let fresh_id = AgentId::new();
+    let error = format!("Agent not found: {stale_id}");
+    let handle = Arc::new(MockHandle::with_auto_reply_outcome(
+        vec![(fresh_id, "coder".to_string())],
+        AutoReplyOutcome::Failed(error),
+    ));
+    let router = Arc::new(AgentRouter::new());
+    // The channel default is the dead id the engine resolved; its configured
+    // name is what re-resolution looks the live agent up by.
+    router.set_channel_default_with_name("telegram".to_string(), stale_id, "coder".to_string());
+    router.set_user_default("34387719".to_string(), stale_id);
+
+    let (adapter, tx) = MockAdapter::new("test-adapter", ChannelType::Telegram);
+    let adapter_ref = adapter.clone();
+
+    let mut manager = BridgeManager::new(handle.clone(), router.clone());
+    manager.start_adapter(adapter.clone()).await.unwrap();
+
+    tx.send(make_text_msg(ChannelType::Telegram, "34387719", "status?"))
+        .await
+        .unwrap();
+
+    // The retry must run and book its outcome before the test can assert on
+    // the delivery record.
+    wait_until("stale auto-reply retry delivery", || {
+        !handle.deliveries().is_empty()
+    })
+    .await;
+
+    // The retry's reply reached the user instead of the stale-id error bubble.
+    let sent = adapter_ref.get_sent();
+    assert_eq!(
+        sent,
+        vec![("34387719".to_string(), "Echo: status?".to_string())],
+        "the re-resolved retry must deliver its reply, not an error bubble"
+    );
+
+    // Two handle calls: the auto-reply claim on the stale id, then the retry
+    // on the re-resolved one.
+    let received = handle.received.lock().unwrap().clone();
+    assert_eq!(
+        received.last().map(|(id, _)| *id),
+        Some(fresh_id),
+        "the retry must run under the re-resolved agent id; calls: {received:?}"
+    );
+
+    // The router now points at the live agent, so the next message skips the
+    // dead id entirely.
+    assert_eq!(
+        router.channel_default("telegram"),
+        Some(fresh_id),
+        "a successful re-resolution must update the router's channel default"
+    );
+
+    assert_eq!(
+        handle.deliveries(),
+        vec![(true, None)],
+        "the successful retry must book exactly one successful delivery"
+    );
 
     manager.stop().await;
 }
@@ -2035,6 +2452,10 @@ struct NotifyingAdapter {
     recipients: Vec<ChannelUser>,
     sent: Arc<Mutex<Vec<(String, String)>>>,
     account_id: Option<String>,
+    /// The transport-reported alias (`ready` account id) of a sidecar whose
+    /// config name is `account_id` — the value it may stamp into inbound
+    /// `metadata["account_id"]` (#8418).
+    reported_account_id: Option<String>,
     channel_type: ChannelType,
     /// Every `send` fails, the way a Telegram bot that is not a member of the
     /// target chat fails. The attempt is still recorded, so a test can assert
@@ -2050,6 +2471,7 @@ impl NotifyingAdapter {
             recipients,
             sent: Arc::new(Mutex::new(Vec::new())),
             account_id: None,
+            reported_account_id: None,
             channel_type: ChannelType::Telegram,
             fail_sends: false,
         })
@@ -2061,6 +2483,28 @@ impl NotifyingAdapter {
             recipients,
             sent: Arc::new(Mutex::new(Vec::new())),
             account_id: Some(account_id.to_string()),
+            reported_account_id: None,
+            channel_type: ChannelType::Telegram,
+            fail_sends: false,
+        })
+    }
+
+    /// Like `with_account`, but the transport reports a different account id
+    /// in its `ready` event — the dingtalk / email / google_chat shape where
+    /// the config name and the inbound-stamped `metadata["account_id"]`
+    /// diverge (#8418).
+    fn with_reported_account(
+        name: &str,
+        account_id: &str,
+        reported_account_id: &str,
+        recipients: Vec<ChannelUser>,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            name: name.to_string(),
+            recipients,
+            sent: Arc::new(Mutex::new(Vec::new())),
+            account_id: Some(account_id.to_string()),
+            reported_account_id: Some(reported_account_id.to_string()),
             channel_type: ChannelType::Telegram,
             fail_sends: false,
         })
@@ -2073,6 +2517,7 @@ impl NotifyingAdapter {
             recipients: Vec::new(),
             sent: Arc::new(Mutex::new(Vec::new())),
             account_id: Some(account_id.to_string()),
+            reported_account_id: None,
             channel_type: ChannelType::Telegram,
             fail_sends: true,
         })
@@ -2092,6 +2537,7 @@ impl NotifyingAdapter {
             recipients,
             sent: Arc::new(Mutex::new(Vec::new())),
             account_id: Some(account_id.to_string()),
+            reported_account_id: None,
             channel_type,
             fail_sends: false,
         })
@@ -2153,6 +2599,10 @@ impl ChannelAdapter for NotifyingAdapter {
 
     fn account_id(&self) -> Option<&str> {
         self.account_id.as_deref()
+    }
+
+    fn reported_account_id(&self) -> Option<&str> {
+        self.reported_account_id.as_deref()
     }
 }
 
@@ -2896,6 +3346,88 @@ async fn test_approval_listener_falls_back_to_agent_binding_when_default_unset()
     manager.stop().await;
 }
 
+/// #8418: a sidecar whose config `name` differs from the account id its
+/// subprocess reports in `ready`. Inbound messages from such adapters
+/// (dingtalk / email / google_chat) carry the reported id in
+/// `metadata["account_id"]`, so a per-account binding keyed to that id matches
+/// inbound routing. The approval listener only has the adapter — config name
+/// in `account_id()`, reported id in `reported_account_id()` — so it must
+/// match the binding through either identity, or the same binding that routes
+/// inbound messages silently drops every approval for its agent.
+#[tokio::test]
+async fn test_approval_listener_matches_a_binding_keyed_by_the_reported_account_id() {
+    use librefang_types::event::{ApprovalRequestedEvent, Event, EventPayload, EventTarget};
+
+    let (handle, event_tx) = EventBusHandle::new();
+    let handle = Arc::new(handle);
+
+    let agent_x = AgentId::new();
+
+    let router = AgentRouter::new();
+    router.register_agent("binder-mail".to_string(), agent_x);
+    router.load_bindings(&[librefang_types::config::AgentBinding {
+        agent: "binder-mail".to_string(),
+        match_rule: librefang_types::config::BindingMatchRule {
+            channel: Some("telegram".to_string()),
+            // The id the adapter reports in `ready`, not the config name.
+            account_id: Some("acct-1".to_string()),
+            peer_id: Some("chat-mail".to_string()),
+            ..Default::default()
+        },
+    }]);
+    let router = Arc::new(router);
+
+    let adapter = NotifyingAdapter::with_reported_account("mail", "mail", "acct-1", Vec::new());
+    let adapter_ref = adapter.clone();
+
+    let mut manager = BridgeManager::new(handle.clone(), router);
+    manager.start_adapter(adapter).await.unwrap();
+    manager.start_approval_listener().await;
+    wait_until("approval listener subscribed", || {
+        event_tx.receiver_count() >= 1
+    })
+    .await;
+
+    event_tx
+        .send(Arc::new(Event::new(
+            agent_x,
+            EventTarget::System,
+            EventPayload::ApprovalRequested(ApprovalRequestedEvent {
+                request_id: "8418aaaa11112222".to_string(),
+                agent_id: agent_x.0.to_string(),
+                tool_name: "shell_exec".to_string(),
+                description: "rm -rf /tmp/foo".to_string(),
+                risk_level: "high".to_string(),
+                ..Default::default()
+            }),
+        )))
+        .expect("broadcast send");
+
+    wait_until(
+        "approval delivered to the reported-id binding's chat",
+        || !adapter_ref.get_sent().is_empty(),
+    )
+    .await;
+
+    let sent = adapter_ref.get_sent();
+    assert_eq!(
+        sent.len(),
+        1,
+        "expected one notification to the bound chat, got: {sent:?}"
+    );
+    assert_eq!(
+        sent[0].0, "chat-mail",
+        "the binding keyed by the adapter-reported account id must receive the approval"
+    );
+    assert!(
+        sent[0].1.contains("8418aaaa"),
+        "notification body should include the approval id prefix, got: {}",
+        sent[0].1
+    );
+
+    manager.stop().await;
+}
+
 /// #5002 cross-agent guard: same setup as the happy-path test, but the
 /// approval is for a DIFFERENT agent (no binding covering it). The fix must
 /// NOT re-introduce the cross-agent broadcast #4985 closed — even though
@@ -3553,6 +4085,90 @@ async fn test_approval_direct_route_is_scoped_to_the_adapter_routing_the_agent()
     assert!(
         spy.seen().is_empty(),
         "a delivered approval must not warn, got: {:#?}",
+        spy.seen()
+    );
+
+    manager.stop().await;
+}
+
+/// #8418 activation check: `SidecarAdapter::account_id()` now returns the
+/// config name, which is the key the router is seeded with, so the
+/// `channel_default` lookup resolves on sidecar hosts for the first time and
+/// `narrow_direct_route` (#8228) actually engages.
+///
+/// Scenario the narrow check cannot see through: agent-x was reached by
+/// @-mention in `chat-c` through bot-a (whose own default is agent-y), while
+/// agent-x's configured default adapter is sibling bot-b, which is not in
+/// `chat-c`. Pre-#8408 `narrow_direct_route` was always false there, every
+/// same-channel bot attempted the direct send, and bot-a — the one actually
+/// in the chat — delivered. Once bot-b resolves as "routes agent-x", the
+/// narrow set drops bot-a, so delivery would depend on bot-b succeeding in a
+/// chat it is not a member of.
+#[tokio::test]
+async fn test_approval_for_mentioned_agent_still_reaches_the_origin_chat() {
+    let (handle, event_tx) = EventBusHandle::new();
+    let handle = Arc::new(handle);
+
+    let agent_x = AgentId::new();
+    let agent_y = AgentId::new();
+
+    let router = AgentRouter::new();
+    // bot-a carried the @-mention traffic for agent-x; its own default is
+    // agent-y. Agent-x's configured default adapter is the sibling bot-b.
+    router.set_channel_default("telegram:bot-a".to_string(), agent_y);
+    router.set_channel_default("telegram:bot-b".to_string(), agent_x);
+    let router = Arc::new(router);
+
+    // bot-a is in `chat-c` (sends succeed); bot-b is not (every send fails,
+    // the way a bot absent from the target chat fails).
+    let adapter_a = NotifyingAdapter::with_account("telegram-a", "bot-a", Vec::new());
+    let adapter_b = NotifyingAdapter::failing_with_account("telegram-b", "bot-b");
+    let (ref_a, ref_b) = (adapter_a.clone(), adapter_b.clone());
+
+    let mut manager = BridgeManager::new(handle.clone(), router);
+    manager.start_adapter(adapter_a).await.unwrap();
+    manager.start_adapter(adapter_b).await.unwrap();
+
+    let spy = WarnSpy::install();
+    manager.start_approval_listener().await;
+    wait_until("approval listener subscribed", || {
+        event_tx.receiver_count() >= 1
+    })
+    .await;
+
+    event_tx
+        .send(Arc::new(approval_event_from_chat(
+            "8418bbbb33334444",
+            agent_x,
+            Some("chat-c"),
+            Some("telegram"),
+        )))
+        .expect("broadcast send");
+
+    wait_until("approval fan-out settled", || {
+        !ref_a.get_sent().is_empty() || !ref_b.get_sent().is_empty()
+    })
+    .await;
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    assert_eq!(
+        ref_a.get_sent().len(),
+        1,
+        "the bot that carried the @-mention is in the origin chat and must deliver, got: {:?}; \
+         sibling bot attempts: {:?}",
+        ref_a.get_sent(),
+        ref_b.get_sent()
+    );
+    assert_eq!(
+        ref_a.get_sent()[0].0,
+        "chat-c",
+        "the approval must land in the originating chat"
+    );
+    assert!(
+        !spy.seen()
+            .iter()
+            .any(|w| w.contains("Approval reached no channel")),
+        "the approval was delivered, so the aggregate warning must not fire, got: {:#?}",
         spy.seen()
     );
 

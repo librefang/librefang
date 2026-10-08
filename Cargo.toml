@@ -212,7 +212,7 @@ sha2 = { version = "0.10", features = ["oid"] }
 hmac = "0.12"
 hex = "0.4"
 subtle = "2"
-ed25519-dalek = { version = "2", features = ["rand_core"] }
+ed25519-dalek = { version = "3", features = ["rand_core"] }
 x25519-dalek = { version = "3", features = ["static_secrets"] }
 hkdf = "0.12"
 rsa = "0.9.6"

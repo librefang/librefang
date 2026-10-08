@@ -4,7 +4,7 @@
 //! `start_channel_bridge()` entry point called by the daemon.
 
 use crate::workflow::WorkflowId;
-use librefang_channels::bridge::{BridgeManager, ChannelBridgeHandle};
+use librefang_channels::bridge::{AutoReplyOutcome, BridgeManager, ChannelBridgeHandle};
 use librefang_channels::router::AgentRouter;
 use librefang_channels::sidecar::SidecarAdapter;
 use librefang_channels::types::{ChannelAdapter, ConversationScope, SenderContext};
@@ -2344,25 +2344,56 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
         }
     }
 
-    async fn check_auto_reply(&self, agent_id: AgentId, message: &str) -> Option<String> {
+    async fn check_auto_reply(
+        &self,
+        agent_id: AgentId,
+        message: &str,
+        sender: &SenderContext,
+    ) -> AutoReplyOutcome {
         // Check if auto-reply should fire for this message
         let channel_type = "bridge"; // Generic; the bridge layer handles specifics
-        self.kernel
+        if self
+            .kernel
             .auto_reply()
-            .should_reply(message, channel_type, agent_id)?;
-        // Fire auto-reply synchronously (bridge already runs in background task)
-        match self.kernel.send_message(agent_id, message).await {
-            Ok(result) => {
-                // If the agent chose NO_REPLY (silent), don't send the literal text
-                if result.silent {
-                    None
-                } else {
-                    Some(result.response)
-                }
-            }
+            .should_reply(message, channel_type, agent_id)
+            .is_none()
+        {
+            // The engine never claimed the message: the ordinary dispatch may
+            // run the turn.
+            return AutoReplyOutcome::NotFired;
+        }
+        // Fire auto-reply synchronously (bridge already runs in background task).
+        //
+        // Sent through this adapter's own channel-turn method rather than by
+        // reaching into the kernel: `send_message_with_sender` is the one place
+        // that knows how to send a channel turn, so it carries both halves of
+        // the conversation's turn state at once — the sender identity the tool
+        // authorization gate reads, and the conversation's `/think` preference.
+        // Calling the kernel directly here dropped both, because it bypassed the
+        // whole method rather than one of its arguments.
+        match self
+            .send_message_with_sender(agent_id, message, sender)
+            .await
+        {
+            // Mirrors the guard the ordinary dispatch applies before delivering
+            // (`bridge.rs`, non-streaming success path): silence and an empty
+            // response both mean "nothing to say". Without it, an empty reply
+            // would reach `maybe_prefix_response` and come out as a prefix-only
+            // bubble whenever `prefix_agent_name` is configured.
+            //
+            // Either way the turn *ran*: the outcome is `Fired`, never
+            // `NotFired`, so the bridge does not dispatch the same message a
+            // second time in the same channel session.
+            Ok(reply) if !reply.is_empty() => AutoReplyOutcome::Fired(Some(reply)),
+            Ok(_) => AutoReplyOutcome::Fired(None),
             Err(e) => {
                 tracing::warn!(error = %e, "Auto-reply failed");
-                None
+                // A failed turn is still a claimed message: re-dispatching it
+                // would run the identical turn again in the same session. The
+                // error rides along so the bridge can surface it and record the
+                // delivery as failed, exactly as the ordinary path does when
+                // the kernel rejects a turn.
+                AutoReplyOutcome::Failed(e)
             }
         }
     }
