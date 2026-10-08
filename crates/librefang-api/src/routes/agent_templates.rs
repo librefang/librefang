@@ -1811,29 +1811,31 @@ pub async fn restore_template_version(
 
 #[cfg(test)]
 mod read_agent_type_in_tests {
-    use super::{read_agent_type_in, TemplateSource};
+    use super::{
+        agent_type_path_in, read_agent_type_in, workspace_agent_manifest_path_in, TemplateSource,
+    };
 
-    /// #8112: the `agent-types/` read failing for a real reason (here,
-    /// `agent-types` existing as a plain file — the ENOTDIR case cited in the
-    /// review) must not veto a value the independently-readable workspace
-    /// manifest can still supply. Before the fix, any non-`NotFound` error on
-    /// the first source short-circuited the whole function with `return
-    /// Err(e)`, so `POST /api/agents {"template": name}` hard-failed even
-    /// though the same name was a perfectly readable live agent.
+    /// Make `path` unreadable for a reason other than absence on every platform by putting a directory where the file should be.
+    /// Reading a directory as a file fails with EISDIR on Unix and `ERROR_ACCESS_DENIED` on Windows, neither of which maps to `NotFound`.
+    /// A plain file standing in for a parent directory is not portable: Unix reports ENOTDIR, but Windows reports `ERROR_PATH_NOT_FOUND`, which Rust maps to `NotFound` and the code under test rightly treats as absence.
+    async fn make_unreadable(path: &std::path::Path) {
+        tokio::fs::create_dir_all(path).await.unwrap();
+    }
+
+    /// #8112: the `agent-types/` read failing for a real reason must not veto a value the independently-readable workspace manifest can still supply.
+    /// Before the fix, any non-`NotFound` error on the first source short-circuited the whole function with `return Err(e)`, so `POST /api/agents {"template": name}` hard-failed even though the same name was a perfectly readable live agent.
     #[tokio::test]
     async fn broken_agent_type_read_falls_back_to_the_workspace_manifest() {
         let tmp = tempfile::tempdir().unwrap();
         let home = tmp.path();
 
-        // `agent-types/{name}.toml` becomes unreadable for a reason other
-        // than absence: the parent `agent-types` is a file, not a directory.
-        tokio::fs::write(home.join("agent-types"), "not a directory")
+        make_unreadable(&agent_type_path_in(home, "researcher")).await;
+
+        let manifest = workspace_agent_manifest_path_in(home, "researcher");
+        tokio::fs::create_dir_all(manifest.parent().unwrap())
             .await
             .unwrap();
-
-        let workspace_dir = home.join("workspaces").join("agents").join("researcher");
-        tokio::fs::create_dir_all(&workspace_dir).await.unwrap();
-        tokio::fs::write(workspace_dir.join("agent.toml"), "name = \"researcher\"\n")
+        tokio::fs::write(&manifest, "name = \"researcher\"\n")
             .await
             .unwrap();
 
@@ -1852,20 +1854,8 @@ mod read_agent_type_in_tests {
         let tmp = tempfile::tempdir().unwrap();
         let home = tmp.path();
 
-        tokio::fs::write(home.join("agent-types"), "not a directory")
-            .await
-            .unwrap();
-        // `workspaces/agents/researcher` as a file, not a directory, makes
-        // `.../researcher/agent.toml` ENOTDIR too.
-        tokio::fs::create_dir_all(home.join("workspaces").join("agents"))
-            .await
-            .unwrap();
-        tokio::fs::write(
-            home.join("workspaces").join("agents").join("researcher"),
-            "not a directory either",
-        )
-        .await
-        .unwrap();
+        make_unreadable(&agent_type_path_in(home, "researcher")).await;
+        make_unreadable(&workspace_agent_manifest_path_in(home, "researcher")).await;
 
         let result = read_agent_type_in(home, "researcher").await;
         assert!(
