@@ -20,10 +20,10 @@
     "test:watch": "vitest"
   },
   "dependencies": {
-    "@tanstack/react-query": "^5.104.0",
+    "@tanstack/react-query": "^5.104.1",
     "clsx": "^2.1.1",
     "framer-motion": "^14.0.0",
-    "lucide-react": "^1.48.0",
+    "lucide-react": "^1.52.0",
     "react": "^19.3.0",
     "react-dom": "^19.3.0",
     "tailwind-merge": "^3.7.0",
@@ -38,12 +38,12 @@
     "@types/react-dom": "^19.3.0",
     "@vitejs/plugin-react": "^6.1.1",
     "autoprefixer": "^10.6.1",
-    "jsdom": "^30.1.1",
+    "jsdom": "^30.1.2",
     "postcss": "^8.5.28",
     "tailwindcss": "^4.3.3",
     "tsx": "^4.23.15",
     "typescript": "^7.0.2",
-    "vite": "^8.3.1",
-    "vitest": "^5.0.2"
+    "vite": "^8.3.2",
+    "vitest": "^5.0.3"
   }
 }
