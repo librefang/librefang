@@ -28,6 +28,15 @@ use crate::MeteringSubsystemApi;
 use super::*;
 
 impl LibreFangKernel {
+    /// The output budget this turn will send, resolved through the catalog exactly as `execute_llm_agent` resolves it.
+    ///
+    /// The pre-call holds must be sized from what the turn will actually ask for: `effective_max_tokens()` returns the manifest's `max_tokens` or the system default, skipping the registry rung the resolver applies, so a hold sized from it reserves the wrong amount for a model the catalog knows.
+    /// `ModelCatalog::resolve_turn_inference_params` is the same call the execution path makes, which keeps the estimate and the request from drifting apart.
+    fn resolved_output_budget(&self, model: &librefang_types::agent::ModelConfig) -> u64 {
+        let catalog = self.llm.model_catalog.load();
+        u64::from(catalog.resolve_turn_inference_params(model).max_tokens)
+    }
+
     /// Send a message to an agent and get a response.
     ///
     /// Automatically upgrades the kernel handle from `self_handle` so that
@@ -1230,11 +1239,11 @@ impl LibreFangKernel {
         // above for the full rationale.
 
         let estimated_usd = {
-            // Best-effort pre-call estimate: model.max_tokens worth of
-            // output, plus a conservative input estimate equal to the
-            // same token count. Real cost is settled later via
+            // Best-effort pre-call estimate: the turn's resolved output
+            // budget worth of output, plus a conservative input estimate
+            // equal to the same token count. Real cost is settled later via
             // `check_all_and_record`; this only sizes the in-memory hold.
-            let max_out = u64::from(entry.manifest.model.effective_max_tokens());
+            let max_out = self.resolved_output_budget(&entry.manifest.model);
             let est_in = max_out;
             {
                 let catalog = self.llm.model_catalog.load();
@@ -1256,7 +1265,7 @@ impl LibreFangKernel {
 
         // Enforce quota on the effective target agent (after routing).
         // Use reserve_tokens so the estimated token budget is pre-charged inside the same DashMap write-lock, closing the TOCTOU race where N concurrent callers all pass the check before any of them calls record_usage (#3736).
-        let estimated_tokens = u64::from(entry.manifest.model.effective_max_tokens());
+        let estimated_tokens = self.resolved_output_budget(&entry.manifest.model);
         let token_reservation = match self
             .agents
             .scheduler
@@ -2217,7 +2226,7 @@ impl LibreFangKernel {
         // the duration of the spawned task and settled/released alongside the
         // token reservation below.
         let estimated_usd = {
-            let max_out = u64::from(entry.manifest.model.effective_max_tokens());
+            let max_out = self.resolved_output_budget(&entry.manifest.model);
             let est_in = max_out;
             let catalog = self.llm.model_catalog.load();
             MeteringEngine::estimate_cost_with_catalog(
@@ -2238,7 +2247,7 @@ impl LibreFangKernel {
         // Pre-charge the estimated token budget atomically to prevent the
         // TOCTOU race (#3736).  The reservation is settled inside the spawned
         // task after the LLM call completes.
-        let estimated_tokens = u64::from(entry.manifest.model.effective_max_tokens());
+        let estimated_tokens = self.resolved_output_budget(&entry.manifest.model);
         let token_reservation = match self
             .agents
             .scheduler
