@@ -4,6 +4,7 @@ import {
   pickLatestSessionId,
   deriveDropdownActiveSessionId,
   pickSessionDropdownLabel,
+  sessionAfterClose,
   shouldAutoPinResolvedSession,
 } from "./sessionSelector";
 import { useAgentSessions } from "./queries/agents";
@@ -89,6 +90,29 @@ describe("deriveDropdownActiveSessionId", () => {
   it("returns the value as-is — callers are responsible for not passing empty strings", () => {
     // The function passes through whatever the URL param contains.
     expect(deriveDropdownActiveSessionId("some-id")).toBe("some-id");
+  });
+});
+
+describe("sessionAfterClose", () => {
+  it("returns null when no tab is left", () => {
+    expect(sessionAfterClose([], "s1")).toBeNull();
+    expect(sessionAfterClose(["s1"], "s1")).toBeNull();
+  });
+
+  it("lands on the neighbour that takes the closed tab's place", () => {
+    // Closing B in [A,B,C] selects C, not the most recently visited tab.
+    expect(sessionAfterClose(["a", "b", "c"], "b")).toBe("c");
+    expect(sessionAfterClose(["a", "b", "c"], "a")).toBe("b");
+  });
+
+  it("falls back to the previous tab when the last one closes", () => {
+    expect(sessionAfterClose(["a", "b", "c"], "c")).toBe("b");
+    expect(sessionAfterClose(["a", "b"], "b")).toBe("a");
+  });
+
+  it("falls back to the last remaining tab when the closed id is not listed", () => {
+    // Defensive: a stale click must not navigate nowhere.
+    expect(sessionAfterClose(["a", "b"], "gone")).toBe("b");
   });
 });
 
