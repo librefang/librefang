@@ -46,6 +46,7 @@ api-error-manifest-too-large = マニフェストが大きすぎます（最大 
 api-error-manifest-invalid-format = 無効なマニフェスト形式
 api-error-manifest-signature-mismatch = 署名されたマニフェストの内容が manifest_toml と一致しません
 api-error-manifest-signature-failed = マニフェストの署名検証に失敗しました
+api-error-manifest-signed-template-conflict = signed_manifest と template は併用できません。インラインの manifest_toml に署名してください
 api-error-manifest-invalid = 無効なマニフェスト: { $error }
 
 # 認証エラー

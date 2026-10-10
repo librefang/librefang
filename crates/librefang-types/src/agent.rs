@@ -1245,6 +1245,25 @@ impl Default for ManifestTrigger {
     }
 }
 
+/// Tag prefixes the kernel owns rather than the operator.
+///
+/// These three are written by hand-role activation (`kernel/hands_lifecycle.rs`) and are the only tags any code branches on.
+/// `hand:` and `hand_role:` route the agent's workspace under `hands/<hand>/<role>` instead of `agents/<name>`, and `hand:` alone marks an agent autonomous for idle-wake purposes, decides whether a tool call needs an approval gate, and scopes structured memory.
+/// An operator who could add or drop one would be relocating a workspace and re-deciding an approval boundary through a field that reads like free-form metadata, so `merge_agent_tags` keeps them out of operator reach in both directions.
+///
+/// Lives here, next to [`AgentManifest::tags`], so every surface that has to
+/// tell a kernel-owned tag from an operator one — the kernel's tag merge and the
+/// API's save-as-agent-type snapshot — reads one definition rather than two.
+pub const SYSTEM_TAG_PREFIXES: [&str; 3] = ["hand:", "hand_instance:", "hand_role:"];
+
+/// Whether a tag belongs to the kernel rather than the operator.
+#[must_use]
+pub fn is_system_tag(tag: &str) -> bool {
+    SYSTEM_TAG_PREFIXES
+        .iter()
+        .any(|prefix| tag.starts_with(prefix))
+}
+
 /// Complete agent manifest — defines everything about an agent.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
