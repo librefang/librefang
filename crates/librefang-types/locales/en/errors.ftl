@@ -323,3 +323,4 @@ api-error-rate-limited = Rate limit exceeded. Try again later.
 # typed MemoryRouteError-style helper. Without this key, every `t_args("api-error-generic", …)`
 # call returns the literal key as the response body and `$error` interpolation never runs.
 api-error-generic = An error occurred: { $error }
+api-error-agent-manifest-conflict = Stale manifest: this agent was saved by someone else after you loaded it. Reload and apply your change again.

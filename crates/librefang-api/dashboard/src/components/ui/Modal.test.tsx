@@ -4,7 +4,7 @@ import React from "react";
 import { Modal } from "./Modal";
 
 // `motion/react` ships browser-only animation primitives that jsdom can't
-// drive. Same shim as PromptsExperimentsModal.test — render children
+// drive. Same shim as PromptsExperimentsPanel.test — render children
 // inline and turn `motion.foo` into the corresponding host tag.
 vi.mock("motion/react", () => ({
   AnimatePresence: ({ children }: { children: React.ReactNode }) => (

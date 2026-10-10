@@ -8,7 +8,19 @@
 // see them without having to read raw TOML.
 
 import { emptyManifestExtras } from "./agentManifest";
+import {
+  ROUTING_ENGINE_LABELS,
+  ROUTING_TIER_DEFAULTS,
+  routingEngineOf,
+} from "./routingEngine";
 import type { ManifestExtras, ManifestFormState } from "./agentManifest";
+
+/**
+ * What a `[routing]` slot resolves to on the daemon, marked when the manifest
+ * does not say and the value comes from `ModelRoutingConfig::default()`.
+ */
+const tierValue = (value: string | number, fallback: string | number): string =>
+  `${value}`.trim() ? `${value}` : `${fallback} _(daemon default)_`;
 
 const escapeTableCell = (value: string): string =>
   value
@@ -211,14 +223,52 @@ const pushAdvancedFormSections = (lines: string[], form: ManifestFormState): voi
     lines.push("");
   }
 
-  if (form.routing.enabled) {
+  {
+    // Always rendered, and the engine leads it. Which engine decides an
+    // agent's model is the first question a reader of this document has, and
+    // the tier table answers a different one: an agent can carry tiers and
+    // still be routed by profile — the kernel consults the profile router
+    // first and the tiers only when nothing matches. Printing the tiers
+    // without the engine was how that read as contradictory.
+    const engine = routingEngineOf(form);
+    // The engine name on its own is true of the manifest and false of the
+    // agent, because a `[routing]` table is not the only thing that arms the
+    // tiers: the kernel falls back to the daemon's `[default_routing]` block
+    // for every agent with no table of its own, and `librefang init` writes
+    // one. The editor's own note carries the same caveat; a document that
+    // names the engine without it promises something the kernel does not.
+    const unmatched = form.routing.enabled
+      ? engine === "profile"
+        ? " — unmatched turns fall back to the tiers below"
+        : ""
+      : engine === "profile"
+        ? " — unmatched turns use this manifest's model unless the daemon sets a kernel-wide `[default_routing]`"
+        : " — no router of this agent's own, so turns use its manifest model unless the daemon sets a kernel-wide `[default_routing]`";
     lines.push("## Model Routing");
     lines.push("");
-    pushBullet(lines, "Simple", form.routing.simple_model);
-    pushBullet(lines, "Medium", form.routing.medium_model);
-    pushBullet(lines, "Complex", form.routing.complex_model);
-    pushBullet(lines, "Simple threshold", form.routing.simple_threshold);
-    pushBullet(lines, "Complex threshold", form.routing.complex_threshold);
+    pushBullet(lines, "Engine", `${ROUTING_ENGINE_LABELS[engine]}${unmatched}`);
+    if (form.model.router_fixed) {
+      // Not a routing preference the engine line can be read as covering: the
+      // pin refuses profiles to the agents this one spawns, which is what a
+      // reader needs in hand to explain a refused `agent_spawn`.
+      lines.push(
+        "- **Pinned**: `[model.router_override] fixed = true` — this agent takes no profile for its own turns and refuses every profile to the agents it spawns",
+      );
+    }
+    if (form.routing.enabled) {
+      // The table is present when the manifest has one, whatever engine runs:
+      // it is the kernel's fallback, and a reader who cannot see it cannot
+      // tell why a task that matched no profile still picked a cheaper model.
+      // A blank slot is not an absent one — serde fills it from
+      // `ModelRoutingConfig::default()` — so each line prints the value the
+      // kernel would use, marked when it is the daemon's rather than the
+      // manifest's.
+      pushBullet(lines, "Simple", tierValue(form.routing.simple_model, ROUTING_TIER_DEFAULTS.simple_model));
+      pushBullet(lines, "Medium", tierValue(form.routing.medium_model, ROUTING_TIER_DEFAULTS.medium_model));
+      pushBullet(lines, "Complex", tierValue(form.routing.complex_model, ROUTING_TIER_DEFAULTS.complex_model));
+      pushBullet(lines, "Simple threshold", tierValue(form.routing.simple_threshold, ROUTING_TIER_DEFAULTS.simple_threshold));
+      pushBullet(lines, "Complex threshold", tierValue(form.routing.complex_threshold, ROUTING_TIER_DEFAULTS.complex_threshold));
+    }
     lines.push("");
   }
 
@@ -263,8 +313,12 @@ const pushLifecycleOverrides = (lines: string[], form: ManifestFormState): void 
   if (form.web_search_augmentation !== "auto") {
     items.push(`- **web_search_augmentation**: ${markdownCodeSpan(form.web_search_augmentation)}`);
   }
-  if (form.exec_policy_shorthand) {
-    items.push(`- **exec_policy**: ${markdownCodeSpan(form.exec_policy_shorthand)}`);
+  // The mode is the policy's headline and is what this list showed when the
+  // shorthand was the only spelling it knew. The table's eight knobs stay out
+  // for the same reason the compaction thresholds do: this is a summary of the
+  // agent, not a copy of its manifest.
+  if (form.exec_policy.mode) {
+    items.push(`- **exec_policy**: ${markdownCodeSpan(form.exec_policy.mode)}`);
   }
   if (form.pinned_model.trim()) {
     items.push(`- **Pinned model**: ${markdownCodeSpan(form.pinned_model.trim())}`);

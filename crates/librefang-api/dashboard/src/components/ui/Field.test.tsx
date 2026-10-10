@@ -33,13 +33,29 @@ describe("Field", () => {
     expect(screen.getByLabelText("Workspace")).toBe(screen.getByRole("textbox"));
   });
 
-  it("leaves the label unassociated when htmlFor is omitted", () => {
+  // Without `htmlFor` the label stays a `<span>`, and a `<span>` beside a
+  // control names nothing — it is not part of the accessible-name computation
+  // at all. What carries the name is the wrapper, as a `role="group"`: the
+  // fieldset/legend pattern, and the same mechanism the finders get through
+  // `ariaLabel`. Before that group existed for a labelled Field, 31 controls
+  // across the agent form had no name from either source — the count is
+  // measured in the live accessibility tree by the e2e guard, not here.
+  it("names the wrapper's group when htmlFor is omitted", () => {
     render(
       <Field label="Workspace">
         <input />
       </Field>,
     );
-    expect(screen.queryByLabelText("Workspace")).not.toBeInTheDocument();
+
+    const group = screen.getByRole("group", { name: "Workspace" });
+    expect(group.tagName).toBe("DIV");
+    expect(group).toContainElement(screen.getByRole("textbox"));
+
+    // The control is still not named *by the label* — the association is with
+    // the group, which is what a screen reader announces when focus enters it.
+    // `getByLabelText` resolves through `aria-labelledby`, so what it finds
+    // here is the wrapper, not the input.
+    expect(screen.getByLabelText("Workspace")).toBe(group);
   });
 
   it("marks a required label but leaves validation to the caller", () => {

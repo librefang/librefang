@@ -324,3 +324,4 @@ api-error-rate-limited = リクエスト制限を超えました。しばらく�
 # typed MemoryRouteError-style helper. Without this key, every `t_args("api-error-generic", …)`
 # call returns the literal key as the response body and `$error` interpolation never runs.
 api-error-generic = エラー: { $error }
+api-error-agent-manifest-conflict = マニフェストが古いです。読み込み後に他のユーザーがこのエージェントを保存しました。再読み込みして変更を適用し直してください。

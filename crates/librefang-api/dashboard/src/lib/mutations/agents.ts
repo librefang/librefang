@@ -210,13 +210,20 @@ export function usePatchAgent() {
         schedule?: AgentSchedulePatch;
         auto_evolve?: boolean;
         manifest_toml?: string;
+        /** ETag from `GET .../manifest`; the server answers 409 on a mismatch (#8424). */
+        expected_version?: string;
       };
     }) => patchAgent(agentId, body),
     onSuccess: (_data, variables) => {
       qc.invalidateQueries({ queryKey: agentKeys.lists() });
       qc.invalidateQueries({ queryKey: agentKeys.detail(variables.agentId) });
+      // Every field this endpoint accepts lives in the manifest, so every
+      // successful call rotates the ETag — not only the `manifest_toml`
+      // replacement. Leaving e.g. `auto_evolve` or a rename out kept the
+      // cached manifest read "fresh" and the editor on a superseded token
+      // (#8424).
+      qc.invalidateQueries({ queryKey: agentKeys.manifest(variables.agentId) });
       if (variables.body.manifest_toml !== undefined) {
-        qc.invalidateQueries({ queryKey: agentKeys.manifest(variables.agentId) });
         qc.invalidateQueries({ queryKey: agentKeys.mcpServers(variables.agentId) });
         qc.invalidateQueries({ queryKey: agentKeys.skills(variables.agentId) });
         qc.invalidateQueries({ queryKey: agentKeys.tools(variables.agentId) });
@@ -655,13 +662,20 @@ export function useUpdateAgentTools() {
     mutationFn: ({
       agentId,
       payload,
+      expectedVersion,
     }: {
       agentId: string;
       payload: { capabilities_tools?: string[]; tool_allowlist?: string[]; tool_blocklist?: string[] };
-    }) => updateAgentTools(agentId, payload),
+      /** ETag of the open manifest editor; the server answers 409 on a mismatch (#8424). */
+      expectedVersion?: string;
+    }) => updateAgentTools(agentId, payload, expectedVersion),
     onSuccess: (_data, variables) => {
       qc.invalidateQueries({ queryKey: agentKeys.detail(variables.agentId) });
       qc.invalidateQueries({ queryKey: agentKeys.tools(variables.agentId) });
+      // The PUT moves the manifest's ETag. Without this the cached manifest
+      // read stays "fresh" for its full staleTime and the form would keep a
+      // token the server has already superseded (#8424).
+      qc.invalidateQueries({ queryKey: agentKeys.manifest(variables.agentId) });
     },
   });
 }
@@ -685,14 +699,19 @@ export function useSetAgentSkills() {
     mutationFn: ({
       agentId,
       skills,
+      expectedVersion,
     }: {
       agentId: string;
       skills: string[];
-    }) => setAgentSkills(agentId, skills),
+      /** ETag of the open manifest editor; the server answers 409 on a mismatch (#8424). */
+      expectedVersion?: string;
+    }) => setAgentSkills(agentId, skills, expectedVersion),
     onSuccess: (_data, variables) => {
       qc.invalidateQueries({ queryKey: agentKeys.skills(variables.agentId) });
       qc.invalidateQueries({ queryKey: agentKeys.detail(variables.agentId) });
       qc.invalidateQueries({ queryKey: agentKeys.lists() });
+      // See `useUpdateAgentTools`: the PUT rotates the manifest ETag (#8424).
+      qc.invalidateQueries({ queryKey: agentKeys.manifest(variables.agentId) });
     },
   });
 }
@@ -713,14 +732,19 @@ export function useSetAgentMcpServers() {
     mutationFn: ({
       agentId,
       mcpServers,
+      expectedVersion,
     }: {
       agentId: string;
       mcpServers: string[];
-    }) => setAgentMcpServers(agentId, mcpServers),
+      /** ETag of the open manifest editor; the server answers 409 on a mismatch (#8424). */
+      expectedVersion?: string;
+    }) => setAgentMcpServers(agentId, mcpServers, expectedVersion),
     onSuccess: (_data, variables) => {
       qc.invalidateQueries({ queryKey: agentKeys.mcpServers(variables.agentId) });
       qc.invalidateQueries({ queryKey: agentKeys.detail(variables.agentId) });
       qc.invalidateQueries({ queryKey: agentKeys.lists() });
+      // See `useUpdateAgentTools`: the PUT rotates the manifest ETag (#8424).
+      qc.invalidateQueries({ queryKey: agentKeys.manifest(variables.agentId) });
     },
   });
 }
@@ -748,13 +772,18 @@ export function useSetAgentChannels() {
     mutationFn: ({
       agentId,
       channels,
+      expectedVersion,
     }: {
       agentId: string;
       channels: string[];
-    }) => setAgentChannels(agentId, channels),
+      /** ETag of the open manifest editor; the server answers 409 on a mismatch (#8424). */
+      expectedVersion?: string;
+    }) => setAgentChannels(agentId, channels, expectedVersion),
     onSuccess: (_data, variables) => {
       qc.invalidateQueries({ queryKey: agentKeys.channels(variables.agentId) });
       qc.invalidateQueries({ queryKey: agentKeys.detail(variables.agentId) });
+      // See `useUpdateAgentTools`: the PUT rotates the manifest ETag (#8424).
+      qc.invalidateQueries({ queryKey: agentKeys.manifest(variables.agentId) });
     },
   });
 }

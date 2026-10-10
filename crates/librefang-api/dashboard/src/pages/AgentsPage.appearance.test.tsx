@@ -4,19 +4,46 @@
 // is exported.
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, fireEvent } from "@testing-library/react";
-import { AgentAppearanceSection } from "./AgentsPage";
+import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import React from "react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { AgentAppearanceSection, AgentsPage } from "./AgentsPage";
 import {
   useDeleteAgentAvatar,
   useUpdateAgentIdentity,
   useUploadAgentAvatar,
 } from "../lib/mutations/agents";
 
-vi.mock("../lib/mutations/agents", () => ({
-  useUpdateAgentIdentity: vi.fn(),
-  useUploadAgentAvatar: vi.fn(),
-  useDeleteAgentAvatar: vi.fn(),
-}));
+// The page-level cases at the bottom render the real `AgentsPage`; the
+// component cases above render only the section. The mutation module is mocked
+// for both, so every hook the page reaches for gets a safe default and the
+// three the component tests drive stay bare `vi.fn()`s they can re-arm per
+// case.
+vi.mock("../lib/mutations/agents", () => {
+  const idle = () => ({
+    mutate: vi.fn(),
+    mutateAsync: vi.fn(),
+    isPending: false,
+    reset: vi.fn(),
+  });
+  return {
+    useSpawnAgent: () => idle(),
+    useCloneAgent: () => idle(),
+    useDeleteAgent: () => idle(),
+    usePatchAgent: () => idle(),
+    useResetAgentSession: () => idle(),
+    useResumeAgent: () => idle(),
+    useSuspendAgent: () => idle(),
+    useUpdateAgentTools: () => idle(),
+    useSetAgentSkills: () => idle(),
+    useAgentTemplateToml: () => idle(),
+    useSetAgentMcpServers: () => idle(),
+    useSetAgentChannels: () => idle(),
+    useDeleteAgentAvatar: vi.fn(idle),
+    useUpdateAgentIdentity: vi.fn(idle),
+    useUploadAgentAvatar: vi.fn(idle),
+  };
+});
 
 const addToast = vi.fn();
 vi.mock("../lib/store", () => ({
@@ -47,6 +74,93 @@ vi.mock("react-i18next", () => ({
     },
     i18n: { language: "en" },
   }),
+}));
+
+// --- page-level harness ----------------------------------------------------
+// Fixtures the `vi.mock` factories below close over have to be hoisted above
+// them, and mutable so a case can decide what the daemon returns.
+const { agentsRef, whoamiRef } = vi.hoisted(() => ({
+  agentsRef: { current: [] as Array<Record<string, unknown>> },
+  whoamiRef: { current: { role: "owner" } as { role?: string } | undefined },
+}));
+
+vi.mock("@tanstack/react-router", () => ({
+  useNavigate: () => vi.fn(),
+  useSearch: () => ({}),
+  Link: ({ children, ...rest }: { children?: React.ReactNode } & Record<string, unknown>) =>
+    React.createElement("a", rest, children),
+}));
+
+// The agents list is projected from the overview snapshot, not from
+// `useAgents` — the page calls `useDashboardSnapshot()` for it.
+vi.mock("../lib/queries/overview", () => ({
+  useDashboardSnapshot: () => ({
+    data: { agents: agentsRef.current },
+    isLoading: false,
+    isFetching: false,
+    refetch: vi.fn(),
+  }),
+}));
+vi.mock("../lib/queries/sessions", () => ({
+  useSessionDetails: () => ({ data: undefined, isLoading: false }),
+  useSessions: () => ({ data: [], isLoading: false }),
+}));
+vi.mock("../lib/queries/memory", () => ({
+  useAgentKvMemory: () => ({ data: undefined, isLoading: false }),
+  useMemorySearchOrList: () => ({ data: undefined, isLoading: false }),
+}));
+vi.mock("../lib/queries/providers", () => ({
+  useProviders: () => ({ data: [], isLoading: false }),
+}));
+vi.mock("../lib/queries/models", () => ({
+  useModels: () => ({ data: [], isLoading: false, isFetching: false, isError: false, refetch: vi.fn() }),
+}));
+vi.mock("../lib/queries/skills", () => ({
+  useSkills: () => ({ data: [], isLoading: false }),
+}));
+vi.mock("../lib/queries/mcp", () => ({
+  useMcpServers: () => ({ data: { configured: [] }, isLoading: false }),
+}));
+vi.mock("../lib/queries/config", () => ({
+  useModelRoutingInertReason: () => ({ data: null, isLoading: false }),
+}));
+vi.mock("../lib/queries/modelRouter", () => ({
+  useModelRouterProfiles: () => ({ data: undefined, isLoading: false }),
+}));
+vi.mock("../lib/queries/authz", () => ({
+  useWhoami: () => ({ data: whoamiRef.current }),
+}));
+// The identity section's `IDENTITY.md` editor mounts with the form; it owns
+// its own read/write pair, so both sides are stubbed rather than fetched.
+vi.mock("../lib/queries/agentFiles", () => ({
+  useAgentFile: () => ({ data: undefined, isLoading: false }),
+}));
+vi.mock("../lib/mutations/agentFiles", () => ({
+  useSetAgentFile: () => ({ mutate: vi.fn(), isPending: false }),
+}));
+vi.mock("../lib/queries/agents", () => ({
+  agentQueries: {
+    detail: (id: string) => ({
+      queryKey: ["agents", "detail", id],
+      queryFn: () =>
+        Promise.resolve(agentsRef.current.find((a) => a.id === id) ?? agentsRef.current[0]),
+    }),
+    manifest: (id: string) => ({
+      queryKey: ["agents", "manifest", id],
+      queryFn: () => Promise.resolve(undefined),
+    }),
+  },
+  useAgentEvents: () => ({ data: [], isLoading: false }),
+  useAgentSessions: () => ({ data: [], isLoading: false }),
+  useAgentStats: () => ({ data: undefined, isLoading: false }),
+  useAgentTemplates: () => ({ data: [], isLoading: false }),
+  useAgentTools: () => ({ data: [], isLoading: false }),
+  useAgentSkills: () => ({ data: [], isLoading: false }),
+  useAgentMcpServers: () => ({ data: [], isLoading: false }),
+  useAgentAvatarUrl: () => ({ data: undefined, isLoading: false }),
+  useAgentManifest: () => ({ data: undefined, isLoading: false }),
+  useAgentChannels: () => ({ data: [], isLoading: false }),
+  useTools: () => ({ data: [], isLoading: false }),
 }));
 
 const updateIdentity = vi.fn();
@@ -359,5 +473,110 @@ describe("what the editor deliberately does not offer", () => {
       expect(input).toHaveAttribute("aria-label", "Emoji");
     }
     expect(screen.queryByDisplayValue(`/api/agents/${AGENT}/avatar`)).not.toBeInTheDocument();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Page level — the panel's placement in the unified editor, and its two gates.
+//
+// `AgentManifestForm` is rendered for real here, so the placement assertion
+// pins the rendered order inside `general`, not a helper's return value. Only
+// the query/mutation layer is mocked.
+// ---------------------------------------------------------------------------
+
+const PAGE_AGENT = {
+  id: "agent-page-1",
+  name: "Alpha",
+  is_hand: false,
+  state: "running",
+  model: { model: "test-model" },
+  identity: { emoji: "🤖" },
+};
+
+function renderPage() {
+  const qc = new QueryClient({
+    defaultOptions: { queries: { retry: false, staleTime: 0 } },
+  });
+  return render(
+    <QueryClientProvider client={qc}>
+      <AgentsPage />
+    </QueryClientProvider>,
+  );
+}
+
+/** Land on the config tab of the auto-selected agent. */
+async function openConfigTab() {
+  const tab = await screen.findByRole("tab", { name: "config" });
+  fireEvent.click(tab);
+  await waitFor(() => expect(tab).toHaveAttribute("aria-selected", "true"));
+}
+
+describe("AgentAppearanceSection in the unified editor", () => {
+  beforeEach(() => {
+    agentsRef.current = [{ ...PAGE_AGENT }];
+    whoamiRef.current = { role: "owner" };
+    // The auto-select effect only runs on the wide-viewport branch. jsdom has
+    // no layout; the setupTests stub answers, and `matches` decides.
+    (window.matchMedia("(min-width: 1000px)") as unknown as { matches: boolean }).matches = true;
+  });
+
+  it("renders as its own panel above the manifest form in the general group", async () => {
+    renderPage();
+    await openConfigTab();
+
+    const appearance = screen.getByText("Appearance").closest("section");
+    const identitySection = document.querySelector('[data-section="identity"]');
+    expect(screen.getByLabelText("Emoji")).toHaveValue("🤖");
+    expect(appearance).not.toBeNull();
+    expect(identitySection).not.toBeNull();
+    // Appearance writes `AgentEntry.identity` through its own endpoint; the
+    // form writes the manifest TOML. One store, one writer — the panel is a
+    // sibling *before* the form, never a field inside it.
+    expect(
+      appearance!.compareDocumentPosition(identitySection!) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+
+    // ...and only under `general`.
+    fireEvent.click(screen.getByRole("tab", { name: "agents.group.model" }));
+    expect(screen.queryByText("Appearance")).toBeNull();
+  });
+
+  it("hides the panel from a credential below admin", async () => {
+    whoamiRef.current = { role: "user" };
+    renderPage();
+    await openConfigTab();
+
+    expect(screen.queryByText("Appearance")).toBeNull();
+    expect(screen.queryByLabelText("Emoji")).toBeNull();
+    // The group itself is unchanged: the form still renders.
+    expect(document.querySelector('[data-section="identity"]')).not.toBeNull();
+  });
+
+  it("locks the panel in place for a provisioned agent", async () => {
+    agentsRef.current = [{ ...PAGE_AGENT, provisioned: { source: "deployment" } }];
+    renderPage();
+    await openConfigTab();
+
+    // #8354: a provisioned agent's appearance stays visible — controls are
+    // disabled and the hint names the source, rather than the panel vanishing.
+    expect(screen.getByLabelText("Emoji")).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Upload" })).toBeDisabled();
+    expect(screen.getByText(/deployment/)).toBeInTheDocument();
+  });
+
+  it("withholds the manifest editor from a hand-derived agent (#7835)", async () => {
+    agentsRef.current = [{ ...PAGE_AGENT, is_hand: true }];
+    renderPage();
+    // Hands are hidden from the list by default; the filter reveals the
+    // fixture, and the auto-select effect then picks it up.
+    fireEvent.click(await screen.findByRole("button", { name: "Hand" }));
+    await openConfigTab();
+
+    // A hand's manifest belongs to the Hand definition: the editor would save
+    // into agent.toml and the next activation would silently revert it. The
+    // notice replaces the form, and the Save/advanced chrome goes with it.
+    expect(await screen.findByTestId("manifest-hand-controlled-note")).toBeInTheDocument();
+    expect(screen.queryByLabelText("Advanced mode")).toBeNull();
+    expect(document.querySelector('[data-section="identity"]')).toBeNull();
   });
 });

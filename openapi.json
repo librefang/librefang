@@ -821,7 +821,7 @@
           }
         ],
         "requestBody": {
-          "description": "Partial agent fields to update",
+          "description": "Partial agent fields to update. `expected_version` (optional) is the `ETag` from `GET /api/agents/{id}/manifest`; a mismatch answers 409 (#8424).",
           "content": {
             "application/json": {
               "schema": {
@@ -834,6 +834,16 @@
         "responses": {
           "200": {
             "description": "Partially update an agent (name, description, model, system prompt)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The manifest changed after this editor read it; reload before saving (#8424)",
             "content": {
               "application/json": {
                 "schema": {
@@ -1121,7 +1131,7 @@
           }
         ],
         "requestBody": {
-          "description": "Object containing the channel allowlist",
+          "description": "Object containing the channel allowlist. `expected_version` (optional) is the `ETag` from `GET /api/agents/{id}/manifest`; a mismatch answers 409 (#8424).",
           "content": {
             "application/json": {
               "schema": {
@@ -1144,6 +1154,16 @@
           },
           "400": {
             "description": "Malformed request body",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The `expected_version` no longer matches the live manifest; another writer saved after the read. Reload and re-apply (#8424)",
             "content": {
               "application/json": {
                 "schema": {
@@ -2060,7 +2080,7 @@
           }
         ],
         "requestBody": {
-          "description": "Object containing the MCP server allowlist",
+          "description": "Object containing the MCP server allowlist. `expected_version` (optional) is the `ETag` from `GET /api/agents/{id}/manifest`; a mismatch answers 409 (#8424).",
           "content": {
             "application/json": {
               "schema": {
@@ -2083,6 +2103,16 @@
           },
           "400": {
             "description": "Malformed request body",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The `expected_version` no longer matches the live manifest; another writer saved after the read. Reload and re-apply (#8424)",
             "content": {
               "application/json": {
                 "schema": {
@@ -3283,11 +3313,11 @@
           }
         ],
         "requestBody": {
-          "description": "Array of skill names",
+          "description": "Object with the `skills` array to store. `expected_version` (optional) is the `ETag` from `GET /api/agents/{id}/manifest`; a mismatch answers 409 (#8424).",
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/JsonArray"
+                "$ref": "#/components/schemas/JsonObject"
               }
             }
           },
@@ -3296,6 +3326,16 @@
         "responses": {
           "200": {
             "description": "Update an agent's skill allowlist",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The `expected_version` no longer matches the live manifest; another writer saved after the read. Reload and re-apply (#8424)",
             "content": {
               "application/json": {
                 "schema": {
@@ -3472,6 +3512,16 @@
         "responses": {
           "200": {
             "description": "Updated tool configuration, echoing the stored `capabilities_tools`, `tool_allowlist`, `tool_blocklist` and `disabled` values. Carries an additional `warnings` array of strings naming each stored `tool_allowlist` entry that provably cannot admit any tool; the key is absent when there is nothing to report. The check runs whenever the request submits `tool_allowlist` or `capabilities_tools` — narrowing the grant surface is itself a way to render a stored entry inert — and is skipped for a request that submits only `tool_blocklist` or only `disabled`, and for an agent left with `tools_disabled = true`, where no allowlist entry can admit anything anyway.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The `expected_version` no longer matches the live manifest; another writer saved after the read. Reload and re-apply (#8424)",
             "content": {
               "application/json": {
                 "schema": {
@@ -17997,6 +18047,13 @@
               "type": "string"
             },
             "description": "`channel_type` strings the agent may receive messages from.\nAn empty list clears the allowlist, which means \"all channels\" (`mode = \"all\"`)."
+          },
+          "expected_version": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Manifest ETag from `GET /api/agents/{id}/manifest` (#8424).\nWhen present and no longer current the request is refused with 409 instead of silently overwriting a write made after the read."
           }
         },
         "additionalProperties": false
@@ -18021,6 +18078,13 @@
           "mcp_servers"
         ],
         "properties": {
+          "expected_version": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Manifest ETag from `GET /api/agents/{id}/manifest` (#8424).\nWhen present and no longer current the request is refused with 409 instead of silently overwriting a write made after the read."
+          },
           "mcp_servers": {
             "type": "array",
             "items": {
@@ -18051,6 +18115,13 @@
               "null"
             ],
             "description": "`agent.toml: tools_disabled` — the master switch that removes every tool from the agent before any of the three filters above are consulted.\n`None` = no change, `Some(true)` = disable all tools, `Some(false)` = re-enable them.\n\nNamed `disabled` to match the key `GET /api/agents/{id}/tools` already returns.\nUntil #7742 the GET returned it and no request could write it, and every successful write forced it back to `false` — so an operator editing a blocklist re-enabled every tool without asking."
+          },
+          "expected_version": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Manifest ETag from `GET /api/agents/{id}/manifest` (#8424).\nWhen present and no longer current the request is refused with 409 instead of silently overwriting a write made after the read."
           },
           "tool_allowlist": {
             "type": [

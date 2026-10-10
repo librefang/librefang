@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import { useId, type ReactNode } from "react";
 import { cn } from "../../lib/cn";
 
 /**
@@ -22,7 +22,13 @@ import { cn } from "../../lib/cn";
  * it has none of the #5246 behaviour, so both properties hold at once.
  */
 export interface FieldProps {
-  label: string;
+  /**
+   * The visible label. Optional only for the case where the surrounding card
+   * already names the field — a section whose title *is* the field's name,
+   * where drawing both reads as the same word twice, one line apart. Those
+   * callers pass `ariaLabel` instead, so the control keeps a name to announce.
+   */
+  label?: string;
   hint?: string;
   /** Marks the label with an asterisk. Validation is the caller's job. */
   required?: boolean;
@@ -37,6 +43,15 @@ export interface FieldProps {
    * same id on the control.
    */
   htmlFor?: string;
+  /**
+   * The accessible name for a field with no visible label.
+   *
+   * Rendered as a labelled `role="group"` around the control, which is what a
+   * composite widget (the skills and MCP finders) needs: its own trigger is
+   * named generically, so without this the operator hears "Select options" and
+   * not which field they are in.
+   */
+  ariaLabel?: string;
   children: ReactNode;
 }
 
@@ -48,6 +63,7 @@ export function Field({
   error,
   errorId,
   htmlFor,
+  ariaLabel,
   children,
 }: FieldProps) {
   const labelClass = cn(
@@ -68,15 +84,43 @@ export function Field({
     </>
   );
 
+  // The wrapper is a `<div>` and, without `htmlFor`, the visible label is a
+  // `<span>` — and a `<span>` names nothing. So a control inside a labelled
+  // Field used to have no accessible name at all: it could not come from the
+  // label (a span), and it could not come from the wrapper, which had no
+  // `role` unless the field was *unlabelled* with an `ariaLabel`.
+  //
+  // Naming the group is the `fieldset`/`legend` pattern and the same mechanism
+  // the finders already use through `ariaLabel`; the difference was only that
+  // a labelled Field never got one. Measured before this: 31 controls across
+  // the agent form had neither a name of their own nor a group's, and every
+  // one of them sat inside a labelled Field.
+  //
+  // `aria-labelledby` rather than `aria-label`: the name is the visible text,
+  // so pointing at it keeps the two in step and lets the required asterisk
+  // come along. `htmlFor` fields are left alone — there the label is a real
+  // `<label>` and already names the control.
+  const labelId = useId();
+  const groupFromLabel = Boolean(label) && !htmlFor;
+  const groupFromAria = !label && Boolean(ariaLabel);
+  const isGroup = groupFromLabel || groupFromAria;
+
   return (
-    <div className="block">
+    <div
+      className="block"
+      role={isGroup ? "group" : undefined}
+      aria-label={groupFromAria ? ariaLabel : undefined}
+      aria-labelledby={groupFromLabel ? labelId : undefined}
+    >
       {label &&
         (htmlFor ? (
           <label className={labelClass} htmlFor={htmlFor}>
             {labelNode}
           </label>
         ) : (
-          <span className={labelClass}>{labelNode}</span>
+          <span id={labelId} className={labelClass}>
+            {labelNode}
+          </span>
         ))}
       <span className={label ? "mt-1 block" : "block"}>{children}</span>
       {invalid && error && (

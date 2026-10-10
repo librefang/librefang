@@ -20,6 +20,8 @@ export {
   // agents
   listAgents,
   getAgentDetail,
+  // workspace identity file bytes (`GET /api/agents/{id}/files/{filename}`)
+  getAgentFile,
   getAgentManifest,
   getAgentChannels,
   getAgentStats,
@@ -90,7 +92,6 @@ export {
   getModelOverrides,
   // model router (profile-based routing)
   listModelRouterProfiles,
-  getAgentModelRouting,
   // providers
   listProviders,
   // credential pools (#4965)
@@ -184,6 +185,8 @@ export {
   getUserPolicy,
   // effective permissions snapshot (RBAC follow-up — backs the simulator)
   getEffectivePermissions,
+  // caller's own resolved identity (#8339) — role gate for the identity editor
+  getWhoami,
   // credential vault — names and a set/not-set boolean only (#8164)
   listVaultKeys,
 } from "../../api";
@@ -205,6 +208,9 @@ export type {
   OperatorPause,
   OperatorActionVerb,
   OperatorActionDescriptor,
+  // workspace identity file bytes (`GET|PUT /api/agents/{id}/files/{filename}`)
+  AgentIdentityFile,
+  AgentIdentityFileWriteResult,
   // agent avatar upload (#8339)
   AgentAvatarUploadResult,
 } from "../../api";
@@ -235,6 +241,8 @@ export {
   clearHandAgentRuntimeConfig,
   resetAgentSession,
   updateAgentTools,
+  // workspace identity file bytes (`PUT /api/agents/{id}/files/{filename}`)
+  setAgentFile,
   // visual identity: emoji / colour, and the avatar image (#8339)
   updateAgentIdentity,
   uploadAgentAvatar,
@@ -321,8 +329,6 @@ export {
   removeCustomModel,
   updateModelOverrides,
   deleteModelOverrides,
-  // model router (profile-based routing)
-  updateAgentModelRouting,
   // providers
   testProvider,
   setProviderKey,
@@ -416,7 +422,6 @@ export {
 // Type re-exports used by hooks and pages
 // ---------------------------------------------------------------------------
 export type {
-  AgentModelRouting,
   ModelProfile,
   ModelRouterProfiles,
   CostTier,

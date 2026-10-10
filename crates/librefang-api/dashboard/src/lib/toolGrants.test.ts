@@ -3,6 +3,7 @@ import {
   isGroupAssigned,
   isMcpGroupCardActionable,
   isMcpServerGranted,
+  isToolAdmittedByCapabilities,
   isToolAllowed,
   isToolBlocked,
   mcpGroupCardState,
@@ -188,6 +189,35 @@ describe("isToolAllowed", () => {
 
   it("keeps everything under a bare star", () => {
     expect(isToolAllowed("mcp__github__create_issue", ["*"])).toBe(true);
+  });
+});
+
+describe("isToolAdmittedByCapabilities", () => {
+  // The case this helper exists to get right, and the one a naive check
+  // reads backwards: `capabilities.tools = []` is the kernel's
+  // "unrestricted" default, not "nothing granted"
+  // (`tools_and_skills.rs`: `declared_tools.is_empty() || ...`). Reading it
+  // as "nothing granted" would raise a false alarm on every agent that never
+  // wrote a `[capabilities]` block, and a warning that fires when nothing is
+  // wrong is worse than no warning at all.
+  it("admits every tool when the declared list is empty", () => {
+    expect(isToolAdmittedByCapabilities("web_fetch", [])).toBe(true);
+    expect(isToolAdmittedByCapabilities("shell_exec", [])).toBe(true);
+  });
+
+  it("admits everything under a bare star", () => {
+    expect(isToolAdmittedByCapabilities("web_fetch", ["*"])).toBe(true);
+  });
+
+  it("admits by exact name and by glob, like the kernel's filter", () => {
+    expect(isToolAdmittedByCapabilities("file_read", ["file_read"])).toBe(true);
+    expect(isToolAdmittedByCapabilities("file_read", ["file_*"])).toBe(true);
+    expect(isToolAdmittedByCapabilities("file_read", ["*_read"])).toBe(true);
+  });
+
+  it("refuses a tool no declared pattern covers", () => {
+    expect(isToolAdmittedByCapabilities("web_fetch", ["file_read"])).toBe(false);
+    expect(isToolAdmittedByCapabilities("shell_exec", ["file_*", "web_*"])).toBe(false);
   });
 });
 

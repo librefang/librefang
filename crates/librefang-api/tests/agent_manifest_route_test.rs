@@ -10,6 +10,8 @@
 //! Routes covered:
 //!   GET   /api/agents/{id}/manifest  (200 TOML, bad id 400, unknown agent 404)
 //!   PATCH /api/agents/{id}           (manifest_toml round trip, tag sync)
+//!   PUT   /api/agents/{id}/tools|skills|mcp_servers|channels
+//!                                    (stale expected_version → 409, #8424)
 //!
 //! Run: cargo test -p librefang-api --test agent_manifest_route_test
 
@@ -99,6 +101,34 @@ fn patch_json(path: &str, body: serde_json::Value) -> Request<Body> {
         .header("authorization", format!("Bearer {TEST_TOKEN}"))
         .body(Body::from(body.to_string()))
         .unwrap()
+}
+
+fn put_json(path: &str, body: serde_json::Value) -> Request<Body> {
+    Request::builder()
+        .method(Method::PUT)
+        .uri(path)
+        .header("content-type", "application/json")
+        .header("authorization", format!("Bearer {TEST_TOKEN}"))
+        .body(Body::from(body.to_string()))
+        .unwrap()
+}
+
+/// The `ETag` of `GET /api/agents/{id}/manifest`, with the RFC 9110 quotes
+/// stripped the same way the dashboard's `getAgentManifest` strips them.
+async fn manifest_etag(app: &axum::Router, id: &AgentId) -> String {
+    let read = app
+        .clone()
+        .oneshot(get(&format!("/api/agents/{id}/manifest")))
+        .await
+        .expect("oneshot");
+    assert_eq!(read.status(), StatusCode::OK);
+    read.headers()
+        .get(axum::http::header::ETAG)
+        .expect("GET must carry an ETag")
+        .to_str()
+        .expect("ascii etag")
+        .trim_matches('"')
+        .to_string()
 }
 
 async fn send_text(app: axum::Router, req: Request<Body>) -> (StatusCode, String) {
@@ -253,4 +283,166 @@ async fn get_manifest_unknown_agent_returns_404() {
     )
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+/// #8424: the GET carries the optimistic-concurrency token the editor echoes
+/// back on save, and a PATCH built on a stale read is refused with 409 rather
+/// than silently overwriting whatever changed in between.
+#[tokio::test(flavor = "multi_thread")]
+async fn manifest_patch_rejects_a_stale_expected_version() {
+    let h = boot().await;
+    let id = spawn_with(
+        &h.state,
+        AgentManifest {
+            name: "manifest-version".to_string(),
+            ..AgentManifest::default()
+        },
+    );
+
+    // The token from the read the editor would have seeded from.
+    let read = h
+        .app
+        .clone()
+        .oneshot(get(&format!("/api/agents/{id}/manifest")))
+        .await
+        .expect("oneshot");
+    assert_eq!(read.status(), StatusCode::OK);
+    let etag = read
+        .headers()
+        .get(axum::http::header::ETAG)
+        .expect("GET must carry an ETag")
+        .to_str()
+        .expect("ascii etag")
+        .trim_matches('"')
+        .to_string();
+
+    let edited = AgentManifest {
+        name: "manifest-version".to_string(),
+        description: "from the editor".to_string(),
+        ..AgentManifest::default()
+    };
+    let edited_toml = toml::to_string_pretty(&edited).expect("serialize");
+
+    // A token that no longer matches what is on the server must not be applied.
+    let (status, body) = send_text(
+        h.app.clone(),
+        patch_json(
+            &format!("/api/agents/{id}"),
+            serde_json::json!({
+                "manifest_toml": edited_toml.clone(),
+                "expected_version": "stale",
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "body: {body}");
+
+    // The token from the seed read still applies.
+    let (status, body) = send_text(
+        h.app.clone(),
+        patch_json(
+            &format!("/api/agents/{id}"),
+            serde_json::json!({ "manifest_toml": edited_toml, "expected_version": etag }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+
+    // And the save rotated the token, so a second save built on the first
+    // read is refused too.
+    let read = h
+        .app
+        .clone()
+        .oneshot(get(&format!("/api/agents/{id}/manifest")))
+        .await
+        .expect("oneshot");
+    let rotated = read
+        .headers()
+        .get(axum::http::header::ETAG)
+        .expect("ETag after save")
+        .to_str()
+        .expect("ascii etag")
+        .trim_matches('"')
+        .to_string();
+    assert_ne!(rotated, etag);
+}
+
+/// #8424 follow-up: the grant panels' PUTs (`tools`, `skills`, `mcp_servers`,
+/// `channels`) write the same manifest the editor's form writes, so they
+/// accept the same `expected_version` token. A panel save built on a
+/// superseded read must be refused instead of silently overwriting whatever
+/// the concurrent writer added; a current token must go through and rotate
+/// the ETag.
+#[tokio::test(flavor = "multi_thread")]
+async fn panel_puts_reject_a_stale_expected_version() {
+    let h = boot().await;
+    let id = spawn_with(
+        &h.state,
+        AgentManifest {
+            name: "panel-version".to_string(),
+            channels: vec!["telegram".to_string()],
+            ..AgentManifest::default()
+        },
+    );
+
+    // Every panel route with a token that no longer matches the manifest.
+    for (path, mut body) in [
+        (
+            format!("/api/agents/{id}/tools"),
+            serde_json::json!({ "capabilities_tools": ["bash"] }),
+        ),
+        (
+            format!("/api/agents/{id}/skills"),
+            serde_json::json!({ "skills": ["alpha"] }),
+        ),
+        (
+            format!("/api/agents/{id}/mcp_servers"),
+            serde_json::json!({ "mcp_servers": ["some-server"] }),
+        ),
+        (
+            format!("/api/agents/{id}/channels"),
+            serde_json::json!({ "channels": [] }),
+        ),
+    ] {
+        body["expected_version"] = serde_json::json!("stale");
+        let (status, response) = send_text(h.app.clone(), put_json(&path, body)).await;
+        assert_eq!(
+            status,
+            StatusCode::CONFLICT,
+            "{path} must refuse a stale token; body: {response}"
+        );
+    }
+
+    // The refused channel write must not have applied: an empty array would
+    // have reopened the agent to every channel.
+    let entry = h.state.kernel.agent_registry().get(id).expect("entry");
+    assert_eq!(
+        entry.manifest.channels,
+        vec!["telegram".to_string()],
+        "a 409 must leave the manifest untouched"
+    );
+
+    // The token from the read the editor seeded from is accepted, and the
+    // write rotates it so a second panel save on the same read is refused.
+    let etag = manifest_etag(&h.app, &id).await;
+    let (status, response) = send_text(
+        h.app.clone(),
+        put_json(
+            &format!("/api/agents/{id}/channels"),
+            serde_json::json!({ "channels": [], "expected_version": etag.clone() }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {response}");
+
+    let entry = h.state.kernel.agent_registry().get(id).expect("entry");
+    assert!(
+        entry.manifest.channels.is_empty(),
+        "the current token must apply the write"
+    );
+    assert_ne!(
+        manifest_etag(&h.app, &id).await,
+        etag,
+        "a successful panel write must rotate the ETag"
+    );
 }

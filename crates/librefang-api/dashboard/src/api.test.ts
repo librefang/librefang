@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   buildAuthenticatedWebSocket,
+  getAgentManifest,
   getAgentTools,
   getMetricsText,
   getUsageByModelPerformance,
@@ -451,5 +452,22 @@ describe("dashboard auth helpers", () => {
       "/api/usage/daily?start_date=2026-03-01&end_date=2026-03-31",
       "/api/usage/daily?days=366",
     ]);
+  });
+
+  it("reads the manifest ETag as an unquoted expected_version token (#8424)", async () => {
+    fetchMock.mockResolvedValueOnce(
+      new Response('name = "a"\n', {
+        status: 200,
+        headers: { "Content-Type": "application/toml", ETag: '"abc123"' },
+      }),
+    );
+
+    const snapshot = await getAgentManifest("agent-1");
+
+    expect(fetchMock.mock.calls[0][0]).toBe("/api/agents/agent-1/manifest");
+    expect(snapshot.manifest_toml).toBe('name = "a"\n');
+    // The server compares the bare hash, so the RFC 9110 quotes come off here
+    // rather than in every caller.
+    expect(snapshot.version).toBe("abc123");
   });
 });

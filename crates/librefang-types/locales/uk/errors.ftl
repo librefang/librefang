@@ -323,3 +323,4 @@ api-error-rate-limited = Перевищено ліміт запитів. Спр�
 # typed MemoryRouteError-style helper. Without this key, every `t_args("api-error-generic", …)`
 # call returns the literal key as the response body and `$error` interpolation never runs.
 api-error-generic = Помилка: { $error }
+api-error-agent-manifest-conflict = Застарілий маніфест: хтось зберіг цього агента після вашого завантаження. Перезавантажте та застосуйте зміну ще раз.

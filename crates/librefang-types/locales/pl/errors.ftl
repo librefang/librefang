@@ -323,3 +323,4 @@ api-error-rate-limited = Przekroczono limit żądań. Spróbuj ponownie późnie
 # typed MemoryRouteError-style helper. Without this key, every `t_args("api-error-generic", …)`
 # call returns the literal key as the response body and `$error` interpolation never runs.
 api-error-generic = Błąd: { $error }
+api-error-agent-manifest-conflict = Nieaktualny manifest: ktoś zapisał tego agenta po jego wczytaniu. Wczytaj ponownie i zastosuj zmianę jeszcze raz.
