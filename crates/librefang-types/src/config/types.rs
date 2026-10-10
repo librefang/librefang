@@ -432,6 +432,109 @@ pub struct UserConfig {
     /// `ApprovalPolicy.channel_rules` — both must agree to allow.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub channel_tool_rules: HashMap<String, crate::user_policy::ChannelToolPolicy>,
+    /// A short glyph the operator picked to stand for this user in the dashboard (#8339).
+    ///
+    /// Free-form text rather than an enum or a validated emoji table: the set of glyphs a person may want is not something this daemon should have an opinion about, and the value only ever reaches a DOM text node.
+    /// The write path bounds its length and refuses control characters — the two properties that matter for a value that is stored in `config.toml` and rendered — and nothing else.
+    ///
+    /// `None` (or an absent key) means "no glyph chosen", which the dashboard renders as the user's initial.
+    /// The avatar *image* deliberately does not live here: it is a file on disk, and whether one exists is answered by probing the directory rather than by a second copy of the answer that can fall out of step with it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub emoji: Option<String>,
+}
+
+/// Longest emoji accepted, in `char`s.
+///
+/// A single glyph is one `char` for the common case and several for the ones built by joining or by a variation selector — `👨‍👩‍👧‍👦` is seven code points, `🏳️‍🌈` is six — so the ceiling is set to clear the widest sequence a picker emits with room to spare, and to stay far below the point where the value stops being a glyph and becomes a string someone is smuggling into `config.toml`.
+pub const MAX_EMOJI_CHARS: usize = 32;
+
+/// Normalize a user's identity emoji, or say why it was refused (#8339).
+///
+/// Lives beside the field it constrains rather than in the API crate, because a value reaches [`UserConfig::emoji`] two ways — `PATCH /api/users/{name}/identity`, and an operator editing `config.toml` — and only the first had a check.
+/// `validate_config_for_reload` in the kernel calls this for every row, so a hand-edited file is *reported* as soon as anything reloads it or writes it back through the API, and the two paths cannot drift apart because there is one implementation.
+///
+/// Neither hand-edit door refuses the value (#8339 review follow-up).
+/// A hand-edit that is only ever *loaded*, by `load_config` at boot, is not checked because refusing to start the daemon over a long glyph is a worse outcome than rendering one.
+/// A hand-edit that is rewritten through the API is checked but not refused, because a pre-existing value failing that check blocked every unrelated config write until the file was fixed by hand; the write path that actually owns the field still bounds it before persisting, and an unbounded glyph is stored in a file operators read and rendered into a DOM text node, not interpreted.
+///
+/// `None` and an empty-or-whitespace string both mean "clear the stored emoji".
+///
+/// Nothing here checks that the value *is* an emoji, and that is deliberate: deciding "is this a glyph" needs an emoji table that would go stale against Unicode, and the properties that actually matter for a value stored in `config.toml` and rendered into a DOM text node are its length and the absence of control or invisible/bidi formatting characters.
+/// A `Z` is therefore accepted as an emoji. It renders as a `Z`.
+pub fn validate_emoji(emoji: Option<&str>) -> Result<Option<String>, String> {
+    let Some(raw) = emoji else {
+        return Ok(None);
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    let len = trimmed.chars().count();
+    if len > MAX_EMOJI_CHARS {
+        return Err(format!(
+            "emoji must be at most {MAX_EMOJI_CHARS} characters; this one is {len}"
+        ));
+    }
+    if trimmed.chars().any(|c| {
+        c.is_control()
+            || crate::text::INJECTION_SIGNAL_CHARS.contains(&c)
+            || ('\u{E0000}'..='\u{E007F}').contains(&c)
+    }) {
+        return Err(
+            "emoji must not contain control or invisible/bidi formatting characters".to_string(),
+        );
+    }
+    Ok(Some(trimmed.to_string()))
+}
+
+#[cfg(test)]
+mod validate_emoji_tests {
+    use super::validate_emoji;
+
+    #[test]
+    fn refuses_invisible_and_bidi_formatting_characters() {
+        // U+202E (right-to-left override) reverses everything rendered after it
+        // in the row; U+200B is an invisible padding character; U+2066 opens a
+        // bidi isolate. None is `char::is_control`, so the old check let them
+        // through.
+        for bad in ["\u{202E}\u{200B}", "\u{200B}\u{200B}", "a\u{2066}b"] {
+            assert!(
+                validate_emoji(Some(bad)).is_err(),
+                "{bad:?} must be refused as an invisible/bidi format character"
+            );
+        }
+    }
+
+    #[test]
+    fn refuses_the_tag_block() {
+        // U+E0000-U+E007F is a coordinated smuggling channel; the filename
+        // guard already refuses it, and the emoji is written into config.toml
+        // and rendered into the DOM.
+        assert!(validate_emoji(Some("\u{E0041}\u{E0042}")).is_err());
+    }
+
+    #[test]
+    fn accepts_the_emoji_sequence_chars_the_set_excludes() {
+        // A family emoji joins four people with U+200D, and U+FE0F requests
+        // emoji presentation; both are legitimate in an emoji and must not be
+        // caught by the invisible-character check.
+        assert_eq!(
+            validate_emoji(Some("\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}"))
+                .expect("a ZWJ family emoji is a valid emoji"),
+            Some("\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}".to_string())
+        );
+        assert!(validate_emoji(Some("\u{2764}\u{FE0F}")).is_ok());
+    }
+
+    #[test]
+    fn clears_empty_and_keeps_ordinary_glyphs() {
+        assert_eq!(validate_emoji(None).expect("none is not an error"), None);
+        assert_eq!(validate_emoji(Some("   ")).expect("blank clears"), None);
+        assert_eq!(
+            validate_emoji(Some(" Z ")).expect("an ordinary glyph is accepted"),
+            Some("Z".to_string())
+        );
+    }
 }
 
 fn default_role() -> String {
@@ -510,6 +613,7 @@ impl Default for UserConfig {
             tool_categories: None,
             memory_access: None,
             channel_tool_rules: HashMap::new(),
+            emoji: None,
         }
     }
 }
@@ -7418,6 +7522,17 @@ impl KernelConfig {
     /// Anchored to `home_dir` rather than to `workspaces_dir` because the latter is operator-overridable and may point anywhere, including into a tree an agent has been granted.
     pub fn effective_avatars_dir(&self) -> PathBuf {
         self.home_dir.join("avatars")
+    }
+
+    /// Resolved directory holding per-user avatar images (#8339).
+    ///
+    /// A subdirectory of [`Self::effective_avatars_dir`] rather than a sibling of it, so the two populations cannot be confused for one another: both name their files `{uuid}.{ext}`, and an agent id and a user id are UUIDs drawn from different namespaces that happen to render identically.
+    /// A shared directory would make "which of these is a person" answerable only by running the UUID backwards, and would let a future sweep that assumes agent avatars be confidently wrong about a user's picture.
+    ///
+    /// It inherits every property that makes the parent directory safe — outside the agent workspaces, outside the unauthenticated `/dashboard/**` tree, and outside the TTL-swept upload directory — because it is strictly below it.
+    pub fn effective_user_avatars_dir(&self) -> PathBuf {
+        self.effective_avatars_dir()
+            .join(crate::media::USER_AVATARS_SUBDIR)
     }
 
     /// Parse the TCP port number from `api_listen`.

@@ -1331,6 +1331,32 @@ pub fn validate_config_for_reload(config: &KernelConfig) -> Result<(), Vec<Strin
         errors.push(format!("tool_exec: {e}"));
     }
 
+    // A user's emoji has two authors — `PATCH /api/users/{name}/identity`,
+    // which bounds it, and an operator editing `config.toml` by hand, which
+    // cannot. A hand-edited value is reported here, not refused (#8339).
+    //
+    // It has to be a warning, because refusing made a pre-existing oversize
+    // glyph a permanent lockout: `load_config` deliberately boots on one
+    // rather than refusing to start, but then every *unrelated* write — a
+    // `/api/users/*` or `/api/groups/*` edit, a budget change, a config-editor
+    // patch — re-serialises the file, trips this check on the row the operator
+    // was not touching, and answers 400 until the file is fixed by hand. The
+    // write path that owns the field still bounds it before persisting, so an
+    // API write cannot introduce one; this is the only check a hand-edit
+    // passes through, and it now names the row in the log instead of blocking
+    // the write.
+    for user in &config.users {
+        if let Err(e) = librefang_types::config::validate_emoji(user.emoji.as_deref()) {
+            tracing::warn!(
+                user = %user.name,
+                error = %e,
+                "user emoji is out of bounds; leaving it in place rather than \
+                 refusing this write. Fix the emoji through the API or by \
+                 editing config.toml."
+            );
+        }
+    }
+
     // Network config: if network is enabled, shared_secret must be set
     if config.network_enabled && config.network.shared_secret.is_empty() {
         errors.push("network_enabled is true but network.shared_secret is empty".to_string());
@@ -2473,6 +2499,41 @@ mod tests {
         config.max_cron_jobs = 100_000;
         let err = validate_config_for_reload(&config).unwrap_err();
         assert!(err.iter().any(|e| e.contains("max_cron_jobs")));
+    }
+
+    /// A hand-edited emoji is reported, not refused, so it cannot wedge the
+    /// next unrelated write (#8339 review follow-up).
+    ///
+    /// The write path that owns the field —
+    /// `PATCH /api/users/{name}/identity` — bounds it before persisting, so an
+    /// API write cannot introduce one. The hand-edit door is deliberately
+    /// tolerant for the same reason `load_config` boots on the same value: a
+    /// hard failure here made a pre-existing oversize glyph block every
+    /// `/api/users/*`, `/api/groups/*`, budget and config-editor write until
+    /// the file was fixed by hand.
+    #[test]
+    fn test_validate_accepts_a_hand_edited_emoji_as_a_warning() {
+        let mut config = default_cfg();
+        config.users.push(librefang_types::config::UserConfig {
+            name: "alice".to_string(),
+            emoji: Some("a".repeat(librefang_types::config::MAX_EMOJI_CHARS + 1)),
+            ..Default::default()
+        });
+
+        assert!(
+            validate_config_for_reload(&config).is_ok(),
+            "a pre-existing hand-edit must not fail every later write"
+        );
+
+        // The check is skipped, not the validator: an unrelated fault still
+        // refuses, and the emoji does not ride along as an error.
+        config.api_listen = String::new();
+        let err = validate_config_for_reload(&config).unwrap_err();
+        assert!(err.iter().any(|e| e.contains("api_listen")));
+        assert!(
+            !err.iter().any(|e| e.contains("emoji")),
+            "the emoji must be a warning, not an error: {err:?}"
+        );
     }
 
     #[test]

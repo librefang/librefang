@@ -394,6 +394,7 @@ async fn users_update_and_import_preserve_rbac_m3_policy_fields() {
             delete_allowed: false,
         }),
         channel_tool_rules: HashMap::new(),
+        emoji: None,
     };
     let h = boot_with_seed_users(vec![seed.clone()]).await;
 
@@ -634,6 +635,7 @@ async fn users_policy_get_round_trip() {
             delete_allowed: true,
         }),
         channel_tool_rules: HashMap::new(),
+        emoji: None,
     };
     let h = boot_with_seed_users(vec![seed]).await;
 
@@ -690,6 +692,7 @@ async fn users_policy_put_replaces_only_specified_fields() {
         tool_categories: None,
         memory_access: Some(seed_memory.clone()),
         channel_tool_rules: HashMap::new(),
+        emoji: None,
     };
     let h = boot_with_seed_users(vec![seed]).await;
 
@@ -1261,6 +1264,7 @@ async fn users_rotate_key_preserves_other_fields() {
             delete_allowed: false,
         }),
         channel_tool_rules: HashMap::new(),
+        emoji: None,
     };
     let h = boot_with_seed_users(vec![seed.clone()]).await;
 

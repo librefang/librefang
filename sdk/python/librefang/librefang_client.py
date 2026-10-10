@@ -1469,6 +1469,9 @@ class _UsersResource(_Resource):
     def import_users(self, **data):
         return self._c._request("POST", "/api/users/import", data)
 
+    def serve_my_avatar(self):
+        return self._c._request("GET", "/api/users/me/avatar")
+
     def get_user(self, name: str):
         return self._c._request("GET", f"/api/users/{name}")
 
@@ -1477,6 +1480,18 @@ class _UsersResource(_Resource):
 
     def delete_user(self, name: str):
         return self._c._request("DELETE", f"/api/users/{name}")
+
+    def serve_user_avatar(self, name: str):
+        return self._c._request("GET", f"/api/users/{name}/avatar")
+
+    def upload_user_avatar(self, name: str, body: bytes, content_type: str = "application/octet-stream"):
+        return self._c._request("POST", f"/api/users/{name}/avatar", body, content_type=content_type)
+
+    def delete_user_avatar(self, name: str):
+        return self._c._request("DELETE", f"/api/users/{name}/avatar")
+
+    def update_user_identity(self, name: str, **data):
+        return self._c._request("PATCH", f"/api/users/{name}/identity", data)
 
     def get_user_policy(self, name: str):
         return self._c._request("GET", f"/api/users/{name}/policy")

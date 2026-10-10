@@ -1947,6 +1947,10 @@ func (r *UsersResource) ImportUsers(data map[string]interface{}) (interface{}, e
 	return r.client.request("POST", "/api/users/import", data, nil)
 }
 
+func (r *UsersResource) ServeMyAvatar() (interface{}, error) {
+	return r.client.request("GET", "/api/users/me/avatar", nil, nil)
+}
+
 func (r *UsersResource) GetUser(name string) (interface{}, error) {
 	return r.client.request("GET", fmt.Sprintf("/api/users/%s", name), nil, nil)
 }
@@ -1957,6 +1961,26 @@ func (r *UsersResource) UpdateUser(name string, data map[string]interface{}) (in
 
 func (r *UsersResource) DeleteUser(name string) (interface{}, error) {
 	return r.client.request("DELETE", fmt.Sprintf("/api/users/%s", name), nil, nil)
+}
+
+func (r *UsersResource) ServeUserAvatar(name string) (interface{}, error) {
+	return r.client.request("GET", fmt.Sprintf("/api/users/%s/avatar", name), nil, nil)
+}
+
+// UploadUserAvatar sends a raw application/octet-stream body. An empty contentType defaults to it.
+func (r *UsersResource) UploadUserAvatar(name string, body []byte, contentType string) (interface{}, error) {
+	if contentType == "" {
+		contentType = "application/octet-stream"
+	}
+	return r.client.requestRaw("POST", fmt.Sprintf("/api/users/%s/avatar", name), body, contentType)
+}
+
+func (r *UsersResource) DeleteUserAvatar(name string) (interface{}, error) {
+	return r.client.request("DELETE", fmt.Sprintf("/api/users/%s/avatar", name), nil, nil)
+}
+
+func (r *UsersResource) UpdateUserIdentity(name string, data map[string]interface{}) (interface{}, error) {
+	return r.client.request("PATCH", fmt.Sprintf("/api/users/%s/identity", name), data, nil)
 }
 
 func (r *UsersResource) GetUserPolicy(name string) (interface{}, error) {
