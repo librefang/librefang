@@ -67,6 +67,7 @@ import { useProviders } from "../lib/queries/providers";
 import { useModels } from "../lib/queries/models";
 import { useSkills } from "../lib/queries/skills";
 import { useMcpServers } from "../lib/queries/mcp";
+import { useWhoami } from "../lib/queries/authz";
 import { useModelRoutingInertReason } from "../lib/queries/config";
 import { AgentManifestForm } from "../components/AgentManifestForm";
 import { AgentModelParamFields } from "../components/AgentModelParamFields";
@@ -625,6 +626,22 @@ export function SystemPromptSection({
 }
 
 /**
+ * Whether the signed-in credential may edit an agent's emoji and avatar.
+ *
+ * The daemon's rule for both writes the appearance section performs is
+ * `role >= UserRole::Admin` (middleware.rs), and it reads the *credential's*
+ * role — the group-derived ones `whoami` reports separately do not open this
+ * door, which is the direction that would hand a viewer controls that can only
+ * 403.
+ *
+ * Pure and exported because `AgentsPage` has no render harness, so a predicate
+ * left inline would be covered by nothing.
+ */
+export function canEditAgentIdentity(role: string | undefined): boolean {
+  return role === "admin" || role === "owner";
+}
+
+/**
  * Editable Description quick-widget for the Configure drawer (#7742).
  * Mirrors `SystemPromptSection`'s draft/dirty/save shape: `description` is
  * backend-supported (`lifecycle.rs: patch_agent` → `update_description`)
@@ -973,6 +990,9 @@ export function AgentsPage() {
   const qc = useQueryClient();
 
   // --- Visual identity of the agent in the drawer (#8339) ------------------
+  const whoami = useWhoami();
+  const canEditAppearance = canEditAgentIdentity(whoami.data?.role);
+
   const detailIdentity = (detailAgent as AgentView | null)?.identity;
   // Gated on "this agent has one" so an agent without an avatar costs no
   // request at all; `undefined` while loading or absent, which is what `Avatar`
@@ -986,7 +1006,6 @@ export function AgentsPage() {
     !!detailIdentity?.avatar_url,
     detailDrawerOpen,
   );
-
   const rawDeleteMutation = useDeleteAgent();
   const handleDeleteSuccess = (agentId: string) => {
     if (detailAgent?.id === agentId) {
@@ -3616,18 +3635,19 @@ export function AgentsPage() {
                   gives for `SystemPromptSection`: `AgentsPage` has ~20 hooks and no
                   render harness, so anything that has to be tested has to be
                   reachable without mounting the page. */}
-              <AgentAppearanceSection
-                // Re-keyed on the agent: without it the section stays mounted
-                // across a list click, so an upload still in flight for A
-                // carries its `isPending` into B and disables B's controls
-                // until it settles.
-                key={detailAgent.id}
-                agentId={detailAgent.id}
-                identity={detailIdentity}
-                provisioned={detailAgent.provisioned}
-                onChanged={() => { void refreshDetailAgent(detailAgent.id); }}
-              />
-
+              {canEditAppearance && (
+                <AgentAppearanceSection
+                  // Re-keyed on the agent: without it the section stays mounted
+                  // across a list click, so an upload still in flight for A
+                  // carries its `isPending` into B and disables B's controls
+                  // until it settles.
+                  key={detailAgent.id}
+                  agentId={detailAgent.id}
+                  identity={detailIdentity}
+                  provisioned={detailAgent.provisioned}
+                  onChanged={() => { void refreshDetailAgent(detailAgent.id); }}
+                />
+              )}
               {/* Full manifest editor entry point (#7742). The widgets below
                   only cover a fraction of AgentManifest's fields — this is
                   the discoverable "long path" to everything else

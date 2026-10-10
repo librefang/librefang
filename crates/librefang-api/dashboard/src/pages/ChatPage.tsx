@@ -50,6 +50,8 @@ import { useVoiceInput } from "../lib/useVoiceInput";
 import { Typewriter_v2 } from "../components/Typewriter_v2";
 import { AuthenticatedImage } from "../components/AuthenticatedImage";
 import { AgentAvatar } from "../components/AgentAvatar";
+import { UserAvatar } from "../components/UserAvatar";
+import { useWhoami } from "../lib/queries/authz";
 import { useMathPlugins } from "../lib/hooks/useMathPlugins";
 import {
   useCreateAgentSession,
@@ -1409,6 +1411,16 @@ interface MessageBubbleProps {
   agentName?: string;
   agentAvatarSrc?: string;
   agentEmoji?: string;
+  /** The signed-in user, for the other side of the same bubble. Undefined while
+   *  `whoami` is in flight or if it failed, where the bubble keeps the generic
+   *  person icon it used to show.
+   *
+   *  Primitives for the reason the agent's are: this component is memoised. */
+  userName?: string;
+  userEmoji?: string;
+  /** `whoami.has_avatar`, which decides whether the picture is worth fetching.
+   *  Undefined means the daemon did not say, which is not the same as "no". */
+  userHasAvatar?: boolean;
   onCopy?: (messageId: string, content: string) => void;
   copied?: boolean;
   onSpeak?: (messageId: string, content: string) => void;
@@ -1418,12 +1430,11 @@ interface MessageBubbleProps {
 }
 
 /**
- * Exported for a render test of the `agentAvatarSrc` passthrough (#8371
- * review). The picker and the transcript are both inline in this file, and
- * `ChatPage` itself is not mountable in a unit test — this component is the
- * reachable call site that hands the once-resolved object URL to every bubble.
+ * Exported for its tests, like `AgentAppearanceSection` on the users page:
+ * mounting `ChatPage` to reach it would mean standing up a session, a selected
+ * agent and a streaming transcript to assert two lines of avatar selection.
  */
-export const MessageBubble = memo(function MessageBubble({ message, usageFooter, agentId, agentName, agentAvatarSrc, agentEmoji, onCopy, copied, onSpeak, isSpeaking, ttsStatus, ttsAvailable }: MessageBubbleProps) {
+export const MessageBubble = memo(function MessageBubble({ message, usageFooter, agentId, agentName, agentAvatarSrc, agentEmoji, userName, userEmoji, userHasAvatar, onCopy, copied, onSpeak, isSpeaking, ttsStatus, ttsAvailable }: MessageBubbleProps) {
   const { t } = useTranslation();
   const isUser = message.role === "user";
   const isSystem = message.role === "system";
@@ -1467,13 +1478,25 @@ export const MessageBubble = memo(function MessageBubble({ message, usageFooter,
       <div className={`flex flex-col min-w-0 w-fit max-w-[90%] sm:max-w-[min(75%,70ch)] ${isUser ? "items-end" : "items-start"}`}>
         {/* Avatar + name */}
         <div className={`flex items-center gap-2 mb-1.5 ${isUser ? "self-end flex-row-reverse" : "self-start"}`}>
-          {/* The user's own identity is still an icon: the account has no
-              avatar to show yet (#8339 covers agents only). The agent's is
-              real, falling back to its emoji and then to its initials. */}
+          {/* Both sides are real. The user's keeps the generic person icon only
+              when there is nobody to name — `whoami` still in flight or failed;
+              otherwise `UserAvatar` draws their image, then their emoji, then
+              their initials. The agent's draws its own, from the same
+              three-step chain, with the object URL resolved once by `ChatPage`
+              and handed to every bubble. */}
           {isUser ? (
-            <div className="h-8 w-8 shrink-0 grid place-items-center rounded-full bg-brand text-white shadow-sm">
-              <User className="h-3.5 w-3.5" />
-            </div>
+            userName ? (
+              <UserAvatar
+                name={userName}
+                emoji={userEmoji}
+                hasAvatar={userHasAvatar}
+                size="sm"
+              />
+            ) : (
+              <div className="h-8 w-8 shrink-0 grid place-items-center rounded-full bg-brand text-white shadow-sm">
+                <User className="h-3.5 w-3.5" />
+              </div>
+            )
           ) : agentId ? (
             <AgentAvatar
               agentId={agentId}
@@ -3285,6 +3308,10 @@ export function ChatPage() {
   }, [showHandAgents]);
 
   const agentsQuery = useAgents({ includeHands: showHandAgents });
+  // The signed-in user, for the other side of every message bubble. Resolved
+  // here rather than inside `MessageBubble` because that component is memoised
+  // and the name is the same for all of them.
+  const whoami = useWhoami();
   // Check if web search is available (any search API key configured)
   const webSearchAvailable = ((configQuery.data as Record<string, unknown>)?.web as Record<string, unknown> | undefined)?.search_available === true;
   const handsQuery = useActiveHandsWhen(showHandAgents);
@@ -3938,6 +3965,9 @@ export function ChatPage() {
                     agentName={selectedAgent?.name}
                     agentAvatarSrc={selectedAgentAvatarSrc}
                     agentEmoji={selectedAgent?.identity?.emoji}
+                    userName={whoami.data?.name}
+                    userEmoji={whoami.data?.emoji}
+                    userHasAvatar={whoami.data?.has_avatar}
                     onCopy={handleCopy}
                     copied={copiedMessageId === msg.id}
                     onSpeak={ttsAvailable ? tts.toggle : undefined}

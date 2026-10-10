@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useObjectUrl } from "../useObjectUrl";
 import { queryOptions, useQuery } from "@tanstack/react-query";
 import {
   agentAvatarPath,
@@ -23,13 +23,13 @@ import {
 } from "../http/client";
 import { agentAvatarKeys, agentKeys, toolKeys } from "./keys";
 import { withOverrides, type QueryOverrides } from "./options";
+import { AVATAR_STALE_MS } from "./avatar";
 
 const STALE_MS = 30_000;
 const REFRESH_MS = 30_000;
 const LIVE_STALE_MS = 10_000;
 const STATS_STALE_MS = 15_000;
 const LIVE_REFRESH_MS = 15_000;
-const AVATAR_STALE_MS = 300_000;
 
 export const agentQueries = {
   list: (opts: { includeHands?: boolean } = {}) =>
@@ -264,13 +264,11 @@ export function useAgentChannels(agentId: string, options: QueryOverrides = {}) 
 /**
  * An agent's avatar as an object URL, ready for an `<img src>` (#8339).
  *
- * Two things are being kept apart here. The query caches the *Blob*, which is
- * shared and lives as long as the cache entry does; this hook owns the *object
- * URL*, which is a document-scoped handle that leaks until revoked. So the URL
- * is minted in an effect keyed on the Blob and revoked in that effect's
- * cleanup — on unmount, and on every switch to another agent, which is the
- * case a drawer that stays mounted while the selection changes would otherwise
- * leak on.
+ * The query caches the *Blob*, which is shared and lives as long as the cache
+ * entry does; the object URL is a document-scoped handle whose lifetime is the
+ * component currently painting it. `useObjectUrl` is what keeps those two
+ * apart, and it is shared with the user avatar rather than copied — the agent
+ * case is where the effect was written, not what makes it specific.
  *
  * `hasAvatar` is the caller's answer to "is `identity.avatar_url` set", and it
  * gates the request: an agent without one would otherwise cost a 404 on every
@@ -283,8 +281,9 @@ export function useAgentChannels(agentId: string, options: QueryOverrides = {}) 
  * downloaded and its object URL held for an image nothing displays.
  *
  * Returns `undefined` while loading and when there is nothing to show, which is
- * exactly what `Avatar`'s `src` wants — it falls back to the initials on its
- * own, so there is no separate loading state to thread through the UI.
+ * exactly what `Avatar`'s `src` wants — it falls back to the emoji and then the
+ * initials on its own, so there is no separate loading state to thread through
+ * the UI.
  */
 export function useAgentAvatarUrl(
   agentId: string,
@@ -292,30 +291,11 @@ export function useAgentAvatarUrl(
   enabled = true,
 ): string | undefined {
   const { data: blob } = useQuery(agentQueries.avatar(agentId, hasAvatar && enabled));
-  const [objectUrl, setObjectUrl] = useState<string | undefined>(undefined);
-
-  useEffect(() => {
-    // `!hasAvatar` is part of the condition, not just the query's `enabled`: a
-    // disabled query still returns cached data, so a caller that only wants to
-    // know "is there an image" would otherwise mint an object URL for a cached
-    // Blob it is not rendering (#8339 review). Same for `enabled`: a drawer
-    // that closes revokes the handle in this cleanup, so a closed consumer
-    // does not keep an object URL alive for an image that is no longer
-    // rendered.
-    if (!blob || !hasAvatar || !enabled) {
-      setObjectUrl(undefined);
-      return;
-    }
-    const url = URL.createObjectURL(blob);
-    setObjectUrl(url);
-    return () => {
-      URL.revokeObjectURL(url);
-      // Without this the next paint still points an `<img>` at a URL that has
-      // just been revoked, which renders as a broken image rather than as the
-      // initials the fallback is there to give.
-      setObjectUrl(undefined);
-    };
-  }, [blob, hasAvatar, enabled]);
-
-  return objectUrl;
+  // Handing `useObjectUrl` nothing while the consumer is unmounted — or while
+  // the caller says there is no image — is what revokes the handle: the blob
+  // stays cached, the URL does not. `!hasAvatar` is part of the condition
+  // because a disabled query still returns cached data, so a caller that only
+  // wants to know "is there an image" would otherwise mint an object URL for a
+  // cached Blob it is not rendering (#8339 review).
+  return useObjectUrl(hasAvatar && enabled ? blob : undefined);
 }

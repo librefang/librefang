@@ -323,6 +323,17 @@ pub struct WhoamiView {
     /// Group-conferred role strings — each effective group's own name plus its declared `roles`.
     /// The channel-binding vocabulary, deliberately **not** the RBAC ladder: `role` above is a separate answer and no entry here contributes to it.
     pub roles: Vec<String>,
+    /// The glyph chosen for this caller's `[[users]]` row, or `null` when none was chosen or the credential names no row (#8339).
+    ///
+    /// Carried here so the WebUI can paint the signed-in identity — avatar, glyph, role — from the one response it already has to fetch before it can render anything.
+    /// A second `GET /api/users/{name}` would be a round trip on every page load for a field the client already has the name for.
+    pub emoji: Option<String>,
+    /// True when an avatar image for this caller is on disk (#8339), derived the same way and for the same reason as [`crate::routes::users::UserView::has_avatar`].
+    ///
+    /// The route that serves it is `GET /api/users/me/avatar` — a literal, resolved from the same credential this response describes, so the client fetches it with no name-building and therefore no encoding question. This field answers *whether* there is something to fetch, not *where*.
+    ///
+    /// It is what lets the dashboard gate that fetch instead of issuing it for every identity and reading the 404: a credential that names no `[[users]]` row has no image, and now says so before anything is requested.
+    pub has_avatar: bool,
 }
 
 /// GET /api/authz/whoami — the calling credential's own resolved identity (#7746).
@@ -377,6 +388,26 @@ pub async fn whoami(
     let groups = config.effective_groups_for(&name, &claimed);
     let roles = config.effective_roles_for(&name, &claimed);
 
+    // Looked up by name rather than by `user_id`: the sentinel id a master-key
+    // or trusted-loopback caller carries is not `UserId::from_name("root")`, so
+    // resolving through it would find nothing even in a deployment that does
+    // declare a `[[users]]` entry called `root`. The name is the same key every
+    // other `/api/users/{name}` route matches on, and `None` when there is no
+    // row is the honest answer — the synthetic root credential owns nothing.
+    let row = config.users.iter().find(|u| u.name == name);
+    let avatar_dir = config.effective_user_avatars_dir();
+    let (emoji, has_avatar) = match row {
+        Some(u) => (
+            u.emoji.clone(),
+            librefang_types::media::find_avatar(
+                &avatar_dir,
+                &UserId::from_name(&u.name).to_string(),
+            )
+            .is_some(),
+        ),
+        None => (None, false),
+    };
+
     Json(WhoamiView {
         name,
         user_id: user_id.to_string(),
@@ -391,6 +422,8 @@ pub async fn whoami(
             .filter(|n| config.group(n).is_some())
             .collect(),
         roles: roles.into_iter().collect(),
+        emoji,
+        has_avatar,
     })
     .into_response()
 }
