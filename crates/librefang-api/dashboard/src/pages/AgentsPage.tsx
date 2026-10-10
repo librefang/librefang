@@ -10,6 +10,7 @@ import {
   type AgentItem,
   type AgentProvenance,
   type CloneAgentResult,
+  type ManifestVersionEntry,
   type PromptVersion,
   type ToolDefinition,
 } from "../api";
@@ -47,7 +48,7 @@ import { useUIStore } from "../lib/store";
 import { copyToClipboard } from "../lib/clipboard";
 import { toastErr } from "../lib/errors";
 import { filterVisible } from "../lib/hiddenModels";
-import { Search, Users, MessageCircle, X, Cpu, Wrench, Shield, Plus, Loader2, Pause, Play, Clock, Brain, Zap, FlaskConical, Trash2, Copy, RotateCcw, Pencil, Bot, Database, FileText, MoreHorizontal, Sparkles, ChevronDown, ChevronRight, Check, Save, Library, GitBranch, Route, Radio } from "lucide-react";
+import { Search, Users, MessageCircle, X, Cpu, Wrench, Shield, Plus, Loader2, Pause, Play, Clock, Brain, Zap, FlaskConical, Trash2, Copy, RotateCcw, Pencil, Bot, Database, FileText, MoreHorizontal, Sparkles, ChevronDown, ChevronRight, Check, Save, Library, GitBranch, Route, Radio, History } from "lucide-react";
 import {
   buildModelConfigPatch,
   emptyModelNumerics,
@@ -97,6 +98,7 @@ import {
   useAgentAvatarUrl,
   useAgentManifest,
   useAgentChannels,
+  useAgentManifestHistory,
   usePromptVersions,
   useTools,
 } from "../lib/queries/agents";
@@ -117,6 +119,7 @@ import {
   useSetAgentSkills,
   useSetAgentMcpServers,
   useSetAgentChannels,
+  useRestoreAgentManifestVersion,
 } from "../lib/mutations/agents";
 import { useBindPromptVersionToAgent } from "../lib/mutations/prompts";
 import { formatNumber } from "../lib/format";
@@ -912,7 +915,7 @@ export function AgentsPage() {
   // the PUT — leaving the tab discards the draft (the "change your mind" path).
   const [skillsDraft, setSkillsDraft] = useState<string[] | null>(null);
   const [agentTab, setAgentTab] = useState<
-    "conversation" | "memory" | "skills" | "tools" | "routing" | "schedule" | "logs"
+    "conversation" | "memory" | "skills" | "tools" | "routing" | "schedule" | "logs" | "history"
   >("conversation");
   // Whether the deep-edit drawer is open. Decoupled from `detailAgent` so
   // selecting an agent in the list shows the inline detail panel without
@@ -1282,6 +1285,13 @@ export function AgentsPage() {
     enabled: !!detailAgent && agentTab === "skills",
   });
   const setAgentSkillsMutation = useSetAgentSkills();
+
+  // Manifest version history (#8041) — fetched only while the History tab is
+  // open, since each row carries the agent's full `agent.toml`.
+  const manifestHistoryQuery = useAgentManifestHistory(detailAgent?.id ?? "", {
+    enabled: !!detailAgent && agentTab === "history",
+  });
+  const restoreManifestVersion = useRestoreAgentManifestVersion();
 
   useEffect(() => {
     if (agentTab !== "tools") {
@@ -1847,6 +1857,7 @@ export function AgentsPage() {
       { id: "routing",      label: t("agents.tab.routing",      { defaultValue: "Routing" }),      Icon: Route },
       { id: "schedule",     label: t("agents.tab.schedule",     { defaultValue: "Schedule" }),     Icon: Clock },
       { id: "logs",         label: t("agents.tab.logs",         { defaultValue: "Logs" }),         Icon: FileText },
+      { id: "history",      label: t("agents.tab.history",      { defaultValue: "History" }),      Icon: History },
     ];
 
     const live = agentStatsQuery.data;
@@ -2096,6 +2107,7 @@ export function AgentsPage() {
       case "routing":           return renderRoutingTab(agent);
       case "schedule":          return renderScheduleTab(agent);
       case "logs":              return renderLogsTab(agent);
+      case "history":           return renderHistoryTab(agent);
     }
   };
 
@@ -3324,6 +3336,98 @@ export function AgentsPage() {
                   {formatLine(e)}
                 </span>
               </div>
+            ))}
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  // ---------- History tab — manifest version timeline
+  //
+  // Every control-plane write to an agent's `agent.toml` records a full TOML
+  // snapshot (#8041). The stored timestamp is naive UTC, so it is parsed with
+  // the `Z` suffix the whole way through — the list row and the restore
+  // confirmation must name a version identically, or the dialog would point at
+  // a row the operator cannot find above it.
+  const renderHistoryTab = (agent: AgentDetail) => {
+    const versions = manifestHistoryQuery.data ?? [];
+    const versionTimestamp = (v: ManifestVersionEntry): string =>
+      new Date(v.timestamp + "Z").toLocaleString();
+    return (
+      <div className="flex flex-col gap-3">
+        <div className="text-[11px] uppercase font-semibold tracking-[0.08em] text-text-dim">
+          {t("agents.detail.manifest_history", { defaultValue: "Manifest history" })} · {versions.length}
+        </div>
+        {manifestHistoryQuery.isLoading ? (
+          <div className="text-[12px] text-text-dim italic">{t("common.loading", { defaultValue: "Loading..." })}</div>
+        ) : manifestHistoryQuery.isError ? (
+          <div className="rounded-md border border-red-500/30 bg-red-500/10 p-4 text-[12px] text-red-500">
+            {t("agents.detail.manifest_history_load_err", { defaultValue: "Failed to load manifest history." })}
+          </div>
+        ) : versions.length === 0 ? (
+          <div className="rounded-md border border-border-subtle bg-main/40 p-4 text-[12px] text-text-dim italic">
+            {t("agents.detail.no_history", { defaultValue: "No config changes recorded yet." })}
+          </div>
+        ) : (
+          <div className="flex flex-col gap-2">
+            {versions.map((v) => (
+              <details
+                key={v.id}
+                className="rounded-md border border-border-subtle bg-main/40 group"
+              >
+                <summary className="px-3 py-2 cursor-pointer text-[12px] flex flex-wrap items-center gap-2 select-none">
+                  <History className="w-3.5 h-3.5 text-text-dim shrink-0" />
+                  <span className="font-medium">{versionTimestamp(v)}</span>
+                  <span className="text-text-dim">· {v.change_source}</span>
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    className="ml-auto"
+                    disabled={restoreManifestVersion.isPending}
+                    onClick={(e) => {
+                      // Keep the click from folding the <details> it sits in.
+                      e.preventDefault();
+                      e.stopPropagation();
+                      setConfirmDialog({
+                        title: t("agents.detail.restore_title", { defaultValue: "Restore this version?" }),
+                        message: t("agents.detail.restore_confirm", {
+                          name: agent.name,
+                          timestamp: versionTimestamp(v),
+                          source: v.change_source,
+                        }),
+                        tone: "destructive",
+                        onConfirm: async () => {
+                          try {
+                            await restoreManifestVersion.mutateAsync({
+                              agentId: agent.id,
+                              versionId: v.id,
+                            });
+                            addToast(
+                              t("agents.detail.restored", { defaultValue: "Manifest restored" }),
+                              "success",
+                            );
+                          } catch (err) {
+                            addToast(
+                              toastErr(err, t("agents.detail.restore_failed", { defaultValue: "Restore failed" })),
+                              "error",
+                            );
+                            // Re-throw so the dialog stays open on failure
+                            // instead of closing over an error toast.
+                            throw err;
+                          }
+                        },
+                      });
+                    }}
+                  >
+                    <RotateCcw className="w-3 h-3 mr-1" />
+                    {t("agents.detail.restore_btn", { defaultValue: "Restore" })}
+                  </Button>
+                </summary>
+                <pre className="px-3 pb-3 text-[11px] font-mono leading-[1.6] max-h-60 overflow-auto whitespace-pre-wrap break-all text-text-dim">
+                  {v.manifest_toml}
+                </pre>
+              </details>
             ))}
           </div>
         )}
