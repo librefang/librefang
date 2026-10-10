@@ -975,8 +975,14 @@ describe("ProvidersPage", () => {
   it("keeps an active context-window override from deleting itself (#7774)", async () => {
     // The row's `context_window` is the *effective* value, so it equals the
     // override. Reverting against it instead of `limits_catalog` would make the
-    // seeded field look identical to the catalog default and clear the override
-    // on the next save.
+    // seeded field show a number the override no longer distinguishes.
+    //
+    // What this guards today is the seeding and the hint. The save path reads
+    // the figure a typed value is compared against (`limits_catalog`, see
+    // `modelOverrideDraft.ts`), but it no longer reads the row's *effective*
+    // `context_window`, which is what made an active override look like the
+    // catalog default and delete itself on the next save. Kept because the
+    // seeding and the hint still discriminate.
     seedDiscoveredModel({ context_window: 16384, limitsCatalogWindow: 131072 });
     useModelOverridesMock.mockReturnValue({
       data: { context_window: 16384 },
@@ -1000,6 +1006,100 @@ describe("ProvidersPage", () => {
     expect(
       within(drawer).getByText("providers.context_window_hint_override"),
     ).toBeInTheDocument();
+  });
+
+  it("leaves Save disabled while the max_tokens field is untouched", async () => {
+    // The box seeds from the stored override only. With none stored it opens
+    // empty, and empty is exactly what "no override" means, so there is nothing
+    // to save — one click must not write `max_tokens: 16384` for every agent
+    // that never set one.
+    seedDiscoveredModel();
+    const drawer = await openConfigureDrawer(LITELLM);
+
+    expect(updateOverridesMutateAsync).not.toHaveBeenCalled();
+    expect(
+      within(drawer).getByRole("button", { name: /providers\.max_tokens/ }),
+    ).toBeDisabled();
+  });
+
+  it("treats a max_tokens equal to the catalog ceiling as no override (#8502)", async () => {
+    // Since #8502 an absent override resolves to the model's output ceiling
+    // before the kernel default, so typing that ceiling is a redundant pin.
+    // Clearing it is not discarding a preference — it is declining to shadow a
+    // later registry or discovery correction.
+    seedDiscoveredModel();
+    const drawer = await openConfigureDrawer(LITELLM);
+
+    const ladder = within(drawer).getByRole("group", { name: "providers.max_tokens" });
+    fireEvent.click(within(ladder).getByRole("button", { name: "model_param.custom" }));
+    const field = within(drawer).getByLabelText(
+      "providers.max_tokens — model_param.custom",
+    );
+    fireEvent.change(field, { target: { value: "" } });
+    fireEvent.change(field, { target: { value: "16384" } });
+
+    expect(
+      within(drawer).getByRole("button", { name: /providers\.max_tokens/ }),
+    ).toBeDisabled();
+    expect(updateOverridesMutateAsync).not.toHaveBeenCalled();
+  });
+
+  it("saves a max_tokens that differs from the catalog ceiling", async () => {
+    // The deliberate side of the same rule: a number below the ceiling is a
+    // real preference and must reach `model_overrides.json`.
+    seedDiscoveredModel();
+    const drawer = await openConfigureDrawer(LITELLM);
+
+    const ladder = within(drawer).getByRole("group", { name: "providers.max_tokens" });
+    fireEvent.click(within(ladder).getByRole("button", { name: "model_param.custom" }));
+    const field = within(drawer).getByLabelText(
+      "providers.max_tokens — model_param.custom",
+    );
+    fireEvent.change(field, { target: { value: "8192" } });
+    fireEvent.click(
+      within(drawer).getByRole("button", {
+        name: /providers\.max_tokens/,
+      }),
+    );
+
+    expect(updateOverridesMutateAsync).toHaveBeenCalledWith({
+      modelKey: "litellm:sensor-model-generic-high",
+      overrides: { max_tokens: 8192 },
+    });
+  });
+
+  it("clears a stored max_tokens that duplicates the catalog ceiling", async () => {
+    // A value stored before #8502 can be redundant under the new chain, and
+    // retyping it is how the operator tells the editor to drop the pin.
+    seedDiscoveredModel();
+    useModelOverridesMock.mockReturnValue({
+      data: { max_tokens: 16384 },
+      isLoading: false,
+    });
+    const drawer = await openConfigureDrawer(LITELLM);
+
+    // Untouched: the stored override is not a change.
+    expect(
+      within(drawer).getByRole("button", { name: /providers\.max_tokens/ }),
+    ).toBeDisabled();
+
+    const ladder = within(drawer).getByRole("group", { name: "providers.max_tokens" });
+    fireEvent.click(within(ladder).getByRole("button", { name: "model_param.custom" }));
+    const field = within(drawer).getByLabelText(
+      "providers.max_tokens — model_param.custom",
+    );
+    fireEvent.change(field, { target: { value: "" } });
+    fireEvent.change(field, { target: { value: "16384" } });
+    fireEvent.click(
+      within(drawer).getByRole("button", {
+        name: /providers\.max_tokens/,
+      }),
+    );
+
+    expect(updateOverridesMutateAsync).toHaveBeenCalledWith({
+      modelKey: "litellm:sensor-model-generic-high",
+      overrides: {},
+    });
   });
 
   it("clearing the field drops the context_window override (#7774)", async () => {

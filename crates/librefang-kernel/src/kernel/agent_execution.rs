@@ -1306,11 +1306,12 @@ impl LibreFangKernel {
         // will actually be called, not the pre-routing one (e.g. routing may
         // switch sonnet → haiku).
         //
-        // Priority: agent manifest > per-model override > system defaults, for
-        // the sampling preferences. This block used to run the chain the other
-        // way round, which meant tuning the temperature of a shared model
-        // silently overwrote it for every agent using that model — two
-        // instances of one agent type could not hold different temperatures.
+        // Priority: agent manifest > per-model override > registry ceiling
+        // (for `max_tokens`) > system defaults, for the sampling preferences.
+        // This block used to run the chain the other way round, which meant
+        // tuning the temperature of a shared model silently overwrote it for
+        // every agent using that model — two instances of one agent type could
+        // not hold different temperatures.
         // The inversion was load-bearing only because `ModelConfig` had no
         // "inherit" state: every agent carried a concrete 4096 / 0.7, so
         // letting the manifest win would have made per-model overrides
@@ -1320,6 +1321,9 @@ impl LibreFangKernel {
         // `reasoning_effort` is deliberately excluded from that reordering —
         // see `librefang_types::inference_params` for why the model level has
         // to keep winning there (#7770).
+        //
+        // `ModelCatalog::resolve_turn_inference_params` owns the two lookups that need the catalog: the `provider:model` override key and the model's *effective* ceiling (the operator's `model_overrides.json` correction if one exists, otherwise the matched entry's own `max_output_tokens`, #7774).
+        // The pre-call holds in `messaging.rs` call the same method, so the estimate and the request cannot drift.
         //
         // Shared with the other two dispatch paths (`messaging::send_message_ephemeral`,
         // `messaging::send_message_streaming_with_sender_context_routing_thinking_and_session`)
