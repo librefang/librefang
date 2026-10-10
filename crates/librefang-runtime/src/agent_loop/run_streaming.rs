@@ -135,6 +135,10 @@ async fn run_agent_loop_streaming_inner(
 ) -> LibreFangResult<AgentLoopResult> {
     info!(agent = %manifest.name, "Starting streaming agent loop");
 
+    // Wall-clock start of the turn, used by the iteration-cap exit to report a
+    // real `latency_ms` (#8556 review P7).
+    let turn_start = Instant::now();
+
     // Start index of new messages added during this turn. See the matching
     // comment in run_agent_loop for details. Initialized to the current
     // session length, updated post-trim to len-1. Fixes #2067.
@@ -144,6 +148,7 @@ async fn run_agent_loop_streaming_inner(
     if !driver.is_configured() {
         info!(agent = %manifest.name, "Skipping streaming agent loop — no LLM provider configured");
         return Ok(AgentLoopResult {
+            hit_iteration_cap: false,
             silent: true,
             provider_not_configured: true,
             experiment_context: None,
@@ -590,6 +595,7 @@ async fn run_agent_loop_streaming_inner(
                 "Streaming agent loop interrupted by session cancel signal"
             );
             return Ok(AgentLoopResult {
+                hit_iteration_cap: false,
                 silent: true,
                 new_messages_start,
                 ..Default::default()
@@ -1057,6 +1063,7 @@ async fn run_agent_loop_streaming_inner(
             forced_tools_stripped_this_turn,
             response.stop_reason,
             response.tool_calls.is_empty(),
+            response.text_synthesized_from_thinking,
         ) {
             let recovered = recover_text_tool_calls(&response.text(), available_tools);
             if !recovered.is_empty() {
@@ -1778,6 +1785,7 @@ async fn run_agent_loop_streaming_inner(
                     fire_hook_best_effort(hooks, &ctx);
                     signal_response_complete(&stream_tx).await;
                     return Ok(AgentLoopResult {
+                        hit_iteration_cap: false,
                         response: text,
                         total_usage,
                         iterations: iteration + 1,
@@ -1835,6 +1843,50 @@ async fn run_agent_loop_streaming_inner(
         }
     }
 
+    // Streaming twin of the graceful cap-exhaustion delivery (#8556). See
+    // `run_agent_loop` for the full rationale: build the best-so-far text,
+    // deliver it as the turn's response, persist it, and flag the kernel so
+    // operators are still notified.
+    let text = finalize_end_turn_text(
+        String::new(),
+        any_tools_executed,
+        &manifest.name,
+        max_iterations,
+        &total_usage,
+        messages.len(),
+        "Max iterations reached (streaming) — guard activated",
+        &accumulated_text,
+    );
+    warn!(
+        agent = %manifest.name,
+        iterations = max_iterations,
+        response_len = text.len(),
+        "Max iterations reached (streaming) — delivering best-so-far response"
+    );
+
+    // #8556 review P6: intermediate tool-use prose was already streamed to
+    // the client by `stream_with_retry` and committed to the session by
+    // `StagedToolUseTurn::commit`. Re-pushing or re-emitting it here would
+    // duplicate both.
+    let prose_already_committed = !accumulated_text.trim().is_empty();
+    if !prose_already_committed {
+        // review P1: the tool-only cap scenario streamed no text, and the
+        // channel bridge's streaming success arm never re-sends
+        // `result.response` — so without this the user would get a "Done"
+        // reaction and no content at all. Emit the canned guard through the
+        // existing streaming pipe so WS/SSE/channel consumers receive it
+        // before completion. `signal_response_complete` follows.
+        if stream_tx
+            .send(StreamEvent::TextDelta { text: text.clone() })
+            .await
+            .is_err()
+        {
+            warn!("Stream consumer disconnected before cap-exit text delta");
+        }
+        session.push_message(Message::assistant(&text));
+    }
+
+    // Persist. Fork and incognito turns skip.
     repair_session_before_save(session, agent_id_str.as_str(), "streaming_max_iterations");
     if !opts.is_fork && !opts.incognito {
         if let Err(e) = memory.save_session_async(session).await {
@@ -1842,18 +1894,47 @@ async fn run_agent_loop_streaming_inner(
         }
     }
 
-    // Fire AgentLoopEnd hook on max iterations exceeded
+    // Fire AgentLoopEnd hook on max iterations reached — with delivery.
     let ctx = crate::hooks::HookContext {
         agent_name: &manifest.name,
         agent_id: agent_id_str.as_str(),
         event: librefang_types::agent::HookEvent::AgentLoopEnd,
         data: serde_json::json!({
-            "reason": "max_iterations_exceeded",
+            "reason": "max_iterations_reached_with_delivery",
             "iterations": max_iterations,
             "is_fork": opts.is_fork,
+            "response_length": text.len(),
         }),
     };
     fire_hook_best_effort(hooks, &ctx);
 
-    Err(LibreFangError::MaxIterationsExceeded(max_iterations))
+    // #8556 review P4: mirror `finalize_successful_end_turn`'s terminal phase.
+    if let Some(cb) = on_phase {
+        cb(LoopPhase::Done);
+    }
+
+    // Unblock consumers still waiting for the response-complete phase.
+    signal_response_complete(&stream_tx).await;
+
+    Ok(AgentLoopResult {
+        response: text,
+        total_usage,
+        iterations: max_iterations,
+        cost_usd: None,
+        silent: false,
+        directives: Default::default(),
+        skill_evolution_suggested: decision_traces.len() >= 5,
+        decision_traces,
+        memories_saved,
+        memories_used,
+        memory_conflicts,
+        provider_not_configured: false,
+        experiment_context: experiment_context.clone(),
+        latency_ms: turn_start.elapsed().as_millis() as u64,
+        new_messages_start,
+        owner_notice: std::mem::take(&mut pending_owner_notice),
+        actual_provider: last_actual_provider.clone(),
+        actual_model: last_actual_model.clone(),
+        hit_iteration_cap: true,
+    })
 }

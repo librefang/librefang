@@ -1938,6 +1938,7 @@ mod session_summary_tests {
         ) -> Result<CompletionResponse, LlmError> {
             tokio::time::sleep(self.sleep_for).await;
             Ok(CompletionResponse {
+                text_synthesized_from_thinking: false,
                 content: vec![ContentBlock::Text {
                     text: "too-late".to_string(),
                     provider_metadata: None,

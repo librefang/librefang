@@ -255,13 +255,74 @@ pub(super) fn is_parameter_error_content(content: &str) -> bool {
     lower.contains("argument is required")
 }
 
+/// Index at which to re-insert a trimmed current-turn task.
+///
+/// The task sits before the turn's tool cycle, so it goes in ahead of any
+/// trailing run of tool-cycle messages (an assistant `ToolUse` or a
+/// tool-result-only user message, repeating). Inserting anywhere else would
+/// either split a `ToolUse`/`ToolResult` pair or leave the task reading as a
+/// brand-new instruction after the results (#8556 review P5b). Falls back to
+/// the end when there is no trailing tool cycle.
+fn current_turn_task_insertion_point(messages: &[Message]) -> usize {
+    let mut start = messages.len();
+    while start > 0 {
+        let msg = &messages[start - 1];
+        let is_tool_cycle = (msg.role == Role::Assistant
+            && crate::session_repair::message_has_tool_use(msg))
+            || (msg.role == Role::User && crate::session_repair::message_is_only_tool_results(msg));
+        if !is_tool_cycle {
+            break;
+        }
+        start -= 1;
+    }
+    start
+}
+
 fn ensure_post_trim_minimum(
     messages: &mut Vec<Message>,
     agent_name: &str,
     user_message: &str,
     history_kind: &str,
+    turn_task: Option<&Message>,
+    turn_task_rev_offset: Option<usize>,
 ) {
-    if messages.len() >= 2 && messages.iter().any(|m| m.role == Role::User) {
+    // #8556: the current turn's task message must survive the trim. A
+    // surviving user message from an *earlier* turn is not enough — the model
+    // would then be answering a question it can no longer see, which is the
+    // mid-turn amnesia that makes it flail until the iteration cap.
+    //
+    // Survival is tested by *position*, not text: the task occupied slot
+    // `rev` counting from the end of the pre-trim history, and a prefix drain
+    // plus front-inserted rescued pinned messages preserve tail reverse
+    // offsets. That distinguishes the task from an earlier user message with
+    // identical text ("continue"), which a content match would misread as
+    // survival, and it does not care whether the task carries image
+    // attachments — a `text_content()` comparison would drop those.
+    let task_survives = match (turn_task, turn_task_rev_offset) {
+        (Some(_), Some(rev)) => {
+            messages.len() > rev && messages[messages.len() - 1 - rev].role == Role::User
+        }
+        _ => messages.len() >= 2 && messages.iter().any(|m| m.role == Role::User),
+    };
+    if task_survives {
+        return;
+    }
+
+    if messages.len() >= 2 && turn_task.is_some() {
+        // History is otherwise healthy; only the current-turn task was
+        // trimmed away. Re-insert it as the active turn instead of
+        // synthesising a fresh conversation and discarding the survivors.
+        let insert_at = current_turn_task_insertion_point(messages);
+        warn!(
+            agent = %agent_name,
+            history = history_kind,
+            remaining = messages.len(),
+            insert_at,
+            "Trim dropped the current-turn user message — re-inserting the task"
+        );
+        if let Some(task) = turn_task {
+            messages.insert(insert_at, task.clone());
+        }
         return;
     }
 
@@ -272,7 +333,11 @@ fn ensure_post_trim_minimum(
         "Trim + repair left too few messages, synthesizing minimal conversation"
     );
     messages.retain(|message| message.role == Role::System);
-    messages.push(Message::user(user_message));
+    messages.push(
+        turn_task
+            .cloned()
+            .unwrap_or_else(|| Message::user(user_message)),
+    );
 }
 
 /// Safely trim message history to `DEFAULT_MAX_HISTORY_MESSAGES`, cutting at
@@ -295,6 +360,19 @@ pub(super) fn safe_trim_messages(
 ) -> (bool, bool) {
     let mut working_mutated = false;
     let mut session_mutated = false;
+
+    // #8556 review P5: capture each history's current-turn task — its last
+    // user message — and its position counted from the end, so the trim below
+    // can never strip it. `prepare_llm_messages` calls this at turn start, so
+    // the task is the last user message by construction. The reverse offset
+    // is the identity used to test survival: it survives a prefix drain and
+    // the front-insertion of rescued pinned messages unchanged.
+    let session_turn_task_idx = session_messages.iter().rposition(|m| m.role == Role::User);
+    let session_turn_task = session_turn_task_idx.map(|i| session_messages[i].clone());
+    let session_turn_task_rev = session_turn_task_idx.map(|i| session_messages.len() - 1 - i);
+    let working_turn_task_idx = messages.iter().rposition(|m| m.role == Role::User);
+    let working_turn_task = working_turn_task_idx.map(|i| messages[i].clone());
+    let working_turn_task_rev = working_turn_task_idx.map(|i| messages.len() - 1 - i);
 
     // Trim the persistent session messages first so the truncated version is
     // saved back to the database, preventing reload-OOM on next boot.
@@ -345,6 +423,8 @@ pub(super) fn safe_trim_messages(
             agent_name,
             user_message,
             "persistent session",
+            session_turn_task.as_ref(),
+            session_turn_task_rev,
         );
     }
 
@@ -396,7 +476,14 @@ pub(super) fn safe_trim_messages(
 
     // Post-trim safety: ensure at least a user message survives so the LLM
     // request body is never empty.
-    ensure_post_trim_minimum(messages, agent_name, user_message, "working copy");
+    ensure_post_trim_minimum(
+        messages,
+        agent_name,
+        user_message,
+        "working copy",
+        working_turn_task.as_ref(),
+        working_turn_task_rev,
+    );
 
     (working_mutated, session_mutated)
 }
@@ -622,5 +709,83 @@ mod safe_trim_session_repair_tests {
         assert_eq!(session[0].content.text_content(), "pinned system policy");
         assert_eq!(session[1].role, Role::User);
         assert_eq!(session[1].content.text_content(), "current user message");
+    }
+
+    /// #8556 review P5a: an earlier user message with identical text must not
+    /// be mistaken for the current-turn task once the task's tail slot no
+    /// longer holds a user message. Survival is decided by the task's
+    /// position, not by content equality.
+    #[test]
+    fn ensure_post_trim_minimum_does_not_confuse_identical_earlier_message() {
+        // Post-trim history ends with an assistant turn: the task's tail slot
+        // was drained, and the surviving "continue" belongs to an earlier
+        // turn. The task must be re-inserted even though its text is already
+        // present.
+        let mut messages = vec![Message::user("continue"), Message::assistant("old reply")];
+        let task = Message::user("continue");
+        // Pre-trim the task occupied the last slot (reverse offset 0).
+        super::ensure_post_trim_minimum(
+            &mut messages,
+            "agent",
+            "fallback",
+            "working copy",
+            Some(&task),
+            Some(0),
+        );
+
+        let continues = messages
+            .iter()
+            .filter(|m| m.role == Role::User && m.content.text_content() == "continue")
+            .count();
+        assert_eq!(
+            continues, 2,
+            "the drained task must be re-inserted even though an identical \
+             earlier message survives; got {messages:?}"
+        );
+        assert_eq!(messages.last().map(|m| m.role), Some(Role::User));
+    }
+
+    /// #8556 review P5b: a re-inserted task must land before a trailing tool
+    /// cycle, not after it, so the model reads task → results and no
+    /// `ToolUse`/`ToolResult` pair is split.
+    #[test]
+    fn current_turn_task_insertion_point_lands_before_trailing_tool_cycle() {
+        use librefang_types::message::{ContentBlock, MessageContent};
+
+        let assistant_tool_use = Message {
+            role: Role::Assistant,
+            content: MessageContent::Blocks(vec![ContentBlock::ToolUse {
+                id: "t1".into(),
+                name: "file_read".into(),
+                input: serde_json::json!({}),
+                provider_metadata: None,
+            }]),
+            pinned: false,
+            timestamp: None,
+        };
+        let user_tool_result = Message {
+            role: Role::User,
+            content: MessageContent::Blocks(vec![ContentBlock::ToolResult {
+                tool_use_id: "t1".into(),
+                tool_name: "file_read".into(),
+                content: "result".into(),
+                is_error: false,
+                status: librefang_types::tool::ToolExecutionStatus::Completed,
+                approval_request_id: None,
+            }]),
+            pinned: false,
+            timestamp: None,
+        };
+        let messages = vec![
+            Message::user("older"),
+            Message::assistant("older reply"),
+            assistant_tool_use,
+            user_tool_result,
+        ];
+        assert_eq!(
+            current_turn_task_insertion_point(&messages),
+            2,
+            "the task must be inserted before the trailing tool cycle"
+        );
     }
 }

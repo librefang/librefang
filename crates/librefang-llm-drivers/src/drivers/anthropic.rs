@@ -1228,6 +1228,7 @@ impl LlmDriver for AnthropicDriver {
                 .await;
 
             return Ok(CompletionResponse {
+                text_synthesized_from_thinking: false,
                 content,
                 stop_reason,
                 tool_calls,
@@ -1647,6 +1648,7 @@ fn convert_response(api: ApiResponse, model: &str) -> CompletionResponse {
     };
 
     CompletionResponse {
+        text_synthesized_from_thinking: false,
         content,
         stop_reason,
         tool_calls,

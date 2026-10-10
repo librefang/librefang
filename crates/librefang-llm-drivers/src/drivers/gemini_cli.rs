@@ -346,6 +346,7 @@ impl LlmDriver for GeminiCliDriver {
         })?;
 
         Ok(CompletionResponse {
+            text_synthesized_from_thinking: false,
             content: vec![ContentBlock::Text {
                 text,
                 provider_metadata: None,

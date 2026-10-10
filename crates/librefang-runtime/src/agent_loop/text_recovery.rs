@@ -195,12 +195,21 @@ pub(super) fn user_message_has_action_intent(user_message: &str) -> bool {
 /// and the cycle repeats to `max_iterations`. The turn offered no tools, so
 /// text that merely resembles a call this turn is not a call the model was
 /// invited to make.
+///
+/// `synthesized_from_thinking` must be `false`: when the driver synthesized
+/// the response text from a thinking-only reply (`text_synthesized_from_thinking`
+/// on `CompletionResponse`, #8556), that text is a best-effort answer, not a
+/// call the model was invited to make. Promoting it back into a `ToolUse`
+/// keeps the turn alive — the model answers "in prose", recovery turns the
+/// prose into a call, and the loop never reaches a clean end.
 pub(super) fn should_attempt_text_recovery(
     forced_tools_stripped_this_turn: bool,
     stop_reason: StopReason,
     tool_calls_empty: bool,
+    synthesized_from_thinking: bool,
 ) -> bool {
     !forced_tools_stripped_this_turn
+        && !synthesized_from_thinking
         && matches!(stop_reason, StopReason::EndTurn | StopReason::StopSequence)
         && tool_calls_empty
 }

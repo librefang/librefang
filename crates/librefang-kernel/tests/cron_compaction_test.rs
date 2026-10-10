@@ -53,6 +53,7 @@ struct FakeDriver {
 impl LlmDriver for FakeDriver {
     async fn complete(&self, _req: CompletionRequest) -> Result<CompletionResponse, LlmError> {
         Ok(CompletionResponse {
+            text_synthesized_from_thinking: false,
             content: vec![ContentBlock::Text {
                 text: self.summary.clone(),
                 provider_metadata: None,

@@ -64,6 +64,11 @@ pub struct EphemeralRunRow {
     pub response: String,
     /// One of [`VALID_STATUSES`].
     pub status: String,
+    /// True when the worker hit its per-turn iteration cap and delivered a
+    /// partial answer rather than running to a natural end (#8556). Distinct
+    /// from `status = "failed"`: the run completed and its answer is usable,
+    /// but the worker was cut off before it was done.
+    pub truncated: bool,
     /// Why the run failed, when it did.
     pub error: Option<String>,
     /// Provider actually used for the run.
@@ -133,12 +138,12 @@ impl EphemeralRunStore {
                 id, parent_agent_id, label, worker_name, agent_type,
                 task, response, status, error, provider, model,
                 iterations, tool_calls, input_tokens, output_tokens,
-                cost_usd, latency_ms, started_at, finished_at
+                cost_usd, latency_ms, started_at, finished_at, truncated
             ) VALUES (
                 ?1, ?2, ?3, ?4, ?5,
                 ?6, ?7, ?8, ?9, ?10, ?11,
                 ?12, ?13, ?14, ?15,
-                ?16, ?17, ?18, ?19
+                ?16, ?17, ?18, ?19, ?20
             )",
             rusqlite::params![
                 row.id,
@@ -160,6 +165,7 @@ impl EphemeralRunStore {
                 row.latency_ms,
                 row.started_at,
                 row.finished_at,
+                row.truncated,
             ],
         )
         .map_err(|e| LibreFangError::memory_msg(format!("ephemeral run insert failed: {e}")))?;
@@ -196,7 +202,7 @@ impl EphemeralRunStore {
                 "SELECT id, parent_agent_id, label, worker_name, agent_type,
                         task, response, status, error, provider, model,
                         iterations, tool_calls, input_tokens, output_tokens,
-                        cost_usd, latency_ms, started_at, finished_at
+                        cost_usd, latency_ms, started_at, finished_at, truncated
                  FROM ephemeral_runs
                  WHERE parent_agent_id = ?1
                  ORDER BY finished_at DESC, rowid DESC
@@ -285,6 +291,7 @@ fn map_run_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<EphemeralRunRow> {
         latency_ms: r.get(16)?,
         started_at: r.get(17)?,
         finished_at: r.get(18)?,
+        truncated: r.get(19)?,
     })
 }
 
@@ -324,6 +331,7 @@ mod tests {
             task: "find the thing".to_string(),
             response: "found it".to_string(),
             status: "completed".to_string(),
+            truncated: false,
             error: None,
             provider: "anthropic".to_string(),
             model: "test-model".to_string(),

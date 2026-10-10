@@ -288,6 +288,7 @@ mod tests {
                 return Err(LlmError::Http("simulated failure".to_string()));
             }
             Ok(CompletionResponse {
+                text_synthesized_from_thinking: false,
                 content: vec![ContentBlock::Text {
                     text: self.reply.clone(),
                     provider_metadata: None,
@@ -344,6 +345,7 @@ mod tests {
                 .unwrap()
                 .push(req.response_format.clone());
             Ok(CompletionResponse {
+                text_synthesized_from_thinking: false,
                 content: vec![ContentBlock::Text {
                     text: r#"{"accept": true, "reason": "ok"}"#.to_string(),
                     provider_metadata: None,

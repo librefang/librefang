@@ -106,6 +106,7 @@ pub(super) fn build_silent_agent_loop_result(
     new_messages_start: usize,
 ) -> AgentLoopResult {
     AgentLoopResult {
+        hit_iteration_cap: false,
         response: String::new(),
         total_usage,
         iterations,
@@ -134,6 +135,14 @@ pub(super) enum EndTurnRetry {
 }
 
 pub(super) fn classify_end_turn_retry(ctx: EndTurnRetryContext<'_>) -> Option<EndTurnRetry> {
+    // #8556: text synthesized from a thinking-only response is a terminal
+    // best-effort answer — never nudge it into a retry (empty-response,
+    // hallucinated-action, or action-intent). Re-issuing the turn here is
+    // what kept it alive after the driver had already answered.
+    if ctx.response.text_synthesized_from_thinking {
+        return None;
+    }
+
     if ctx.text.trim().is_empty() && ctx.response.tool_calls.is_empty() {
         let is_silent_failure =
             ctx.response.usage.input_tokens == 0 && ctx.response.usage.output_tokens == 0;
@@ -402,6 +411,7 @@ pub(super) async fn finalize_successful_end_turn(
 
     let tool_call_count = end_turn.decision_traces.len();
     Ok(AgentLoopResult {
+        hit_iteration_cap: false,
         response: end_turn.final_response,
         total_usage: end_turn.total_usage,
         iterations: end_turn.iteration + 1,

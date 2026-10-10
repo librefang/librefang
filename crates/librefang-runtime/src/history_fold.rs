@@ -877,6 +877,7 @@ mod tests {
         async fn complete(&self, _req: CompletionRequest) -> Result<CompletionResponse, LlmError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             Ok(CompletionResponse {
+                text_synthesized_from_thinking: false,
                 content: vec![ContentBlock::Text {
                     text: self.text.clone(),
                     provider_metadata: None,
@@ -898,6 +899,7 @@ mod tests {
     impl LlmDriver for OkDriver {
         async fn complete(&self, _req: CompletionRequest) -> Result<CompletionResponse, LlmError> {
             Ok(CompletionResponse {
+                text_synthesized_from_thinking: false,
                 content: vec![ContentBlock::Text {
                     text: self.0.clone(),
                     provider_metadata: None,
@@ -934,6 +936,7 @@ mod tests {
             let byte_limit = (req.max_tokens as usize).saturating_mul(4);
             let truncated: String = self.full_response.chars().take(byte_limit).collect();
             Ok(CompletionResponse {
+                text_synthesized_from_thinking: false,
                 content: vec![ContentBlock::Text {
                     text: truncated,
                     provider_metadata: None,
@@ -994,6 +997,7 @@ mod tests {
             }
             let body = format!("[{}]", entries.join(","));
             Ok(CompletionResponse {
+                text_synthesized_from_thinking: false,
                 content: vec![ContentBlock::Text {
                     text: body,
                     provider_metadata: None,
@@ -2412,6 +2416,7 @@ mod tests {
             }
             let body = format!("[{}]", entries.join(","));
             Ok(CompletionResponse {
+                text_synthesized_from_thinking: false,
                 content: vec![ContentBlock::Text {
                     text: body,
                     provider_metadata: None,

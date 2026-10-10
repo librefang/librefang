@@ -822,6 +822,7 @@ pub fn spawn_daemon_stream(
 
         // Connection closed — agent loop is truly done.
         let _ = tx.send(AppEvent::StreamDone(Ok(AgentLoopResult {
+            hit_iteration_cap: false,
             response: String::new(),
             total_usage: librefang_types::message::TokenUsage {
                 input_tokens: total_input_tokens,
@@ -875,6 +876,7 @@ fn daemon_fallback(
         let input_tokens = body["input_tokens"].as_u64().unwrap_or(0);
         let output_tokens = body["output_tokens"].as_u64().unwrap_or(0);
         Ok(AgentLoopResult {
+            hit_iteration_cap: false,
             response: response.to_string(),
             total_usage: librefang_types::message::TokenUsage {
                 input_tokens,

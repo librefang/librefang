@@ -456,6 +456,7 @@ mod tests {
         async fn complete(&self, _req: CompletionRequest) -> Result<CompletionResponse, LlmError> {
             self.1.fetch_add(1, Ordering::SeqCst);
             Ok(CompletionResponse {
+                text_synthesized_from_thinking: false,
                 content: vec![ContentBlock::Text {
                     text: self.0.to_string(),
                     provider_metadata: None,

@@ -894,6 +894,7 @@ impl ChatGptDriver {
         }
 
         Ok(CompletionResponse {
+            text_synthesized_from_thinking: false,
             content: content_blocks,
             stop_reason,
             tool_calls,

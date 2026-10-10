@@ -325,6 +325,7 @@ impl LibreFangKernel {
         );
 
         Ok(AgentLoopResult {
+            hit_iteration_cap: false,
             response,
             total_usage: librefang_types::message::TokenUsage {
                 input_tokens: 0,
@@ -402,6 +403,7 @@ impl LibreFangKernel {
         info!(agent = %entry.name, "Python agent execution complete");
 
         Ok(AgentLoopResult {
+            hit_iteration_cap: false,
             response: result.response,
             total_usage: librefang_types::message::TokenUsage {
                 input_tokens: 0,

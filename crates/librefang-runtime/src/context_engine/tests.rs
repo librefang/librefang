@@ -756,6 +756,7 @@ async fn test_summary_engine_compact_called_once_on_threshold_cross() {
             _req: crate::llm_driver::CompletionRequest,
         ) -> Result<CompletionResponse, LlmError> {
             Ok(CompletionResponse {
+                text_synthesized_from_thinking: false,
                 content: vec![ContentBlock::Text {
                     text: "Summary of prior conversation".to_string(),
                     provider_metadata: None,

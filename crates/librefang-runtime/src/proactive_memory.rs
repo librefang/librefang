@@ -1082,6 +1082,7 @@ mod tests {
         ) -> Result<crate::llm_driver::CompletionResponse, crate::llm_driver::LlmError> {
             use librefang_types::message::{ContentBlock, StopReason, TokenUsage};
             Ok(crate::llm_driver::CompletionResponse {
+                text_synthesized_from_thinking: false,
                 content: vec![ContentBlock::Text {
                     text: self.response.clone(),
                     provider_metadata: None,

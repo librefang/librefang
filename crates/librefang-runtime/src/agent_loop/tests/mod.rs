@@ -44,11 +44,26 @@ fn test_should_attempt_text_recovery_skips_forced_tools_stripped_turn() {
         true, // forced_tools_stripped_this_turn
         StopReason::EndTurn,
         true, // tool_calls_empty
+        false,
     ));
     assert!(!should_attempt_text_recovery(
         true,
         StopReason::StopSequence,
         true,
+        false,
+    ));
+}
+
+// #8556: a text block synthesized from a thinking-only response is terminal.
+// It must never be re-promoted into a tool call, however tool-call-shaped it
+// looks, or the turn never reaches a clean end.
+#[test]
+fn test_should_attempt_text_recovery_skips_synthesized_thinking_text() {
+    assert!(!should_attempt_text_recovery(
+        false, // forced_tools_stripped_this_turn
+        StopReason::EndTurn,
+        true, // tool_calls_empty
+        true, // synthesized_from_thinking
     ));
 }
 
@@ -58,6 +73,7 @@ fn test_should_attempt_text_recovery_runs_on_a_normal_turn() {
         false, // forced_tools_stripped_this_turn
         StopReason::EndTurn,
         true, // tool_calls_empty
+        false,
     ));
 }
 
@@ -69,11 +85,13 @@ fn test_should_attempt_text_recovery_requires_empty_tool_calls_and_end_turn() {
     assert!(!should_attempt_text_recovery(
         false,
         StopReason::ToolUse,
-        true
+        true,
+        false
     ));
     assert!(!should_attempt_text_recovery(
         false,
         StopReason::EndTurn,
+        false,
         false
     ));
 }

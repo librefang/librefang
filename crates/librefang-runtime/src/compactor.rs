@@ -1756,6 +1756,7 @@ mod tests {
                 _req: CompletionRequest,
             ) -> Result<CompletionResponse, LlmError> {
                 Ok(CompletionResponse {
+                    text_synthesized_from_thinking: false,
                     content: vec![ContentBlock::Text {
                         text: "Summary of conversation".to_string(),
                         provider_metadata: None,
@@ -1833,6 +1834,7 @@ mod tests {
                     "Should include tool result"
                 );
                 Ok(CompletionResponse {
+                    text_synthesized_from_thinking: false,
                     content: vec![ContentBlock::Text {
                         text: "Summary with tools".to_string(),
                         provider_metadata: None,
@@ -1947,6 +1949,7 @@ mod tests {
                 _req: CompletionRequest,
             ) -> Result<CompletionResponse, LlmError> {
                 Ok(CompletionResponse {
+                    text_synthesized_from_thinking: false,
                     content: vec![ContentBlock::Text {
                         text: "Summary: discussed topics 0 through 79".to_string(),
                         provider_metadata: None,
@@ -2170,6 +2173,7 @@ mod tests {
             ) -> Result<CompletionResponse, LlmError> {
                 self.calls.fetch_add(1, Ordering::SeqCst);
                 Ok(CompletionResponse {
+                    text_synthesized_from_thinking: false,
                     content: vec![ContentBlock::Text {
                         text: "the summary".to_string(),
                         provider_metadata: None,
@@ -2242,6 +2246,7 @@ mod tests {
             ) -> Result<CompletionResponse, LlmError> {
                 let n = CALL_COUNT.fetch_add(1, Ordering::SeqCst);
                 Ok(CompletionResponse {
+                    text_synthesized_from_thinking: false,
                     content: vec![ContentBlock::Text {
                         text: format!("Chunk summary {n}"),
                         provider_metadata: None,
