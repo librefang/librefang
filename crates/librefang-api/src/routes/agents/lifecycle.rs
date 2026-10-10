@@ -1394,7 +1394,7 @@ pub async fn patch_agent(
         // is surfaced to the client.
         let internal_error_msg = t.t("api-error-internal");
         drop(t);
-        return match state.kernel.update_manifest(agent_id, manifest) {
+        return match state.kernel.update_manifest(agent_id, manifest, "api") {
             Ok(()) => (
                 StatusCode::OK,
                 Json(serde_json::json!({
@@ -1553,7 +1553,7 @@ pub async fn patch_agent(
             // Write updated manifest to agent.toml on disk so disk doesn't override
             // dashboard changes on next boot (#996, #1018).
             if !mcp_only_patch {
-                state.kernel.persist_manifest_to_disk(agent_id);
+                state.kernel.persist_manifest_to_disk(agent_id, "api");
             }
         }
 

@@ -20,6 +20,7 @@ import {
   getAgentTools,
   getAgentSkills,
   getAgentMcpServers,
+  getAgentManifestHistory,
 } from "../http/client";
 import { agentAvatarKeys, agentKeys, toolKeys } from "./keys";
 import { withOverrides, type QueryOverrides } from "./options";
@@ -162,6 +163,16 @@ export const agentQueries = {
       queryFn: () => getAgentChannels(agentId),
       enabled: !!agentId,
     }),
+  // Manifest version history (#8041) — the agent detail History tab. Disabled
+  // by default so the full TOML snapshots are only fetched while that tab is
+  // actually open.
+  manifestHistory: (agentId: string) =>
+    queryOptions({
+      queryKey: agentKeys.manifestHistory(agentId),
+      queryFn: () => getAgentManifestHistory(agentId),
+      enabled: false,
+      staleTime: 60_000,
+    }),
   toolsList: () =>
     queryOptions({
       queryKey: toolKeys.list(),
@@ -259,6 +270,10 @@ export function useAgentManifest(agentId: string, options: QueryOverrides = {}) 
 
 export function useAgentChannels(agentId: string, options: QueryOverrides = {}) {
   return useQuery(withOverrides(agentQueries.channels(agentId), options));
+}
+
+export function useAgentManifestHistory(agentId: string, options: QueryOverrides = {}) {
+  return useQuery(withOverrides(agentQueries.manifestHistory(agentId), options));
 }
 
 /**
