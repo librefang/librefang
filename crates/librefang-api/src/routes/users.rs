@@ -1292,11 +1292,23 @@ where
         ))
     })?;
 
-    // Replace the entire `users` key with a freshly built array-of-tables
-    // (or remove it when the vector is empty so we don't leave a stranded
-    // `users = []` behind).
+    // Replace the entire `users` key with a freshly built array-of-tables, or
+    // with an explicit empty array when the vector is empty.
+    //
+    // The empty case states `users = []` rather than removing the key: the
+    // reload overlay (#8459/#8460) reads a top-level key the document does not
+    // state as "keep the live value", so deleting the last user by dropping
+    // the key resurrected that user — and its bearer — on the reload this same
+    // write triggers. An explicit empty array is a statement about the
+    // section, so the deletion sticks while a genuinely partial document still
+    // leaves the fields it never mentions on the live config.
     if users.is_empty() {
+        // Remove-then-insert rather than inserting over the existing key: a
+        // `[[users]]` key keeps the array-of-tables header's formatting decor
+        // and would render as `users= []`; a fresh key gets the standard
+        // `key = value` spacing an operator reads.
         doc.remove("users");
+        doc.insert("users", toml_edit::value(toml_edit::Array::new()));
     } else {
         let mut aot = toml_edit::ArrayOfTables::new();
         for u in &users {
@@ -1321,12 +1333,16 @@ where
         doc.insert("users", toml_edit::Item::ArrayOfTables(aot));
     }
 
-    // Same treatment for `[[groups]]` (#7745). Written on every identity
-    // mutation, not only on group edits: the vector is re-serialized from the
-    // config the kernel already parsed, so a users-only edit round-trips the
-    // groups section byte-identically and the write stays idempotent.
+    // Same treatment for `[[groups]]` (#7745), including the explicit empty
+    // array for the same resurrection reason as `users` above. Written on
+    // every identity mutation, not only on group edits: the vector is
+    // re-serialized from the config the kernel already parsed, so a users-only
+    // edit round-trips the groups section byte-identically and the write stays
+    // idempotent.
     if groups.is_empty() {
+        // Same shape and same remove-then-insert rationale as `users` above.
         doc.remove("groups");
+        doc.insert("groups", toml_edit::value(toml_edit::Array::new()));
     } else {
         let mut aot = toml_edit::ArrayOfTables::new();
         for g in &groups {

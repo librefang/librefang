@@ -150,6 +150,15 @@ async fn groups_create_then_get_then_delete_round_trips() {
 
     let (status, _) = json_request(&h, Method::GET, "/api/groups/oncall", None).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
+
+    // The deletion is explicit on disk — `groups = []`, not a dropped key — so
+    // the reload overlay (#8459/#8460) cannot keep the live copy and resurrect
+    // the group on the handler's own reload.
+    let raw = raw_config(&h).await;
+    assert!(
+        raw.contains("groups = []"),
+        "the empty section must be stated explicitly: {raw}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

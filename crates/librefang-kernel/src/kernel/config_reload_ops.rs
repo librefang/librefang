@@ -22,14 +22,15 @@ impl LibreFangKernel {
         let old_cfg = self.config.load();
         use crate::config_reload::{should_store_config, validate_config_for_reload};
 
-        // Read and parse the on-disk config via the strict loader (#4664).
-        // Unlike `crate::config::load_config`, `try_load_config` returns `Err`
-        // on every failure mode (TOML syntax error, broken `include = [...]`
-        // chain, migration failure, deserialize-shape mismatch) instead of
-        // silently falling back to `KernelConfig::default()`. Without this,
-        // the diff-and-apply path below would treat the defaults as the
-        // operator's intent and wipe out their `default_model`,
-        // `provider_api_keys`, channels, etc.
+        // Read and parse the on-disk config via the strict loader (#4664),
+        // loading the document over the live config rather than over the
+        // compiled defaults (#8459). Unlike `crate::config::load_config`,
+        // `try_load_config_over` returns `Err` on every failure mode (TOML
+        // syntax error, broken `include = [...]` chain, migration failure,
+        // deserialize-shape mismatch) instead of silently falling back to
+        // `KernelConfig::default()`. Without this, the diff-and-apply path
+        // below would treat the defaults as the operator's intent and wipe
+        // out their `default_model`, `provider_api_keys`, channels, etc.
         //
         // Surfacing `Err` here lets the watcher's
         // `Err(e) => tracing::warn!("Config hot-reload failed: {e}")` branch
@@ -38,7 +39,13 @@ impl LibreFangKernel {
         // re-introduced the pre-#4664 tolerant path during the mod.rs split;
         // this restores the strict loader.)
         let config_path = self.config_path_boot.clone();
-        let mut new_config = crate::config::try_load_config(&config_path)
+        // The running config is the base, so a field the document does not state keeps its live
+        // value instead of reverting to its compiled default.
+        // `KernelConfig` is `#[serde(default)]` at the container level, and strictness stops at
+        // parseability, so without this a document that parses and is *partial* — which is what the
+        // API's own config writes produce when the file did not exist yet — resets everything it
+        // does not mention: home, data directory, API key. See #8459.
+        let mut new_config = crate::config::try_load_config_over(&config_path, Some(&old_cfg))
             .map_err(|e| format!("Config reload failed; live config unchanged: {e}"))?;
 
         // Clamp bounds on the new config before validating or applying.
@@ -79,15 +86,22 @@ impl LibreFangKernel {
         // the old config.
         //
         // Store the new config in Hot / Hybrid modes whenever the plan carries
-        // any effective change — including `noop_changes`. Those "no-op" fields
-        // are read live from `config.load()` on each message/request and rely
-        // on this swap to take effect (e.g. `max_history_messages`,
+        // a hot action or a `noop_changes` entry. Those "no-op" fields are read
+        // live from `config.load()` on each message/request and rely on this
+        // swap to take effect (e.g. `max_history_messages`,
         // `agent_max_iterations`, `compaction`, `prompt_caching`); gating the
         // swap on `hot_actions` alone made such edits silently no-op while the
         // reload response still reported success. `apply_hot_actions_inner`
         // iterates `plan.hot_actions`, so it is a harmless no-op when only
-        // `noop_changes` are present. In Off / Restart modes the user expects
-        // no runtime change until a full restart.
+        // `noop_changes` are present.
+        //
+        // A plan whose ONLY change is restart-required is deliberately not
+        // stored: swapping it in would leave every live reader of a
+        // restart-required field on a value boot never wired (e.g.
+        // `protected_write_paths` reads `data_dir` live) and would stop the
+        // next reload from reporting `restart_required` for a change that has
+        // not taken effect. In Off / Restart modes the user expects no runtime
+        // change until a full restart either way.
         if should_store_config(old_cfg.reload.mode, &plan) {
             // Serialize MCP config replacement with every connection creator before taking the config write lock.
             // An in-flight connection may still publish `NeedsAuth`; waiting here ensures the hot action clears that result only after the old operation has finished, without holding `config_reload_lock` across the potentially long connection wait.

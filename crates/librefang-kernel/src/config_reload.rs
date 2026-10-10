@@ -1375,6 +1375,18 @@ pub fn should_apply_hot(mode: ReloadMode, plan: &ReloadPlan) -> bool {
 /// swap on `hot_actions` alone made those edits silently no-op while the
 /// reload response reported success.
 ///
+/// A plan whose only change is **restart-required** does NOT store. Swapping it
+/// in would leave every live reader of a restart-required field looking at a
+/// value boot never wired — `protected_write_paths` reads `data_dir` live to
+/// guard the audit anchor, so a `data_dir`-only edit would move the guard to the
+/// new path while the anchor keeps being written at the old one until the
+/// restart; `GET /api/config` would report the new `api_listen` / `data_dir`
+/// while the daemon still serves the old ones; and the next reload would diff
+/// against the stored config and no longer report `restart_required` for a
+/// change that has not taken effect. A field with no live reader is classified
+/// `R` honestly and left for the restart, rather than making `R` mean "stored
+/// but not applied" for every field at once.
+///
 /// `Off` / `Restart` modes still return `false` — the operator expects no
 /// runtime change until a full restart.
 pub fn should_store_config(mode: ReloadMode, plan: &ReloadPlan) -> bool {
@@ -2558,6 +2570,44 @@ mod tests {
         assert!(!should_apply_hot(ReloadMode::Hybrid, &plan));
         // `should_store_config` is true — the new config is swapped in so the
         // read-live field takes effect on the next message/request.
+        assert!(should_store_config(ReloadMode::Hot, &plan));
+        assert!(should_store_config(ReloadMode::Hybrid, &plan));
+    }
+
+    #[test]
+    fn test_should_store_config_restart_only_does_not_swap() {
+        // Plan with NO hot actions and NO noop changes: the only change is restart-required.
+        let plan = ReloadPlan {
+            restart_required: true,
+            restart_reasons: vec!["api_listen".to_string()],
+            hot_actions: vec![],
+            noop_changes: vec![],
+            config_stored: false,
+        };
+        // A restart-only plan must NOT be swapped into the live config: every
+        // live reader of a restart-required field would otherwise see a value
+        // boot never wired, and the reload response would stop reporting
+        // `restart_required` on the next diff. The API still reports the plan as
+        // partial (restart required). See `should_store_config`'s docs.
+        assert!(!should_store_config(ReloadMode::Hot, &plan));
+        assert!(!should_store_config(ReloadMode::Hybrid, &plan));
+        // Off / Restart must still withhold the runtime change.
+        assert!(!should_store_config(ReloadMode::Off, &plan));
+        assert!(!should_store_config(ReloadMode::Restart, &plan));
+    }
+
+    /// A plan that carries a hot or noop change *alongside* a restart-required
+    /// one still stores, so the hot/noop half takes effect; the restart half is
+    /// applied by the following restart.
+    #[test]
+    fn test_should_store_config_mixed_plan_still_swaps() {
+        let plan = ReloadPlan {
+            restart_required: true,
+            restart_reasons: vec!["api_listen".to_string()],
+            hot_actions: vec![],
+            noop_changes: vec!["max_history_messages".to_string()],
+            config_stored: false,
+        };
         assert!(should_store_config(ReloadMode::Hot, &plan));
         assert!(should_store_config(ReloadMode::Hybrid, &plan));
     }

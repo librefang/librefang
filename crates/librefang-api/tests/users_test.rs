@@ -128,6 +128,17 @@ async fn users_create_then_get_then_delete_round_trips() {
 
     let (status, _) = json_request(&h, Method::GET, "/api/users/Alice", None).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
+
+    // The deletion is explicit on disk — `users = []`, not a dropped key — so
+    // the reload overlay (#8459/#8460) cannot keep the live copy and resurrect
+    // Alice on the handler's own reload (a missing key means "keep the live
+    // value", which is the contract for partial documents).
+    let raw = std::fs::read_to_string(h._test.tmp_path().join("config.toml"))
+        .expect("config.toml is on disk");
+    assert!(
+        raw.contains("users = []"),
+        "the empty section must be stated explicitly: {raw}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
