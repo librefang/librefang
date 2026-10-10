@@ -2,13 +2,17 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { SessionsPage } from "./SessionsPage";
-import { useAgents } from "../lib/queries/agents";
+import { useAgentAvatarUrl, useAgents } from "../lib/queries/agents";
 import { useSessions } from "../lib/queries/sessions";
 import { useDeleteAgentSession } from "../lib/mutations/agents";
 import { useSetSessionLabel } from "../lib/mutations/sessions";
 
 vi.mock("../lib/queries/agents", () => ({
   useAgents: vi.fn(),
+  // Each session row renders `AgentAvatar`, which resolves the agent's
+  // avatar image through this hook. Without it in the mock, rendering a row
+  // with a resolvable agent throws.
+  useAgentAvatarUrl: vi.fn(),
 }));
 
 vi.mock("../lib/queries/sessions", () => ({
@@ -48,6 +52,7 @@ vi.mock("../lib/store", () => ({
 }));
 
 const useAgentsMock = useAgents as unknown as ReturnType<typeof vi.fn>;
+const mockAvatarUrl = useAgentAvatarUrl as unknown as ReturnType<typeof vi.fn>;
 const useSessionsMock = useSessions as unknown as ReturnType<typeof vi.fn>;
 const useDeleteAgentSessionMock =
   useDeleteAgentSession as unknown as ReturnType<typeof vi.fn>;
@@ -70,6 +75,10 @@ function renderPage() {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  // `undefined` is what the hook returns while the blob is in flight and when
+  // the agent has no image at all — both by design.
+  mockAvatarUrl.mockReset();
+  mockAvatarUrl.mockReturnValue(undefined);
   useDeleteAgentSessionMock.mockReturnValue({
     mutateAsync: vi.fn().mockResolvedValue(undefined),
     isPending: false,
@@ -118,5 +127,98 @@ describe("SessionsPage hand agent name (#6156)", () => {
     useAgentsMock.mockReturnValue({ data: [], isLoading: false, isError: false });
     renderPage();
     expect(screen.getByText("sessions.unknown_agent")).toBeInTheDocument();
+  });
+});
+
+describe("SessionsPage agent avatar (#8339)", () => {
+  const AVATAR = `/api/agents/${HAND_AGENT_ID}/avatar`;
+
+  it("renders the agent's avatar, resolving its image through AgentAvatar", () => {
+    useAgentsMock.mockReturnValue({
+      data: [
+        {
+          id: HAND_AGENT_ID,
+          name: "My Hand Agent",
+          is_hand: true,
+          identity: { avatar_url: AVATAR, emoji: "🤖" },
+        },
+      ],
+      isLoading: false,
+      isError: false,
+    });
+    mockAvatarUrl.mockReturnValue("blob:test/1");
+
+    renderPage();
+
+    // `Avatar` carries the agent's name as its accessible label, so the row
+    // is no longer a bare initial: identity renders image → emoji → initials.
+    const avatar = screen.getByRole("img", { name: "My Hand Agent" });
+    expect(avatar.querySelector("img")).toHaveAttribute("src", "blob:test/1");
+    // `identity.avatar_url` is present, so the image must actually be fetched.
+    expect(mockAvatarUrl).toHaveBeenCalledWith(HAND_AGENT_ID, true);
+  });
+
+  it("shows the agent's emoji while it has no avatar image", () => {
+    useAgentsMock.mockReturnValue({
+      data: [
+        {
+          id: HAND_AGENT_ID,
+          name: "My Hand Agent",
+          is_hand: true,
+          identity: { emoji: "🤖" },
+        },
+      ],
+      isLoading: false,
+      isError: false,
+    });
+
+    renderPage();
+
+    expect(screen.getByRole("img", { name: "My Hand Agent" })).toHaveTextContent("🤖");
+    // No avatar_url on the identity, so the row must not cost a request for one.
+    expect(mockAvatarUrl).toHaveBeenCalledWith(HAND_AGENT_ID, false);
+  });
+
+  it("keeps the Users fallback when the session has no resolvable agent", () => {
+    useAgentsMock.mockReturnValue({ data: [], isLoading: false, isError: false });
+
+    const { container } = renderPage();
+
+    expect(screen.queryByRole("img")).not.toBeInTheDocument();
+    // `lucide-users` ties this to lucide's internal naming; the tile carries
+    // no other stable marker to select the fallback icon by.
+    expect(container.querySelector("svg.lucide-users")).toBeInTheDocument();
+  });
+
+  it("keeps the active dot pinned to the avatar's corner", () => {
+    useAgentsMock.mockReturnValue({
+      data: [{ id: HAND_AGENT_ID, name: "My Hand Agent", is_hand: true }],
+      isLoading: false,
+      isError: false,
+    });
+    useSessionsMock.mockReturnValue({
+      data: [
+        {
+          session_id: HAND_SESSION_ID,
+          agent_id: HAND_AGENT_ID,
+          created_at: "2026-06-17T00:00:00Z",
+          active: true,
+        },
+      ],
+      isLoading: false,
+      isError: false,
+      isFetching: false,
+      refetch: vi.fn(),
+      truncated: false,
+    });
+
+    renderPage();
+
+    // The dot lives on the wrapper around the avatar, the way `AgentsPage`
+    // and the chat agent picker anchor it — not inside the avatar itself.
+    const avatar = screen.getByRole("img", { name: "My Hand Agent" });
+    const dot = avatar.parentElement!.querySelector("span.animate-pulse");
+    expect(dot).toBeInTheDocument();
+    expect(dot).toHaveClass("absolute", "-bottom-0.5", "-right-0.5", "bg-success");
   });
 });

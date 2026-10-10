@@ -9,6 +9,7 @@ import { useDeleteAgentSession } from "../lib/mutations/agents";
 import { useSetSessionLabel } from "../lib/mutations/sessions";
 import { Button } from "../components/ui/Button";
 import { Badge } from "../components/ui/Badge";
+import { AgentAvatar } from "../components/AgentAvatar";
 import { Input } from "../components/ui/Input";
 import { PageHeader } from "../components/ui/PageHeader";
 import { ListSkeleton } from "../components/ui/Skeleton";
@@ -158,11 +159,30 @@ export function SessionsPage() {
                 className={`flex items-center gap-3 p-3 sm:p-4 rounded-xl sm:rounded-2xl border transition-all duration-300 card-glow ${
                   s.active ? "border-success/30 bg-success/5" : "border-border-subtle hover:border-brand/30 hover:-translate-y-0.5"
                 }`}>
-                {/* Agent avatar */}
-                <div className={`relative w-9 h-9 sm:w-10 sm:h-10 rounded-lg sm:rounded-xl flex items-center justify-center text-base sm:text-lg font-bold shrink-0 ${
-                  s.active ? "bg-success/20 text-success" : "bg-main text-text-dim/40"
-                }`}>
-                  {agent?.name?.charAt(0).toUpperCase() || <Users className="w-4 h-4 sm:w-5 sm:h-5" />}
+                {/* Agent avatar — image, then emoji, then initials (#8339).
+                    `size="md"` is the `h-10 w-10` the tile used from the sm
+                    breakpoint up; below it the slot grows 36→40px because
+                    `AvatarSize` is discrete, and the silhouette becomes the
+                    identity circle the SPA uses everywhere else — the same
+                    shift the chat agent picker documented for its `h-10 w-10`
+                    chip. Sessions without a resolvable agent keep the icon
+                    tile: `AgentAvatar` needs an agent id to resolve from. */}
+                <div className="relative shrink-0">
+                  {agent ? (
+                    <AgentAvatar
+                      agentId={agent.id}
+                      avatarUrl={agent.identity?.avatar_url}
+                      emoji={agent.identity?.emoji}
+                      fallback={agent.name}
+                      size="md"
+                    />
+                  ) : (
+                    <div className={`w-9 h-9 sm:w-10 sm:h-10 rounded-lg sm:rounded-xl flex items-center justify-center shrink-0 ${
+                      s.active ? "bg-success/20 text-success" : "bg-main text-text-dim/40"
+                    }`}>
+                      <Users className="w-4 h-4 sm:w-5 sm:h-5" />
+                    </div>
+                  )}
                   {s.active && <span className="absolute -bottom-0.5 -right-0.5 w-2 h-2 sm:w-2.5 sm:h-2.5 rounded-full bg-success border-2 border-white dark:border-surface animate-pulse" />}
                 </div>
 
