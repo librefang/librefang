@@ -1329,6 +1329,25 @@ async fn history_and_restore_round_trip() {
         restored["spec"]["description"], "first version",
         "{restored}"
     );
+
+    // The rollback is a write path like the rest, so it names itself in history and the new
+    // snapshot carries the content it just put back on disk (#8021).
+    let (status, history) = get(&h, &format!("/api/templates/{name}/history")).await;
+    assert_eq!(status, StatusCode::OK, "{history}");
+    let versions = history["versions"].as_array().expect("versions array");
+    assert_eq!(
+        versions.len(),
+        3,
+        "the restore must append its own snapshot: {history}"
+    );
+    assert_eq!(versions[0]["change_source"], "restore", "{history}");
+    assert!(
+        versions[0]["manifest_toml"]
+            .as_str()
+            .expect("manifest_toml")
+            .contains("first version"),
+        "the restore snapshot must carry the content the restore wrote: {history}"
+    );
 }
 
 /// The server-side privacy gate: a manifest whose system prompt still
