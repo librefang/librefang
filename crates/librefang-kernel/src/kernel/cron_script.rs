@@ -91,7 +91,7 @@ pub(super) async fn cron_script_wake_gate(
     cmd.kill_on_drop(true);
 
     // Hard cap: pre-check scripts must complete within 30 s.
-    // A hung script would otherwise block the cron dispatcher indefinitely.
+    // The gate runs inside the job's spawned fire (after the Cron lane permit), so a hung script would otherwise hold that lane permit indefinitely.
     let run = async {
         let child = cmd.spawn();
         match child {

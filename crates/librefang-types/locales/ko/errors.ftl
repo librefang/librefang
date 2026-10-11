@@ -271,6 +271,8 @@ api-error-job-disappeared-complete = 완료 후 작업이 사라졌습니다
 # Task errors
 api-error-task-not-found = 작업을 찾을 수 없습니다
 api-error-task-disappeared = 작업이 사라졌습니다
+api-error-task-not-retryable = 작업이 재시도 가능한 상태가 아닙니다 (완료 또는 실패 상태여야 합니다)
+api-error-task-transition-not-allowed = 현재 상태에서 이 작업 상태로 전환할 수 없습니다
 
 # Pairing errors
 api-error-pairing-not-enabled = 페어링이 활성화되지 않았습니다

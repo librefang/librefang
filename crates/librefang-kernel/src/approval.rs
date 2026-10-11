@@ -2175,6 +2175,8 @@ impl ApprovalManager {
     /// daemon refuses the second redemption itself.  Returns `false` when
     /// no audit DB is wired (test harness) so the existing tests are
     /// unaffected.
+    ///
+    /// This is a read-only probe that fails open on DB errors; callers enforcing single use must go through [`Self::claim_oauth_nonce`], which checks and records in one statement.
     pub fn is_oauth_nonce_used(&self, nonce: &str) -> bool {
         let Some(db) = &self.audit_db else {
             return false;
@@ -2201,6 +2203,8 @@ impl ApprovalManager {
     /// Record a redeemed OIDC nonce.  Prunes entries older than 1 hour
     /// to keep the table small without trimming inside the typical
     /// OAuth-flow window.
+    ///
+    /// Errors are swallowed; single-use enforcement must use [`Self::claim_oauth_nonce`] instead of pairing this with [`Self::is_oauth_nonce_used`].
     pub fn record_oauth_nonce_used(&self, nonce: &str) {
         let Some(db) = &self.audit_db else { return };
         let Ok(conn) = db.get() else { return };
@@ -2220,6 +2224,48 @@ impl ApprovalManager {
             "DELETE FROM oauth_used_nonces WHERE used_at < ?1",
             rusqlite::params![prune_before],
         );
+    }
+
+    /// Atomically claim an OIDC state nonce for single use.
+    ///
+    /// Returns `Ok(true)` when this caller redeemed the nonce, `Ok(false)` when it was already redeemed within the last hour, and `Err` when the replay database is unavailable so the caller can fail closed.
+    /// The check and the record are one conditional UPSERT (the same shape as [`Self::claim_totp_code_used_for`]), so two concurrent callbacks carrying the same `state` cannot both win.
+    /// Returns `Ok(true)` when no audit DB is wired (test harness), matching the old check-then-record pair.
+    pub fn claim_oauth_nonce(&self, nonce: &str) -> Result<bool, String> {
+        let Some(db) = &self.audit_db else {
+            return Ok(true);
+        };
+        let conn = db
+            .get()
+            .map_err(|error| format!("failed to acquire OAuth nonce replay database: {error}"))?;
+        let hash = Self::oauth_nonce_hash(nonce);
+        let now_unix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+        // Same 1-hour window as `is_oauth_nonce_used`: an older row belongs to an expired flow and may be reclaimed.
+        let window_start = now_unix - 3600;
+        let changed = conn
+            .execute(
+                "INSERT INTO oauth_used_nonces (nonce_hash, used_at)
+                 VALUES (?1, ?2)
+                 ON CONFLICT(nonce_hash) DO UPDATE SET used_at = excluded.used_at
+                 WHERE oauth_used_nonces.used_at < ?3",
+                rusqlite::params![hash, now_unix, window_start],
+            )
+            .map_err(|error| format!("failed to persist OAuth nonce record: {error}"))?;
+
+        if changed == 0 {
+            return Ok(false);
+        }
+
+        if let Err(error) = conn.execute(
+            "DELETE FROM oauth_used_nonces WHERE used_at < ?1",
+            rusqlite::params![window_start],
+        ) {
+            warn!(error = %error, "Failed to prune expired OAuth nonce records");
+        }
+        Ok(true)
     }
 
     /// Write an audit entry to the persistent database.
@@ -4295,6 +4341,57 @@ mod tests {
         mgr.record_totp_code_used("123456");
         // A different code must not be blocked.
         assert!(!mgr.is_totp_code_used("654321"));
+    }
+
+    /// Two OIDC callbacks carrying the same `state` nonce race on the replay table; exactly one claim may win.
+    #[test]
+    fn concurrent_oauth_nonce_claim_has_exactly_one_winner() {
+        use std::sync::Barrier;
+        use std::thread;
+
+        let workers = 16;
+        let manager = Arc::new(make_manager_with_db());
+        let barrier = Arc::new(Barrier::new(workers));
+        let handles: Vec<_> = (0..workers)
+            .map(|_| {
+                let manager = Arc::clone(&manager);
+                let barrier = Arc::clone(&barrier);
+                thread::spawn(move || {
+                    barrier.wait();
+                    manager
+                        .claim_oauth_nonce("same-nonce")
+                        .expect("claim query")
+                })
+            })
+            .collect();
+        let winners = handles
+            .into_iter()
+            .map(|handle| handle.join().expect("claim worker"))
+            .filter(|won| *won)
+            .count();
+        assert_eq!(winners, 1);
+    }
+
+    #[test]
+    fn oauth_nonce_claim_rejects_replay_and_reclaims_expired() {
+        let mgr = make_manager_with_db();
+        assert_eq!(mgr.claim_oauth_nonce("n1"), Ok(true));
+        assert_eq!(mgr.claim_oauth_nonce("n1"), Ok(false));
+        assert!(mgr.is_oauth_nonce_used("n1"));
+        assert_eq!(mgr.claim_oauth_nonce("n2"), Ok(true));
+        {
+            let conn = mgr.audit_db.as_ref().unwrap().get().unwrap();
+            conn.execute("UPDATE oauth_used_nonces SET used_at = used_at - 7200", [])
+                .unwrap();
+        }
+        assert_eq!(mgr.claim_oauth_nonce("n1"), Ok(true));
+    }
+
+    #[test]
+    fn oauth_nonce_claim_without_db_is_permissive() {
+        let mgr = ApprovalManager::new(ApprovalPolicy::default());
+        assert_eq!(mgr.claim_oauth_nonce("n"), Ok(true));
+        assert_eq!(mgr.claim_oauth_nonce("n"), Ok(true));
     }
 
     /// The replay table is the cross-task/process serialization point: even when many workers race with the same valid code, exactly one claim may authorize an action.

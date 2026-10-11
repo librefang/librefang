@@ -271,6 +271,8 @@ api-error-job-disappeared-complete = Zadanie zniknęło po ukończeniu
 # Task errors
 api-error-task-not-found = Nie znaleziono zadania
 api-error-task-disappeared = Zadanie zniknęło
+api-error-task-not-retryable = Zadanie nie jest w stanie umożliwiającym ponowienie (musi być ukończone lub nieudane)
+api-error-task-transition-not-allowed = Zmiana statusu zadania z bieżącego stanu jest niedozwolona
 
 # Pairing errors
 api-error-pairing-not-enabled = Parowanie nie jest włączone

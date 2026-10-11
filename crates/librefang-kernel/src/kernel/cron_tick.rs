@@ -50,489 +50,7 @@ pub(super) async fn run_cron_scheduler_loop(kernel: Arc<LibreFangKernel>) {
         }
 
         let due = kernel.workflows.cron_scheduler.due_jobs();
-        // Snapshot the cron_lane semaphore once per tick so we
-        // can move an Arc clone into each spawned job task (#3738).
-        let cron_sem = kernel
-            .workflows
-            .command_queue
-            .semaphore_for_lane(librefang_runtime::command_lane::Lane::Cron);
-        for job in due {
-            let job_id = job.id;
-            let agent_id = job.agent_id;
-            let job_name = job.name.clone();
-
-            match &job.action {
-                librefang_types::scheduler::CronAction::SystemEvent { text } => {
-                    tracing::debug!(job = %job_name, "Cron: firing system event");
-                    let payload_bytes = match serde_json::to_vec(&serde_json::json!({
-                        "type": format!("cron.{}", job_name),
-                        "text": text,
-                        "job_id": job_id.to_string(),
-                    })) {
-                        Ok(bytes) => bytes,
-                        Err(e) => {
-                            // Publishing an empty payload here would emit an
-                            // event subscribers can't decode and the cron
-                            // fire would look "successful" — record the
-                            // failure and skip this job's tick instead
-                            // (#5137).
-                            tracing::error!(
-                                job = %job_name,
-                                job_id = %job_id,
-                                error = %e,
-                                "Cron: failed to encode system event payload; skipping fire"
-                            );
-                            kernel
-                                .workflows
-                                .cron_scheduler
-                                .record_failure(job_id, &format!("payload encode failed: {e}"));
-                            continue;
-                        }
-                    };
-                    let event = Event::new(
-                        AgentId::new(), // system-originated
-                        EventTarget::Broadcast,
-                        EventPayload::Custom(payload_bytes),
-                    );
-                    kernel.publish_event(event).await;
-                    kernel.workflows.cron_scheduler.record_success(job_id);
-                }
-                librefang_types::scheduler::CronAction::AgentTurn {
-                    message,
-                    timeout_secs,
-                    pre_check_script,
-                    ..
-                } => {
-                    tracing::debug!(job = %job_name, agent = %agent_id, "Cron: firing agent turn");
-
-                    // Bug #3839: skip cron fires for Suspended agents.
-                    // Check agent state before running pre_check_script or
-                    // dispatching any message — a Suspended agent cannot run,
-                    // and recording success here would be misleading.
-                    let is_suspended = kernel
-                        .agents
-                        .registry
-                        .get(agent_id)
-                        .map(|e| e.state == AgentState::Suspended)
-                        .unwrap_or(false);
-                    if is_suspended {
-                        warn!(
-                            job = %job_name,
-                            agent = %agent_id,
-                            "Cron: agent is Suspended, skipping fire"
-                        );
-                        kernel.workflows.cron_scheduler.record_skipped(job_id);
-                        continue;
-                    }
-
-                    // Wake-gate: run pre_check_script and check for
-                    // {"wakeAgent": false} in the last non-empty output line.
-                    // Only fires when the script exits successfully.
-                    if let Some(script_path) = pre_check_script {
-                        // Resolve the agent workspace so cron_script_wake_gate
-                        // can restrict the child's cwd to the agent's own directory.
-                        let agent_ws = kernel
-                            .agents
-                            .registry
-                            .get(agent_id)
-                            .and_then(|e| e.manifest.workspace.clone());
-                        if !cron_script_wake_gate(&job_name, script_path, agent_ws.as_deref()).await
-                        {
-                            tracing::info!(
-                                job = %job_name,
-                                "cron: script gate wakeAgent=false, skipping agent"
-                            );
-                            kernel.workflows.cron_scheduler.record_success(job_id);
-                            continue;
-                        }
-                    }
-
-                    let timeout_s = timeout_secs.unwrap_or(120);
-                    let timeout = std::time::Duration::from_secs(timeout_s);
-                    let delivery = job.delivery.clone();
-                    let delivery_targets = job.delivery_targets.clone();
-                    let kh: std::sync::Arc<dyn librefang_runtime::kernel_handle::KernelHandle> =
-                        kernel.clone();
-                    // Cron jobs synthesize their SenderContext locally
-                    // so memory/peer lookups still see channel="cron".
-                    //
-                    // Session resolution by `job.session_mode`:
-                    //   * None / Some(Persistent) — all fires share
-                    //     the agent's `(agent, channel="cron")`
-                    //     persistent session (historical default).
-                    //   * Some(New) — each fire receives a fresh
-                    //     deterministic session via
-                    //     `SessionId::for_cron_run(agent, run_key)`.
-                    //     We pass it as `session_id_override` (rather
-                    //     than relying on `session_mode_override`
-                    //     alone) because the channel-derived branch
-                    //     in `send_message_full` would otherwise
-                    //     win over the mode override and route
-                    //     every fire back to the persistent
-                    //     `(agent, "cron")` session — see
-                    //     CLAUDE.md note on cron + session_mode.
-                    //
-                    // Resolution order (#3597): per-job override >
-                    // agent manifest default > historical persistent.
-                    // When the job has no per-job `session_mode` set
-                    // (`None`), we fall back to the agent manifest's
-                    // `session_mode` so that agents with
-                    // `session_mode = "new"` in agent.toml get
-                    // per-fire isolation for cron jobs as well.
-                    // Snapshot the manifest's declared session_mode
-                    // separately so the trace below can show what
-                    // the agent.toml actually asked for, in
-                    // addition to the per-job override.
-                    let manifest_session_mode = kernel
-                        .agents
-                        .registry
-                        .get(agent_id)
-                        .map(|entry| entry.manifest.session_mode);
-                    let effective_session_mode = job.session_mode.or(manifest_session_mode);
-                    let wants_new_session =
-                        effective_session_mode == Some(librefang_types::agent::SessionMode::New);
-                    // #3692: emit a structured event recording how
-                    // the cron fire's session id was resolved, so
-                    // operators can grep logs to confirm whether
-                    // their `session_mode = "new"` (per-job or
-                    // manifest) was honored — or silently ignored
-                    // because neither path set it.
-                    let resolution_source = if job.session_mode.is_some() {
-                        "cron-job-override"
-                    } else if manifest_session_mode
-                        == Some(librefang_types::agent::SessionMode::New)
-                    {
-                        "cron-manifest-fallback"
-                    } else {
-                        "cron-default-persistent"
-                    };
-                    debug!(
-                        agent_id = %agent_id,
-                        job = %job_name,
-                        resolution_source = resolution_source,
-                        job_session_mode = ?job.session_mode,
-                        manifest_session_mode = ?manifest_session_mode,
-                        effective_session_mode = ?effective_session_mode,
-                        "cron session_mode resolved"
-                    );
-                    let cron_sender = SenderContext {
-                        channel: SYSTEM_CHANNEL_CRON.to_string(),
-                        user_id: job.peer_id.clone().unwrap_or_default(),
-                        display_name: SYSTEM_CHANNEL_CRON.to_string(),
-                        is_group: false,
-                        was_mentioned: false,
-                        thread_id: None,
-                        account_id: None,
-                        is_internal_cron: true,
-                        is_internal_system: true,
-                        ..Default::default()
-                    };
-                    let sender_ctx_owned = Some(cron_sender);
-                    let (mode_override, fire_session_override) =
-                        crate::cron::cron_fire_session_override(
-                            agent_id,
-                            effective_session_mode,
-                            job.id,
-                            chrono::Utc::now(),
-                        );
-                    let message_owned = message.clone();
-
-                    // Spawn each AgentTurn job concurrently, bounded
-                    // by the `cron_lane` semaphore (#3738).  We
-                    // acquire the permit INSIDE the spawn so a
-                    // saturated lane queues spawned tasks rather
-                    // than blocking the tick loop — the previous
-                    // design awaited the permit here and stalled
-                    // the entire `for job in due` dispatch behind
-                    // any single slow fire.
-                    let cron_sem_for_job = cron_sem.clone();
-                    let kernel_job = kernel.clone();
-                    // Shadow so outer `job_name` survives the move
-                    // for the post-arm per-job persist warn.
-                    let job_name = job_name.clone();
-                    spawn_logged("cron_agent_turn", async move {
-                        // Acquire the lane permit before any work
-                        // so concurrent fires are still capped.
-                        let _permit = match cron_sem_for_job.acquire_owned().await {
-                            Ok(p) => p,
-                            Err(_) => {
-                                tracing::error!(
-                                    job = %job_name,
-                                    "Cron lane semaphore closed; skipping fire"
-                                );
-                                return;
-                            }
-                        };
-
-                        // Prune (or summarize-and-trim) the persistent cron
-                        // session before firing if the user has configured a
-                        // size cap, and emit a tracing::warn! when the
-                        // post-compaction size is approaching the provider
-                        // context window (#3693).
-                        if !wants_new_session {
-                            let cfg_snap = kernel_job.config.load();
-                            let max_tokens_raw = cfg_snap.cron_session_max_tokens;
-                            let max_messages_raw = cfg_snap.cron_session_max_messages;
-                            let warn_fraction = cfg_snap.cron_session_warn_fraction;
-                            let warn_fallback = cfg_snap.cron_session_warn_total_tokens;
-                            let compaction_mode = cfg_snap.cron_session_compaction_mode;
-                            let keep_recent_cfg =
-                                cfg_snap.cron_session_compaction_keep_recent.max(1);
-                            drop(cfg_snap);
-                            let max_messages = resolve_cron_max_messages(max_messages_raw);
-                            let max_tokens = resolve_cron_max_tokens(max_tokens_raw);
-                            let warn_threshold = resolve_cron_warn_threshold(
-                                max_tokens,
-                                warn_fallback,
-                                warn_fraction,
-                            );
-                            if max_tokens.is_some()
-                                || max_messages.is_some()
-                                || warn_threshold.is_some()
-                            {
-                                let cron_sid = SessionId::for_channel(agent_id, "cron");
-                                // #3443 / cron-prune-lock-across-llm-await:
-                                // the per-agent and per-session mutexes are
-                                // acquired around each read-then-write cycle so
-                                // cron sends and sibling prune fires cannot
-                                // clobber each other's keep-set. **The locks
-                                // MUST NOT be held across
-                                // `try_summarize_trim().await`** — under a
-                                // congested provider the LLM call can stall
-                                // for tens of seconds, and the persistent
-                                // `(agent, "cron")` lock would jam every
-                                // sibling cron fire for the duration. Instead:
-                                //
-                                //   1. Take both locks (agent then session),
-                                //      snapshot the messages and record
-                                //      `messages_generation`.
-                                //   2. Drop both locks.
-                                //   3. Run `try_summarize_trim` lock-free.
-                                //   4. Re-acquire both locks; if
-                                //      `messages_generation` is unchanged,
-                                //      apply the trim result; otherwise drop
-                                //      our result (a concurrent fire won the
-                                //      write-back) and log the conflict.
-                                //
-                                // `Session.messages_generation` (memory crate)
-                                // is the canonical CAS counter and is already
-                                // bumped by `set_messages` /
-                                // `mark_messages_mutated`, so no new state is
-                                // introduced.
-                                let prune_lock = kernel_job
-                                    .agents
-                                    .session_msg_locks
-                                    .entry(cron_sid)
-                                    .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
-                                    .clone();
-                                cron_prune_session(
-                                    &kernel_job,
-                                    agent_id,
-                                    cron_sid,
-                                    &job_name,
-                                    prune_lock,
-                                    max_tokens,
-                                    max_messages,
-                                    warn_threshold,
-                                    warn_fallback,
-                                    compaction_mode,
-                                    keep_recent_cfg,
-                                )
-                                .await;
-                            }
-                        }
-
-                        let sender_ctx = sender_ctx_owned.as_ref();
-                        match tokio::time::timeout(
-                            timeout,
-                            kernel_job.send_message_full(
-                                agent_id,
-                                &message_owned,
-                                kh,
-                                None,
-                                sender_ctx,
-                                mode_override,
-                                None,
-                                fire_session_override,
-                            ),
-                        )
-                        .await
-                        {
-                            Ok(Ok(result)) => {
-                                tracing::info!(job = %job_name, "Cron job completed successfully");
-                                kernel_job.workflows.cron_scheduler.record_success(job_id);
-                                // Persist last_run before delivery
-                                // so a slow/failed channel push
-                                // can't strand last_run on disk.
-                                if let Err(e) = kernel_job.workflows.cron_scheduler.persist() {
-                                    tracing::warn!(job = %job_name, "Cron post-run persist failed: {e}");
-                                }
-                                kernel_job
-                                    .deliver_cron_output(
-                                        agent_id,
-                                        &job_name,
-                                        &result.response,
-                                        result.silent,
-                                        &delivery,
-                                        &delivery_targets,
-                                    )
-                                    .await;
-                            }
-                            Ok(Err(e)) => {
-                                let err_msg = format!("{e}");
-                                tracing::warn!(job = %job_name, error = %err_msg, "Cron job failed");
-                                kernel_job
-                                    .workflows
-                                    .cron_scheduler
-                                    .record_failure(job_id, &err_msg);
-                                if let Err(e) = kernel_job.workflows.cron_scheduler.persist() {
-                                    tracing::warn!(job = %job_name, "Cron post-run persist failed: {e}");
-                                }
-                            }
-                            Err(_) => {
-                                tracing::warn!(job = %job_name, timeout_s, "Cron job timed out");
-                                kernel_job.workflows.cron_scheduler.record_failure(
-                                    job_id,
-                                    &format!("timed out after {timeout_s}s"),
-                                );
-                                if let Err(e) = kernel_job.workflows.cron_scheduler.persist() {
-                                    tracing::warn!(job = %job_name, "Cron post-run persist failed: {e}");
-                                }
-                            }
-                        }
-                    }); // end tokio::spawn for AgentTurn
-                }
-                librefang_types::scheduler::CronAction::Workflow {
-                    workflow_id,
-                    input,
-                    timeout_secs,
-                } => {
-                    tracing::debug!(job = %job_name, workflow = %workflow_id, "Cron: firing workflow");
-                    let input_text = input.clone().unwrap_or_default();
-                    let delivery = job.delivery.clone();
-                    let delivery_targets = job.delivery_targets.clone();
-                    let timeout_s = timeout_secs.unwrap_or(300);
-                    let timeout = std::time::Duration::from_secs(timeout_s);
-                    let workflow_id_owned = workflow_id.clone();
-
-                    // Spawn the workflow fire so a long-running
-                    // workflow does not block the cron tick loop
-                    // (#3738). Concurrency is capped by the
-                    // shared cron_lane semaphore acquired inside
-                    // the spawned task.
-                    let cron_sem_for_job = cron_sem.clone();
-                    let kernel_job = kernel.clone();
-                    let job_name = job_name.clone();
-                    tokio::spawn(async move {
-                        let _permit = match cron_sem_for_job.acquire_owned().await {
-                            Ok(p) => p,
-                            Err(_) => {
-                                tracing::error!(
-                                    job = %job_name,
-                                    "Cron lane semaphore closed; skipping workflow fire"
-                                );
-                                return;
-                            }
-                        };
-
-                        // Resolve workflow by UUID first, then by name (case-insensitive,
-                        // matching WorkflowRunner::run_workflow and the trigger-workflow
-                        // dispatch path so cron/tool/trigger all agree on the same name).
-                        let resolved_id =
-                            if let Ok(uuid) = uuid::Uuid::parse_str(&workflow_id_owned) {
-                                Some(crate::workflow::WorkflowId(uuid))
-                            } else {
-                                let name_lower = workflow_id_owned.to_lowercase();
-                                let workflows = kernel_job.workflows.engine.list_workflows().await;
-                                workflows
-                                    .iter()
-                                    .find(|w| w.name.to_lowercase() == name_lower)
-                                    .map(|w| w.id)
-                            };
-
-                        match resolved_id {
-                            Some(wf_id) => {
-                                match tokio::time::timeout(
-                                    timeout,
-                                    kernel_job.run_workflow(wf_id, input_text),
-                                )
-                                .await
-                                {
-                                    Ok(Ok((run_id, output))) => {
-                                        // `run_workflow` returns `Ok` for a run that finished and for a run that suspended itself at a human-in-the-loop gate alike.
-                                        // The fire itself succeeded either way, which is what `record_success` records — but the delivered body must not present the pre-gate artifact as the job's result, or the reviewer the gate was raised for never learns there is anything to review.
-                                        let paused_reason =
-                                            kernel_job.workflows.engine.paused_reason(run_id).await;
-                                        let delivered = match &paused_reason {
-                                            Some(reason) => {
-                                                tracing::info!(job = %job_name, run_id = %run_id, %reason, "Cron workflow paused at a human-in-the-loop gate");
-                                                format!("[workflow paused awaiting a human — {reason}; not finished]\n{output}")
-                                            }
-                                            None => {
-                                                tracing::info!(job = %job_name, "Cron workflow completed successfully");
-                                                output.clone()
-                                            }
-                                        };
-                                        kernel_job.workflows.cron_scheduler.record_success(job_id);
-                                        if let Err(e) =
-                                            kernel_job.workflows.cron_scheduler.persist()
-                                        {
-                                            tracing::warn!(job = %job_name, "Cron post-run persist failed: {e}");
-                                        }
-                                        kernel_job
-                                            .deliver_cron_output(
-                                                agent_id,
-                                                &job_name,
-                                                &delivered,
-                                                false,
-                                                &delivery,
-                                                &delivery_targets,
-                                            )
-                                            .await;
-                                    }
-                                    Ok(Err(e)) => {
-                                        let err_msg = format!("{e}");
-                                        tracing::warn!(job = %job_name, error = %err_msg, "Cron workflow failed");
-                                        kernel_job
-                                            .workflows
-                                            .cron_scheduler
-                                            .record_failure(job_id, &err_msg);
-                                        if let Err(e) =
-                                            kernel_job.workflows.cron_scheduler.persist()
-                                        {
-                                            tracing::warn!(job = %job_name, "Cron post-run persist failed: {e}");
-                                        }
-                                    }
-                                    Err(_) => {
-                                        tracing::warn!(job = %job_name, timeout_s, "Cron workflow timed out");
-                                        kernel_job.workflows.cron_scheduler.record_failure(
-                                            job_id,
-                                            &format!("workflow timed out after {timeout_s}s"),
-                                        );
-                                        if let Err(e) =
-                                            kernel_job.workflows.cron_scheduler.persist()
-                                        {
-                                            tracing::warn!(job = %job_name, "Cron post-run persist failed: {e}");
-                                        }
-                                    }
-                                }
-                            }
-                            None => {
-                                let err_msg = format!("workflow not found: {workflow_id_owned}");
-                                tracing::warn!(job = %job_name, error = %err_msg, "Cron workflow lookup failed");
-                                kernel_job
-                                    .workflows
-                                    .cron_scheduler
-                                    .record_failure(job_id, &err_msg);
-                                if let Err(e) = kernel_job.workflows.cron_scheduler.persist() {
-                                    tracing::warn!(job = %job_name, "Cron post-run persist failed: {e}");
-                                }
-                            }
-                        }
-                    });
-                }
-            }
-        }
+        dispatch_due_jobs(&kernel, due).await;
 
         // Periodic persist as a safety net (every ~5 minutes / 20 ticks * 15s)
         persist_counter += 1;
@@ -541,6 +59,525 @@ pub(super) async fn run_cron_scheduler_loop(kernel: Arc<LibreFangKernel>) {
             if let Err(e) = kernel.workflows.cron_scheduler.persist() {
                 tracing::warn!("Cron persist failed: {e}");
             }
+        }
+    }
+}
+
+/// Dispatch one tick's worth of due jobs.
+///
+/// Every `AgentTurn` and `Workflow` fire is spawned, so this returns without waiting for any job's own work (lane permit, wake-gate script, LLM turn, workflow run).
+/// Only `SystemEvent` publishing runs inline, and that is a cheap in-process broadcast.
+pub(super) async fn dispatch_due_jobs(
+    kernel: &Arc<LibreFangKernel>,
+    due: Vec<librefang_types::scheduler::CronJob>,
+) {
+    // Snapshot the cron_lane semaphore once per tick so we
+    // can move an Arc clone into each spawned job task (#3738).
+    let cron_sem = kernel
+        .workflows
+        .command_queue
+        .semaphore_for_lane(librefang_runtime::command_lane::Lane::Cron);
+    for job in due {
+        let job_id = job.id;
+        let agent_id = job.agent_id;
+        let job_name = job.name.clone();
+
+        match &job.action {
+            librefang_types::scheduler::CronAction::SystemEvent { text } => {
+                tracing::debug!(job = %job_name, "Cron: firing system event");
+                let payload_bytes = match serde_json::to_vec(&serde_json::json!({
+                    "type": format!("cron.{}", job_name),
+                    "text": text,
+                    "job_id": job_id.to_string(),
+                })) {
+                    Ok(bytes) => bytes,
+                    Err(e) => {
+                        // Publishing an empty payload here would emit an
+                        // event subscribers can't decode and the cron
+                        // fire would look "successful" — record the
+                        // failure and skip this job's tick instead
+                        // (#5137).
+                        tracing::error!(
+                            job = %job_name,
+                            job_id = %job_id,
+                            error = %e,
+                            "Cron: failed to encode system event payload; skipping fire"
+                        );
+                        kernel
+                            .workflows
+                            .cron_scheduler
+                            .record_failure(job_id, &format!("payload encode failed: {e}"));
+                        continue;
+                    }
+                };
+                let event = Event::new(
+                    AgentId::new(), // system-originated
+                    EventTarget::Broadcast,
+                    EventPayload::Custom(payload_bytes),
+                );
+                kernel.publish_event(event).await;
+                kernel.workflows.cron_scheduler.record_success(job_id);
+            }
+            librefang_types::scheduler::CronAction::AgentTurn {
+                message,
+                timeout_secs,
+                pre_check_script,
+                ..
+            } => {
+                tracing::debug!(job = %job_name, agent = %agent_id, "Cron: firing agent turn");
+
+                // Bug #3839: skip cron fires for Suspended agents.
+                // Check agent state before running pre_check_script or
+                // dispatching any message — a Suspended agent cannot run,
+                // and recording success here would be misleading.
+                let is_suspended = kernel
+                    .agents
+                    .registry
+                    .get(agent_id)
+                    .map(|e| e.state == AgentState::Suspended)
+                    .unwrap_or(false);
+                if is_suspended {
+                    warn!(
+                        job = %job_name,
+                        agent = %agent_id,
+                        "Cron: agent is Suspended, skipping fire"
+                    );
+                    kernel.workflows.cron_scheduler.record_skipped(job_id);
+                    continue;
+                }
+
+                // The wake gate itself runs inside the spawned task below, so a slow or hung pre_check_script cannot stall the rest of this tick's dispatch.
+                // Resolve the agent workspace here so cron_script_wake_gate can restrict the child's cwd to the agent's own directory.
+                let pre_check_owned = pre_check_script.clone();
+                let agent_ws = if pre_check_owned.is_some() {
+                    kernel
+                        .agents
+                        .registry
+                        .get(agent_id)
+                        .and_then(|e| e.manifest.workspace.clone())
+                } else {
+                    None
+                };
+
+                let timeout_s = timeout_secs.unwrap_or(120);
+                let timeout = std::time::Duration::from_secs(timeout_s);
+                let delivery = job.delivery.clone();
+                let delivery_targets = job.delivery_targets.clone();
+                let kh: std::sync::Arc<dyn librefang_runtime::kernel_handle::KernelHandle> =
+                    kernel.clone();
+                // Cron jobs synthesize their SenderContext locally
+                // so memory/peer lookups still see channel="cron".
+                //
+                // Session resolution by `job.session_mode`:
+                //   * None / Some(Persistent) — all fires share
+                //     the agent's `(agent, channel="cron")`
+                //     persistent session (historical default).
+                //   * Some(New) — each fire receives a fresh
+                //     deterministic session via
+                //     `SessionId::for_cron_run(agent, run_key)`.
+                //     We pass it as `session_id_override` (rather
+                //     than relying on `session_mode_override`
+                //     alone) because the channel-derived branch
+                //     in `send_message_full` would otherwise
+                //     win over the mode override and route
+                //     every fire back to the persistent
+                //     `(agent, "cron")` session — see
+                //     CLAUDE.md note on cron + session_mode.
+                //
+                // Resolution order (#3597): per-job override >
+                // agent manifest default > historical persistent.
+                // When the job has no per-job `session_mode` set
+                // (`None`), we fall back to the agent manifest's
+                // `session_mode` so that agents with
+                // `session_mode = "new"` in agent.toml get
+                // per-fire isolation for cron jobs as well.
+                // Snapshot the manifest's declared session_mode
+                // separately so the trace below can show what
+                // the agent.toml actually asked for, in
+                // addition to the per-job override.
+                let manifest_session_mode = kernel
+                    .agents
+                    .registry
+                    .get(agent_id)
+                    .map(|entry| entry.manifest.session_mode);
+                let effective_session_mode = job.session_mode.or(manifest_session_mode);
+                let wants_new_session =
+                    effective_session_mode == Some(librefang_types::agent::SessionMode::New);
+                // #3692: emit a structured event recording how
+                // the cron fire's session id was resolved, so
+                // operators can grep logs to confirm whether
+                // their `session_mode = "new"` (per-job or
+                // manifest) was honored — or silently ignored
+                // because neither path set it.
+                let resolution_source = if job.session_mode.is_some() {
+                    "cron-job-override"
+                } else if manifest_session_mode == Some(librefang_types::agent::SessionMode::New) {
+                    "cron-manifest-fallback"
+                } else {
+                    "cron-default-persistent"
+                };
+                debug!(
+                    agent_id = %agent_id,
+                    job = %job_name,
+                    resolution_source = resolution_source,
+                    job_session_mode = ?job.session_mode,
+                    manifest_session_mode = ?manifest_session_mode,
+                    effective_session_mode = ?effective_session_mode,
+                    "cron session_mode resolved"
+                );
+                let cron_sender = SenderContext {
+                    channel: SYSTEM_CHANNEL_CRON.to_string(),
+                    user_id: job.peer_id.clone().unwrap_or_default(),
+                    display_name: SYSTEM_CHANNEL_CRON.to_string(),
+                    is_group: false,
+                    was_mentioned: false,
+                    thread_id: None,
+                    account_id: None,
+                    is_internal_cron: true,
+                    is_internal_system: true,
+                    ..Default::default()
+                };
+                let sender_ctx_owned = Some(cron_sender);
+                let (mode_override, fire_session_override) =
+                    crate::cron::cron_fire_session_override(
+                        agent_id,
+                        effective_session_mode,
+                        job.id,
+                        chrono::Utc::now(),
+                    );
+                let message_owned = message.clone();
+
+                // Spawn each AgentTurn job concurrently, bounded
+                // by the `cron_lane` semaphore (#3738).  We
+                // acquire the permit INSIDE the spawn so a
+                // saturated lane queues spawned tasks rather
+                // than blocking the tick loop — the previous
+                // design awaited the permit here and stalled
+                // the entire `for job in due` dispatch behind
+                // any single slow fire.
+                let cron_sem_for_job = cron_sem.clone();
+                let kernel_job = kernel.clone();
+                // Shadow so outer `job_name` survives the move
+                // for the post-arm per-job persist warn.
+                let job_name = job_name.clone();
+                spawn_logged("cron_agent_turn", async move {
+                    // Acquire the lane permit before any work
+                    // so concurrent fires are still capped.
+                    let _permit = match cron_sem_for_job.acquire_owned().await {
+                        Ok(p) => p,
+                        Err(_) => {
+                            tracing::error!(
+                                job = %job_name,
+                                "Cron lane semaphore closed; skipping fire"
+                            );
+                            return;
+                        }
+                    };
+
+                    // Wake-gate: run pre_check_script and check for {"wakeAgent": false} in the last non-empty output line.
+                    // Runs after the lane permit so concurrent gate scripts are capped by the same Cron lane semaphore as turns.
+                    if let Some(script_path) = pre_check_owned.as_deref() {
+                        if !cron_pre_check_gate(
+                            &job_name,
+                            script_path,
+                            kernel_job.home_dir(),
+                            agent_ws.as_deref(),
+                        )
+                        .await
+                        {
+                            tracing::info!(
+                                job = %job_name,
+                                "cron: script gate wakeAgent=false, skipping agent"
+                            );
+                            kernel_job.workflows.cron_scheduler.record_success(job_id);
+                            return;
+                        }
+                    }
+
+                    // Prune (or summarize-and-trim) the persistent cron
+                    // session before firing if the user has configured a
+                    // size cap, and emit a tracing::warn! when the
+                    // post-compaction size is approaching the provider
+                    // context window (#3693).
+                    if !wants_new_session {
+                        let cfg_snap = kernel_job.config.load();
+                        let max_tokens_raw = cfg_snap.cron_session_max_tokens;
+                        let max_messages_raw = cfg_snap.cron_session_max_messages;
+                        let warn_fraction = cfg_snap.cron_session_warn_fraction;
+                        let warn_fallback = cfg_snap.cron_session_warn_total_tokens;
+                        let compaction_mode = cfg_snap.cron_session_compaction_mode;
+                        let keep_recent_cfg = cfg_snap.cron_session_compaction_keep_recent.max(1);
+                        drop(cfg_snap);
+                        let max_messages = resolve_cron_max_messages(max_messages_raw);
+                        let max_tokens = resolve_cron_max_tokens(max_tokens_raw);
+                        let warn_threshold =
+                            resolve_cron_warn_threshold(max_tokens, warn_fallback, warn_fraction);
+                        if max_tokens.is_some()
+                            || max_messages.is_some()
+                            || warn_threshold.is_some()
+                        {
+                            let cron_sid = SessionId::for_channel(agent_id, "cron");
+                            // #3443 / cron-prune-lock-across-llm-await:
+                            // the per-agent and per-session mutexes are
+                            // acquired around each read-then-write cycle so
+                            // cron sends and sibling prune fires cannot
+                            // clobber each other's keep-set. **The locks
+                            // MUST NOT be held across
+                            // `try_summarize_trim().await`** — under a
+                            // congested provider the LLM call can stall
+                            // for tens of seconds, and the persistent
+                            // `(agent, "cron")` lock would jam every
+                            // sibling cron fire for the duration. Instead:
+                            //
+                            //   1. Take both locks (agent then session),
+                            //      snapshot the messages and record
+                            //      `messages_generation`.
+                            //   2. Drop both locks.
+                            //   3. Run `try_summarize_trim` lock-free.
+                            //   4. Re-acquire both locks; if
+                            //      `messages_generation` is unchanged,
+                            //      apply the trim result; otherwise drop
+                            //      our result (a concurrent fire won the
+                            //      write-back) and log the conflict.
+                            //
+                            // `Session.messages_generation` (memory crate)
+                            // is the canonical CAS counter and is already
+                            // bumped by `set_messages` /
+                            // `mark_messages_mutated`, so no new state is
+                            // introduced.
+                            let prune_lock = kernel_job
+                                .agents
+                                .session_msg_locks
+                                .entry(cron_sid)
+                                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+                                .clone();
+                            cron_prune_session(
+                                &kernel_job,
+                                agent_id,
+                                cron_sid,
+                                &job_name,
+                                prune_lock,
+                                max_tokens,
+                                max_messages,
+                                warn_threshold,
+                                warn_fallback,
+                                compaction_mode,
+                                keep_recent_cfg,
+                            )
+                            .await;
+                        }
+                    }
+
+                    let sender_ctx = sender_ctx_owned.as_ref();
+                    match tokio::time::timeout(
+                        timeout,
+                        kernel_job.send_message_full(
+                            agent_id,
+                            &message_owned,
+                            kh,
+                            None,
+                            sender_ctx,
+                            mode_override,
+                            None,
+                            fire_session_override,
+                        ),
+                    )
+                    .await
+                    {
+                        Ok(Ok(result)) => {
+                            tracing::info!(job = %job_name, "Cron job completed successfully");
+                            kernel_job.workflows.cron_scheduler.record_success(job_id);
+                            // Persist last_run before delivery
+                            // so a slow/failed channel push
+                            // can't strand last_run on disk.
+                            if let Err(e) = kernel_job.workflows.cron_scheduler.persist() {
+                                tracing::warn!(job = %job_name, "Cron post-run persist failed: {e}");
+                            }
+                            kernel_job
+                                .deliver_cron_output(
+                                    agent_id,
+                                    &job_name,
+                                    &result.response,
+                                    result.silent,
+                                    &delivery,
+                                    &delivery_targets,
+                                )
+                                .await;
+                        }
+                        Ok(Err(e)) => {
+                            let err_msg = format!("{e}");
+                            tracing::warn!(job = %job_name, error = %err_msg, "Cron job failed");
+                            kernel_job
+                                .workflows
+                                .cron_scheduler
+                                .record_failure(job_id, &err_msg);
+                            if let Err(e) = kernel_job.workflows.cron_scheduler.persist() {
+                                tracing::warn!(job = %job_name, "Cron post-run persist failed: {e}");
+                            }
+                        }
+                        Err(_) => {
+                            tracing::warn!(job = %job_name, timeout_s, "Cron job timed out");
+                            kernel_job
+                                .workflows
+                                .cron_scheduler
+                                .record_failure(job_id, &format!("timed out after {timeout_s}s"));
+                            if let Err(e) = kernel_job.workflows.cron_scheduler.persist() {
+                                tracing::warn!(job = %job_name, "Cron post-run persist failed: {e}");
+                            }
+                        }
+                    }
+                }); // end tokio::spawn for AgentTurn
+            }
+            librefang_types::scheduler::CronAction::Workflow {
+                workflow_id,
+                input,
+                timeout_secs,
+            } => {
+                tracing::debug!(job = %job_name, workflow = %workflow_id, "Cron: firing workflow");
+                let input_text = input.clone().unwrap_or_default();
+                let delivery = job.delivery.clone();
+                let delivery_targets = job.delivery_targets.clone();
+                let timeout_s = timeout_secs.unwrap_or(300);
+                let timeout = std::time::Duration::from_secs(timeout_s);
+                let workflow_id_owned = workflow_id.clone();
+
+                // Spawn the workflow fire so a long-running
+                // workflow does not block the cron tick loop
+                // (#3738). Concurrency is capped by the
+                // shared cron_lane semaphore acquired inside
+                // the spawned task.
+                let cron_sem_for_job = cron_sem.clone();
+                let kernel_job = kernel.clone();
+                let job_name = job_name.clone();
+                tokio::spawn(async move {
+                    let _permit = match cron_sem_for_job.acquire_owned().await {
+                        Ok(p) => p,
+                        Err(_) => {
+                            tracing::error!(
+                                job = %job_name,
+                                "Cron lane semaphore closed; skipping workflow fire"
+                            );
+                            return;
+                        }
+                    };
+
+                    // Resolve workflow by UUID first, then by name (case-insensitive,
+                    // matching WorkflowRunner::run_workflow and the trigger-workflow
+                    // dispatch path so cron/tool/trigger all agree on the same name).
+                    let resolved_id = if let Ok(uuid) = uuid::Uuid::parse_str(&workflow_id_owned) {
+                        Some(crate::workflow::WorkflowId(uuid))
+                    } else {
+                        let name_lower = workflow_id_owned.to_lowercase();
+                        let workflows = kernel_job.workflows.engine.list_workflows().await;
+                        workflows
+                            .iter()
+                            .find(|w| w.name.to_lowercase() == name_lower)
+                            .map(|w| w.id)
+                    };
+
+                    match resolved_id {
+                        Some(wf_id) => {
+                            match tokio::time::timeout(
+                                timeout,
+                                kernel_job.run_workflow(wf_id, input_text),
+                            )
+                            .await
+                            {
+                                Ok(Ok((run_id, output))) => {
+                                    // `run_workflow` returns `Ok` for a run that finished and for a run that suspended itself at a human-in-the-loop gate alike.
+                                    // The fire itself succeeded either way, which is what `record_success` records — but the delivered body must not present the pre-gate artifact as the job's result, or the reviewer the gate was raised for never learns there is anything to review.
+                                    let paused_reason =
+                                        kernel_job.workflows.engine.paused_reason(run_id).await;
+                                    let delivered = match &paused_reason {
+                                        Some(reason) => {
+                                            tracing::info!(job = %job_name, run_id = %run_id, %reason, "Cron workflow paused at a human-in-the-loop gate");
+                                            format!("[workflow paused awaiting a human — {reason}; not finished]\n{output}")
+                                        }
+                                        None => {
+                                            tracing::info!(job = %job_name, "Cron workflow completed successfully");
+                                            output.clone()
+                                        }
+                                    };
+                                    kernel_job.workflows.cron_scheduler.record_success(job_id);
+                                    if let Err(e) = kernel_job.workflows.cron_scheduler.persist() {
+                                        tracing::warn!(job = %job_name, "Cron post-run persist failed: {e}");
+                                    }
+                                    kernel_job
+                                        .deliver_cron_output(
+                                            agent_id,
+                                            &job_name,
+                                            &delivered,
+                                            false,
+                                            &delivery,
+                                            &delivery_targets,
+                                        )
+                                        .await;
+                                }
+                                Ok(Err(e)) => {
+                                    let err_msg = format!("{e}");
+                                    tracing::warn!(job = %job_name, error = %err_msg, "Cron workflow failed");
+                                    kernel_job
+                                        .workflows
+                                        .cron_scheduler
+                                        .record_failure(job_id, &err_msg);
+                                    if let Err(e) = kernel_job.workflows.cron_scheduler.persist() {
+                                        tracing::warn!(job = %job_name, "Cron post-run persist failed: {e}");
+                                    }
+                                }
+                                Err(_) => {
+                                    tracing::warn!(job = %job_name, timeout_s, "Cron workflow timed out");
+                                    kernel_job.workflows.cron_scheduler.record_failure(
+                                        job_id,
+                                        &format!("workflow timed out after {timeout_s}s"),
+                                    );
+                                    if let Err(e) = kernel_job.workflows.cron_scheduler.persist() {
+                                        tracing::warn!(job = %job_name, "Cron post-run persist failed: {e}");
+                                    }
+                                }
+                            }
+                        }
+                        None => {
+                            let err_msg = format!("workflow not found: {workflow_id_owned}");
+                            tracing::warn!(job = %job_name, error = %err_msg, "Cron workflow lookup failed");
+                            kernel_job
+                                .workflows
+                                .cron_scheduler
+                                .record_failure(job_id, &err_msg);
+                            if let Err(e) = kernel_job.workflows.cron_scheduler.persist() {
+                                tracing::warn!(job = %job_name, "Cron post-run persist failed: {e}");
+                            }
+                        }
+                    }
+                });
+            }
+        }
+    }
+}
+
+/// Enforce the `<home_dir>/scripts/` allowlist on a job's `pre_check_script`, then run it as the wake gate.
+///
+/// Add-time validation already rejects paths outside the allowlist, but jobs persisted before that check existed, or edited by hand in `cron_jobs.json`, reach the tick loop without it (load re-validates with no home directory).
+/// A path that fails the check is never executed; the agent is woken instead, matching the gate's fail-open contract for every other script error.
+/// The canonicalized path is what gets spawned, so the checked file is the executed file.
+async fn cron_pre_check_gate(
+    job_name: &str,
+    script_path: &str,
+    home_dir: &std::path::Path,
+    agent_workspace: Option<&std::path::Path>,
+) -> bool {
+    match librefang_types::scheduler::validate_pre_check_script(script_path, home_dir) {
+        Ok(resolved) => {
+            let resolved = resolved.to_string_lossy();
+            cron_script_wake_gate(job_name, &resolved, agent_workspace).await
+        }
+        Err(error) => {
+            warn!(
+                job = %job_name,
+                script = %script_path,
+                %error,
+                "cron: pre_check_script rejected by the scripts allowlist; not running it, waking agent"
+            );
+            true
         }
     }
 }
@@ -1256,5 +1293,176 @@ mod tests {
         task.await.unwrap();
         assert!(agent_lock.try_lock().is_ok());
         assert!(session_lock.try_lock().is_ok());
+    }
+}
+
+#[cfg(all(test, unix))]
+mod dispatch_tests {
+    //! Tests for `dispatch_due_jobs` and the fire-time `pre_check_script` gate against a booted kernel.
+
+    use super::{cron_pre_check_gate, dispatch_due_jobs};
+    use crate::kernel::LibreFangKernel;
+    use librefang_types::config::KernelConfig;
+    use librefang_types::scheduler::{CronAction, CronDelivery, CronJob, CronJobId, CronSchedule};
+    use std::os::unix::fs::PermissionsExt;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    fn write_executable(path: &std::path::Path, body: &str) {
+        std::fs::write(path, body).unwrap();
+        let mut perms = std::fs::metadata(path).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(path, perms).unwrap();
+    }
+
+    fn job(agent_id: librefang_types::agent::AgentId, name: &str, action: CronAction) -> CronJob {
+        CronJob {
+            id: CronJobId::new(),
+            agent_id,
+            name: name.into(),
+            enabled: true,
+            schedule: CronSchedule::Cron {
+                expr: "0 * * * *".into(),
+                tz: None,
+            },
+            action,
+            delivery: CronDelivery::None,
+            delivery_targets: Vec::new(),
+            peer_id: None,
+            owner: None,
+            session_mode: None,
+            created_at: chrono::Utc::now(),
+            last_run: None,
+            next_run: None,
+        }
+    }
+
+    /// A job persisted before add-time validation covered `pre_check_script` (or hand-edited on disk) must not get its out-of-allowlist script executed at fire time.
+    #[tokio::test]
+    async fn pre_check_gate_refuses_script_outside_allowlist() {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(home.path().join("scripts")).unwrap();
+        let marker = home.path().join("ran");
+        let outside = home.path().join("outside.sh");
+        write_executable(
+            &outside,
+            &format!(
+                "#!/bin/sh\ntouch '{}'\necho '{{\"wakeAgent\": false}}'\n",
+                marker.display()
+            ),
+        );
+
+        let wake = cron_pre_check_gate("job", &outside.to_string_lossy(), home.path(), None).await;
+
+        assert!(
+            wake,
+            "a rejected gate path must fail open and wake the agent"
+        );
+        assert!(
+            !marker.exists(),
+            "a script outside <home>/scripts must never be executed"
+        );
+    }
+
+    #[tokio::test]
+    async fn pre_check_gate_runs_script_inside_allowlist() {
+        let home = tempfile::tempdir().unwrap();
+        let scripts = home.path().join("scripts");
+        std::fs::create_dir_all(&scripts).unwrap();
+        write_executable(
+            &scripts.join("gate.sh"),
+            "#!/bin/sh\necho '{\"wakeAgent\": false}'\n",
+        );
+
+        let wake = cron_pre_check_gate("job", "gate.sh", home.path(), None).await;
+
+        assert!(
+            !wake,
+            "an allowlisted gate answering wakeAgent=false must skip the agent"
+        );
+    }
+
+    /// A slow wake-gate script must not hold up dispatch of the other jobs due in the same tick.
+    ///
+    /// Asserted structurally rather than by wall-clock: when `dispatch_due_jobs` returns, the gated job must still be pending (its gate script is still sleeping in the spawned task) while the system event behind it is already recorded.
+    /// Before the gate moved into the spawned task, dispatch awaited the script inline, so the gated job was already recorded by the time dispatch returned.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn slow_pre_check_script_does_not_block_dispatch() {
+        let dir = tempfile::tempdir().unwrap();
+        let home_dir = dir.path().to_path_buf();
+        std::fs::create_dir_all(home_dir.join("data")).unwrap();
+        let scripts = home_dir.join("scripts");
+        std::fs::create_dir_all(&scripts).unwrap();
+        let gate = scripts.join("slow-gate.sh");
+        write_executable(&gate, "#!/bin/sh\nsleep 3\necho '{\"wakeAgent\": false}'\n");
+
+        let config = KernelConfig {
+            home_dir: home_dir.clone(),
+            data_dir: home_dir.join("data"),
+            ..KernelConfig::default()
+        };
+        let kernel =
+            Arc::new(LibreFangKernel::boot_with_config(config).expect("Kernel should boot"));
+        let agent_id = kernel
+            .agents
+            .registry
+            .list()
+            .iter()
+            .find(|a| a.name == "assistant")
+            .expect("assistant should exist")
+            .id;
+
+        let gated = job(
+            agent_id,
+            "slow-gate",
+            CronAction::AgentTurn {
+                message: "hi".into(),
+                model_override: None,
+                timeout_secs: None,
+                pre_check_script: Some(gate.to_string_lossy().into_owned()),
+                pre_script: None,
+                silent_marker: None,
+            },
+        );
+        let event = job(
+            agent_id,
+            "after-gate",
+            CronAction::SystemEvent { text: "x".into() },
+        );
+        let scheduler = &kernel.workflows.cron_scheduler;
+        let gated_id = scheduler.add_job(gated, false).unwrap();
+        let event_id = scheduler.add_job(event, false).unwrap();
+        let due = vec![
+            scheduler.get_job(gated_id).unwrap(),
+            scheduler.get_job(event_id).unwrap(),
+        ];
+
+        dispatch_due_jobs(&kernel, due).await;
+
+        assert_eq!(
+            scheduler.get_meta(event_id).unwrap().last_status.as_deref(),
+            Some("ok"),
+            "the system event queued behind the gated job must be dispatched in the same call"
+        );
+        assert_eq!(
+            scheduler.get_meta(gated_id).unwrap().last_status,
+            None,
+            "dispatch must not wait for the gate script to finish"
+        );
+
+        // The gate still runs in the spawned fire and records success when it skips the agent.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        loop {
+            if scheduler.get_meta(gated_id).unwrap().last_status.as_deref() == Some("ok") {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "gated job never recorded its wakeAgent=false skip"
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+
+        kernel.shutdown();
     }
 }

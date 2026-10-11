@@ -988,6 +988,10 @@ impl AgentRegistry {
 
         // Use atomic entry() API to avoid TOCTOU race between contains_key and insert.
         match self.name_index.entry(new_name.clone()) {
+            // Renaming an agent to the name it already has is a no-op, not a conflict: clients that send the whole agent object back on PATCH would otherwise get a spurious error and a partial update.
+            Entry::Occupied(occupied) if *occupied.get() == id => {
+                return Ok(new_name);
+            }
             Entry::Occupied(_) => {
                 return Err(LibreFangError::AgentAlreadyExists(new_name));
             }
@@ -1220,6 +1224,31 @@ mod tests {
         let registry = AgentRegistry::new();
         registry.register(test_entry("dup")).unwrap();
         assert!(registry.register(test_entry("dup")).is_err());
+    }
+
+    #[test]
+    fn update_name_to_current_name_is_a_noop() {
+        let registry = AgentRegistry::new();
+        let entry = test_entry("researcher");
+        let id = entry.id;
+        registry.register(entry).unwrap();
+        let other = test_entry("writer");
+        let other_id = other.id;
+        registry.register(other).unwrap();
+
+        assert_eq!(
+            registry.update_name(id, "researcher".to_string()).unwrap(),
+            "researcher"
+        );
+        assert_eq!(registry.find_by_name("researcher").unwrap().id, id);
+        assert_eq!(registry.get(id).unwrap().name, "researcher");
+
+        // A name held by a different agent is still a conflict.
+        assert!(matches!(
+            registry.update_name(other_id, "researcher".to_string()),
+            Err(LibreFangError::AgentAlreadyExists(_))
+        ));
+        assert_eq!(registry.get(other_id).unwrap().name, "writer");
     }
 
     #[test]

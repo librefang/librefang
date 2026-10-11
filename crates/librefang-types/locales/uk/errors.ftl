@@ -271,6 +271,8 @@ api-error-job-disappeared-complete = Таска зникла після заве
 # Task errors
 api-error-task-not-found = Таску не знайдено
 api-error-task-disappeared = Таска зникла
+api-error-task-not-retryable = Таска не в стані, що дозволяє повтор (має бути завершена або невдала)
+api-error-task-transition-not-allowed = Перехід статусу таски з поточного стану не дозволено
 
 # Pairing errors
 api-error-pairing-not-enabled = Пейринг не увімкнений

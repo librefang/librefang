@@ -277,7 +277,15 @@ impl BackgroundExecutor {
             ScheduleMode::Continuous {
                 check_interval_secs,
             } => {
-                let interval = std::time::Duration::from_secs(*check_interval_secs);
+                let check_interval = (*check_interval_secs).max(MIN_BACKGROUND_INTERVAL_SECS);
+                if check_interval != *check_interval_secs {
+                    warn!(
+                        agent = %agent_name, id = %agent_id,
+                        requested = *check_interval_secs, clamped = check_interval,
+                        "Continuous check_interval_secs below minimum; clamping to avoid a busy loop"
+                    );
+                }
+                let interval = std::time::Duration::from_secs(check_interval);
                 let name = agent_name.to_string();
                 let mut shutdown = self.shutdown_rx.clone();
                 let busy = Arc::new(AtomicBool::new(false));
@@ -292,11 +300,10 @@ impl BackgroundExecutor {
 
                 info!(
                     agent = %name, id = %agent_id,
-                    interval_secs = check_interval_secs,
+                    interval_secs = check_interval,
                     "Starting continuous background loop"
                 );
 
-                let check_interval = *check_interval_secs;
                 // Consecutive rate-limit tick counter (issue #5168). Updated by
                 // the inner watcher from the tick outcome; read by the loop to
                 // decide when to stop hammering a rate-limited provider.
@@ -456,7 +463,15 @@ impl BackgroundExecutor {
                 let _ = installed_tx.send(());
             }
             ScheduleMode::Periodic { cron } => {
-                let interval_secs = parse_cron_to_secs(cron);
+                let raw_interval_secs = parse_cron_to_secs_raw(cron);
+                let interval_secs = raw_interval_secs.max(MIN_BACKGROUND_INTERVAL_SECS);
+                if raw_interval_secs < MIN_BACKGROUND_INTERVAL_SECS {
+                    warn!(
+                        agent = %agent_name, id = %agent_id, cron = %cron,
+                        clamped = interval_secs,
+                        "Periodic schedule interval below minimum; clamping to avoid a busy loop"
+                    );
+                }
                 let interval = std::time::Duration::from_secs(interval_secs);
                 let name = agent_name.to_string();
                 let cron_owned = cron.clone();
@@ -684,6 +699,14 @@ pub fn parse_condition(condition: &str) -> Option<TriggerPattern> {
     None
 }
 
+/// Smallest tick interval a continuous or periodic background loop will use.
+///
+/// A 0s interval turns the scheduling loop into a spin: ticks fire back to back (burning provider quota) and the paused/busy `continue` paths re-enter an already-elapsed sleep and pin a core.
+const MIN_BACKGROUND_INTERVAL_SECS: u64 = 1;
+
+/// Interval used when a cron expression cannot be parsed or overflows.
+const DEFAULT_CRON_INTERVAL_SECS: u64 = 300;
+
 /// Parse a cron or interval expression into a polling interval in seconds.
 ///
 /// Supported formats:
@@ -695,9 +718,23 @@ pub fn parse_condition(condition: &str) -> Option<TriggerPattern> {
 ///   the minute field: `*/N` → N*60, otherwise 60s for per-minute schedules.
 ///   Hour/day constraints are handled by the cron scheduler, not this function.
 ///
-/// Falls back to 300 seconds (5 minutes) for unparseable expressions.
+/// Falls back to 300 seconds (5 minutes) for unparseable expressions and for intervals that overflow `u64` seconds.
+/// The result is never below [`MIN_BACKGROUND_INTERVAL_SECS`], so `"every 0s"` or `"*/0 * * * *"` yield 1.
 pub fn parse_cron_to_secs(cron: &str) -> u64 {
+    parse_cron_to_secs_raw(cron).max(MIN_BACKGROUND_INTERVAL_SECS)
+}
+
+/// Unfloored parse behind [`parse_cron_to_secs`].
+///
+/// Unit multiplications are checked so an absurd `N` falls back to the default instead of panicking in debug builds or wrapping to a tiny interval in release builds.
+fn parse_cron_to_secs_raw(cron: &str) -> u64 {
     let cron_lower = cron.trim().to_lowercase();
+    let scaled = |n: u64, unit_secs: u64| -> u64 {
+        n.checked_mul(unit_secs).unwrap_or_else(|| {
+            warn!(cron = %cron, "Cron interval overflows u64 seconds, defaulting to 300s");
+            DEFAULT_CRON_INTERVAL_SECS
+        })
+    };
 
     // Try "every <N><unit>" format
     if let Some(rest) = cron_lower.strip_prefix("every ") {
@@ -709,17 +746,17 @@ pub fn parse_cron_to_secs(cron: &str) -> u64 {
         }
         if let Some(num_str) = rest.strip_suffix('m') {
             if let Ok(n) = num_str.trim().parse::<u64>() {
-                return n * 60;
+                return scaled(n, 60);
             }
         }
         if let Some(num_str) = rest.strip_suffix('h') {
             if let Ok(n) = num_str.trim().parse::<u64>() {
-                return n * 3600;
+                return scaled(n, 3600);
             }
         }
         if let Some(num_str) = rest.strip_suffix('d') {
             if let Ok(n) = num_str.trim().parse::<u64>() {
-                return n * 86400;
+                return scaled(n, 86400);
             }
         }
     }
@@ -733,7 +770,7 @@ pub fn parse_cron_to_secs(cron: &str) -> u64 {
         // */N minute interval (e.g. */15 → 900s)
         if let Some(n_str) = min_field.strip_prefix("*/") {
             if let Ok(n) = n_str.parse::<u64>() {
-                return n * 60;
+                return scaled(n, 60);
             }
         }
         // Specific minute(s) with hour constraint → run once per hour window
@@ -749,7 +786,7 @@ pub fn parse_cron_to_secs(cron: &str) -> u64 {
     }
 
     warn!(cron = %cron, "Unparseable cron expression, defaulting to 300s");
-    300
+    DEFAULT_CRON_INTERVAL_SECS
 }
 
 #[cfg(test)]
@@ -877,6 +914,53 @@ mod tests {
         // Active count still shows the entry until stop_agent is called
         executor.stop_agent(agent_id);
         assert_eq!(executor.active_count(), 0);
+    }
+
+    #[test]
+    fn parse_cron_zero_and_overflow_are_bounded() {
+        assert_eq!(parse_cron_to_secs("every 0s"), 1);
+        assert_eq!(parse_cron_to_secs("every 0m"), 1);
+        assert_eq!(parse_cron_to_secs("*/0 * * * *"), 1);
+        assert_eq!(parse_cron_to_secs(&format!("every {}d", u64::MAX)), 300);
+        assert_eq!(parse_cron_to_secs(&format!("every {}m", u64::MAX)), 300);
+        assert_eq!(parse_cron_to_secs(&format!("*/{} * * * *", u64::MAX)), 300);
+    }
+
+    /// Runs a loop with the given schedule for 1.5s and returns how many ticks fired.
+    async fn ticks_in_1500ms(schedule: ScheduleMode) -> u64 {
+        let (_shutdown_tx, shutdown_rx) = watch::channel(false);
+        let executor = BackgroundExecutor::new(shutdown_rx);
+        let agent_id = AgentId::new();
+        let tick_count = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let tick_clone = tick_count.clone();
+        executor.start_agent(agent_id, "zero-interval", &schedule, move |_id, _msg| {
+            let tc = tick_clone.clone();
+            tokio::spawn(async move {
+                tc.fetch_add(1, Ordering::SeqCst);
+                TickOutcome::Ok
+            })
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+        executor.stop_agent(agent_id);
+        tick_count.load(Ordering::SeqCst)
+    }
+
+    #[tokio::test]
+    async fn continuous_zero_interval_does_not_spin() {
+        let ticks = ticks_in_1500ms(ScheduleMode::Continuous {
+            check_interval_secs: 0,
+        })
+        .await;
+        assert!(ticks <= 3, "zero interval fired {ticks} ticks in 1.5s");
+    }
+
+    #[tokio::test]
+    async fn periodic_zero_interval_does_not_spin() {
+        let ticks = ticks_in_1500ms(ScheduleMode::Periodic {
+            cron: "every 0s".into(),
+        })
+        .await;
+        assert!(ticks <= 3, "zero interval fired {ticks} ticks in 1.5s");
     }
 
     #[tokio::test]

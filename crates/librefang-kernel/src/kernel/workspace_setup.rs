@@ -1456,6 +1456,7 @@ pub(super) fn append_daily_memory_log(workspace: &Path, response: &str) {
 pub(super) const MAX_IDENTITY_FILE_BYTES: usize = 32_768;
 
 /// Read a workspace identity file with a size cap to prevent prompt stuffing.
+/// The read itself is bounded to the cap, so an oversized file (the root fallback sits in the agent-writable workspace) costs at most `MAX_IDENTITY_FILE_BYTES` of memory, and invalid bytes past the cap do not drop the file.
 /// Checks `.identity/{filename}` first (new layout), falls back to `{filename}` at workspace
 /// root (pre-migration layout). Returns None if the file doesn't exist or is empty.
 pub(super) fn read_identity_file(workspace: &Path, filename: &str) -> Option<String> {
@@ -1479,20 +1480,40 @@ pub(super) fn read_identity_file(workspace: &Path, filename: &str) -> Option<Str
             },
             Err(_) => continue, // file doesn't exist at this location
         }
-        let content = match std::fs::read_to_string(path) {
-            Ok(c) => c,
-            Err(_) => continue,
+        let Some(content) = read_capped_utf8(path, MAX_IDENTITY_FILE_BYTES) else {
+            continue;
         };
         if content.trim().is_empty() {
             continue;
         }
-        return if content.len() > MAX_IDENTITY_FILE_BYTES {
-            Some(librefang_types::truncate_str(&content, MAX_IDENTITY_FILE_BYTES).to_string())
-        } else {
-            Some(content)
-        };
+        return Some(content);
     }
     None
+}
+
+/// Read at most `cap` bytes of `path` as UTF-8, never pulling the rest of the file into memory.
+///
+/// A cut that lands inside a multi-byte character drops the incomplete sequence, the same char-boundary result `truncate_str` gives on the full text, so bytes past the cap (valid UTF-8 or not) never affect the outcome.
+/// Returns `None` when the file cannot be read or the kept prefix itself is not valid UTF-8.
+fn read_capped_utf8(path: &Path, cap: usize) -> Option<String> {
+    use std::io::Read as _;
+
+    let file = std::fs::File::open(path).ok()?;
+    let mut buf = Vec::with_capacity(cap.min(8192));
+    file.take(cap as u64 + 1).read_to_end(&mut buf).ok()?;
+    let truncated = buf.len() > cap;
+    buf.truncate(cap);
+    match String::from_utf8(buf) {
+        Ok(s) => Some(s),
+        // Only an incomplete sequence at the very end is the cap's doing; anything else is genuinely invalid UTF-8.
+        Err(e) if truncated && e.utf8_error().error_len().is_none() => {
+            let valid = e.utf8_error().valid_up_to();
+            let mut bytes = e.into_bytes();
+            bytes.truncate(valid);
+            String::from_utf8(bytes).ok()
+        }
+        Err(_) => None,
+    }
 }
 
 /// Get the system hostname as a String.
@@ -2270,6 +2291,69 @@ mod identity_personality_tests {
             std::fs::read_to_string(tmp.path().join(".identity").join("IDENTITY.md"))
                 .unwrap()
                 .contains("\nvibe: calm\n")
+        );
+    }
+}
+
+#[cfg(test)]
+mod identity_read_cap_tests {
+    //! `read_identity_file` must bound the read itself at `MAX_IDENTITY_FILE_BYTES`, not read the whole file and truncate afterwards.
+
+    use super::*;
+
+    #[test]
+    fn read_identity_file_keeps_valid_prefix_when_tail_past_cap_is_not_utf8() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(tmp.path().join(".identity")).unwrap();
+        let mut bytes = vec![b'a'; MAX_IDENTITY_FILE_BYTES];
+        bytes.extend_from_slice(&[0xFF, 0xFE, 0xFD]);
+        std::fs::write(tmp.path().join(".identity").join("SOUL.md"), &bytes).unwrap();
+
+        let content = read_identity_file(tmp.path(), "SOUL.md")
+            .expect("invalid bytes past the cap must not drop the file");
+        assert_eq!(content.len(), MAX_IDENTITY_FILE_BYTES);
+        assert!(content.bytes().all(|b| b == b'a'));
+    }
+
+    #[test]
+    fn read_identity_file_truncates_at_char_boundary() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(tmp.path().join(".identity")).unwrap();
+        let full = "a".repeat(MAX_IDENTITY_FILE_BYTES - 1) + &"é".repeat(10);
+        std::fs::write(tmp.path().join(".identity").join("SOUL.md"), &full).unwrap();
+
+        let content = read_identity_file(tmp.path(), "SOUL.md").unwrap();
+        assert_eq!(content.len(), MAX_IDENTITY_FILE_BYTES - 1);
+        assert_eq!(
+            content,
+            librefang_types::truncate_str(&full, MAX_IDENTITY_FILE_BYTES)
+        );
+    }
+
+    #[test]
+    fn read_identity_file_caps_oversized_root_fallback() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("USER.md"), "u".repeat(1 << 20)).unwrap();
+
+        let content = read_identity_file(tmp.path(), "USER.md").unwrap();
+        assert_eq!(content.len(), MAX_IDENTITY_FILE_BYTES);
+    }
+
+    #[test]
+    fn read_identity_file_skips_invalid_utf8_within_cap() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(tmp.path().join(".identity")).unwrap();
+        std::fs::write(
+            tmp.path().join(".identity").join("SOUL.md"),
+            [b'a', 0xFF, b'b'],
+        )
+        .unwrap();
+        std::fs::write(tmp.path().join("SOUL.md"), "root soul").unwrap();
+
+        assert_eq!(
+            read_identity_file(tmp.path(), "SOUL.md").as_deref(),
+            Some("root soul"),
+            "an invalid .identity copy is skipped and the root fallback used, as before"
         );
     }
 }

@@ -618,6 +618,7 @@ impl LibreFangKernel {
 
         // Delegate to the context engine when available (and allowed for this agent),
         // otherwise fall back to the built-in compactor directly.
+        let echo_policy = self.lookup_reasoning_echo_policy(&model);
         let result = if let Some(engine) = self.context_engine_for_agent(&entry.manifest) {
             engine
                 .compact(
@@ -626,11 +627,11 @@ impl LibreFangKernel {
                     Arc::clone(&driver),
                     &model,
                     agent_ctx_window,
+                    echo_policy,
                 )
                 .await
                 .map_err(KernelError::LibreFang)?
         } else {
-            let echo_policy = self.lookup_reasoning_echo_policy(&model);
             compact_session(driver, &model, &session, &config, echo_policy)
                 .await
                 .map_err(|e| KernelError::LibreFang(LibreFangError::Internal(e)))?
@@ -664,6 +665,10 @@ impl LibreFangKernel {
             .save_session_async(&updated_session)
             .await
             .map_err(KernelError::LibreFang)?;
+        // #4971: drop file_read dedup state — the bodies its stubs referenced have been summarised away.
+        librefang_runtime::context_compressor::reset_post_compression_side_state(
+            updated_session.id,
+        );
 
         // Build result message with audit summary
         let mut msg = format!(

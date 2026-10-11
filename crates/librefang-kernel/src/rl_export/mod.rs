@@ -37,7 +37,7 @@
 use std::sync::Arc;
 
 use librefang_rl_export::{ExportTarget, RlTrajectoryExport};
-use librefang_types::agent::AgentId;
+use librefang_types::agent::{AgentId, SessionId};
 use librefang_types::config::RlExportTarget;
 
 use crate::kernel::LibreFangKernel;
@@ -102,16 +102,24 @@ fn to_export_target(target: RlExportTarget) -> ExportTarget {
     }
 }
 
-/// Build the [`RlTrajectoryExport`] payload for an agent's current session.
+/// Build the [`RlTrajectoryExport`] payload for the session a turn ran in.
 ///
+/// `session_id` is the turn's session from the `AgentLoopEnd` payload; `None` falls back to the agent's registry session, which channel-derived and `session_mode = "new"` turns never update.
 /// Returns `None` when the agent is unknown or the trajectory bundle cannot
 /// be built (e.g. the session row is missing for a non-current id). The
 /// `run_id` is `"<agent_id>:<session_id>"` so an upstream run is uniquely
 /// addressable back to the producing agent and session. `started_at` is the
 /// first recorded message timestamp (falling back to now when none is
 /// present); `finished_at` is the export instant.
-fn build_payload(kernel: &LibreFangKernel, agent_id: AgentId) -> Option<RlTrajectoryExport> {
-    let session_id = kernel.agent_registry_ref().get(agent_id)?.session_id;
+fn build_payload(
+    kernel: &LibreFangKernel,
+    agent_id: AgentId,
+    session_id: Option<SessionId>,
+) -> Option<RlTrajectoryExport> {
+    let session_id = match session_id {
+        Some(id) => id,
+        None => kernel.agent_registry_ref().get(agent_id)?.session_id,
+    };
 
     let bundle = match kernel.export_session_trajectory(agent_id, session_id) {
         Ok(bundle) => bundle,
@@ -157,7 +165,13 @@ fn build_payload(kernel: &LibreFangKernel, agent_id: AgentId) -> Option<RlTrajec
 /// agent finishes a turn. Cheap early-exits keep the hot path near-free; the
 /// payload assembly and network upload run on a detached task so the agent
 /// loop never blocks on serialization or I/O.
-pub fn maybe_export_on_turn_end(kernel: Arc<LibreFangKernel>, agent_id: AgentId) {
+///
+/// `session_id` is the session the turn ran in; `None` exports the agent's registry session.
+pub fn maybe_export_on_turn_end(
+    kernel: Arc<LibreFangKernel>,
+    agent_id: AgentId,
+    session_id: Option<SessionId>,
+) {
     // Gate 1: kernel shutdown.
     if kernel.agents.supervisor.is_shutting_down() {
         return;
@@ -186,7 +200,7 @@ pub fn maybe_export_on_turn_end(kernel: Arc<LibreFangKernel>, agent_id: AgentId)
             return;
         }
 
-        let Some(payload) = build_payload(&kernel, agent_id) else {
+        let Some(payload) = build_payload(&kernel, agent_id, session_id) else {
             return;
         };
         let run_id = payload.run_id.clone();
@@ -259,7 +273,11 @@ impl librefang_runtime::hooks::HookHandler for RlExportTurnEndHook {
             );
             return Ok(());
         };
-        maybe_export_on_turn_end(kernel, AgentId(uuid));
+        maybe_export_on_turn_end(
+            kernel,
+            AgentId(uuid),
+            crate::skill_workshop::turn_session_id(ctx),
+        );
         Ok(())
     }
 }
@@ -530,7 +548,7 @@ target = { type = "wandb", project = "rollouts", entity = "team", api_key_env = 
             .expect("agent entry")
             .session_id;
 
-        let payload = build_payload(&kernel, agent_id).expect("payload assembled");
+        let payload = build_payload(&kernel, agent_id, None).expect("payload assembled");
         assert_eq!(payload.run_id, format!("{}:{}", agent_id, session_id.0));
         assert!(
             !payload.trajectory_bytes.is_empty(),
@@ -545,6 +563,56 @@ target = { type = "wandb", project = "rollouts", entity = "team", api_key_env = 
             "first JSONL line must be the metadata header: {first_line}"
         );
         assert!(payload.toolset_metadata.is_some());
+        kernel.shutdown();
+    }
+
+    /// The turn's session from the hook payload wins over the registry pointer.
+    /// Channel turns never move `entry.session_id`, so exporting it would re-upload a stale rollout and never the channel conversation.
+    #[test]
+    fn payload_uses_turn_session_over_registry_session() {
+        use crate::MemorySubsystemApi;
+        let (kernel, _tmp) = boot_kernel(RlExportConfig {
+            enabled: true,
+            target: None,
+        });
+        let agent_id = spawn_test_agent(&kernel, None);
+        let registry_session = kernel
+            .agent_registry_ref()
+            .get(agent_id)
+            .expect("agent entry")
+            .session_id;
+        let channel_session = SessionId::new();
+        assert_ne!(channel_session, registry_session);
+        kernel
+            .substrate_ref()
+            .save_session(&librefang_memory::session::Session {
+                id: channel_session,
+                agent_id,
+                parent_session_id: None,
+                messages: vec![
+                    librefang_types::message::Message::user("channel-only question"),
+                    librefang_types::message::Message::assistant("channel-only answer"),
+                ],
+                context_window_tokens: 0,
+                label: None,
+                model_override: None,
+                messages_generation: 1,
+                last_repaired_generation: None,
+                peer_id: None,
+            })
+            .expect("save_session");
+
+        let payload =
+            build_payload(&kernel, agent_id, Some(channel_session)).expect("payload assembled");
+        assert_eq!(
+            payload.run_id,
+            format!("{}:{}", agent_id, channel_session.0)
+        );
+        let text = String::from_utf8(payload.trajectory_bytes).expect("utf-8 jsonl");
+        assert!(
+            text.contains("channel-only question"),
+            "trajectory must carry the channel session's messages: {text}"
+        );
         kernel.shutdown();
     }
 }

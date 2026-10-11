@@ -271,6 +271,8 @@ api-error-job-disappeared-complete = 完了後にタスクが消失しました
 # タスクエラー
 api-error-task-not-found = タスクが見つかりません
 api-error-task-disappeared = タスクが消失しました
+api-error-task-not-retryable = タスクは再試行可能な状態ではありません（完了または失敗している必要があります）
+api-error-task-transition-not-allowed = 現在の状態からこのタスクのステータスには変更できません
 
 # ペアリングエラー
 api-error-pairing-not-enabled = ペアリングが有効になっていません

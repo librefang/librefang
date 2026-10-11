@@ -169,6 +169,20 @@ impl LibreFangKernel {
         kind: TaskKind,
         chat_id: Option<String>,
     ) -> TaskHandle {
+        self.register_async_task_inner(agent_id, session_id, kind, chat_id)
+            .0
+    }
+
+    /// [`Self::register_async_task`] that also reports whether this call created the registry entry (`true`) or returned an existing one through the `kind` dedupe (`false`).
+    ///
+    /// Callers that start the underlying work themselves (the async `agent_send` path) must not start it again when `created` is `false`: the operation is already in flight and its single completion event is shared.
+    pub(crate) fn register_async_task_inner(
+        &self,
+        agent_id: AgentId,
+        session_id: SessionId,
+        kind: TaskKind,
+        chat_id: Option<String>,
+    ) -> (TaskHandle, bool) {
         let mut guard = self.events.async_tasks.lock();
 
         // Dedupe by `kind`. The match is structural — same run_id for a
@@ -213,7 +227,7 @@ impl LibreFangKernel {
                 session_id = %session_id,
                 "Async task already registered for this kind — returning existing handle"
             );
-            return handle;
+            return (handle, false);
         }
 
         let handle = TaskHandle {
@@ -234,7 +248,7 @@ impl LibreFangKernel {
             session_id = %session_id,
             "Async task registered"
         );
-        handle
+        (handle, true)
     }
 
     /// Mark an in-flight async task as terminated with `status` and

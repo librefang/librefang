@@ -175,14 +175,15 @@ impl ConsolidationLock {
         };
 
         if let Some(mtime) = prior_mtime {
-            let now = now_ms();
-            let within_stale_window = now.saturating_sub(mtime) < HOLDER_STALE_MS;
+            // Saturating: an mtime ahead of the wall clock (NTP step back, lock dir restored from another host) must read as age 0, not underflow.
+            let age_ms = now_ms().saturating_sub(mtime);
+            let within_stale_window = age_ms < HOLDER_STALE_MS;
             let live_holder = holder_pid.is_some_and(is_process_running);
             if within_stale_window && live_holder {
                 if let Some(pid) = holder_pid {
                     tracing::debug!(
                         holder_pid = pid,
-                        age_s = (now - mtime) / 1000,
+                        age_s = age_ms / 1000,
                         "auto_dream: lock held by live PID"
                     );
                 }
@@ -484,6 +485,28 @@ mod tests {
         lock.try_acquire().await.unwrap();
         let second = lock.try_acquire().await.unwrap();
         assert!(second.is_none(), "expected None when live holder owns lock");
+        let _ = tokio::fs::remove_file(&path).await;
+    }
+
+    /// A lock file whose mtime is ahead of the wall clock must not underflow the age computed for the live-holder debug log.
+    /// The debug subscriber makes tracing evaluate the `age_s` field, which is where the plain subtraction panicked under overflow checks.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn acquire_with_future_mtime_and_live_holder_does_not_underflow() {
+        let path = tmpfile("future-mtime");
+        let lock = ConsolidationLock::new(path.clone());
+        lock.try_acquire().await.unwrap();
+        set_mtime_ms(&path, now_ms() + 10 * 60 * 1000).unwrap();
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::DEBUG)
+            .with_test_writer()
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+        let second = lock.try_acquire().await.unwrap();
+        assert!(
+            second.is_none(),
+            "live holder with a future mtime still owns the lock"
+        );
         let _ = tokio::fs::remove_file(&path).await;
     }
 

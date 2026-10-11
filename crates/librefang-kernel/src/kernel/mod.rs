@@ -547,8 +547,8 @@ impl CachedToolList {
 /// Thread-safe cache for prompt-building metadata. Avoids redundant filesystem
 /// scans and skill registry iteration on every incoming message.
 ///
-/// Keyed by workspace path (for workspace metadata) and a sorted skill
-/// allowlist string (for skill metadata). Entries expire after [`PROMPT_CACHE_TTL`].
+/// Keyed by workspace path (for workspace metadata) and an encoded sorted skill allowlist (for skill metadata, see [`PromptMetadataCache::skill_cache_key`]).
+/// Entries expire after [`PROMPT_CACHE_TTL`].
 ///
 /// Invalidated explicitly on skill reload, config reload, or workspace change.
 struct PromptMetadataCache {
@@ -576,13 +576,49 @@ impl PromptMetadataCache {
     }
 
     /// Build a cache key for the skill allowlist.
+    ///
+    /// An empty allowlist means "all enabled skills" and gets its own sentinel so it never shares a slot with `["*"]`, which on the skill path is a literal name that matches nothing (see `classify_required_skills`).
+    /// Names are length-prefixed so `["a,b"]` and `["a", "b"]` cannot alias either.
     fn skill_cache_key(allowlist: &[String]) -> String {
+        use std::fmt::Write as _;
+
         if allowlist.is_empty() {
-            return String::from("*");
+            return String::from("\x1fall\x1f");
         }
         let mut sorted = allowlist.to_vec();
         sorted.sort();
-        sorted.join(",")
+        let mut key = format!("{}:", sorted.len());
+        for name in &sorted {
+            write!(key, "{}:", name.len()).expect("writing to a String cannot fail");
+            key.push_str(name);
+        }
+        key
+    }
+}
+
+#[cfg(test)]
+mod skill_cache_key_tests {
+    use super::PromptMetadataCache;
+
+    fn names(v: &[&str]) -> Vec<String> {
+        v.iter().map(|x| x.to_string()).collect()
+    }
+
+    /// `[]` means every enabled skill while `["*"]` is a literal name that matches nothing, so the two must never share a skill-metadata cache slot; comma-bearing names must not alias a split list either.
+    #[test]
+    fn skill_cache_key_distinguishes_empty_wildcard_and_comma_names() {
+        let key = PromptMetadataCache::skill_cache_key;
+        let empty = key(&[]);
+        let star = key(&names(&["*"]));
+        let comma = key(&names(&["a,b"]));
+        let split = key(&names(&["a", "b"]));
+        let all = [&empty, &star, &comma, &split];
+        for i in 0..all.len() {
+            for j in (i + 1)..all.len() {
+                assert_ne!(all[i], all[j], "keys {i} and {j} alias");
+            }
+        }
+        assert_eq!(key(&names(&["b", "a"])), split, "order must not matter");
     }
 }
 

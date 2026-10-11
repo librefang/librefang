@@ -206,19 +206,19 @@ pub enum PreScriptValidationError {
     /// `argv` was empty — there is no command to run.
     #[error("pre_script.argv must not be empty")]
     EmptyArgv,
-    /// Resolved `argv[0]` canonicalized to a path outside the
-    /// `<home_dir>/scripts/` allowlist.
-    #[error(
-        "pre_script binary `{path}` is outside the scripts allowlist (must be under {home_dir})"
-    )]
+    /// A `pre_check_script` path was the empty string.
+    #[error("script path must not be empty")]
+    EmptyPath,
+    /// The script path (`pre_script.argv[0]` or `pre_check_script`) canonicalized to a path outside the `<home_dir>/scripts/` allowlist.
+    #[error("script binary `{path}` is outside the scripts allowlist (must be under {home_dir})")]
     OutsideAllowlist {
         /// Resolved path that failed the allowlist check.
         path: String,
         /// The expected allowlist root (`<home_dir>/scripts`).
         home_dir: String,
     },
-    /// Resolved `argv[0]` does not exist on disk (canonicalize failed).
-    #[error("pre_script binary `{path}` does not exist")]
+    /// The script path does not exist on disk (canonicalize failed).
+    #[error("script binary `{path}` does not exist")]
     NotFound {
         /// The path that could not be canonicalized.
         path: String,
@@ -308,9 +308,33 @@ pub fn validate_pre_script(
         return Err(PreScriptValidationError::EmptyArgv);
     }
 
+    resolve_under_scripts_root(argv0, home_dir).map(|_| ())
+}
+
+/// Validate a `CronAction::AgentTurn.pre_check_script` path against the same `<home_dir>/scripts/` allowlist that [`validate_pre_script`] applies to `pre_script.argv[0]`.
+///
+/// Returns the canonicalized path on success.
+/// The kernel runs the wake gate from that returned path, so the file that was checked is the file that is spawned even if the configured path is a symlink swapped after validation.
+pub fn validate_pre_check_script(
+    path: &str,
+    home_dir: &std::path::Path,
+) -> Result<std::path::PathBuf, PreScriptValidationError> {
+    if path.is_empty() {
+        return Err(PreScriptValidationError::EmptyPath);
+    }
+    resolve_under_scripts_root(path, home_dir)
+}
+
+/// Resolve `path` (joined onto `<home_dir>/scripts/` when relative), canonicalize it, and require the result to sit under the canonicalized scripts root.
+///
+/// Shared by [`validate_pre_script`] and [`validate_pre_check_script`] so both script fields enforce one allowlist.
+fn resolve_under_scripts_root(
+    path: &str,
+    home_dir: &std::path::Path,
+) -> Result<std::path::PathBuf, PreScriptValidationError> {
     let scripts_root = home_dir.join("scripts");
     let candidate = {
-        let p = std::path::Path::new(argv0);
+        let p = std::path::Path::new(path);
         if p.is_absolute() {
             p.to_path_buf()
         } else {
@@ -342,7 +366,7 @@ pub fn validate_pre_script(
             home_dir: allow_root.display().to_string(),
         });
     }
-    Ok(())
+    Ok(resolved)
 }
 
 // ---------------------------------------------------------------------------
@@ -501,7 +525,7 @@ impl CronJob {
     }
 
     /// Same as [`CronJob::validate`] but additionally enforces the
-    /// `<home_dir>/scripts/` path allowlist on any `pre_script.argv[0]`.
+    /// `<home_dir>/scripts/` path allowlist on any `pre_script.argv[0]` and `pre_check_script`.
     /// Pass the daemon home (typically `~/.librefang`) as `home_dir` from
     /// production code paths; pass `None` only from tests or contexts
     /// where the path check is intentionally deferred.
@@ -603,6 +627,7 @@ impl CronJob {
                 message,
                 timeout_secs,
                 pre_script,
+                pre_check_script,
                 ..
             } => {
                 if message.is_empty() {
@@ -630,9 +655,28 @@ impl CronJob {
                 // runs when the caller supplied a daemon home directory.
                 if let Some(ps) = pre_script {
                     if let Some(home) = home_dir {
-                        validate_pre_script(ps, home).map_err(|e| e.to_string())?;
+                        validate_pre_script(ps, home).map_err(|e| match e {
+                            PreScriptValidationError::OutsideAllowlist { .. }
+                            | PreScriptValidationError::NotFound { .. } => {
+                                format!("pre_script: {e}")
+                            }
+                            other => other.to_string(),
+                        })?;
                     } else {
                         validate_pre_script_env(ps).map_err(|e| e.to_string())?;
+                    }
+                }
+                // pre_check_script: the wake gate is spawned by the daemon just like pre_script, so it is held to the same `<home_dir>/scripts/` allowlist.
+                // Without a home directory only the empty-path check can run; the kernel re-checks the allowlist at fire time for jobs that bypassed this path (persisted before the check existed, or hand-edited on disk).
+                if let Some(path) = pre_check_script {
+                    if let Some(home) = home_dir {
+                        validate_pre_check_script(path, home)
+                            .map_err(|e| format!("pre_check_script: {e}"))?;
+                    } else if path.is_empty() {
+                        return Err(format!(
+                            "pre_check_script: {}",
+                            PreScriptValidationError::EmptyPath
+                        ));
                     }
                 }
             }
@@ -2342,6 +2386,79 @@ mod tests {
         assert!(
             err.contains("allowlist"),
             "expected allowlist error, got: {err}"
+        );
+    }
+
+    fn agent_turn_with_pre_check(path: String) -> CronAction {
+        CronAction::AgentTurn {
+            message: "hello".into(),
+            model_override: None,
+            timeout_secs: None,
+            pre_check_script: Some(path),
+            pre_script: None,
+            silent_marker: None,
+        }
+    }
+
+    #[test]
+    fn cron_job_validate_with_home_rejects_pre_check_script_outside_allowlist() {
+        // The wake gate is spawned by the daemon, so an agent-authored job must not be able to point it at an arbitrary executable.
+        let home = fixture_home_with_script("safe.sh");
+        let mut job = valid_job();
+        #[cfg(unix)]
+        let outside = "/bin/sh".to_string();
+        #[cfg(not(unix))]
+        let outside =
+            std::env::var("COMSPEC").unwrap_or_else(|_| "C:\\Windows\\System32\\cmd.exe".into());
+        job.action = agent_turn_with_pre_check(outside);
+        let err = job.validate_with_home(0, Some(home.path())).unwrap_err();
+        assert!(
+            err.contains("pre_check_script") && err.contains("allowlist"),
+            "expected pre_check_script allowlist error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn cron_job_validate_with_home_rejects_pre_check_script_dot_dot_escape() {
+        let home = fixture_home_with_script("safe.sh");
+        std::fs::write(home.path().join("outside.sh"), "#!/bin/sh\n").unwrap();
+        let mut job = valid_job();
+        job.action = agent_turn_with_pre_check("../outside.sh".into());
+        let err = job.validate_with_home(0, Some(home.path())).unwrap_err();
+        assert!(
+            err.contains("pre_check_script") && err.contains("allowlist"),
+            "expected pre_check_script allowlist error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn cron_job_validate_with_home_accepts_pre_check_script_under_scripts() {
+        let home = fixture_home_with_script("safe.sh");
+        let mut job = valid_job();
+        job.action =
+            agent_turn_with_pre_check(home.path().join("scripts/safe.sh").display().to_string());
+        job.validate_with_home(0, Some(home.path()))
+            .expect("absolute pre_check_script under scripts/ accepted");
+        job.action = agent_turn_with_pre_check("safe.sh".into());
+        job.validate_with_home(0, Some(home.path()))
+            .expect("relative pre_check_script resolves under scripts/");
+    }
+
+    #[test]
+    fn cron_job_validate_rejects_empty_pre_check_script_without_home() {
+        let mut job = valid_job();
+        job.action = agent_turn_with_pre_check(String::new());
+        let err = job.validate(0).unwrap_err();
+        assert!(err.contains("pre_check_script"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_pre_check_script_returns_canonical_path() {
+        let home = fixture_home_with_script("safe.sh");
+        let resolved = validate_pre_check_script("safe.sh", home.path()).unwrap();
+        assert_eq!(
+            resolved,
+            home.path().join("scripts/safe.sh").canonicalize().unwrap()
         );
     }
 
