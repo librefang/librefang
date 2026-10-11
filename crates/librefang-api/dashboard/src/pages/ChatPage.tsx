@@ -24,6 +24,7 @@ import { applyForeignTerminalFrame, isTerminalFrameType, normalizeToolOutput, te
 import {
   deriveDropdownActiveSessionId,
   pickSessionDropdownLabel,
+  sessionAfterClose,
   shouldAutoPinResolvedSession,
 } from "../lib/sessionSelector";
 import {
@@ -3627,6 +3628,71 @@ export function ChatPage() {
 
   // Sidebar clicks update the URL — no switch_agent_session POST. Each tab's
   // URL carries its own sessionId, and the send path forwards it per-request.
+  // ── Session tabs ────────────────────────────────────────────────────
+  //
+  // The strip is a UI list, not server state: a session exists whether or not
+  // it has a tab, and closing one must never delete it. Visiting a session
+  // opens its tab, which is what makes "several conversations at once" work
+  // without a second way to create them.
+  const openChatTabs = useUIStore((s) => s.openChatTabs);
+  const openChatTab = useUIStore((s) => s.openChatTab);
+  const closeChatTab = useUIStore((s) => s.closeChatTab);
+  const pruneChatTabs = useUIStore((s) => s.pruneChatTabs);
+  const pruneChatTabAgents = useUIStore((s) => s.pruneChatTabAgents);
+  const agentTabs = useMemo(
+    () => (selectedAgentId ? (openChatTabs[selectedAgentId] ?? []) : []),
+    [openChatTabs, selectedAgentId],
+  );
+
+  useEffect(() => {
+    if (selectedAgentId && activeSessionId) openChatTab(selectedAgentId, activeSessionId);
+  }, [selectedAgentId, activeSessionId, openChatTab]);
+
+  useEffect(() => {
+    // A session deleted from the dropdown, another browser tab, or the CLI
+    // leaves a tab pointing at nothing. Only prune once the list has actually
+    // loaded — `sessionsQuery.data` is `undefined` while the query is in
+    // flight, and an empty list there would close every tab the operator has
+    // open. Once it has loaded, an empty list is a real "no sessions left",
+    // so it prunes the stale tabs instead of being skipped (#8326 review).
+    const loaded = sessionsQuery.data;
+    if (!selectedAgentId || !loaded) return;
+    pruneChatTabs(
+      selectedAgentId,
+      new Set(loaded.map((session) => session.session_id).filter((id): id is string => !!id)),
+    );
+  }, [selectedAgentId, sessionsQuery.data, pruneChatTabs]);
+
+  useEffect(() => {
+    // Tabs are keyed by agent, so a deleted agent would otherwise leave its
+    // entry in the persisted store forever. The list is authoritative only
+    // when it includes hand agents (`includeHands`): with them hidden the
+    // query returns a subset, and a hidden agent must not lose its tabs.
+    if (agentsQuery.data === undefined || !showHandAgents) return;
+    pruneChatTabAgents(new Set(agentsQuery.data.map((agent) => agent.id)));
+  }, [agentsQuery.data, showHandAgents, pruneChatTabAgents]);
+
+  const handleCloseTab = useCallback(
+    (sessionId: string) => {
+      if (!selectedAgentId) return;
+      // Resolve the landing spot before the store drops the tab: the neighbour
+      // at the closed tab's index, not the most recently visited tab.
+      const nextSessionId = sessionAfterClose(agentTabs, sessionId);
+      closeChatTab(selectedAgentId, sessionId);
+      // Closing the one you are looking at has to land somewhere. The
+      // neighbour, not "no session" — dropping the param would re-derive the
+      // server-active session and could reopen the tab just closed.
+      if (sessionId === activeSessionId && nextSessionId) {
+        navigate({
+          to: "/chat",
+          search: { agentId: selectedAgentId, sessionId: nextSessionId },
+          replace: true,
+        });
+      }
+    },
+    [selectedAgentId, agentTabs, activeSessionId, closeChatTab, navigate],
+  );
+
   const handleSwitchSession = useCallback(async (sessionId: string) => {
     if (!selectedAgentId) return;
     navigate({
@@ -3990,6 +4056,65 @@ export function ChatPage() {
                 } catch { /* Config update failure — non-critical */ }
               }}
             />
+          )}
+
+          {/*
+            Session tabs. Only once there are two — a single tab is a label
+            pretending to be a control, and the header already names the
+            conversation you are in.
+          */}
+          {agentTabs.length > 1 && (
+            <div
+              role="tablist"
+              aria-label={t("chat.session_tabs", { defaultValue: "Open conversations" })}
+              className="flex items-center gap-1 overflow-x-auto border-b border-border-subtle/50 px-2 py-1 scrollbar-thin"
+            >
+              {agentTabs.map((sessionId) => {
+                const isActive = sessionId === activeSessionId;
+                return (
+                  <div
+                    key={sessionId}
+                    className={`group flex shrink-0 items-center gap-1 rounded-t-lg border-b-2 px-2 py-1 text-[11px] transition-colors ${
+                      isActive
+                        ? "border-brand bg-brand/5 text-brand font-bold"
+                        : "border-transparent text-text-dim hover:text-text-main hover:bg-surface-hover"
+                    }`}
+                  >
+                    <button
+                      type="button"
+                      role="tab"
+                      aria-selected={isActive}
+                      onClick={() => { if (!isActive) void handleSwitchSession(sessionId); }}
+                      className="max-w-[16ch] truncate"
+                    >
+                      {pickSessionDropdownLabel(sessionId, sessionsQuery.data) ?? sessionId.slice(0, 8)}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleCloseTab(sessionId)}
+                      aria-label={t("chat.session_tab_close", { defaultValue: "Close this tab" })}
+                      title={t("chat.session_tab_close_hint", {
+                        defaultValue: "Closes the tab. The conversation is kept.",
+                      })}
+                      // Hidden on hover-capable devices to keep the strip
+                      // quiet, always visible on touch screens where there is
+                      // no hover to reveal it.
+                      className="rounded p-0.5 opacity-0 transition-opacity hover:text-error focus-visible:opacity-100 group-hover:opacity-100 pointer-coarse:opacity-100"
+                    >
+                      <X className="h-2.5 w-2.5" />
+                    </button>
+                  </div>
+                );
+              })}
+              <button
+                type="button"
+                onClick={() => { void handleNewSession(); }}
+                aria-label={t("chat.new_session", { defaultValue: "New session" })}
+                className="shrink-0 rounded-lg p-1 text-text-dim hover:text-brand hover:bg-surface-hover"
+              >
+                <Plus className="h-3 w-3" />
+              </button>
+            </div>
           )}
 
           {/*

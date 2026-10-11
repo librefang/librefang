@@ -8250,6 +8250,13 @@
             "$ref": "#/definitions/ChannelToolPolicy"
           }
         },
+        "emoji": {
+          "description": "A short glyph the operator picked to stand for this user in the dashboard (#8339).\n\nFree-form text rather than an enum or a validated emoji table: the set of glyphs a person may want is not something this daemon should have an opinion about, and the value only ever reaches a DOM text node. The write path bounds its length and refuses control characters — the two properties that matter for a value that is stored in `config.toml` and rendered — and nothing else.\n\n`None` (or an absent key) means \"no glyph chosen\", which the dashboard renders as the user's initial. The avatar *image* deliberately does not live here: it is a file on disk, and whether one exists is answered by probing the directory rather than by a second copy of the answer that can fall out of step with it.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "memory_access": {
           "description": "Memory namespace ACL — controls reads/writes to memory scopes (`proactive`, `kv:*`, etc.) and PII redaction. `None` means \"use the role default ACL\".",
           "anyOf": [

@@ -50,6 +50,28 @@ export function deriveDropdownActiveSessionId(
 }
 
 /**
+ * Pick which tab to open after the active one is closed.
+ *
+ * The strip keeps a stable display order, so the expected landing spot is the
+ * neighbour that takes the closed tab's place: closing B in `[A,B,C]` selects
+ * C. When the last one goes there is no right neighbour, so it falls back to
+ * the new last — closing C in `[A,B,C]` selects B. Returns `null` when no tab
+ * is left to select (the caller then leaves the session unpinned).
+ */
+export function sessionAfterClose(
+  tabs: readonly string[],
+  sessionId: string,
+): string | null {
+  const index = tabs.indexOf(sessionId);
+  const remaining = tabs.filter((id) => id !== sessionId);
+  if (remaining.length === 0) return null;
+  // `index < 0` (closing something no longer listed) is defensive; land on the
+  // last remaining tab rather than throwing or navigating nowhere.
+  const nextIndex = index < 0 ? remaining.length - 1 : Math.min(index, remaining.length - 1);
+  return remaining[nextIndex];
+}
+
+/**
  * Should the chat hook auto-pin a server-resolved session id into the URL?
  *
  * Issue #5199 — shared gate for both transport paths:

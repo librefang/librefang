@@ -146,6 +146,15 @@ const uiState = {
   hiddenModelKeys: [] as string[],
   chatScale: 1,
   setChatScale: vi.fn(),
+  // Session tabs (#8326) read these store fields, and the page prunes tabs on
+  // mount. The empty state keeps the strip out of the way; without the stubs
+  // the merged page crashes before this test can reach the export bar.
+  openChatTabs: {} as Record<string, string[]>,
+  chatTabRecency: {} as Record<string, string[]>,
+  openChatTab: vi.fn(),
+  closeChatTab: vi.fn(),
+  pruneChatTabs: vi.fn(),
+  pruneChatTabAgents: vi.fn(),
 };
 vi.mock("../lib/store", () => ({
   useUIStore: (selector: (state: Record<string, unknown>) => unknown) => selector(uiState),

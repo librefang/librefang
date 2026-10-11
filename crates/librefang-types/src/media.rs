@@ -461,6 +461,14 @@ pub fn on_disk_name(file_id: &str, content_type: &str, filename: &str) -> String
 /// The MIME served back is re-derived from the bytes at read time, so a renamed file cannot change what the daemon claims a file is.
 pub const AVATAR_EXTENSIONS: [&str; 4] = ["png", "jpg", "gif", "webp"];
 
+/// The subdirectory of the avatars root that holds *user* avatars (#8339).
+///
+/// Both populations name their files `{uuid}.{ext}` and an agent id and a user id are UUIDs from different namespaces that render identically, so a single directory would make "which of these belongs to a person" answerable only by running the UUID backwards.
+/// Separating them by directory makes the question a path prefix instead, and lets a future sweep that assumes agent avatars delete only agent avatars.
+///
+/// See `KernelConfig::effective_user_avatars_dir`, which is the only place callers should read this from.
+pub const USER_AVATARS_SUBDIR: &str = "users";
+
 /// The reference a stored [`crate::agent::AgentIdentity::avatar_url`] is allowed to hold.
 ///
 /// This is the *only* legal value besides none at all, and it is deliberately a route on this daemon rather than a URL.
@@ -476,6 +484,10 @@ pub fn agent_avatar_url(agent_id: &str) -> String {
 ///
 /// `agent_id` is a UUID rendered by `AgentId::to_string`, so the joined name is entirely server-derived: no part of it comes from the request.
 /// That is what makes the shared [`filename_guard`](https://github.com/librefang/librefang/blob/main/crates/librefang-api/src/validation/filename_guard.rs) unnecessary here rather than merely satisfied — there is no client-supplied name to check.
+///
+/// The per-user avatars (#8339) reuse this function, and they are the reason the argument is documented as "a UUID" rather than "an `AgentId`".
+/// A user is addressed by a name, and that name **does** come from the request — so the route never passes it here.
+/// It passes [`UserId::from_name`](crate::agent::UserId::from_name), a UUIDv5 this daemon derives from the configured name under a user-specific namespace, which is what keeps the property above true for the second caller instead of quietly weakening it.
 #[must_use]
 pub fn avatar_path(avatars_dir: &std::path::Path, agent_id: &str, ext: &str) -> std::path::PathBuf {
     avatars_dir.join(format!("{agent_id}.{ext}"))
