@@ -1489,7 +1489,6 @@ impl McpConnection {
         use rmcp::transport::{ConfigureCommandExt, TokioChildProcess};
         use rmcp::ServiceExt;
         use std::process::Stdio;
-        use tokio::io::AsyncBufReadExt;
 
         // Validate command path (no path traversal)
         if command.contains("..") {
@@ -1615,68 +1614,11 @@ impl McpConnection {
         .spawn()
         .map_err(|e| format_spawn_error(&resolved_command, &e))?;
 
-        // Drain the child's stderr in a background task, logging each line at
-        // DEBUG level.  This prevents the pipe buffer from filling (which would
-        // stall the child) while keeping child diagnostics available in the
-        // daemon's structured logs.  Line length is capped at 256 bytes; we
-        // stop reading after 100 lines per session to bound memory usage. (#3805)
+        // Drain the child's stderr in a background task for the server's whole lifetime, logging the first lines at DEBUG level (#3805).
+        // This prevents the pipe buffer from filling (which would stall the child) while keeping child diagnostics available in the daemon's structured logs.
         if let Some(stderr) = stderr_opt {
             let server_name_for_log = resolved_command.clone();
-            tokio::spawn(async move {
-                use tokio::io::BufReader;
-                let mut reader = BufReader::new(stderr).lines();
-                let mut lines_read: u32 = 0;
-                const MAX_LINE_BYTES: usize = 256;
-                const MAX_LINES: u32 = 100;
-                loop {
-                    match reader.next_line().await {
-                        Ok(Some(line)) => {
-                            // Past the log cap we KEEP READING but stop
-                            // logging.  CRITICAL: we must continue to
-                            // drain the pipe — if the loop exits on
-                            // line 101, the kernel stderr pipe buffer
-                            // (64 KiB on Linux) fills and the child's
-                            // next `write(stderr)` blocks forever,
-                            // hanging the MCP server.  #3926 introduced
-                            // a `break` here that reintroduced exactly
-                            // the pipe-stall failure mode the PR title
-                            // claimed to fix.
-                            if lines_read >= MAX_LINES {
-                                if lines_read == MAX_LINES {
-                                    debug!(
-                                        server = %server_name_for_log,
-                                        "MCP stdio stderr drain reached {MAX_LINES}-line log cap; \
-                                         continuing to discard further output to keep the pipe drained"
-                                    );
-                                }
-                                lines_read = lines_read.saturating_add(1);
-                                continue;
-                            }
-                            let truncated = if line.len() > MAX_LINE_BYTES {
-                                // Find the last valid UTF-8 character boundary at
-                                // or before MAX_LINE_BYTES so we don't panic on
-                                // multi-byte characters.
-                                let safe_end = line
-                                    .char_indices()
-                                    .take_while(|(i, _)| *i < MAX_LINE_BYTES)
-                                    .last()
-                                    .map(|(i, c)| i + c.len_utf8())
-                                    .unwrap_or(0);
-                                format!("{}…", &line[..safe_end])
-                            } else {
-                                line
-                            };
-                            debug!(
-                                server = %server_name_for_log,
-                                "MCP stdio stderr: {truncated}"
-                            );
-                            lines_read += 1;
-                        }
-                        Ok(None) => break, // EOF — child closed stderr.
-                        Err(_) => break,   // read error — pipe is unusable.
-                    }
-                }
-            });
+            tokio::spawn(drain_child_stderr(stderr, server_name_for_log));
         }
 
         let client = if roots.is_empty() {
@@ -3806,6 +3748,79 @@ fn expand_leading_tilde(input: &str) -> String {
     format!("{trimmed}/{rest}")
 }
 
+/// Drain an MCP stdio server's stderr until EOF, logging the first lines at DEBUG level (#3805).
+///
+/// The drain must run for the server's whole lifetime: if it stops, the pipe buffer fills (or the read end is dropped) and the child's next stderr write blocks forever or dies with SIGPIPE/EPIPE.
+/// It therefore reads raw bytes rather than `lines()`, which fails with `InvalidData` on the first non-UTF-8 line and used to end the loop on a perfectly healthy pipe.
+/// Each line is decoded lossily, only its first `MAX_LINE_BYTES` are kept, and the rest of an over-long line is discarded as it is read, so a newline-less stream cannot grow memory without bound.
+/// Past `MAX_LINES` logged lines it keeps reading but stops logging (#3926 once broke this by exiting at the cap).
+/// Returns the number of lines seen, for tests.
+async fn drain_child_stderr<R>(stderr: R, server_name: String) -> u64
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    use tokio::io::AsyncBufReadExt;
+    const MAX_LINE_BYTES: usize = 256;
+    const MAX_LINES: u64 = 100;
+
+    let mut reader = tokio::io::BufReader::new(stderr);
+    let mut line: Vec<u8> = Vec::with_capacity(MAX_LINE_BYTES + 4);
+    let mut overlong = false;
+    let mut lines_seen: u64 = 0;
+
+    let emit = |line: &mut Vec<u8>, overlong: &mut bool, lines_seen: &mut u64| {
+        if *lines_seen < MAX_LINES {
+            let text = String::from_utf8_lossy(line);
+            let text = text.trim_end_matches(['\r', '\n']);
+            if *overlong {
+                debug!(server = %server_name, "MCP stdio stderr: {text}…");
+            } else {
+                debug!(server = %server_name, "MCP stdio stderr: {text}");
+            }
+        } else if *lines_seen == MAX_LINES {
+            debug!(
+                server = %server_name,
+                "MCP stdio stderr drain reached {MAX_LINES}-line log cap; continuing to discard further output to keep the pipe drained"
+            );
+        }
+        *lines_seen = lines_seen.saturating_add(1);
+        line.clear();
+        *overlong = false;
+    };
+
+    loop {
+        let buf = match reader.fill_buf().await {
+            Ok(buf) => buf,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            // A real I/O error: the pipe is unusable.
+            Err(_) => break,
+        };
+        if buf.is_empty() {
+            // EOF — child closed stderr. Flush an unterminated last line.
+            if !line.is_empty() || overlong {
+                emit(&mut line, &mut overlong, &mut lines_seen);
+            }
+            break;
+        }
+        let (chunk, consumed, ends_line) = match buf.iter().position(|b| *b == b'\n') {
+            Some(pos) => (&buf[..pos], pos + 1, true),
+            None => (buf, buf.len(), false),
+        };
+        let room = MAX_LINE_BYTES.saturating_sub(line.len());
+        if chunk.len() > room {
+            line.extend_from_slice(&chunk[..room]);
+            overlong = true;
+        } else {
+            line.extend_from_slice(chunk);
+        }
+        reader.consume(consumed);
+        if ends_line {
+            emit(&mut line, &mut overlong, &mut lines_seen);
+        }
+    }
+    lines_seen
+}
+
 /// Convert a child-process spawn failure into an actionable error string for
 /// MCP stdio-transport connections.
 ///
@@ -3896,6 +3911,35 @@ mod tests {
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
+
+    /// A non-UTF-8 stderr line must not end the drain: the writer keeps writing far more than the pipe holds, which only completes if the drain keeps reading to EOF.
+    #[tokio::test]
+    async fn stderr_drain_survives_non_utf8_and_newline_less_output() {
+        let (mut writer, reader) = tokio::io::duplex(64);
+        let drain = tokio::spawn(drain_child_stderr(reader, "test-server".to_string()));
+        let write = async move {
+            writer.write_all(b"ok line\n").await.unwrap();
+            writer.write_all(b"bad \xff\xfe byte\n").await.unwrap();
+            // A single 64 KiB line with no newline must be discarded as it streams, not buffered.
+            writer.write_all(&vec![b'a'; 64 * 1024]).await.unwrap();
+            writer.write_all(b"\n").await.unwrap();
+            for _ in 0..200 {
+                writer
+                    .write_all(b"more logging after the cap\n")
+                    .await
+                    .unwrap();
+            }
+            writer.write_all(b"unterminated tail").await.unwrap();
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(5), write)
+            .await
+            .expect("writer must not block: the drain has to keep reading after a non-UTF-8 line");
+        let lines = tokio::time::timeout(std::time::Duration::from_secs(5), drain)
+            .await
+            .expect("drain must finish at EOF")
+            .unwrap();
+        assert_eq!(lines, 3 + 200 + 1);
+    }
 
     // ----------------------------------------------------------------------- #7963 — transport vs application classification -----------------------------------------------------------------------
 

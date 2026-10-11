@@ -629,11 +629,19 @@ impl ContextEngine for ScriptableContextEngine {
         driver: Arc<dyn LlmDriver>,
         model: &str,
         context_window_tokens: usize,
+        reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy,
     ) -> LibreFangResult<CompactionResult> {
         let Some(ref script) = self.compact_script else {
             return self
                 .inner
-                .compact(agent_id, messages, driver, model, context_window_tokens)
+                .compact(
+                    agent_id,
+                    messages,
+                    driver,
+                    model,
+                    context_window_tokens,
+                    reasoning_echo_policy,
+                )
                 .await;
         };
 
@@ -718,7 +726,14 @@ impl ContextEngine for ScriptableContextEngine {
                 }
                 return self
                     .inner
-                    .compact(agent_id, messages, driver, model, context_window_tokens)
+                    .compact(
+                        agent_id,
+                        messages,
+                        driver,
+                        model,
+                        context_window_tokens,
+                        reasoning_echo_policy,
+                    )
                     .await;
             }
             // Cache miss — run hook and store result.
@@ -772,7 +787,14 @@ impl ContextEngine for ScriptableContextEngine {
                     Self::record_hook(&self.metrics, "compact", ms, false);
                     return self
                         .inner
-                        .compact(agent_id, messages, driver, model, context_window_tokens)
+                        .compact(
+                            agent_id,
+                            messages,
+                            driver,
+                            model,
+                            context_window_tokens,
+                            reasoning_echo_policy,
+                        )
                         .await;
                 }
                 Err(e) => {
@@ -780,7 +802,14 @@ impl ContextEngine for ScriptableContextEngine {
                     self.apply_failure_policy("compact", &e)?;
                     return self
                         .inner
-                        .compact(agent_id, messages, driver, model, context_window_tokens)
+                        .compact(
+                            agent_id,
+                            messages,
+                            driver,
+                            model,
+                            context_window_tokens,
+                            reasoning_echo_policy,
+                        )
                         .await;
                 }
             }
@@ -829,14 +858,28 @@ impl ContextEngine for ScriptableContextEngine {
                 }
                 Self::record_hook(&self.metrics, "compact", ms, false);
                 self.inner
-                    .compact(agent_id, messages, driver, model, context_window_tokens)
+                    .compact(
+                        agent_id,
+                        messages,
+                        driver,
+                        model,
+                        context_window_tokens,
+                        reasoning_echo_policy,
+                    )
                     .await
             }
             Err(e) => {
                 Self::record_hook(&self.metrics, "compact", 0, false);
                 self.apply_failure_policy("compact", &e)?;
                 self.inner
-                    .compact(agent_id, messages, driver, model, context_window_tokens)
+                    .compact(
+                        agent_id,
+                        messages,
+                        driver,
+                        model,
+                        context_window_tokens,
+                        reasoning_echo_policy,
+                    )
                     .await
             }
         }

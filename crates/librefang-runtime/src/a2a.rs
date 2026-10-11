@@ -954,14 +954,9 @@ impl A2aClient {
     ///
     /// Each outbound request rebuilds a `reqwest::Client` from
     /// [`build_client_for_url`], which:
-    /// 1. Runs `web_fetch::check_ssrf` on the URL to resolve DNS once,
-    ///    validate the addresses, and obtain a [`SsrfResolution`].
-    /// 2. Pins those exact addresses via `ClientBuilder::resolve` so the
-    ///    HTTP stack cannot re-resolve and connect to a different IP — this
-    ///    closes the DNS-rebinding TOCTOU window (#3563).
-    /// 3. Installs a custom redirect policy that re-runs `check_ssrf` against
-    ///    every redirect target (#3782), since the DNS pin only protects the
-    ///    original hostname.
+    /// 1. Runs `web_fetch::check_ssrf_async` on the URL to resolve DNS once (off the tokio worker), validate the addresses, and obtain a [`SsrfResolution`].
+    /// 2. Pins those exact addresses on a direct (never proxied) client so the HTTP stack cannot re-resolve and connect to a different IP — this closes the DNS-rebinding TOCTOU window (#3563).
+    /// 3. Refuses redirects entirely (`Policy::none`), since the DNS pin only protects the original hostname.
     pub fn new_with_allowlist(allowed_hosts: Vec<String>) -> Self {
         Self { allowed_hosts }
     }
@@ -969,8 +964,9 @@ impl A2aClient {
     /// Build a per-request reqwest client pinned to the SSRF-validated IPs of
     /// the supplied URL.  Returns `Err` if the URL fails the entry-point SSRF
     /// check (private IP, blocked hostname, unresolvable host, …).
-    fn build_client_for_url(&self, url: &str) -> Result<reqwest::Client, String> {
-        let resolution = crate::web_fetch::check_ssrf(url, &self.allowed_hosts)?;
+    async fn build_client_for_url(&self, url: &str) -> Result<reqwest::Client, String> {
+        // The async resolver keeps the DNS lookup off the tokio worker; the blocking `check_ssrf` stalled it for the full resolver timeout.
+        let resolution = crate::web_fetch::check_ssrf_async(url, &self.allowed_hosts).await?;
 
         // Bug #3563: refuse to follow redirects entirely. A `Policy::custom`
         // that re-runs `check_ssrf` on each hop is *not* enough — DNS for the
@@ -981,7 +977,8 @@ impl A2aClient {
         // already short-circuits on `response.status().is_redirection()`.
         let redirect_policy = reqwest::redirect::Policy::none();
 
-        let builder = crate::http_client::proxied_client_builder()
+        // Connect directly, never through a configured proxy: a proxy resolves the original hostname itself, which bypasses the DNS pin below and reopens DNS rebinding (#6761, same as `web_fetch::pinned_client`).
+        let builder = crate::http_client::direct_client_builder()
             .timeout(std::time::Duration::from_secs(30))
             .redirect(redirect_policy)
             // Bug #3785: disable transport-layer decompression. Otherwise
@@ -1015,7 +1012,7 @@ impl A2aClient {
         // `build_client_for_url`.  Build against the actual URL we are about
         // to fetch (with the `/.well-known/agent.json` suffix) so the pinned
         // host matches the request host.
-        let client = self.build_client_for_url(&agent_json_url)?;
+        let client = self.build_client_for_url(&agent_json_url).await?;
         let response = client
             .get(&agent_json_url)
             .header(
@@ -1063,7 +1060,7 @@ impl A2aClient {
         });
 
         // Bug #3563: SSRF check + DNS pin per call (see `discover`).
-        let client = self.build_client_for_url(url)?;
+        let client = self.build_client_for_url(url).await?;
         let response = client
             .post(url)
             .json(&request)
@@ -1102,7 +1099,7 @@ impl A2aClient {
         });
 
         // Bug #3563: SSRF check + DNS pin per call (see `discover`).
-        let client = self.build_client_for_url(url)?;
+        let client = self.build_client_for_url(url).await?;
         let response = client
             .post(url)
             .json(&request)
@@ -1919,5 +1916,47 @@ mod tests {
             err.contains("redirect not followed"),
             "expected explicit redirect rejection, got: {err}"
         );
+    }
+
+    /// `build_client_for_url` resolves through `check_ssrf_async` and builds a direct (never proxied) client pinned to the validated address.
+    /// On a current-thread runtime the old blocking resolver stalled the only worker; this locks in that discovery completes end to end through the async path.
+    #[tokio::test(flavor = "current_thread")]
+    async fn discover_succeeds_against_allowlisted_host_via_async_ssrf_check() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            if let Ok((mut stream, _)) = listener.accept().await {
+                let mut buf = [0u8; 4096];
+                let _ = stream.read(&mut buf).await;
+                let body = r#"{"name":"peer","description":"d","url":"http://peer","version":"1","capabilities":{"streaming":false,"pushNotifications":false,"stateTransitionHistory":false},"skills":[]}"#;
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(response.as_bytes()).await;
+                let _ = stream.shutdown().await;
+            }
+        });
+
+        let client = A2aClient::new_with_allowlist(vec!["127.0.0.1".to_string()]);
+        let card = tokio::time::timeout(
+            Duration::from_secs(5),
+            client.discover(&format!("http://{addr}")),
+        )
+        .await
+        .expect("discovery must not hang")
+        .expect("allowlisted loopback peer must be discoverable");
+        let _ = server.await;
+        assert_eq!(card.name, "peer");
+
+        // Without the allowlist the same loopback peer is still refused by the SSRF gate.
+        let err = A2aClient::new()
+            .discover(&format!("http://{addr}"))
+            .await
+            .expect_err("loopback must be blocked without an allowlist");
+        assert!(err.contains("SSRF blocked"), "got: {err}");
     }
 }

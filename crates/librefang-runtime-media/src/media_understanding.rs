@@ -899,21 +899,23 @@ async fn gemini_describe_image(
         }
     });
 
+    // The key goes in the `x-goog-api-key` header, never the URL, so reqwest error text cannot carry it (#4999).
     let url = format!(
-        "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent?key={}",
-        model, api_key
+        "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent",
+        model
     );
 
     let client = librefang_http::proxied_client();
     let resp = client
         .post(&url)
+        .header("x-goog-api-key", api_key.as_str())
         .json(&body)
         .timeout(std::time::Duration::from_secs(60))
         .send()
         .await
         .map_err(|e| {
-            // Gemini's URL embeds the API key as `?key=…` — sanitize.
-            tracing::warn!(error = %e, "Gemini vision request failed");
+            // Never surface transport error text to the LLM prompt; strip the URL from the log line as defence in depth (#4999).
+            tracing::warn!(error = %e.without_url(), "Gemini vision request failed");
             "Gemini vision request failed".to_string()
         })?;
 
@@ -925,7 +927,7 @@ async fn gemini_describe_image(
     }
 
     let json: serde_json::Value = resp.json().await.map_err(|e| {
-        tracing::warn!(error = %e, "Failed to parse Gemini vision response");
+        tracing::warn!(error = %e.without_url(), "Failed to parse Gemini vision response");
         "Failed to parse Gemini vision response".to_string()
     })?;
 
@@ -1191,24 +1193,23 @@ async fn gemini_transcribe(
         }]
     });
 
+    // The key goes in the `x-goog-api-key` header, never the URL, so reqwest error text cannot carry it (#4999).
     let url = format!(
-        "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent?key={}",
-        model, api_key
+        "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent",
+        model
     );
 
     let client = librefang_http::proxied_client();
     let resp = client
         .post(&url)
+        .header("x-goog-api-key", api_key.as_str())
         .json(&body)
         .timeout(timeout)
         .send()
         .await
         .map_err(|e| {
-            // Critical: Gemini's URL embeds the API key as `?key=…`.
-            // The `reqwest::Error` display can reproduce the URL — never
-            // surface it to the LLM prompt. Log + return a sanitized Err.
-            // See #4999.
-            tracing::warn!(error = %e, "Gemini transcription request failed");
+            // Never surface transport error text to the LLM prompt: log it with the URL stripped and return a sanitized Err (#4999).
+            tracing::warn!(error = %e.without_url(), "Gemini transcription request failed");
             "Gemini transcription request failed".to_string()
         })?;
 
@@ -1220,7 +1221,7 @@ async fn gemini_transcribe(
     }
 
     let json: serde_json::Value = resp.json().await.map_err(|e| {
-        tracing::warn!(error = %e, "Failed to parse Gemini response");
+        tracing::warn!(error = %e.without_url(), "Failed to parse Gemini response");
         "Failed to parse Gemini response".to_string()
     })?;
 

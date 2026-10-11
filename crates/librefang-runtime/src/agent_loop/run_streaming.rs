@@ -423,6 +423,7 @@ async fn run_agent_loop_streaming_inner(
         mut messages,
         new_messages_start: prepared_new_messages_start,
         repair_stats,
+        mut injections,
     } = prepare_llm_messages(
         manifest,
         session,
@@ -448,12 +449,11 @@ async fn run_agent_loop_streaming_inner(
     )
     .await
     {
-        messages.insert(
-            0,
-            Message::user(format!(
-                "[Web search results — use these to inform your response]\n{search_results}"
-            )),
-        );
+        let search_msg = Message::user(format!(
+            "[Web search results — use these to inform your response]\n{search_results}"
+        ));
+        messages.insert(0, search_msg.clone());
+        injections.head.insert(0, search_msg);
     }
 
     let mut total_usage = TokenUsage::default();
@@ -596,6 +596,12 @@ async fn run_agent_loop_streaming_inner(
             });
         }
 
+        // Resolved once per iteration and shared by engine compaction and the history fold, so neither strips reasoning an Echo provider requires (#4842).
+        let fold_echo_policy = kernel
+            .as_ref()
+            .map(|k| k.reasoning_echo_policy_for(&manifest.model.model))
+            .unwrap_or_default();
+
         // Pluggable context engine: threshold-gated compaction (same as the
         // non-streaming loop). `last_prompt_tokens` carries only the previous
         // turn's prompt cost — never the cumulative total.  `total_usage`
@@ -614,13 +620,16 @@ async fn run_agent_loop_streaming_inner(
                 // understand when used as a summarisation model.
                 let compact_model =
                     strip_provider_prefix(&manifest.model.model, &manifest.model.provider);
+                // Compact the canonical history, not the working copy — see `compaction_history`.
+                let history = compaction_history(session);
                 match engine
                     .compact(
                         session.agent_id,
-                        &messages,
+                        &history,
                         driver.clone(),
                         &compact_model,
                         ctx_window,
+                        fold_echo_policy,
                     )
                     .await
                 {
@@ -635,6 +644,7 @@ async fn run_agent_loop_streaming_inner(
                             &mut new_messages_start,
                             result.summary,
                             result.kept_messages,
+                            &injections,
                         );
                         // `last_prompt_tokens` is NOT reset — see non-streaming
                         // comment for rationale.
@@ -649,10 +659,6 @@ async fn run_agent_loop_streaming_inner(
         // History fold (#3347 3/N): rewrite stale tool-result blocks in place
         // before context assembly — streaming path mirrors non-streaming via
         // `maybe_fold_stale_tool_results` (#4 review-followup DRY).
-        let fold_echo_policy = kernel
-            .as_ref()
-            .map(|k| k.reasoning_echo_policy_for(&manifest.model.model))
-            .unwrap_or_default();
         messages = maybe_fold_stale_tool_results(
             messages,
             session,
@@ -729,7 +735,8 @@ async fn run_agent_loop_streaming_inner(
                 messages = crate::session_repair::ensure_starts_with_user(messages);
             }
             if had_soft_compression {
-                session.set_messages(messages.clone());
+                // Persist the compressed history without the per-turn injections, which belong to this request only.
+                session.set_messages(without_turn_injections(&messages, &injections));
             }
             apply_context_guard(&mut messages, &context_budget, available_tools);
             recovery
@@ -1679,6 +1686,7 @@ async fn run_agent_loop_streaming_inner(
                             "reason": "tool_failure",
                             "error_count": hard_error_count,
                             "consecutive_all_failed": consecutive_all_failed,
+                            "session_id": session.id.to_string(),
                             "is_fork": opts.is_fork,
                         }),
                     };
@@ -1772,6 +1780,7 @@ async fn run_agent_loop_streaming_inner(
                         data: serde_json::json!({
                             "iterations": iteration + 1,
                             "reason": "max_continuations",
+                            "session_id": session.id.to_string(),
                             "is_fork": opts.is_fork,
                         }),
                     };
@@ -1850,6 +1859,7 @@ async fn run_agent_loop_streaming_inner(
         data: serde_json::json!({
             "reason": "max_iterations_exceeded",
             "iterations": max_iterations,
+            "session_id": session.id.to_string(),
             "is_fork": opts.is_fork,
         }),
     };

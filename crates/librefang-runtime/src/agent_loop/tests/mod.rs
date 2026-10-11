@@ -107,6 +107,7 @@ fn context_compaction_updates_working_and_persistent_messages() {
         &mut new_messages_start,
         "earlier facts".to_string(),
         vec![current_user.clone()],
+        &TurnInjections::default(),
     );
 
     assert_eq!(working.len(), session.messages.len());
@@ -163,6 +164,7 @@ fn context_compaction_preserves_current_turn_when_engine_omits_it() {
         &mut new_messages_start,
         "old history".to_string(),
         Vec::new(),
+        &TurnInjections::default(),
     );
 
     assert_eq!(new_messages_start, 1);
@@ -201,6 +203,7 @@ fn context_compaction_uses_last_duplicate_as_current_turn_boundary() {
         &mut new_messages_start,
         String::new(),
         original,
+        &TurnInjections::default(),
     );
 
     assert_eq!(new_messages_start, 2);
@@ -237,6 +240,7 @@ fn context_compaction_keeps_full_current_turn_when_first_message_repeats() {
         &mut new_messages_start,
         String::new(),
         original,
+        &TurnInjections::default(),
     );
 
     assert_eq!(new_messages_start, 1);
@@ -249,6 +253,279 @@ fn context_compaction_keeps_full_current_turn_when_first_message_repeats() {
         ["same request", "intermediate answer", "same request"]
     );
     assert_eq!(working.len(), session.messages.len());
+}
+
+fn compaction_test_session(messages: Vec<Message>) -> Session {
+    Session {
+        id: librefang_types::agent::SessionId::new(),
+        agent_id: librefang_types::agent::AgentId::new(),
+        parent_session_id: None,
+        messages,
+        context_window_tokens: 0,
+        label: None,
+        model_override: None,
+        messages_generation: 0,
+        last_repaired_generation: None,
+        peer_id: None,
+    }
+}
+
+fn tool_use_message(id: &str, input: serde_json::Value) -> Message {
+    Message {
+        role: Role::Assistant,
+        content: MessageContent::Blocks(vec![ContentBlock::ToolUse {
+            id: id.to_string(),
+            name: "x".to_string(),
+            input,
+            provider_metadata: None,
+        }]),
+        pinned: false,
+        timestamp: None,
+    }
+}
+
+fn tool_result_message(id: &str) -> Message {
+    Message {
+        role: Role::User,
+        content: MessageContent::Blocks(vec![ContentBlock::ToolResult {
+            tool_use_id: id.to_string(),
+            tool_name: "x".to_string(),
+            content: "r".to_string(),
+            is_error: false,
+            status: librefang_types::tool::ToolExecutionStatus::Completed,
+            approval_request_id: None,
+        }]),
+        pinned: false,
+        timestamp: None,
+    }
+}
+
+fn count_tool_blocks(messages: &[Message], id: &str) -> (usize, usize) {
+    let mut uses = 0;
+    let mut results = 0;
+    for message in messages {
+        if let MessageContent::Blocks(blocks) = &message.content {
+            for block in blocks {
+                match block {
+                    ContentBlock::ToolUse { id: use_id, .. } if use_id == id => uses += 1,
+                    ContentBlock::ToolResult { tool_use_id, .. } if tool_use_id == id => {
+                        results += 1
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    (uses, results)
+}
+
+/// Engine compaction mid tool loop: the working copy carries the memory-context head injection and the current-time message, the session does not.
+/// Neither may be persisted, the tool turn must not be duplicated, and the rebuilt working copy must keep both injections in place.
+#[test]
+fn context_compaction_does_not_persist_time_msg_or_duplicate_tool_turn() {
+    let question = Message::user("q");
+    let tool_use = tool_use_message("tu1", serde_json::json!({}));
+    let tool_result = tool_result_message("tu1");
+    let mut session = compaction_test_session(vec![
+        Message::user("old"),
+        Message::assistant("old answer"),
+        question.clone(),
+        tool_use.clone(),
+        tool_result.clone(),
+    ]);
+    let memory_msg = Message::user("[System context — what you know about this person]\nm");
+    let time_msg = Message::user("[Current date/time: Friday 12:00]");
+    let injections = TurnInjections {
+        head: vec![memory_msg.clone()],
+        time_msg: Some(time_msg.clone()),
+    };
+    let mut working = vec![
+        memory_msg.clone(),
+        session.messages[0].clone(),
+        session.messages[1].clone(),
+        question.clone(),
+        time_msg.clone(),
+        tool_use.clone(),
+        tool_result.clone(),
+    ];
+    let mut new_messages_start = 2;
+
+    // What `DefaultContextEngine` keeps from `compaction_history` with keep_recent = 3.
+    let kept = compaction_history(&session)[2..].to_vec();
+    apply_context_compaction(
+        &mut session,
+        &mut working,
+        &mut new_messages_start,
+        "earlier facts".to_string(),
+        kept,
+        &injections,
+    );
+
+    for message in &session.messages {
+        let text = message.content.text_content();
+        assert!(
+            !text.contains("[Current date/time"),
+            "time message persisted"
+        );
+        assert!(
+            !text.starts_with("[System context"),
+            "memory context persisted"
+        );
+    }
+    assert_eq!(count_tool_blocks(&session.messages, "tu1"), (1, 1));
+    assert_eq!(new_messages_start, 1);
+    let current_turn: Vec<_> = session.messages[new_messages_start..]
+        .iter()
+        .map(|m| serde_json::to_value(m).unwrap())
+        .collect();
+    let expected: Vec<_> = [&question, &tool_use, &tool_result]
+        .iter()
+        .map(|m| serde_json::to_value(m).unwrap())
+        .collect();
+    assert_eq!(current_turn, expected);
+
+    let working_text: Vec<_> = working.iter().map(|m| m.content.text_content()).collect();
+    assert_eq!(working.len(), 6);
+    assert!(working_text[0].starts_with("[System context"));
+    assert!(working_text[1].contains("earlier facts"));
+    assert_eq!(working_text[2], "q");
+    assert!(working_text[3].contains("[Current date/time"));
+    assert_eq!(count_tool_blocks(&working, "tu1"), (1, 1));
+}
+
+/// A custom engine that rewrites the current turn's tool call must not leave the rewritten copy next to the appended original — the same tool_use id twice is a provider 400.
+#[test]
+fn context_compaction_fallback_drops_rewritten_current_turn_tool_calls() {
+    let question = Message::user("q");
+    let mut session = compaction_test_session(vec![
+        Message::user("old"),
+        question.clone(),
+        tool_use_message("tu1", serde_json::json!({})),
+        tool_result_message("tu1"),
+    ]);
+    let mut working = session.messages.clone();
+    let mut new_messages_start = 1;
+
+    apply_context_compaction(
+        &mut session,
+        &mut working,
+        &mut new_messages_start,
+        "summary".to_string(),
+        vec![
+            question,
+            tool_use_message("tu1", serde_json::json!({"rewritten": true})),
+            tool_result_message("tu1"),
+        ],
+        &TurnInjections::default(),
+    );
+
+    assert_eq!(count_tool_blocks(&session.messages, "tu1"), (1, 1));
+    assert_eq!(count_tool_blocks(&working, "tu1"), (1, 1));
+}
+
+/// Retry nudges pushed only into the working copy before a `continue` must survive a compaction on the next iteration, and must not be persisted.
+#[test]
+fn context_compaction_keeps_working_only_retry_nudges() {
+    let question = Message::user("q");
+    let mut session = compaction_test_session(vec![
+        Message::user("old"),
+        Message::assistant("old answer"),
+        question.clone(),
+    ]);
+    let time_msg = Message::user("[Current date/time: Friday 12:00]");
+    let injections = TurnInjections {
+        head: Vec::new(),
+        time_msg: Some(time_msg.clone()),
+    };
+    let mut working = session.messages.clone();
+    working.push(time_msg);
+    working.push(Message::assistant("[no response]"));
+    working.push(Message::user("Please provide your response."));
+    let mut new_messages_start = 2;
+
+    apply_context_compaction(
+        &mut session,
+        &mut working,
+        &mut new_messages_start,
+        "summary".to_string(),
+        vec![question],
+        &injections,
+    );
+
+    assert_eq!(session.messages.len(), 2);
+    let working_text: Vec<_> = working.iter().map(|m| m.content.text_content()).collect();
+    assert_eq!(working_text.len(), 5);
+    assert_eq!(working_text[1], "q");
+    assert!(working_text[2].contains("[Current date/time"));
+    assert_eq!(working_text[3], "[no response]");
+    assert_eq!(working_text[4], "Please provide your response.");
+}
+
+/// The inline compressor path persists its compressed working copy, so the per-turn injections must be filtered out first or they are re-sent on every later turn.
+#[test]
+fn without_turn_injections_strips_head_and_time_messages() {
+    let memory_msg = Message::user("[System context — what you know about this person]\nm");
+    let time_msg = Message::user("[Current date/time: Friday 12:00]");
+    let injections = TurnInjections {
+        head: vec![memory_msg.clone()],
+        time_msg: Some(time_msg.clone()),
+    };
+    let working = vec![
+        memory_msg,
+        Message::user("[Context compaction summary] s"),
+        Message::user("q"),
+        time_msg,
+        tool_use_message("tu1", serde_json::json!({})),
+        tool_result_message("tu1"),
+    ];
+
+    let persisted = without_turn_injections(&working, &injections);
+
+    let texts: Vec<_> = persisted.iter().map(|m| m.content.text_content()).collect();
+    assert_eq!(persisted.len(), 4, "{texts:?}");
+    assert!(texts[0].starts_with("[Context compaction summary]"));
+    assert_eq!(texts[1], "q");
+    assert_eq!(count_tool_blocks(&persisted, "tu1"), (1, 1));
+    assert_eq!(
+        without_turn_injections(&working, &TurnInjections::default()).len(),
+        working.len()
+    );
+}
+
+/// #4971: engine compaction (the production path) must reset the file_read dedup tracker, or a re-read of a summarised file returns only a stub.
+#[test]
+fn context_compaction_resets_file_read_dedup_tracker() {
+    use crate::file_read_tracker::{with_session, ReadOutcome};
+    use std::path::Path;
+
+    let current = Message::user("current");
+    let mut session = compaction_test_session(vec![
+        Message::user("old"),
+        Message::assistant("a"),
+        current.clone(),
+    ]);
+    let path = Path::new("/w/src/config.rs");
+    with_session(session.id, |t| t.observe(path, "BODY"));
+    assert!(matches!(
+        with_session(session.id, |t| t.observe(path, "BODY")),
+        ReadOutcome::Unchanged { .. }
+    ));
+    let mut working = session.messages.clone();
+    let mut new_messages_start = 2;
+
+    apply_context_compaction(
+        &mut session,
+        &mut working,
+        &mut new_messages_start,
+        "summary".to_string(),
+        vec![current],
+        &TurnInjections::default(),
+    );
+
+    assert_eq!(
+        with_session(session.id, |t| t.observe(path, "BODY")),
+        ReadOutcome::First
+    );
 }
 
 // ── push_accumulated_text bounded growth ──────────────────────────────
@@ -271,22 +548,55 @@ fn test_push_accumulated_text_caps_at_max_bytes() {
     push_accumulated_text(&mut buf, &small);
     assert_eq!(buf.len(), 1024);
 
-    // Second push: would exceed the cap → buffer is sealed at exactly the cap
+    // Second push: would exceed the cap → buffer is sealed without overflowing
     let huge = "b".repeat(ACCUMULATED_TEXT_MAX_BYTES);
     push_accumulated_text(&mut buf, &huge);
-    assert_eq!(
-        buf.len(),
-        ACCUMULATED_TEXT_MAX_BYTES,
-        "buffer must be sealed exactly at the cap (no overflow)"
+    assert!(
+        buf.len() <= ACCUMULATED_TEXT_MAX_BYTES,
+        "buffer must be sealed within the cap (no overflow)"
     );
+    assert!(buf.ends_with(" [accumulated_text capped]"));
     // The original 'a' prefix must be preserved — that's the whole point
     // of the "preserve buffered prefix" guarantee.
     assert!(buf.starts_with(&small));
 
     // Third push: short-circuits, no growth, no panic
+    let sealed = buf.clone();
     push_accumulated_text(&mut buf, "ignored");
-    assert_eq!(buf.len(), ACCUMULATED_TEXT_MAX_BYTES);
+    assert_eq!(buf, sealed);
     assert!(!buf.contains("ignored"));
+}
+
+/// The sealed buffer is the user-facing fallback reply, so it must not be padded with whitespace, and the overflowing text is truncated to fit rather than dropped whole.
+#[test]
+fn test_push_accumulated_text_cap_does_not_pad_and_keeps_fitting_prefix() {
+    let mut buf = String::new();
+    push_accumulated_text(&mut buf, "Checking the logs");
+    push_accumulated_text(&mut buf, &"b".repeat(70_000));
+    assert!(buf.len() <= ACCUMULATED_TEXT_MAX_BYTES);
+    assert!(buf.starts_with("Checking the logs"));
+    assert!(
+        buf.ends_with("[accumulated_text capped]"),
+        "sealed buffer must end with the sentinel, not whitespace padding"
+    );
+    assert!(!buf.contains("   "), "no space padding");
+    assert!(
+        buf.contains("bbbb"),
+        "overflowing text should be truncated to fit, not dropped"
+    );
+    let sealed = buf.clone();
+    push_accumulated_text(&mut buf, "ignored");
+    assert_eq!(buf, sealed);
+}
+
+#[test]
+fn test_push_accumulated_text_cap_truncates_multibyte_on_char_boundary() {
+    let mut buf = String::new();
+    push_accumulated_text(&mut buf, "x");
+    push_accumulated_text(&mut buf, &"é".repeat(40_000));
+    assert!(buf.len() <= ACCUMULATED_TEXT_MAX_BYTES);
+    assert!(buf.starts_with("x\n\né"));
+    assert!(buf.ends_with(" [accumulated_text capped]"));
 }
 
 #[test]
@@ -966,6 +1276,7 @@ fn silent_response_single_source_of_truth() {
     );
 }
 
+mod hook_payload;
 mod integration;
 mod recovery;
 mod sampling_params;

@@ -53,6 +53,7 @@ impl ContextEngine for TransformOnlyEngine {
         _driver: Arc<dyn LlmDriver>,
         _model: &str,
         _context_window_tokens: usize,
+        _reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy,
     ) -> LibreFangResult<CompactionResult> {
         Ok(CompactionResult {
             summary: String::new(),
@@ -825,10 +826,18 @@ async fn test_summary_engine_compact_called_once_on_threshold_cross() {
             driver: Arc<dyn LlmDriver>,
             model: &str,
             context_window_tokens: usize,
+            reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy,
         ) -> LibreFangResult<CompactionResult> {
             self.compact_count.fetch_add(1, Ordering::SeqCst);
             self.inner
-                .compact(agent_id, messages, driver, model, context_window_tokens)
+                .compact(
+                    agent_id,
+                    messages,
+                    driver,
+                    model,
+                    context_window_tokens,
+                    reasoning_echo_policy,
+                )
                 .await
         }
         async fn after_turn(&self, agent_id: AgentId, messages: &[Message]) -> LibreFangResult<()> {
@@ -874,6 +883,7 @@ async fn test_summary_engine_compact_called_once_on_threshold_cross() {
             driver.clone(),
             "test-model",
             200_000,
+            librefang_types::model_catalog::ReasoningEchoPolicy::None,
         )
         .await;
     assert_eq!(
@@ -899,11 +909,128 @@ async fn test_summary_engine_compact_called_once_on_threshold_cross() {
             driver.clone(),
             "test-model",
             200_000,
+            librefang_types::model_catalog::ReasoningEchoPolicy::None,
         )
         .await;
     assert_eq!(
         tracker.compact_count.load(Ordering::SeqCst),
         2,
         "compact must be called when should_compress transitions to true"
+    );
+}
+
+/// `DefaultContextEngine::compact` must forward the caller's reasoning echo policy into the compactor, so the kept tail keeps its `Thinking` blocks for an `Echo` provider (DeepSeek V4 Flash, #4842) that rejects a history without them.
+#[tokio::test]
+async fn test_default_engine_compact_honours_reasoning_echo_policy() {
+    use crate::llm_driver::{CompletionResponse, LlmError};
+    use librefang_types::message::{ContentBlock, MessageContent, Role, TokenUsage};
+    use librefang_types::model_catalog::ReasoningEchoPolicy;
+
+    struct SummaryDriver;
+
+    #[async_trait]
+    impl LlmDriver for SummaryDriver {
+        async fn complete(
+            &self,
+            _req: crate::llm_driver::CompletionRequest,
+        ) -> Result<CompletionResponse, LlmError> {
+            Ok(CompletionResponse {
+                content: vec![ContentBlock::Text {
+                    text: "Summary of prior conversation".to_string(),
+                    provider_metadata: None,
+                }],
+                stop_reason: librefang_types::message::StopReason::EndTurn,
+                tool_calls: vec![],
+                usage: TokenUsage::default(),
+                actual_provider: None,
+                actual_model: None,
+            })
+        }
+    }
+
+    fn assistant_with_thinking(n: usize) -> Message {
+        Message {
+            role: Role::Assistant,
+            content: MessageContent::Blocks(vec![
+                ContentBlock::Thinking {
+                    thinking: format!("reasoning {n}"),
+                    provider_metadata: None,
+                },
+                ContentBlock::Text {
+                    text: format!("answer {n}"),
+                    provider_metadata: None,
+                },
+            ]),
+            pinned: false,
+            timestamp: None,
+        }
+    }
+
+    fn has_thinking(message: &Message) -> bool {
+        matches!(&message.content, MessageContent::Blocks(blocks) if blocks.iter().any(|b| matches!(b, ContentBlock::Thinking { .. })))
+    }
+
+    let config = ContextEngineConfig {
+        compaction: Some(librefang_types::config::CompactionTomlConfig {
+            keep_recent: 4,
+            strip_reasoning_after_turns: 1,
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let engine = DefaultContextEngine::new(config, make_memory(), None);
+    let mut messages = Vec::new();
+    for n in 0..4 {
+        messages.push(Message::user(format!("question {n}")));
+        messages.push(assistant_with_thinking(n));
+    }
+    let agent_id = librefang_types::agent::AgentId::new();
+
+    let echo = engine
+        .compact(
+            agent_id,
+            &messages,
+            Arc::new(SummaryDriver),
+            "deepseek-v4-flash",
+            200_000,
+            ReasoningEchoPolicy::Echo,
+        )
+        .await
+        .unwrap();
+    let echo_assistants: Vec<_> = echo
+        .kept_messages
+        .iter()
+        .filter(|m| m.role == Role::Assistant)
+        .collect();
+    assert_eq!(echo_assistants.len(), 2);
+    assert!(
+        echo_assistants.iter().all(|m| has_thinking(m)),
+        "Echo policy must keep every Thinking block in the kept tail"
+    );
+
+    let stripped = engine
+        .compact(
+            agent_id,
+            &messages,
+            Arc::new(SummaryDriver),
+            "some-model",
+            200_000,
+            ReasoningEchoPolicy::None,
+        )
+        .await
+        .unwrap();
+    let stripped_assistants: Vec<_> = stripped
+        .kept_messages
+        .iter()
+        .filter(|m| m.role == Role::Assistant)
+        .collect();
+    assert_eq!(stripped_assistants.len(), 2);
+    assert!(
+        !has_thinking(stripped_assistants[0]),
+        "older kept assistant turn must lose its reasoning without Echo"
+    );
+    assert!(
+        has_thinking(stripped_assistants[1]),
+        "newest assistant turn keeps its reasoning"
     );
 }

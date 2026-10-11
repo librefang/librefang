@@ -25,17 +25,19 @@ use tracing::{info, warn};
 /// reasonable user-facing message (~10× a Slack message limit) while still
 /// being orders of magnitude below problematic memory pressure.
 ///
-/// Once the cap is reached the buffer is sealed: subsequent appends short-
-/// circuit and a single `warn!` is emitted on the transition so the log
-/// isn't spammed. The existing buffered prefix is preserved so the empty-
-/// response fallback still has something useful to surface.
+/// When an append would cross the cap, the incoming text is truncated (on a char boundary) to whatever room is left, `ACCUMULATED_TEXT_CAPPED_SENTINEL` is appended, and the buffer is sealed: subsequent appends short-circuit and a single `warn!` is emitted on the transition so the log isn't spammed.
+/// The buffer is never padded — it is the user-facing reply when the final EndTurn text is empty, so padding would be delivered and persisted verbatim.
+/// The existing buffered prefix is preserved so the empty-response fallback still has something useful to surface.
 pub(super) const ACCUMULATED_TEXT_MAX_BYTES: usize = 64 * 1024;
+
+/// Marks a sealed `accumulated_text` buffer; its presence at the end of the buffer is what later appends check.
+const ACCUMULATED_TEXT_CAPPED_SENTINEL: &str = " [accumulated_text capped]";
 
 /// Append `intermediate_text` to `accumulated_text`, bounded by
 /// `ACCUMULATED_TEXT_MAX_BYTES`. See the constant's doc-comment for rationale.
 pub(super) fn push_accumulated_text(accumulated_text: &mut String, intermediate_text: &str) {
     // Buffer already sealed on a prior call.
-    if accumulated_text.len() >= ACCUMULATED_TEXT_MAX_BYTES {
+    if accumulated_text.ends_with(ACCUMULATED_TEXT_CAPPED_SENTINEL) {
         return;
     }
     let separator = if accumulated_text.is_empty() {
@@ -49,23 +51,26 @@ pub(super) fn push_accumulated_text(accumulated_text: &mut String, intermediate_
             current_bytes = accumulated_text.len(),
             incoming_bytes = intermediate_text.len(),
             cap_bytes = ACCUMULATED_TEXT_MAX_BYTES,
-            "accumulated_text fallback buffer cap reached; further intermediate \
-             text for this loop will be dropped (existing buffer is preserved \
-             for the empty-response fallback)"
+            "accumulated_text fallback buffer cap reached; the overflowing intermediate text is truncated to fit and further text for this loop will be dropped (existing buffer is preserved for the empty-response fallback)"
         );
-        // Seal the buffer with ASCII padding so future calls trip the early
-        // return above. ASCII is always UTF-8 boundary-safe.
-        let sentinel = " [accumulated_text capped]";
-        if accumulated_text.len() + sentinel.len() <= ACCUMULATED_TEXT_MAX_BYTES {
-            accumulated_text.push_str(sentinel);
+        let room = ACCUMULATED_TEXT_MAX_BYTES.saturating_sub(
+            accumulated_text.len() + separator.len() + ACCUMULATED_TEXT_CAPPED_SENTINEL.len(),
+        );
+        let fitting = crate::str_utils::safe_truncate_str(intermediate_text, room);
+        if !fitting.is_empty() {
+            accumulated_text.push_str(separator);
+            accumulated_text.push_str(fitting);
+        } else if accumulated_text.len() + ACCUMULATED_TEXT_CAPPED_SENTINEL.len()
+            > ACCUMULATED_TEXT_MAX_BYTES
+        {
+            let keep = crate::str_utils::safe_truncate_str(
+                accumulated_text,
+                ACCUMULATED_TEXT_MAX_BYTES - ACCUMULATED_TEXT_CAPPED_SENTINEL.len(),
+            )
+            .len();
+            accumulated_text.truncate(keep);
         }
-        let pad = ACCUMULATED_TEXT_MAX_BYTES.saturating_sub(accumulated_text.len());
-        if pad > 0 {
-            accumulated_text.reserve(pad);
-            for _ in 0..pad {
-                accumulated_text.push(' ');
-            }
-        }
+        accumulated_text.push_str(ACCUMULATED_TEXT_CAPPED_SENTINEL);
         return;
     }
     accumulated_text.push_str(separator);

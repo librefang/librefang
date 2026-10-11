@@ -1350,6 +1350,81 @@ async fn maybe_fold_stale_tool_results_persists_rewrites_to_session_messages() {
     );
 }
 
+/// #4971: once the history fold summarises stale tool results away, the file_read dedup tracker must be reset, or a re-read of a folded file returns only a stub pointing at content no longer in the prompt.
+#[tokio::test]
+async fn maybe_fold_stale_tool_results_resets_file_read_dedup_tracker() {
+    use crate::file_read_tracker::{with_session, ReadOutcome};
+    use crate::history_fold::FoldConfig;
+    use librefang_types::message::{ContentBlock, Message, MessageContent, Role};
+    use librefang_types::tool::ToolExecutionStatus;
+    use std::path::Path;
+
+    let mut session = librefang_memory::session::Session {
+        id: librefang_types::agent::SessionId::new(),
+        agent_id: librefang_types::agent::AgentId::new(),
+        parent_session_id: None,
+        messages: vec![Message::user("start")],
+        context_window_tokens: 0,
+        label: None,
+        model_override: None,
+        messages_generation: 0,
+        last_repaired_generation: None,
+        peer_id: None,
+    };
+    for i in 0..10 {
+        session
+            .messages
+            .push(Message::assistant(format!("asst {i}")));
+        session.messages.push(Message {
+            role: Role::User,
+            content: MessageContent::Blocks(vec![ContentBlock::ToolResult {
+                tool_use_id: format!("tid_{i}"),
+                tool_name: "file_read".to_string(),
+                content: format!("file body {i}"),
+                is_error: false,
+                status: ToolExecutionStatus::Completed,
+                approval_request_id: None,
+            }]),
+            pinned: false,
+            timestamp: None,
+        });
+    }
+    let path = Path::new("/w/src/config.rs");
+    with_session(session.id, |t| t.observe(path, "BODY"));
+    assert!(matches!(
+        with_session(session.id, |t| t.observe(path, "BODY")),
+        ReadOutcome::Unchanged { .. }
+    ));
+
+    let aux_driver: Arc<dyn LlmDriver> = Arc::new(FoldSummaryDriver);
+    let aux_client = crate::aux_client::AuxClient::with_primary_only(Arc::clone(&aux_driver));
+    let working = session.messages.clone();
+    let folded = maybe_fold_stale_tool_results(
+        working,
+        &mut session,
+        FoldConfig {
+            fold_after_turns: 2,
+            min_batch_size: 1,
+        },
+        "test-model",
+        Some(&aux_client),
+        aux_driver,
+        false,
+        librefang_types::model_catalog::ReasoningEchoPolicy::None,
+    )
+    .await;
+    assert!(
+        folded.iter().any(|m| matches!(&m.content, MessageContent::Blocks(blocks) if blocks.iter().any(|b| matches!(b, ContentBlock::ToolResult { content, .. } if content.starts_with("[history-fold]"))))),
+        "fixture must actually fold at least one group"
+    );
+
+    assert_eq!(
+        with_session(session.id, |t| t.observe(path, "BODY")),
+        ReadOutcome::First,
+        "fold must reset the file_read dedup tracker"
+    );
+}
+
 #[tokio::test]
 async fn test_streaming_max_continuations_return_preserves_reply_directives() {
     let memory = librefang_memory::MemorySubstrate::open_in_memory(0.01).unwrap();

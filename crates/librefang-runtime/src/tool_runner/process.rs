@@ -84,24 +84,34 @@ pub(super) async fn tool_process_start(
     let command = input["command"]
         .as_str()
         .ok_or(ToolError::MissingParameter("command"))?;
-    let args: Vec<String> = match input["args"].as_array() {
-        Some(arr) => {
+    // Models routinely emit bare numbers and booleans for ports and counts, so those are stringified to the argv the model meant.
+    // Anything else is refused rather than dropped: silently removing an element starts a process with a different argv while the tool reports success.
+    // This runs before `full_command` is built, so the exec gates below check exactly the argv that is spawned.
+    let args: Vec<String> = match &input["args"] {
+        serde_json::Value::Null => Vec::new(),
+        serde_json::Value::Array(arr) => {
             let mut out = Vec::with_capacity(arr.len());
             for (i, v) in arr.iter().enumerate() {
-                match v.as_str() {
-                    Some(s) => out.push(s.to_string()),
-                    None => {
-                        tracing::warn!(
-                            index = i,
-                            value = %v,
-                            "Dropping non-string arg in process_start"
-                        );
+                match v {
+                    serde_json::Value::String(s) => out.push(s.clone()),
+                    serde_json::Value::Number(n) => out.push(n.to_string()),
+                    serde_json::Value::Bool(b) => out.push(b.to_string()),
+                    other => {
+                        return Err(ToolError::InvalidParameter {
+                            name: "args",
+                            reason: format!("args[{i}] must be a string, got {other}"),
+                        })
                     }
                 }
             }
             out
         }
-        None => Vec::new(),
+        _ => {
+            return Err(ToolError::InvalidParameter {
+                name: "args",
+                reason: "must be an array of strings".to_string(),
+            })
+        }
     };
 
     // SECURITY: route process_start through the same exec gate as shell_exec
@@ -545,6 +555,83 @@ mod tests {
         assert_eq!(pm.count(), 1);
         // Cleanup the spawned child.
         let list = pm.list("agent1");
+        for p in list {
+            let _ = pm.kill(&p.id, "agent1").await;
+        }
+    }
+
+    #[tokio::test]
+    async fn process_start_rejects_non_scalar_arg_without_spawning() {
+        use librefang_types::config::{ExecPolicy, ExecSecurityMode};
+        let pm = crate::process_manager::ProcessManager::new(5);
+        let policy = ExecPolicy {
+            mode: ExecSecurityMode::Full,
+            ..Default::default()
+        };
+        let res = tool_process_start(
+            &json!({ "command": "echo", "args": ["a", {"x": 1}] }),
+            Some(&pm),
+            Some("agent1"),
+            Some(&policy),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
+        assert!(
+            matches!(res, Err(ToolError::InvalidParameter { name: "args", .. })),
+            "{res:?}"
+        );
+        assert_eq!(pm.count(), 0);
+    }
+
+    #[tokio::test]
+    async fn process_start_rejects_non_array_args() {
+        let pm = crate::process_manager::ProcessManager::new(5);
+        let res = tool_process_start(
+            &json!({ "command": "echo", "args": "hi" }),
+            Some(&pm),
+            Some("agent1"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
+        assert!(
+            matches!(res, Err(ToolError::InvalidParameter { name: "args", .. })),
+            "{res:?}"
+        );
+        assert_eq!(pm.count(), 0);
+    }
+
+    // A bare number used to be dropped from argv, so `sleep 30` ran as `sleep` while the tool reported success.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn process_start_stringifies_numeric_arg() {
+        use librefang_types::config::ExecPolicy;
+        let pm = crate::process_manager::ProcessManager::new(5);
+        let policy = ExecPolicy::default();
+        let res = tool_process_start(
+            &json!({ "command": "sleep", "args": [30] }),
+            Some(&pm),
+            Some("agent1"),
+            Some(&policy),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
+        assert!(res.is_ok(), "{res:?}");
+        let list = pm.list("agent1");
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].command, "sleep 30");
         for p in list {
             let _ = pm.kill(&p.id, "agent1").await;
         }

@@ -4020,3 +4020,166 @@ fn adopting_a_legacy_discover_flag_warns_that_the_store_now_decides() {
         "and how to turn discovery off once the store owns it; got: {text}"
     );
 }
+
+fn custom_entry(id: &str, provider: &str, aliases: &[&str]) -> ModelCatalogEntry {
+    ModelCatalogEntry {
+        id: id.to_string(),
+        display_name: id.to_string(),
+        provider: provider.to_string(),
+        tier: ModelTier::Custom,
+        context_window: 64_000,
+        max_output_tokens: 4_096,
+        input_cost_per_m: 0.0,
+        output_cost_per_m: 0.0,
+        supports_tools: true,
+        supports_vision: false,
+        supports_streaming: true,
+        supports_thinking: false,
+        aliases: aliases.iter().map(|a| a.to_string()).collect(),
+        ..Default::default()
+    }
+}
+
+fn provider_model_count(catalog: &ModelCatalog, provider: &str) -> usize {
+    catalog
+        .list_providers()
+        .iter()
+        .find(|p| p.id == provider)
+        .map(|p| p.model_count)
+        .expect("provider present in test catalog")
+}
+
+/// A malformed custom_models.json must not be silently dropped and then clobbered: it is moved aside, so the next save cannot overwrite the operator's only copy.
+#[test]
+fn load_custom_models_moves_unparseable_file_aside() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("custom_models.json");
+    let original = r#"[{"id": "a", "display_name": "A",}]"#;
+    std::fs::write(&path, original).unwrap();
+
+    let mut catalog = test_catalog();
+    catalog.load_custom_models(&path);
+    assert!(!path.exists(), "unparseable file must be moved aside");
+    let aside: Vec<_> = std::fs::read_dir(tmp.path())
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter(|p| {
+            p.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("custom_models.json.corrupt-")
+        })
+        .collect();
+    assert_eq!(aside.len(), 1, "expected one aside copy, found {aside:?}");
+    assert_eq!(std::fs::read_to_string(&aside[0]).unwrap(), original);
+
+    // The next add persists only in-memory models; the aside copy must survive untouched.
+    assert!(catalog.add_custom_model(custom_entry("new-one", "qwen", &[])));
+    catalog.save_custom_models(&path).unwrap();
+    assert_eq!(std::fs::read_to_string(&aside[0]).unwrap(), original);
+}
+
+#[test]
+fn load_custom_models_missing_file_is_noop() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("custom_models.json");
+    let mut catalog = test_catalog();
+    let before = catalog.list_models().len();
+    catalog.load_custom_models(&path);
+    assert_eq!(catalog.list_models().len(), before);
+    assert_eq!(std::fs::read_dir(tmp.path()).unwrap().count(), 0);
+}
+
+#[test]
+fn save_then_load_custom_models_round_trips() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("custom_models.json");
+    let mut catalog = test_catalog();
+    assert!(catalog.add_custom_model(custom_entry("rt-model", "qwen", &[])));
+    catalog.save_custom_models(&path).unwrap();
+    assert_eq!(
+        std::fs::read_dir(tmp.path()).unwrap().count(),
+        1,
+        "only the final file may remain; no temp file left behind"
+    );
+
+    let mut fresh = test_catalog();
+    fresh.load_custom_models(&path);
+    assert!(fresh
+        .list_models()
+        .iter()
+        .any(|m| m.id == "rt-model" && m.provider == "qwen" && m.tier == ModelTier::Custom));
+}
+
+/// The add-handler rollback must remove only the entry it added, not a same-id custom model under another provider.
+#[test]
+fn remove_custom_model_scoped_to_provider_keeps_sibling() {
+    let mut catalog = test_catalog();
+    assert!(catalog.add_custom_model(custom_entry("llama3", "qwen", &[])));
+    assert!(catalog.add_custom_model(custom_entry("llama3", "minimax", &[])));
+
+    let removed = catalog.remove_custom_model("LLAMA3", Some("MiniMax"));
+    assert_eq!(removed.len(), 1);
+    assert_eq!(removed[0].provider, "minimax");
+    assert!(catalog
+        .list_models()
+        .iter()
+        .any(|m| m.id == "llama3" && m.provider == "qwen"));
+    assert!(!catalog
+        .list_models()
+        .iter()
+        .any(|m| m.id == "llama3" && m.provider == "minimax"));
+}
+
+#[test]
+fn remove_custom_model_updates_model_count_and_prunes_aliases() {
+    let mut catalog = test_catalog();
+    assert!(catalog.add_custom_model(custom_entry("gone-soon", "qwen", &["gone-alias"])));
+    let with_custom = provider_model_count(&catalog, "qwen");
+    assert_eq!(
+        catalog.resolve_alias("gone-alias").map(String::from),
+        Some("gone-soon".to_string())
+    );
+
+    let removed = catalog.remove_custom_model("gone-soon", None);
+    assert_eq!(removed.len(), 1);
+    assert_eq!(provider_model_count(&catalog, "qwen"), with_custom - 1);
+    assert_eq!(catalog.resolve_alias("gone-alias"), None);
+}
+
+#[test]
+fn remove_custom_model_keeps_alias_while_target_id_survives() {
+    let mut catalog = test_catalog();
+    assert!(catalog.add_custom_model(custom_entry("dup", "qwen", &["dup-alias"])));
+    assert!(catalog.add_custom_model(custom_entry("dup", "minimax", &[])));
+
+    catalog.remove_custom_model("dup", Some("qwen"));
+    assert_eq!(
+        catalog.resolve_alias("dup-alias").map(String::from),
+        Some("dup".to_string())
+    );
+}
+
+#[test]
+fn remove_custom_model_never_touches_builtin() {
+    let mut catalog = test_catalog();
+    assert!(catalog.find_model("grok-4-fast-reasoning").is_some());
+    assert!(catalog
+        .remove_custom_model("grok-4-fast-reasoning", None)
+        .is_empty());
+    assert!(catalog.find_model("grok-4-fast-reasoning").is_some());
+}
+
+/// An alias created through the alias API is persisted separately and must survive the model's removal, so deleting and re-adding a custom model to edit it does not lose the operator's alias.
+#[test]
+fn remove_custom_model_keeps_user_created_alias() {
+    let mut catalog = test_catalog();
+    assert!(catalog.add_custom_model(custom_entry("edited", "qwen", &[])));
+    assert!(catalog.add_alias("my-edited", "edited"));
+
+    catalog.remove_custom_model("edited", None);
+    assert_eq!(
+        catalog.resolve_alias("my-edited").map(String::from),
+        Some("edited".to_string())
+    );
+}

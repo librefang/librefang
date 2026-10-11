@@ -2111,30 +2111,100 @@ impl ModelCatalog {
         true
     }
 
-    /// Remove a custom model by ID.
+    /// Remove custom models by ID, optionally narrowed to one provider (both case-insensitive).
     ///
-    /// Only removes models with `Custom` tier to prevent accidental deletion
-    /// of builtin models. Returns `true` if removed.
-    pub fn remove_custom_model(&mut self, model_id: &str) -> bool {
-        let lower = model_id.to_lowercase();
-        let before = self.models.len();
-        self.models
-            .retain(|m| !(m.id.to_lowercase() == lower && m.tier == ModelTier::Custom));
-        self.models.len() < before
+    /// Only removes models with `Custom` tier to prevent accidental deletion of builtin models.
+    /// With `provider: None` every Custom entry with that ID is removed, whatever its provider.
+    /// Recomputes `model_count` for each affected provider and drops the aliases the removed entries registered once their target ID no longer names any model.
+    /// Returns the removed entries, so a caller can restore exactly those on rollback.
+    pub fn remove_custom_model(
+        &mut self,
+        model_id: &str,
+        provider: Option<&str>,
+    ) -> Vec<ModelCatalogEntry> {
+        let lower_id = model_id.to_lowercase();
+        let lower_provider = provider.map(str::to_lowercase);
+        let (removed, kept): (Vec<_>, Vec<_>) =
+            std::mem::take(&mut self.models).into_iter().partition(|m| {
+                m.tier == ModelTier::Custom
+                    && m.id.to_lowercase() == lower_id
+                    && lower_provider
+                        .as_deref()
+                        .is_none_or(|p| m.provider.to_lowercase() == p)
+            });
+        self.models = kept;
+        if removed.is_empty() {
+            return removed;
+        }
+
+        let affected: std::collections::BTreeSet<&str> =
+            removed.iter().map(|m| m.provider.as_str()).collect();
+        for provider in affected {
+            if let Some(p) = self.providers.iter_mut().find(|p| p.id == provider) {
+                p.model_count = self
+                    .models
+                    .iter()
+                    .filter(|m| m.provider == provider)
+                    .count();
+            }
+        }
+
+        // Only the aliases the removed entries registered themselves are pruned, and only while they still point at the removed ID.
+        // An alias survives while any model (a builtin, or the same ID under another provider) still has that ID.
+        // Aliases created through the alias API are left alone: they are persisted separately in aliases.toml, and the delete-then-re-add edit flow must not silently lose them.
+        let target_gone = !self.models.iter().any(|m| m.id.to_lowercase() == lower_id);
+        if target_gone {
+            for alias in removed.iter().flat_map(|m| &m.aliases) {
+                let key = alias.to_lowercase();
+                if self
+                    .aliases
+                    .get(&key)
+                    .is_some_and(|target| target.to_lowercase() == lower_id)
+                {
+                    self.aliases.remove(&key);
+                }
+            }
+        }
+        removed
     }
 
     /// Load custom models from a JSON file.
     ///
     /// Merges them into the catalog. Skips models that already exist.
+    /// A missing file is normal and silent. Any other read failure, or a parse failure, is logged at WARN.
+    /// On a parse failure the file is also renamed aside, so the next `save_custom_models` cannot overwrite the operator's only copy with just the models still in memory.
     pub fn load_custom_models(&mut self, path: &std::path::Path) {
-        if !path.exists() {
-            return;
-        }
-        let Ok(data) = std::fs::read_to_string(path) else {
-            return;
+        let data = match std::fs::read_to_string(path) {
+            Ok(d) => d,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
+            Err(e) => {
+                tracing::warn!(path = %path.display(), %e, "custom-models file ignored: read failed");
+                return;
+            }
         };
-        let Ok(entries) = serde_json::from_str::<Vec<ModelCatalogEntry>>(&data) else {
-            return;
+        let entries = match serde_json::from_str::<Vec<ModelCatalogEntry>>(&data) {
+            Ok(entries) => entries,
+            Err(e) => {
+                tracing::warn!(path = %path.display(), %e, "custom-models file ignored: parse failed");
+                let aside = path.with_extension(format!(
+                    "json.corrupt-{}",
+                    chrono::Utc::now().format("%Y%m%dT%H%M%SZ")
+                ));
+                match std::fs::rename(path, &aside) {
+                    Ok(()) => tracing::warn!(
+                        path = %path.display(),
+                        aside = %aside.display(),
+                        "unparseable custom-models file moved aside; fix it and move it back to restore those models"
+                    ),
+                    Err(re) => tracing::warn!(
+                        path = %path.display(),
+                        aside = %aside.display(),
+                        error = %re,
+                        "failed to move unparseable custom-models file aside; the next custom-model add or delete will overwrite it"
+                    ),
+                }
+                return;
+            }
         };
         for entry in entries {
             self.add_custom_model(entry);
@@ -2142,6 +2212,8 @@ impl ModelCatalog {
     }
 
     /// Save all custom-tier models to a JSON file.
+    ///
+    /// Writes a sibling temp file and renames it over `path`, so a crash mid-write cannot leave a truncated file.
     pub fn save_custom_models(&self, path: &std::path::Path) -> Result<(), String> {
         let custom: Vec<&ModelCatalogEntry> = self
             .models
@@ -2150,8 +2222,14 @@ impl ModelCatalog {
             .collect();
         let json = serde_json::to_string_pretty(&custom)
             .map_err(|e| format!("Failed to serialize custom models: {e}"))?;
-        std::fs::write(path, json)
+        // A unique temp name per call, so two concurrent saves cannot rename each other's half-written file into place.
+        let tmp = path.with_extension(format!("json.tmp-{}", uuid::Uuid::new_v4()));
+        std::fs::write(&tmp, json)
             .map_err(|e| format!("Failed to write custom models file: {e}"))?;
+        std::fs::rename(&tmp, path).map_err(|e| {
+            let _ = std::fs::remove_file(&tmp);
+            format!("Failed to replace custom models file: {e}")
+        })?;
         Ok(())
     }
 

@@ -395,6 +395,7 @@ pub(super) async fn finalize_successful_end_turn(
         data: serde_json::json!({
             "iterations": end_turn.iteration + 1,
             "response_length": end_turn.final_response.len(),
+            "session_id": ctx.session.id.to_string(),
             "is_fork": ctx.opts.is_fork,
         }),
     };
@@ -495,6 +496,9 @@ pub(super) async fn maybe_fold_stale_tool_results(
         }
     }
     if fold_result.groups_folded > 0 {
+        // #4971: a folded `file_read` body is gone from the prompt, so a dedup stub pointing at it would leave the model unable to see the file again.
+        // Keyed on `groups_folded` rather than `rewrites`: the working copy is folded even when no durable rewrite applies.
+        crate::context_compressor::reset_post_compression_side_state(session.id);
         let label = if streaming {
             "streaming"
         } else {

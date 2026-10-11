@@ -343,6 +343,7 @@ pub fn contains_shell_metacharacters(command: &str) -> Option<String> {
 /// Handles single quotes (`'...'`) and double quotes (`"..."`).
 /// Backslash escapes inside double quotes are respected (`\"`).
 /// Single quotes have no escape mechanism (POSIX behavior).
+/// An unquoted backslash escapes the next character, so `\'` or `\"` outside quotes is a literal quote and cannot open a quoted region that would hide the metacharacters after it.
 fn strip_quoted_regions(command: &str) -> String {
     let mut result = String::with_capacity(command.len());
     let chars: Vec<char> = command.chars().collect();
@@ -351,6 +352,17 @@ fn strip_quoted_regions(command: &str) -> String {
 
     while i < len {
         match chars[i] {
+            '\\' => {
+                // Unquoted backslash escapes the next character (POSIX), so an escaped quote is a literal and must not open a quoted region.
+                // Both characters are kept so an escaped metacharacter (`\;`, `\&`, `\>`) is still rejected by the scan.
+                result.push('\\');
+                if i + 1 < len {
+                    result.push(chars[i + 1]);
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            }
             '\'' => {
                 // Single-quoted region: skip until closing '
                 i += 1;
@@ -1634,6 +1646,25 @@ mod tests {
         assert!(contains_shell_metacharacters("echo 'safe' > output.txt").is_some());
         assert!(contains_shell_metacharacters("echo 'ok' | grep x").is_some());
         assert!(contains_shell_metacharacters("echo 'a' && echo 'b'").is_some());
+    }
+
+    #[test]
+    fn test_unquoted_backslash_quote_does_not_open_quoted_region() {
+        // Outside quotes `\'` is a literal quote under `sh -c`, so the metacharacters between two of them are live.
+        assert!(contains_shell_metacharacters(r"echo \' & id \'").is_some());
+        assert!(contains_shell_metacharacters(r"echo \'> /tmp/x \'").is_some());
+        assert!(contains_shell_metacharacters(r"echo \' ; touch /tmp/pwn #\'").is_some());
+        assert!(contains_shell_metacharacters(r#"echo \" | id \""#).is_some());
+        // Escaped metacharacters stay rejected (conservative).
+        assert!(contains_shell_metacharacters(r"echo \&").is_some());
+        // Real quoting still hides metacharacters, including after an escaped character.
+        assert!(contains_shell_metacharacters("echo 'a & b'").is_none());
+        assert!(contains_shell_metacharacters(r"echo \x 'a & b'").is_none());
+        let policy = ExecPolicy {
+            mode: ExecSecurityMode::Allowlist,
+            ..ExecPolicy::default()
+        };
+        assert!(validate_command_allowlist(r"echo \' & touch /tmp/pwn \'", &policy).is_err());
     }
 
     #[test]

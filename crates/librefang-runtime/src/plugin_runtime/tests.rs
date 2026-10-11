@@ -684,3 +684,92 @@ fn hook_baseline_env_excludes_daemon_secrets() {
         "an explicitly-allowed benign var should be passed through: {env:?}"
     );
 }
+
+#[test]
+fn take_hook_output_lines_splits_complete_lines_and_decodes_lossily() {
+    let mut pending = b"one\ntw\xffo\nthr".to_vec();
+    let lines = take_hook_output_lines(&mut pending, false);
+    assert_eq!(
+        lines,
+        vec!["one\n".to_string(), "tw\u{fffd}o\n".to_string()]
+    );
+    assert_eq!(pending, b"thr");
+    assert!(take_hook_output_lines(&mut pending, false).is_empty());
+    assert_eq!(
+        take_hook_output_lines(&mut pending, true),
+        vec!["thr".to_string()]
+    );
+    assert!(pending.is_empty());
+}
+
+#[cfg(unix)]
+async fn run_sh_hook(
+    script: &str,
+    timeout_secs: u64,
+) -> Result<serde_json::Value, PluginRuntimeError> {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = tempfile::tempdir().unwrap();
+    let hook = tmp.path().join("stream_hook");
+    std::fs::write(&hook, script).unwrap();
+    std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+    run_hook_json(
+        "ingest",
+        hook.to_str().unwrap(),
+        PluginRuntime::Native,
+        &serde_json::json!({"type": "ingest", "agent_id": "a", "message": "m"}),
+        &HookConfig {
+            allow_network: true,
+            allow_filesystem: true,
+            timeout_secs,
+            ..Default::default()
+        },
+    )
+    .await
+}
+
+/// A stderr line completing while a stdout line is half read must not drop the stdout bytes already read (the old `read_line` inside `select!` was not cancel safe).
+#[cfg(unix)]
+#[tokio::test]
+async fn hook_stdout_survives_interleaved_stderr() {
+    let out = run_sh_hook(
+        "#!/bin/sh\nread _input\nprintf '{\"type\":\"ingest_result\",'\nsleep 0.3\necho progress >&2\nsleep 0.3\nprintf '\"memories\":[]}\\n'\n",
+        10,
+    )
+    .await
+    .expect("hook ran");
+    assert_eq!(out["type"], "ingest_result", "got {out}");
+    assert!(out["memories"].is_array(), "got {out}");
+}
+
+/// A non-UTF-8 stderr line must not stop draining stderr, or a child that keeps logging blocks on the full pipe until the hook timeout.
+#[cfg(unix)]
+#[tokio::test]
+async fn hook_non_utf8_stderr_does_not_stall() {
+    let out = tokio::time::timeout(
+        Duration::from_secs(8),
+        run_sh_hook(
+            "#!/bin/sh\nread _input\nprintf '\\377\\n' >&2\nhead -c 200000 /dev/zero | tr '\\0' 'a' >&2\nprintf '{\"ok\":true}\\n'\n",
+            10,
+        ),
+    )
+    .await
+    .expect("hook must not stall on non-UTF-8 stderr")
+    .expect("hook ran");
+    assert_eq!(out["ok"], true, "got {out}");
+}
+
+/// The per-stream cap must trip on a stream that never emits a newline, instead of buffering it without bound.
+#[cfg(unix)]
+#[tokio::test]
+async fn hook_newline_less_stdout_hits_cap() {
+    let err = run_sh_hook(
+        "#!/bin/sh\nread _input\nhead -c 2000000 /dev/zero | tr '\\0' 'a'\n",
+        10,
+    )
+    .await
+    .expect_err("oversized stdout must fail");
+    match err {
+        PluginRuntimeError::InvalidOutput(msg) => assert!(msg.contains("exceeded"), "{msg}"),
+        other => panic!("expected InvalidOutput, got {other:?}"),
+    }
+}
