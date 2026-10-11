@@ -8513,11 +8513,14 @@
           "system"
         ],
         "summary": "GET /api/logs/stream — SSE endpoint for real-time audit log streaming.",
-        "description": "Streams new audit entries as Server-Sent Events. Accepts optional query\nparameters for filtering:\n  - `level`  — filter by classified level (info, warn, error, debug), classified from the entry's `outcome` (leading `error` / `fail` / `denied` or a status code ending `_failed` / `_error` / `_denied` such as `db_remove_failed`, `warn`, `debug`), falling back to the action so `PermissionDenied` and `BudgetExceeded` are errors; each event carries the classification as `level`\n  - `filter` — text substring filter across action/detail/agent_id\n\nA heartbeat ping is sent every 15 seconds to keep the connection alive.\nThe endpoint polls the audit log every second. The first poll sends up\nto the most recent 200 entries as a bounded backfill (prevents a flood\nwhen subscribing against a long-running daemon); every subsequent poll\nuses a cursor (`since_seq`) so bursts faster than the previous\n`recent(200)` sliding window are no longer silently truncated.",
+        "description": "Streams new audit entries as Server-Sent Events. Accepts optional query\nparameters for filtering:\n  - `level`  — filter by classified level (info, warn, error, debug), classified from the entry's `outcome` (leading `error` / `fail` / `denied` or a status code ending `_failed` / `_error` / `_denied` such as `db_remove_failed`, `warn`, `debug`), falling back to the action so `PermissionDenied` and `BudgetExceeded` are errors; each event carries the classification as `level`\n  - `filter` — text substring filter across action/detail/agent_id\n\nA heartbeat ping is sent every 15 seconds to keep the connection alive.\nThe endpoint polls the audit log every second. The first poll sends up\nto the most recent 200 entries as a bounded backfill (prevents a flood\nwhen subscribing against a long-running daemon); every subsequent poll\nuses a cursor (`since_seq`) so bursts faster than the previous\n`recent(200)` sliding window are no longer silently truncated.\n\nAdmin-only, exactly like `/api/audit/*`: every event is a raw audit ledger row (attribution, detail string, outcome), so the stream goes through the same `require_admin` gate.\nCallers below Admin, anonymous callers and the trusted loopback / no-auth identity get 403 and a `PermissionDenied` audit entry.",
         "operationId": "logs_stream",
         "responses": {
           "200": {
             "description": "SSE log stream"
+          },
+          "403": {
+            "description": "Admin role required"
           }
         }
       }
@@ -18469,7 +18472,7 @@
       },
       "UserUpsert": {
         "type": "object",
-        "description": "Payload for creating or replacing a user. `api_key_hash` is accepted\npre-hashed (Argon2 phc string) — the dashboard hashes locally before\nsending. `None` clears any existing hash on update; absent on create.",
+        "description": "Payload for creating or replacing a user. `api_key_hash` is accepted\npre-hashed (Argon2 phc string) — the dashboard hashes locally before\nsending.\n\n`api_key_hash` is tri-state on update (both `PUT /api/users/{name}` and an import row that matches an existing user).\nAn absent key keeps the stored hash, because the dashboard's edit modal, identity wizard and CSV import never send it and would otherwise revoke the user's key on every edit.\nAn explicit `null` or an empty string clears the stored hash, and a PHC string replaces it.\nOn create, absent, `null` and empty all mean \"no key\".",
         "required": [
           "name"
         ],
@@ -18478,7 +18481,8 @@
             "type": [
               "string",
               "null"
-            ]
+            ],
+            "description": "Outer `None` = key absent (keep), `Some(None)` = explicit `null` (clear)."
           },
           "channel_bindings": {
             "type": "object",
