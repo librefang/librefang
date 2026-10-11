@@ -355,15 +355,12 @@ impl SkillhubClient {
                 dl_resp.status()
             )));
         }
-        let bytes = dl_resp
-            .bytes()
-            .await
-            .map_err(|e| SkillError::Network(format!("Failed to read download body: {e}")))?;
+        let bytes = crate::marketplace::read_body_capped(dl_resp).await?;
 
         // Step 3: Delegate to ClawHub client for extraction + security scan
         let result = self
             .inner
-            .install_from_bytes(slug, target_dir, &bytes)
+            .install_from_bytes(slug, target_dir, bytes)
             .await?;
 
         // Step 4: Patch source provenance to Skillhub.

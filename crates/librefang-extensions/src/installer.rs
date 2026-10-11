@@ -13,7 +13,7 @@ use librefang_types::config::{McpOAuthConfig, McpServerConfigEntry, McpTransport
 use librefang_types::mcp::{McpCatalogEntry, McpCatalogTransport, McpStatus};
 use librefang_types::oauth::OAuthTemplate;
 use std::collections::HashMap;
-use tracing::info;
+use tracing::{info, warn};
 use zeroize::Zeroizing;
 
 /// Result of an installation attempt.
@@ -76,22 +76,39 @@ pub fn install_integration(
         .ok_or_else(|| ExtensionError::NotFound(id.to_string()))?
         .clone();
 
-    // 2. Store provided keys in the vault. A success response must not claim
-    // the integration is ready unless every supplied credential is durable.
-    for (key, value) in provided_keys {
-        resolver.store_in_vault(key, Zeroizing::new(value.clone()))?;
-    }
-
-    // 3. Check all required credentials
     let required_keys: Vec<&str> = template
         .required_env
         .iter()
         .map(|e| e.name.as_str())
         .collect();
+
+    // 2. Store provided keys in the vault. A success response must not claim
+    // the integration is ready unless every supplied credential is durable.
+    // Only the template's own `required_env` names are accepted: vault entries are injected into the process env at boot with priority over `.env`, so a stray key (e.g. `OPENAI_API_KEY`) would silently overwrite an unrelated secret.
+    // Blank values are skipped rather than stored, so they neither clobber an existing credential nor count as present.
+    let mut stored: Vec<&str> = Vec::new();
+    for (key, value) in provided_keys {
+        if !required_keys.contains(&key.as_str()) {
+            warn!(
+                integration = id,
+                key = %key,
+                "Ignoring credential that is not a required_env of this integration"
+            );
+            continue;
+        }
+        if value.trim().is_empty() {
+            warn!(integration = id, key = %key, "Ignoring empty credential value");
+            continue;
+        }
+        resolver.store_in_vault(key, Zeroizing::new(value.clone()))?;
+        stored.push(key.as_str());
+    }
+
+    // 3. Check all required credentials
     let missing = resolver.missing_credentials(&required_keys);
     let actually_missing: Vec<String> = missing
         .into_iter()
-        .filter(|k| !provided_keys.contains_key(k))
+        .filter(|k| !stored.contains(&k.as_str()))
         .collect();
 
     let status = if actually_missing.is_empty() {
@@ -312,6 +329,34 @@ mod tests {
             .expect_err("missing vault must fail instead of reporting Ready");
 
         assert!(matches!(error, ExtensionError::Vault(_)));
+    }
+
+    #[test]
+    fn install_ignores_unrelated_and_empty_credentials() {
+        ensure_registry();
+        let home = librefang_runtime::registry_sync::resolve_home_dir_for_tests();
+        let mut catalog = McpCatalog::new(&home);
+        catalog.load(&home);
+        let credential = catalog
+            .get("github")
+            .and_then(|entry| entry.required_env.first())
+            .expect("github fixture should require a credential")
+            .name
+            .clone();
+        let provided = HashMap::from([
+            (credential.clone(), "   ".to_string()),
+            ("OPENAI_API_KEY".to_string(), "sk-test".to_string()),
+        ]);
+        // No vault: any attempt to store either key would fail with ExtensionError::Vault.
+        let mut resolver = CredentialResolver::new(None, None);
+
+        let result = install_integration(&catalog, &mut resolver, "github", &provided)
+            .expect("unrelated and blank credentials must be skipped, not stored");
+
+        if std::env::var(&credential).is_err() {
+            assert_eq!(result.status, McpStatus::Setup);
+            assert!(result.missing_credentials.contains(&credential));
+        }
     }
 
     #[test]
