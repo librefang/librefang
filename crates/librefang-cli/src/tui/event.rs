@@ -904,8 +904,7 @@ fn daemon_fallback(
             actual_model: None,
         })
     } else {
-        Err(body["error"]
-            .as_str()
+        Err(daemon_error_reason(&body)
             .unwrap_or("Unknown error")
             .to_string())
     }
@@ -3558,7 +3557,9 @@ pub fn spawn_save_memory_kv(
             let client = make_daemon_client(api_key.as_deref());
             let outcome = daemon_response(
                 client
-                    .put(format!("{base_url}/api/memory/agents/{agent_id}/kv/{key}"))
+                    .put(crate::commands::monitoring::memory_kv_url(
+                        &base_url, &agent_id, &key,
+                    ))
                     .json(&serde_json::json!({"value": value}))
                     .send(),
                 || crate::i18n::t("tui-event-kv-save-failed"),
@@ -3592,7 +3593,9 @@ pub fn spawn_delete_memory_kv(
             let client = make_daemon_client(api_key.as_deref());
             let outcome = daemon_response(
                 client
-                    .delete(format!("{base_url}/api/memory/agents/{agent_id}/kv/{key}"))
+                    .delete(crate::commands::monitoring::memory_kv_url(
+                        &base_url, &agent_id, &key,
+                    ))
                     .send(),
                 || crate::i18n::t("tui-event-kv-delete-failed"),
             );
@@ -4573,18 +4576,26 @@ pub fn spawn_fetch_model_catalog(backend: BackendRef, tx: mpsc::Sender<AppEvent>
 /// clears every field the body omits, so submitting only the two capacity
 /// limits would silently drop the temperature, top-p and reasoning-effort
 /// settings stored under the same key.
+///
+/// A read that fails (transport error, non-2xx, or a body that is not a JSON object) is an `Err` carrying the line built by `summary`, never an empty document.
+/// Falling back to `{}` here is exactly the data loss the merge exists to prevent: the caller would then PUT a document holding only the limits, or DELETE the whole entry on reset.
 fn read_model_overrides(
     client: &reqwest::blocking::Client,
     base_url: &str,
     key: &str,
-) -> serde_json::Value {
-    client
-        .get(format!("{base_url}/api/models/overrides/{key}"))
-        .send()
-        .ok()
-        .and_then(|resp| resp.json::<serde_json::Value>().ok())
-        .filter(|doc| doc.is_object())
-        .unwrap_or_else(|| serde_json::json!({}))
+    summary: impl Fn() -> String,
+) -> Result<serde_json::Value, String> {
+    let doc = fetch_json(
+        client
+            .get(format!("{base_url}/api/models/overrides/{key}"))
+            .send(),
+        &summary,
+    )?;
+    if doc.is_object() {
+        Ok(doc)
+    } else {
+        Err(summary())
+    }
 }
 
 /// Persist one model's operator capacity limits (refs #7774).
@@ -4601,7 +4612,15 @@ pub fn spawn_save_model_limits(
     std::thread::spawn(move || match backend {
         BackendRef::Daemon { base_url, api_key } => {
             let client = make_daemon_client(api_key.as_deref());
-            let mut doc = read_model_overrides(&client, &base_url, &key);
+            let summary =
+                || crate::i18n::t_args("tui-event-model-limits-save-failed", &[("model", &key)]);
+            let mut doc = match read_model_overrides(&client, &base_url, &key, summary) {
+                Ok(doc) => doc,
+                Err(message) => {
+                    let _ = tx.send(AppEvent::FetchError(message));
+                    return;
+                }
+            };
             set_or_clear(&mut doc, "context_window", context_window);
             set_or_clear(&mut doc, "max_output_tokens", max_output_tokens);
             let outcome = daemon_response(
@@ -4609,7 +4628,7 @@ pub fn spawn_save_model_limits(
                     .put(format!("{base_url}/api/models/overrides/{key}"))
                     .json(&doc)
                     .send(),
-                || crate::i18n::t_args("tui-event-model-limits-save-failed", &[("model", &key)]),
+                summary,
             );
             match outcome {
                 Ok(_) => {
@@ -4638,7 +4657,15 @@ pub fn spawn_reset_model_limits(backend: BackendRef, key: String, tx: mpsc::Send
     std::thread::spawn(move || match backend {
         BackendRef::Daemon { base_url, api_key } => {
             let client = make_daemon_client(api_key.as_deref());
-            let mut doc = read_model_overrides(&client, &base_url, &key);
+            let summary =
+                || crate::i18n::t_args("tui-event-model-limits-reset-failed", &[("model", &key)]);
+            let mut doc = match read_model_overrides(&client, &base_url, &key, summary) {
+                Ok(doc) => doc,
+                Err(message) => {
+                    let _ = tx.send(AppEvent::FetchError(message));
+                    return;
+                }
+            };
             set_or_clear(&mut doc, "context_window", None);
             set_or_clear(&mut doc, "max_output_tokens", None);
             let empty = doc.as_object().map(|o| o.is_empty()).unwrap_or(true);
@@ -4652,9 +4679,7 @@ pub fn spawn_reset_model_limits(backend: BackendRef, key: String, tx: mpsc::Send
                     .json(&doc)
                     .send()
             };
-            let outcome = daemon_response(outcome, || {
-                crate::i18n::t_args("tui-event-model-limits-reset-failed", &[("model", &key)])
-            });
+            let outcome = daemon_response(outcome, summary);
             match outcome {
                 Ok(_) => {
                     let _ = tx.send(AppEvent::ModelLimitsReset(key));
@@ -8444,5 +8469,116 @@ path = "/srv/data"
                 }
             }
         }
+    }
+
+    // ── Request-recording stub for write paths ─────────────────────────────
+
+    /// A stub daemon that answers `responses` in order and reports each request line (`"PUT /api/... HTTP/1.1"`) on the returned channel before answering it.
+    /// A request that would have followed the last answer is refused by the closed listener, so the caller still sees it as a transport error rather than hanging.
+    fn recording_server(
+        responses: Vec<(&'static str, &'static str)>,
+    ) -> (String, mpsc::Receiver<String>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let base = format!("http://{}", listener.local_addr().expect("addr"));
+        let (seen_tx, seen_rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            for (status, body) in responses {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    return;
+                };
+                let mut buf = [0u8; 8192];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                let head = String::from_utf8_lossy(&buf[..n]);
+                let _ = seen_tx.send(head.lines().next().unwrap_or_default().to_string());
+                let response = format!(
+                    "HTTP/1.1 {status}\r\ncontent-type: text/html\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(response.as_bytes());
+                let _ = stream.flush();
+            }
+        });
+        (base, seen_rx)
+    }
+
+    /// A failed read of the stored overrides must abort the write.
+    ///
+    /// `PUT /api/models/overrides/{id}` replaces the whole document, so merging the limits into `{}` after a 502 would wipe the stored temperature, top-p and reasoning effort.
+    #[test]
+    fn save_model_limits_does_not_put_after_failed_read() {
+        let (base, seen) = recording_server(vec![
+            ("502 Bad Gateway", "<html>bad gateway</html>"),
+            ("200 OK", "{}"),
+        ]);
+        let (tx, rx) = mpsc::channel();
+        spawn_save_model_limits(
+            daemon(base),
+            "openai:gpt-4o".to_string(),
+            Some(64000),
+            None,
+            tx,
+        );
+        match next_event(&rx) {
+            AppEvent::FetchError(message) => assert!(!message.is_empty()),
+            _ => panic!("a failed read must surface as FetchError, not as a saved limit"),
+        }
+        let requests: Vec<String> = seen.try_iter().collect();
+        assert_eq!(requests.len(), 1, "only the GET may be sent: {requests:?}");
+        assert!(requests[0].starts_with("GET "), "{requests:?}");
+    }
+
+    /// The reset path needs the same guard even more: a failed read left an empty document, which made it DELETE the whole entry.
+    #[test]
+    fn reset_model_limits_does_not_delete_after_failed_read() {
+        let (base, seen) = recording_server(vec![
+            ("502 Bad Gateway", "<html>bad gateway</html>"),
+            ("200 OK", "{}"),
+        ]);
+        let (tx, rx) = mpsc::channel();
+        spawn_reset_model_limits(daemon(base), "openai:gpt-4o".to_string(), tx);
+        match next_event(&rx) {
+            AppEvent::FetchError(message) => assert!(!message.is_empty()),
+            _ => panic!("a failed read must surface as FetchError, not as a reset"),
+        }
+        let requests: Vec<String> = seen.try_iter().collect();
+        assert_eq!(requests.len(), 1, "only the GET may be sent: {requests:?}");
+        assert!(requests[0].starts_with("GET "), "{requests:?}");
+    }
+
+    /// Memory KV keys are free-form, and agents store keys such as `notes/2026`; the TUI must address them as one encoded path segment.
+    #[test]
+    fn memory_kv_save_and_delete_percent_encode_the_key() {
+        let (base, seen) = recording_server(vec![("200 OK", "{}"), ("200 OK", "{}")]);
+        let (tx, rx) = mpsc::channel();
+        spawn_save_memory_kv(
+            daemon(base.clone()),
+            "a1".to_string(),
+            "notes/2026?x".to_string(),
+            "v".to_string(),
+            tx.clone(),
+        );
+        match next_event(&rx) {
+            AppEvent::MemoryKvSaved { key } => assert_eq!(key, "notes/2026?x"),
+            _ => panic!("expected MemoryKvSaved"),
+        }
+        spawn_delete_memory_kv(
+            daemon(base),
+            "a1".to_string(),
+            "notes/2026?x".to_string(),
+            tx,
+        );
+        match next_event(&rx) {
+            AppEvent::MemoryKvDeleted(key) => assert_eq!(key, "notes/2026?x"),
+            _ => panic!("expected MemoryKvDeleted"),
+        }
+        let requests: Vec<String> = seen.try_iter().collect();
+        assert_eq!(
+            requests,
+            vec![
+                "PUT /api/memory/agents/a1/kv/notes%2F2026%3Fx HTTP/1.1".to_string(),
+                "DELETE /api/memory/agents/a1/kv/notes%2F2026%3Fx HTTP/1.1".to_string(),
+            ]
+        );
     }
 }

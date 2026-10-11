@@ -67,7 +67,9 @@ pub(crate) fn cmd_hand_install(path: &str) {
             .send(),
     );
 
-    if let Some(err) = body.get("error").and_then(|v| v.as_str()) {
+    // `ApiErrorResponse` nests the reason under `error.message`, so key failure on the presence of `error`, not on it being a string, or a rejected TOML prints "installed" and exits 0.
+    if body.get("error").is_some() {
+        let err = api_error_message(&body).unwrap_or("?");
         eprintln!("{}", i18n::t_args("hand-error-prefix", &[("error", err)]));
         std::process::exit(1);
     }
@@ -252,7 +254,7 @@ pub(crate) fn cmd_hand_activate(id: &str) {
                 "hand-activate-failed",
                 &[
                     ("id", id),
-                    ("error", body["error"].as_str().unwrap_or(&err_fallback))
+                    ("error", api_error_message(&body).unwrap_or(&err_fallback))
                 ]
             )
         );
@@ -291,7 +293,7 @@ pub(crate) fn cmd_hand_deactivate(id: &str) {
                     "{}",
                     i18n::t_args(
                         "label-failed-reason",
-                        &[("error", body["error"].as_str().unwrap_or(&err_fallback))]
+                        &[("error", api_error_message(&body).unwrap_or(&err_fallback))]
                     )
                 );
                 std::process::exit(1);
@@ -313,7 +315,7 @@ pub(crate) fn cmd_hand_info(id: &str) {
             "{}",
             i18n::t_args(
                 "hand-info-not-found",
-                &[("error", body["error"].as_str().unwrap_or(id))]
+                &[("error", api_error_message(&body).unwrap_or(id))]
             )
         );
         std::process::exit(1);
@@ -335,7 +337,7 @@ pub(crate) fn cmd_hand_check_deps(id: &str) {
     if body.get("error").is_some() {
         ui::error(&i18n::t_args(
             "label-failed-reason",
-            &[("error", body["error"].as_str().unwrap_or("?"))],
+            &[("error", api_error_message(&body).unwrap_or("?"))],
         ));
     } else {
         println!(
@@ -356,7 +358,7 @@ pub(crate) fn cmd_hand_install_deps(id: &str) {
     if body.get("error").is_some() {
         ui::error(&i18n::t_args(
             "label-failed-reason",
-            &[("error", body["error"].as_str().unwrap_or("?"))],
+            &[("error", api_error_message(&body).unwrap_or("?"))],
         ));
     } else {
         ui::success(&i18n::t_args("hand-install-deps-success", &[("id", id)]));
@@ -390,7 +392,7 @@ pub(crate) fn cmd_hand_pause(id: &str) {
     if body.get("error").is_some() {
         ui::error(&i18n::t_args(
             "label-failed-reason",
-            &[("error", body["error"].as_str().unwrap_or("?"))],
+            &[("error", api_error_message(&body).unwrap_or("?"))],
         ));
         std::process::exit(1);
     } else {
@@ -422,7 +424,7 @@ pub(crate) fn cmd_hand_resume(id: &str) {
     if body.get("error").is_some() {
         ui::error(&i18n::t_args(
             "label-failed-reason",
-            &[("error", body["error"].as_str().unwrap_or("?"))],
+            &[("error", api_error_message(&body).unwrap_or("?"))],
         ));
         std::process::exit(1);
     } else {
@@ -440,7 +442,7 @@ pub(crate) fn cmd_hand_settings(id: &str) {
     if body.get("error").is_some() {
         ui::error(&i18n::t_args(
             "label-failed-reason",
-            &[("error", body["error"].as_str().unwrap_or("?"))],
+            &[("error", api_error_message(&body).unwrap_or("?"))],
         ));
         std::process::exit(1);
     }
@@ -554,7 +556,7 @@ pub(crate) fn cmd_hand_set(id: &str, key: &str, value: &str) {
     if body.get("error").is_some() {
         ui::error(&i18n::t_args(
             "label-failed-reason",
-            &[("error", body["error"].as_str().unwrap_or("?"))],
+            &[("error", api_error_message(&body).unwrap_or("?"))],
         ));
         std::process::exit(1);
     }
@@ -571,7 +573,7 @@ pub(crate) fn cmd_hand_reload() {
     if body.get("error").is_some() {
         ui::error(&i18n::t_args(
             "label-failed-reason",
-            &[("error", body["error"].as_str().unwrap_or("?"))],
+            &[("error", api_error_message(&body).unwrap_or("?"))],
         ));
         std::process::exit(1);
     }
@@ -640,8 +642,8 @@ pub(crate) fn cmd_hand_chat(id: &str) {
             .send();
 
         let body = daemon_json(resp);
-        if let Some(err) = body["error"].as_str() {
-            ui::error(err);
+        if body.get("error").is_some() {
+            ui::error(api_error_message(&body).unwrap_or("?"));
             continue;
         }
         let no_resp_fallback = i18n::t("label-no-response");

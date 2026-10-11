@@ -31,6 +31,26 @@ thread_local! {
     static I18N: RefCell<Option<I18n>> = const { RefCell::new(None) };
 }
 
+/// The language the process selected at startup, recorded by [`init_process`].
+///
+/// The per-thread slot above is filled lazily on a thread's first lookup, and every TUI fetch/save runs on a freshly spawned thread.
+/// Without this, those threads fell back to `DEFAULT_LANGUAGE` and printed their error and status lines in English next to translated labels.
+static PROCESS_LANGUAGE: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
+
+/// The `SUPPORTED_LANGUAGES` entry matching `language`, or `DEFAULT_LANGUAGE` when there is none.
+fn resolve_supported(language: &str) -> &'static str {
+    SUPPORTED_LANGUAGES
+        .iter()
+        .copied()
+        .find(|l| *l == language)
+        .unwrap_or(DEFAULT_LANGUAGE)
+}
+
+/// The language a thread that never called [`init`] starts with.
+fn thread_default_language() -> &'static str {
+    PROCESS_LANGUAGE.get().copied().unwrap_or(DEFAULT_LANGUAGE)
+}
+
 pub struct I18n {
     bundle: FluentBundle<FluentResource>,
     fallback_bundle: FluentBundle<FluentResource>,
@@ -99,6 +119,28 @@ pub fn init(language: &str) {
     });
 }
 
+/// Select the language for the whole process: the calling thread, and every thread whose first lookup happens later.
+///
+/// Only `main` calls this.
+/// [`init`] stays thread-local so unit tests, which each run on their own thread, can pick a language without changing it for their neighbours.
+pub fn init_process(language: &str) {
+    let _ = PROCESS_LANGUAGE.set(resolve_supported(language));
+    init(language);
+}
+
+/// Run `f` against this thread's bundle, building it in the process language on first use.
+fn with_i18n<R>(f: impl FnOnce(&I18n) -> R) -> R {
+    I18N.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let i18n = borrow.get_or_insert_with(|| {
+            I18n::new(thread_default_language()).unwrap_or_else(|error| {
+                panic!("failed to initialize default i18n fallback: {error}");
+            })
+        });
+        f(i18n)
+    })
+}
+
 fn is_utf8_locale() -> bool {
     let vars = ["LC_ALL", "LC_MESSAGES", "LANG"];
     for var in vars {
@@ -163,28 +205,11 @@ pub fn detect_system_language() -> String {
 }
 
 pub fn t(key: &str) -> String {
-    I18N.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        if borrow.is_none() {
-            let i18n = I18n::new(DEFAULT_LANGUAGE).unwrap_or_else(|error| {
-                panic!("failed to initialize default i18n fallback: {error}");
-            });
-            *borrow = Some(i18n);
-        }
-        borrow.as_ref().unwrap().get(key, None)
-    })
+    with_i18n(|i18n| i18n.get(key, None))
 }
 
 pub fn t_args(key: &str, args: &[(&str, &str)]) -> String {
-    I18N.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        if borrow.is_none() {
-            let i18n = I18n::new(DEFAULT_LANGUAGE).unwrap_or_else(|error| {
-                panic!("failed to initialize default i18n fallback: {error}");
-            });
-            *borrow = Some(i18n);
-        }
-        let i18n = borrow.as_ref().unwrap();
+    with_i18n(|i18n| {
         let mut fluent_args = FluentArgs::new();
         for (name, value) in args {
             fluent_args.set(*name, FluentValue::from(*value));
@@ -385,6 +410,49 @@ mod tests {
             "3 skills"
         );
         assert_eq!(i18n.get("missing-test-key", None), "[missing-test-key]");
+    }
+
+    /// Env var that marks the child run of [`spawned_thread_inherits_process_language`].
+    const INHERIT_CHILD_ENV: &str = "LIBREFANG_I18N_INHERIT_CHILD";
+
+    /// A thread spawned after `init_process` must render in the process language, not English.
+    ///
+    /// `PROCESS_LANGUAGE` is a write-once process global, and libtest runs every test on its own fresh thread, so setting it in this binary would switch every English-asserting test that starts afterwards to Chinese.
+    /// The assertion therefore runs in a child copy of this test binary, filtered to this one test, where nothing else can observe the global.
+    #[test]
+    fn spawned_thread_inherits_process_language() {
+        if std::env::var_os(INHERIT_CHILD_ENV).is_some() {
+            init_process("zh-CN");
+            let got = std::thread::spawn(|| t("label-dashboard"))
+                .join()
+                .expect("worker thread");
+            assert_eq!(got, "控制台");
+            let got = std::thread::spawn(|| t_args("models-available", &[("count", "12")]))
+                .join()
+                .expect("worker thread");
+            assert_ne!(got, "12 models available", "t_args must also inherit");
+            return;
+        }
+        let exe = std::env::current_exe().expect("test binary path");
+        let out = std::process::Command::new(exe)
+            .args([
+                "i18n::tests::spawned_thread_inherits_process_language",
+                "--exact",
+                "--test-threads=1",
+            ])
+            .env(INHERIT_CHILD_ENV, "1")
+            .output()
+            .expect("run child test binary");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            out.status.success(),
+            "child run failed\nstdout: {stdout}\nstderr: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(
+            stdout.contains("1 passed"),
+            "the child must actually run the test: {stdout}"
+        );
     }
 
     #[test]

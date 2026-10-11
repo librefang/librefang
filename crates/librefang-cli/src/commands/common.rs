@@ -385,19 +385,42 @@ pub(crate) fn daemon_client_with_api_key_and_timeout(
     builder.build().expect("Failed to build HTTP client")
 }
 
-/// True when `body` is a JSON object carrying a non-empty `error` string —
-/// the structured-error shape some commands intentionally surface with a
-/// command-specific message (e.g. validation failures returned as 4xx).
+/// The human-readable reason in a daemon error body, whichever shape it arrives in.
 ///
-/// When this holds for a 4xx response, `daemon_json` returns the body
-/// untouched so the caller's existing `body.get("error")` handler runs.
-/// When it does not (non-JSON body, JSON without `error`, or an empty/
-/// non-string `error`), a 4xx is treated as a fatal daemon error instead
-/// of slipping through as silent success (#6019).
+/// Tries, in order: a flat string `error` (legacy handlers and the rate limiter), the nested `error.message` that `ApiErrorResponse` serializes, and the flat top-level `message` that `ApiErrorResponse` also writes.
+/// Blank strings are skipped, so a caller's `unwrap_or("?")` placeholder is only printed when the body truly carries no reason.
+pub(crate) fn api_error_message(body: &serde_json::Value) -> Option<&str> {
+    fn non_blank(v: Option<&serde_json::Value>) -> Option<&str> {
+        v.and_then(|v| v.as_str()).filter(|s| !s.trim().is_empty())
+    }
+    let error = body.get("error");
+    non_blank(error)
+        .or_else(|| non_blank(error.and_then(|e| e.get("message"))))
+        .or_else(|| non_blank(body.get("message")))
+}
+
+/// The reason to print for a failed daemon write: the daemon's own message when the body carries one, else the HTTP status (a proxy's HTML 502 decodes to `Null` and has no message).
+pub(crate) fn mutation_failure_reason(
+    status: reqwest::StatusCode,
+    body: &serde_json::Value,
+) -> String {
+    api_error_message(body)
+        .map(str::to_string)
+        .unwrap_or_else(|| status.to_string())
+}
+
+/// True when `body` carries a usable `error`: either a non-empty `error` string, or the `ApiErrorResponse` shape whose `error` is an object with a non-empty `message`.
+/// This is the structured-error shape commands intentionally surface with a command-specific message (e.g. validation failures returned as 4xx).
+///
+/// When this holds for a 4xx response, `daemon_json` returns the body untouched so the caller's existing `body.get("error")` handler runs.
+/// When it does not (non-JSON body, JSON without `error`, or an `error` with no readable message), a 4xx is treated as a fatal daemon error instead of slipping through as silent success (#6019).
+/// A flat top-level `message` alone deliberately does not count: callers key failure on the `error` key, so accepting it would turn `{"message":"not found"}` on a 404 back into a silent success.
 pub(crate) fn body_carries_usable_error(body: &serde_json::Value) -> bool {
-    body.get("error")
-        .and_then(|e| e.as_str())
-        .is_some_and(|s| !s.trim().is_empty())
+    body.get("error").is_some_and(|e| {
+        e.as_str()
+            .or_else(|| e.get("message").and_then(|m| m.as_str()))
+            .is_some_and(|s| !s.trim().is_empty())
+    })
 }
 
 /// Decide whether a daemon response `status` + parsed `body` should be
@@ -1225,6 +1248,40 @@ mod tests {
             StatusCode::CONFLICT,
             &json!({ "error": "already exists" })
         ));
+    }
+
+    #[test]
+    fn usable_error_accepts_apierror_nested_shape() {
+        // The daemon's real `ApiErrorResponse` puts an object at `error`; a string-only classifier printed the generic status line and every caller then printed "?".
+        let body = serde_json::to_value(librefang_api::types::ApiErrorResponse::bad_request(
+            "Invalid job ID",
+        ))
+        .expect("ApiErrorResponse serializes");
+        assert!(
+            body["error"].is_object(),
+            "fixture must be the nested shape"
+        );
+        assert!(body_carries_usable_error(&body));
+        assert!(!should_surface_status_error(StatusCode::BAD_REQUEST, &body));
+        assert_eq!(api_error_message(&body), Some("Invalid job ID"));
+    }
+
+    #[test]
+    fn api_error_message_reads_every_shape() {
+        assert_eq!(api_error_message(&json!({"error": "flat"})), Some("flat"));
+        assert_eq!(
+            api_error_message(&json!({"error": {"message": "nested only"}})),
+            Some("nested only")
+        );
+        assert_eq!(
+            api_error_message(&json!({"message": "top only"})),
+            Some("top only")
+        );
+        assert_eq!(api_error_message(&json!({"error": {"code": 1}})), None);
+        assert_eq!(api_error_message(&json!({"error": "  "})), None);
+        assert_eq!(api_error_message(&serde_json::Value::Null), None);
+        // A nested error without a message is still not a usable error for the classifier.
+        assert!(!body_carries_usable_error(&json!({"error": {"code": 1}})));
     }
 
     #[test]
