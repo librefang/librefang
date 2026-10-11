@@ -1044,18 +1044,6 @@ fn audit_evolve(
 }
 
 // ── Helper functions for secrets.env management ────────────────────────
-/// Escape a value for safe storage in a `.env` file.
-///
-/// If a value contains literal newlines the raw `KEY=value\nEXTRA=junk` text
-/// would be parsed as two separate keys by every dotenv reader. Backslashes
-/// must be doubled so they are not misread as escape sequences on read-back.
-fn escape_env_value(value: &str) -> String {
-    value
-        .replace('\\', "\\\\") // must come first to avoid double-escaping
-        .replace('\n', "\\n")
-        .replace('\r', "\\r")
-}
-
 pub(crate) fn write_secret_env(
     path: &std::path::Path,
     key: &str,
@@ -1075,6 +1063,30 @@ pub(crate) fn write_secret_env(
             "secret value must not contain newline characters",
         ));
     }
+    // The value is written raw (`KEY=value`, no quoting or escaping), because that is the only form every secrets.env reader returns unchanged: `librefang_extensions::dotenv::parse_env_line`, `crate::secrets_env::parse_secrets_env` and the channel sidecar parser all trim the value and strip a matched outer quote pair, and only the first unescapes inside double quotes.
+    // Escaping backslashes here doubled them on every restart, so reject the remaining shapes the readers would mangle instead, the same set `routes::secrets_env::upsert_secret` rejects.
+    if value.contains('\0') {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "secret value must not contain a NUL byte",
+        ));
+    }
+    if value.starts_with(char::is_whitespace) || value.ends_with(char::is_whitespace) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "secret value must not have leading or trailing whitespace",
+        ));
+    }
+    if value.starts_with('"') || value.starts_with('\'') {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "secret value must not start with a quote character",
+        ));
+    }
+
+    // Serialize the read-modify-write with every other secrets.env writer; without it two concurrent saves both read the same original and the last rename drops the other key.
+    let _write_guard = super::secrets_env::lock_secret_writes();
+
     let mut lines: Vec<String> = if path.exists() {
         std::fs::read_to_string(path)?
             .lines()
@@ -1087,10 +1099,7 @@ pub(crate) fn write_secret_env(
     // Remove existing line for this key
     lines.retain(|l| !l.starts_with(&format!("{key}=")));
 
-    // Add new line — escape the value so embedded newlines/backslashes cannot
-    // corrupt the file structure.
-    let escaped = escape_env_value(value);
-    lines.push(format!("{key}={escaped}"));
+    lines.push(format!("{key}={value}"));
 
     // Ensure parent directory exists
     if let Some(parent) = path.parent() {
@@ -1122,6 +1131,7 @@ pub(crate) fn write_secret_env(
 pub(crate) fn remove_secret_env(path: &std::path::Path, key: &str) -> Result<(), std::io::Error> {
     validate_static_file_path(path, "secrets.env")
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
+    let _write_guard = super::secrets_env::lock_secret_writes();
     if !path.exists() {
         return Ok(());
     }
@@ -1814,47 +1824,62 @@ mod tests {
     // exercised — every channel runs as a sidecar so the `[channels.<x>]`
     // TOML write path has zero callers.
 
-    // ── escape_env_value tests (Bug #3790) ─────────────────────────────────
+    // ── secrets.env round-trip / locking ───────────────────────────────────
 
+    /// A backslash in a secret must survive a write followed by the boot-time readers; the old escaper doubled it on every restart.
     #[test]
-    fn escape_env_value_plain_value_unchanged() {
-        assert_eq!(escape_env_value("hello"), "hello");
-        assert_eq!(escape_env_value("sk-abc123"), "sk-abc123");
+    fn write_secret_env_backslash_round_trips_through_boot_parsers() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("secrets.env");
+        let raw = r"C:\Users\p\w0rd";
+        write_secret_env(&path, "HAND_PW", raw).unwrap();
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            crate::secrets_env::parse_secrets_env(&content),
+            vec![("HAND_PW".to_string(), raw.to_string())]
+        );
     }
 
     #[test]
-    fn escape_env_value_newline_becomes_backslash_n() {
-        let raw = "line1\nline2";
-        let escaped = escape_env_value(raw);
-        assert_eq!(escaped, "line1\\nline2");
-        // Must not contain a literal newline character.
-        assert!(!escaped.contains('\n'));
+    fn write_secret_env_rejects_values_the_readers_would_mangle() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("secrets.env");
+        for bad in [" lead", "trail ", "\"q\"", "'q'", "nul\0byte"] {
+            let err = write_secret_env(&path, "K", bad).unwrap_err();
+            assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput, "{bad:?}");
+        }
+        assert!(!path.exists(), "rejected values must not create the file");
     }
 
+    /// `write_secret_env`, `remove_secret_env` and `upsert_secret` share one lock, so interleaved writers never drop each other's keys.
     #[test]
-    fn escape_env_value_carriage_return_becomes_backslash_r() {
-        let raw = "val\r\nend";
-        let escaped = escape_env_value(raw);
-        assert_eq!(escaped, "val\\r\\nend");
-        assert!(!escaped.contains('\r'));
-        assert!(!escaped.contains('\n'));
-    }
-
-    #[test]
-    fn escape_env_value_backslash_is_doubled() {
-        let raw = r"C:\Users\secret";
-        let escaped = escape_env_value(raw);
-        assert_eq!(escaped, r"C:\\Users\\secret");
-    }
-
-    #[test]
-    fn escape_env_value_backslash_before_newline_double_escapes_correctly() {
-        // "\\\n" → the backslash must be doubled before the newline is escaped,
-        // producing "\\\\n" (a literal backslash-backslash-n), not "\\n".
-        let raw = "\\\n";
-        let escaped = escape_env_value(raw);
-        assert_eq!(escaped, "\\\\\\n");
-        assert!(!escaped.contains('\n'));
+    fn concurrent_secret_writers_do_not_lose_keys() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("secrets.env");
+        write_secret_env(&path, "DOOMED", "x").unwrap();
+        std::thread::scope(|s| {
+            for i in 0..32 {
+                let p = path.clone();
+                s.spawn(move || {
+                    if i % 2 == 0 {
+                        write_secret_env(&p, &format!("K{i}"), "v").unwrap();
+                    } else {
+                        crate::routes::secrets_env::upsert_secret(&p, &format!("K{i}"), "v")
+                            .unwrap();
+                    }
+                });
+            }
+            let p = path.clone();
+            s.spawn(move || remove_secret_env(&p, "DOOMED").unwrap());
+        });
+        let content = std::fs::read_to_string(&path).unwrap();
+        for i in 0..32 {
+            assert!(
+                content.lines().any(|l| l == format!("K{i}=v")),
+                "lost K{i}:\n{content}"
+            );
+        }
+        assert!(!content.contains("DOOMED="), "{content}");
     }
 
     /// Regression for audit `write-secret-env-toctou`. After a

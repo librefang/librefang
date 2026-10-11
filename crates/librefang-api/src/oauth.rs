@@ -864,9 +864,9 @@ pub async fn auth_callback_post(
 /// callback URL captured from browser history, Referer, or proxy logs
 /// could be replayed against the daemon repeatedly until the IdP
 /// rejected the authorization code.  This helper enforces single-use
-/// at the daemon by checking + recording the nonce as consumed before
-/// the code exchange runs.  Subsequent requests with the same `state`
-/// are rejected with HTTP 400.
+/// at the daemon by claiming the nonce with one conditional UPSERT (`ApprovalManager::claim_oauth_nonce`) before the code exchange runs, so concurrent callbacks with the same `state` cannot both pass.
+/// Subsequent requests with the same `state` are rejected with HTTP 400.
+/// If the replay database is unavailable the callback fails closed with HTTP 503.
 ///
 /// The nonce is consumed eagerly (before code exchange).  Failed
 /// downstream verification (token-endpoint reject, JWT signature fail)
@@ -884,18 +884,29 @@ pub async fn auth_callback_post(
 // path is the rare-branch).  Suppress the lint here.
 #[allow(clippy::result_large_err)]
 fn consume_oauth_nonce(state: &Arc<AppState>, nonce: &str) -> Result<(), Response> {
-    if state.kernel.approvals().is_oauth_nonce_used(nonce) {
-        warn!("OIDC nonce replay rejected (state.nonce already redeemed)");
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({
-                "error": "OAuth callback already redeemed; please restart the sign-in flow"
-            })),
-        )
-            .into_response());
+    match state.kernel.approvals().claim_oauth_nonce(nonce) {
+        Ok(true) => Ok(()),
+        Ok(false) => {
+            warn!("OIDC nonce replay rejected (state.nonce already redeemed)");
+            Err((
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": "OAuth callback already redeemed; please restart the sign-in flow"
+                })),
+            )
+                .into_response())
+        }
+        Err(error) => {
+            warn!(error = %error, "OIDC nonce replay check unavailable; rejecting callback");
+            Err((
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({
+                    "error": "Sign-in is temporarily unavailable; please retry"
+                })),
+            )
+                .into_response())
+        }
     }
-    state.kernel.approvals().record_oauth_nonce_used(nonce);
-    Ok(())
 }
 
 /// Outcome of validating the `nonce` claim in a JWT id_token against the

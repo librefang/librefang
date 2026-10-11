@@ -118,7 +118,12 @@ impl From<&UserConfig> for UserView {
 
 /// Payload for creating or replacing a user. `api_key_hash` is accepted
 /// pre-hashed (Argon2 phc string) — the dashboard hashes locally before
-/// sending. `None` clears any existing hash on update; absent on create.
+/// sending.
+///
+/// `api_key_hash` is tri-state on update (both `PUT /api/users/{name}` and an import row that matches an existing user).
+/// An absent key keeps the stored hash, because the dashboard's edit modal, identity wizard and CSV import never send it and would otherwise revoke the user's key on every edit.
+/// An explicit `null` or an empty string clears the stored hash, and a PHC string replaces it.
+/// On create, absent, `null` and empty all mean "no key".
 #[derive(Debug, Clone, Deserialize, utoipa::ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct UserUpsert {
@@ -127,8 +132,19 @@ pub struct UserUpsert {
     pub role: String,
     #[serde(default)]
     pub channel_bindings: HashMap<String, String>,
-    #[serde(default)]
-    pub api_key_hash: Option<String>,
+    /// Outer `None` = key absent (keep), `Some(None)` = explicit `null` (clear).
+    #[serde(default, deserialize_with = "deserialize_present")]
+    #[schema(value_type = Option<String>)]
+    pub api_key_hash: Option<Option<String>>,
+}
+
+/// Wrap any present value (including `null`) in `Some`, so a field declared `#[serde(default)] Option<Option<T>>` distinguishes an absent key (`None`) from an explicit `null` (`Some(None)`).
+fn deserialize_present<'de, T, D>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    T: serde::Deserialize<'de>,
+    D: serde::Deserializer<'de>,
+{
+    T::deserialize(deserializer).map(Some)
 }
 
 fn default_role() -> String {
@@ -319,10 +335,11 @@ pub async fn create_user(
         Ok(r) => r,
         Err(e) => return err_response(StatusCode::BAD_REQUEST, e),
     };
-    let api_key_hash = match validate_api_key_hash(req.api_key_hash.as_deref()) {
-        Ok(h) => h,
-        Err(e) => return err_response(StatusCode::BAD_REQUEST, e),
-    };
+    let api_key_hash =
+        match validate_api_key_hash(req.api_key_hash.as_ref().and_then(|h| h.as_deref())) {
+            Ok(h) => h,
+            Err(e) => return err_response(StatusCode::BAD_REQUEST, e),
+        };
 
     let new_cfg = UserConfig {
         name: req.name.trim().to_string(),
@@ -414,9 +431,13 @@ pub async fn update_user(
         Err(e) => return err_response(StatusCode::BAD_REQUEST, e),
     };
 
-    let api_key_hash = match validate_api_key_hash(req.api_key_hash.as_deref()) {
-        Ok(h) => h,
-        Err(e) => return err_response(StatusCode::BAD_REQUEST, e),
+    // `None` = the body did not carry `api_key_hash`, so the stored hash is kept; `Some(h)` = the body set or cleared it.
+    let api_key_hash: Option<Option<String>> = match req.api_key_hash {
+        None => None,
+        Some(v) => match validate_api_key_hash(v.as_deref()) {
+            Ok(h) => Some(h),
+            Err(e) => return err_response(StatusCode::BAD_REQUEST, e),
+        },
     };
 
     // The PUT body's `name` is treated as the desired final name; the URL
@@ -468,7 +489,7 @@ pub async fn update_user(
                 name: renamed_to_for_closure.clone(),
                 role: new_role.clone(),
                 channel_bindings: new_bindings.clone(),
-                api_key_hash: new_api_key_hash.clone(),
+                api_key_hash: new_api_key_hash.clone().unwrap_or(preserved.api_key_hash),
                 budget: preserved.budget,
                 tool_policy: preserved.tool_policy,
                 tool_categories: preserved.tool_categories,
@@ -601,7 +622,8 @@ pub async fn import_users(
         let prepared_row = (|| -> Result<UserConfig, String> {
             validate_name(&row.name)?;
             let role = validate_role(&row.role)?;
-            let api_key_hash = validate_api_key_hash(row.api_key_hash.as_deref())?;
+            let api_key_hash =
+                validate_api_key_hash(row.api_key_hash.as_ref().and_then(|h| h.as_deref()))?;
             Ok(UserConfig {
                 name: row.name.trim().to_string(),
                 role,
@@ -694,11 +716,15 @@ pub async fn import_users(
         }
     }
 
-    let payload: Vec<UserConfig> = to_apply.iter().map(|(_, u)| u.clone()).collect();
+    // Pair each row with whether it carried `api_key_hash` at all, so an update row that omits it keeps the stored hash (same tri-state rule as `update_user`).
+    let payload: Vec<(UserConfig, bool)> = to_apply
+        .iter()
+        .map(|(i, u)| (u.clone(), req.rows[*i].api_key_hash.is_some()))
+        .collect();
     let caller_uid = caller.as_ref().map(|c| c.0.user_id);
     let result = persist_users(&state, caller_uid, move |users| {
         let mut existed_before_row = Vec::with_capacity(payload.len());
-        for new_u in &payload {
+        for (new_u, hash_present) in &payload {
             if let Some(idx) = users.iter().position(|u| u.name == new_u.name) {
                 existed_before_row.push(true);
                 // RBAC M3 (#3205) + M5 (#3203): preserve existing per-
@@ -706,6 +732,11 @@ pub async fn import_users(
                 // existing user — same reasoning as `update_user`.
                 let preserved = users[idx].clone();
                 users[idx] = UserConfig {
+                    api_key_hash: if *hash_present {
+                        new_u.api_key_hash.clone()
+                    } else {
+                        preserved.api_key_hash
+                    },
                     budget: preserved.budget,
                     tool_policy: preserved.tool_policy,
                     tool_categories: preserved.tool_categories,

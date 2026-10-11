@@ -26,12 +26,25 @@ pub fn router() -> axum::Router<Arc<AppState>> {
 /// when subscribing against a long-running daemon); every subsequent poll
 /// uses a cursor (`since_seq`) so bursts faster than the previous
 /// `recent(200)` sliding window are no longer silently truncated.
-#[utoipa::path(get, path = "/api/logs/stream", tag = "system", responses((status = 200, description = "SSE log stream")))]
+///
+/// Admin-only, exactly like `/api/audit/*`: every event is a raw audit ledger row (attribution, detail string, outcome), so the stream goes through the same `require_admin` gate.
+/// Callers below Admin, anonymous callers and the trusted loopback / no-auth identity get 403 and a `PermissionDenied` audit entry.
+#[utoipa::path(get, path = "/api/logs/stream", tag = "system", responses((status = 200, description = "SSE log stream"), (status = 403, description = "Admin role required")))]
 pub async fn logs_stream(
     State(state): State<Arc<AppState>>,
     Query(params): Query<HashMap<String, String>>,
+    api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
+    trusted_no_auth: Option<axum::Extension<crate::middleware::TrustedNoAuthCaller>>,
 ) -> axum::response::Response {
     use axum::response::sse::{Event, KeepAlive, Sse};
+
+    if let Some(deny) = super::audit::require_admin(
+        &state,
+        api_user.as_ref().map(|e| &e.0),
+        trusted_no_auth.is_some(),
+    ) {
+        return deny;
+    }
 
     let level_filter = params
         .get("level")

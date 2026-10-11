@@ -8,7 +8,7 @@
 
 use super::tools_sessions::PaginationParams;
 use super::AppState;
-use crate::middleware::RequestLanguage;
+use crate::middleware::{AuthenticatedApiUser, RequestLanguage, UserRole};
 use crate::types::ApiErrorResponse;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
@@ -60,8 +60,9 @@ pub fn router() -> axum::Router<Arc<AppState>> {
                 |state: State<Arc<AppState>>,
                  id: Path<String>,
                  lang: Option<axum::Extension<RequestLanguage>>,
+                 api_user: Option<axum::Extension<AuthenticatedApiUser>>,
                  body: Json<ApproveRequestBody>| async move {
-                    approve_request(state, id, lang, body).await
+                    approve_request(state, id, lang, api_user, body).await
                 },
             ),
         )
@@ -70,8 +71,9 @@ pub fn router() -> axum::Router<Arc<AppState>> {
             axum::routing::post(
                 |state: State<Arc<AppState>>,
                  id: Path<String>,
-                 lang: Option<axum::Extension<RequestLanguage>>| async move {
-                    reject_request(state, id, lang).await
+                 lang: Option<axum::Extension<RequestLanguage>>,
+                 api_user: Option<axum::Extension<AuthenticatedApiUser>>| async move {
+                    reject_request(state, id, lang, api_user).await
                 },
             ),
         )
@@ -81,8 +83,9 @@ pub fn router() -> axum::Router<Arc<AppState>> {
                 |state: State<Arc<AppState>>,
                  id: Path<String>,
                  lang: Option<axum::Extension<RequestLanguage>>,
+                 api_user: Option<axum::Extension<AuthenticatedApiUser>>,
                  body: Json<ModifyRequestBody>| async move {
-                    modify_request(state, id, body, lang).await
+                    modify_request(state, id, lang, api_user, body).await
                 },
             ),
         )
@@ -91,6 +94,101 @@ pub fn router() -> axum::Router<Arc<AppState>> {
 // ---------------------------------------------------------------------------
 // Execution Approval System — backed by kernel.approvals()
 // ---------------------------------------------------------------------------
+
+/// The caller a restricted (#6753 owner-scoped) approvals view applies to, or `None` when the caller sees every approval.
+///
+/// Admin+ (including the Owner-level `root` identity the middleware gives the master key and the trusted loopback / no-auth caller) and a request with no `api_user` at all are unrestricted, matching [`super::can_access_agent`].
+/// Every other role only sees and decides approvals raised by agents it authored: the middleware deliberately lets a User-role key POST the approve / reject / modify / batch / session actions, so ownership has to be enforced here, exactly as `messaging.rs` and `cloning.rs` do for their User-allowed POSTs.
+fn restricted_caller(
+    api_user: Option<&axum::Extension<AuthenticatedApiUser>>,
+) -> Option<&AuthenticatedApiUser> {
+    api_user
+        .map(|user| &user.0)
+        .filter(|user| user.role < UserRole::Admin)
+}
+
+/// Whether `user` authored the agent an approval's free-form `agent_id` names.
+///
+/// Tool-runner requests carry the agent UUID; manual `POST /api/approvals` requests may carry an agent name, the same fallback [`approval_to_json`] uses to resolve `agent_name`.
+/// An `agent_id` that resolves to no registered agent is not owned by anyone below Admin.
+fn approval_owned_by(state: &AppState, agent_id: &str, user: &AuthenticatedApiUser) -> bool {
+    let registry = state.kernel.agent_registry();
+    let author_matches = |entry: &librefang_types::agent::AgentEntry| {
+        entry.manifest.author.eq_ignore_ascii_case(&user.name)
+    };
+    match agent_id.parse::<librefang_types::agent::AgentId>() {
+        Ok(id) => registry
+            .get_arc(id)
+            .is_some_and(|entry| author_matches(&entry)),
+        Err(_) => registry
+            .find_by_name(agent_id)
+            .is_some_and(|entry| author_matches(&entry)),
+    }
+}
+
+/// Whether the caller may see and decide an approval raised by `agent_id`.
+fn caller_can_access_approval(
+    state: &AppState,
+    agent_id: &str,
+    api_user: Option<&axum::Extension<AuthenticatedApiUser>>,
+) -> bool {
+    match restricted_caller(api_user) {
+        None => true,
+        Some(user) => approval_owned_by(state, agent_id, user),
+    }
+}
+
+/// `decided_by` attribution for a decision made over the HTTP API: the authenticated caller's name.
+///
+/// The master key and the trusted loopback / no-auth caller are attributed by the middleware as `root`; the legacy `"api"` source label remains only for a request that reached the handler without any `AuthenticatedApiUser`.
+fn api_decider(api_user: Option<&axum::Extension<AuthenticatedApiUser>>) -> String {
+    api_user
+        .map(|user| user.0.name.clone())
+        .unwrap_or_else(|| "api".to_string())
+}
+
+/// Resolve the `agent_id` of an approval that is still pending or sits in the in-memory recent ring.
+fn approval_agent_id(state: &AppState, id: uuid::Uuid) -> Option<String> {
+    state
+        .kernel
+        .approvals()
+        .get_pending(id)
+        .map(|request| request.agent_id)
+        .or_else(|| {
+            state
+                .kernel
+                .approvals()
+                .list_recent(usize::MAX)
+                .into_iter()
+                .find(|record| record.request.id == id)
+                .map(|record| record.request.agent_id)
+        })
+}
+
+/// For a restricted caller, `Some(404)` unless the approval exists and belongs to one of its agents.
+///
+/// Answers with the same `AgentNotFound` 404 the kernel returns for an unknown id, so another user's approval id is indistinguishable from a missing one.
+/// It runs before any TOTP handling so a non-owner cannot burn the shared TOTP lockout counter.
+/// An id that is neither pending nor in the recent ring is also a 404 for a restricted caller, rather than the kernel's durable-audit 409 that would name who decided another user's request.
+fn deny_unowned_approval(
+    state: &AppState,
+    id: uuid::Uuid,
+    api_user: Option<&axum::Extension<AuthenticatedApiUser>>,
+) -> Option<axum::response::Response> {
+    let user = restricted_caller(api_user)?;
+    let owned = approval_agent_id(state, id)
+        .is_some_and(|agent_id| approval_owned_by(state, &agent_id, user));
+    if owned {
+        None
+    } else {
+        Some(
+            ApiErrorResponse::from(librefang_types::error::LibreFangError::AgentNotFound(
+                id.to_string(),
+            ))
+            .into_response(),
+        )
+    }
+}
 
 /// Serialize an [`ApprovalRequest`] to the JSON shape expected by the dashboard.
 ///
@@ -174,6 +272,7 @@ fn approval_record_to_json(
 pub async fn list_approvals(
     State(state): State<Arc<AppState>>,
     Query(pagination): Query<PaginationParams>,
+    api_user: Option<axum::Extension<AuthenticatedApiUser>>,
 ) -> impl IntoResponse {
     let pending = state.kernel.approvals().list_pending();
     // Pull the full in-memory recent buffer (capped at
@@ -187,14 +286,19 @@ pub async fn list_approvals(
     let recent = state.kernel.approvals().list_recent(usize::MAX);
 
     let registry_agents = state.kernel.agent_registry().list();
+    // #6753: filter before counting `total` so a restricted caller's pagination covers only its own agents' approvals.
     let mut approvals: Vec<serde_json::Value> = pending
         .iter()
+        .filter(|a| caller_can_access_approval(&state, &a.agent_id, api_user.as_ref()))
         .map(|a| approval_to_json(a, &registry_agents))
         .collect();
 
     approvals.extend(
         recent
             .into_iter()
+            .filter(|record| {
+                caller_can_access_approval(&state, &record.request.agent_id, api_user.as_ref())
+            })
             .map(|record| approval_record_to_json(record, &registry_agents)),
     );
 
@@ -225,6 +329,7 @@ pub async fn get_approval(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
     lang: Option<axum::Extension<RequestLanguage>>,
+    api_user: Option<axum::Extension<AuthenticatedApiUser>>,
 ) -> impl IntoResponse {
     let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
     let uuid = match uuid::Uuid::parse_str(&id) {
@@ -235,7 +340,14 @@ pub async fn get_approval(
         }
     };
 
-    match state.kernel.approvals().get_pending(uuid) {
+    // #6753: another user's approval answers exactly like a missing one.
+    let visible = |agent_id: &str| caller_can_access_approval(&state, agent_id, api_user.as_ref());
+    match state
+        .kernel
+        .approvals()
+        .get_pending(uuid)
+        .filter(|a| visible(&a.agent_id))
+    {
         Some(a) => {
             let registry_agents = state.kernel.agent_registry().list();
             (StatusCode::OK, Json(approval_to_json(&a, &registry_agents)))
@@ -247,7 +359,7 @@ pub async fn get_approval(
                 .approvals()
                 .list_recent(usize::MAX)
                 .into_iter()
-                .find(|record| record.request.id == uuid)
+                .find(|record| record.request.id == uuid && visible(&record.request.agent_id))
             {
                 Some(record) => (
                     StatusCode::OK,
@@ -382,6 +494,7 @@ pub async fn approve_request(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
     lang: Option<axum::Extension<RequestLanguage>>,
+    api_user: Option<axum::Extension<AuthenticatedApiUser>>,
     Json(body): Json<ApproveRequestBody>,
 ) -> axum::response::Response {
     let uuid = match uuid::Uuid::parse_str(&id) {
@@ -393,6 +506,9 @@ pub async fn approve_request(
                 .into_response();
         }
     };
+    if let Some(deny) = deny_unowned_approval(&state, uuid, api_user.as_ref()) {
+        return deny;
+    }
 
     // Verify a code only when this request actually has one to verify: the
     // tool must be inside `totp_tools` and the caller outside the grace window
@@ -550,7 +666,7 @@ pub async fn approve_request(
         .resolve_tool_approval(
             uuid,
             librefang_types::approval::ApprovalDecision::Approved,
-            Some("api".to_string()),
+            Some(api_decider(api_user.as_ref())),
             totp_verified,
             Some("api_admin"),
         )
@@ -578,6 +694,7 @@ pub async fn reject_request(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
     lang: Option<axum::Extension<RequestLanguage>>,
+    api_user: Option<axum::Extension<AuthenticatedApiUser>>,
 ) -> axum::response::Response {
     let uuid = match uuid::Uuid::parse_str(&id) {
         Ok(u) => u,
@@ -588,13 +705,16 @@ pub async fn reject_request(
                 .into_response();
         }
     };
+    if let Some(deny) = deny_unowned_approval(&state, uuid, api_user.as_ref()) {
+        return deny;
+    }
 
     match state
         .kernel
         .resolve_tool_approval(
             uuid,
             librefang_types::approval::ApprovalDecision::Denied,
-            Some("api".to_string()),
+            Some(api_decider(api_user.as_ref())),
             false,
             None,
         )
@@ -633,8 +753,9 @@ pub(crate) struct ModifyRequestBody {
 pub async fn modify_request(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
-    Json(body): Json<ModifyRequestBody>,
     lang: Option<axum::Extension<RequestLanguage>>,
+    api_user: Option<axum::Extension<AuthenticatedApiUser>>,
+    Json(body): Json<ModifyRequestBody>,
 ) -> axum::response::Response {
     // Truncate feedback to prevent database bloat
     let feedback: String = body
@@ -651,13 +772,16 @@ pub async fn modify_request(
                 .into_response();
         }
     };
+    if let Some(deny) = deny_unowned_approval(&state, uuid, api_user.as_ref()) {
+        return deny;
+    }
 
     match state
         .kernel
         .resolve_tool_approval(
             uuid,
             librefang_types::approval::ApprovalDecision::ModifyAndRetry { feedback },
-            Some("api".to_string()),
+            Some(api_decider(api_user.as_ref())),
             false,
             None,
         )
@@ -700,6 +824,7 @@ const BULK_APPROVAL_LIMIT: usize = 100;
 #[allow(private_interfaces)]
 pub async fn batch_resolve(
     State(state): State<Arc<AppState>>,
+    api_user: Option<axum::Extension<AuthenticatedApiUser>>,
     Json(body): Json<BatchResolveRequest>,
 ) -> impl IntoResponse {
     // Guard BEFORE the `Vec::with_capacity(body.ids.len())` below — without
@@ -736,6 +861,7 @@ pub async fn batch_resolve(
             .iter()
             .filter_map(|id| uuid::Uuid::parse_str(id).ok())
             .filter_map(|uid| state.kernel.approvals().get_pending(uid))
+            .filter(|req| caller_can_access_approval(&state, &req.agent_id, api_user.as_ref()))
             .any(|req| policy.tool_requires_totp(&req.tool_name));
         if any_needs_totp {
             return (
@@ -761,11 +887,18 @@ pub async fn batch_resolve(
         }
     }
 
+    let decider = api_decider(api_user.as_ref());
     for uuid in valid_uuids {
         let id = uuid.to_string();
+        // #6753: another user's approval is reported per id exactly like a missing one.
+        if deny_unowned_approval(&state, uuid, api_user.as_ref()).is_some() {
+            result_json
+                .push(serde_json::json!({"id": id, "status": "error", "message": "not found"}));
+            continue;
+        }
         match state
             .kernel
-            .resolve_tool_approval(uuid, decision.clone(), Some("api".to_string()), false, None)
+            .resolve_tool_approval(uuid, decision.clone(), Some(decider.clone()), false, None)
             .await
         {
             Ok((resp, _)) => result_json.push(serde_json::json!({
@@ -807,6 +940,7 @@ pub async fn batch_resolve(
 pub async fn list_approvals_for_session(
     State(state): State<Arc<AppState>>,
     Path(session_id): Path<String>,
+    api_user: Option<axum::Extension<AuthenticatedApiUser>>,
 ) -> impl IntoResponse {
     // Validate session_id is not empty/whitespace.
     if session_id.trim().is_empty() {
@@ -829,6 +963,7 @@ pub async fn list_approvals_for_session(
         .list_pending_for_session(&session_id);
     let items: Vec<serde_json::Value> = pending
         .iter()
+        .filter(|a| caller_can_access_approval(&state, &a.agent_id, api_user.as_ref()))
         .map(|a| approval_to_json(a, &registry_agents))
         .collect();
     let count = items.len();
@@ -885,6 +1020,7 @@ pub(crate) struct ApproveAllForSessionRequest {
 pub async fn approve_all_for_session(
     State(state): State<Arc<AppState>>,
     Path(session_id): Path<String>,
+    api_user: Option<axum::Extension<AuthenticatedApiUser>>,
     body: Option<Json<ApproveAllForSessionRequest>>,
 ) -> impl IntoResponse {
     let req = body
@@ -909,10 +1045,14 @@ pub async fn approve_all_for_session(
     }
 
     // Collect pending IDs and pre-check for TOTP blockers.
-    let pending = state
+    // #6753: a restricted caller only acts on its own agents' approvals, and the confirmation checks below compare against that same visible set.
+    let pending: Vec<_> = state
         .kernel
         .approvals()
-        .list_pending_for_session(&session_id);
+        .list_pending_for_session(&session_id)
+        .into_iter()
+        .filter(|req| caller_can_access_approval(&state, &req.agent_id, api_user.as_ref()))
+        .collect();
 
     // Confirmation check: verify pending count matches expected_count if provided.
     if let Some(expected_count) = req.expected_count {
@@ -965,6 +1105,7 @@ pub async fn approve_all_for_session(
     // for each deferred payload).
     // Reuse the `pending` list collected above — avoids a TOCTOU race where the
     // set could change between the pre-check and the resolve loop.
+    let decider = api_decider(api_user.as_ref());
     let mut resolved = 0usize;
     for pending_req in pending {
         if state
@@ -972,7 +1113,7 @@ pub async fn approve_all_for_session(
             .resolve_tool_approval(
                 pending_req.id,
                 librefang_types::approval::ApprovalDecision::Approved,
-                Some("api".to_string()),
+                Some(decider.clone()),
                 false,
                 None,
             )
@@ -1011,6 +1152,7 @@ pub async fn approve_all_for_session(
 pub async fn reject_all_for_session(
     State(state): State<Arc<AppState>>,
     Path(session_id): Path<String>,
+    api_user: Option<axum::Extension<AuthenticatedApiUser>>,
 ) -> impl IntoResponse {
     // Validate session_id is not empty/whitespace.
     if session_id.trim().is_empty() {
@@ -1030,18 +1172,21 @@ pub async fn reject_all_for_session(
     // Route through resolve_tool_approval for each request so deferred
     // executions are properly handled (even though rejection means the deferred
     // will never run, this keeps the code path consistent).
+    let decider = api_decider(api_user.as_ref());
     let mut resolved = 0usize;
     for pending_req in state
         .kernel
         .approvals()
         .list_pending_for_session(&session_id)
+        .into_iter()
+        .filter(|req| caller_can_access_approval(&state, &req.agent_id, api_user.as_ref()))
     {
         if state
             .kernel
             .resolve_tool_approval(
                 pending_req.id,
                 librefang_types::approval::ApprovalDecision::Denied,
-                Some("api".to_string()),
+                Some(decider.clone()),
                 false,
                 None,
             )
@@ -1080,9 +1225,21 @@ fn default_audit_limit() -> usize {
 pub async fn audit_log(
     State(state): State<Arc<AppState>>,
     Query(params): Query<AuditQueryParams>,
+    api_user: Option<axum::Extension<AuthenticatedApiUser>>,
 ) -> impl IntoResponse {
     const MAX_AUDIT_LIMIT: usize = 500;
     let limit = params.limit.min(MAX_AUDIT_LIMIT);
+    if let Some(user) = restricted_caller(api_user.as_ref()) {
+        // #6753: the audit rows carry the same `action_summary` as the pending list, so a restricted caller only reads its own agents' history.
+        // An explicit `agent_id` filter it owns takes the normal single-query path below.
+        let owns_filter = params
+            .agent_id
+            .as_deref()
+            .is_some_and(|aid| approval_owned_by(&state, aid, user));
+        if !owns_filter {
+            return owner_scoped_audit_log(&state, &params, limit, user);
+        }
+    }
     let entries = match state.kernel.approvals().query_audit(
         limit,
         params.offset,
@@ -1110,10 +1267,83 @@ pub async fn audit_log(
     .into_response()
 }
 
+/// `GET /api/approvals/audit` for a restricted caller that did not name one of its own agents.
+///
+/// A named agent the caller does not own yields an empty page.
+/// Without an `agent_id` filter the page is merged from one query per key an owned agent's approvals can be recorded under (its UUID, and its name for manual requests), each fetching the first `offset + limit` rows, so the merged window is exact.
+fn owner_scoped_audit_log(
+    state: &AppState,
+    params: &AuditQueryParams,
+    limit: usize,
+    user: &AuthenticatedApiUser,
+) -> axum::response::Response {
+    let keys: Vec<String> = if params.agent_id.is_some() {
+        Vec::new()
+    } else {
+        state
+            .kernel
+            .agent_registry()
+            .list_arcs()
+            .iter()
+            .filter(|entry| entry.manifest.author.eq_ignore_ascii_case(&user.name))
+            .flat_map(|entry| [entry.id.to_string(), entry.name.clone()])
+            .collect()
+    };
+    let window = params.offset.saturating_add(limit);
+    let mut entries = Vec::new();
+    let mut total = 0usize;
+    for key in &keys {
+        match state.kernel.approvals().query_audit(
+            window,
+            0,
+            Some(key),
+            params.tool_name.as_deref(),
+        ) {
+            Ok(rows) => entries.extend(rows),
+            Err(error) => return ApiErrorResponse::internal_scrub(error).into_response(),
+        }
+        match state
+            .kernel
+            .approvals()
+            .audit_count(Some(key), params.tool_name.as_deref())
+        {
+            Ok(count) => total += count,
+            Err(error) => return ApiErrorResponse::internal_scrub(error).into_response(),
+        }
+    }
+    // Same order as the SQL path: newest decision first.
+    entries.sort_by(|a, b| b.decided_at.cmp(&a.decided_at));
+    let items: Vec<_> = entries
+        .into_iter()
+        .skip(params.offset)
+        .take(limit)
+        .collect();
+    Json(serde_json::json!({
+        "items": items,
+        "total": total,
+        "offset": params.offset,
+        "limit": limit,
+    }))
+    .into_response()
+}
+
 /// GET /api/approvals/count — Lightweight pending count for notification badges.
 #[utoipa::path(get, path = "/api/approvals/count", tag = "approvals", responses((status = 200, description = "Pending approval count", body = crate::types::JsonObject)))]
-pub async fn approval_count(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let pending = state.kernel.approvals().pending_count();
+pub async fn approval_count(
+    State(state): State<Arc<AppState>>,
+    api_user: Option<axum::Extension<AuthenticatedApiUser>>,
+) -> impl IntoResponse {
+    // #6753: a restricted caller's badge counts the same approvals `GET /api/approvals` shows it.
+    let pending = match restricted_caller(api_user.as_ref()) {
+        None => state.kernel.approvals().pending_count(),
+        Some(user) => state
+            .kernel
+            .approvals()
+            .list_pending()
+            .iter()
+            .filter(|req| approval_owned_by(&state, &req.agent_id, user))
+            .count(),
+    };
     Json(serde_json::json!({"pending": pending}))
 }
 

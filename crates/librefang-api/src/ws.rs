@@ -547,14 +547,14 @@ pub async fn agent_ws(
             }
             drop(sessions);
 
-            // Check per-user API keys (hashed with Argon2).
-            if !session_auth {
-                if let Some(user) = user_api_keys.iter().find(|user| {
-                    crate::password_hash::verify_password(token_str, &user.api_key_hash)
-                }) {
+            // Check per-user API keys. `find_user_api_key` keeps the Argon2id verifies off the async worker; skipped when the master key already matched, since root attribution wins below anyway.
+            if !session_auth && !api_auth {
+                if let Some(user) =
+                    crate::server::find_user_api_key(&user_api_keys, token_str).await
+                {
                     user_key_auth = true;
                     authenticated_user = Some(crate::middleware::AuthenticatedApiUser {
-                        name: user.name.clone(),
+                        name: user.name,
                         role: user.role,
                         user_id: user.user_id,
                     });

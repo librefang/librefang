@@ -103,12 +103,13 @@ async fn post(
 fn write_instance(home: &Path, name: &str) -> PathBuf {
     let dir = home.join("workspaces").join("agents").join(name);
     std::fs::create_dir_all(dir.join(".identity")).expect("mkdir instance");
+    // Paths go into TOML literal strings ('...'): a Windows path in a basic string ("C:\Users\...") is an invalid escape, so the manifest would not parse.
     std::fs::write(
         dir.join("agent.toml"),
         format!(
             "name = \"{name}\"\n\
              module = \"builtin:chat\"\n\
-             workspace = \"{}\"\n\
+             workspace = '{}'\n\
              description = \"DE LA INSTANCIA\"\n",
             dir.display()
         ),
@@ -190,7 +191,7 @@ async fn a_supplied_manifest_cannot_point_at_another_agents_directory() {
         serde_json::json!({
             "name": "nuevo",
             "manifest_toml": format!(
-                "name = \"nuevo\"\nmodule = \"builtin:chat\"\nworkspace = \"{}\"\n",
+                "name = \"nuevo\"\nmodule = \"builtin:chat\"\nworkspace = '{}'\n",
                 victima.display()
             ),
         }),
@@ -270,7 +271,7 @@ async fn a_declared_shared_workspace_outside_the_agents_tree_is_kept() {
         serde_json::json!({
             "name": "con-compartido",
             "manifest_toml": format!(
-                "name = \"con-compartido\"\nmodule = \"builtin:chat\"\nworkspace = \"{}\"\n",
+                "name = \"con-compartido\"\nmodule = \"builtin:chat\"\nworkspace = '{}'\n",
                 compartido.display()
             ),
         }),

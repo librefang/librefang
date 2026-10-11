@@ -1350,6 +1350,7 @@ pub async fn patch_agent_config(
                         .kernel
                         .agent_registry()
                         .find_by_name(new_name)
+                        .filter(|existing| existing.id != agent_id)
                         .map(|_| {
                             librefang_types::error::LibreFangError::AgentAlreadyExists(
                                 new_name.to_string(),

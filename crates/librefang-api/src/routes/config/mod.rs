@@ -29,11 +29,7 @@ pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
         .route("/status", axum::routing::get(status))
         .route(
             "/dashboard/snapshot",
-            axum::routing::get({
-                |State(state): State<Arc<AppState>>| async move {
-                    axum::Json(dashboard_snapshot_inner(&state).await)
-                }
-            }),
+            axum::routing::get(dashboard_snapshot),
         )
         .route("/version", axum::routing::get(version))
         .route("/config", axum::routing::get(get_config))
@@ -1077,10 +1073,41 @@ pub fn json_to_toml_value(value: &serde_json::Value) -> toml::Value {
 ///
 /// Replaces 7 parallel frontend requests (health, status, providers, channels,
 /// skills, agents, workflows) with one round-trip, cutting poll overhead by ~7x.
+///
+/// The `agents` array is owner-scoped exactly like `GET /api/agents` (#6753): a caller below Admin only sees agents whose manifest author matches its name.
+/// The memoized payload stays role-independent; the filter runs on every response after the cache lookup, so one caller's view never leaks into another's.
 pub async fn dashboard_snapshot(
     State(state): State<Arc<AppState>>,
+    api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
 ) -> axum::Json<serde_json::Value> {
-    axum::Json(dashboard_snapshot_inner(&state).await)
+    let mut payload = dashboard_snapshot_inner(&state).await;
+    scope_snapshot_agents(&state, &mut payload, api_user.as_ref());
+    axum::Json(payload)
+}
+
+/// Drop every `agents` entry the caller may not access, using the same predicate as the agent-scoped routes ([`super::can_access_agent`]).
+///
+/// Admin+ (including the Owner-level `root` identity the middleware gives the master key and the trusted no-auth caller) and a request with no `api_user` at all keep the full list.
+fn scope_snapshot_agents(
+    state: &AppState,
+    payload: &mut serde_json::Value,
+    api_user: Option<&axum::Extension<crate::middleware::AuthenticatedApiUser>>,
+) {
+    let restricted = api_user.is_some_and(|user| user.0.role < crate::middleware::UserRole::Admin);
+    if !restricted {
+        return;
+    }
+    if let Some(agents) = payload
+        .get_mut("agents")
+        .and_then(serde_json::Value::as_array_mut)
+    {
+        agents.retain(|agent| {
+            agent["id"]
+                .as_str()
+                .and_then(|id| id.parse::<librefang_types::agent::AgentId>().ok())
+                .is_some_and(|id| super::can_access_agent(state, id, api_user))
+        });
+    }
 }
 
 /// TTL for the [`dashboard_snapshot_inner`] memoization cache.

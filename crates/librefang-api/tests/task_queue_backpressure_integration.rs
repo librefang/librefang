@@ -324,7 +324,87 @@ async fn an_expired_task_leaves_the_pending_count_and_is_visible_as_cancelled() 
         after["pending"], 0,
         "a cancelled task is no longer pending: {after}"
     );
+    assert_eq!(
+        after["cancelled"], 1,
+        "the status summary must count cancelled tasks: {after}"
+    );
+    let bucket_sum: u64 = ["pending", "in_progress", "completed", "failed", "cancelled"]
+        .iter()
+        .map(|k| after[*k].as_u64().unwrap_or_default())
+        .sum();
+    assert_eq!(
+        Some(bucket_sum),
+        after["total"].as_u64(),
+        "the buckets must add up to total: {after}"
+    );
 
     let (_, listed) = send(&h.app, auth_get("/api/tasks?status=cancelled")).await;
     assert_eq!(listed["total"], 1, "and is listable as cancelled: {listed}");
+}
+
+fn patch_status(id: &str, status: &str) -> Request<Body> {
+    Request::builder()
+        .method(Method::PATCH)
+        .uri(format!("/api/tasks/{id}"))
+        .header(header::AUTHORIZATION, format!("Bearer {API_KEY}"))
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            serde_json::json!({ "status": status }).to_string(),
+        ))
+        .expect("request")
+}
+
+/// A PATCH the task's current state does not allow is a 409 on a task that still exists, not a 404 that tells the client the task was deleted.
+#[tokio::test(flavor = "multi_thread")]
+async fn patch_with_disallowed_transition_on_existing_task_is_409_not_404() {
+    let h = boot_router(|_| {}).await;
+    let (status, body) = send(&h.app, post_task("t", None)).await;
+    assert_eq!(status, StatusCode::CREATED);
+    let id = body["id"].as_str().expect("id").to_string();
+
+    // Only a failed task may be reset to pending.
+    let (status, body) = send(&h.app, patch_status(&id, "pending")).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    let message = body.to_string();
+    assert!(
+        !message.contains("api-error-task-transition-not-allowed"),
+        "409 body must carry a translated message, not the raw key: {body}"
+    );
+
+    let (status, body) = send(&h.app, patch_status(&id, "cancelled")).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body) = send(&h.app, patch_status(&id, "cancelled")).await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "a second cancel is a conflict, not a missing task: {body}"
+    );
+
+    let (status, _) = send(&h.app, auth_get(&format!("/api/tasks/{id}"))).await;
+    assert_eq!(status, StatusCode::OK, "the task is still readable");
+
+    let (status, _) = send(&h.app, patch_status("does-not-exist", "cancelled")).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+/// Retrying a task that is still pending is a 409 whose message is translated; the key used to be missing from the locale files, so the body carried the raw key.
+#[tokio::test(flavor = "multi_thread")]
+async fn retry_of_a_pending_task_is_409_with_a_translated_message() {
+    let h = boot_router(|_| {}).await;
+    let (status, body) = send(&h.app, post_task("t", None)).await;
+    assert_eq!(status, StatusCode::CREATED);
+    let id = body["id"].as_str().expect("id").to_string();
+
+    let req = Request::builder()
+        .method(Method::POST)
+        .uri(format!("/api/tasks/{id}/retry"))
+        .header(header::AUTHORIZATION, format!("Bearer {API_KEY}"))
+        .body(Body::empty())
+        .expect("request");
+    let (status, body) = send(&h.app, req).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert!(
+        !body.to_string().contains("api-error-task-not-retryable"),
+        "409 body must carry a translated message, not the raw key: {body}"
+    );
 }

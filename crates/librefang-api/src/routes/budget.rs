@@ -230,40 +230,45 @@ fn usage_query_error(error: impl std::fmt::Display) -> Response {
 pub async fn usage_stats(
     State(state): State<Arc<AppState>>,
     Query(q): Query<UsageRangeQuery>,
+    api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
 ) -> Response {
     let range = match parse_range(q.start_date.as_deref(), q.end_date.as_deref()) {
         Ok(r) => r,
         Err(e) => return e.into_response(),
     };
-    let usage_store = state.kernel.memory_substrate().usage();
-    let items = state
+    // Read from the persistent SQLite store (survives restarts) in one `GROUP BY agent_id` pass rather than one summary query per agent, the N+1 pattern #3684 already removed from `/api/budget/agents`.
+    let summaries = match state
         .kernel
-        .agent_registry()
-        .list()
-        .iter()
-        .map(
-            |e| -> librefang_types::error::LibreFangResult<serde_json::Value> {
-                // Read from persistent SQLite store (survives restarts)
-                let summary = usage_store.query_summary_ranged(Some(e.id), &range)?;
-                Ok(serde_json::json!({
-                    "agent_id": e.id.to_string(),
-                    "name": e.name,
-                    "is_hand": e.is_hand,
-                    "total_tokens": summary.total_input_tokens + summary.total_output_tokens,
-                    "input_tokens": summary.total_input_tokens,
-                    "output_tokens": summary.total_output_tokens,
-                    "total_cost_usd": summary.total_cost_usd,
-                    "cost": summary.total_cost_usd,
-                    "call_count": summary.call_count,
-                    "tool_calls": summary.total_tool_calls,
-                }))
-            },
-        )
-        .collect::<librefang_types::error::LibreFangResult<Vec<_>>>();
-    let items = match items {
-        Ok(items) => items,
+        .memory_substrate()
+        .usage()
+        .query_summary_ranged_by_agent(&range)
+    {
+        Ok(map) => map,
         Err(error) => return usage_query_error(error),
     };
+    // `list_arcs()` avoids deep-cloning every manifest just to read `id` / `name` / `is_hand` (#3569).
+    let items: Vec<serde_json::Value> = state
+        .kernel
+        .agent_registry()
+        .list_arcs()
+        .iter()
+        .filter(|e| caller_can_see_agent_entry(e, api_user.as_ref()))
+        .map(|e| {
+            let summary = summaries.get(&e.id).cloned().unwrap_or_default();
+            serde_json::json!({
+                "agent_id": e.id.to_string(),
+                "name": e.name,
+                "is_hand": e.is_hand,
+                "total_tokens": summary.total_input_tokens + summary.total_output_tokens,
+                "input_tokens": summary.total_input_tokens,
+                "output_tokens": summary.total_output_tokens,
+                "total_cost_usd": summary.total_cost_usd,
+                "cost": summary.total_cost_usd,
+                "call_count": summary.call_count,
+                "tool_calls": summary.total_tool_calls,
+            })
+        })
+        .collect();
     let total = items.len();
     Json(crate::types::PaginatedResponse {
         items,
@@ -1096,6 +1101,21 @@ async fn persist_budget_locked(
     Ok(())
 }
 
+/// Whether the caller may see per-agent cost for `entry` (#6753).
+///
+/// Same predicate as [`super::can_access_agent`], applied to an entry the handler already holds so listing handlers do not repeat a registry lookup per agent.
+/// Admin+ (including the Owner-level `root` identity the middleware gives the master key and the trusted no-auth caller) and a request with no `api_user` at all see every agent; lower roles only agents whose manifest author matches their name, case-insensitively, exactly like `GET /api/agents`.
+fn caller_can_see_agent_entry(
+    entry: &librefang_types::agent::AgentEntry,
+    api_user: Option<&axum::Extension<crate::middleware::AuthenticatedApiUser>>,
+) -> bool {
+    match api_user {
+        None => true,
+        Some(user) if user.0.role >= UserRole::Admin => true,
+        Some(user) => entry.manifest.author.eq_ignore_ascii_case(&user.0.name),
+    }
+}
+
 /// GET /api/budget/agents/{id} — Per-agent budget/quota status.
 #[utoipa::path(
     get,
@@ -1107,10 +1127,12 @@ async fn persist_budget_locked(
 pub async fn agent_budget_status(
     State(state): State<Arc<AppState>>,
     AgentIdPath(agent_id): AgentIdPath,
+    api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
 ) -> impl IntoResponse {
+    // #6753: a caller below Admin only sees the spend of agents it authored; another user's agent answers with the same 404 as a missing one so ids cannot be enumerated.
     let entry = match state.kernel.agent_registry().get(agent_id) {
-        Some(e) => e,
-        None => {
+        Some(e) if caller_can_see_agent_entry(&e, api_user.as_ref()) => e,
+        _ => {
             // #3511: even on 404 we know agent_id was well-formed, so emit it.
             return crate::extensions::with_agent_id(
                 agent_id,
@@ -1187,7 +1209,10 @@ pub async fn agent_budget_status(
         (status = 200, description = "Per-agent cost ranking", body = crate::types::JsonObject)
     )
 )]
-pub async fn agent_budget_ranking(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+pub async fn agent_budget_ranking(
+    State(state): State<Arc<AppState>>,
+    api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
+) -> impl IntoResponse {
     let usage_store =
         librefang_memory::usage::UsageStore::new(state.kernel.memory_substrate().pool());
 
@@ -1211,6 +1236,7 @@ pub async fn agent_budget_ranking(State(state): State<Arc<AppState>>) -> impl In
     let registry_entries = state.kernel.agent_registry().list_arcs();
     let items: Vec<serde_json::Value> = registry_entries
         .iter()
+        .filter(|entry| caller_can_see_agent_entry(entry, api_user.as_ref()))
         .filter_map(|entry| {
             let daily = *daily_costs.get(&entry.id).unwrap_or(&0.0);
             if daily > 0.0 {

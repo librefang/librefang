@@ -413,8 +413,8 @@ pub fn validate_window_id(id: &str) -> bool {
 /// Allowed: any Unicode character except control characters and `|`.
 /// Length is measured in Unicode scalar values (chars), 1–64.
 ///
-/// The `|` character is forbidden because it is used as the field separator
-/// in our `list-windows -F` format string; allowing it would corrupt parsing.
+/// The `|` character is forbidden because it is the field separator in our `list-windows -F` format string.
+/// The parser tolerates it inside a name set outside this controller, but names created through the API are kept unambiguous.
 /// Control characters (including newlines and null bytes) are rejected because
 /// they cannot appear in tmux window names meaningfully.
 ///
@@ -433,9 +433,8 @@ pub fn validate_window_name(name: &str) -> bool {
 
 /// Parse the output of `list-windows -F '#{window_id}|#{window_index}|#{window_name}|#{window_active}'`.
 ///
-/// Each non-empty line is split into exactly four fields using `splitn(4, '|')`.
-/// Window names from tmux are returned as-is (upstream validators ensure names
-/// were whitelisted when created through this controller).
+/// `window_id` (`@N`) and `window_index` (a number) are split off from the left and `window_active` (`0`/`1`) from the right, so everything in between is the name.
+/// Names set outside this controller (for example `tmux rename-window` typed in the attached shell) bypass `validate_window_name` and may contain `|`; this split keeps them intact.
 fn parse_window_list(output: &str) -> Result<Vec<WindowInfo>, TmuxError> {
     let mut windows = Vec::new();
 
@@ -445,7 +444,7 @@ fn parse_window_list(output: &str) -> Result<Vec<WindowInfo>, TmuxError> {
             continue;
         }
 
-        let mut parts = line.splitn(4, '|');
+        let mut parts = line.splitn(3, '|');
         let id = parts.next().ok_or_else(|| TmuxError::MissingField {
             field: "window_id",
             line: line.to_string(),
@@ -454,14 +453,17 @@ fn parse_window_list(output: &str) -> Result<Vec<WindowInfo>, TmuxError> {
             field: "window_index",
             line: line.to_string(),
         })?;
-        let name = parts.next().ok_or_else(|| TmuxError::MissingField {
+        let rest = parts.next().ok_or_else(|| TmuxError::MissingField {
             field: "window_name",
             line: line.to_string(),
         })?;
-        let active_str = parts.next().ok_or_else(|| TmuxError::MissingField {
-            field: "window_active",
-            line: line.to_string(),
-        })?;
+        // `window_active` is always "0" or "1", so split it off from the right; a '|' that a user put in the name via `tmux rename-window` inside the attached shell stays in the name.
+        let (name, active_str) = rest
+            .rsplit_once('|')
+            .ok_or_else(|| TmuxError::MissingField {
+                field: "window_active",
+                line: line.to_string(),
+            })?;
 
         let index: u32 = index_str
             .trim()
@@ -516,18 +518,17 @@ mod tests {
     }
 
     #[test]
-    fn parse_window_with_pipe_in_name_uses_splitn() {
-        // If a name somehow contains a pipe (which the validator would reject,
-        // but tmux output could theoretically produce), splitn(4) captures the
-        // rest as the name field.
-        let raw = "@5|2|weird|name|0";
-        let windows = parse_window_list(raw).unwrap();
-        assert_eq!(windows.len(), 1);
-        // The name field is "weird" and the rest "name|0" becomes `active_str`.
-        // This is an edge-case acknowledgement — the validator prevents such names
-        // from being created through this controller in the first place.
+    fn parse_window_with_pipe_in_name_preserves_name_and_active() {
+        // A user can run `tmux rename-window 'logs|prod'` in the attached dashboard shell, bypassing validate_window_name.
+        let windows = parse_window_list("@5|2|logs|prod|1\n@6|3|a|b|c|0").unwrap();
+        assert_eq!(windows.len(), 2);
         assert_eq!(windows[0].id, "@5");
         assert_eq!(windows[0].index, 2);
+        assert_eq!(windows[0].name, "logs|prod");
+        assert!(windows[0].active);
+        assert_eq!(windows[1].id, "@6");
+        assert_eq!(windows[1].name, "a|b|c");
+        assert!(!windows[1].active);
     }
 
     #[test]

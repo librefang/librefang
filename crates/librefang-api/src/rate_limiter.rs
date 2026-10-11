@@ -67,7 +67,16 @@ pub fn is_rate_limit_exempt(path: &str) -> bool {
 }
 
 pub fn operation_cost(method: &str, path: &str) -> NonZeroU32 {
-    match (method, path) {
+    // Every route is mounted at both `/api` and `/api/v1` (server.rs), and the limiter sees the raw URI, so strip the version prefix the same way the auth middleware does before pricing.
+    // Strip `/api/v1/` with the trailing slash so an unrelated `/api/v10...` path is left alone.
+    let normalized: Cow<'_, str> = if let Some(rest) = path.strip_prefix("/api/v1/") {
+        Cow::Owned(format!("/api/{rest}"))
+    } else if path == "/api/v1" {
+        Cow::Borrowed("/api")
+    } else {
+        Cow::Borrowed(path)
+    };
+    match (method, normalized.as_ref()) {
         (_, "/api/health") => NonZeroU32::new(1).unwrap(),
         // Priced with `/api/health`, not at the 5-token fallback: a
         // Kubernetes pod runs startup + liveness + readiness probes
@@ -75,11 +84,8 @@ pub fn operation_cost(method: &str, path: &str) -> NonZeroU32 {
         // source IP, which is what the GCRA limiter keys on. At the fallback
         // cost a startup probe on a 1s period alone would drain the
         // 500-token/min budget and 429 the pod out of its own rollout.
-        // Both spellings are listed because `operation_cost` matches the raw
-        // path with no version normalisation, and a probe URL is written by
-        // hand into a manifest — an operator who reaches for the versioned
-        // form should not silently get the expensive tier.
-        (_, "/api/ready") | (_, "/api/v1/ready") => NonZeroU32::new(1).unwrap(),
+        // The versioned `/api/v1/ready` spelling is priced the same through the prefix normalisation at the top of this function; a probe URL is written by hand into a manifest, and an operator who reaches for the versioned form must not silently get the expensive tier.
+        (_, "/api/ready") => NonZeroU32::new(1).unwrap(),
         ("GET", "/api/status") => NonZeroU32::new(1).unwrap(),
         ("GET", "/api/version") => NonZeroU32::new(1).unwrap(),
         ("GET", "/api/tools") => NonZeroU32::new(1).unwrap(),
@@ -909,6 +915,37 @@ mod tests {
         assert_eq!(operation_cost("GET", "/api/approvals/count").get(), 1);
         assert_eq!(operation_cost("GET", "/api/providers").get(), 1);
         assert_eq!(operation_cost("GET", "/api/media/providers").get(), 1);
+    }
+
+    #[test]
+    fn versioned_paths_cost_the_same_as_unversioned() {
+        for (m, p) in [
+            ("POST", "/api/agents"),
+            ("POST", "/api/pairing/complete"),
+            ("POST", "/api/skills/install"),
+            ("POST", "/api/skills/uninstall"),
+            ("POST", "/api/migrate"),
+            ("PATCH", "/api/agents/abc"),
+            ("GET", "/api/dashboard/snapshot"),
+            ("GET", "/api/ready"),
+            ("GET", "/api/agents"),
+            ("GET", "/api/audit/recent"),
+            ("GET", "/api/marketplace/search"),
+        ] {
+            let v1 = format!("/api/v1{}", &p[4..]);
+            assert_eq!(operation_cost(m, p), operation_cost(m, &v1), "{m} {v1}");
+        }
+        assert_eq!(operation_cost("POST", "/api/v1/agents").get(), 50);
+        assert_eq!(operation_cost("POST", "/api/v1/pairing/complete").get(), 50);
+        assert_eq!(operation_cost("POST", "/api/v1/migrate").get(), 100);
+        assert_eq!(operation_cost("GET", "/api/v1/dashboard/snapshot").get(), 1);
+        assert_eq!(operation_cost("PATCH", "/api/v1/agents/abc").get(), 10);
+        assert_eq!(
+            operation_cost("PATCH", "/api/v1/agents/abc/config").get(),
+            5
+        );
+        // `/api/v10` is not the version prefix and must not be rewritten.
+        assert_eq!(operation_cost("GET", "/api/v10/ready").get(), 5);
     }
 
     // ── Auth rate limiter unit tests ─────────────────────────────────────────

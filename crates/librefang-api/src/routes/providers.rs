@@ -1603,9 +1603,16 @@ pub async fn add_custom_model(
         .save_custom_models(&custom_path)
     {
         tracing::warn!("Failed to persist custom models: {e}");
+        // Scope the rollback to this request's (id, provider) so a same-id custom model under another provider survives.
+        // `remove_custom_model` prunes aliases left without a target; put back any that existed before this request so the rollback undoes only the add.
         let id_for_rollback = id.clone();
+        let provider_for_rollback = provider.clone();
         state.kernel.model_catalog_update(&mut move |catalog| {
-            catalog.remove_custom_model(&id_for_rollback);
+            let aliases = aliases_targeting(catalog, &id_for_rollback);
+            catalog.remove_custom_model(&id_for_rollback, Some(&provider_for_rollback));
+            for (alias, target) in &aliases {
+                catalog.add_alias(alias, target);
+            }
         });
         return ApiErrorResponse::internal_scrub(e).into_json_tuple();
     }
@@ -1620,23 +1627,35 @@ pub async fn add_custom_model(
     )
 }
 
+/// Alias mappings whose target is `model_id` (case-insensitive), so a failed-persist rollback can restore what `remove_custom_model` pruned.
+fn aliases_targeting(
+    catalog: &librefang_kernel::model_catalog::ModelCatalog,
+    model_id: &str,
+) -> Vec<(String, String)> {
+    catalog
+        .list_aliases()
+        .iter()
+        .filter(|(_, target)| target.eq_ignore_ascii_case(model_id))
+        .map(|(alias, target)| (alias.clone(), target.clone()))
+        .collect()
+}
+
 /// DELETE /api/models/custom/{id} — Remove a custom model.
 #[utoipa::path(delete, path = "/api/models/custom/{id}", tag = "models", params(("id" = String, Path, description = "Model ID")), responses((status = 200, description = "Custom model removed")))]
 pub async fn remove_custom_model(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(model_id): axum::extract::Path<String>,
 ) -> impl IntoResponse {
-    // Snapshot the entry before removing so we can restore it if the
-    // subsequent persist fails — keeps the in-memory catalog consistent
-    // with disk across failure paths.
+    // Keep every removed entry so all of them can be restored if the subsequent persist fails, which keeps the in-memory catalog consistent with disk across failure paths.
+    // The aliases pointing at this ID are kept too, because `remove_custom_model` prunes the ones it leaves without a target.
     let model_id_for_closure = model_id.clone();
-    let mut snapshot = None;
-    let mut removed = false;
+    let mut removed = Vec::new();
+    let mut pruned_aliases = Vec::new();
     state.kernel.model_catalog_update(&mut |catalog| {
-        snapshot = catalog.find_model(&model_id_for_closure).cloned();
-        removed = catalog.remove_custom_model(&model_id_for_closure);
+        pruned_aliases = aliases_targeting(catalog, &model_id_for_closure);
+        removed = catalog.remove_custom_model(&model_id_for_closure, None);
     });
-    if !removed {
+    if removed.is_empty() {
         return ApiErrorResponse::not_found(format!("Custom model '{}' not found", model_id))
             .into_json_tuple();
     }
@@ -1652,11 +1671,14 @@ pub async fn remove_custom_model(
         .save_custom_models(&custom_path)
     {
         tracing::warn!("Failed to persist custom models: {e}");
-        if let Some(entry) = snapshot {
-            state.kernel.model_catalog_update(&mut move |catalog| {
+        state.kernel.model_catalog_update(&mut move |catalog| {
+            for entry in &removed {
                 catalog.add_custom_model(entry.clone());
-            });
-        }
+            }
+            for (alias, target) in &pruned_aliases {
+                catalog.add_alias(alias, target);
+            }
+        });
         return ApiErrorResponse::internal_scrub(e).into_json_tuple();
     }
 

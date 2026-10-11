@@ -875,7 +875,7 @@ async fn auto_policy_promotes_to_active_and_reloads_registry() {
     // `reload_skills` via `spawn_blocking` — when this future resolves
     // the active skill is on disk and the in-memory registry has been
     // refreshed.
-    skill_workshop::run_capture(kernel.clone(), agent_id).await;
+    skill_workshop::run_capture(kernel.clone(), agent_id, None).await;
 
     let skill_dir = skills_root_path.join(&expected_name);
     assert!(
@@ -1134,7 +1134,7 @@ async fn auto_policy_recovers_orphaned_pending_via_retry() {
         .save_session(&session)
         .expect("save_session");
 
-    skill_workshop::run_capture(kernel.clone(), agent_id).await;
+    skill_workshop::run_capture(kernel.clone(), agent_id, None).await;
 
     // Active skill must land — the orphan was retried and promoted.
     let skill_dir = skills_root_path.join(&hit.name);

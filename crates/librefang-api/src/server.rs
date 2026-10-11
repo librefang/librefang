@@ -305,6 +305,40 @@ pub(crate) async fn master_hash_matches(hash: &str, token: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Find the per-user API key entry (`[[users]]` or a paired device) that `token` verifies against, without ever blocking the async runtime.
+///
+/// Same contract as [`master_hash_matches`]: the table mixes `$sha256$` device hashes, which verify inline because one SHA-256 is cheaper than a thread hop, with `[[users]]` Argon2id hashes, which cost ~50–100 ms of CPU each.
+/// The Argon2id entries are verified together inside one `spawn_blocking`, so a garbage bearer from an unauthenticated caller cannot stall a tokio worker for the length of the whole table's KDF work.
+/// When no Argon2id entry exists the blocking hop is skipped entirely.
+///
+/// A `spawn_blocking` join failure is a miss rather than a match: an auth check that cannot complete must fail closed.
+pub(crate) async fn find_user_api_key(
+    users: &[middleware::ApiUserAuth],
+    token: &str,
+) -> Option<middleware::ApiUserAuth> {
+    let (cheap, expensive): (Vec<_>, Vec<_>) = users
+        .iter()
+        .partition(|user| crate::password_hash::is_cheap_to_verify(&user.api_key_hash));
+    if let Some(user) = cheap
+        .into_iter()
+        .find(|user| crate::password_hash::verify_password(token, &user.api_key_hash))
+    {
+        return Some(user.clone());
+    }
+    if expensive.is_empty() {
+        return None;
+    }
+    let expensive: Vec<middleware::ApiUserAuth> = expensive.into_iter().cloned().collect();
+    let token = token.to_string();
+    tokio::task::spawn_blocking(move || {
+        expensive
+            .into_iter()
+            .find(|user| crate::password_hash::verify_password(&token, &user.api_key_hash))
+    })
+    .await
+    .unwrap_or(None)
+}
+
 pub(crate) fn has_dashboard_credentials(snap: &ApiAuthSnapshot) -> bool {
     let DashboardRawConfig {
         user,
@@ -1657,7 +1691,10 @@ fn save_sessions(
             // the bearer tokens during the gap.  open(mode 0600 +
             // truncate) + write_all + flush + sync_all + rename keeps
             // the file at owner-only mode for its entire lifetime.
-            let tmp_path = path.with_extension(format!("json.tmp.{}", std::process::id()));
+            // The temp name is unique per call (pid plus a process-wide sequence), so two writers can never open, truncate and rename the same temp file even if one of them skips the `active_sessions` write guard.
+            static SAVE_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let seq = SAVE_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let tmp_path = path.with_extension(format!("json.tmp.{}.{seq}", std::process::id()));
             let result = (|| -> std::io::Result<()> {
                 use std::io::Write as _;
                 let mut opts = std::fs::OpenOptions::new();
@@ -1681,6 +1718,42 @@ fn save_sessions(
         }
         Err(e) => tracing::warn!("Failed to serialize sessions: {e}"),
     }
+}
+
+/// Drop expired session tokens from `sessions` and persist the trimmed map, returning how many were removed.
+///
+/// The save runs while the write guard is still held, like the login and logout writers: that guard is what serialises every `save_sessions` caller, so a snapshot saved after the guard was released could land after a newer login's save and overwrite `sessions.json` without the just-issued session.
+async fn prune_and_persist_expired_sessions(
+    home_dir: &std::path::Path,
+    sessions: &tokio::sync::RwLock<
+        std::collections::HashMap<String, crate::password_hash::SessionToken>,
+    >,
+) -> usize {
+    let mut sessions = sessions.write().await;
+    let before = sessions.len();
+    sessions.retain(|_, token| {
+        !crate::password_hash::is_token_expired(
+            token,
+            crate::password_hash::DEFAULT_SESSION_TTL_SECS,
+        )
+    });
+    let removed = before - sessions.len();
+    if removed > 0 {
+        save_sessions(home_dir, &sessions);
+    }
+    removed
+}
+
+/// Evict route-cache entries older than `ttl` and return how many were removed.
+///
+/// The count is taken around the `retain` alone and saturates, because route handlers insert into these maps concurrently and a later `len()` can exceed the one sampled before the sweep.
+fn evict_expired_cache_entries(
+    cache: &dashmap::DashMap<String, (Instant, serde_json::Value)>,
+    ttl: std::time::Duration,
+) -> usize {
+    let before = cache.len();
+    cache.retain(|_, (fetched_at, _)| fetched_at.elapsed() < ttl);
+    before.saturating_sub(cache.len())
 }
 
 /// Atomically write the Argon2id upgrade-hint file at owner-only (0600) mode.
@@ -2789,12 +2862,8 @@ pub async fn run_daemon(
 
                 // Evict expired clawhub/skillhub cache entries (120s TTL)
                 let cache_ttl = std::time::Duration::from_secs(120);
-                let before_claw = st.clawhub_cache.len();
-                st.clawhub_cache
-                    .retain(|_, (fetched_at, _)| fetched_at.elapsed() < cache_ttl);
-                let before_skill = st.skillhub_cache.len();
-                st.skillhub_cache
-                    .retain(|_, (fetched_at, _)| fetched_at.elapsed() < cache_ttl);
+                let claw_removed = evict_expired_cache_entries(&st.clawhub_cache, cache_ttl);
+                let skill_removed = evict_expired_cache_entries(&st.skillhub_cache, cache_ttl);
 
                 // Evict expired session tokens and persist the
                 // trimmed state to disk. Audit:
@@ -2805,33 +2874,16 @@ pub async fn run_daemon(
                 // expired token came back to life on the next daemon
                 // boot via `load_sessions`. Persisting after the
                 // prune closes that survives-restart loop.
-                let (expired_sessions, sessions_snapshot) = {
-                    let mut sessions = st.active_sessions.write().await;
-                    let before = sessions.len();
-                    sessions.retain(|_, token| {
-                        !crate::password_hash::is_token_expired(
-                            token,
-                            crate::password_hash::DEFAULT_SESSION_TTL_SECS,
-                        )
-                    });
-                    let removed = before - sessions.len();
-                    // Snapshot for disk write so we can drop the
-                    // write guard before the (potentially blocking)
-                    // file syscall. Only snapshot when there's
-                    // actually something to persist — the token map
-                    // is shallow but cloning on every tick when
-                    // nothing expired would be wasted work.
-                    let snap = (removed > 0).then(|| sessions.clone());
-                    (removed, snap)
-                };
-                if let Some(snap) = sessions_snapshot {
-                    save_sessions(st.kernel.home_dir(), &snap);
-                }
+                let expired_sessions =
+                    prune_and_persist_expired_sessions(st.kernel.home_dir(), &st.active_sessions)
+                        .await;
 
                 // Prune stale auth-rate-limit entries (windows older than 30 minutes).
                 let before_auth_rl = st.auth_login_limiter.map.len();
                 st.auth_login_limiter.prune_stale();
-                let auth_rl_removed = before_auth_rl - st.auth_login_limiter.map.len();
+                // `saturating_sub`: a login attempt from a new IP can insert between the two `len()` reads, and a plain subtraction would underflow (a panic that kills this GC task in debug builds).
+                let auth_rl_removed =
+                    before_auth_rl.saturating_sub(st.auth_login_limiter.map.len());
 
                 // Evict stale GCRA rate-limiter entries. The DashMap grows
                 // unbounded as new client IPs arrive — every unique IP adds a
@@ -2852,8 +2904,6 @@ pub async fn run_daemon(
                     &st.pending_a2a_agents,
                 );
 
-                let claw_removed = before_claw - st.clawhub_cache.len();
-                let skill_removed = before_skill - st.skillhub_cache.len();
                 let total = claw_removed
                     + skill_removed
                     + expired_sessions
@@ -3380,6 +3430,68 @@ mod master_credential_tests {
         assert!(!master_hash_matches("", "anything").await);
     }
 
+    fn api_user(name: &str, api_key_hash: String) -> middleware::ApiUserAuth {
+        middleware::ApiUserAuth {
+            name: name.to_string(),
+            role: middleware::UserRole::User,
+            api_key_hash,
+            user_id: librefang_types::agent::UserId::from_name(name),
+        }
+    }
+
+    fn mixed_user_key_table() -> Vec<middleware::ApiUserAuth> {
+        let mut users: Vec<_> = (0..3)
+            .map(|i| {
+                api_user(
+                    &format!("user{i}"),
+                    crate::password_hash::hash_password(&format!("k{i}")).expect("hash"),
+                )
+            })
+            .collect();
+        users.push(api_user(
+            "device:phone",
+            crate::password_hash::hash_device_token("dev"),
+        ));
+        users
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn find_user_api_key_matches_argon2_and_device_entries() {
+        let users = mixed_user_key_table();
+        assert_eq!(
+            find_user_api_key(&users, "k2").await.map(|u| u.name),
+            Some("user2".to_string())
+        );
+        assert_eq!(
+            find_user_api_key(&users, "dev").await.map(|u| u.name),
+            Some("device:phone".to_string())
+        );
+        assert!(find_user_api_key(&users, "garbage").await.is_none());
+        assert!(find_user_api_key(&users, "").await.is_none());
+        assert!(find_user_api_key(&[], "k0").await.is_none());
+    }
+
+    /// The Argon2id scan must not run inline on the async worker: on a current-thread runtime a ticker task only advances while the lookup is in flight if the KDF work was moved to the blocking pool.
+    #[tokio::test(flavor = "current_thread")]
+    async fn find_user_api_key_does_not_stall_the_runtime() {
+        let users = mixed_user_key_table();
+        let ticks = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let ticker_ticks = ticks.clone();
+        let ticker = tokio::spawn(async move {
+            loop {
+                ticker_ticks.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                tokio::task::yield_now().await;
+            }
+        });
+        assert!(find_user_api_key(&users, "garbage").await.is_none());
+        let observed = ticks.load(std::sync::atomic::Ordering::Relaxed);
+        ticker.abort();
+        assert!(
+            observed > 0,
+            "the runtime must keep polling other tasks during the Argon2id scan"
+        );
+    }
+
     /// An `$argon2id$` master hash stays *accepted* — a hand-written or
     /// pre-#6613 value must keep working even though `$sha256$` is what the
     /// upgrade path and `librefang hash-api-key` now produce.
@@ -3614,6 +3726,135 @@ mod observability_tests {
             !raw_after.contains("live-token"),
             "live cleartext bearer must NEVER leak to disk (#5494): {raw_after}"
         );
+    }
+
+    fn session_token_at(created_at: u64) -> crate::password_hash::SessionToken {
+        crate::password_hash::SessionToken {
+            token: String::new(),
+            created_at,
+            user_name: None,
+            user_role: None,
+        }
+    }
+
+    fn now_secs() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+    }
+
+    /// The GC sweep races login writers that insert a session and save under the `active_sessions` write guard.
+    /// Before the sweep saved under the same guard, its stale snapshot could be renamed over `sessions.json` after a newer login's save, so a live session vanished from disk.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn gc_sweep_and_concurrent_logins_leave_disk_equal_to_memory() {
+        let expired_at =
+            now_secs().saturating_sub(crate::password_hash::DEFAULT_SESSION_TTL_SECS * 2);
+        for round in 0..10 {
+            let tmp = tempfile::tempdir().unwrap();
+            let home = tmp.path().to_path_buf();
+            std::fs::create_dir_all(home.join("data")).unwrap();
+            let sessions = Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new()));
+
+            let mut tasks = Vec::new();
+            for i in 0..20 {
+                let login_sessions = sessions.clone();
+                let login_home = home.clone();
+                tasks.push(tokio::spawn(async move {
+                    let mut guard = login_sessions.write().await;
+                    guard.insert(
+                        crate::password_hash::hash_device_token(&format!("live-{round}-{i}")),
+                        session_token_at(now_secs()),
+                    );
+                    save_sessions(&login_home, &guard);
+                }));
+                let gc_sessions = sessions.clone();
+                let gc_home = home.clone();
+                tasks.push(tokio::spawn(async move {
+                    gc_sessions.write().await.insert(
+                        crate::password_hash::hash_device_token(&format!("expired-{round}-{i}")),
+                        session_token_at(expired_at),
+                    );
+                    prune_and_persist_expired_sessions(&gc_home, &gc_sessions).await;
+                }));
+            }
+            for t in tasks {
+                t.await.unwrap();
+            }
+            // Leave memory free of expired entries so the on-disk and in-memory views are comparable after `load_sessions` filters expiry.
+            prune_and_persist_expired_sessions(&home, &sessions).await;
+
+            let mut on_disk: Vec<String> = load_sessions(&home).into_keys().collect();
+            let mut in_memory: Vec<String> = sessions.read().await.keys().cloned().collect();
+            on_disk.sort();
+            in_memory.sort();
+            assert_eq!(
+                in_memory.len(),
+                20,
+                "round {round}: every login is live in memory"
+            );
+            assert_eq!(on_disk, in_memory, "round {round}: disk must match memory");
+        }
+    }
+
+    /// Concurrent unguarded `save_sessions` calls must never share a temp file, so the final `sessions.json` is always valid and no temp file is left behind.
+    #[test]
+    fn concurrent_save_sessions_use_distinct_temp_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().to_path_buf();
+        std::fs::create_dir_all(home.join("data")).unwrap();
+        let handles: Vec<_> = (0..8)
+            .map(|t| {
+                let home = home.clone();
+                std::thread::spawn(move || {
+                    for i in 0..50 {
+                        let mut map = std::collections::HashMap::new();
+                        for k in 0..=(i % 7) {
+                            map.insert(
+                                crate::password_hash::hash_device_token(&format!(
+                                    "tok-{t}-{i}-{k}"
+                                )),
+                                session_token_at(now_secs()),
+                            );
+                        }
+                        save_sessions(&home, &map);
+                    }
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().unwrap();
+        }
+        let path = sessions_path(&home);
+        let raw = std::fs::read_to_string(&path).unwrap();
+        serde_json::from_str::<serde_json::Value>(&raw)
+            .unwrap_or_else(|e| panic!("sessions.json must be valid JSON: {e}: {raw}"));
+        let leftovers: Vec<_> = std::fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.contains(".tmp."))
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "temp files left behind: {leftovers:?}"
+        );
+    }
+
+    #[test]
+    fn evict_expired_cache_entries_counts_only_removed_entries() {
+        let cache: dashmap::DashMap<String, (Instant, serde_json::Value)> = dashmap::DashMap::new();
+        let ttl = std::time::Duration::from_secs(120);
+        let stale = Instant::now()
+            .checked_sub(std::time::Duration::from_secs(300))
+            .expect("monotonic clock has at least 300s of history");
+        cache.insert("stale".into(), (stale, serde_json::Value::Null));
+        cache.insert("fresh".into(), (Instant::now(), serde_json::Value::Null));
+        assert_eq!(evict_expired_cache_entries(&cache, ttl), 1);
+        assert_eq!(cache.len(), 1);
+        assert!(cache.contains_key("fresh"));
+        // Nothing expired: zero removed, never an underflowed count.
+        assert_eq!(evict_expired_cache_entries(&cache, ttl), 0);
     }
 
     // #3725: a sessions.json file already on disk at world-readable
