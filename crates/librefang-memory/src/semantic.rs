@@ -42,9 +42,14 @@ const MAX_BRUTEFORCE_CANDIDATES: usize = 5000;
 /// both close to SQLite's variable ceiling and slower to prepare than the
 /// relevance it buys — bm25 has already ordered the matches, so a caller asking
 /// for at most 50 fragments gains nothing from a 5000th-ranked candidate.
-/// The remaining SQL predicates (scope, confidence, peer_id, …) run after this
+/// `deleted`, `agent_id`, `scope` and `peer_id` are applied inside the FTS lookup; the remaining SQL predicates (confidence, source, time window, metadata) run after this
 /// cut, which is why it over-fetches at all rather than stopping at `limit`.
 const MAX_FTS_CANDIDATES: usize = 500;
+
+/// Upper bound on the extra hits `recall_via_vector_store` asks an external backend for beyond `limit`.
+///
+/// The backend may still hold vectors for memories SQLite has since soft-deleted, and hydration drops those, so the request is doubled to keep them from starving the result; this cap keeps a large `limit` from doubling an expensive ANN query.
+const MAX_VECTOR_OVERFETCH: usize = 100;
 
 /// Upper bound on how many terms a natural-language query contributes to the
 /// FTS5 `MATCH` expression, so a pathological paste cannot build a query string
@@ -349,7 +354,7 @@ impl SemanticStore {
         filter: Option<MemoryFilter>,
         query_embedding: Option<&[f32]>,
     ) -> LibreFangResult<Vec<MemoryFragment>> {
-        self.recall_impl(query, limit, filter, query_embedding, true)
+        self.recall_impl(query, limit, filter, query_embedding, true, true)
     }
 
     /// Read-only listing recall: same query/filter semantics as [`Self::recall`]
@@ -368,9 +373,10 @@ impl SemanticStore {
         limit: usize,
         filter: Option<MemoryFilter>,
     ) -> LibreFangResult<Vec<MemoryFragment>> {
-        self.recall_impl(query, limit, filter, None, false)
+        self.recall_impl(query, limit, filter, None, false, true)
     }
 
+    /// `allow_fts` is `false` only for the LIKE retry below, after an FTS pre-selection hydrated nothing.
     fn recall_impl(
         &self,
         query: &str,
@@ -378,6 +384,7 @@ impl SemanticStore {
         filter: Option<MemoryFilter>,
         query_embedding: Option<&[f32]>,
         track_access: bool,
+        allow_fts: bool,
     ) -> LibreFangResult<Vec<MemoryFragment>> {
         // ── Delegate to external vector store when available ──────────
         if let (Some(vs), Some(qe)) = (&self.vector_store, query_embedding) {
@@ -403,16 +410,12 @@ impl SemanticStore {
         // boundaries would miss ("fang" inside "librefang") still work, and a
         // deployment whose index has not been built yet degrades to exactly
         // the old behaviour instead of going silent.
-        let fts_ranked: Option<Vec<String>> = if query_embedding.is_none() && !query.is_empty() {
-            fts_candidate_ids(
-                &conn,
-                query,
-                filter.as_ref().and_then(|f| f.agent_id),
-                MAX_FTS_CANDIDATES,
-            )
-        } else {
-            None
-        };
+        let fts_ranked: Option<Vec<String>> =
+            if allow_fts && query_embedding.is_none() && !query.is_empty() {
+                fts_candidate_ids(&conn, query, filter.as_ref(), MAX_FTS_CANDIDATES)
+            } else {
+                None
+            };
 
         // Build SQL: fetch candidates (broader than limit for re-ranking).
         // Both re-ranked paths — cosine and bm25 — order in Rust after the
@@ -750,6 +753,20 @@ impl SemanticStore {
                 "FTS recall: {} results from {candidate_count} candidates",
                 fragments.len(),
             );
+            // The FTS lookup only pre-filters on deleted / agent / peer / scope; the remaining predicates (confidence, source, time window, metadata) and the corrupt-row skip run on the hydrated window and can empty it.
+            // Retry with the LIKE predicate so FTS stays strictly additive: it may add matches LIKE would miss, but must never turn a LIKE hit into an empty recall.
+            if fragments.is_empty() {
+                drop(stmt);
+                drop(conn);
+                return self.recall_impl(
+                    query,
+                    limit,
+                    filter,
+                    query_embedding,
+                    track_access,
+                    false,
+                );
+            }
         }
 
         // If we have a query embedding, re-rank by cosine similarity.
@@ -865,9 +882,18 @@ impl SemanticStore {
         let vs = Arc::clone(vs);
         let qe = query_embedding.to_vec();
         let filter_clone = filter.clone();
+        // Over-fetch: hits that no longer hydrate (soft-deleted by a path that never reaches the backend, such as consolidation or decay) or that fail the filter re-check below are dropped, and must not starve the result.
+        // The final list is truncated back to `limit`.
+        let fetch_limit = limit
+            .saturating_mul(2)
+            .min(limit.saturating_add(MAX_VECTOR_OVERFETCH));
         let results: Vec<librefang_types::memory::VectorSearchResult> =
             tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current().block_on(vs.search(&qe, limit, filter_clone))
+                tokio::runtime::Handle::current().block_on(vs.search(
+                    &qe,
+                    fetch_limit,
+                    filter_clone,
+                ))
             })?;
 
         debug!(
@@ -950,6 +976,7 @@ impl SemanticStore {
         if let Some(floor) = filter.as_ref().and_then(|f| f.min_similarity) {
             fragments.retain(|frag| frag.similarity.is_some_and(|s| s >= floor));
         }
+        fragments.truncate(limit);
 
         // Update access counts — see note on the SQLite-path
         // update above for why silent drops would corrupt decay
@@ -1065,14 +1092,70 @@ impl SemanticStore {
     /// later. Without the timestamp the prune filter (`deleted_at IS NOT NULL`)
     /// would skip it forever, leaking the embedding BLOB indefinitely.
     pub fn forget(&self, id: MemoryId) -> LibreFangResult<()> {
-        let conn = self.pool.get().map_err(LibreFangError::memory)?;
-        conn.execute(
+        let ids = self.soft_delete_returning_ids(
             "UPDATE memories SET deleted = 1, deleted_at = ?1 \
-             WHERE id = ?2 AND deleted = 0",
+             WHERE id = ?2 AND deleted = 0 RETURNING id",
             rusqlite::params![Utc::now().timestamp(), id.0.to_string()],
-        )
-        .map_err(LibreFangError::memory)?;
+        )?;
+        self.delete_from_vector_store(&ids);
         Ok(())
+    }
+
+    /// Run a soft-delete `UPDATE … RETURNING id` and collect the ids it actually flipped.
+    ///
+    /// The pooled connection is released before returning, so the caller can mirror the delete into an external vector backend without holding it.
+    fn soft_delete_returning_ids(
+        &self,
+        sql: &str,
+        params: impl rusqlite::Params,
+    ) -> LibreFangResult<Vec<String>> {
+        let conn = self.pool.get().map_err(LibreFangError::memory)?;
+        let mut stmt = conn.prepare(sql).map_err(LibreFangError::memory)?;
+        let ids = stmt
+            .query_map(params, |row| row.get::<_, String>(0))
+            .map_err(LibreFangError::memory)?
+            .collect::<rusqlite::Result<Vec<String>>>()
+            .map_err(LibreFangError::memory)?;
+        Ok(ids)
+    }
+
+    /// Mirror soft-deletes into the external vector backend, when one is attached.
+    ///
+    /// `remember` copies each embedding and its full content into the backend, so without this a forgotten memory stayed searchable there indefinitely and its dead vector kept taking top-k slots from live ones.
+    /// Backend failures are logged, not returned: the SQLite row is already deleted and is the source of truth, and hydration drops any id that no longer resolves.
+    /// The async call is bridged the same way `remember` does it, and skipped with a warning when there is no multi-threaded runtime to bridge on.
+    fn delete_from_vector_store(&self, ids: &[String]) {
+        let Some(vs) = &self.vector_store else {
+            return;
+        };
+        if ids.is_empty() {
+            return;
+        }
+        let handle = match tokio::runtime::Handle::try_current() {
+            Ok(h) if h.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => h,
+            _ => {
+                warn!(
+                    backend = vs.backend_name(),
+                    count = ids.len(),
+                    "no multi-threaded tokio runtime; forgotten memories were not removed from the external vector store"
+                );
+                return;
+            }
+        };
+        tokio::task::block_in_place(|| {
+            handle.block_on(async {
+                for id in ids {
+                    if let Err(e) = vs.delete(id).await {
+                        warn!(
+                            backend = vs.backend_name(),
+                            memory_id = %id,
+                            error = %e,
+                            "failed to delete forgotten memory from the external vector store"
+                        );
+                    }
+                }
+            })
+        });
     }
 
     /// Update the content (and optionally metadata) of an existing memory in-place.
@@ -1234,32 +1317,58 @@ impl SemanticStore {
         Ok(map)
     }
 
+    /// Load the `peer_id` column for a batch of live memory IDs.
+    ///
+    /// `MemoryFragment` does not carry the peer, but a destructive dedup pass must not merge rows owned by different users of a multi-user agent, so it needs the column alongside the fragments it already holds.
+    /// IDs that are missing or soft-deleted are omitted; a `NULL` peer maps to `None`.
+    pub fn get_peer_ids_batch(
+        &self,
+        ids: &[&str],
+    ) -> LibreFangResult<HashMap<String, Option<String>>> {
+        let mut map = HashMap::new();
+        if ids.is_empty() {
+            return Ok(map);
+        }
+        let conn = self.pool.get().map_err(LibreFangError::memory)?;
+        let mut stmt = conn
+            .prepare("SELECT peer_id FROM memories WHERE id = ?1 AND deleted = 0")
+            .map_err(LibreFangError::memory)?;
+        for id in ids {
+            match stmt.query_row(rusqlite::params![*id], |row| {
+                row.get::<_, Option<String>>(0)
+            }) {
+                Ok(peer) => {
+                    map.insert(id.to_string(), peer);
+                }
+                Err(rusqlite::Error::QueryReturnedNoRows) => {}
+                Err(e) => return Err(LibreFangError::memory(e)),
+            }
+        }
+        Ok(map)
+    }
+
     /// Soft-delete all memories for a specific agent.
     ///
     /// See [`Self::forget`] for why `deleted_at` is stamped.
     pub fn forget_by_agent(&self, agent_id: AgentId) -> LibreFangResult<u64> {
-        let conn = self.pool.get().map_err(LibreFangError::memory)?;
-        let count = conn
-            .execute(
-                "UPDATE memories SET deleted = 1, deleted_at = ?1 \
-                 WHERE agent_id = ?2 AND deleted = 0",
-                rusqlite::params![Utc::now().timestamp(), agent_id.0.to_string()],
-            )
-            .map_err(LibreFangError::memory)?;
-        Ok(count as u64)
+        let ids = self.soft_delete_returning_ids(
+            "UPDATE memories SET deleted = 1, deleted_at = ?1 \
+             WHERE agent_id = ?2 AND deleted = 0 RETURNING id",
+            rusqlite::params![Utc::now().timestamp(), agent_id.0.to_string()],
+        )?;
+        self.delete_from_vector_store(&ids);
+        Ok(ids.len() as u64)
     }
 
     /// Soft-delete all memories for a specific agent and scope.
     pub fn forget_by_scope(&self, agent_id: AgentId, scope: &str) -> LibreFangResult<u64> {
-        let conn = self.pool.get().map_err(LibreFangError::memory)?;
-        let count = conn
-            .execute(
-                "UPDATE memories SET deleted = 1, deleted_at = ?1 \
-                 WHERE agent_id = ?2 AND scope = ?3 AND deleted = 0",
-                rusqlite::params![Utc::now().timestamp(), agent_id.0.to_string(), scope],
-            )
-            .map_err(LibreFangError::memory)?;
-        Ok(count as u64)
+        let ids = self.soft_delete_returning_ids(
+            "UPDATE memories SET deleted = 1, deleted_at = ?1 \
+             WHERE agent_id = ?2 AND scope = ?3 AND deleted = 0 RETURNING id",
+            rusqlite::params![Utc::now().timestamp(), agent_id.0.to_string(), scope],
+        )?;
+        self.delete_from_vector_store(&ids);
+        Ok(ids.len() as u64)
     }
 
     /// Soft-delete memories older than a given timestamp for a specific agent and scope.
@@ -1269,20 +1378,18 @@ impl SemanticStore {
         scope: &str,
         before: chrono::DateTime<Utc>,
     ) -> LibreFangResult<u64> {
-        let conn = self.pool.get().map_err(LibreFangError::memory)?;
-        let count = conn
-            .execute(
-                "UPDATE memories SET deleted = 1, deleted_at = ?1 \
-                 WHERE agent_id = ?2 AND scope = ?3 AND created_at < ?4 AND deleted = 0",
-                rusqlite::params![
-                    Utc::now().timestamp(),
-                    agent_id.0.to_string(),
-                    scope,
-                    before.to_rfc3339()
-                ],
-            )
-            .map_err(LibreFangError::memory)?;
-        Ok(count as u64)
+        let ids = self.soft_delete_returning_ids(
+            "UPDATE memories SET deleted = 1, deleted_at = ?1 \
+             WHERE agent_id = ?2 AND scope = ?3 AND created_at < ?4 AND deleted = 0 RETURNING id",
+            rusqlite::params![
+                Utc::now().timestamp(),
+                agent_id.0.to_string(),
+                scope,
+                before.to_rfc3339()
+            ],
+        )?;
+        self.delete_from_vector_store(&ids);
+        Ok(ids.len() as u64)
     }
 
     /// Soft-delete session memories older than a given timestamp across ALL agents.
@@ -1294,15 +1401,13 @@ impl SemanticStore {
         scope: &str,
         before: chrono::DateTime<Utc>,
     ) -> LibreFangResult<u64> {
-        let conn = self.pool.get().map_err(LibreFangError::memory)?;
-        let count = conn
-            .execute(
-                "UPDATE memories SET deleted = 1, deleted_at = ?1 \
-                 WHERE scope = ?2 AND created_at < ?3 AND deleted = 0",
-                rusqlite::params![Utc::now().timestamp(), scope, before.to_rfc3339()],
-            )
-            .map_err(LibreFangError::memory)?;
-        Ok(count as u64)
+        let ids = self.soft_delete_returning_ids(
+            "UPDATE memories SET deleted = 1, deleted_at = ?1 \
+             WHERE scope = ?2 AND created_at < ?3 AND deleted = 0 RETURNING id",
+            rusqlite::params![Utc::now().timestamp(), scope, before.to_rfc3339()],
+        )?;
+        self.delete_from_vector_store(&ids);
+        Ok(ids.len() as u64)
     }
 
     /// Count non-deleted memories for a specific agent, optionally filtered by scope.
@@ -1702,35 +1807,45 @@ fn fts_match_expression(query: &str) -> Option<String> {
 fn fts_candidate_ids(
     conn: &rusqlite::Connection,
     query: &str,
-    agent_id: Option<AgentId>,
+    filter: Option<&MemoryFilter>,
     limit: usize,
 ) -> Option<Vec<String>> {
     let expression = fts_match_expression(query)?;
 
-    // `agent_id` is UNINDEXED in the FTS table, so this is a filter over the
-    // matched rows rather than an index probe — still far cheaper than
-    // hydrating another agent's matches only to discard them in SQL.
-    let (sql, params): (&str, Vec<Box<dyn rusqlite::types::ToSql>>) = match agent_id {
-        Some(agent) => (
-            "SELECT memory_id FROM memories_fts \
-             WHERE memories_fts MATCH ?1 AND agent_id = ?2 \
-             ORDER BY rank LIMIT ?3",
-            vec![
-                Box::new(expression),
-                Box::new(agent.0.to_string()),
-                Box::new(limit as i64),
-            ],
-        ),
-        None => (
-            "SELECT memory_id FROM memories_fts \
-             WHERE memories_fts MATCH ?1 \
-             ORDER BY rank LIMIT ?2",
-            vec![Box::new(expression), Box::new(limit as i64)],
-        ),
-    };
+    // The index keeps rows for soft-deleted memories (the update trigger only fires on content / agent_id changes), so the lookup applies the cheap `memories` row predicates here through a correlated `EXISTS`.
+    // Otherwise deleted rows, other peers' rows or other scopes' rows can fill the capped candidate window and hide every live match.
+    // `EXISTS` (rather than a JOIN) keeps the FTS table as the driving loop, which `MATCH` requires.
+    // `agent_id` is UNINDEXED in the FTS table, so the agent predicate is a filter over the matched rows rather than an index probe — still far cheaper than hydrating another agent's matches only to discard them in SQL.
+    let mut sql = String::from(
+        "SELECT memory_id FROM memories_fts \
+         WHERE memories_fts MATCH ?1",
+    );
+    let mut exists = String::from(
+        " AND EXISTS (SELECT 1 FROM memories m \
+         WHERE m.id = memories_fts.memory_id AND m.deleted = 0",
+    );
+    let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = vec![Box::new(expression)];
+    if let Some(f) = filter {
+        if let Some(agent) = f.agent_id {
+            params.push(Box::new(agent.0.to_string()));
+            sql.push_str(&format!(" AND agent_id = ?{}", params.len()));
+        }
+        if let Some(ref scope) = f.scope {
+            params.push(Box::new(scope.clone()));
+            exists.push_str(&format!(" AND m.scope = ?{}", params.len()));
+        }
+        if let Some(ref pid) = f.peer_id {
+            params.push(Box::new(pid.clone()));
+            exists.push_str(&format!(" AND m.peer_id = ?{}", params.len()));
+        }
+    }
+    exists.push(')');
+    sql.push_str(&exists);
+    params.push(Box::new(limit as i64));
+    sql.push_str(&format!(" ORDER BY rank LIMIT ?{}", params.len()));
 
     let read = || -> Result<Vec<String>, rusqlite::Error> {
-        let mut stmt = conn.prepare(sql)?;
+        let mut stmt = conn.prepare(&sql)?;
         let param_refs: Vec<&dyn rusqlite::types::ToSql> =
             params.iter().map(|p| p.as_ref()).collect();
         let rows = stmt.query_map(param_refs.as_slice(), |row| row.get::<_, String>(0))?;
@@ -2820,6 +2935,81 @@ mod tests {
         );
     }
 
+    /// `memories_fts` keeps soft-deleted rows, and the lookup used to filter only on agent, so a deleted or other-peer FTS hit switched recall to `id IN (...)` and hid a live LIKE match.
+    #[test]
+    fn fts_stale_or_foreign_hits_do_not_hide_live_substring_matches() {
+        let store = setup();
+        let agent = AgentId::new();
+        let put = |content: &str, peer: Option<&str>| {
+            store
+                .remember_with_embedding_and_peer(
+                    agent,
+                    content,
+                    MemorySource::Conversation,
+                    "episodic",
+                    HashMap::new(),
+                    None,
+                    None,
+                    None,
+                    MemoryModality::Text,
+                    peer,
+                )
+                .unwrap()
+        };
+        let deleted = put("drinks coffee daily", Some("peer-a"));
+        store.forget(deleted).unwrap();
+        put("coffee with oat milk", Some("peer-b"));
+        put("coffeeshop on 5th street", Some("peer-a"));
+
+        let filter = MemoryFilter {
+            agent_id: Some(agent),
+            peer_id: Some("peer-a".to_string()),
+            ..Default::default()
+        };
+        let results = store.recall("coffee", 10, Some(filter)).unwrap();
+        assert_eq!(
+            results
+                .iter()
+                .map(|f| f.content.as_str())
+                .collect::<Vec<_>>(),
+            vec!["coffeeshop on 5th street"]
+        );
+    }
+
+    /// Predicates applied only after hydration (here `source`) can empty the FTS window; recall must then retry with LIKE instead of reporting nothing.
+    #[test]
+    fn fts_window_emptied_by_post_filters_falls_back_to_substring() {
+        let store = setup();
+        let agent = AgentId::new();
+        store
+            .remember(
+                agent,
+                "coffee notes",
+                MemorySource::Conversation,
+                "episodic",
+                HashMap::new(),
+            )
+            .unwrap();
+        store
+            .remember(
+                agent,
+                "coffeeshop on 5th street",
+                MemorySource::System,
+                "episodic",
+                HashMap::new(),
+            )
+            .unwrap();
+
+        let filter = MemoryFilter {
+            agent_id: Some(agent),
+            source: Some(MemorySource::System),
+            ..Default::default()
+        };
+        let results = store.recall("coffee", 10, Some(filter)).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].content, "coffeeshop on 5th street");
+    }
+
     /// A query made entirely of punctuation contributes no FTS term. That must
     /// read as "no pre-selection" and fall through, not as "no results".
     #[test]
@@ -3398,7 +3588,8 @@ mod tests {
             Ok(scored)
         }
 
-        async fn delete(&self, _id: &str) -> LibreFangResult<()> {
+        async fn delete(&self, id: &str) -> LibreFangResult<()> {
+            self.inserted.lock().unwrap().retain(|(rid, _)| rid != id);
             Ok(())
         }
 
@@ -3412,6 +3603,110 @@ mod tests {
         fn backend_name(&self) -> &str {
             "recording-test"
         }
+    }
+
+    /// Every soft-delete path on the store must remove the vector from the external backend; otherwise forgotten content stays searchable there and dead vectors take live ones' top-k slots.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn forget_paths_delete_from_external_vector_store() {
+        let mut store = setup();
+        let vs = Arc::new(RecordingVectorStore {
+            inserted: std::sync::Mutex::new(Vec::new()),
+        });
+        store.set_vector_store(vs.clone());
+        let agent = AgentId::new();
+        let put = |content: &str, scope: &str, emb: [f32; 3]| {
+            store
+                .remember_with_embedding(
+                    agent,
+                    content,
+                    MemorySource::Conversation,
+                    scope,
+                    HashMap::new(),
+                    Some(&emb),
+                    None,
+                    None,
+                    Default::default(),
+                )
+                .unwrap()
+        };
+        let single = put("one", "episodic", [1.0, 0.0, 0.0]);
+        put("two", "session_memory", [0.0, 1.0, 0.0]);
+        let kept = put("three", "episodic", [0.0, 0.0, 1.0]);
+        assert_eq!(vs.inserted.lock().unwrap().len(), 3);
+
+        store.forget(single).unwrap();
+        assert_eq!(store.forget_by_scope(agent, "session_memory").unwrap(), 1);
+        let remaining: Vec<String> = vs
+            .inserted
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(id, _)| id.clone())
+            .collect();
+        assert_eq!(remaining, vec![kept.0.to_string()]);
+
+        assert_eq!(store.forget_by_agent(agent).unwrap(), 1);
+        assert!(vs.inserted.lock().unwrap().is_empty());
+    }
+
+    /// A vector whose row was soft-deleted behind the store's back (consolidation, decay) must not starve a `limit`-sized recall: the backend is over-fetched and the result truncated back to `limit`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn vector_store_recall_overfetches_past_dead_hits() {
+        let mut store = setup();
+        let vs = Arc::new(RecordingVectorStore {
+            inserted: std::sync::Mutex::new(Vec::new()),
+        });
+        store.set_vector_store(vs.clone());
+        let agent = AgentId::new();
+        let mut ids = Vec::new();
+        for (content, emb) in [
+            ("nearest", [1.0_f32, 0.0, 0.0]),
+            ("second", [0.9, 0.1, 0.0]),
+            ("third", [0.5, 0.5, 0.0]),
+        ] {
+            ids.push(
+                store
+                    .remember_with_embedding(
+                        agent,
+                        content,
+                        MemorySource::Conversation,
+                        "episodic",
+                        HashMap::new(),
+                        Some(&emb),
+                        None,
+                        None,
+                        Default::default(),
+                    )
+                    .unwrap(),
+            );
+        }
+        // Soft-delete directly in SQLite, the way the consolidation engine does, so the backend keeps the vector.
+        store
+            .pool
+            .get()
+            .unwrap()
+            .execute(
+                "UPDATE memories SET deleted = 1 WHERE id = ?1",
+                rusqlite::params![ids[0].0.to_string()],
+            )
+            .unwrap();
+        assert_eq!(vs.inserted.lock().unwrap().len(), 3);
+
+        let query = [1.0_f32, 0.0, 0.0];
+        let results = store
+            .recall_with_embedding("", 1, Some(MemoryFilter::agent(agent)), Some(&query))
+            .unwrap();
+        assert_eq!(
+            results
+                .iter()
+                .map(|f| f.content.as_str())
+                .collect::<Vec<_>>(),
+            vec!["second"]
+        );
+        let two = store
+            .recall_with_embedding("", 2, Some(MemoryFilter::agent(agent)), Some(&query))
+            .unwrap();
+        assert_eq!(two.len(), 2);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -365,7 +365,7 @@ impl ConsolidationEngine {
 /// Absent, empty and whitespace-only stamps all normalise to `None`, matching the "untagged means scope-agnostic" reading the recall filters use.
 /// That makes an unstamped row its own tenant rather than a wildcard: it is visible everywhere, so folding a stamped row into it would delete the stamped copy, and folding it into a stamped row would restrict a fact that was deliberately global.
 #[derive(Debug, PartialEq, Eq)]
-struct TenantKey {
+pub(crate) struct TenantKey {
     peer_id: Option<String>,
     chat_scope: Option<String>,
     session_scope: Option<String>,
@@ -374,10 +374,24 @@ struct TenantKey {
 impl TenantKey {
     fn from_row(peer_id: Option<&str>, metadata: &str) -> Self {
         let parsed = serde_json::from_str::<serde_json::Value>(metadata).ok();
+        Self::from_parts(peer_id, |key| parsed.as_ref().and_then(|v| v.get(key)))
+    }
+
+    /// Same key, built from an already-decoded metadata map (a `MemoryItem` / `MemoryFragment`) plus the row's `peer_id` column.
+    /// `ProactiveMemoryStore::find_duplicates` uses it so its merge groups respect the same isolation axes as this engine.
+    pub(crate) fn from_metadata_map(
+        peer_id: Option<&str>,
+        metadata: &HashMap<String, serde_json::Value>,
+    ) -> Self {
+        Self::from_parts(peer_id, |key| metadata.get(key))
+    }
+
+    fn from_parts<'a>(
+        peer_id: Option<&str>,
+        get: impl Fn(&str) -> Option<&'a serde_json::Value>,
+    ) -> Self {
         let stamp = |key: &str| -> Option<String> {
-            parsed
-                .as_ref()
-                .and_then(|v| v.get(key))
+            get(key)
                 .and_then(|v| v.as_str())
                 .map(str::trim)
                 .filter(|s| !s.is_empty())

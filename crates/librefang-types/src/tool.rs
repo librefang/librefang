@@ -380,9 +380,14 @@ fn normalize_schema_for_strict_validators(
 
         // Convert anyOf/oneOf to flat type + enum when possible
         if key == "anyOf" || key == "oneOf" {
-            if let Some(converted) = try_flatten_any_of(value) {
+            if let Some(converted) = try_flatten_any_of(value, depth, expansions) {
                 for (k, v) in converted {
-                    result.insert(k, v);
+                    // `type` / `nullable` come from the union itself; any other key was lifted from the non-null variant and must not override a sibling the outer schema declares (e.g. its own `description`).
+                    if k == "type" || k == "nullable" {
+                        result.insert(k, v);
+                    } else {
+                        result.entry(k).or_insert(v);
+                    }
                 }
                 continue;
             }
@@ -567,7 +572,14 @@ fn resolve_refs(
 ///
 /// Works when all variants are simple types (string, number, etc.) or
 /// when it's a nullable pattern like `anyOf: [{type: "string"}, {type: "null"}]`.
-fn try_flatten_any_of(any_of: &serde_json::Value) -> Option<Vec<(String, serde_json::Value)>> {
+///
+/// In the nullable pattern the non-null variant is normalized recursively and all of its keys are kept, so `Optional[List[str]]` keeps its `items` and `Optional[Model]` keeps its `properties` / `required`.
+/// Emitting only `{type, nullable}` there left strict validators with an array lacking `items` (Gemini rejects it) and the model with no field list for an optional object.
+fn try_flatten_any_of(
+    any_of: &serde_json::Value,
+    depth: usize,
+    expansions: &mut usize,
+) -> Option<Vec<(String, serde_json::Value)>> {
     let items = any_of.as_array()?;
     if items.is_empty() {
         return None;
@@ -576,7 +588,7 @@ fn try_flatten_any_of(any_of: &serde_json::Value) -> Option<Vec<(String, serde_j
     // Check if this is a simple type union (all items have just "type")
     let mut types = Vec::new();
     let mut has_null = false;
-    let mut non_null_type = None;
+    let mut non_null_variant = None;
 
     for item in items {
         let obj = item.as_object()?;
@@ -586,17 +598,25 @@ fn try_flatten_any_of(any_of: &serde_json::Value) -> Option<Vec<(String, serde_j
             has_null = true;
         } else {
             types.push(type_val.to_string());
-            non_null_type = Some(type_val.to_string());
+            non_null_variant = Some(item);
         }
     }
 
-    // If it's a nullable pattern (type + null), emit the non-null type
+    // If it's a nullable pattern (type + null), emit the normalized non-null variant
     if has_null && types.len() == 1 {
-        let mut result = vec![(
+        let variant = non_null_variant?;
+        let normalized = normalize_schema_for_strict_validators(variant, depth + 1, expansions);
+        let mut result: Vec<(String, serde_json::Value)> = match normalized {
+            serde_json::Value::Object(map) => map.into_iter().collect(),
+            _ => Vec::new(),
+        };
+        // The depth backstop can replace the variant with a placeholder object; keep the declared type either way.
+        result.retain(|(k, _)| k != "type" && k != "nullable");
+        result.push((
             "type".to_string(),
-            serde_json::Value::String(non_null_type.unwrap()),
-        )];
-        // Mark as nullable via description hint (since JSON Schema nullable isn't universal)
+            serde_json::Value::String(types[0].clone()),
+        ));
+        // Mark as nullable (JSON Schema `null` unions aren't accepted by strict validators)
         result.push(("nullable".to_string(), serde_json::Value::Bool(true)));
         return Some(result);
     }
@@ -852,6 +872,74 @@ mod tests {
         assert_eq!(value_prop["type"], "string");
         assert_eq!(value_prop["nullable"], true);
         assert!(value_prop.get("anyOf").is_none());
+    }
+
+    /// `Optional[List[str]]` must keep its `items`; a bare `{type: array, nullable}` loses the element type and Gemini rejects arrays without `items`.
+    #[test]
+    fn test_normalize_schema_anyof_nullable_array_keeps_items() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "filters": {
+                    "description": "Optional filters",
+                    "anyOf": [
+                        { "type": "array", "items": { "type": "integer", "format": "int64" } },
+                        { "type": "null" }
+                    ]
+                }
+            }
+        });
+        let result = normalize_schema_for_provider(&schema, "gemini");
+        let prop = &result["properties"]["filters"];
+        assert_eq!(prop["type"], "array");
+        assert_eq!(prop["nullable"], true);
+        assert_eq!(prop["items"], serde_json::json!({ "type": "integer" }));
+        assert_eq!(prop["description"], "Optional filters");
+        assert!(prop.get("anyOf").is_none());
+    }
+
+    /// `Optional[Model]` (after `$ref` inlining) must keep the model's `properties` / `required`, normalized recursively, while the outer `description` wins over the variant's.
+    #[test]
+    fn test_normalize_schema_anyof_nullable_object_keeps_properties() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "opts": {
+                    "description": "outer",
+                    "anyOf": [
+                        { "$ref": "#/$defs/Opts" },
+                        { "type": "null" }
+                    ]
+                }
+            },
+            "$defs": {
+                "Opts": {
+                    "type": "object",
+                    "title": "Opts",
+                    "description": "inner",
+                    "additionalProperties": false,
+                    "properties": {
+                        "mode": { "type": ["string", "null"] },
+                        "limit": { "type": "integer", "default": 5 }
+                    },
+                    "required": ["limit"]
+                }
+            }
+        });
+        let result = normalize_schema_for_provider(&schema, "openai");
+        let prop = &result["properties"]["opts"];
+        assert_eq!(prop["type"], "object");
+        assert_eq!(prop["nullable"], true);
+        assert_eq!(prop["description"], "outer");
+        assert_eq!(prop["required"], serde_json::json!(["limit"]));
+        assert_eq!(prop["properties"]["mode"]["type"], "string");
+        assert_eq!(prop["properties"]["mode"]["nullable"], true);
+        assert_eq!(
+            prop["properties"]["limit"],
+            serde_json::json!({ "type": "integer" })
+        );
+        assert!(prop.get("additionalProperties").is_none());
+        assert!(prop.get("title").is_none());
     }
 
     #[test]

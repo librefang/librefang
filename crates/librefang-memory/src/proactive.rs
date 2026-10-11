@@ -1243,10 +1243,13 @@ impl ProactiveMemoryStore {
 
             // Add relation (skip if already exists)
             let relation_type = parse_relation_type(&triple.relation);
-            match self
-                .knowledge
-                .has_relation(&source_id, &relation_type, &target_id, peer_id)
-            {
+            match self.knowledge.has_relation(
+                &source_id,
+                &relation_type,
+                &target_id,
+                agent_id,
+                peer_id,
+            ) {
                 Ok(true) => {
                     tracing::debug!(
                         "Skipping duplicate relation: {} -> {} -> {}",
@@ -1287,7 +1290,10 @@ impl ProactiveMemoryStore {
     ///
     /// Extracts candidate entity names from the query, then does targeted
     /// graph lookups instead of loading all relations.
-    fn graph_context(&self, query: &str) -> Option<String> {
+    ///
+    /// `agent_id` is the raw id string `store_relations` writes into `relations.agent_id`; every lookup is scoped to it so one agent's recall never surfaces another agent's triples.
+    /// The unscoped `query_graph` read every agent's and every user's graph into the prompt.
+    fn graph_context(&self, query: &str, agent_id: &str) -> Option<String> {
         // Extract capitalized words and significant terms as entity candidates
         let candidates = extract_entity_candidates(query);
         if candidates.is_empty() {
@@ -1299,12 +1305,16 @@ impl ProactiveMemoryStore {
 
         for candidate in &candidates {
             // Query as source
-            if let Ok(matches) = self.knowledge.query_graph(GraphPattern {
-                source: Some(candidate.clone()),
-                relation: None,
-                target: None,
-                max_depth: 1,
-            }) {
+            if let Ok(matches) = self.knowledge.query_graph_scoped(
+                GraphPattern {
+                    source: Some(candidate.clone()),
+                    relation: None,
+                    target: None,
+                    max_depth: 1,
+                },
+                Some(agent_id),
+                None,
+            ) {
                 for m in matches {
                     let key = format!("{}-{:?}-{}", m.source.id, m.relation.relation, m.target.id);
                     if seen.insert(key) {
@@ -1313,12 +1323,16 @@ impl ProactiveMemoryStore {
                 }
             }
             // Query as target
-            if let Ok(matches) = self.knowledge.query_graph(GraphPattern {
-                source: None,
-                relation: None,
-                target: Some(candidate.clone()),
-                max_depth: 1,
-            }) {
+            if let Ok(matches) = self.knowledge.query_graph_scoped(
+                GraphPattern {
+                    source: None,
+                    relation: None,
+                    target: Some(candidate.clone()),
+                    max_depth: 1,
+                },
+                Some(agent_id),
+                None,
+            ) {
                 for m in matches {
                     let key = format!("{}-{:?}-{}", m.source.id, m.relation.relation, m.target.id);
                     if seen.insert(key) {
@@ -1351,12 +1365,17 @@ impl ProactiveMemoryStore {
     /// Also includes relevant knowledge graph relations if any entity
     /// names appear in the memory content. Honors the configured
     /// `format_context_max_chars` (H4 review-followup #8).
-    pub fn format_context_with_query(&self, memories: &[MemoryItem], query: &str) -> String {
+    pub fn format_context_with_query(
+        &self,
+        memories: &[MemoryItem],
+        query: &str,
+        agent_id: &str,
+    ) -> String {
         let max_chars = self.read_config().format_context_max_chars;
         let mut context = librefang_types::memory::format_memories_with_budget(memories, max_chars);
 
         // Append knowledge graph context if relevant
-        if let Some(graph_ctx) = self.graph_context(query) {
+        if let Some(graph_ctx) = self.graph_context(query, agent_id) {
             context.push('\n');
             context.push_str(&graph_ctx);
         }
@@ -1555,11 +1574,10 @@ impl ProactiveMemoryStore {
 
         // Preserve the existing agent-scoped graph enrichment, but never add
         // an Agent-level synthetic item to a User/Session-filtered result set.
-        if parsed_agent_id.is_some()
-            && level.is_none_or(|value| value == MemoryLevel::Agent)
-            && items.len() < limit
-        {
-            if let Some(graph_context) = self.graph_context(query) {
+        if let Some(raw_agent_id) = agent_id.filter(|_| {
+            level.is_none_or(|value| value == MemoryLevel::Agent) && items.len() < limit
+        }) {
+            if let Some(graph_context) = self.graph_context(query, raw_agent_id) {
                 items.push(
                     MemoryItem::new(graph_context, MemoryLevel::Agent)
                         .with_category("knowledge_graph"),
@@ -1798,6 +1816,20 @@ impl ProactiveMemoryStore {
 
         let threshold = self.read_config().duplicate_threshold;
 
+        // Only rows in the same tenant (peer, chat scope, session scope) can be duplicates of each other.
+        // Every read path enforces those axes, so merging across them soft-deletes one tenant's fact beyond the reach of any reader — the same rule `ConsolidationEngine` applies (#5227, #7605).
+        // A failed peer lookup aborts rather than defaulting every row to the shared tenant, because the caller of this function deletes.
+        let peers = self.semantic.get_peer_ids_batch(&id_refs)?;
+        let tenants: Vec<crate::consolidation::TenantKey> = all_items
+            .iter()
+            .map(|item| {
+                crate::consolidation::TenantKey::from_metadata_map(
+                    peers.get(&item.id).and_then(|p| p.as_deref()),
+                    &item.metadata,
+                )
+            })
+            .collect();
+
         let mut used = vec![false; all_items.len()];
         let mut groups: Vec<Vec<MemoryItem>> = Vec::new();
 
@@ -1811,7 +1843,7 @@ impl ProactiveMemoryStore {
             let emb_a = embeddings.get(&all_items[i].id);
 
             for j in (i + 1)..all_items.len() {
-                if used[j] {
+                if used[j] || tenants[i] != tenants[j] {
                     continue;
                 }
                 let b_lower = all_items[j].content.to_lowercase();
@@ -2237,7 +2269,7 @@ impl ProactiveMemory for ProactiveMemoryStore {
         // Enrich with knowledge graph: if entities in query match graph nodes,
         // synthesize a context memory from graph relations.
         if items.len() < limit {
-            if let Some(graph_ctx) = self.graph_context(query) {
+            if let Some(graph_ctx) = self.graph_context(query, user_id) {
                 items.push(
                     MemoryItem::new(graph_ctx, MemoryLevel::Agent).with_category("knowledge_graph"),
                 );
@@ -4805,6 +4837,89 @@ mod tests {
         assert_eq!(matches.len(), 1);
     }
 
+    /// Relations are owned per agent, so a second agent's identical triple must be stored for that agent rather than dropped as a duplicate of the first agent's row.
+    #[tokio::test]
+    async fn test_store_relations_dedup_is_per_agent() {
+        let substrate = Arc::new(MemorySubstrate::open_in_memory(0.1).unwrap());
+        let store = ProactiveMemoryStore::with_default_config(substrate.clone());
+        let triples = vec![librefang_types::memory::RelationTriple {
+            subject: "Bob".to_string(),
+            subject_type: "person".to_string(),
+            relation: "works_at".to_string(),
+            object: "Acme".to_string(),
+            object_type: "organization".to_string(),
+        }];
+        let agent_a = AgentId::new().to_string();
+        let agent_b = AgentId::new().to_string();
+        store.store_relations(&triples, &agent_a, None);
+        store.store_relations(&triples, &agent_b, None);
+        store.store_relations(&triples, &agent_b, None);
+
+        for agent in [&agent_a, &agent_b] {
+            let matches = substrate
+                .knowledge()
+                .query_graph_scoped(
+                    GraphPattern {
+                        source: Some("Bob".to_string()),
+                        relation: None,
+                        target: None,
+                        max_depth: 1,
+                    },
+                    Some(agent),
+                    None,
+                )
+                .unwrap();
+            assert_eq!(matches.len(), 1, "agent {agent} must own exactly one copy");
+        }
+    }
+
+    /// Knowledge-graph enrichment of search must only read the searching agent's triples, never another agent's.
+    #[tokio::test]
+    async fn test_search_graph_enrichment_is_agent_scoped() {
+        let substrate = Arc::new(MemorySubstrate::open_in_memory(0.1).unwrap());
+        let store = ProactiveMemoryStore::with_default_config(substrate.clone());
+        let agent_a = AgentId::new().to_string();
+        let agent_b = AgentId::new().to_string();
+        store.store_relations(
+            &[librefang_types::memory::RelationTriple {
+                subject: "Alice".to_string(),
+                subject_type: "person".to_string(),
+                relation: "works_at".to_string(),
+                object: "Acme".to_string(),
+                object_type: "organization".to_string(),
+            }],
+            &agent_a,
+            None,
+        );
+
+        let graph_items = |items: Vec<MemoryItem>| -> Vec<String> {
+            items
+                .into_iter()
+                .filter(|i| i.category.as_deref() == Some("knowledge_graph"))
+                .map(|i| i.content)
+                .collect()
+        };
+
+        let b_items = graph_items(
+            store
+                .search("Where does Alice work?", &agent_b, 5)
+                .await
+                .unwrap(),
+        );
+        assert!(
+            b_items.is_empty(),
+            "agent B must not see agent A's graph: {b_items:?}"
+        );
+        let a_items = graph_items(
+            store
+                .search("Where does Alice work?", &agent_a, 5)
+                .await
+                .unwrap(),
+        );
+        assert_eq!(a_items.len(), 1);
+        assert!(a_items[0].contains("Acme"));
+    }
+
     #[tokio::test]
     async fn test_consolidate_merges_duplicates() {
         let substrate = MemorySubstrate::open_in_memory(0.1).unwrap();
@@ -4849,6 +4964,77 @@ mod tests {
 
         let count_after = store.count(&agent_id, None).unwrap();
         assert_eq!(count_after, 1);
+    }
+
+    /// `consolidate` must not merge near-duplicates that belong to different tenants (peer, chat scope or session scope): the losing row would be soft-deleted beyond the reach of its own tenant's reads.
+    #[tokio::test]
+    async fn test_consolidate_does_not_merge_across_tenants() {
+        let substrate = MemorySubstrate::open_in_memory(0.1).unwrap();
+        let store = ProactiveMemoryStore::with_default_config(Arc::new(substrate));
+        let agent = AgentId::new();
+        let agent_str = agent.to_string();
+        let stamped = |key: &str, value: &str| {
+            let mut m = HashMap::new();
+            m.insert(key.to_string(), serde_json::json!(value));
+            m
+        };
+        let put =
+            |content: &str, metadata: HashMap<String, serde_json::Value>, peer: Option<&str>| {
+                store
+                    .semantic
+                    .remember_with_embedding_and_peer(
+                        agent,
+                        content,
+                        MemorySource::Conversation,
+                        scopes::USER,
+                        metadata,
+                        None,
+                        None,
+                        None,
+                        librefang_types::memory::MemoryModality::Text,
+                        peer,
+                    )
+                    .unwrap();
+            };
+
+        // Same text, different sessions.
+        put(
+            "User likes tea",
+            stamped(SESSION_SCOPE_METADATA_KEY, "s1"),
+            None,
+        );
+        put(
+            "User likes tea and coffee",
+            stamped(SESSION_SCOPE_METADATA_KEY, "s2"),
+            None,
+        );
+        // Same text, different chats.
+        put(
+            "Lives in Berlin",
+            stamped(CHAT_SCOPE_METADATA_KEY, "dm"),
+            None,
+        );
+        put(
+            "Lives in Berlin",
+            stamped(CHAT_SCOPE_METADATA_KEY, "group"),
+            None,
+        );
+        // Same text, different peers.
+        put("Owns a bicycle", HashMap::new(), Some("peer-a"));
+        put("Owns a bicycle", HashMap::new(), Some("peer-b"));
+
+        assert!(store
+            .find_duplicates(&agent_str, None)
+            .await
+            .unwrap()
+            .is_empty());
+        assert_eq!(store.consolidate(&agent_str).await.unwrap(), 0);
+        assert_eq!(store.count(&agent_str, None).unwrap(), 6);
+
+        // Within one tenant the duplicate is still merged.
+        put("Owns a bicycle", HashMap::new(), Some("peer-a"));
+        assert_eq!(store.consolidate(&agent_str).await.unwrap(), 1);
+        assert_eq!(store.count(&agent_str, None).unwrap(), 6);
     }
 
     #[test]
