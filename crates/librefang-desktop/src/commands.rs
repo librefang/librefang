@@ -56,8 +56,8 @@ pub fn get_agent_count(kernel_state: tauri::State<'_, KernelState>) -> Result<us
 
 /// Open a native file picker to import an agent TOML manifest.
 ///
-/// Validates the TOML as a valid `AgentManifest`, copies it to
-/// `~/.librefang/workspaces/agents/{name}/agent.toml`, then spawns the agent.
+/// Validates the TOML as a valid `AgentManifest`, spawns the agent, then copies it to `~/.librefang/workspaces/agents/{name}/agent.toml`.
+/// Nothing is written to disk unless a local kernel is running and the spawn succeeds, so a failed import never leaves an orphan manifest that the next boot would pick up.
 #[tauri::command]
 pub fn import_agent_toml(
     app: tauri::AppHandle,
@@ -82,15 +82,11 @@ pub fn import_agent_toml(
         toml::from_str(&content).map_err(|e| format!("Invalid agent manifest: {e}"))?;
 
     let agent_name = manifest.name.clone();
+    validate_import_agent_name(&agent_name)?;
     let agent_dir = librefang_home()
         .join("workspaces")
         .join("agents")
         .join(&agent_name);
-    std::fs::create_dir_all(&agent_dir)
-        .map_err(|e| format!("Failed to create agent directory: {e}"))?;
-
-    let dest = agent_dir.join("agent.toml");
-    std::fs::write(&dest, &content).map_err(|e| format!("Failed to write manifest: {e}"))?;
 
     let guard = kernel_state.0.read().unwrap_or_else(|p| p.into_inner());
     let inner = guard
@@ -100,9 +96,38 @@ pub fn import_agent_toml(
         .kernel
         .spawn_agent(manifest)
         .map_err(|e| format!("Failed to spawn agent: {e}"))?;
+    drop(guard);
+
+    std::fs::create_dir_all(&agent_dir).map_err(|e| {
+        format!("Agent \"{agent_name}\" is running but its directory could not be created: {e}")
+    })?;
+    let dest = agent_dir.join("agent.toml");
+    std::fs::write(&dest, &content).map_err(|e| {
+        format!("Agent \"{agent_name}\" is running but its manifest could not be saved: {e}")
+    })?;
 
     info!("Imported and spawned agent \"{agent_name}\"");
     Ok(agent_name)
+}
+
+/// Reject an imported manifest name that is unsafe to use as a directory name.
+///
+/// The name comes from a user-picked file and is joined under `workspaces/agents/`, so `..`, path separators, an absolute path, or an empty name would write outside that directory (or onto it).
+/// The charset matches the API's template-name filter and the kernel's `safe_path_component`.
+fn validate_import_agent_name(name: &str) -> Result<(), String> {
+    if name.is_empty() {
+        return Err("Invalid agent manifest: name must not be empty".to_string());
+    }
+    if !name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return Err(format!(
+            "Invalid agent manifest: name {name:?} may only contain ASCII letters, digits, '-' and '_'"
+        ));
+    }
+    librefang_types::agent::validate_agent_name(name)
+        .map_err(|e| format!("Invalid agent manifest: {e}"))
 }
 
 /// Open a native file picker to import a skill file.
@@ -434,8 +459,37 @@ pub async fn uninstall_app(app: tauri::AppHandle) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_registry_uninstall_string, uninstall_process_from_argv};
+    use super::{
+        parse_registry_uninstall_string, uninstall_process_from_argv, validate_import_agent_name,
+    };
     use std::ffi::OsString;
+
+    #[test]
+    fn import_agent_name_accepts_safe_names() {
+        for name in ["assistant", "chat-agent", "my_agent_2"] {
+            assert!(validate_import_agent_name(name).is_ok(), "{name}");
+        }
+    }
+
+    #[test]
+    fn import_agent_name_rejects_path_traversal_and_empty() {
+        for name in [
+            "",
+            "..",
+            "../../../Library/LaunchAgents/x",
+            "/etc/passwd",
+            "a/b",
+            "a\\b",
+            "C:evil",
+            "has space",
+            ".hidden",
+        ] {
+            assert!(
+                validate_import_agent_name(name).is_err(),
+                "{name:?} must be rejected"
+            );
+        }
+    }
 
     #[cfg(target_os = "windows")]
     use super::parse_windows_command_line;

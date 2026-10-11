@@ -12,14 +12,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use agent_client_protocol::schema::v1::{
-    ContentBlock, CreateTerminalRequest, CreateTerminalResponse, InitializeRequest,
-    InitializeResponse, LoadSessionRequest, NewSessionRequest, NewSessionResponse,
-    PermissionOptionId, PromptRequest, PromptResponse, ReadTextFileRequest, ReadTextFileResponse,
-    ReleaseTerminalRequest, ReleaseTerminalResponse, RequestPermissionOutcome,
-    RequestPermissionRequest, RequestPermissionResponse, ResumeSessionRequest,
-    ResumeSessionResponse, SelectedPermissionOutcome, SessionNotification, SessionUpdate,
-    StopReason, TerminalExitStatus, TerminalId, TerminalOutputRequest, TerminalOutputResponse,
-    TextContent, WaitForTerminalExitRequest, WaitForTerminalExitResponse,
+    CancelNotification, ContentBlock, CreateTerminalRequest, CreateTerminalResponse,
+    InitializeRequest, InitializeResponse, LoadSessionRequest, NewSessionRequest,
+    NewSessionResponse, PermissionOptionId, PromptRequest, PromptResponse, ReadTextFileRequest,
+    ReadTextFileResponse, ReleaseTerminalRequest, ReleaseTerminalResponse,
+    RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
+    ResumeSessionRequest, ResumeSessionResponse, SelectedPermissionOutcome, SessionNotification,
+    SessionUpdate, StopReason, TerminalExitStatus, TerminalId, TerminalOutputRequest,
+    TerminalOutputResponse, TextContent, WaitForTerminalExitRequest, WaitForTerminalExitResponse,
 };
 // `ProtocolVersion` is re-exported at the `schema` root (not under `v1`) in agent-client-protocol 1.x.
 use agent_client_protocol::schema::ProtocolVersion;
@@ -66,6 +66,10 @@ impl MockKernel {
             terminal_client: std::sync::Mutex::new(None),
             canned_history: AsyncMutex::new(Vec::new()),
         })
+    }
+
+    async fn set_events(&self, events: Vec<StreamEvent>) {
+        *self.canned_events.lock().await = events;
     }
 
     async fn set_history(&self, history: Vec<(librefang_types::message::Role, String)>) {
@@ -346,6 +350,84 @@ async fn prompt_channel_close_without_completion_returns_scrubbed_internal_error
                     assert_eq!(
                         error.data,
                         Some(serde_json::json!("internal acp error"))
+                    );
+                    Ok(())
+                })
+                .await;
+
+            assert!(result.is_ok(), "client driver failed: {result:?}");
+        })
+        .await;
+}
+
+fn end_turn_events() -> Vec<StreamEvent> {
+    vec![
+        StreamEvent::TextDelta { text: "ok".into() },
+        StreamEvent::ContentComplete {
+            stop_reason: LfStopReason::EndTurn,
+            usage: TokenUsage::default(),
+        },
+    ]
+}
+
+/// A `session/cancel` must only cancel the turn it targets.
+/// Before the per-turn token, the session's single token stayed cancelled forever, so every later prompt returned `Cancelled` while the kernel turn kept running in the background.
+#[tokio::test(flavor = "current_thread")]
+async fn prompt_after_cancel_returns_end_turn() {
+    use tokio::task::LocalSet;
+
+    let local = LocalSet::new();
+    local
+        .run_until(async {
+            let kernel = MockKernel::new(end_turn_events());
+            let kernel_for_client = Arc::clone(&kernel);
+            let (server_reader, server_writer, client_reader, client_writer) = duplex_pair();
+            let server_transport =
+                agent_client_protocol::ByteStreams::new(server_writer, server_reader);
+            let client_transport =
+                agent_client_protocol::ByteStreams::new(client_writer, client_reader);
+
+            tokio::task::spawn_local(async move {
+                let _ = librefang_acp::run_with_transport(
+                    kernel,
+                    AgentId(Uuid::nil()),
+                    server_transport,
+                )
+                .await;
+            });
+
+            let client = agent_client_protocol::Client.builder();
+            let result = client
+                .connect_with(client_transport, async |cx: ConnectionTo<agent_client_protocol::Agent>| -> Result<(), agent_client_protocol::Error> {
+                    let _: InitializeResponse =
+                        recv(cx.send_request(InitializeRequest::new(ProtocolVersion::LATEST)))
+                            .await?;
+                    let new_resp: NewSessionResponse =
+                        recv(cx.send_request(NewSessionRequest::new(PathBuf::from("/tmp/proj"))))
+                            .await?;
+                    let session_id = new_resp.session_id;
+
+                    let first: PromptResponse = recv(cx.send_request(PromptRequest::new(
+                        session_id.clone(),
+                        vec![ContentBlock::Text(TextContent::new("first"))],
+                    )))
+                    .await?;
+                    assert_eq!(first.stop_reason, StopReason::EndTurn);
+
+                    // The user clicks Stop after the turn already finished (or mid-turn); either way the session must stay usable.
+                    cx.send_notification(CancelNotification::new(session_id.clone()))?;
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+
+                    kernel_for_client.set_events(end_turn_events()).await;
+                    let second: PromptResponse = recv(cx.send_request(PromptRequest::new(
+                        session_id,
+                        vec![ContentBlock::Text(TextContent::new("second"))],
+                    )))
+                    .await?;
+                    assert_eq!(
+                        second.stop_reason,
+                        StopReason::EndTurn,
+                        "a prior session/cancel must not cancel the next prompt"
                     );
                     Ok(())
                 })

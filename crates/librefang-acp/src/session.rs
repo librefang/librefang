@@ -12,12 +12,12 @@
 //! 2. The cwd the editor declared at `session/new` time, surfaced to the
 //!    agent loop so file-relative paths in tool calls resolve against
 //!    the editor's project root.
-//! 3. A [`tokio_util::sync::CancellationToken`] used by `session/cancel`
-//!    notifications to interrupt the active prompt pump.
+//! 3. A session-lifetime [`tokio_util::sync::CancellationToken`] plus a per-turn child token.
+//!    `session/cancel` interrupts only the current turn; closing or replacing the session cancels every turn.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
+use std::sync::{Arc, Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use agent_client_protocol::schema::v1::SessionId as AcpSessionId;
 use librefang_types::agent::SessionId as LfSessionId;
@@ -25,14 +25,17 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 /// Per-ACP-session state.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub(crate) struct SessionState {
     pub librefang_session_id: LfSessionId,
     #[allow(dead_code)] // surfaced to the agent loop in Phase 2 via SenderContext
     pub cwd: PathBuf,
-    /// Cancelled by the `session/cancel` notification. Cloned by the
-    /// prompt pump so a tokio `select!` can short-circuit on cancel.
+    /// Session-lifetime token, cancelled when the session is closed, replaced, or drained.
+    /// Every turn token is a child of it, so this also stops any in-flight prompt.
     pub cancel: CancellationToken,
+    /// Token for the current (or most recent) prompt turn, cancelled by `session/cancel`.
+    /// A `CancellationToken` cannot be reset, so [`Self::begin_turn`] swaps in a fresh child token for every prompt; otherwise one cancel would make every later prompt on the session return `Cancelled` immediately.
+    turn_cancel: Mutex<CancellationToken>,
 }
 
 /// Namespace UUID used to derive a stable LibreFang `SessionId` from
@@ -59,11 +62,41 @@ impl SessionState {
     /// deterministic derivation as an access-control decision.
     pub(crate) fn for_acp_id(acp_id: &AcpSessionId, cwd: PathBuf) -> Self {
         let lf_uuid = Uuid::new_v5(&ACP_SESSION_NS, acp_id.0.as_bytes());
+        Self::with_librefang_id(LfSessionId(lf_uuid), cwd)
+    }
+
+    fn with_librefang_id(librefang_session_id: LfSessionId, cwd: PathBuf) -> Self {
+        let cancel = CancellationToken::new();
+        let turn_cancel = Mutex::new(cancel.child_token());
         Self {
-            librefang_session_id: LfSessionId(lf_uuid),
+            librefang_session_id,
             cwd,
-            cancel: CancellationToken::new(),
+            cancel,
+            turn_cancel,
         }
+    }
+
+    fn lock_turn(&self) -> MutexGuard<'_, CancellationToken> {
+        self.turn_cancel.lock().unwrap_or_else(|poisoned| {
+            tracing::warn!("ACP session turn lock poisoned; recovering state");
+            let guard = poisoned.into_inner();
+            self.turn_cancel.clear_poison();
+            guard
+        })
+    }
+
+    /// Start a new prompt turn and return its cancellation token.
+    ///
+    /// The token is a fresh child of the session-lifetime token, so a `session/cancel` that hit an earlier turn (or arrived while the session was idle) does not leak into this one, while closing the session still cancels it.
+    pub(crate) fn begin_turn(&self) -> CancellationToken {
+        let token = self.cancel.child_token();
+        *self.lock_turn() = token.clone();
+        token
+    }
+
+    /// Cancel the current prompt turn only; the session stays usable for later prompts.
+    pub(crate) fn cancel_turn(&self) {
+        self.lock_turn().cancel();
     }
 
     /// Random-id constructor kept for tests that don't care about
@@ -71,11 +104,7 @@ impl SessionState {
     /// [`Self::for_acp_id`].
     #[cfg(test)]
     pub(crate) fn new(cwd: PathBuf) -> Self {
-        Self {
-            librefang_session_id: LfSessionId(Uuid::new_v4()),
-            cwd,
-            cancel: CancellationToken::new(),
-        }
+        Self::with_librefang_id(LfSessionId(Uuid::new_v4()), cwd)
     }
 }
 
@@ -195,13 +224,14 @@ impl SessionStore {
         Some(state)
     }
 
-    /// Trigger the cancel token for `id` if it exists. Returns `true`
-    /// if a session was found, regardless of whether it was already
-    /// cancelled — ACP `session/cancel` is fire-and-forget.
+    /// Cancel the current prompt turn of `id` if the session exists.
+    /// Returns `true` if a session was found, regardless of whether a turn was running — ACP `session/cancel` is fire-and-forget.
+    /// The session itself stays usable: the next prompt starts with a fresh turn token.
     pub(crate) fn cancel(&self, id: &AcpSessionId) -> bool {
-        match self.read_maps().by_acp_id.get(id) {
+        let state = self.read_maps().by_acp_id.get(id).map(Arc::clone);
+        match state {
             Some(state) => {
-                state.cancel.cancel();
+                state.cancel_turn();
                 true
             }
             None => false,
@@ -266,15 +296,59 @@ mod tests {
     }
 
     #[test]
-    fn cancel_flips_token() {
+    fn cancel_flips_current_turn_token() {
         let store = SessionStore::default();
         let id: AcpSessionId = "sess-2".into();
-        let state = SessionState::new(PathBuf::from("/tmp"));
-        let token = state.cancel.clone();
-        assert!(store.insert(id.clone(), state).is_none());
-        assert!(!token.is_cancelled());
+        assert!(store
+            .insert(id.clone(), SessionState::new(PathBuf::from("/tmp")))
+            .is_none());
+        let state = store.get(&id).expect("session should exist");
+        let turn = state.begin_turn();
+        assert!(!turn.is_cancelled());
         assert!(store.cancel(&id));
-        assert!(token.is_cancelled());
+        assert!(turn.is_cancelled());
+        assert!(
+            !state.cancel.is_cancelled(),
+            "session/cancel must not cancel the session-lifetime token"
+        );
+    }
+
+    #[test]
+    fn turn_after_cancel_starts_uncancelled() {
+        let store = SessionStore::default();
+        let id: AcpSessionId = "sess-cancel-then-prompt".into();
+        assert!(store
+            .insert(id.clone(), SessionState::new(PathBuf::from("/tmp")))
+            .is_none());
+        let state = store.get(&id).expect("session should exist");
+
+        // Cancel while idle, then cancel a running turn.
+        assert!(store.cancel(&id));
+        let first = state.begin_turn();
+        assert!(
+            !first.is_cancelled(),
+            "idle cancel must not leak into the next turn"
+        );
+        assert!(store.cancel(&id));
+        assert!(first.is_cancelled());
+
+        let second = state.begin_turn();
+        assert!(
+            !second.is_cancelled(),
+            "a cancelled turn must not poison the next one"
+        );
+    }
+
+    #[test]
+    fn removing_a_session_cancels_its_running_turn() {
+        let store = SessionStore::default();
+        let id: AcpSessionId = "sess-remove-running".into();
+        assert!(store
+            .insert(id.clone(), SessionState::new(PathBuf::from("/tmp")))
+            .is_none());
+        let turn = store.get(&id).expect("session should exist").begin_turn();
+        store.remove(&id).expect("remove session");
+        assert!(turn.is_cancelled());
     }
 
     #[test]

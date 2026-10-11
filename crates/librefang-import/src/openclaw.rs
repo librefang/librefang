@@ -2455,8 +2455,8 @@ fn migrate_workspace_dirs(
 
                 let dest_dir = target.join("agents").join(&agent_name).join("workspace");
 
-                if !dry_run {
-                    copy_dir_recursive(&path, &dest_dir)?;
+                if !copy_workspace_dir(&path, &dest_dir, dry_run, report)? {
+                    continue;
                 }
 
                 report.imported.push(MigrateItem {
@@ -2505,8 +2505,8 @@ fn migrate_workspace_dirs(
                     continue;
                 }
 
-                if !dry_run {
-                    copy_dir_recursive(&workspace_dir, &dest_dir)?;
+                if !copy_workspace_dir(&workspace_dir, &dest_dir, dry_run, report)? {
+                    continue;
                 }
 
                 report.imported.push(MigrateItem {
@@ -3332,8 +3332,8 @@ fn migrate_legacy_workspaces(
 
         let dest_dir = target.join("agents").join(&agent_name).join("workspace");
 
-        if !dry_run {
-            copy_dir_recursive(&workspace_dir, &dest_dir)?;
+        if !copy_workspace_dir(&workspace_dir, &dest_dir, dry_run, report)? {
+            continue;
         }
 
         report.imported.push(MigrateItem {
@@ -3394,20 +3394,62 @@ fn scan_legacy_skills(source: &Path, report: &mut MigrationReport) {
 // Shared utilities
 // ---------------------------------------------------------------------------
 
-/// Recursively copy a directory.
-fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), std::io::Error> {
+/// Copy a workspace tree without following symlinks.
+///
+/// `Path::is_dir()` and `fs::copy` both follow links, so a link to `~/.aws` would copy secrets from outside the workspace into the agent's readable workspace, and a cyclic link (`self -> .`) would recurse until the path is too long and abort the whole migration.
+/// Symlinks (and other non-regular entries such as sockets) are skipped instead, and the skipped source paths are appended to `skipped` so the caller can surface them as report warnings.
+fn copy_dir_recursive(
+    src: &Path,
+    dst: &Path,
+    skipped: &mut Vec<PathBuf>,
+) -> Result<(), std::io::Error> {
     std::fs::create_dir_all(dst)?;
     for entry in std::fs::read_dir(src)? {
         let entry = entry?;
         let src_path = entry.path();
         let dst_path = dst.join(entry.file_name());
-        if src_path.is_dir() {
-            copy_dir_recursive(&src_path, &dst_path)?;
-        } else {
+        // `DirEntry::file_type` does not follow symlinks.
+        let file_type = entry.file_type()?;
+        if file_type.is_dir() {
+            copy_dir_recursive(&src_path, &dst_path, skipped)?;
+        } else if file_type.is_file() {
             std::fs::copy(&src_path, &dst_path)?;
+        } else {
+            skipped.push(src_path);
         }
     }
     Ok(())
+}
+
+/// Copy an agent workspace and record every skipped symlink / special file as a migration warning.
+///
+/// Returns `Ok(false)` without copying anything when `src` itself is a symlink, since the workspace root would otherwise be followed to wherever it points.
+/// The root check also runs on a dry run, so the dry-run report does not list a workspace the real run would skip; only the copy itself is gated on `dry_run`.
+fn copy_workspace_dir(
+    src: &Path,
+    dst: &Path,
+    dry_run: bool,
+    report: &mut MigrationReport,
+) -> Result<bool, std::io::Error> {
+    if std::fs::symlink_metadata(src)?.file_type().is_symlink() {
+        report.warnings.push(format!(
+            "Skipped symlinked workspace directory (not copied): {}",
+            src.display()
+        ));
+        return Ok(false);
+    }
+    if dry_run {
+        return Ok(true);
+    }
+    let mut skipped = Vec::new();
+    copy_dir_recursive(src, dst, &mut skipped)?;
+    for path in skipped {
+        report.warnings.push(format!(
+            "Skipped symlink or special file in workspace (not copied): {}",
+            path.display()
+        ));
+    }
+    Ok(true)
 }
 
 // ---------------------------------------------------------------------------
@@ -3418,6 +3460,62 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), std::io::Error> {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[cfg(unix)]
+    #[test]
+    fn copy_workspace_dir_skips_symlinks_and_cycles() {
+        let tmp = TempDir::new().unwrap();
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("credentials"), "secret").unwrap();
+
+        let src = tmp.path().join("workspace");
+        std::fs::create_dir_all(src.join("notes")).unwrap();
+        std::fs::write(src.join("notes").join("todo.md"), "hello").unwrap();
+        std::os::unix::fs::symlink(&outside, src.join("creds")).unwrap();
+        std::os::unix::fs::symlink(outside.join("credentials"), src.join("cred-file")).unwrap();
+        std::os::unix::fs::symlink(".", src.join("self")).unwrap();
+
+        let dst = tmp.path().join("dest");
+        let mut report = MigrationReport::default();
+        assert!(copy_workspace_dir(&src, &dst, false, &mut report)
+            .expect("a cyclic link must not abort the copy"));
+
+        assert_eq!(
+            std::fs::read_to_string(dst.join("notes").join("todo.md")).unwrap(),
+            "hello"
+        );
+        for link in ["creds", "cred-file", "self"] {
+            assert!(
+                std::fs::symlink_metadata(dst.join(link)).is_err(),
+                "{link} must not be copied into the workspace"
+            );
+        }
+        assert_eq!(report.warnings.len(), 3, "{:?}", report.warnings);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn copy_workspace_dir_skips_symlinked_root() {
+        let tmp = TempDir::new().unwrap();
+        let outside = tmp.path().join("home-dotfiles");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret"), "x").unwrap();
+        let src = tmp.path().join("workspace");
+        std::os::unix::fs::symlink(&outside, &src).unwrap();
+
+        let dst = tmp.path().join("dest");
+        let mut report = MigrationReport::default();
+        assert!(!copy_workspace_dir(&src, &dst, false, &mut report).unwrap());
+        assert!(!dst.exists());
+        assert_eq!(report.warnings.len(), 1, "{:?}", report.warnings);
+
+        // A dry run must skip the same root, so its report matches the real run.
+        let mut dry_report = MigrationReport::default();
+        assert!(!copy_workspace_dir(&src, &dst, true, &mut dry_report).unwrap());
+        assert!(!dst.exists());
+        assert_eq!(dry_report.warnings.len(), 1, "{:?}", dry_report.warnings);
+    }
 
     #[test]
     fn validate_migration_id_rejects_toml_injection_chars() {

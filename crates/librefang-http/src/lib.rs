@@ -182,9 +182,8 @@ fn active_proxy() -> ProxyConfig {
 /// and TLS that works even when system CA certificates are missing.
 ///
 /// Proxy resolution:
-/// - Explicit values from `ProxyConfig` (config.toml `[proxy]` section) are applied directly.
-/// - When `ProxyConfig` fields are `None`, reqwest's built-in env var detection
-///   (`HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY`) provides the fallback automatically.
+/// - When no `ProxyConfig` field is set, reqwest's built-in system proxy detection (`HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` / `NO_PROXY`, plus the platform proxy settings on macOS and Windows) applies unchanged.
+/// - When any field is set, each field is resolved on its own: the config value wins, otherwise the matching environment variable is used. See [`build_http_client`].
 /// - `init_proxy()` also exports config values as env vars, ensuring consistency
 ///   for crates that don't use this builder (e.g. `librefang-channels`).
 pub fn proxied_client_builder() -> reqwest::ClientBuilder {
@@ -268,9 +267,9 @@ pub fn new_client() -> reqwest::Client {
 /// Build a [`reqwest::ClientBuilder`] with the given proxy settings applied
 /// and TLS fallback to bundled Mozilla CA roots.
 ///
-/// Only explicit `ProxyConfig` values are set on the builder. When fields are
-/// `None`, reqwest's built-in env var detection handles the fallback, avoiding
-/// double-application of proxy settings that `init_proxy` already exported.
+/// When every `ProxyConfig` field is unset, the builder keeps reqwest's automatic system proxy detection.
+/// When any field is set, each one is resolved separately (config value first, then the matching environment variable) and applied explicitly.
+/// That per-field fallback has to be done here because adding any explicit proxy to a reqwest builder disables its automatic environment detection entirely, which would otherwise drop the user's `NO_PROXY` and `HTTPS_PROXY` as soon as config sets only `http_proxy`.
 ///
 /// Prefer [`proxied_client_builder`] which reads the global config automatically.
 pub fn build_http_client(proxy: &ProxyConfig) -> reqwest::ClientBuilder {
@@ -291,42 +290,94 @@ pub fn build_http_client(proxy: &ProxyConfig) -> reqwest::ClientBuilder {
         .connect_timeout(std::time::Duration::from_secs(30))
         .read_timeout(std::time::Duration::from_secs(300));
 
-    // Build the NoProxy filter from explicit config only.
-    let no_proxy_filter = proxy
+    let Some(resolved) = resolve_proxy(proxy, |key| std::env::var(key).ok()) else {
+        // Nothing configured: keep reqwest's automatic system proxy detection.
+        return builder;
+    };
+
+    let no_proxy_filter = resolved
         .no_proxy
         .as_deref()
-        .filter(|s| !s.is_empty())
         .and_then(reqwest::NoProxy::from_string);
 
-    // Apply HTTP proxy from config. When None, reqwest reads HTTP_PROXY env var.
-    if let Some(ref url) = proxy.http_proxy {
-        if !url.is_empty() {
-            if let Ok(p) = Proxy::http(url) {
-                builder = builder.proxy(p.no_proxy(no_proxy_filter.clone()));
-            } else {
-                tracing::warn!(
-                    "invalid HTTP proxy URL: {}",
-                    librefang_types::config::redact_proxy_url(url)
-                );
-            }
+    if let Some(ref url) = resolved.http {
+        if let Ok(p) = Proxy::http(url) {
+            builder = builder.proxy(p.no_proxy(no_proxy_filter.clone()));
+        } else {
+            tracing::warn!(
+                "invalid HTTP proxy URL: {}",
+                librefang_types::config::redact_proxy_url(url)
+            );
         }
     }
 
-    // Apply HTTPS proxy from config. When None, reqwest reads HTTPS_PROXY env var.
-    if let Some(ref url) = proxy.https_proxy {
-        if !url.is_empty() {
-            if let Ok(p) = Proxy::https(url) {
-                builder = builder.proxy(p.no_proxy(no_proxy_filter.clone()));
-            } else {
-                tracing::warn!(
-                    "invalid HTTPS proxy URL: {}",
-                    librefang_types::config::redact_proxy_url(url)
-                );
-            }
+    if let Some(ref url) = resolved.https {
+        if let Ok(p) = Proxy::https(url) {
+            builder = builder.proxy(p.no_proxy(no_proxy_filter.clone()));
+        } else {
+            tracing::warn!(
+                "invalid HTTPS proxy URL: {}",
+                librefang_types::config::redact_proxy_url(url)
+            );
         }
     }
 
     builder
+}
+
+/// Proxy settings after merging `ProxyConfig` with the environment.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct ResolvedProxy {
+    http: Option<String>,
+    https: Option<String>,
+    no_proxy: Option<String>,
+}
+
+/// Merge the `[proxy]` config with the environment, field by field.
+///
+/// Returns `None` when no config field is set, so the caller can leave reqwest's own system proxy detection in charge.
+/// Otherwise each field takes the non-empty config value, falling back to the same environment variables (and precedence) that reqwest's system detection reads: `HTTP_PROXY` / `http_proxy`, `HTTPS_PROXY` / `https_proxy`, both falling back to `ALL_PROXY` / `all_proxy`, and `NO_PROXY` / `no_proxy`.
+/// Like reqwest, the environment is ignored under CGI (`REQUEST_METHOD` set), where `HTTP_PROXY` can be injected through a request header.
+fn resolve_proxy(
+    proxy: &ProxyConfig,
+    env: impl Fn(&str) -> Option<String>,
+) -> Option<ResolvedProxy> {
+    fn non_empty(value: Option<&String>) -> Option<String> {
+        value.filter(|v| !v.is_empty()).cloned()
+    }
+
+    let config = ResolvedProxy {
+        http: non_empty(proxy.http_proxy.as_ref()),
+        https: non_empty(proxy.https_proxy.as_ref()),
+        no_proxy: non_empty(proxy.no_proxy.as_ref()),
+    };
+    if config == ResolvedProxy::default() {
+        return None;
+    }
+
+    let is_cgi = env("REQUEST_METHOD").is_some();
+    let first_env = |keys: &[&str]| -> Option<String> {
+        if is_cgi {
+            return None;
+        }
+        keys.iter()
+            .find_map(|key| env(key).filter(|v| !v.is_empty()))
+    };
+    let all = || first_env(&["ALL_PROXY", "all_proxy"]);
+
+    Some(ResolvedProxy {
+        http: config
+            .http
+            .or_else(|| first_env(&["HTTP_PROXY", "http_proxy"]))
+            .or_else(all),
+        https: config
+            .https
+            .or_else(|| first_env(&["HTTPS_PROXY", "https_proxy"]))
+            .or_else(all),
+        no_proxy: config
+            .no_proxy
+            .or_else(|| first_env(&["NO_PROXY", "no_proxy"])),
+    })
 }
 
 #[cfg(test)]
@@ -340,6 +391,89 @@ mod tests {
         let proxy = ProxyConfig::default();
         let client = build_http_client(&proxy).build().unwrap();
         drop(client);
+    }
+
+    fn env_of(vars: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
+        let vars: std::collections::HashMap<String, String> = vars
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        move |key| vars.get(key).cloned()
+    }
+
+    #[test]
+    fn resolve_proxy_defers_to_system_detection_when_config_is_empty() {
+        let env = env_of(&[("HTTPS_PROXY", "http://corp:3128")]);
+        assert_eq!(resolve_proxy(&ProxyConfig::default(), &env), None);
+        let empty_strings = ProxyConfig {
+            http_proxy: Some(String::new()),
+            https_proxy: Some(String::new()),
+            no_proxy: Some(String::new()),
+        };
+        assert_eq!(resolve_proxy(&empty_strings, &env), None);
+    }
+
+    #[test]
+    fn resolve_proxy_falls_back_to_env_per_field() {
+        // Config sets only http_proxy; reqwest disables env detection once any proxy is added, so the env HTTPS_PROXY and NO_PROXY must still be picked up here.
+        let proxy = ProxyConfig {
+            http_proxy: Some("http://config:3128".to_string()),
+            ..ProxyConfig::default()
+        };
+        let env = env_of(&[
+            ("HTTP_PROXY", "http://env-http:3128"),
+            ("https_proxy", "http://env-https:3128"),
+            ("NO_PROXY", "localhost,127.0.0.1"),
+        ]);
+        assert_eq!(
+            resolve_proxy(&proxy, env),
+            Some(ResolvedProxy {
+                http: Some("http://config:3128".to_string()),
+                https: Some("http://env-https:3128".to_string()),
+                no_proxy: Some("localhost,127.0.0.1".to_string()),
+            })
+        );
+    }
+
+    #[test]
+    fn resolve_proxy_config_wins_and_all_proxy_is_last_resort() {
+        let proxy = ProxyConfig {
+            no_proxy: Some("internal.example".to_string()),
+            ..ProxyConfig::default()
+        };
+        let env = env_of(&[
+            ("ALL_PROXY", "socks5://all:1080"),
+            ("HTTPS_PROXY", "http://env-https:3128"),
+            ("NO_PROXY", "localhost"),
+        ]);
+        assert_eq!(
+            resolve_proxy(&proxy, env),
+            Some(ResolvedProxy {
+                http: Some("socks5://all:1080".to_string()),
+                https: Some("http://env-https:3128".to_string()),
+                no_proxy: Some("internal.example".to_string()),
+            })
+        );
+    }
+
+    #[test]
+    fn resolve_proxy_ignores_env_under_cgi() {
+        let proxy = ProxyConfig {
+            https_proxy: Some("http://config:3128".to_string()),
+            ..ProxyConfig::default()
+        };
+        let env = env_of(&[
+            ("REQUEST_METHOD", "GET"),
+            ("HTTP_PROXY", "http://injected:80"),
+        ]);
+        assert_eq!(
+            resolve_proxy(&proxy, env),
+            Some(ResolvedProxy {
+                http: None,
+                https: Some("http://config:3128".to_string()),
+                no_proxy: None,
+            })
+        );
     }
 
     #[test]
