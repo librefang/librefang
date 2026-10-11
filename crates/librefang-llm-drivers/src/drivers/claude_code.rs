@@ -851,6 +851,86 @@ impl PreparedPrompt {
     }
 }
 
+/// Removes a CLI subprocess's entry from the shared PID map when dropped.
+///
+/// Holding the entry in a guard rather than removing it by hand means a cancelled request (the driver future dropped while awaiting the CLI) does not leave a stale entry in the operator-visible `pid_map()`.
+/// A guard dropped without [`Self::release`] also kills the CLI's process group: `kill_on_drop` only reaches the direct child, so the MCP helpers and Node subprocesses it spawned would otherwise outlive a cancelled request.
+struct ActivePidGuard {
+    map: Arc<DashMap<String, u32>>,
+    label: String,
+    pid: u32,
+    kill_group_on_drop: bool,
+}
+
+impl ActivePidGuard {
+    fn track(map: &Arc<DashMap<String, u32>>, label: String, pid: Option<u32>) -> Option<Self> {
+        let pid = pid?;
+        map.insert(label.clone(), pid);
+        Some(Self {
+            map: Arc::clone(map),
+            label,
+            pid,
+            kill_group_on_drop: true,
+        })
+    }
+
+    /// Clear the PID map entry on a normal exit path, leaving the process group to the caller.
+    fn release(guard: Option<Self>) {
+        if let Some(mut guard) = guard {
+            guard.kill_group_on_drop = false;
+        }
+    }
+}
+
+impl Drop for ActivePidGuard {
+    fn drop(&mut self) {
+        self.map.remove(&self.label);
+        if self.kill_group_on_drop {
+            // The guard is declared after the `Child`, so on cancellation it drops first and the CLI has not been reaped yet: its pid still names the process group `set_process_group` created at spawn.
+            crate::cli_process::kill_process_group(Some(self.pid));
+        }
+    }
+}
+
+/// Removes the driver-owned temporary files of a [`PreparedPrompt`] if they still exist when dropped.
+///
+/// Every normal exit path already awaits `PreparedPrompt::cleanup`, so this only does work when the request future is cancelled mid-flight.
+struct PreparedCleanupGuard {
+    image_dir: Option<PathBuf>,
+    mcp_config_path: Option<PathBuf>,
+}
+
+impl PreparedCleanupGuard {
+    fn new(prepared: &PreparedPrompt) -> Self {
+        Self {
+            image_dir: prepared.image_dir.clone(),
+            mcp_config_path: prepared.mcp_config_path.clone(),
+        }
+    }
+}
+
+impl Drop for PreparedCleanupGuard {
+    fn drop(&mut self) {
+        let image_dir = self.image_dir.take().filter(|dir| dir.exists());
+        let mcp_config_path = self.mcp_config_path.take().filter(|path| path.exists());
+        if image_dir.is_none() && mcp_config_path.is_none() {
+            return;
+        }
+        let prepared = PreparedPrompt {
+            text: String::new(),
+            image_dir,
+            extra_image_dirs: std::collections::BTreeSet::new(),
+            mcp_config_path,
+        };
+        match tokio::runtime::Handle::try_current() {
+            Ok(handle) => {
+                handle.spawn_blocking(move || prepared.cleanup_blocking());
+            }
+            Err(_) => prepared.cleanup_blocking(),
+        }
+    }
+}
+
 /// JSON output from `claude -p --output-format json`.
 ///
 /// The CLI may return the response text in different fields depending on
@@ -979,6 +1059,7 @@ impl LlmDriver for ClaudeCodeDriver {
         // tool_use / tool_result round-trip natively — no stream parsing,
         // no session plumbing on our side.
         let prepared = self.prepare_prompt(&request).await?;
+        let _cleanup_guard = PreparedCleanupGuard::new(&prepared);
         let model_flag = Self::model_flag(&request.model);
 
         if !request.tools.is_empty() && self.mcp_bridge.is_none() {
@@ -1019,6 +1100,9 @@ impl LlmDriver for ClaudeCodeDriver {
         cmd.stdin(std::process::Stdio::piped());
         cmd.stdout(std::process::Stdio::piped());
         cmd.stderr(std::process::Stdio::piped());
+        // A cancelled request must not leave the CLI running, and a timeout kill must reach the MCP helpers and Node subprocesses it spawns.
+        cmd.kill_on_drop(true);
+        crate::cli_process::set_process_group(&mut cmd);
 
         debug!(
             cli = %self.cli_path,
@@ -1040,6 +1124,14 @@ impl LlmDriver for ClaudeCodeDriver {
             }
         };
 
+        // Track the PID using model + UUID to avoid collisions on concurrent same-model requests.
+        // Tracked before the prompt is written so a request cancelled while a large prompt is still being piped in also kills the CLI's process group.
+        let pid_label = format!("{}:{}", request.model, uuid::Uuid::new_v4());
+        let pid_guard = ActivePidGuard::track(&self.active_pids, pid_label.clone(), child.id());
+        if let Some(pid) = child.id() {
+            debug!(pid = pid, label = %pid_label, "Claude Code CLI subprocess started");
+        }
+
         // Write the prompt to stdin and close it so the CLI sees EOF and
         // begins processing. tokio::io::AsyncWriteExt::write_all chunks
         // automatically — no per-write size limit applies here, only the
@@ -1047,19 +1139,14 @@ impl LlmDriver for ClaudeCodeDriver {
         if let Some(mut stdin) = child.stdin.take() {
             use tokio::io::AsyncWriteExt;
             if let Err(e) = stdin.write_all(prepared.text.as_bytes()).await {
+                // Released before the diagnosis reaps the child, so the guard never signals a pid that may already be reused.
+                ActivePidGuard::release(pid_guard);
                 let diag = Self::diagnose_stdin_write_failure(&mut child, &e).await;
                 prepared.cleanup().await;
                 return Err(LlmError::Http(diag));
             }
             // Drop closes stdin; CLI proceeds with the full prompt.
             drop(stdin);
-        }
-
-        // Track the PID using model + UUID to avoid collisions on concurrent same-model requests
-        let pid_label = format!("{}:{}", request.model, uuid::Uuid::new_v4());
-        if let Some(pid) = child.id() {
-            self.active_pids.insert(pid_label.clone(), pid);
-            debug!(pid = pid, label = %pid_label, "Claude Code CLI subprocess started");
         }
 
         // Take ownership of pipes BEFORE waiting, then drain them
@@ -1092,7 +1179,7 @@ impl LlmDriver for ClaudeCodeDriver {
         let wait_result = tokio::time::timeout(timeout_duration, child.wait()).await;
 
         // Clear PID tracking regardless of outcome
-        self.active_pids.remove(&pid_label);
+        ActivePidGuard::release(pid_guard);
 
         let status = match wait_result {
             Ok(Ok(status)) => status,
@@ -1110,7 +1197,7 @@ impl LlmDriver for ClaudeCodeDriver {
                     model = %pid_label,
                     "Claude Code CLI subprocess timed out, killing process"
                 );
-                let _ = child.kill().await;
+                crate::cli_process::kill_on_timeout(&mut child).await;
                 prepared.cleanup().await;
                 return Err(LlmError::Http(format!(
                     "Claude Code CLI subprocess timed out after {effective_timeout_secs}s — process killed"
@@ -1251,6 +1338,7 @@ impl LlmDriver for ClaudeCodeDriver {
         tx: tokio::sync::mpsc::Sender<StreamEvent>,
     ) -> Result<CompletionResponse, LlmError> {
         let prepared = self.prepare_prompt(&request).await?;
+        let _cleanup_guard = PreparedCleanupGuard::new(&prepared);
         let model_flag = Self::model_flag(&request.model);
 
         if !request.tools.is_empty() && self.mcp_bridge.is_none() {
@@ -1290,6 +1378,9 @@ impl LlmDriver for ClaudeCodeDriver {
         cmd.stdin(std::process::Stdio::piped());
         cmd.stdout(std::process::Stdio::piped());
         cmd.stderr(std::process::Stdio::piped());
+        // A cancelled request must not leave the CLI running, and a timeout kill must reach the MCP helpers and Node subprocesses it spawns.
+        cmd.kill_on_drop(true);
+        crate::cli_process::set_process_group(&mut cmd);
 
         debug!(
             cli = %self.cli_path,
@@ -1309,9 +1400,19 @@ impl LlmDriver for ClaudeCodeDriver {
             }
         };
 
+        // Track PID with unique key to avoid collisions on concurrent same-model requests.
+        // Tracked before the prompt is written so a request cancelled while a large prompt is still being piped in also kills the CLI's process group.
+        let pid_label = format!("{}-stream:{}", request.model, uuid::Uuid::new_v4());
+        let pid_guard = ActivePidGuard::track(&self.active_pids, pid_label.clone(), child.id());
+        if let Some(pid) = child.id() {
+            debug!(pid = pid, label = %pid_label, "Claude Code CLI streaming subprocess started");
+        }
+
         if let Some(mut stdin) = child.stdin.take() {
             use tokio::io::AsyncWriteExt;
             if let Err(e) = stdin.write_all(prepared.text.as_bytes()).await {
+                // Released before the diagnosis reaps the child, so the guard never signals a pid that may already be reused.
+                ActivePidGuard::release(pid_guard);
                 let diag = Self::diagnose_stdin_write_failure(&mut child, &e).await;
                 prepared.cleanup().await;
                 return Err(LlmError::Http(diag));
@@ -1319,17 +1420,10 @@ impl LlmDriver for ClaudeCodeDriver {
             drop(stdin);
         }
 
-        // Track PID with unique key to avoid collisions on concurrent same-model requests
-        let pid_label = format!("{}-stream:{}", request.model, uuid::Uuid::new_v4());
-        if let Some(pid) = child.id() {
-            self.active_pids.insert(pid_label.clone(), pid);
-            debug!(pid = pid, label = %pid_label, "Claude Code CLI streaming subprocess started");
-        }
-
         let stdout = match child.stdout.take() {
             Some(stdout) => stdout,
             None => {
-                self.active_pids.remove(&pid_label);
+                ActivePidGuard::release(pid_guard);
                 prepared.cleanup().await;
                 return Err(LlmError::Http("No stdout from claude CLI".to_string()));
             }
@@ -1490,7 +1584,7 @@ impl LlmDriver for ClaudeCodeDriver {
                                             tracing::debug!(
                                                 "streaming receiver dropped; cancelling Claude Code CLI stream"
                                             );
-                                            let _ = child.kill().await;
+                                            crate::cli_process::kill_on_timeout(&mut child).await;
                                             break None;
                                         }
                                     }
@@ -1579,7 +1673,7 @@ impl LlmDriver for ClaudeCodeDriver {
                             model = %pid_label,
                             "Claude CLI streaming timed out due to inactivity, killing process"
                         );
-                        let _ = child.kill().await;
+                        crate::cli_process::kill_on_timeout(&mut child).await;
                         let partial_body: std::sync::Arc<str> =
                             std::sync::Arc::from(std::mem::take(&mut full_text));
                         break Some(LlmError::TimedOut {
@@ -1599,7 +1693,7 @@ impl LlmDriver for ClaudeCodeDriver {
         };
 
         // Clear PID tracking
-        self.active_pids.remove(&pid_label);
+        ActivePidGuard::release(pid_guard);
 
         if let Some(err) = stream_err {
             prepared.cleanup().await;
@@ -3463,5 +3557,104 @@ mod tests {
         let _ = std::fs::remove_file(&path);
         let cfg: serde_json::Value = serde_json::from_str(&written).unwrap();
         assert!(cfg["mcpServers"]["librefang"].get("headers").is_none());
+    }
+
+    /// Process state as reported by `ps`; `None` once the process is gone.
+    #[cfg(unix)]
+    fn process_state(pid: u32) -> Option<String> {
+        let out = std::process::Command::new("ps")
+            .args(["-o", "stat=", "-p", &pid.to_string()])
+            .output()
+            .ok()?;
+        let state = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        (!state.is_empty()).then_some(state)
+    }
+
+    /// Dropping the `complete` future while the CLI is still running (agent stopped, outer timeout fired) must kill the CLI and clear its `pid_map()` entry instead of leaving both behind.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cancelled_complete_kills_cli_and_clears_pid_entry() {
+        use librefang_types::message::Message;
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let pid_path = dir.path().join("cli.pid");
+        let helper_pid_path = dir.path().join("helper.pid");
+        let script = dir.path().join("fake-claude");
+        // The fake CLI backgrounds a helper (standing in for an MCP server or Node subprocess) before writing its own pid.
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\n/bin/cat >/dev/null\n/bin/sleep 30 &\necho $! > {}\necho $$ > {}\nexec /bin/sleep 30\n",
+                helper_pid_path.display(),
+                pid_path.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let driver = ClaudeCodeDriver::new(Some(script.to_string_lossy().into_owned()), true);
+        let request = CompletionRequest {
+            model: "claude-code/sonnet".to_string(),
+            messages: std::sync::Arc::new(vec![Message {
+                role: Role::User,
+                content: MessageContent::text("Hello"),
+                pinned: false,
+                timestamp: None,
+            }]),
+            ..Default::default()
+        };
+
+        let mut complete = Box::pin(driver.complete(request));
+        let started = tokio::time::Instant::now();
+        let pid: u32 = loop {
+            tokio::select! {
+                _ = &mut complete => panic!("fake CLI must still be running"),
+                _ = tokio::time::sleep(std::time::Duration::from_millis(20)) => {}
+            }
+            if let Some(pid) = std::fs::read_to_string(&pid_path)
+                .ok()
+                .and_then(|text| text.trim().parse().ok())
+            {
+                break pid;
+            }
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(10),
+                "fake CLI never started"
+            );
+        };
+        assert_eq!(driver.active_pids().len(), 1);
+
+        // Cancel the request.
+        drop(complete);
+
+        assert!(
+            driver.active_pids().is_empty(),
+            "cancelled request left a stale pid_map entry"
+        );
+        let helper_pid: u32 = std::fs::read_to_string(&helper_pid_path)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        for (what, pid) in [
+            ("CLI subprocess", pid),
+            ("CLI helper grandchild", helper_pid),
+        ] {
+            loop {
+                match process_state(pid) {
+                    None => break,
+                    Some(state) if state.starts_with('Z') => break,
+                    Some(state) => {
+                        assert!(
+                            tokio::time::Instant::now() < deadline,
+                            "{what} still running after cancellation (state {state})"
+                        );
+                        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                    }
+                }
+            }
+        }
     }
 }

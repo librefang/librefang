@@ -23,9 +23,7 @@ use tracing::{info, warn};
 /// Each driver is paired with the model name it should use.
 ///
 /// Health-aware: tracks per-driver EWMA latency and consecutive errors.
-/// On each request, the driver list is dynamically reordered so healthy,
-/// low-latency drivers are tried first while preserving the primary position
-/// when it is healthy.
+/// On each request, the driver list is dynamically reordered: a healthy primary always stays first, the remaining healthy drivers follow sorted by measured latency, and unhealthy drivers come last.
 ///
 /// Exhaustion-aware (#4807): when constructed with
 /// [`Self::with_exhaustion_store`] and per-slot provider names supplied
@@ -257,10 +255,12 @@ impl FallbackDriver {
         }
     }
 
-    /// Build a health-aware ordering of driver indices. Healthy drivers
-    /// (consecutive_errors == 0) come first sorted by EWMA latency; unhealthy
-    /// drivers follow sorted by error count (fewest errors first). The primary
-    /// driver (index 0) gets a latency bonus to keep it preferred when healthy.
+    /// Build a health-aware ordering of driver indices.
+    ///
+    /// Healthy drivers (consecutive_errors == 0) come first and unhealthy drivers follow.
+    /// Among healthy drivers the primary (index 0) is always first: the fallbacks are usually different models, so a fast backup must never silently replace the operator's configured primary while it is healthy.
+    /// The remaining healthy drivers are sorted by EWMA latency, where an EWMA of 0 means "never measured" and sorts after every measured slot rather than as the fastest.
+    /// Unhealthy drivers are sorted by EWMA, which carries the per-error penalty.
     ///
     /// Before ordering we give every unhealthy driver a chance to recover if
     /// enough time has elapsed since its last failure — this is what keeps a
@@ -270,22 +270,27 @@ impl FallbackDriver {
         for entry in &self.drivers {
             Self::maybe_recover(entry, now);
         }
-        let mut indices: Vec<usize> = (0..self.drivers.len()).collect();
-        indices.sort_by(|&a, &b| {
-            let ea = self.drivers[a].consecutive_errors.load(Ordering::Relaxed);
-            let eb = self.drivers[b].consecutive_errors.load(Ordering::Relaxed);
-            // Healthy (0 errors) before unhealthy
-            match (ea == 0, eb == 0) {
-                (true, false) => std::cmp::Ordering::Less,
-                (false, true) => std::cmp::Ordering::Greater,
-                _ => {
-                    let la = self.drivers[a].ewma_latency_ms.load(Ordering::Relaxed);
-                    let lb = self.drivers[b].ewma_latency_ms.load(Ordering::Relaxed);
-                    la.cmp(&lb).then(a.cmp(&b))
-                }
-            }
-        });
-        indices
+        // Snapshot every sort key once: the atomics can change under concurrent requests, and a comparator that reloads them mid-sort is not a total order (which `sort` may panic on).
+        let mut keyed: Vec<((bool, bool, u64), usize)> = self
+            .drivers
+            .iter()
+            .enumerate()
+            .map(|(i, entry)| {
+                let healthy = entry.consecutive_errors.load(Ordering::Relaxed) == 0;
+                let latency = entry.ewma_latency_ms.load(Ordering::Relaxed);
+                let key = if healthy {
+                    // Healthy: primary first, then measured latency, with "never measured" (0) after every measured slot.
+                    let measured_latency = if latency == 0 { u64::MAX } else { latency };
+                    (false, i != 0, measured_latency)
+                } else {
+                    // Unhealthy: after every healthy slot, ordered by EWMA (which carries the per-error penalty).
+                    (true, false, latency)
+                };
+                (key, i)
+            })
+            .collect();
+        keyed.sort_unstable();
+        keyed.into_iter().map(|(_, i)| i).collect()
     }
 }
 
@@ -1179,23 +1184,65 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_health_order_sorts_by_ewma_when_both_healthy() {
+    async fn test_health_order_sorts_fallbacks_by_ewma_when_healthy() {
         let driver = FallbackDriver::new(vec![
+            Arc::new(OkDriver) as Arc<dyn LlmDriver>,
             Arc::new(OkDriver) as Arc<dyn LlmDriver>,
             Arc::new(OkDriver) as Arc<dyn LlmDriver>,
         ]);
 
-        // Simulate: driver 0 has high latency, driver 1 has low latency
+        // The primary is slow, fallback 1 is slower than fallback 2.
         driver.drivers[0]
             .ewma_latency_ms
             .store(5000, Ordering::Relaxed);
         driver.drivers[1]
             .ewma_latency_ms
+            .store(900, Ordering::Relaxed);
+        driver.drivers[2]
+            .ewma_latency_ms
             .store(100, Ordering::Relaxed);
 
         let order = driver.health_order();
-        assert_eq!(order[0], 1, "lower latency driver should come first");
-        assert_eq!(order[1], 0);
+        assert_eq!(
+            order,
+            vec![0, 2, 1],
+            "a healthy primary stays first; fallbacks are sorted by latency"
+        );
+    }
+
+    /// Regression: an untried fallback has EWMA 0, which used to sort as "fastest" and took over all traffic as soon as the primary recorded its first real latency.
+    #[tokio::test]
+    async fn test_health_order_keeps_primary_first_after_its_first_success() {
+        let driver = FallbackDriver::with_models(vec![
+            (
+                Arc::new(OkDriver) as Arc<dyn LlmDriver>,
+                "primary".to_string(),
+            ),
+            (
+                Arc::new(OkDriver) as Arc<dyn LlmDriver>,
+                "backup-a".to_string(),
+            ),
+            (
+                Arc::new(OkDriver) as Arc<dyn LlmDriver>,
+                "backup-b".to_string(),
+            ),
+        ]);
+
+        // The primary served one request at 8 s; the fallbacks were never called.
+        driver.drivers[0]
+            .ewma_latency_ms
+            .store(8000, Ordering::Relaxed);
+        // backup-b served a request once while the primary was down.
+        driver.drivers[2]
+            .ewma_latency_ms
+            .store(1200, Ordering::Relaxed);
+
+        let order = driver.health_order();
+        assert_eq!(
+            order,
+            vec![0, 2, 1],
+            "primary first, then the measured fallback, then the never-measured one"
+        );
     }
 
     #[tokio::test]

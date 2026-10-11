@@ -3,7 +3,7 @@
 //! The Copilot API uses the OpenAI chat completions format, so this module
 //! handles token exchange and caching, then delegates to the OpenAI-compatible driver.
 
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 use tracing::{debug, warn};
 use zeroize::Zeroizing;
@@ -171,6 +171,13 @@ pub fn copilot_auth_available() -> bool {
     std::env::var("GITHUB_TOKEN").is_ok_and(|v| !v.trim().is_empty())
 }
 
+/// Inner OpenAI-compatible driver built for one Copilot token and base URL.
+struct CachedInnerDriver {
+    token: Zeroizing<String>,
+    base_url: String,
+    driver: Arc<super::openai::OpenAIDriver>,
+}
+
 /// LLM driver that wraps OpenAI-compatible with Copilot token exchange.
 ///
 /// On each API call, ensures a valid Copilot API token is available
@@ -178,6 +185,9 @@ pub fn copilot_auth_available() -> bool {
 pub struct CopilotDriver {
     github_token: Zeroizing<String>,
     token_cache: CopilotTokenCache,
+    /// The inner driver for the current token, reused across requests so its HTTP connection pool and per-instance state (such as the `reasoning_effort` rejection memo) survive between calls.
+    /// Rebuilt only when the Copilot token or its base URL changes.
+    inner: Mutex<Option<CachedInnerDriver>>,
     /// Whether to emit the three `x-librefang-{agent,session,step}-id` trace
     /// headers on outbound requests. Mirrors
     /// `KernelConfig.telemetry.emit_caller_trace_headers`; when `false`, no
@@ -192,6 +202,7 @@ impl CopilotDriver {
         Self {
             github_token: Zeroizing::new(github_token),
             token_cache: CopilotTokenCache::new(),
+            inner: Mutex::new(None),
             emit_caller_trace_headers: true,
         }
     }
@@ -224,6 +235,7 @@ impl CopilotDriver {
         Self {
             github_token: zeroize::Zeroizing::new(github_token),
             token_cache: cache,
+            inner: Mutex::new(None),
             emit_caller_trace_headers: true,
         }
     }
@@ -249,15 +261,40 @@ impl CopilotDriver {
         Ok(token)
     }
 
-    /// Create a fresh OpenAI driver with the current Copilot token.
-    fn make_inner_driver(&self, token: &CachedToken) -> super::openai::OpenAIDriver {
+    /// Return the inner OpenAI driver for `token`, building a new one only when the token or base URL differs from the cached one.
+    fn inner_driver(&self, token: &CachedToken) -> Arc<super::openai::OpenAIDriver> {
         // Use proxy-ep from token if available, otherwise fall back to default base URL.
         let base_url = if token.base_url.is_empty() {
             GITHUB_COPILOT_BASE_URL.to_string()
         } else {
             token.base_url.clone()
         };
-        super::openai::OpenAIDriver::new(token.token.to_string(), base_url)
+        let mut inner = match self.inner.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                warn!("Copilot inner driver lock poisoned; recovering inner state");
+                let guard = poisoned.into_inner();
+                self.inner.clear_poison();
+                guard
+            }
+        };
+        if let Some(cached) = inner.as_ref() {
+            if *cached.token == *token.token && cached.base_url == base_url {
+                return Arc::clone(&cached.driver);
+            }
+        }
+        let driver = Arc::new(self.make_inner_driver(&token.token, base_url.clone()));
+        *inner = Some(CachedInnerDriver {
+            token: token.token.clone(),
+            base_url,
+            driver: Arc::clone(&driver),
+        });
+        driver
+    }
+
+    /// Create a fresh OpenAI driver for a Copilot token and base URL.
+    fn make_inner_driver(&self, token: &str, base_url: String) -> super::openai::OpenAIDriver {
+        super::openai::OpenAIDriver::new(token.to_string(), base_url)
             .with_extra_headers(vec![
                 ("Editor-Version".to_string(), "vscode/1.96.0".to_string()),
                 (
@@ -285,7 +322,7 @@ impl crate::llm_driver::LlmDriver for CopilotDriver {
         request: crate::llm_driver::CompletionRequest,
     ) -> Result<crate::llm_driver::CompletionResponse, crate::llm_driver::LlmError> {
         let token = self.ensure_token().await?;
-        let driver = self.make_inner_driver(&token);
+        let driver = self.inner_driver(&token);
         driver.complete(request).await
     }
 
@@ -300,7 +337,7 @@ impl crate::llm_driver::LlmDriver for CopilotDriver {
         tx: tokio::sync::mpsc::Sender<crate::llm_driver::StreamEvent>,
     ) -> Result<crate::llm_driver::CompletionResponse, crate::llm_driver::LlmError> {
         let token = self.ensure_token().await?;
-        let driver = self.make_inner_driver(&token);
+        let driver = self.inner_driver(&token);
         driver.stream(request, tx).await
     }
 
@@ -312,6 +349,40 @@ impl crate::llm_driver::LlmDriver for CopilotDriver {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn inner_driver_is_reused_until_the_token_changes() {
+        let driver = CopilotDriver::new_for_test(
+            "gh-token".to_string(),
+            "https://copilot.example".to_string(),
+        );
+        let token = |value: &str, base_url: &str| CachedToken {
+            token: Zeroizing::new(value.to_string()),
+            expires_at: Instant::now() + Duration::from_secs(3600),
+            base_url: base_url.to_string(),
+        };
+
+        let first = driver.inner_driver(&token("tok-a", "https://copilot.example"));
+        let second = driver.inner_driver(&token("tok-a", "https://copilot.example"));
+        assert!(
+            Arc::ptr_eq(&first, &second),
+            "the same token must reuse the inner driver (HTTP pool and per-instance caches)"
+        );
+
+        let rotated = driver.inner_driver(&token("tok-b", "https://copilot.example"));
+        assert!(
+            !Arc::ptr_eq(&second, &rotated),
+            "a new token needs a new driver"
+        );
+
+        let moved = driver.inner_driver(&token("tok-b", "https://other.example"));
+        assert!(
+            !Arc::ptr_eq(&rotated, &moved),
+            "a new base URL needs a new driver"
+        );
+        let again = driver.inner_driver(&token("tok-b", "https://other.example"));
+        assert!(Arc::ptr_eq(&moved, &again));
+    }
 
     #[test]
     fn test_parse_copilot_token_with_proxy() {

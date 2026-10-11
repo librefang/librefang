@@ -146,6 +146,28 @@ pub(crate) async fn kill_on_timeout(child: &mut tokio::process::Child) {
     let _ = child.kill().await;
 }
 
+/// How long the output pipes may stay open after the direct child has already exited before the remaining process group is killed.
+///
+/// A descendant that inherited stdout/stderr (an MCP helper, a telemetry flusher) keeps the pipes open after the CLI itself is done.
+/// Without this bound the call would block until the full message deadline and then be misreported as a timeout.
+const POST_EXIT_PIPE_GRACE: Duration = Duration::from_secs(2);
+
+/// Kill every process left in the group led by `pgid` (Unix only).
+///
+/// Unlike [`kill_on_timeout`] this does not need a live `Child`: once `Child::wait` has reaped the direct child, `Child::id()` returns `None`, so the group id has to be captured at spawn time and passed in here.
+#[cfg(unix)]
+pub(crate) fn kill_process_group(pgid: Option<u32>) {
+    if let Some(pgid) = pgid {
+        // SAFETY: `kill` only delivers a signal; `set_process_group` made the child the leader of group `pgid` at spawn time, and POSIX does not reuse a pid as a new process id while a process group with that id still has members.
+        unsafe {
+            libc::kill(-(pgid as libc::pid_t), libc::SIGKILL);
+        }
+    }
+}
+
+#[cfg(not(unix))]
+pub(crate) fn kill_process_group(_pgid: Option<u32>) {}
+
 /// Run a command while draining both output pipes and enforcing a hard deadline.
 ///
 /// On timeout the child (and, where the platform allows, its whole process tree — see `kill_on_timeout`) is killed and reaped before this function returns.
@@ -180,6 +202,8 @@ async fn output_with_optional_input_timeout(
     command.kill_on_drop(true);
     set_process_group(command);
     let mut child = command.spawn().map_err(OutputError::Spawn)?;
+    // Captured now because `Child::id()` returns `None` once the child has been reaped, and the group may still hold pipe-holding descendants at that point.
+    let pgid = child.id();
     let mut stdout_task = AbortOnDrop::new(tokio::spawn(read_pipe(child.stdout.take())));
     let mut stderr_task = AbortOnDrop::new(tokio::spawn(read_pipe(child.stderr.take())));
     let deadline = Instant::now() + duration;
@@ -224,6 +248,19 @@ async fn output_with_optional_input_timeout(
         }
     };
 
+    // The direct child has exited, so anything still holding the pipes open is a descendant in its process group.
+    // Give it a short grace period, then kill the group so the readers reach EOF and the output already produced is returned instead of a spurious timeout.
+    let grace_deadline = std::cmp::min(deadline, Instant::now() + POST_EXIT_PIPE_GRACE);
+    let both_pipes_done = timeout_at(grace_deadline, async {
+        while !(stdout_task.0.is_finished() && stderr_task.0.is_finished()) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    if both_pipes_done.is_err() {
+        kill_process_group(pgid);
+    }
+
     let pipes = timeout_at(deadline, async {
         tokio::try_join!(
             collect_pipe(&mut stdout_task),
@@ -240,7 +277,7 @@ async fn output_with_optional_input_timeout(
         }),
         Ok(Err(error)) => Err(OutputError::Io(error)),
         Err(_) => {
-            kill_on_timeout(&mut child).await;
+            kill_process_group(pgid);
             stdout_task.abort();
             stderr_task.abort();
             Err(OutputError::TimedOut)
@@ -285,6 +322,52 @@ mod tests {
 
         assert!(output.status.success());
         assert_eq!(output.stdout, b"private prompt");
+    }
+
+    /// The CLI exits successfully but a helper it backgrounded keeps the inherited stdout open.
+    /// The call must return the CLI's output shortly after the grace period instead of blocking until the full deadline and reporting a timeout, and the helper must not be left running.
+    #[tokio::test]
+    async fn exited_child_with_pipe_holding_grandchild_returns_output_and_kills_group() {
+        let pid_file = tempfile::NamedTempFile::new().unwrap();
+        let pid_path = pid_file.path().to_str().unwrap().to_string();
+
+        let mut command = Command::new("sh");
+        command
+            .args(["-c", &format!("sleep 30 & echo $! > {pid_path}; echo done")])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+
+        let started = Instant::now();
+        let result = output_with_timeout(&mut command, Duration::from_secs(20)).await;
+        let output = match result {
+            Ok(output) => output,
+            Err(_) => panic!("exited CLI with a pipe-holding grandchild was reported as a failure"),
+        };
+
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"done\n");
+        assert!(
+            started.elapsed() < POST_EXIT_PIPE_GRACE + Duration::from_secs(3),
+            "call waited for the grandchild instead of the post-exit grace period"
+        );
+
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let grandchild_pid: libc::pid_t = std::fs::read_to_string(&pid_path)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        // `is_still_running` relies on `/proc`; elsewhere fall back to a plain liveness probe (the orphan is reaped by init promptly once killed).
+        let alive = if cfg!(target_os = "linux") {
+            is_still_running(grandchild_pid)
+        } else {
+            // SAFETY: signal 0 only probes liveness; no signal is delivered.
+            unsafe { libc::kill(grandchild_pid, 0) == 0 }
+        };
+        assert!(
+            !alive,
+            "pipe-holding grandchild leaked after the CLI exited"
+        );
     }
 
     /// A process that received SIGKILL but has not yet been reaped by its
