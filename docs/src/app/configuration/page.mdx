@@ -1894,6 +1894,8 @@ default_agent = "assistant"
 
 **Safety limits:** Files larger than 1 MB are skipped. Binary files (non-text extensions) are skipped. Empty files are moved to `processed/` without sending.
 
+**Write completion:** A file is picked up only after its modification time has been unchanged for about 2 seconds, so a file that is still being copied or redirected into the inbox is not delivered truncated. Hidden files (names starting with `.`) are ignored. For fully atomic delivery, write to a temporary name such as `report.txt.tmp` and `mv` it into place.
+
 **Usage examples:**
 
 Target a specific agent:
