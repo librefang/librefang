@@ -762,8 +762,10 @@ async fn hook_non_utf8_stderr_does_not_stall() {
 #[cfg(unix)]
 #[tokio::test]
 async fn hook_newline_less_stdout_hits_cap() {
+    // Built from shell builtins only: under the hook seccomp filter on Linux CI, `head -c 2000000 /dev/zero | tr` died with SIGSYS before the cap tripped, so the test exercised the filter instead of the cap.
+    // 2^21 bytes without a newline is twice the 1 MiB per-stream cap.
     let err = run_sh_hook(
-        "#!/bin/sh\nread _input\nhead -c 2000000 /dev/zero | tr '\\0' 'a'\n",
+        "#!/bin/sh\nread _input\ns=a\ni=0\nwhile [ \"$i\" -lt 21 ]; do s=\"$s$s\"; i=$((i + 1)); done\nprintf '%s' \"$s\"\n",
         10,
     )
     .await
