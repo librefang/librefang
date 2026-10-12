@@ -15,7 +15,7 @@ use async_trait::async_trait;
 use futures::future::join_all;
 use librefang_types::scheduler::CronDeliveryTarget;
 use serde::{Deserialize, Serialize};
-use std::path::Path;
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::{debug, warn};
@@ -96,6 +96,9 @@ pub struct CronDeliveryEngine {
     /// Shared HTTP client for webhook delivery, or the construction error
     /// that webhook targets should report without blocking other targets.
     http: Result<reqwest::Client, String>,
+    /// Directory that `LocalFile` target paths resolve against: the owning agent's workspace.
+    /// `None` means the job has no resolvable workspace, and every `LocalFile` target is refused rather than written relative to the daemon's current directory.
+    local_file_root: Option<PathBuf>,
 }
 
 impl CronDeliveryEngine {
@@ -132,7 +135,16 @@ impl CronDeliveryEngine {
         Self {
             channel_sender,
             http,
+            local_file_root: None,
         }
+    }
+
+    /// Resolve `LocalFile` targets against `root` (the owning agent's workspace).
+    ///
+    /// Without a root every `LocalFile` target fails, because the documented contract is a workspace-relative path and there is no other directory it may safely land in.
+    pub fn with_local_file_root(mut self, root: Option<PathBuf>) -> Self {
+        self.local_file_root = root;
+        self
     }
 
     /// Deliver `output` to every target concurrently.
@@ -235,7 +247,14 @@ impl CronDeliveryEngine {
             }
             CronDeliveryTarget::LocalFile { path, append } => {
                 let desc = format!("file:{path}");
-                match deliver_local_file(Path::new(path), *append, output).await {
+                let written = match self.local_file_root.as_deref() {
+                    Some(root) => deliver_local_file(root, Path::new(path), *append, output).await,
+                    None => Err(
+                        "local_file target refused: the owning agent has no workspace to resolve it against"
+                            .to_string(),
+                    ),
+                };
+                match written {
                     Ok(()) => {
                         debug!(target = %desc, "Cron fan-out: file write ok");
                         DeliveryResult::ok(desc)
@@ -363,35 +382,78 @@ async fn deliver_webhook(
     Ok(())
 }
 
-/// Append or overwrite `output` at `path`. Creates parent directories when
-/// missing. Returns `Err(msg)` on any I/O failure.
+/// Append or overwrite `output` at `rel_path`, resolved inside `root`.
+/// Creates missing parent directories. Returns `Err(msg)` on any I/O failure or containment violation.
 ///
-/// SECURITY: this layer trusts the path it is handed. The real safety net
-/// against `LocalFile { path: "../../etc/passwd" }` and absolute paths
-/// like `/etc/passwd` lives in `CronJob::validate_delivery_targets()`,
-/// which rejects untrusted input before it ever reaches the scheduler.
-/// We keep a defence-in-depth `..` check here so that a future code path
-/// which forgets to validate can't trivially write outside the workspace,
-/// but absolute paths are accepted because tests legitimately use
-/// `tempfile::tempdir()` (which yields absolute paths under `/tmp` or
-/// `/var/folders`) and rejecting them here would block all unit tests.
-async fn deliver_local_file(path: &Path, append: bool, output: &str) -> Result<(), String> {
-    if path
-        .components()
-        .any(|c| matches!(c, std::path::Component::ParentDir))
+/// SECURITY: `CronJob::validate_delivery_targets()` only checks the configured string (relative, no `..`), and jobs can be authored by an agent through `cron_create`.
+/// The path is therefore re-checked here and joined onto the owning agent's workspace, never onto the daemon's current directory, so a target such as `.ssh/authorized_keys` cannot reach `$HOME` when the daemon was started from there.
+/// Containment is checked on canonical paths both before and after creating parent directories, so a symlinked directory inside the workspace cannot redirect the write, and a symlink at the final path is refused.
+/// A symlink swapped in between the check and the open is a TOCTOU this layer accepts.
+async fn deliver_local_file(
+    root: &Path,
+    rel_path: &Path,
+    append: bool,
+    output: &str,
+) -> Result<(), String> {
+    if rel_path.as_os_str().is_empty()
+        || rel_path
+            .components()
+            .any(|c| !matches!(c, Component::Normal(_) | Component::CurDir))
     {
         return Err(format!(
-            "path traversal rejected: '..' component in {}",
-            path.display()
+            "path rejected: must be workspace-relative with no '..' component: {}",
+            rel_path.display()
         ));
     }
-    if let Some(parent) = path.parent() {
-        if !parent.as_os_str().is_empty() && !parent.exists() {
-            tokio::fs::create_dir_all(parent)
-                .await
-                .map_err(|e| format!("create parent dir failed: {e}"))?;
+    let file_name = rel_path
+        .file_name()
+        .ok_or_else(|| format!("path rejected: no file name in {}", rel_path.display()))?
+        .to_owned();
+    let canonical_root = tokio::fs::canonicalize(root)
+        .await
+        .map_err(|e| format!("workspace {} unavailable: {e}", root.display()))?;
+    let parent = match rel_path.parent() {
+        Some(p) => canonical_root.join(p),
+        None => canonical_root.clone(),
+    };
+    let ensure_inside = |dir: &Path| -> Result<(), String> {
+        if dir.starts_with(&canonical_root) {
+            Ok(())
+        } else {
+            Err(format!(
+                "path rejected: {} escapes the agent workspace",
+                rel_path.display()
+            ))
+        }
+    };
+    // Check the deepest existing ancestor before creating anything, so a symlinked directory cannot make `create_dir_all` build directories outside the workspace.
+    let mut existing = parent.as_path();
+    while tokio::fs::symlink_metadata(existing).await.is_err() {
+        existing = existing
+            .parent()
+            .ok_or_else(|| format!("path rejected: {}", rel_path.display()))?;
+    }
+    let canonical_existing = tokio::fs::canonicalize(existing)
+        .await
+        .map_err(|e| format!("resolve parent dir failed: {e}"))?;
+    ensure_inside(&canonical_existing)?;
+    tokio::fs::create_dir_all(&parent)
+        .await
+        .map_err(|e| format!("create parent dir failed: {e}"))?;
+    let canonical_parent = tokio::fs::canonicalize(&parent)
+        .await
+        .map_err(|e| format!("resolve parent dir failed: {e}"))?;
+    ensure_inside(&canonical_parent)?;
+    let path = canonical_parent.join(file_name);
+    if let Ok(meta) = tokio::fs::symlink_metadata(&path).await {
+        if meta.file_type().is_symlink() {
+            return Err(format!(
+                "path rejected: {} is a symlink",
+                rel_path.display()
+            ));
         }
     }
+    let path = path.as_path();
     if append {
         use tokio::io::AsyncWriteExt;
         let mut f = tokio::fs::OpenOptions::new()
@@ -487,18 +549,27 @@ mod tests {
         CronDeliveryEngine::new(sender)
     }
 
+    /// Engine whose `LocalFile` targets resolve inside `root`, the way the kernel roots them at the owning agent's workspace.
+    fn rooted_engine(sender: Arc<MockSender>, root: &Path) -> CronDeliveryEngine {
+        CronDeliveryEngine::new(sender).with_local_file_root(Some(root.to_path_buf()))
+    }
+
+    fn local_file(path: &str, append: bool) -> CronDeliveryTarget {
+        CronDeliveryTarget::LocalFile {
+            path: path.to_string(),
+            append,
+        }
+    }
+
     // -- LocalFile: overwrite ------------------------------------------------
 
     #[tokio::test]
     async fn localfile_overwrite_creates_file() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("out.txt");
-        let target = CronDeliveryTarget::LocalFile {
-            path: path.to_string_lossy().to_string(),
-            append: false,
-        };
+        let target = local_file("out.txt", false);
 
-        let engine = test_engine(MockSender::new());
+        let engine = rooted_engine(MockSender::new(), tmp.path());
         let results = engine.deliver(&[target], "job-x", "hello world").await;
 
         assert_eq!(results.len(), 1);
@@ -513,11 +584,8 @@ mod tests {
         let path = tmp.path().join("replace.txt");
         std::fs::write(&path, "OLD CONTENT").unwrap();
 
-        let target = CronDeliveryTarget::LocalFile {
-            path: path.to_string_lossy().to_string(),
-            append: false,
-        };
-        let engine = test_engine(MockSender::new());
+        let target = local_file("replace.txt", false);
+        let engine = rooted_engine(MockSender::new(), tmp.path());
         let results = engine.deliver(&[target], "job-x", "NEW").await;
 
         assert!(results[0].success);
@@ -531,11 +599,8 @@ mod tests {
     async fn localfile_append_adds_lines() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("log.txt");
-        let target = CronDeliveryTarget::LocalFile {
-            path: path.to_string_lossy().to_string(),
-            append: true,
-        };
-        let engine = test_engine(MockSender::new());
+        let target = local_file("log.txt", true);
+        let engine = rooted_engine(MockSender::new(), tmp.path());
 
         engine
             .deliver(std::slice::from_ref(&target), "job", "first")
@@ -553,15 +618,102 @@ mod tests {
     async fn localfile_creates_missing_parent_dirs() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("nested/deep/out.log");
-        let target = CronDeliveryTarget::LocalFile {
-            path: path.to_string_lossy().to_string(),
-            append: true,
-        };
-        let engine = test_engine(MockSender::new());
+        let target = local_file("nested/deep/out.log", true);
+        let engine = rooted_engine(MockSender::new(), tmp.path());
         let results = engine.deliver(&[target], "job", "payload").await;
 
         assert!(results[0].success, "error: {:?}", results[0].error);
         assert!(path.exists(), "nested file should have been created");
+    }
+
+    // -- LocalFile: workspace containment ------------------------------------
+
+    /// A relative path must land inside the agent workspace, never relative to the daemon's current directory.
+    #[tokio::test]
+    async fn localfile_relative_path_resolves_inside_workspace_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let name = format!("cron-root-check-{}.txt", uuid::Uuid::new_v4());
+        let engine = rooted_engine(MockSender::new(), tmp.path());
+        let results = engine
+            .deliver(&[local_file(&name, false)], "job", "payload")
+            .await;
+
+        assert!(results[0].success, "error: {:?}", results[0].error);
+        assert_eq!(
+            std::fs::read_to_string(tmp.path().join(&name)).unwrap(),
+            "payload"
+        );
+        assert!(
+            !std::env::current_dir().unwrap().join(&name).exists(),
+            "file must not be written relative to the process CWD"
+        );
+    }
+
+    #[tokio::test]
+    async fn localfile_without_workspace_root_is_refused() {
+        let name = format!("cron-no-root-{}.txt", uuid::Uuid::new_v4());
+        let engine = test_engine(MockSender::new());
+        let results = engine
+            .deliver(&[local_file(&name, true)], "job", "payload")
+            .await;
+
+        assert!(!results[0].success);
+        assert!(!std::env::current_dir().unwrap().join(&name).exists());
+    }
+
+    #[tokio::test]
+    async fn localfile_absolute_and_traversal_paths_are_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let abs = outside.path().join("abs.txt");
+        let engine = rooted_engine(MockSender::new(), tmp.path());
+        let targets = vec![
+            local_file(&abs.to_string_lossy(), false),
+            local_file("../escape.txt", false),
+        ];
+        let results = engine.deliver(&targets, "job", "payload").await;
+
+        assert!(results.iter().all(|r| !r.success), "{results:?}");
+        assert!(!abs.exists());
+        assert!(!tmp.path().parent().unwrap().join("escape.txt").exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn localfile_symlinked_dir_cannot_escape_workspace() {
+        let tmp = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(outside.path(), tmp.path().join("link")).unwrap();
+        let engine = rooted_engine(MockSender::new(), tmp.path());
+        let targets = vec![
+            local_file("link/authorized_keys", true),
+            local_file("link/new/dir/out.txt", true),
+        ];
+        let results = engine.deliver(&targets, "job", "payload").await;
+
+        assert!(results.iter().all(|r| !r.success), "{results:?}");
+        assert!(!outside.path().join("authorized_keys").exists());
+        assert!(
+            !outside.path().join("new").exists(),
+            "no directory may be created outside the workspace"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn localfile_symlinked_file_is_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let victim = outside.path().join("victim.txt");
+        std::fs::write(&victim, "ORIGINAL").unwrap();
+        std::os::unix::fs::symlink(&victim, tmp.path().join("out.txt")).unwrap();
+        let engine = rooted_engine(MockSender::new(), tmp.path());
+        let results = engine
+            .deliver(&[local_file("out.txt", true)], "job", "payload")
+            .await;
+
+        assert!(!results[0].success);
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "ORIGINAL");
     }
 
     // -- Webhook -------------------------------------------------------------
@@ -708,10 +860,7 @@ mod tests {
 
         let targets = vec![
             // Will succeed (file write).
-            CronDeliveryTarget::LocalFile {
-                path: ok_path.to_string_lossy().to_string(),
-                append: false,
-            },
+            local_file("ok.txt", false),
             // Will fail (mock sender rejects 'slack').
             CronDeliveryTarget::Channel {
                 channel_type: "slack".to_string(),
@@ -722,7 +871,7 @@ mod tests {
         ];
 
         let sender = MockSender::failing_on("slack");
-        let engine = test_engine(sender);
+        let engine = rooted_engine(sender, tmp.path());
         let results = engine.deliver(&targets, "job", "payload").await;
 
         assert_eq!(results.len(), 2);
@@ -755,15 +904,13 @@ mod tests {
                 url: "https://example.invalid/hook".to_string(),
                 auth_header: None,
             },
-            CronDeliveryTarget::LocalFile {
-                path: ok_path.to_string_lossy().to_string(),
-                append: false,
-            },
+            local_file("ok.txt", false),
         ];
         let engine = CronDeliveryEngine::with_http_client_result(
             MockSender::new(),
             Err("HTTP client unavailable: simulated build failure".to_string()),
-        );
+        )
+        .with_local_file_root(Some(tmp.path().to_path_buf()));
 
         let results = engine.deliver(&targets, "job", "payload").await;
 
@@ -813,13 +960,11 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let ok_path = tmp.path().join("ok.txt");
         let stall = Arc::new(StallSender);
-        let engine = CronDeliveryEngine::new(stall);
+        let engine =
+            CronDeliveryEngine::new(stall).with_local_file_root(Some(tmp.path().to_path_buf()));
 
         let targets = vec![
-            CronDeliveryTarget::LocalFile {
-                path: ok_path.to_string_lossy().to_string(),
-                append: false,
-            },
+            local_file("ok.txt", false),
             CronDeliveryTarget::Channel {
                 channel_type: "stuck".to_string(),
                 recipient: "rcp".to_string(),

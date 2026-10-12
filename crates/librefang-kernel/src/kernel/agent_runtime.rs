@@ -20,7 +20,6 @@ use tracing::{error, info, warn};
 use crate::error::{KernelError, KernelResult};
 use crate::metering::MeteringEngine;
 
-use super::cron_script::atomic_write_toml;
 use super::LibreFangKernel;
 
 type AgentWatcherHandles = Vec<tokio::task::JoinHandle<()>>;
@@ -304,7 +303,7 @@ impl LibreFangKernel {
         // `stop_agent_run` so a multi-session agent is fully halted.
         let _ = self.stop_agent_run(agent_id);
         // Persist enabled=false to agent.toml
-        self.persist_agent_enabled(agent_id, &entry.name, false);
+        self.persist_agent_enabled(agent_id, &entry, false);
         info!(agent_id = %agent_id, "Agent suspended");
         Ok(())
     }
@@ -322,55 +321,9 @@ impl LibreFangKernel {
             .set_state(agent_id, AgentState::Running)
             .map_err(KernelError::LibreFang)?;
         // Persist enabled=true to agent.toml
-        self.persist_agent_enabled(agent_id, &entry.name, true);
+        self.persist_agent_enabled(agent_id, &entry, true);
         info!(agent_id = %agent_id, "Agent resumed");
         Ok(())
-    }
-
-    /// Write enabled flag to agent's TOML file.
-    fn persist_agent_enabled(&self, _agent_id: AgentId, name: &str, enabled: bool) {
-        let cfg = self.config.load();
-        // Check both workspaces/agents/ and workspaces/hands/ directories
-        let agents_path = cfg
-            .effective_agent_workspaces_dir()
-            .join(name)
-            .join("agent.toml");
-        let hands_path = cfg
-            .effective_hands_workspaces_dir()
-            .join(name)
-            .join("agent.toml");
-        let toml_path = if agents_path.exists() {
-            agents_path
-        } else if hands_path.exists() {
-            hands_path
-        } else {
-            return;
-        };
-        match std::fs::read_to_string(&toml_path) {
-            Ok(content) => {
-                // Simple: replace or append enabled field
-                let new_content = if content.contains("enabled =") || content.contains("enabled=") {
-                    content
-                        .lines()
-                        .map(|line| {
-                            if line.trim_start().starts_with("enabled") && line.contains('=') {
-                                format!("enabled = {enabled}")
-                            } else {
-                                line.to_string()
-                            }
-                        })
-                        .collect::<Vec<_>>()
-                        .join("\n")
-                } else {
-                    // Append after [agent] section or at end
-                    format!("{content}\nenabled = {enabled}\n")
-                };
-                if let Err(e) = atomic_write_toml(&toml_path, &new_content) {
-                    warn!("Failed to persist enabled={enabled} for {name}: {e}");
-                }
-            }
-            Err(e) => warn!("Failed to read agent TOML for {name}: {e}"),
-        }
     }
 
     /// Compact an agent's session using LLM-based summarization.

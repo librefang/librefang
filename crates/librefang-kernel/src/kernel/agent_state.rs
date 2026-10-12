@@ -56,6 +56,43 @@ fn patch_mcp_servers(source: &str, servers: &[String]) -> Result<String, String>
     Ok(patched)
 }
 
+#[derive(Deserialize)]
+struct EnabledDocument {
+    #[serde(default)]
+    enabled: Option<toml::Spanned<bool>>,
+}
+
+/// Set the root `enabled` key of an `agent.toml` source without touching any other line.
+///
+/// Only the root key is patched: nested tables carry their own `enabled` flags (`[skill_workshop]`, `[[triggers]]`, `[rl_export]`) that a suspend or resume must leave alone.
+/// When the key is absent it is prepended, so it lands at the root rather than inside whichever table happens to come last.
+fn patch_root_enabled(source: &str, enabled: bool) -> Result<String, String> {
+    toml::from_str::<AgentManifest>(source)
+        .map_err(|error| format!("existing agent.toml is invalid: {error}"))?;
+    let document: EnabledDocument = toml::from_str(source)
+        .map_err(|error| format!("failed to locate enabled in agent.toml: {error}"))?;
+    let patched = if let Some(current) = document.enabled {
+        let mut patched = source.to_string();
+        patched.replace_range(current.span(), &enabled.to_string());
+        patched
+    } else {
+        // Keep a leading byte-order mark in front: a BOM pushed behind the new line would make the document unparseable.
+        let (bom, body) = match source.strip_prefix('\u{feff}') {
+            Some(body) => ("\u{feff}", body),
+            None => ("", source),
+        };
+        format!("{bom}enabled = {enabled}\n{body}")
+    };
+    let reparsed: EnabledDocument = toml::from_str(&patched)
+        .map_err(|error| format!("patched agent.toml is invalid: {error}"))?;
+    if reparsed.enabled.map(|value| *value.get_ref()) != Some(enabled) {
+        return Err("patched agent.toml does not carry the requested enabled flag".to_string());
+    }
+    toml::from_str::<AgentManifest>(&patched)
+        .map_err(|error| format!("patched agent.toml is invalid: {error}"))?;
+    Ok(patched)
+}
+
 /// Carry a resolved `exec_policy` from the running registry entry onto a replacement manifest that leaves it unset.
 ///
 /// `exec_policy` is normally absent from `agent.toml`.
@@ -163,6 +200,57 @@ impl LibreFangKernel {
             return;
         };
         self.persist_full_manifest_at(&current_entry, &toml_path);
+    }
+
+    /// Persist a suspend / resume to the root `enabled` key of the agent's `agent.toml`.
+    ///
+    /// The file is the first existing one of `source_toml_path`, the canonical `workspaces/agents/<name>/agent.toml` and the hands workspace, and is patched in place under the per-path manifest write lock.
+    /// A missing file is left missing, matching the previous behaviour: the authoritative copy lives in SQLite.
+    pub(super) fn persist_agent_enabled(
+        &self,
+        agent_id: AgentId,
+        entry: &librefang_types::agent::AgentEntry,
+        enabled: bool,
+    ) {
+        // Same candidate order boot drift sync reads (`source_toml_path` when it still exists, then the canonical `workspaces/agents/<name>/`), so a stale `source_toml_path` cannot make the suspend land in a file boot never looks at.
+        let safe_name = safe_path_component(&entry.name, &agent_id.to_string());
+        let cfg = self.config.load();
+        let candidates = [
+            entry.source_toml_path.clone(),
+            Some(
+                cfg.effective_agent_workspaces_dir()
+                    .join(&safe_name)
+                    .join("agent.toml"),
+            ),
+            Some(
+                cfg.effective_hands_workspaces_dir()
+                    .join(&safe_name)
+                    .join("agent.toml"),
+            ),
+        ];
+        drop(cfg);
+        let Some(toml_path) = candidates.into_iter().flatten().find(|path| path.exists()) else {
+            return;
+        };
+        let write_lock = self.manifest_write_lock(&toml_path);
+        let _write_guard = write_lock.lock().unwrap_or_else(|error| error.into_inner());
+        let source = match std::fs::read_to_string(&toml_path) {
+            Ok(source) => source,
+            Err(error) => {
+                warn!(agent = %entry.name, "Failed to read agent TOML before persisting enabled={enabled}: {error}");
+                return;
+            }
+        };
+        let patched = match patch_root_enabled(&source, enabled) {
+            Ok(patched) => patched,
+            Err(error) => {
+                warn!(agent = %entry.name, "Refusing to overwrite agent manifest while persisting enabled={enabled}: {error}");
+                return;
+            }
+        };
+        if let Err(error) = atomic_write_toml(&toml_path, &patched) {
+            warn!(agent = %entry.name, "Failed to persist enabled={enabled}: {error}");
+        }
     }
 
     fn persist_mcp_servers_to_disk(&self, agent_id: AgentId) {
@@ -1175,6 +1263,59 @@ mod mcp_manifest_patch_tests {
 
         assert!(patched.starts_with("mcp_servers = [\"new-server\"]\n# operator note\n"));
         assert!(patched.ends_with(&source));
+    }
+
+    #[test]
+    fn root_enabled_patch_leaves_nested_enabled_flags_alone() {
+        let mut manifest: AgentManifest = toml::from_str(&manifest_source()).unwrap();
+        manifest.enabled = true;
+        manifest.skill_workshop.enabled = false;
+        manifest.triggers =
+            vec![
+                toml::from_str("pattern = \"all\"\nprompt_template = \"x\"\nenabled = false\n")
+                    .unwrap(),
+            ];
+        let source = toml::to_string_pretty(&manifest).unwrap();
+        // The fixture must carry the nested flags as real `enabled = ...` lines, or the test would not exercise the line-rewrite hazard.
+        assert!(
+            source
+                .lines()
+                .filter(|line| line.trim_start().starts_with("enabled"))
+                .count()
+                >= 3,
+            "fixture lost its nested enabled lines:\n{source}"
+        );
+        let patched = patch_root_enabled(&source, false).unwrap();
+        let manifest: AgentManifest = toml::from_str(&patched).unwrap();
+        assert!(!manifest.enabled);
+        assert!(!manifest.skill_workshop.enabled);
+        assert!(!manifest.triggers[0].enabled);
+
+        let resumed = patch_root_enabled(&patched, true).unwrap();
+        let manifest: AgentManifest = toml::from_str(&resumed).unwrap();
+        assert!(manifest.enabled);
+        assert!(
+            !manifest.skill_workshop.enabled,
+            "resume must not enable the skill workshop"
+        );
+        assert!(
+            !manifest.triggers[0].enabled,
+            "resume must not enable a disabled trigger"
+        );
+    }
+
+    #[test]
+    fn root_enabled_is_inserted_at_root_when_document_ends_in_a_table() {
+        let source = manifest_source()
+            .lines()
+            .filter(|line| !line.starts_with("enabled ="))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(source.trim_end().lines().any(|line| line.starts_with('[')));
+        let patched = patch_root_enabled(&source, false).unwrap();
+        assert!(patched.starts_with("enabled = false\n"));
+        assert!(!toml::from_str::<AgentManifest>(&patched).unwrap().enabled);
+        assert!(super::super::manifest_helpers::toml_enabled_false(&patched));
     }
 
     #[test]
