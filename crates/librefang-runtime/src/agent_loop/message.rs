@@ -260,13 +260,17 @@ pub(super) fn is_parameter_error_content(content: &str) -> bool {
     lower.contains("argument is required")
 }
 
+/// Guarantee the trimmed history still holds a user turn, synthesising one from `user_message` only when none survived.
+///
+/// Any surviving user message is enough: the current turn's message is the last one in the history and is already the PII-filtered, injection-guarded and multimodal form built by `push_filtered_user_message`.
+/// Replacing it with `user_message` — the raw inbound text — would send unredacted text to the LLM, persist it in the session, and drop every attachment of the turn.
 fn ensure_post_trim_minimum(
     messages: &mut Vec<Message>,
     agent_name: &str,
     user_message: &str,
     history_kind: &str,
 ) {
-    if messages.len() >= 2 && messages.iter().any(|m| m.role == Role::User) {
+    if messages.iter().any(|m| m.role == Role::User) {
         return;
     }
 
@@ -274,7 +278,7 @@ fn ensure_post_trim_minimum(
         agent = %agent_name,
         history = history_kind,
         remaining = messages.len(),
-        "Trim + repair left too few messages, synthesizing minimal conversation"
+        "Trim + repair left no user message, synthesizing minimal conversation"
     );
     messages.retain(|message| message.role == Role::System);
     messages.push(Message::user(user_message));
@@ -288,9 +292,7 @@ fn ensure_post_trim_minimum(
 /// persisted on the next `save_session_async` call — preventing unbounded
 /// growth of the on-disk session blob.
 ///
-/// After trim + repair, if fewer than 2 messages survive the function
-/// synthesises a minimal `[user_message]` so the LLM always gets at least
-/// the current question.
+/// After trim + repair, if no user message survives the function synthesises a minimal `[user_message]` so the LLM always gets at least the current question.
 pub(super) fn safe_trim_messages(
     messages: &mut Vec<Message>,
     session_messages: &mut Vec<Message>,
@@ -627,5 +629,79 @@ mod safe_trim_session_repair_tests {
         assert_eq!(session[0].content.text_content(), "pinned system policy");
         assert_eq!(session[1].role, Role::User);
         assert_eq!(session[1].content.text_content(), "current user message");
+    }
+
+    /// A session holding one question followed by a long tool loop has no safe trim boundary, so trim + repair cascades down to the current message alone.
+    /// That message is the filtered, multimodal one and must be kept as-is: rebuilding it from the raw inbound text would leak redacted PII to the LLM and the session store, and drop the turn's image.
+    #[test]
+    fn safe_trim_keeps_filtered_multimodal_current_message_after_cascade() {
+        use librefang_types::message::{ContentBlock, MessageContent};
+        use librefang_types::tool::ToolExecutionStatus;
+
+        let mut session: Vec<Message> = vec![Message::user("original question")];
+        for i in 0..35 {
+            let id = format!("call_{i}");
+            session.push(Message {
+                role: Role::Assistant,
+                content: MessageContent::Blocks(vec![ContentBlock::ToolUse {
+                    id: id.clone(),
+                    name: "shell_exec".to_string(),
+                    input: serde_json::json!({}),
+                    provider_metadata: None,
+                }]),
+                pinned: false,
+                timestamp: None,
+            });
+            session.push(Message {
+                role: Role::User,
+                content: MessageContent::Blocks(vec![ContentBlock::ToolResult {
+                    tool_use_id: id,
+                    tool_name: "shell_exec".to_string(),
+                    content: "ok".to_string(),
+                    is_error: false,
+                    status: ToolExecutionStatus::default(),
+                    approval_request_id: None,
+                }]),
+                pinned: false,
+                timestamp: None,
+            });
+        }
+        session.push(Message::assistant("all done"));
+        let current_blocks = vec![
+            ContentBlock::Text {
+                text: "[Alice]: my email is [REDACTED], see attached screenshot".to_string(),
+                provider_metadata: None,
+            },
+            ContentBlock::Image {
+                media_type: "image/png".to_string(),
+                data: "aGVsbG8=".to_string(),
+            },
+        ];
+        session.push(Message {
+            role: Role::User,
+            content: MessageContent::Blocks(current_blocks.clone()),
+            pinned: false,
+            timestamp: None,
+        });
+        let mut working = session.clone();
+        let raw = "[Alice]: my email is a@b.com, see attached screenshot";
+
+        let _ = safe_trim_messages(&mut working, &mut session, "agent-under-test", raw, 60);
+
+        for (label, history) in [("working copy", &working), ("persisted session", &session)] {
+            let last = history.last().expect("history must not be empty");
+            assert_eq!(last.role, Role::User, "{label}");
+            assert!(
+                matches!(&last.content, MessageContent::Blocks(b) if *b == current_blocks),
+                "{label}: the filtered multimodal message was replaced: {:?}",
+                last.content
+            );
+            assert!(
+                history
+                    .iter()
+                    .all(|m| !m.content.text_content().contains("a@b.com")),
+                "{label}: raw unredacted text reached the history"
+            );
+        }
     }
 }

@@ -447,6 +447,29 @@ impl StagedToolUseTurn {
     }
 }
 
+/// Commit and persist a staged turn whose tool batch aborted with an error before the normal commit — the loop guard's circuit break.
+///
+/// The calls that ran before the abort had real side effects (a message sent, a `git push`), so dropping the staged turn would erase them from history and the model, with no record of having done them, may do them again on the next turn.
+/// Executed calls keep their real results and every call that never ran is padded with an "interrupted" result, so the history stays provider-valid.
+/// Fork and incognito turns stay unsaved, as everywhere else in the loop.
+pub(super) async fn commit_aborted_tool_use_turn(
+    staged: &mut StagedToolUseTurn,
+    session: &mut Session,
+    messages: &mut Vec<Message>,
+    memory: &MemorySubstrate,
+    opts: &LoopOptions,
+    agent_id_str: &str,
+) {
+    staged.pad_missing_results();
+    staged.commit(session, messages);
+    repair_session_before_save(session, agent_id_str, "tool_batch_aborted");
+    if !opts.is_fork && !opts.incognito {
+        if let Err(e) = memory.save_session_async(session).await {
+            warn!("Failed to save session after aborted tool batch: {e}");
+        }
+    }
+}
+
 /// Build a `StagedToolUseTurn` for an assistant response whose stop
 /// reason is `ToolUse`. Does NOT mutate `session.messages` or the LLM
 /// working copy — see `StagedToolUseTurn` docs for why.

@@ -8,12 +8,6 @@
 use super::retry::stream_with_retry;
 use super::*;
 
-/// The note left in session history when a non-timeout provider failure kills a turn.
-///
-/// Deliberately opaque, for the same reason `IMAGE_DESCRIPTION_UNAVAILABLE` is on the media path: the driver error's `Display` carries endpoint URLs, model ids and upstream response bodies, and `build_user_facing_llm_error` appends that raw string verbatim for the `Format` category — which is also where an unrecognised provider error lands by default.
-/// The raw error goes to the `warn!` at the push site and nowhere else.
-const PROVIDER_FAILURE_NOTE: &str = "[System: the model provider failed and the task could not be completed. No response was produced; the provider error is recorded in the daemon log.]";
-
 /// Run the agent execution loop with streaming support.
 ///
 /// Like `run_agent_loop`, but sends `StreamEvent`s to the provided channel
@@ -439,7 +433,9 @@ async fn run_agent_loop_streaming_inner(
         .as_ref()
         .map(|k| k.reasoning_echo_policy_for(&manifest.model.model))
         .unwrap_or_default();
-    if let Some(search_results) = web_search_augment(
+    // Declared before the augment call so its query-generation LLM call is metered with the rest of the turn.
+    let mut total_usage = TokenUsage::default();
+    let (search_results, augment_usage) = web_search_augment(
         manifest,
         user_message,
         web_ctx,
@@ -447,8 +443,9 @@ async fn run_agent_loop_streaming_inner(
         &session.messages,
         web_search_echo_policy,
     )
-    .await
-    {
+    .await;
+    accumulate_token_usage(&mut total_usage, &augment_usage);
+    if let Some(search_results) = search_results {
         let search_msg = Message::user(format!(
             "[Web search results — use these to inform your response]\n{search_results}"
         ));
@@ -456,7 +453,6 @@ async fn run_agent_loop_streaming_inner(
         injections.head.insert(0, search_msg);
     }
 
-    let mut total_usage = TokenUsage::default();
     let final_response;
     // Track the slot that actually served the most recent LLM call (#4807
     // review nit 10). See run_agent_loop for rationale.
@@ -589,9 +585,18 @@ async fn run_agent_loop_streaming_inner(
                 iteration,
                 "Streaming agent loop interrupted by session cancel signal"
             );
+            // Same accumulated state as the non-streaming interrupt: the kernel settles quota and records cost from `total_usage`.
             return Ok(AgentLoopResult {
                 silent: true,
+                total_usage,
+                iterations: iteration,
+                decision_traces,
+                memories_used,
+                experiment_context,
                 new_messages_start,
+                owner_notice: pending_owner_notice,
+                actual_provider: last_actual_provider,
+                actual_model: last_actual_model,
                 ..Default::default()
             });
         }
@@ -736,7 +741,13 @@ async fn run_agent_loop_streaming_inner(
             }
             if had_soft_compression {
                 // Persist the compressed history without the per-turn injections, which belong to this request only.
+                let current_turn = current_turn_snapshot(session, new_messages_start);
                 session.set_messages(without_turn_injections(&messages, &injections));
+                new_messages_start = current_turn_start_after_rewrite(
+                    current_turn.as_deref(),
+                    &session.messages,
+                    new_messages_start,
+                );
             }
             apply_context_guard(&mut messages, &context_budget, available_tools);
             recovery
@@ -962,34 +973,32 @@ async fn run_agent_loop_streaming_inner(
                     // This is the failure mode observed live: the circuit
                     // breaker opened after a stream error, the turn ended,
                     // and neither the chat nor the history explained it.
-                    //
-                    // `Role::Assistant`, matching the timeout note above, with the `[System: …]` text prefix carrying the "this is the daemon speaking" framing.
-                    // A `Role::System` message in the middle of history reaches no hosted model: `anthropic.rs` filters it out of the request, `gemini.rs` and `bedrock.rs` skip it, and `openai.rs` / `ollama.rs` only emit one when the request carries no system prompt — which the agent loop always sets.
-                    // Worse, it survives long enough to break alternation: `session_repair` merges *adjacent* same-role messages, so a system note interposed between two user turns blocks that merge and the driver then strips it, handing the provider the `user, user` pair the merge exists to prevent.
-                    warn!(
-                        event = "provider_failure_note",
-                        agent = %manifest.name,
-                        error = %err_str,
-                        "Provider failed on the streaming path — the session gets an opaque note, and this line is the only place the raw provider error appears"
-                    );
-                    session.push_message(Message::assistant(PROVIDER_FAILURE_NOTE));
-                    repair_session_before_save(
+                    // The note is an `Role::Assistant` message, matching the timeout note above; see `persist_provider_failure_note` for why.
+                    persist_provider_failure_note(
                         session,
+                        memory,
+                        opts,
+                        &manifest.name,
                         agent_id_str.as_str(),
+                        &err_str,
                         "streaming_provider_error",
-                    );
-                    if !opts.is_fork && !opts.incognito {
-                        if let Err(save_err) = memory.save_session_async(session).await {
-                            warn!(
-                                "Failed to persist provider-error note to session: {save_err}. \
-                                 The error will not appear on next session load."
-                            );
-                        }
-                    }
+                    )
+                    .await;
                 }
                 return Err(e);
             }
         };
+
+        // Account for the call before any early return below: the provider billed it even when the turn is then dropped as silent.
+        accumulate_token_usage(&mut total_usage, &stream_result.response.usage);
+        // Track actual-serving slot for billing attribution (#4807 review nit 10).
+        if let Some(ref p) = stream_result.response.actual_provider {
+            last_actual_provider = Some(p.clone());
+        }
+        // Track the model the call actually ran (#6134).
+        if let Some(ref m) = stream_result.response.actual_model {
+            last_actual_model = Some(m.clone());
+        }
 
         // Incremental cascade-leak guard fired mid-stream: the forward task
         // already stopped emitting TextDelta. Treat the turn as a silent
@@ -1014,7 +1023,7 @@ async fn run_agent_loop_streaming_inner(
                     .await
                     .map_err(LibreFangError::memory)?;
             }
-            return Ok(build_silent_agent_loop_result(
+            let mut result = build_silent_agent_loop_result(
                 total_usage,
                 iteration + 1,
                 Default::default(),
@@ -1022,21 +1031,13 @@ async fn run_agent_loop_streaming_inner(
                 memories_used.clone(),
                 experiment_context.clone(),
                 new_messages_start,
-            ));
+            );
+            result.actual_provider = last_actual_provider;
+            result.actual_model = last_actual_model;
+            return Ok(result);
         }
 
         let mut response = stream_result.response;
-
-        accumulate_token_usage(&mut total_usage, &response.usage);
-        // Track actual-serving slot for billing attribution (#4807
-        // review nit 10).
-        if let Some(ref p) = response.actual_provider {
-            last_actual_provider = Some(p.clone());
-        }
-        // Track the model the call actually ran (#6134).
-        if let Some(ref m) = response.actual_model {
-            last_actual_model = Some(m.clone());
-        }
 
         // Snapshot prompt tokens for the next iteration's should_compress check.
         // Some drivers (gemini_cli, codex_cli) return input_tokens = 0.  Fall
@@ -1528,8 +1529,23 @@ async fn run_agent_loop_streaming_inner(
                             group,
                             max_concurrent,
                         )
-                        .await?;
+                        .await;
                         drop(tool_exec_ctx);
+                        let group_results = match group_results {
+                            Ok(results) => results,
+                            Err(e) => {
+                                commit_aborted_tool_use_turn(
+                                    &mut staged,
+                                    session,
+                                    &mut messages,
+                                    memory,
+                                    opts,
+                                    agent_id_str.as_str(),
+                                )
+                                .await;
+                                return Err(e);
+                            }
+                        };
 
                         // Emit + stage results in original index order.
                         for (idx, executed) in &group_results {
@@ -1606,8 +1622,23 @@ async fn run_agent_loop_streaming_inner(
                     for (call_idx, tool_call) in response.tool_calls.iter().enumerate() {
                         let mut tool_exec_ctx = build_tool_exec_ctx!();
                         let executed =
-                            execute_single_tool_call(&mut tool_exec_ctx, tool_call).await?;
+                            execute_single_tool_call(&mut tool_exec_ctx, tool_call).await;
                         drop(tool_exec_ctx);
+                        let executed = match executed {
+                            Ok(executed) => executed,
+                            Err(e) => {
+                                commit_aborted_tool_use_turn(
+                                    &mut staged,
+                                    session,
+                                    &mut messages,
+                                    memory,
+                                    opts,
+                                    agent_id_str.as_str(),
+                                )
+                                .await;
+                                return Err(e);
+                            }
+                        };
 
                         let is_hard_error = process_executed_streaming!(&executed, &tool_call.name);
 

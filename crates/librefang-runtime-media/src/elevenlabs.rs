@@ -41,6 +41,9 @@ const VOICE_ID_LEN: usize = 20;
 /// still bounded.
 const VOICE_ID_ERROR_ECHO_MAX_BYTES: usize = 64;
 
+/// Upper bound on an `output_format` token; the longest documented format (`mp3_44100_192`) is well under it.
+const OUTPUT_FORMAT_MAX_LEN: usize = 32;
+
 /// Max audio response size (25 MB).
 const MAX_AUDIO_RESPONSE_BYTES: usize = 25 * 1024 * 1024;
 
@@ -58,6 +61,24 @@ fn validate_voice_id(voice_id: &str) -> Result<(), MediaError> {
         return Err(MediaError::InvalidRequest(format!(
             "Invalid ElevenLabs voice_id {echoed:?}: expected {VOICE_ID_LEN} ASCII alphanumeric characters. \
              Find valid IDs at https://elevenlabs.io/app/voice-library."
+        )));
+    }
+    Ok(())
+}
+
+/// Reject `output_format` values that are not a plain ElevenLabs format token such as `mp3_44100_128`.
+///
+/// The value is spliced into the request's query string, so anything outside `[a-z0-9_]` (`&`, `#`, `=`, whitespace) could add parameters to an authenticated request.
+fn validate_output_format(format: &str) -> Result<(), MediaError> {
+    if format.is_empty()
+        || format.len() > OUTPUT_FORMAT_MAX_LEN
+        || !format
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+    {
+        let echoed = crate::safe_truncate_str(format, VOICE_ID_ERROR_ECHO_MAX_BYTES);
+        return Err(MediaError::InvalidRequest(format!(
+            "Invalid ElevenLabs output_format {echoed:?}: expected a format such as \"mp3_44100_128\" or \"opus_48000_32\" (lowercase letters, digits and '_')."
         )));
     }
     Ok(())
@@ -111,10 +132,11 @@ impl MediaDriver for ElevenLabsMediaDriver {
         let model = request.model.as_deref().unwrap_or(DEFAULT_MODEL);
         let voice_id = request.voice.as_deref().unwrap_or(DEFAULT_VOICE_ID);
         validate_voice_id(voice_id)?;
-        let api_key = Self::api_key()?;
         // Default to Opus so WhatsApp PTT voice-notes work without transcoding;
         // callers needing MP3 pass `format: Some("mp3_44100_128")` (#6116).
         let format = request.format.as_deref().unwrap_or("opus_48000_32");
+        validate_output_format(format)?;
+        let api_key = Self::api_key()?;
 
         let mut body = serde_json::json!({
             "text": request.text,
@@ -459,6 +481,35 @@ mod tests {
                 );
             }
             other => panic!("expected MediaError::InvalidRequest, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_output_format_accepts_documented_formats() {
+        for f in ["mp3_44100_128", "opus_48000_32", "pcm_16000", "ulaw_8000"] {
+            assert!(validate_output_format(f).is_ok(), "{f}");
+        }
+    }
+
+    #[tokio::test]
+    async fn synthesize_speech_rejects_query_injection_in_format_before_network() {
+        // Validation runs before the API key lookup, so no key is needed and no request is sent.
+        let driver = ElevenLabsMediaDriver::new(Some("http://127.0.0.1:1"));
+        let req = MediaTtsRequest {
+            text: "hello".into(),
+            provider: None,
+            model: None,
+            voice: None,
+            format: Some("mp3_44100_128&enable_logging=true".into()),
+            speed: None,
+            language: None,
+            pitch: None,
+        };
+        match driver.synthesize_speech(&req).await {
+            Err(MediaError::InvalidRequest(msg)) => {
+                assert!(msg.contains("output_format"), "{msg}")
+            }
+            other => panic!("expected InvalidRequest for output_format, got {other:?}"),
         }
     }
 }
