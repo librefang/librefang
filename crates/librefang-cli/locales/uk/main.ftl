@@ -8,6 +8,10 @@ daemon-started-bg = Демон запущений у фоновому режим
 daemon-still-starting = Демон запущений у фоновому режимі та все ще запускається
 daemon-stopped-ok = Демон зупинений
 daemon-stopped-forced = Демон зупинений (примусово)
+daemon-stop-waiting = Очікування завершення роботи демона (PID { $pid })...
+daemon-stop-kill-failed = Демон (PID { $pid }) усе ще працює після примусового завершення
+daemon-stop-kill-failed-fix = Завершіть процес { $pid } вручну, а потім запустіть команду знову
+daemon-stop-timeout = Демон не зупинився протягом { $secs } с
 daemon-error = Помилка демона: { $error }
 daemon-already-running = Демон уже запущений на { $url }
 daemon-already-running-fix = Використовуйте `librefang status` для перевірки або спочатку зупиніть його
@@ -574,6 +578,7 @@ acp-error-resolve-agent = Не вдалося розпізнати агента 
 acp-error-server = Помилка сервера ACP: { $error }
 acp-error-uds-connect = Помилка підключення ACP UDS за шляхом { $path }: { $error }
 acp-error-pipe-connect = Помилка підключення до іменованого каналу ACP { $name }: { $error }
+acp-error-agent-attached = ACP-слухач запущеного демона обслуговує лише агента '{ $default }', тож '--agent { $name }' не можна застосувати, поки він працює; приберіть --agent або зупиніть демон, щоб запустити '{ $name }' у процесі
 
 
 # auth.rs

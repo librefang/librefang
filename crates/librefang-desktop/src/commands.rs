@@ -3,6 +3,7 @@
 use crate::{KernelState, PortState};
 use librefang_kernel::config::librefang_home;
 use librefang_kernel::AgentSubsystemApi;
+use librefang_kernel::SkillsSubsystemApi;
 use tauri_plugin_dialog::DialogExt;
 use tracing::info;
 
@@ -58,7 +59,9 @@ pub fn get_agent_count(kernel_state: tauri::State<'_, KernelState>) -> Result<us
 ///
 /// Validates the TOML as a valid `AgentManifest`, spawns the agent, then copies it to `~/.librefang/workspaces/agents/{name}/agent.toml`.
 /// Nothing is written to disk unless a local kernel is running and the spawn succeeds, so a failed import never leaves an orphan manifest that the next boot would pick up.
-#[tauri::command]
+///
+/// `async` moves it off the main thread: a synchronous command runs on the event-loop thread, where `blocking_pick_file` waits on a dialog that needs that same loop to make progress, and the app deadlocks.
+#[tauri::command(async)]
 pub fn import_agent_toml(
     app: tauri::AppHandle,
     kernel_state: tauri::State<'_, KernelState>,
@@ -130,11 +133,13 @@ fn validate_import_agent_name(name: &str) -> Result<(), String> {
         .map_err(|e| format!("Invalid agent manifest: {e}"))
 }
 
-/// Open a native file picker to import a skill file.
+/// Open a native file picker to import a skill manifest.
 ///
-/// Copies the selected file to `~/.librefang/skills/` and triggers a
-/// hot-reload of the skill registry.
-#[tauri::command]
+/// The registry only loads skill directories (`skills/<name>/skill.toml` or `skills/<name>/SKILL.md`), so the picked file is installed as the manifest of a new `skills/<name>/` directory, never as a loose file next to them.
+/// The skill registry is then hot-reloaded, and the import fails (and is rolled back) unless the new skill actually loaded.
+///
+/// `async` for the same reason as [`import_agent_toml`]: `blocking_pick_file` deadlocks on the main thread.
+#[tauri::command(async)]
 pub fn import_skill_file(
     app: tauri::AppHandle,
     kernel_state: tauri::State<'_, KernelState>,
@@ -142,37 +147,102 @@ pub fn import_skill_file(
     let path = app
         .dialog()
         .file()
-        .set_title("Import Skill File")
-        .add_filter("Skill files", &["md", "toml", "py", "js", "wasm"])
+        .set_title("Import Skill")
+        .add_filter("Skill manifests", &["md", "toml"])
         .blocking_pick_file();
 
     let file_path = match path {
         Some(p) => p,
         None => return Err("No file selected".to_string()),
     };
-
     let src = file_path.as_path().ok_or("Invalid file path")?;
-    let file_name = src
-        .file_name()
-        .ok_or("No filename")?
-        .to_string_lossy()
-        .to_string();
-
-    let skills_dir = librefang_home().join("skills");
-    std::fs::create_dir_all(&skills_dir)
-        .map_err(|e| format!("Failed to create skills directory: {e}"))?;
-
-    let dest = skills_dir.join(&file_name);
-    std::fs::copy(src, &dest).map_err(|e| format!("Failed to copy skill file: {e}"))?;
 
     let guard = kernel_state.0.read().unwrap_or_else(|p| p.into_inner());
     let inner = guard
         .as_ref()
         .ok_or_else(|| "No local server running".to_string())?;
-    inner.kernel.reload_skills();
+    // The kernel reloads from its own home, which can differ from the default `librefang_home()`.
+    let skills_dir = inner.kernel.home_dir().join("skills");
+    let count_before = inner
+        .kernel
+        .skill_registry_ref()
+        .read()
+        .unwrap_or_else(|p| p.into_inner())
+        .count();
 
-    info!("Imported skill file \"{file_name}\" and reloaded registry");
-    Ok(file_name)
+    let (skill_name, skill_dir) = stage_skill_import(&skills_dir, src)?;
+    let outcome = inner.kernel.reload_skills();
+    drop(guard);
+
+    if outcome.frozen {
+        return Err(format!(
+            "Skill \"{skill_name}\" was installed, but the skill registry is frozen (Stable mode); restart LibreFang to load it"
+        ));
+    }
+    if outcome.count <= count_before {
+        let _ = std::fs::remove_dir_all(&skill_dir);
+        return Err(format!(
+            "Skill \"{skill_name}\" did not load: the manifest is invalid or was blocked by the security scan (see the logs)"
+        ));
+    }
+
+    info!("Imported skill \"{skill_name}\" and reloaded registry");
+    Ok(skill_name)
+}
+
+/// Install `src` as the manifest of a new skill directory under `skills_dir`, returning the directory's name and path.
+///
+/// A `.md` file becomes `SKILL.md` and a `.toml` file `skill.toml`; anything else is refused, since a lone script or module is not a loadable skill.
+/// The directory is named after the file stem, or after the file's parent directory when the file is itself called `SKILL.md` / `skill.toml`.
+/// An existing directory is never overwritten.
+fn stage_skill_import(
+    skills_dir: &std::path::Path,
+    src: &std::path::Path,
+) -> Result<(String, std::path::PathBuf), String> {
+    let ext = src
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(str::to_ascii_lowercase);
+    let manifest_name = match ext.as_deref() {
+        Some("md") => "SKILL.md",
+        Some("toml") => "skill.toml",
+        _ => {
+            return Err("A skill is imported from its SKILL.md or skill.toml manifest".to_string())
+        }
+    };
+    let stem = src
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .ok_or("Invalid file name")?;
+    let name = if stem.eq_ignore_ascii_case("skill") {
+        src.parent()
+            .and_then(|p| p.file_name())
+            .and_then(|n| n.to_str())
+            .ok_or("Cannot name the skill: rename the file after the skill")?
+    } else {
+        stem
+    };
+    if name.is_empty()
+        || !name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return Err(format!(
+            "Skill name {name:?} may only contain ASCII letters, digits, '-' and '_'; rename the file"
+        ));
+    }
+
+    let skill_dir = skills_dir.join(name);
+    if skill_dir.exists() {
+        return Err(format!("A skill named \"{name}\" is already installed"));
+    }
+    std::fs::create_dir_all(&skill_dir)
+        .map_err(|e| format!("Failed to create skill directory: {e}"))?;
+    if let Err(e) = std::fs::copy(src, skill_dir.join(manifest_name)) {
+        let _ = std::fs::remove_dir_all(&skill_dir);
+        return Err(format!("Failed to copy skill manifest: {e}"));
+    }
+    Ok((name.to_string(), skill_dir))
 }
 
 /// Check whether auto-start on login is enabled.
@@ -460,9 +530,76 @@ pub async fn uninstall_app(app: tauri::AppHandle) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        parse_registry_uninstall_string, uninstall_process_from_argv, validate_import_agent_name,
+        parse_registry_uninstall_string, stage_skill_import, uninstall_process_from_argv,
+        validate_import_agent_name,
     };
     use std::ffi::OsString;
+
+    fn scratch_dir(tag: &str) -> std::path::PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or_default();
+        let dir =
+            std::env::temp_dir().join(format!("lf-desktop-{tag}-{}-{nanos}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("create scratch dir");
+        dir
+    }
+
+    /// The registry skips loose files in `skills/`; the old import copied the picked file there and reported success for a skill that never loaded.
+    #[test]
+    fn skill_import_installs_manifest_into_its_own_directory() {
+        let root = scratch_dir("skill-import");
+        let skills = root.join("skills");
+        let src = root.join("my-skill.md");
+        std::fs::write(&src, "---\nname: my-skill\n---\nbody").unwrap();
+
+        let (name, dir) = stage_skill_import(&skills, &src).expect("import");
+        assert_eq!(name, "my-skill");
+        assert_eq!(dir, skills.join("my-skill"));
+        assert!(dir.join("SKILL.md").is_file());
+        assert!(
+            !skills.join("my-skill.md").exists(),
+            "no loose file at the skills root"
+        );
+
+        // Re-importing never overwrites the installed skill.
+        assert!(stage_skill_import(&skills, &src).is_err());
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn skill_import_names_a_skill_md_after_its_parent_and_maps_toml() {
+        let root = scratch_dir("skill-import-parent");
+        let skills = root.join("skills");
+        let pkg = root.join("web_search");
+        std::fs::create_dir_all(&pkg).unwrap();
+        std::fs::write(pkg.join("SKILL.md"), "x").unwrap();
+        let (name, dir) = stage_skill_import(&skills, &pkg.join("SKILL.md")).expect("import");
+        assert_eq!(name, "web_search");
+        assert!(dir.join("SKILL.md").is_file());
+
+        let toml = root.join("calc.toml");
+        std::fs::write(&toml, "x").unwrap();
+        let (_, dir) = stage_skill_import(&skills, &toml).expect("import");
+        assert!(dir.join("skill.toml").is_file());
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn skill_import_rejects_non_manifests_and_unsafe_names() {
+        let root = scratch_dir("skill-import-reject");
+        let skills = root.join("skills");
+        for bad in ["tool.py", "mod.wasm", "bad name.md"] {
+            let p = root.join(bad);
+            std::fs::write(&p, "x").unwrap();
+            assert!(stage_skill_import(&skills, &p).is_err(), "{bad}");
+        }
+        assert!(!skills.exists() || std::fs::read_dir(&skills).unwrap().next().is_none());
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     #[test]
     fn import_agent_name_accepts_safe_names() {

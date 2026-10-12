@@ -8,6 +8,10 @@ daemon-started-bg = Daemon started in background
 daemon-still-starting = Daemon launched in background and is still starting
 daemon-stopped-ok = Daemon stopped
 daemon-stopped-forced = Daemon stopped (forced)
+daemon-stop-waiting = Waiting for the daemon (PID { $pid }) to finish shutting down...
+daemon-stop-kill-failed = Daemon (PID { $pid }) is still running after a forced kill
+daemon-stop-kill-failed-fix = Stop process { $pid } manually, then run the command again
+daemon-stop-timeout = The daemon did not stop within { $secs }s
 daemon-error = Daemon error: { $error }
 daemon-already-running = Daemon already running at { $url }
 daemon-already-running-fix = Use `librefang status` to check it, or stop it first
@@ -561,6 +565,7 @@ acp-error-resolve-agent = Failed to resolve agent '{ $name }': { $error }
 acp-error-server = ACP server error: { $error }
 acp-error-uds-connect = ACP UDS connect failed at { $path }: { $error }
 acp-error-pipe-connect = ACP named-pipe connect failed at { $name }: { $error }
+acp-error-agent-attached = The running daemon's ACP listener serves only the '{ $default }' agent, so '--agent { $name }' cannot be honoured while it runs; omit --agent, or stop the daemon to run '{ $name }' in-process
 
 
 # auth.rs

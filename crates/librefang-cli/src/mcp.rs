@@ -3,7 +3,8 @@
 //! Exposes running agents as MCP tools over JSON-RPC 2.0 stdio.
 //! Each agent becomes a callable tool named `librefang_agent_{name}`.
 //!
-//! Protocol: Content-Length framing over stdin/stdout.
+//! Protocol: newline-delimited JSON over stdin/stdout, as the MCP stdio transport specifies.
+//! A peer that frames with LSP-style `Content-Length` headers is still accepted, and is answered in the same framing.
 //! Connects to running daemon via HTTP, falls back to in-process kernel.
 
 use librefang_kernel::AgentSubsystemApi;
@@ -128,20 +129,21 @@ pub fn run_mcp_server(config: Option<std::path::PathBuf>) {
     let stdout = io::stdout();
     let mut reader = stdin.lock();
     let mut writer = stdout.lock();
+    let mut framing = Framing::default();
 
     loop {
-        match read_message(&mut reader) {
+        match read_message(&mut reader, &mut framing) {
             Ok(Frame::Message(msg)) => {
                 let response = handle_message(&backend, &msg);
                 if let Some(resp) = response {
-                    write_message(&mut writer, &resp);
+                    write_message(&mut writer, &resp, framing);
                 }
             }
             Ok(Frame::ProtocolError(id)) => {
                 // A single malformed or oversized frame must not kill the
                 // session: reply with a JSON-RPC parse error and keep reading.
                 let resp = jsonrpc_error(id, -32700, "Parse error");
-                write_message(&mut writer, &resp);
+                write_message(&mut writer, &resp, framing);
             }
             Ok(Frame::Eof) => break,
             // Genuine I/O failure on the underlying stream — nothing left to do.
@@ -150,7 +152,20 @@ pub fn run_mcp_server(config: Option<std::path::PathBuf>) {
     }
 }
 
-/// Outcome of reading one Content-Length framed message.
+/// How the peer frames its messages; replies use the same framing.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum Framing {
+    /// One JSON value per line, terminated by `\n` (the MCP stdio transport).
+    #[default]
+    Newline,
+    /// LSP-style `Content-Length:` headers followed by a blank line and the body.
+    ContentLength,
+}
+
+/// SECURITY: messages larger than this are drained and rejected to prevent OOM.
+const MAX_MCP_MESSAGE_SIZE: usize = 10 * 1024 * 1024; // 10MB
+
+/// Outcome of reading one framed message.
 enum Frame {
     /// Stream closed cleanly (true EOF / connection closed).
     Eof,
@@ -213,7 +228,41 @@ fn create_backend(config: Option<std::path::PathBuf>) -> McpBackend {
     McpBackend::InProcess { kernel, rt }
 }
 
-/// Read a Content-Length framed JSON-RPC message from the reader.
+/// Read one line of at most `MAX_MCP_MESSAGE_SIZE` bytes into `line`.
+///
+/// Returns `Ok(None)` on EOF, `Ok(Some(true))` for a complete line, and `Ok(Some(false))` for a line that exceeded the cap; the rest of such a line is drained up to and including its `\n` so the stream stays aligned on the next message.
+fn read_bounded_line(reader: &mut impl BufRead, line: &mut String) -> io::Result<Option<bool>> {
+    line.clear();
+    let mut buf = Vec::new();
+    let n = io::Read::take(&mut *reader, MAX_MCP_MESSAGE_SIZE as u64 + 1)
+        .read_until(b'\n', &mut buf)?;
+    if n == 0 {
+        return Ok(None);
+    }
+    if buf.len() > MAX_MCP_MESSAGE_SIZE && buf.last() != Some(&b'\n') {
+        loop {
+            let available = reader.fill_buf()?;
+            if available.is_empty() {
+                break;
+            }
+            match available.iter().position(|&b| b == b'\n') {
+                Some(pos) => {
+                    reader.consume(pos + 1);
+                    break;
+                }
+                None => {
+                    let len = available.len();
+                    reader.consume(len);
+                }
+            }
+        }
+        return Ok(Some(false));
+    }
+    line.push_str(&String::from_utf8_lossy(&buf));
+    Ok(Some(true))
+}
+
+/// Read one JSON-RPC message, accepting both newline-delimited JSON and `Content-Length` framing, and record in `framing` which one the peer used.
 ///
 /// Distinguishes true end-of-stream (`Frame::Eof`) from recoverable
 /// protocol errors (`Frame::ProtocolError`): a malformed or oversized body
@@ -221,7 +270,7 @@ fn create_backend(config: Option<std::path::PathBuf>) -> McpBackend {
 /// loop can reply with a JSON-RPC error and keep the session alive, rather
 /// than collapsing the connection. `Err` is reserved for genuine I/O
 /// failures on the underlying stream.
-fn read_message(reader: &mut impl BufRead) -> io::Result<Frame> {
+fn read_message(reader: &mut impl BufRead, framing: &mut Framing) -> io::Result<Frame> {
     // Read headers until empty line.
     //
     // `saw_header` distinguishes a genuine end-of-stream (the very first
@@ -235,16 +284,33 @@ fn read_message(reader: &mut impl BufRead) -> io::Result<Frame> {
     let mut saw_header = false;
     let mut malformed = false;
     let mut content_length: Option<usize> = None;
+    let mut header = String::new();
     loop {
-        let mut header = String::new();
-        let bytes_read = reader.read_line(&mut header)?;
-        if bytes_read == 0 {
-            return Ok(Frame::Eof); // True EOF — stream closed.
+        let complete = match read_bounded_line(reader, &mut header)? {
+            None => return Ok(Frame::Eof), // True EOF — stream closed.
+            Some(complete) => complete,
+        };
+        if !complete {
+            // An over-long line can only be a newline-delimited message; it has been drained.
+            return Ok(Frame::ProtocolError(Value::Null));
         }
 
         let trimmed = header.trim();
         if trimmed.is_empty() {
-            break; // End of headers
+            if saw_header {
+                break; // End of headers
+            }
+            // A blank line between newline-delimited messages carries nothing.
+            continue;
+        }
+
+        if !saw_header && (trimmed.starts_with('{') || trimmed.starts_with('[')) {
+            // A newline-delimited message: the whole line is the JSON-RPC body.
+            *framing = Framing::Newline;
+            return Ok(match serde_json::from_str(trimmed) {
+                Ok(v) => Frame::Message(v),
+                Err(_) => Frame::ProtocolError(Value::Null),
+            });
         }
 
         saw_header = true;
@@ -263,26 +329,18 @@ fn read_message(reader: &mut impl BufRead) -> io::Result<Frame> {
         }
     }
 
+    *framing = Framing::ContentLength;
+
     if malformed {
         return Ok(Frame::ProtocolError(Value::Null));
     }
 
-    // After the headers terminate: a missing or zero-length Content-Length is
-    // only a clean EOF / empty keepalive when no header line was read at all.
-    // If headers were present but none gave a valid positive length, the frame
-    // is malformed and recoverable, not end-of-stream.
+    // Headers were present but none gave a valid positive length: the frame is malformed and recoverable, not end-of-stream.
     let content_length = match content_length {
         Some(n) if n > 0 => n,
-        _ => {
-            if saw_header {
-                return Ok(Frame::ProtocolError(Value::Null));
-            }
-            return Ok(Frame::Eof);
-        }
+        _ => return Ok(Frame::ProtocolError(Value::Null)),
     };
 
-    // SECURITY: Reject oversized messages to prevent OOM.
-    const MAX_MCP_MESSAGE_SIZE: usize = 10 * 1024 * 1024; // 10MB
     if content_length > MAX_MCP_MESSAGE_SIZE {
         // Drain the oversized body to avoid stream desync, then surface a
         // recoverable protocol error so the session continues. The id is
@@ -312,10 +370,18 @@ fn read_message(reader: &mut impl BufRead) -> io::Result<Frame> {
     }
 }
 
-/// Write a Content-Length framed JSON-RPC response to the writer.
-fn write_message(writer: &mut impl Write, msg: &Value) {
+/// Encode one JSON-RPC message in the given framing.
+fn encode_message(msg: &Value, framing: Framing) -> String {
     let body = serde_json::to_string(msg).unwrap_or_default();
-    if let Err(e) = write!(writer, "Content-Length: {}\r\n\r\n{}", body.len(), body) {
+    match framing {
+        Framing::Newline => format!("{body}\n"),
+        Framing::ContentLength => format!("Content-Length: {}\r\n\r\n{}", body.len(), body),
+    }
+}
+
+/// Write a JSON-RPC message to the writer in the peer's framing.
+fn write_message(writer: &mut impl Write, msg: &Value, framing: Framing) {
+    if let Err(e) = writer.write_all(encode_message(msg, framing).as_bytes()) {
         tracing::error!("MCP write error: {e}");
         return;
     }
@@ -327,11 +393,10 @@ fn write_message(writer: &mut impl Write, msg: &Value) {
 /// Handle a JSON-RPC message and return an optional response.
 fn handle_message(backend: &McpBackend, msg: &Value) -> Option<Value> {
     let method = msg["method"].as_str().unwrap_or("");
-    let id = msg.get("id").cloned();
 
-    // Per JSON-RPC 2.0 spec: requests MUST have an id field.
-    // Use null if missing so we always send a response.
-    let rid = id.unwrap_or(Value::Null);
+    // A message without an `id` is a notification (`notifications/initialized`, `notifications/cancelled`, ...).
+    // JSON-RPC 2.0 forbids replying to one, even with an error for an unknown method.
+    let rid = msg.get("id").cloned()?;
 
     match method {
         "initialize" => {
@@ -348,7 +413,7 @@ fn handle_message(backend: &McpBackend, msg: &Value) -> Option<Value> {
             Some(jsonrpc_response(rid, result))
         }
 
-        "notifications/initialized" => None, // Notification, no response
+        "ping" => Some(jsonrpc_response(rid, json!({}))),
 
         "tools/list" => {
             let agents = backend.list_agents();
@@ -587,7 +652,7 @@ mod tests {
         let body = r#"{"jsonrpc":"2.0","id":1,"method":"initialize"}"#;
         let input = format!("Content-Length: {}\r\n\r\n{}", body.len(), body);
         let mut reader = io::BufReader::new(input.as_bytes());
-        match read_message(&mut reader).unwrap() {
+        match read_message(&mut reader, &mut Framing::default()).unwrap() {
             Frame::Message(msg) => {
                 assert_eq!(msg["method"], "initialize");
                 assert_eq!(msg["id"], 1);
@@ -600,7 +665,10 @@ mod tests {
     fn test_read_message_true_eof() {
         // Empty stream — read_line returns 0 bytes immediately.
         let mut reader = io::BufReader::new(&b""[..]);
-        assert!(matches!(read_message(&mut reader).unwrap(), Frame::Eof));
+        assert!(matches!(
+            read_message(&mut reader, &mut Framing::default()).unwrap(),
+            Frame::Eof
+        ));
     }
 
     #[test]
@@ -611,7 +679,7 @@ mod tests {
         let body = "this is not json";
         let input = format!("Content-Length: {}\r\n\r\n{}", body.len(), body);
         let mut reader = io::BufReader::new(input.as_bytes());
-        match read_message(&mut reader).unwrap() {
+        match read_message(&mut reader, &mut Framing::default()).unwrap() {
             Frame::ProtocolError(id) => assert_eq!(id, Value::Null),
             Frame::Eof => panic!("malformed body must not be reported as EOF"),
             Frame::Message(_) => panic!("malformed body must not parse as a message"),
@@ -634,14 +702,14 @@ mod tests {
         );
         let mut reader = io::BufReader::new(input.as_bytes());
 
-        match read_message(&mut reader).unwrap() {
+        match read_message(&mut reader, &mut Framing::default()).unwrap() {
             Frame::ProtocolError(id) => assert_eq!(id, Value::Null),
             Frame::Eof => panic!("malformed Content-Length must not be reported as EOF"),
             Frame::Message(_) => panic!("malformed Content-Length must not parse as a message"),
         }
 
         // Subsequent valid frame still parses — stream stayed in sync.
-        match read_message(&mut reader).unwrap() {
+        match read_message(&mut reader, &mut Framing::default()).unwrap() {
             Frame::Message(msg) => {
                 assert_eq!(msg["method"], "initialize");
                 assert_eq!(msg["id"], 3);
@@ -657,7 +725,7 @@ mod tests {
         // it must be a recoverable ProtocolError rather than Frame::Eof.
         let input = "X-Custom: value\r\n\r\n";
         let mut reader = io::BufReader::new(input.as_bytes());
-        match read_message(&mut reader).unwrap() {
+        match read_message(&mut reader, &mut Framing::default()).unwrap() {
             Frame::ProtocolError(id) => assert_eq!(id, Value::Null),
             Frame::Eof => panic!("a frame with headers but no Content-Length must not be EOF"),
             Frame::Message(_) => panic!("no body to parse as a message"),
@@ -684,13 +752,13 @@ mod tests {
 
         // First frame: malformed -> recoverable protocol error.
         assert!(matches!(
-            read_message(&mut reader).unwrap(),
+            read_message(&mut reader, &mut Framing::default()).unwrap(),
             Frame::ProtocolError(_)
         ));
 
         // Second frame: the valid request still parses, proving the stream
         // was not desynced and the loop would have continued.
-        match read_message(&mut reader).unwrap() {
+        match read_message(&mut reader, &mut Framing::default()).unwrap() {
             Frame::Message(msg) => {
                 assert_eq!(msg["method"], "initialize");
                 assert_eq!(msg["id"], 7);
@@ -699,7 +767,108 @@ mod tests {
         }
 
         // And then a clean EOF.
-        assert!(matches!(read_message(&mut reader).unwrap(), Frame::Eof));
+        assert!(matches!(
+            read_message(&mut reader, &mut Framing::default()).unwrap(),
+            Frame::Eof
+        ));
+    }
+
+    fn test_backend() -> McpBackend {
+        McpBackend::Daemon {
+            base_url: "http://localhost:9999".to_string(),
+            client: crate::http_client::new_client(),
+        }
+    }
+
+    /// The MCP stdio transport is one JSON value per line; the old reader took the line as a header and blocked forever waiting for a blank line.
+    #[test]
+    fn newline_delimited_messages_are_read_and_answered_in_kind() {
+        let input = "{\"jsonrpc\":\"2.0\",\"id\":0,\"method\":\"initialize\",\"params\":{}}\n\n{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\"}\n";
+        let mut reader = io::BufReader::new(input.as_bytes());
+        let mut framing = Framing::ContentLength;
+        match read_message(&mut reader, &mut framing).unwrap() {
+            Frame::Message(msg) => assert_eq!(msg["method"], "initialize"),
+            _ => panic!("expected a newline-delimited message"),
+        }
+        assert_eq!(framing, Framing::Newline);
+        // The blank line between messages is skipped rather than ending the session.
+        match read_message(&mut reader, &mut framing).unwrap() {
+            Frame::Message(msg) => assert_eq!(msg["id"], 1),
+            _ => panic!("expected the second message"),
+        }
+        assert!(matches!(
+            read_message(&mut reader, &mut framing).unwrap(),
+            Frame::Eof
+        ));
+
+        let encoded = encode_message(
+            &json!({"jsonrpc": "2.0", "id": 1, "result": {}}),
+            Framing::Newline,
+        );
+        assert!(
+            encoded.ends_with('\n') && !encoded.contains("Content-Length"),
+            "{encoded}"
+        );
+        assert_eq!(encoded.matches('\n').count(), 1);
+    }
+
+    #[test]
+    fn content_length_peer_is_answered_with_content_length() {
+        let body = r#"{"jsonrpc":"2.0","id":1,"method":"initialize"}"#;
+        let input = format!("Content-Length: {}\r\n\r\n{}", body.len(), body);
+        let mut reader = io::BufReader::new(input.as_bytes());
+        let mut framing = Framing::Newline;
+        assert!(matches!(
+            read_message(&mut reader, &mut framing).unwrap(),
+            Frame::Message(_)
+        ));
+        assert_eq!(framing, Framing::ContentLength);
+        assert!(encode_message(&json!({}), framing).starts_with("Content-Length: 2\r\n\r\n"));
+    }
+
+    #[test]
+    fn invalid_newline_message_is_protocol_error_and_session_continues() {
+        let input = "{not json\n{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"ping\"}\n";
+        let mut reader = io::BufReader::new(input.as_bytes());
+        let mut framing = Framing::default();
+        assert!(matches!(
+            read_message(&mut reader, &mut framing).unwrap(),
+            Frame::ProtocolError(_)
+        ));
+        match read_message(&mut reader, &mut framing).unwrap() {
+            Frame::Message(msg) => assert_eq!(msg["id"], 4),
+            _ => panic!("expected the following message to parse"),
+        }
+    }
+
+    #[test]
+    fn oversized_newline_message_is_drained() {
+        let mut input = Vec::new();
+        input.push(b'{');
+        input.extend(std::iter::repeat_n(b'x', MAX_MCP_MESSAGE_SIZE + 10));
+        input.extend_from_slice(b"\n{\"jsonrpc\":\"2.0\",\"id\":8,\"method\":\"ping\"}\n");
+        let mut reader = io::BufReader::new(&input[..]);
+        let mut framing = Framing::default();
+        assert!(matches!(
+            read_message(&mut reader, &mut framing).unwrap(),
+            Frame::ProtocolError(_)
+        ));
+        match read_message(&mut reader, &mut framing).unwrap() {
+            Frame::Message(msg) => assert_eq!(msg["id"], 8),
+            _ => panic!("expected the post-oversize message to parse"),
+        }
+    }
+
+    /// JSON-RPC forbids replying to a notification, including an unknown one such as `notifications/cancelled`.
+    #[test]
+    fn notifications_get_no_reply_and_ping_gets_empty_result() {
+        let backend = test_backend();
+        let cancelled = json!({"jsonrpc": "2.0", "method": "notifications/cancelled", "params": {"requestId": 3}});
+        assert!(handle_message(&backend, &cancelled).is_none());
+        let ping = json!({"jsonrpc": "2.0", "id": "p1", "method": "ping"});
+        let resp = handle_message(&backend, &ping).expect("ping is a request");
+        assert_eq!(resp["id"], "p1");
+        assert_eq!(resp["result"], json!({}));
     }
 
     #[test]
@@ -721,12 +890,12 @@ mod tests {
 
         // Oversized frame -> recoverable protocol error, body fully drained.
         assert!(matches!(
-            read_message(&mut reader).unwrap(),
+            read_message(&mut reader, &mut Framing::default()).unwrap(),
             Frame::ProtocolError(_)
         ));
 
         // Stream stayed in sync: the following valid request parses.
-        match read_message(&mut reader).unwrap() {
+        match read_message(&mut reader, &mut Framing::default()).unwrap() {
             Frame::Message(msg) => assert_eq!(msg["id"], 9),
             _ => panic!("expected the post-oversize valid request to parse"),
         }

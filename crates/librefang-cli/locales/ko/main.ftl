@@ -8,6 +8,10 @@ daemon-started-bg = 데몬이 백그라운드에서 시작됨
 daemon-still-starting = 데몬이 백그라운드에서 실행되었으며 아직 시작하는 중
 daemon-stopped-ok = 데몬이 중지됨
 daemon-stopped-forced = 데몬이 중지됨 (강제)
+daemon-stop-waiting = 데몬(PID { $pid })이 종료를 마칠 때까지 기다리는 중...
+daemon-stop-kill-failed = 강제 종료 후에도 데몬(PID { $pid })이 실행 중입니다
+daemon-stop-kill-failed-fix = 프로세스 { $pid }를 수동으로 종료한 뒤 명령을 다시 실행하세요
+daemon-stop-timeout = 데몬이 { $secs }초 안에 중지되지 않았습니다
 daemon-error = 데몬 오류: { $error }
 daemon-already-running = 데몬이 { $url }에서 이미 실행 중
 daemon-already-running-fix = `librefang status`로 확인하거나 먼저 중지하십시오
@@ -561,6 +565,7 @@ acp-error-resolve-agent = 에이전트 '{ $name }' 확인에 실패했습니다:
 acp-error-server = ACP 서버 오류: { $error }
 acp-error-uds-connect = { $path }에서 ACP UDS 연결에 실패했습니다: { $error }
 acp-error-pipe-connect = { $name }에서 ACP named-pipe 연결에 실패했습니다: { $error }
+acp-error-agent-attached = 실행 중인 데몬의 ACP 리스너는 '{ $default }' 에이전트만 제공하므로 데몬이 실행되는 동안 '--agent { $name }'을(를) 적용할 수 없습니다. --agent를 생략하거나 데몬을 중지하고 '{ $name }'을(를) 프로세스 내에서 실행하세요
 
 
 # auth.rs

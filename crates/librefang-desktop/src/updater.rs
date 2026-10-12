@@ -90,6 +90,8 @@ pub async fn download_and_install_update(app_handle: &tauri::AppHandle) -> Resul
         .map_err(|e| e.to_string())?;
 
     info!("Update installed, restarting...");
+    // `restart` replaces the process without going through the event loop's `RunEvent::Exit`, so shut the embedded kernel down first.
+    crate::shutdown_embedded_server(app_handle);
     app_handle.restart()
 }
 
