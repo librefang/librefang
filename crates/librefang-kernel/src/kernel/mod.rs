@@ -111,6 +111,8 @@ mod assistant_routing;
 mod background_lifecycle;
 mod bindings_and_handle;
 mod boot;
+// Shared with `config_reload::validate_config_for_reload`, so a config the API accepts is one boot will still start on.
+pub(crate) use boot::validate_state_secret_value;
 mod config_reload_ops;
 mod cron_bridge;
 // Cron session compaction helpers (#4683 / #3693). Cherry-picked into

@@ -157,6 +157,9 @@ impl LibreFangKernel {
             return;
         };
         let toml_path = self.agent_manifest_path(&entry, agent_id);
+        if Self::is_hand_manifest_target(&entry, &toml_path) {
+            return;
+        }
         let write_lock = self.manifest_write_lock(&toml_path);
         let _write_guard = write_lock.lock().unwrap_or_else(|error| error.into_inner());
         let Some(current_entry) = self.agents.registry.get(agent_id) else {
@@ -165,11 +168,35 @@ impl LibreFangKernel {
         self.persist_full_manifest_at(&current_entry, &toml_path);
     }
 
+    /// Whether `toml_path` is a hand's shared `hand.toml` that a per-agent manifest write must not touch.
+    ///
+    /// Every role of a hand is spawned with `source_toml_path` pointing at the one `hand.toml` they share, which holds a `HandDefinition`, not an `AgentManifest`.
+    /// Writing one role's flat manifest there clobbers the hand definition for every role: a later `reload_agent_from_disk` on another role falls back to the flat parse and hands that role the first role's prompt, tools and capabilities.
+    /// A hand agent's durable state is the hand definition plus the runtime overrides in `hand_state.json`, and the boot restore loop skips `is_hand` rows, so skipping the write loses nothing that would have been read back.
+    fn is_hand_manifest_target(
+        entry: &librefang_types::agent::AgentEntry,
+        toml_path: &std::path::Path,
+    ) -> bool {
+        let is_hand_file = toml_path.file_name().and_then(|n| n.to_str()) == Some("hand.toml");
+        if entry.is_hand || is_hand_file {
+            debug!(
+                agent = %entry.name,
+                path = %toml_path.display(),
+                "Not persisting a hand agent's manifest over the shared hand.toml"
+            );
+            return true;
+        }
+        false
+    }
+
     fn persist_mcp_servers_to_disk(&self, agent_id: AgentId) {
         let Some(entry) = self.agents.registry.get(agent_id) else {
             return;
         };
         let toml_path = self.agent_manifest_path(&entry, agent_id);
+        if Self::is_hand_manifest_target(&entry, &toml_path) {
+            return;
+        }
         let write_lock = self.manifest_write_lock(&toml_path);
         let _write_guard = write_lock.lock().unwrap_or_else(|error| error.into_inner());
         let Some(current_entry) = self.agents.registry.get(agent_id) else {
@@ -579,6 +606,33 @@ impl LibreFangKernel {
         if let Some(workspace) = workspace.as_deref() {
             if reconcile_identity_name(workspace, &old_name, &new_name) {
                 self.prompt_metadata_cache.workspace.remove(workspace);
+            }
+        }
+        // Channel bindings store the agent's name, so they must follow the rename or `/agent` chats fall back to other routing, or later reach an unrelated agent created under the old name.
+        // The registry already holds the new name, so a failure here is logged rather than unwinding the rename.
+        if old_name != new_name {
+            match self
+                .memory
+                .substrate
+                .channel_bindings()
+                .rename_agent(&old_name, &new_name)
+            {
+                Ok((conversations, defaults)) if conversations + defaults > 0 => info!(
+                    agent_id = %agent_id,
+                    old_name = %old_name,
+                    new_name = %new_name,
+                    conversations,
+                    defaults,
+                    "Moved channel bindings to the agent's new name"
+                ),
+                Ok(_) => {}
+                Err(e) => warn!(
+                    agent_id = %agent_id,
+                    old_name = %old_name,
+                    new_name = %new_name,
+                    error = %e,
+                    "Failed to move channel bindings to the agent's new name"
+                ),
             }
         }
         Ok(())

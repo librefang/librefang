@@ -1371,15 +1371,22 @@ impl LibreFangKernel {
         let mut skill_registry = librefang_skills::registry::SkillRegistry::new(skills_dir);
         skill_registry.set_disabled_skills(config.skills.disabled.clone());
 
-        match skill_registry.load_all() {
-            Ok(count) => {
-                if count > 0 {
-                    info!("Loaded {count} user skill(s) from skill registry");
+        // `[skills] load_user = false` limits the registry to the curated `extra_dirs` overlay; `reload_skills_with` applies the same gate.
+        if config.skills.load_user {
+            match skill_registry.load_all() {
+                Ok(count) => {
+                    if count > 0 {
+                        info!("Loaded {count} user skill(s) from skill registry");
+                    }
+                }
+                Err(e) => {
+                    warn!("Failed to load skill registry: {e}");
                 }
             }
-            Err(e) => {
-                warn!("Failed to load skill registry: {e}");
-            }
+        } else {
+            info!(
+                "[skills] load_user = false — not loading skills from the primary skills directory"
+            );
         }
         if !config.skills.extra_dirs.is_empty() {
             match skill_registry.load_external_dirs(&config.skills.extra_dirs) {
@@ -3337,7 +3344,7 @@ fn resolve_api_key_override(raw: Option<&str>) -> ApiKeyOverride {
 /// `state_secret_validation` tests without the global-env-mutation
 /// race that would otherwise force the suite serial.
 /// (audit: state-secret-default-random)
-fn validate_state_secret_value(raw: Option<&str>) -> Result<(), String> {
+pub(crate) fn validate_state_secret_value(raw: Option<&str>) -> Result<(), String> {
     use base64::Engine as _;
     let value = raw.ok_or_else(|| "unset".to_string())?;
     let bytes = base64::engine::general_purpose::STANDARD

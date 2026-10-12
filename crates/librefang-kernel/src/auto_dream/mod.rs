@@ -830,9 +830,21 @@ pub fn set_agent_enabled(
     agent_id: AgentId,
     enabled: bool,
 ) -> LibreFangResult<()> {
+    let previous = kernel.agent_registry_ref().is_auto_dream_enabled(agent_id);
     kernel
         .agent_registry_ref()
         .update_auto_dream_enabled(agent_id, enabled)?;
+    // `auto_dream_enabled` is a manifest field, and boot re-syncs each agent from its agent.toml, so a registry-only toggle reverted on the next restart.
+    // Persist it through the same SQLite + agent.toml pair the other manifest setters use, rolling the in-memory flag back if the DB write fails.
+    if let Some(entry) = kernel.agent_registry_ref().get(agent_id) {
+        if let Err(e) = kernel.memory.substrate.save_agent(&entry) {
+            let _ = kernel
+                .agent_registry_ref()
+                .update_auto_dream_enabled(agent_id, previous);
+            return Err(e);
+        }
+    }
+    kernel.persist_manifest_to_disk(agent_id);
     kernel.audit_log().record(
         agent_id.to_string(),
         librefang_runtime::audit::AuditAction::ConfigChange,

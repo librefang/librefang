@@ -891,9 +891,7 @@ impl LibreFangKernel {
 
         // Record experiment metrics if running an experiment (kernel has cost info)
         if let Some(ref ctx) = result.experiment_context {
-            let has_content = !result.response.trim().is_empty();
-            let no_tool_errors = result.iterations > 0;
-            let success = has_content && no_tool_errors;
+            let success = self.experiment_turn_succeeded(ctx, &result);
             if let Err(e) = self.record_experiment_request(
                 &ctx.experiment_id.to_string(),
                 &ctx.variant_id.to_string(),
@@ -2218,6 +2216,10 @@ impl LibreFangKernel {
         // to a healthy slot. See the ephemeral-path explanation
         // above for the full rationale.
 
+        // Per-agent cost quota, checked before dispatch exactly as `execute_llm_agent` does.
+        // Without it a streaming turn (every dashboard chat message) only met the quota in the post-call `check_all_and_record`, which records the spend and lets the turn through, so an agent over its hourly / daily / monthly cap kept answering.
+        self.enforce_agent_cost_quota(agent_id, &entry.manifest.resources)?;
+
         // Reserve the global USD budget up front, mirroring the
         // non-streaming path (#3616). Without this hold, N concurrent
         // streaming turns all observe the same pre-call total and only the
@@ -2343,10 +2345,11 @@ impl LibreFangKernel {
         // 3. Fork: always canonical to preserve prompt-cache alignment.
         // 4. Session-mode fallback: Persistent = entry.session_id, New = fresh UUID.
         let effective_session_id = if let Some(sid) = session_id_override {
+            // Column-only read: the ownership check needs the owner, not the decoded history.
             if let Some(existing) = self
                 .memory
                 .substrate
-                .get_session(sid)
+                .session_meta(sid)
                 .map_err(KernelError::LibreFang)?
             {
                 if existing.agent_id != agent_id {
@@ -2449,12 +2452,14 @@ impl LibreFangKernel {
             }
         }
 
-        let existing_session = self
+        // Pre-lock, only the scalar columns are needed (model override, context window, peer, existence).
+        // The full history is loaded exactly once, under the session lock in the spawned task, so a multi-MB blob is not decoded on this caller's worker and then thrown away.
+        let existing_meta = self
             .memory
             .substrate
-            .get_session(effective_session_id)
+            .session_meta(effective_session_id)
             .map_err(KernelError::LibreFang)?;
-        let session_was_new = existing_session.is_none();
+        let session_was_new = existing_meta.is_none();
         // Derive `peer_id` for the freshly-materialised session row from the
         // same `SenderContext.chat_id` that fed `SessionId::for_sender_scope`
         // above. This is the field migration v16 added but `save_session`
@@ -2473,18 +2478,33 @@ impl LibreFangKernel {
             }
             _ => None,
         };
-        let mut session = existing_session.unwrap_or_else(|| librefang_memory::session::Session {
-            id: effective_session_id,
-            agent_id,
-            parent_session_id: None,
-            messages: Vec::new(),
-            context_window_tokens: 0,
-            label: None,
-            model_override: None,
-            messages_generation: 0,
-            last_repaired_generation: None,
-            peer_id: peer_id_for_new_session.clone(),
-        });
+        // Placeholder carrying the pre-lock scalar columns; the spawned task replaces it with the row reloaded under the lock whenever the row exists.
+        let mut session = match existing_meta {
+            Some(meta) => librefang_memory::session::Session {
+                id: effective_session_id,
+                agent_id,
+                parent_session_id: None,
+                messages: Vec::new(),
+                context_window_tokens: meta.context_window_tokens,
+                label: None,
+                model_override: meta.model_override,
+                messages_generation: 0,
+                last_repaired_generation: None,
+                peer_id: meta.peer_id,
+            },
+            None => librefang_memory::session::Session {
+                id: effective_session_id,
+                agent_id,
+                parent_session_id: None,
+                messages: Vec::new(),
+                context_window_tokens: 0,
+                label: None,
+                model_override: None,
+                messages_generation: 0,
+                last_repaired_generation: None,
+                peer_id: peer_id_for_new_session.clone(),
+            },
+        };
         // Existing rows pre-date this column being written; backfill on the
         // first touch when we have a derivable peer. We only overwrite NULL
         // — never trample a value that was already set by a previous save.
@@ -2528,41 +2548,18 @@ impl LibreFangKernel {
         // `LoopOptions::allowed_tools` in agent_loop instead. Before the
         // forkedAgent migration this was filtered here by matching on
         // `sender_context.channel == AUTO_DREAM_CHANNEL`.
-        //
-        // #5980: pre-dispatch per-provider budget gate on the streaming path
-        // too. Flags the shared `ProviderExhaustionStore` when this provider's
-        // operator cap is already crossed so a multi-provider agent's
-        // `FallbackDriver` skips the exhausted slot; a single-provider agent
-        // has no slot to skip to, so we hard-return `QuotaExceeded`.
-        let provider = entry.manifest.model.provider.clone();
-        let exhausted = self.flag_provider_budget_if_exhausted(&provider);
-        if self.provider_exhausted_blocks_call(exhausted, &entry.manifest, &cfg) {
-            return Err(KernelError::LibreFang(LibreFangError::QuotaExceeded(
-                format!(
-                    "Provider '{provider}' hourly budget exhausted and the agent has no fallback chain"
-                ),
-            )));
-        }
-
-        // A fork / sub-agent must never bill the parent turn's human owner —
-        // its spend is the sub-agent's, not the initiating user's — so the
-        // owner is defensively cleared on the fork path regardless of what the
-        // caller passed (#6460). Non-fork streaming turns resolve with the
-        // real owner.
-        let effective_owner = if loop_opts.is_fork { None } else { owner };
-        let driver = self.resolve_driver_for_owner(&entry.manifest, effective_owner)?;
-
-        let (tx, rx) = crate::session_stream_hub::install_stream_fanout(
-            &self.events.session_stream_hub,
-            effective_session_id,
-        );
         let mut manifest = entry.manifest.clone();
 
-        // Apply per-session model override (#4898) before any manifest field is
-        // read downstream (model catalog lookup, system prompt build, billing).
-        // The pre-lock session snapshot already carries model_override; the
-        // reload inside the spawn task will produce the same value because the
-        // PATCH route updates the persisted session before returning.
+        // Model selection (Stable-mode `pinned_model`, `[model_router]` profiles, tier routing on `routing` / `[default_routing]`) runs here exactly as in `execute_llm_agent`.
+        // It runs before the session model override below, so an explicit `/model` pick still wins, and before the budget gate and driver resolution, so both see the provider this turn will actually call.
+        // A fork is excluded from the message-dependent routers: its message is a synthetic post-turn prompt (memory extraction, dream), so scoring it would route background work by the prompt's size rather than the parent turn's, and could move every fork onto the complex tier.
+        // Stable-mode pinning has no such dependency and still applies, so a fork keeps the pinned model its parent runs on.
+        if !loop_opts.is_fork || cfg.mode == librefang_types::config::KernelMode::Stable {
+            self.apply_model_selection(&mut manifest, message, &tools, &cfg);
+        }
+
+        // Apply per-session model override (#4898) before any manifest field is read downstream (model catalog lookup, system prompt build, billing).
+        // The pre-lock session snapshot already carries model_override; the reload inside the spawn task will produce the same value because the PATCH route updates the persisted session before returning.
         if let Some(override_str) = session.model_override.as_deref() {
             librefang_runtime::agent_loop::apply_session_model_override_to_manifest(
                 &mut manifest,
@@ -2576,6 +2573,34 @@ impl LibreFangKernel {
                 );
             });
         }
+
+        // #5980: pre-dispatch per-provider budget gate on the streaming path
+        // too. Flags the shared `ProviderExhaustionStore` when this provider's
+        // operator cap is already crossed so a multi-provider agent's
+        // `FallbackDriver` skips the exhausted slot; a single-provider agent
+        // has no slot to skip to, so we hard-return `QuotaExceeded`.
+        let provider = manifest.model.provider.clone();
+        let exhausted = self.flag_provider_budget_if_exhausted(&provider);
+        if self.provider_exhausted_blocks_call(exhausted, &manifest, &cfg) {
+            return Err(KernelError::LibreFang(LibreFangError::QuotaExceeded(
+                format!(
+                    "Provider '{provider}' hourly budget exhausted and the agent has no fallback chain"
+                ),
+            )));
+        }
+
+        // A fork / sub-agent must never bill the parent turn's human owner —
+        // its spend is the sub-agent's, not the initiating user's — so the
+        // owner is defensively cleared on the fork path regardless of what the
+        // caller passed (#6460). Non-fork streaming turns resolve with the
+        // real owner.
+        let effective_owner = if loop_opts.is_fork { None } else { owner };
+        let driver = self.resolve_driver_for_owner(&manifest, effective_owner)?;
+
+        let (tx, rx) = crate::session_stream_hub::install_stream_fanout(
+            &self.events.session_stream_hub,
+            effective_session_id,
+        );
 
         // #8112: resolve the per-model-override sampling preferences
         // (`top_p` / `frequency_penalty` / `presence_penalty`, plus
@@ -3048,7 +3073,9 @@ impl LibreFangKernel {
                 None
             };
 
-            // Reload session under the lock; keep the placeholder on miss.
+            // Load the session under the lock; keep the placeholder on miss.
+            // This is the only full history load of the turn, so a failure here fails the turn: the placeholder has no messages, and running the loop on it would save an empty history over the real one.
+            let mut reload_error: Option<LibreFangError> = None;
             match memory.get_session(effective_session_id) {
                 Ok(Some(reloaded)) => {
                     session = reloaded;
@@ -3061,14 +3088,15 @@ impl LibreFangKernel {
                         agent_id = %agent_id,
                         session_id = %effective_session_id,
                         error = %e,
-                        "Failed to reload session under lock; proceeding with pre-lock snapshot (streaming)"
+                        "Failed to load session under lock; failing the turn (streaming)"
                     );
+                    reload_error = Some(e);
                 }
             }
 
             // Decide against the freshly-reloaded session, not the pre-lock snapshot: a concurrent turn that wrote history while this one queued on `session_lock` could have moved it across the threshold in either direction.
             // Fork turns must not auto-compact: compaction rewrites the canonical session on disk, so a dream or auto_memorize fork would compact the user's real conversation.
-            if !loop_opts.is_fork {
+            if !loop_opts.is_fork && reload_error.is_none() {
                 kernel_clone
                     .auto_compact_before_turn(
                         agent_id,
@@ -3145,46 +3173,50 @@ impl LibreFangKernel {
                 .as_ref()
                 .unwrap_or(&kernel_clone.mcp.mcp_connections);
 
-            let result = run_agent_loop_streaming(
-                &manifest,
-                &message_owned,
-                &mut session,
-                &memory,
-                driver,
-                &tools,
-                Some(kernel_handle),
-                tx,
-                Some(&skill_snapshot),
-                Some(effective_mcp),
-                Some(&kernel_clone.media.web_ctx),
-                Some(&kernel_clone.media.browser_ctx),
-                kernel_clone.llm.embedding_driver.as_deref(),
-                manifest.workspace.as_deref(),
-                Some(&phase_cb),
-                Some(&kernel_clone.media.media_engine),
-                Some(&kernel_clone.media.media_drivers),
-                if loop_cfg.tts.enabled {
-                    Some(&kernel_clone.media.tts_engine)
-                } else {
-                    None
-                },
-                if loop_cfg.docker.enabled {
-                    Some(&loop_cfg.docker)
-                } else {
-                    None
-                },
-                Some(&kernel_clone.governance.hooks),
-                ctx_window,
-                Some(&kernel_clone.processes.manager),
-                kernel_clone.checkpoint_manager.clone(),
-                Some(&kernel_clone.processes.registry),
-                None, // content_blocks (streaming path uses text only for now)
-                kernel_clone.memory.proactive_memory.get().cloned(),
-                kernel_clone.context_engine_for_agent(&manifest),
-                injection_rx.as_deref(),
-                &loop_opts,
-            )
-            .await;
+            let result = if let Some(e) = reload_error {
+                Err(e)
+            } else {
+                run_agent_loop_streaming(
+                    &manifest,
+                    &message_owned,
+                    &mut session,
+                    &memory,
+                    driver,
+                    &tools,
+                    Some(kernel_handle),
+                    tx,
+                    Some(&skill_snapshot),
+                    Some(effective_mcp),
+                    Some(&kernel_clone.media.web_ctx),
+                    Some(&kernel_clone.media.browser_ctx),
+                    kernel_clone.llm.embedding_driver.as_deref(),
+                    manifest.workspace.as_deref(),
+                    Some(&phase_cb),
+                    Some(&kernel_clone.media.media_engine),
+                    Some(&kernel_clone.media.media_drivers),
+                    if loop_cfg.tts.enabled {
+                        Some(&kernel_clone.media.tts_engine)
+                    } else {
+                        None
+                    },
+                    if loop_cfg.docker.enabled {
+                        Some(&loop_cfg.docker)
+                    } else {
+                        None
+                    },
+                    Some(&kernel_clone.governance.hooks),
+                    ctx_window,
+                    Some(&kernel_clone.processes.manager),
+                    kernel_clone.checkpoint_manager.clone(),
+                    Some(&kernel_clone.processes.registry),
+                    None, // content_blocks (streaming path uses text only for now)
+                    kernel_clone.memory.proactive_memory.get().cloned(),
+                    kernel_clone.context_engine_for_agent(&manifest),
+                    injection_rx.as_deref(),
+                    &loop_opts,
+                )
+                .await
+            };
 
             // Tear down injection channel after loop finishes (skipped for
             // forks since they never set one up — tearing down would
@@ -3219,20 +3251,27 @@ impl LibreFangKernel {
                         let start = result.new_messages_start.min(session.messages.len());
                         if start < session.messages.len() {
                             let new_messages = session.messages[start..].to_vec();
-                            if let Err(e) = memory.append_canonical(
-                                agent_id,
-                                &new_messages,
-                                None,
-                                Some(effective_session_id),
-                            ) {
+                            if let Err(e) = memory
+                                .append_canonical_async(
+                                    agent_id,
+                                    &new_messages,
+                                    None,
+                                    Some(effective_session_id),
+                                )
+                                .await
+                            {
                                 warn!(agent_id = %agent_id, "Failed to update canonical session (streaming): {e}");
                             }
                         }
 
                         // Write JSONL session mirror to workspace
                         if let Some(ref workspace) = manifest.workspace {
-                            if let Err(e) =
-                                memory.write_jsonl_mirror(&session, &workspace.join("sessions"))
+                            if let Err(e) = memory
+                                .write_jsonl_mirror_async(
+                                    session.clone(),
+                                    workspace.join("sessions"),
+                                )
+                                .await
                             {
                                 warn!("Failed to write JSONL session mirror (streaming): {e}");
                             }
@@ -3364,9 +3403,7 @@ impl LibreFangKernel {
                     // because those tokens were really billed.
                     if !loop_opts.is_fork {
                         if let Some(ref ctx) = result.experiment_context {
-                            let has_content = !result.response.trim().is_empty();
-                            let no_tool_errors = result.iterations > 0;
-                            let success = has_content && no_tool_errors;
+                            let success = kernel_clone.experiment_turn_succeeded(ctx, &result);
                             if let Err(e) = kernel_clone.record_experiment_request(
                                 &ctx.experiment_id.to_string(),
                                 &ctx.variant_id.to_string(),
@@ -3602,6 +3639,45 @@ impl LibreFangKernel {
     }
 }
 
+impl LibreFangKernel {
+    /// Judge an experiment turn against the experiment's configured `success_criteria`.
+    ///
+    /// Both the blocking and the streaming paths record through this, so the two cannot drift.
+    /// When the experiment cannot be loaded, the default criteria apply.
+    pub(crate) fn experiment_turn_succeeded(
+        &self,
+        ctx: &librefang_runtime::agent_loop::ExperimentContext,
+        result: &librefang_runtime::agent_loop::AgentLoopResult,
+    ) -> bool {
+        let criteria = self
+            .memory
+            .prompt_store
+            .get()
+            .and_then(|store| store.get_experiment(ctx.experiment_id).ok().flatten())
+            .map(|experiment| experiment.success_criteria)
+            .unwrap_or_default();
+        experiment_turn_meets_criteria(&criteria, &result.response, &result.decision_traces)
+    }
+}
+
+/// Evaluate the turn-end-decidable parts of an experiment's [`SuccessCriteria`](librefang_types::agent::SuccessCriteria).
+///
+/// `require_non_empty` checks the response text and `require_no_tool_errors` checks the turn's tool executions.
+/// `require_user_helpful` and `custom_min_score` need feedback that does not exist when the turn ends, so they are left to the feedback path.
+pub(crate) fn experiment_turn_meets_criteria(
+    criteria: &librefang_types::agent::SuccessCriteria,
+    response: &str,
+    decision_traces: &[librefang_types::tool::DecisionTrace],
+) -> bool {
+    if criteria.require_non_empty && response.trim().is_empty() {
+        return false;
+    }
+    if criteria.require_no_tool_errors && decision_traces.iter().any(|t| t.is_error) {
+        return false;
+    }
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::sidecar_default_conversation;
@@ -3739,5 +3815,55 @@ mod tests {
             "command": "python3",
         }));
         assert!(c.default_conversation.is_none());
+    }
+
+    fn trace(is_error: bool) -> librefang_types::tool::DecisionTrace {
+        librefang_types::tool::DecisionTrace {
+            tool_use_id: "t".to_string(),
+            tool_name: "file_read".to_string(),
+            input: serde_json::json!({}),
+            rationale: None,
+            recovered_from_text: false,
+            execution_ms: 1,
+            is_error,
+            output_summary: String::new(),
+            iteration: 0,
+            timestamp: chrono::Utc::now(),
+        }
+    }
+
+    /// Experiment success must follow the configured criteria rather than a fixed "non-empty and iterated" heuristic that never looked at tool errors.
+    #[test]
+    fn experiment_success_follows_configured_criteria() {
+        use super::experiment_turn_meets_criteria;
+        use librefang_types::agent::SuccessCriteria;
+
+        let no_tool_errors_only = SuccessCriteria {
+            require_user_helpful: false,
+            require_no_tool_errors: true,
+            require_non_empty: false,
+            custom_min_score: None,
+        };
+        assert!(
+            !experiment_turn_meets_criteria(&no_tool_errors_only, "answer", &[trace(true)]),
+            "a turn with a failing tool call must not count as a success"
+        );
+        assert!(
+            experiment_turn_meets_criteria(&no_tool_errors_only, "", &[trace(false)]),
+            "an empty response is fine when require_non_empty is off"
+        );
+
+        let non_empty_only = SuccessCriteria {
+            require_user_helpful: false,
+            require_no_tool_errors: false,
+            require_non_empty: true,
+            custom_min_score: None,
+        };
+        assert!(experiment_turn_meets_criteria(
+            &non_empty_only,
+            "answer",
+            &[trace(true)]
+        ));
+        assert!(!experiment_turn_meets_criteria(&non_empty_only, "  ", &[]));
     }
 }

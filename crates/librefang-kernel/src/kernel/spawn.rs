@@ -595,26 +595,30 @@ impl LibreFangKernel {
                 name: name.clone(),
             }),
         );
-        // Evaluate triggers synchronously (we can't await in a sync fn, so just evaluate)
+        self.evaluate_lifecycle_triggers_sync(&event);
+
+        Ok(agent_id)
+    }
+
+    /// Evaluate and dispatch triggers for a lifecycle event from a sync call site.
+    ///
+    /// Spawn and kill are synchronous, so they cannot await `publish_event`; this runs the same evaluation and dispatch pair it does.
+    pub(crate) fn evaluate_lifecycle_triggers_sync(&self, event: &Event) {
         let event_timestamp = event.timestamp;
-        let (triggered, trigger_state_mutated) = self
-            .workflows
-            .triggers
-            .evaluate_with_resolver(&event, |id| {
-                self.agents.registry.get(id).map(|e| e.name.clone())
+        let (triggered, trigger_state_mutated) =
+            self.workflows.triggers.evaluate_with_resolver(event, |id| {
+                self.agents.registry.get_arc(id).map(|e| e.name.clone())
             });
         if !triggered.is_empty() || trigger_state_mutated {
             if let Err(e) = self.workflows.triggers.persist() {
-                warn!("Failed to persist trigger jobs after spawn event: {e}");
+                warn!("Failed to persist trigger jobs after lifecycle event: {e}");
             }
         }
         // Evaluation already charged each match its `fire_count`, its cooldown stamp and a step towards `max_fires`, so dropping the matches here would spend a trigger's budget on a fire that delivered nothing.
-        // Dispatch through the same path the event bus uses so an `agent_spawned` trigger reaches its agent or starts its workflow under the same concurrency, ordering and timeout guarantees.
+        // Dispatch through the same path the event bus uses so an `agent_spawned` / `agent_terminated` trigger reaches its agent or starts its workflow under the same concurrency, ordering and timeout guarantees.
         if !triggered.is_empty() {
             self.dispatch_trigger_matches(&triggered, event_timestamp);
         }
-
-        Ok(agent_id)
     }
 
     /// Verify a signed manifest envelope (Ed25519 + SHA-256).

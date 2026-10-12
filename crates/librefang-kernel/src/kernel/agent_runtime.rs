@@ -695,14 +695,16 @@ impl LibreFangKernel {
         // otherwise fall back to the built-in compactor directly.
         let echo_policy = self.lookup_reasoning_echo_policy(&model);
         let result = if let Some(engine) = self.context_engine_for_agent(&entry.manifest) {
+            // Hand the engine the merged `config`, not just the gate: without it the engine compacts with the global `[compaction]` it was built from at boot, ignoring this agent's `agent.toml [compaction]` overrides and later reloads.
             engine
-                .compact(
+                .compact_with_config(
                     agent_id,
                     &session.messages,
                     Arc::clone(&driver),
                     &model,
                     agent_ctx_window,
                     echo_policy,
+                    Some(&config),
                 )
                 .await
                 .map_err(KernelError::LibreFang)?
@@ -940,6 +942,7 @@ impl LibreFangKernel {
         // they release semaphore permits and stop spending tokens on
         // behalf of a now-deleted agent (#3705).
         self.abort_agent_watchers(agent_id);
+        self.release_agent_runtime_resources(agent_id);
         self.agents.scheduler.unregister(agent_id);
         self.agents.capabilities.revoke_all(agent_id);
         self.events.event_bus.unsubscribe_agent(agent_id);
@@ -1052,6 +1055,19 @@ impl LibreFangKernel {
             },
         );
 
+        // The session lifecycle bus above is a separate channel that triggers never see.
+        // Without this event `agent_terminated` triggers, `TriggerPattern::Lifecycle` and `event:agent_terminated` background conditions waited on something the kernel never produced, the mirror of the `Spawned` event spawn publishes.
+        use librefang_types::event::{Event, EventPayload, EventTarget, LifecycleEvent};
+        let terminated = Event::new(
+            agent_id,
+            EventTarget::Broadcast,
+            EventPayload::Lifecycle(LifecycleEvent::Terminated {
+                agent_id,
+                reason: format!("kill_agent(name={})", entry.name),
+            }),
+        );
+        self.evaluate_lifecycle_triggers_sync(&terminated);
+
         // Bubble the DB-remove failure last so the operator hears about it
         // (#5117); on success this is a no-op. routes/agents/lifecycle.rs::kill_agent
         // maps a non-AgentNotFound KernelError to ApiErrorResponse::internal
@@ -1060,6 +1076,28 @@ impl LibreFangKernel {
 
         info!(agent = %entry.name, id = %agent_id, "Agent killed");
         Ok(())
+    }
+
+    /// Close the agent's browser session and kill every process it started with `process_start`.
+    ///
+    /// Both are keyed on the agent id string, and once the agent is gone nothing else reaches them: `process_kill` is ownership-checked against an agent that no longer exists, the children run in their own process group without `kill_on_drop`, and a browser session otherwise holds one of the `max_sessions` slots until it idles out.
+    /// Kill is sync and both teardowns are async, so they run on a spawned task when a runtime is available.
+    fn release_agent_runtime_resources(&self, agent_id: AgentId) {
+        let Ok(rt) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let aid = agent_id.to_string();
+        let processes = Arc::clone(&self.processes.manager);
+        let kernel = self.self_handle.get().and_then(|weak| weak.upgrade());
+        rt.spawn(async move {
+            let killed = processes.kill_all_for_agent(&aid).await;
+            if killed > 0 {
+                info!(agent_id = %aid, killed, "Killed managed processes of deleted agent");
+            }
+            if let Some(kernel) = kernel {
+                kernel.media.browser_ctx.cleanup_agent(&aid).await;
+            }
+        });
     }
 
     // Hand lifecycle (`activate_hand`, `deactivate_hand`, `pause_hand`,

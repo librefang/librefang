@@ -651,6 +651,35 @@ impl LibreFangKernel {
         }
     }
 
+    /// Delete sessions idle longer than `retention_days` and drop the process-local state keyed on them.
+    ///
+    /// Every retention caller (the background loop, the boot prune and `POST /api/sessions/cleanup`) goes through this instead of the substrate directly, so none of them can forget the `file_read_tracker` buckets.
+    /// Channel session ids are deterministic, so a stale bucket would answer the returning user's first re-read with a "see above" stub for history that no longer exists.
+    /// Returns the number of sessions removed.
+    pub fn prune_expired_sessions(&self, retention_days: u32) -> KernelResult<u64> {
+        let removed = self
+            .memory
+            .substrate
+            .cleanup_expired_sessions(retention_days)
+            .map_err(KernelError::LibreFang)?;
+        Self::forget_file_read_state(&removed);
+        Ok(removed.len() as u64)
+    }
+
+    /// Keep only the newest `max_per_agent` sessions per agent and drop the process-local state keyed on the ones removed.
+    ///
+    /// See [`Self::prune_expired_sessions`] for why every caller must go through the kernel.
+    /// Returns the number of sessions removed.
+    pub fn prune_excess_sessions(&self, max_per_agent: u32) -> KernelResult<u64> {
+        let removed = self
+            .memory
+            .substrate
+            .cleanup_excess_sessions(max_per_agent)
+            .map_err(KernelError::LibreFang)?;
+        Self::forget_file_read_state(&removed);
+        Ok(removed.len() as u64)
+    }
+
     /// Best-effort removal of `<workspace>/sessions/{sid}.jsonl` mirrors after
     /// a session row is deleted from SQLite. Without this, `/new`, `/reboot`,
     /// and `clear_agent_history` accumulate orphan transcripts indefinitely
@@ -2249,6 +2278,57 @@ mod reset_lock_and_tracker_tests {
         prime_tracker(sid, path);
         kernel.clear_agent_history(agent_id).await.unwrap();
         assert_tracker_forgotten(sid, path, "clear_agent_history");
+        kernel.shutdown();
+    }
+
+    /// Retention pruning deletes sessions in bulk; channel sids are deterministic, so a returning user lands on the same id and must not get a "see above" stub for the pruned history.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn retention_prune_forgets_file_read_tracker() {
+        let dir = tempfile::tempdir().unwrap();
+        let kernel = boot(&dir);
+        let agent_id = spawn(&kernel, "prune-tracker-test");
+        let path = Path::new("/ws/config.toml");
+
+        let expired = override_session(&kernel, agent_id).id;
+        let old_date = (chrono::Utc::now() - chrono::Duration::days(60)).to_rfc3339();
+        kernel
+            .memory
+            .substrate
+            .pool()
+            .get()
+            .unwrap()
+            .execute(
+                "UPDATE sessions SET updated_at = ?1 WHERE id = ?2",
+                rusqlite::params![old_date, expired.0.to_string()],
+            )
+            .unwrap();
+        prime_tracker(expired, path);
+        assert_eq!(kernel.prune_expired_sessions(30).unwrap(), 1);
+        assert_tracker_forgotten(expired, path, "prune_expired_sessions");
+        file_read_tracker::forget_session(&expired);
+
+        let older = override_session(&kernel, agent_id).id;
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let newer = override_session(&kernel, agent_id).id;
+        prime_tracker(older, path);
+        prime_tracker(newer, path);
+        assert!(kernel.prune_excess_sessions(1).unwrap() >= 1);
+        assert!(kernel
+            .memory
+            .substrate
+            .get_session(older)
+            .unwrap()
+            .is_none());
+        assert_tracker_forgotten(older, path, "prune_excess_sessions");
+        assert!(
+            matches!(
+                file_read_tracker::with_session(newer, |t| t.observe(path, "a=1")),
+                ReadOutcome::Unchanged { .. }
+            ),
+            "the surviving session keeps its tracker state"
+        );
+        file_read_tracker::forget_session(&older);
+        file_read_tracker::forget_session(&newer);
         kernel.shutdown();
     }
 }
