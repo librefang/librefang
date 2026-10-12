@@ -248,7 +248,7 @@ impl ConsolidationEngine {
                     if absorbed.contains(&j) {
                         continue;
                     }
-                    // Different peer, chat or session → different tenant, not a duplicate.
+                    // Different memory scope, peer, chat or session → different tenant, not a duplicate.
                     // Skipping the pair is the whole fix: without it one tenant's row is soft-deleted beyond the reach of any read path, and the survivor inherits the loser's scope stamps.
                     if tenants[i] != tenants[j] {
                         continue;
@@ -1013,6 +1013,56 @@ mod tests {
                 .is_none(),
             "the session-agnostic keeper must not inherit the loser's session stamp"
         );
+    }
+
+    /// Helper: insert one `agent-1` memory in an explicit `scope`, unstamped and without a peer.
+    fn insert_memory_in_scope(
+        conn: &Connection,
+        id: &str,
+        content: &str,
+        confidence: f64,
+        scope: &str,
+    ) {
+        let now = Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO memories (id, agent_id, content, source, scope, confidence, metadata, created_at, accessed_at, access_count, deleted)
+             VALUES (?1, 'agent-1', ?2, '\"conversation\"', ?3, ?4, '{}', ?5, ?5, 0, 0)",
+            rusqlite::params![id, content, scope, confidence, now],
+        ).unwrap();
+    }
+
+    /// A permanent `user_memory` fact and a near-identical, higher-confidence `session_memory` row must not merge.
+    /// Before the fix the pair grouped on peer / chat / session only, so the session row won, the user fact was soft-deleted, and decay later swept the session row — losing a fact that was never meant to expire.
+    #[test]
+    fn test_no_cross_memory_scope_merge() {
+        let engine = setup();
+        {
+            let conn = engine.pool.get().expect("consolidation pool get");
+            insert_memory_in_scope(
+                &conn,
+                "user-fact",
+                "user prefers metric units",
+                0.8,
+                "user_memory",
+            );
+            insert_memory_in_scope(
+                &conn,
+                "session-fact",
+                "user prefers metric units",
+                0.9,
+                "session_memory",
+            );
+        }
+
+        let report = engine.consolidate().unwrap();
+        assert_eq!(report.memories_merged, 0);
+
+        let conn = engine.pool.get().expect("consolidation pool get");
+        assert!(
+            !is_deleted(&conn, "user-fact"),
+            "the permanent user_memory fact was folded into a decaying session row"
+        );
+        assert!(!is_deleted(&conn, "session-fact"));
     }
 
     /// Positive control for the three tests above: rows that agree on peer and on both scope stamps still merge, so the partition did not simply switch consolidation off.
