@@ -2,7 +2,7 @@
 //!
 //! Supports three autonomous modes:
 //! - **Continuous**: Agent self-prompts on a fixed interval.
-//! - **Periodic**: Agent wakes on a simplified cron schedule (e.g. "every 5m").
+//! - **Periodic**: Agent wakes on a cron schedule — a fixed `"every 5m"` interval, or a 5/6-field calendar expression evaluated in UTC by the cron-job engine.
 //! - **Proactive**: Agent wakes when matching events fire (via the trigger engine).
 
 use crate::triggers::TriggerPattern;
@@ -456,8 +456,18 @@ impl BackgroundExecutor {
                 let _ = installed_tx.send(());
             }
             ScheduleMode::Periodic { cron } => {
-                let interval_secs = parse_cron_to_secs(cron);
-                let interval = std::time::Duration::from_secs(interval_secs);
+                let Some(cadence) = periodic_cadence(cron, chrono::Utc::now()) else {
+                    warn!(
+                        agent = %agent_name, id = %agent_id, cron = %cron,
+                        "Periodic schedule is a calendar cron expression that cannot be parsed or never fires; \
+                         not starting the background loop rather than guessing an interval"
+                    );
+                    return;
+                };
+                let interval_secs = match &cadence {
+                    PeriodicCadence::Interval(secs) => Some(*secs),
+                    PeriodicCadence::Calendar(_) => None,
+                };
                 let name = agent_name.to_string();
                 let cron_owned = cron.clone();
                 let mut shutdown = self.shutdown_rx.clone();
@@ -473,7 +483,8 @@ impl BackgroundExecutor {
 
                 info!(
                     agent = %name, id = %agent_id,
-                    cron = %cron, interval_secs = interval_secs,
+                    cron = %cron, interval_secs = ?interval_secs,
+                    calendar = interval_secs.is_none(),
                     "Starting periodic background loop"
                 );
 
@@ -499,19 +510,62 @@ impl BackgroundExecutor {
                     if installed_rx.await.is_err() {
                         return;
                     }
-                    // Stagger first tick: random jitter so agents don't spike memory together.
-                    let jitter_secs = rand::random::<u64>() % interval_secs.max(1);
-                    let jitter = std::time::Duration::from_secs(jitter_secs);
-                    debug!(agent = %name, jitter_secs, "Periodic loop: initial jitter");
-                    tokio::time::sleep(jitter).await;
+                    // Stagger the first tick of an interval schedule: random jitter so agents don't spike memory together.
+                    // A calendar schedule gets none — its fire times are the schedule, and the LLM semaphore already bounds a burst of agents due at the same minute.
+                    if let PeriodicCadence::Interval(interval_secs) = &cadence {
+                        let jitter_secs = rand::random::<u64>() % (*interval_secs).max(1);
+                        let jitter = std::time::Duration::from_secs(jitter_secs);
+                        debug!(agent = %name, jitter_secs, "Periodic loop: initial jitter");
+                        tokio::time::sleep(jitter).await;
+                    }
 
+                    // Calendar fire this loop is waiting for, kept across sleep slices until the wall clock reaches it.
+                    let mut pending_fire: Option<chrono::DateTime<chrono::Utc>> = None;
+                    // Last calendar fire that ticked, so the next target is always strictly after it even if the wall clock steps back.
+                    let mut last_fire: Option<chrono::DateTime<chrono::Utc>> = None;
                     loop {
+                        let wait = match &cadence {
+                            PeriodicCadence::Interval(secs) => {
+                                std::time::Duration::from_secs(*secs)
+                            }
+                            PeriodicCadence::Calendar(expr) => {
+                                let now = chrono::Utc::now();
+                                let target = match pending_fire {
+                                    Some(target) => target,
+                                    None => match next_calendar_fire(expr, now, last_fire) {
+                                        Some(target) => target,
+                                        None => {
+                                            warn!(
+                                                agent = %name, id = %agent_id, cron = %expr,
+                                                "Periodic loop: calendar schedule has no future fire time; stopping the loop"
+                                            );
+                                            break;
+                                        }
+                                    },
+                                };
+                                pending_fire = Some(target);
+                                // Sleep in bounded slices and re-read the wall clock: tokio timers run on the monotonic clock, which stops while the host is suspended and ignores wall-clock steps, so one day-long sleep would land the fire hours late.
+                                (target - now)
+                                    .to_std()
+                                    .unwrap_or_default()
+                                    .min(CALENDAR_RECHECK_INTERVAL)
+                            }
+                        };
                         tokio::select! {
-                            _ = tokio::time::sleep(interval) => {}
+                            _ = tokio::time::sleep(wait) => {}
                             _ = shutdown.changed() => {
                                 info!(agent = %name, "Periodic loop: shutdown signal received");
                                 break;
                             }
+                        }
+
+                        // A calendar target ticks only once the wall clock has reached it; an earlier wake-up (a recheck slice, or a timer a hair ahead of the wall clock) goes back to sleep towards the same target, so it can neither fire early nor fire twice.
+                        if let Some(target) = pending_fire {
+                            if chrono::Utc::now() < target {
+                                continue;
+                            }
+                            pending_fire = None;
+                            last_fire = Some(target);
                         }
 
                         // Rate-limit circuit breaker (issue #5168): stop
@@ -684,7 +738,56 @@ pub fn parse_condition(condition: &str) -> Option<TriggerPattern> {
     None
 }
 
+/// Longest single sleep of a calendar periodic loop before it re-reads the wall clock (#8532).
+const CALENDAR_RECHECK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// How a `ScheduleMode::Periodic` loop decides when to fire next (#8532).
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PeriodicCadence {
+    /// A fixed number of seconds between ticks: the `"every <N><unit>"` form, and any expression that is neither that nor a calendar cron (which keeps the historical [`parse_cron_to_secs`] fallback).
+    Interval(u64),
+    /// A 5- or 6-field cron expression whose fire times come from the same calendar engine `CronJob` uses, evaluated in UTC.
+    Calendar(String),
+}
+
+/// Classify a periodic schedule expression.
+///
+/// A 5/6-field expression used to be collapsed by [`parse_cron_to_secs`] into one fixed interval, which threw away every hour, day-of-month, month and day-of-week constraint — `"0 9 * * *"` ("daily at 09:00") ran every hour.
+/// It is now handed to [`crate::cron::compute_next_run_after_opt`] instead, so it fires exactly when the expression says.
+///
+/// Returns `None` for a 5/6-field expression that engine cannot schedule (unparseable, or a date that never occurs such as February 30), so the caller refuses to start the loop instead of approximating an interval the operator never asked for.
+fn periodic_cadence(cron: &str, now: chrono::DateTime<chrono::Utc>) -> Option<PeriodicCadence> {
+    let trimmed = cron.trim();
+    if trimmed.to_lowercase().starts_with("every ") {
+        return Some(PeriodicCadence::Interval(parse_cron_to_secs(trimmed)));
+    }
+    let field_count = trimmed.split_whitespace().count();
+    if field_count == 5 || field_count == 6 {
+        return next_calendar_fire(trimmed, now, None)
+            .map(|_| PeriodicCadence::Calendar(trimmed.to_string()));
+    }
+    Some(PeriodicCadence::Interval(parse_cron_to_secs(trimmed)))
+}
+
+/// Next calendar fire of `expr` strictly after both `now` and the previous fire, in UTC.
+fn next_calendar_fire(
+    expr: &str,
+    now: chrono::DateTime<chrono::Utc>,
+    last_fire: Option<chrono::DateTime<chrono::Utc>>,
+) -> Option<chrono::DateTime<chrono::Utc>> {
+    let after = last_fire.map_or(now, |t| t.max(now));
+    crate::cron::compute_next_run_after_opt(
+        &librefang_types::scheduler::CronSchedule::Cron {
+            expr: expr.to_string(),
+            tz: None,
+        },
+        after,
+    )
+}
+
 /// Parse a cron or interval expression into a polling interval in seconds.
+///
+/// The periodic background loop only uses this for the `"every <N><unit>"` form and for expressions that are not cron at all; a 5/6-field calendar expression is scheduled through [`periodic_cadence`] instead, because a single interval cannot express it.
 ///
 /// Supported formats:
 /// - `"every 30s"` → 30
@@ -876,6 +979,135 @@ mod tests {
         // The loop should have exited (handle finished)
         // Active count still shows the entry until stop_agent is called
         executor.stop_agent(agent_id);
+        assert_eq!(executor.active_count(), 0);
+    }
+
+    fn utc(y: i32, mo: u32, d: u32, h: u32, mi: u32) -> chrono::DateTime<chrono::Utc> {
+        use chrono::TimeZone;
+        chrono::Utc.with_ymd_and_hms(y, mo, d, h, mi, 0).unwrap()
+    }
+
+    /// #8532: a calendar expression must be scheduled as a calendar, not collapsed into one interval.
+    #[test]
+    fn periodic_cadence_keeps_calendar_semantics() {
+        let now = utc(2026, 10, 12, 10, 0);
+        assert_eq!(
+            periodic_cadence("0 9 * * *", now),
+            Some(PeriodicCadence::Calendar("0 9 * * *".into()))
+        );
+        assert_eq!(
+            periodic_cadence("  30 8 * * 1 ", now),
+            Some(PeriodicCadence::Calendar("30 8 * * 1".into()))
+        );
+        assert_eq!(
+            periodic_cadence("*/15 * * * *", now),
+            Some(PeriodicCadence::Calendar("*/15 * * * *".into()))
+        );
+        assert_eq!(
+            periodic_cadence("*/5 * * * * *", now),
+            Some(PeriodicCadence::Calendar("*/5 * * * * *".into()))
+        );
+        // The interval form and non-cron input keep their historical meaning.
+        assert_eq!(
+            periodic_cadence("every 5m", now),
+            Some(PeriodicCadence::Interval(300))
+        );
+        assert_eq!(
+            periodic_cadence("Every 2h", now),
+            Some(PeriodicCadence::Interval(7200))
+        );
+        assert_eq!(
+            periodic_cadence("gibberish", now),
+            Some(PeriodicCadence::Interval(300))
+        );
+        // A calendar expression the engine cannot schedule is refused rather than approximated.
+        assert_eq!(periodic_cadence("0 0 30 2 *", now), None);
+        assert_eq!(periodic_cadence("61 * * * *", now), None);
+    }
+
+    /// #8532: `"0 9 * * *"` fires once a day at 09:00 UTC; the old interval mapping fired it every hour.
+    #[test]
+    fn daily_calendar_schedule_fires_once_per_day_at_nine() {
+        let mut at = utc(2026, 10, 12, 10, 0);
+        let mut last = None;
+        let mut fires = Vec::new();
+        for _ in 0..3 {
+            let next = next_calendar_fire("0 9 * * *", at, last).expect("schedulable");
+            fires.push(next);
+            last = Some(next);
+            at = next;
+        }
+        assert_eq!(
+            fires,
+            vec![
+                utc(2026, 10, 13, 9, 0),
+                utc(2026, 10, 14, 9, 0),
+                utc(2026, 10, 15, 9, 0)
+            ]
+        );
+    }
+
+    /// #8532: day-of-week is honoured — `"30 8 * * 1"` is Mondays at 08:30, a week apart.
+    #[test]
+    fn weekly_calendar_schedule_honours_day_of_week() {
+        // 2026-10-12 is a Monday; 10:00 is past this week's 08:30.
+        let first = next_calendar_fire("30 8 * * 1", utc(2026, 10, 12, 10, 0), None).unwrap();
+        assert_eq!(first, utc(2026, 10, 19, 8, 30));
+        let second = next_calendar_fire("30 8 * * 1", first, Some(first)).unwrap();
+        assert_eq!(second, utc(2026, 10, 26, 8, 30));
+    }
+
+    /// Once a fire has ticked, the next target is strictly after it even when the wall clock reads a hair earlier (a step back, or a timer ahead of the wall clock).
+    #[test]
+    fn early_wakeup_does_not_refire_the_same_calendar_slot() {
+        let target = utc(2026, 10, 13, 9, 0);
+        let early = target - chrono::Duration::milliseconds(5);
+        let next = next_calendar_fire("0 9 * * *", early, Some(target)).unwrap();
+        assert_eq!(next, utc(2026, 10, 14, 9, 0));
+    }
+
+    /// #8532: the loop actually ticks on calendar fire times.
+    /// A 6-field every-second expression is due within about two seconds (the engine skips the current second); the old mapping fell back to a 300s interval with up to 300s of jitter and almost never ticked in this window.
+    #[tokio::test]
+    async fn periodic_calendar_loop_ticks_on_calendar_fires() {
+        let (_shutdown_tx, shutdown_rx) = watch::channel(false);
+        let executor = BackgroundExecutor::new(shutdown_rx);
+        let agent_id = AgentId::new();
+        let tick_count = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let tick_clone = tick_count.clone();
+
+        let schedule = ScheduleMode::Periodic {
+            cron: "* * * * * *".to_string(),
+        };
+        executor.start_agent(agent_id, "calendar-agent", &schedule, move |_id, _msg| {
+            let tc = tick_clone.clone();
+            tokio::spawn(async move {
+                tc.fetch_add(1, Ordering::SeqCst);
+                TickOutcome::Ok
+            })
+        });
+        assert_eq!(executor.active_count(), 1);
+
+        tokio::time::sleep(std::time::Duration::from_millis(3_500)).await;
+        let ticks = tick_count.load(Ordering::SeqCst);
+        assert!(
+            (1..=4).contains(&ticks),
+            "an every-second calendar schedule must tick within a few seconds, got {ticks}"
+        );
+        executor.stop_agent(agent_id);
+    }
+
+    /// #8532: a calendar expression that never fires must not start a loop that would tick on a guessed interval.
+    #[tokio::test]
+    async fn periodic_loop_is_not_started_for_an_unschedulable_calendar() {
+        let (_shutdown_tx, shutdown_rx) = watch::channel(false);
+        let executor = BackgroundExecutor::new(shutdown_rx);
+        let schedule = ScheduleMode::Periodic {
+            cron: "0 0 30 2 *".to_string(),
+        };
+        executor.start_agent(AgentId::new(), "feb-30", &schedule, |_id, _msg| {
+            tokio::spawn(async { TickOutcome::Ok })
+        });
         assert_eq!(executor.active_count(), 0);
     }
 

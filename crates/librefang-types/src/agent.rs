@@ -741,6 +741,9 @@ pub enum ScheduleMode {
     #[default]
     Reactive,
     /// Agent wakes up on a cron schedule.
+    ///
+    /// `cron` is either a fixed interval (`"every 30s"`, `"every 5m"`, `"every 2h"`, `"every 1d"`) or a 5/6-field cron expression whose fire times are evaluated in UTC, e.g. `"0 9 * * *"` for daily at 09:00 UTC (#8532).
+    /// A 5/6-field expression that does not parse or never fires leaves the loop unstarted with a `WARN`; use a cron job (`cron_create`) when a timezone is needed.
     Periodic { cron: String },
     /// Agent monitors conditions and acts when thresholds are met.
     Proactive { conditions: Vec<String> },
@@ -1278,8 +1281,8 @@ pub struct AgentManifest {
     /// Scheduling mode.
     pub schedule: ScheduleMode,
     /// Session mode for automated (non-channel) invocations.
-    /// Controls whether background ticks, triggers, and `agent_send` calls
-    /// reuse the agent's persistent session or create a fresh one.
+    /// Controls whether triggers, `agent_send` calls, cron agent turns and workflow steps reuse the agent's persistent session or create a fresh one.
+    /// `Continuous` / `Periodic` background ticks are not among them: they run under the reserved `"autonomous"` channel, so the channel branch below always lands them on the `(agent, "autonomous")` session.
     ///
     /// Resolved session id precedence (highest first):
     /// 1. Explicit `session_id_override` from the dispatch caller (HTTP /

@@ -468,6 +468,8 @@ pub struct CronJob {
     ///   default.
     /// * `Some(New)` — every fire creates a fresh, isolated session so
     ///   history from previous fires cannot influence the current run.
+    ///
+    /// Meaningful only for `CronAction::AgentTurn`; creating a `Workflow` job with this field set is refused (see [`CronJob::validate_session_mode`], #8533).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_mode: Option<SessionMode>,
     /// The principal this job belongs to — the identity the turn that created it was acting for (#7744).
@@ -550,6 +552,21 @@ impl CronJob {
         // -- delivery_targets (multi-destination fan-out) --
         self.validate_delivery_targets()?;
 
+        Ok(())
+    }
+
+    /// Reject a per-job `session_mode` on a workflow schedule, where the dispatcher never reads it (#8533).
+    ///
+    /// Only the `AgentTurn` branch of the cron dispatcher resolves a session from `session_mode`.
+    /// A `Workflow` fire runs each step on the session that step's own `WorkflowStep.session_mode` (or the target agent's manifest) selects, so accepting the field there would store a setting that silently does nothing while reading to an operator like per-fire isolation.
+    /// `SystemEvent` is left alone: it runs no agent turn, so the field has nothing to mislead about, and the `cron_create` tool has always accepted it there.
+    ///
+    /// Deliberately kept out of [`CronJob::validate_with_home`]: the scheduler re-runs that on every persisted job at boot and disables any that fail, and a job saved by an older daemon with this field set must keep firing exactly as it did.
+    /// Callers that create a job, or change an existing job's action, enforce it instead.
+    pub fn validate_session_mode(&self) -> Result<(), String> {
+        if self.session_mode.is_some() && matches!(self.action, CronAction::Workflow { .. }) {
+            return Err("session_mode is ignored on a workflow schedule and is not accepted there; omit it and set session_mode on the workflow's steps instead (WorkflowStep.session_mode, which falls back to the target agent's manifest)".to_string());
+        }
         Ok(())
     }
 
@@ -1001,6 +1018,43 @@ mod tests {
             last_run: None,
             next_run: None,
         }
+    }
+
+    #[test]
+    fn session_mode_is_accepted_only_on_agent_turn_jobs() {
+        // #8533: the cron dispatcher reads `session_mode` only on the agent_turn branch.
+        let mut job = valid_job();
+        job.action = CronAction::AgentTurn {
+            message: "hi".into(),
+            model_override: None,
+            timeout_secs: None,
+            pre_check_script: None,
+            pre_script: None,
+            silent_marker: None,
+        };
+        job.session_mode = Some(SessionMode::New);
+        assert!(job.validate_session_mode().is_ok());
+
+        job.action = CronAction::Workflow {
+            workflow_id: "wf".into(),
+            input: None,
+            timeout_secs: None,
+        };
+        for mode in [SessionMode::New, SessionMode::Persistent] {
+            job.session_mode = Some(mode);
+            let err = job
+                .validate_session_mode()
+                .expect_err("a workflow schedule must refuse a session_mode it would ignore");
+            assert!(err.contains("workflow"), "{err}");
+            assert!(err.contains("WorkflowStep.session_mode"), "{err}");
+        }
+        job.session_mode = None;
+        assert!(job.validate_session_mode().is_ok());
+
+        // system_event runs no agent turn; the cron_create tool has always accepted the field there.
+        job.action = CronAction::SystemEvent { text: "x".into() };
+        job.session_mode = Some(SessionMode::Persistent);
+        assert!(job.validate_session_mode().is_ok());
     }
 
     #[test]
