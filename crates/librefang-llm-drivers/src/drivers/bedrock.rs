@@ -762,6 +762,17 @@ enum StatusAction {
     Fail,
 }
 
+/// Delay before retry `attempt + 1` (0-based `attempt`).
+///
+/// Waits at least the server's Retry-After, but routes it through [`crate::backoff::standard_retry_delay`] like every other driver: the floor is capped at 300 s, jitter is added, and the test zero-backoff hook applies.
+/// An uncapped Retry-After (e.g. 3600 s) would otherwise hold the agent turn, and its session locks, for the whole period on every attempt.
+fn bedrock_retry_delay(attempt: u32, retry_after_ms: u64) -> std::time::Duration {
+    crate::backoff::standard_retry_delay(
+        attempt + 1,
+        std::time::Duration::from_millis(retry_after_ms),
+    )
+}
+
 fn classify_response_status(status: u16) -> StatusAction {
     if (200..300).contains(&status) {
         StatusAction::Success
@@ -828,14 +839,14 @@ impl LlmDriver for BedrockDriver {
                 Ok(resp) => resp,
                 Err(e) => {
                     if attempt < max_retries && crate::backoff::transport_error_is_retryable(&e) {
-                        let wait_ms = (attempt + 1) as u64 * 2000;
+                        let delay = bedrock_retry_delay(attempt, 0);
                         warn!(
                             error = %e,
-                            wait_ms,
+                            delay_ms = delay.as_millis(),
                             attempt,
                             "Bedrock transport error, retrying"
                         );
-                        tokio::time::sleep(std::time::Duration::from_millis(wait_ms)).await;
+                        tokio::time::sleep(delay).await;
                         continue;
                     }
                     return Err(LlmError::Http(e.to_string()));
@@ -852,18 +863,14 @@ impl LlmDriver for BedrockDriver {
                     let retry_after_ms =
                         crate::retry_after::parse_retry_after_ms(resp.headers(), 5000);
                     if attempt < max_retries {
-                        let retry_ms = (attempt + 1) as u64 * 2000;
-                        // Wait at least the server's Retry-After, but
-                        // never less than the in-loop exponential
-                        // schedule.
-                        let wait_ms = retry_ms.max(retry_after_ms);
+                        let delay = bedrock_retry_delay(attempt, retry_after_ms);
                         tracing::warn!(
                             status,
-                            wait_ms,
+                            delay_ms = delay.as_millis(),
                             attempt,
                             "Bedrock transient failure, retrying"
                         );
-                        tokio::time::sleep(std::time::Duration::from_millis(wait_ms)).await;
+                        tokio::time::sleep(delay).await;
                         continue;
                     }
                     return Err(if status == 429 {
@@ -923,6 +930,20 @@ mod tests {
     use super::*;
     use librefang_types::message::{Message, MessageContent, Role};
     use librefang_types::tool::ToolDefinition;
+
+    /// A huge server Retry-After must be capped like every other driver's backoff, not slept verbatim inside the turn.
+    #[test]
+    fn retry_delay_caps_large_retry_after() {
+        let delay = bedrock_retry_delay(0, 3_600_000);
+        // Floor capped at 300 s, plus at most 50 % jitter.
+        assert!(
+            delay <= std::time::Duration::from_secs(450),
+            "Retry-After: 3600 must be capped, got {delay:?}"
+        );
+        assert!(delay >= std::time::Duration::from_secs(300));
+        // A small Retry-After is still honoured as a floor.
+        assert!(bedrock_retry_delay(0, 7_000) >= std::time::Duration::from_secs(7));
+    }
 
     // ── Endpoint building ──────────────────────────────────────────────────────
 

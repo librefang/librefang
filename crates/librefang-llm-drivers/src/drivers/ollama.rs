@@ -877,6 +877,16 @@ impl LlmDriver for OllamaDriver {
                     }
                 };
 
+                // A runner failure after streaming started (OOM, crash, context overflow) arrives as an `{"error": "..."}` line inside the 200 body.
+                // Surface it so retry / fallback engage instead of returning the partial text as a finished answer.
+                if json.get("error").is_some_and(|e| !e.is_null()) {
+                    warn!(
+                        line_len = line.len(),
+                        "Ollama stream returned an error line"
+                    );
+                    return Err(map_http_error(500, &line));
+                }
+
                 if let Some(msg) = json.get("message") {
                     if let Some(content) = msg.get("content").and_then(|v| v.as_str()) {
                         if !content.is_empty() {

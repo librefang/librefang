@@ -786,6 +786,48 @@ async fn streaming_truncated_response_returns_partial_with_zero_usage() {
     assert_eq!(resp.usage.output_tokens, 0);
 }
 
+/// Streaming: an `{"error": ...}` line written into the 200 body after generation started (runner OOM / crash) must surface as an error, not as the partial text returned as a finished answer.
+#[tokio::test]
+#[serial_test::serial]
+async fn streaming_error_line_surfaces_as_error() {
+    let _env = isolated_env();
+    let server = MockServer::start().await;
+    let mut body = String::new();
+    body.push_str(
+        &serde_json::json!({
+            "message": {"role": "assistant", "content": "partial"},
+            "done": false
+        })
+        .to_string(),
+    );
+    body.push('\n');
+    body.push_str(
+        &serde_json::json!({
+            "error": "an error was encountered while running the model: CUDA error: out of memory"
+        })
+        .to_string(),
+    );
+    body.push('\n');
+
+    Mock::given(method("POST"))
+        .and(path("/api/chat"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(body))
+        .mount(&server)
+        .await;
+
+    let driver = mock_ollama_driver(&server);
+    let (result, _events) = collect_stream(&driver, simple_request("m")).await;
+    match result {
+        Err(LlmError::Api {
+            status, message, ..
+        }) => {
+            assert_eq!(status, 500);
+            assert!(message.contains("out of memory"), "message: {message}");
+        }
+        other => panic!("expected Api error from the error line, got {other:?}"),
+    }
+}
+
 /// Reverse-proxy mounts where `/v1` is part of a custom path (not the
 /// entire path) MUST be left alone — stripping would break the user's
 /// deliberately-non-standard mount point. We exercise the gating by

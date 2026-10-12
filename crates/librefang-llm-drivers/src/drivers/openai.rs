@@ -281,8 +281,15 @@ impl OpenAIDriver {
     }
 
     /// 16-hex key identifier for [`crate::shared_rate_guard`].
+    ///
+    /// Keyless drivers (vllm, lmstudio, lemonade and other local servers) all hash the same empty key, so they are identified by their base URL instead.
+    /// Otherwise a 429 from one local server would persist a lockout that blocks every other keyless OpenAI-compatible endpoint, in this and every sibling process.
     fn shared_guard_key_id(&self) -> String {
-        crate::shared_rate_guard::key_id_hash(self.api_key.as_str())
+        if self.api_key.is_empty() {
+            crate::shared_rate_guard::key_id_hash(&format!("keyless\n{}", self.base_url))
+        } else {
+            crate::shared_rate_guard::key_id_hash(self.api_key.as_str())
+        }
     }
 
     /// Upload a file to Moonshot's `/v1/files` endpoint and return the file ID.
@@ -1279,6 +1286,8 @@ fn status_for_stream_error_code(
 /// non-stream and streaming paths.
 fn map_oai_finish_reason(reason: Option<&str>, has_tool_calls: bool) -> StopReason {
     match reason {
+        // Some OpenAI-compatible servers (LM Studio, llama.cpp, vLLM builds, Gemini's OpenAI-compat endpoint) report "stop" on a turn that carries tool_calls; honour the calls, as `ollama::map_done_reason` does.
+        Some("stop") if has_tool_calls => StopReason::ToolUse,
         Some("stop") => StopReason::EndTurn,
         Some("tool_calls") => StopReason::ToolUse,
         Some("length") => StopReason::MaxTokens,
@@ -1294,6 +1303,40 @@ fn map_oai_finish_reason(reason: Option<&str>, has_tool_calls: bool) -> StopReas
             }
         }
     }
+}
+
+/// What to do after an error response to a request that still carries tools.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ToolFallback {
+    /// Drop `tools` / `tool_choice` and retry.
+    StripTools,
+    /// Retry the identical request (tools kept) after a normal backoff.
+    RetryWithTools,
+    /// Not a tool-support signal; let the caller surface the error.
+    None,
+}
+
+/// Decide whether an error response means the model cannot take tools.
+///
+/// A 400 that names tools as unsupported is an explicit signal and strips them at once.
+/// A 500 or "internal error" body is ambiguous: some backends (GLM-5 on DashScope) answer that way when sent tools, but it is far more often a transient server fault.
+/// The first such error therefore retries with the tools unchanged, and only a repeat while tools are still present strips them, so one transient 500 never silently downgrades a turn to a tool-less completion.
+fn tool_unsupported_fallback(status: u16, body: &str, server_error_seen: bool) -> ToolFallback {
+    let body_lower = body.to_lowercase();
+    let explicit_unsupported = status == 400
+        && (body_lower.contains("does not support tools")
+            || body_lower.contains("tool") && body_lower.contains("not supported"));
+    if explicit_unsupported {
+        return ToolFallback::StripTools;
+    }
+    if status == 500 || body_lower.contains("internal error") {
+        return if server_error_seen {
+            ToolFallback::StripTools
+        } else {
+            ToolFallback::RetryWithTools
+        };
+    }
+    ToolFallback::None
 }
 
 /// Strip trailing assistant messages that would trigger "prefill not supported"
@@ -1720,6 +1763,8 @@ impl LlmDriver for OpenAIDriver {
         let guard_key_id = self.shared_guard_key_id();
         crate::shared_rate_guard::pre_request_check(guard_provider, &guard_key_id, "OpenAI")?;
 
+        // Set once a request carrying tools got a 500 / "internal error"; see `tool_unsupported_fallback`.
+        let mut tool_server_error_seen = false;
         // Configurable in-driver retry cap (#10); default 3.
         let max_retries = self.max_retries;
         for attempt in 0..=max_retries {
@@ -1931,29 +1976,38 @@ impl LlmDriver for OpenAIDriver {
 
                 // Model doesn't support function calling — retry without tools
                 // (e.g. GLM-5 on DashScope returns 500 "internal error" when tools are sent)
-                let body_lower = body.to_lowercase();
-                if !oai_request.tools.is_empty()
-                    && attempt < max_retries
-                    && (status == 500
-                        || body_lower.contains("internal error")
-                        || (status == 400
-                            && (body_lower.contains("does not support tools")
-                                || body_lower.contains("tool")
-                                    && body_lower.contains("not supported"))))
-                {
-                    warn!(
-                        model = %oai_request.model,
-                        status,
-                        "Model may not support tools, retrying without tools"
-                    );
-                    oai_request.tools.clear();
-                    oai_request.tool_choice = None;
-                    // Small backoff to prevent a tight retry loop.
-                    tokio::time::sleep(std::time::Duration::from_millis(
-                        100 * (attempt as u64 + 1),
-                    ))
-                    .await;
-                    continue;
+                if !oai_request.tools.is_empty() && attempt < max_retries {
+                    match tool_unsupported_fallback(status, &body, tool_server_error_seen) {
+                        ToolFallback::StripTools => {
+                            warn!(
+                                model = %oai_request.model,
+                                status,
+                                "Model may not support tools, retrying without tools"
+                            );
+                            oai_request.tools.clear();
+                            oai_request.tool_choice = None;
+                            // Small backoff to prevent a tight retry loop.
+                            tokio::time::sleep(std::time::Duration::from_millis(
+                                100 * (attempt as u64 + 1),
+                            ))
+                            .await;
+                            continue;
+                        }
+                        ToolFallback::RetryWithTools => {
+                            tool_server_error_seen = true;
+                            let delay =
+                                standard_retry_delay(attempt + 1, std::time::Duration::ZERO);
+                            warn!(
+                                model = %oai_request.model,
+                                status,
+                                delay_ms = delay.as_millis(),
+                                "Server error with tools present, retrying with tools unchanged"
+                            );
+                            tokio::time::sleep(delay).await;
+                            continue;
+                        }
+                        ToolFallback::None => {}
+                    }
                 }
 
                 return Err(LlmError::Api {
@@ -2182,6 +2236,8 @@ impl LlmDriver for OpenAIDriver {
             "OpenAI streaming",
         )?;
 
+        // Set once a request carrying tools got a 500 / "internal error"; see `tool_unsupported_fallback`.
+        let mut tool_server_error_seen = false;
         // Retry loop for the initial HTTP request
         // Configurable in-driver retry cap (#10); default 3.
         let max_retries = self.max_retries;
@@ -2396,28 +2452,37 @@ impl LlmDriver for OpenAIDriver {
                 }
 
                 // Model doesn't support function calling — retry without tools
-                let body_lower = body.to_lowercase();
-                if !oai_request.tools.is_empty()
-                    && attempt < max_retries
-                    && (status == 500
-                        || body_lower.contains("internal error")
-                        || (status == 400
-                            && (body_lower.contains("does not support tools")
-                                || body_lower.contains("tool")
-                                    && body_lower.contains("not supported"))))
-                {
-                    warn!(
-                        model = %oai_request.model,
-                        status,
-                        "Model may not support tools (stream), retrying without tools"
-                    );
-                    oai_request.tools.clear();
-                    oai_request.tool_choice = None;
-                    tokio::time::sleep(std::time::Duration::from_millis(
-                        100 * (attempt + 1) as u64,
-                    ))
-                    .await;
-                    continue;
+                if !oai_request.tools.is_empty() && attempt < max_retries {
+                    match tool_unsupported_fallback(status, &body, tool_server_error_seen) {
+                        ToolFallback::StripTools => {
+                            warn!(
+                                model = %oai_request.model,
+                                status,
+                                "Model may not support tools (stream), retrying without tools"
+                            );
+                            oai_request.tools.clear();
+                            oai_request.tool_choice = None;
+                            tokio::time::sleep(std::time::Duration::from_millis(
+                                100 * (attempt + 1) as u64,
+                            ))
+                            .await;
+                            continue;
+                        }
+                        ToolFallback::RetryWithTools => {
+                            tool_server_error_seen = true;
+                            let delay =
+                                standard_retry_delay(attempt + 1, std::time::Duration::ZERO);
+                            warn!(
+                                model = %oai_request.model,
+                                status,
+                                delay_ms = delay.as_millis(),
+                                "Server error with tools present (stream), retrying with tools unchanged"
+                            );
+                            tokio::time::sleep(delay).await;
+                            continue;
+                        }
+                        ToolFallback::None => {}
+                    }
                 }
 
                 return Err(LlmError::Api {
@@ -5363,6 +5428,68 @@ mod tests {
         // based on whether tool calls were actually emitted.
         assert_eq!(map_oai_finish_reason(None, false), StopReason::EndTurn);
         assert_eq!(map_oai_finish_reason(None, true), StopReason::ToolUse);
+    }
+
+    /// Keyless OpenAI-compatible servers must not share one persistent rate-limit lockout identity: a 429 from vLLM must not block an idle LM Studio fallback.
+    #[test]
+    fn shared_guard_key_id_separates_keyless_servers_by_base_url() {
+        let vllm = OpenAIDriver::new(String::new(), "http://127.0.0.1:8000/v1".to_string());
+        let lmstudio = OpenAIDriver::new(String::new(), "http://127.0.0.1:1234/v1".to_string());
+        assert_eq!(
+            vllm.shared_guard_provider(),
+            lmstudio.shared_guard_provider()
+        );
+        assert_ne!(vllm.shared_guard_key_id(), lmstudio.shared_guard_key_id());
+        assert_eq!(
+            vllm.shared_guard_key_id(),
+            OpenAIDriver::new(String::new(), "http://127.0.0.1:8000/v1".to_string())
+                .shared_guard_key_id()
+        );
+        // Keyed drivers keep the plain key hash, so a lockout stays shared across every URL that bills the same key.
+        let keyed = OpenAIDriver::new("sk-abc".to_string(), "http://127.0.0.1:8000/v1".to_string());
+        assert_eq!(
+            keyed.shared_guard_key_id(),
+            crate::shared_rate_guard::key_id_hash("sk-abc")
+        );
+    }
+
+    /// A 500 / "internal error" with tools present is retried with the tools unchanged first; only a repeat strips them, while an explicit 400 "does not support tools" strips at once.
+    #[test]
+    fn tool_unsupported_fallback_requires_explicit_or_repeated_signal() {
+        let body500 = r#"{"error":{"message":"Internal server error"}}"#;
+        assert_eq!(
+            tool_unsupported_fallback(500, body500, false),
+            ToolFallback::RetryWithTools
+        );
+        assert_eq!(
+            tool_unsupported_fallback(500, body500, true),
+            ToolFallback::StripTools
+        );
+        assert_eq!(
+            tool_unsupported_fallback(503, r#"{"error":{"message":"Internal error"}}"#, false),
+            ToolFallback::RetryWithTools
+        );
+        assert_eq!(
+            tool_unsupported_fallback(400, "This model does not support tools", false),
+            ToolFallback::StripTools
+        );
+        assert_eq!(
+            tool_unsupported_fallback(400, "bad request", false),
+            ToolFallback::None
+        );
+        assert_eq!(
+            tool_unsupported_fallback(502, "bad gateway", true),
+            ToolFallback::None
+        );
+    }
+
+    /// A "stop" finish on a turn that carries tool_calls (LM Studio / llama.cpp / vLLM) must still run the tools.
+    #[test]
+    fn map_oai_finish_reason_stop_with_tool_calls_is_tool_use() {
+        assert_eq!(
+            map_oai_finish_reason(Some("stop"), true),
+            StopReason::ToolUse
+        );
     }
 
     /// Driving a real `OaiResponse` through `serde` and into the helper
