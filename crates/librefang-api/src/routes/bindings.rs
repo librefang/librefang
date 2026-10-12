@@ -18,6 +18,23 @@ pub fn router() -> axum::Router<Arc<AppState>> {
         .route("/bindings/{index}", axum::routing::delete(remove_binding))
 }
 
+/// Push the kernel's binding list into the running channel bridge's router.
+///
+/// The router copies the bindings once when the bridge starts, so without this an added or removed binding would not route a single message until the next restart or channel reload.
+/// `resolved` is the name the new binding uses and the agent it names: the router resolves a binding through its own name cache, which is seeded only at bridge start, so a binding to an agent spawned since then would match and still route nowhere.
+/// With no bridge running (no channels configured) there is no router to update, and the next bridge start loads the kernel list itself.
+fn sync_live_router(state: &AppState, resolved: Option<(String, librefang_types::agent::AgentId)>) {
+    let guard = state.bridge_manager.load();
+    let Some(bridge) = &**guard else {
+        return;
+    };
+    let router = bridge.router();
+    if let Some((name, id)) = resolved {
+        router.register_agent(name, id);
+    }
+    router.load_bindings(&state.kernel.list_bindings());
+}
+
 /// GET /api/bindings — List all agent bindings.
 #[utoipa::path(get, path = "/api/bindings", tag = "system", responses((status = 200, description = "List key bindings", body = Vec<serde_json::Value>)))]
 pub async fn list_bindings(State(state): State<Arc<AppState>>) -> impl IntoResponse {
@@ -49,17 +66,25 @@ pub async fn add_binding(
     Json(binding): Json<librefang_types::config::AgentBinding>,
 ) -> impl IntoResponse {
     let registry = state.kernel.agent_registry();
-    let agent_exists = registry.list().iter().any(|e| e.name == binding.agent)
-        || binding
-            .agent
-            .parse::<librefang_types::agent::AgentId>()
-            .ok()
-            .is_some_and(|id| registry.get(id).is_some());
-    if !agent_exists {
+    let resolved = registry
+        .list()
+        .iter()
+        .find(|e| e.name == binding.agent)
+        .map(|e| e.id)
+        .or_else(|| {
+            binding
+                .agent
+                .parse::<librefang_types::agent::AgentId>()
+                .ok()
+                .filter(|id| registry.get(*id).is_some())
+        });
+    if resolved.is_none() {
         tracing::warn!(agent = %binding.agent, "Binding references unknown agent");
     }
 
+    let agent = binding.agent.clone();
     state.kernel.add_binding(binding);
+    sync_live_router(&state, resolved.map(|id| (agent, id)));
     (
         StatusCode::CREATED,
         Json(serde_json::json!({ "status": "created" })),
@@ -78,7 +103,10 @@ pub async fn remove_binding(
         // A bodyless 204: a generated client decoding a no-content response trips over both a
         // serialized JSON `null` and the `content-type` that shipping one implies.
         // `bindings_routes_test.rs` drives the mounted router and asserts both.
-        Some(_) => StatusCode::NO_CONTENT.into_response(),
+        Some(_) => {
+            sync_live_router(&state, None);
+            StatusCode::NO_CONTENT.into_response()
+        }
         None => (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({ "error": t.t("api-error-binding-index-out-of-range") })),

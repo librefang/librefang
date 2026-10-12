@@ -2390,10 +2390,14 @@ pub async fn security_headers(request: Request<Body>, next: Next) -> Response<Bo
         "referrer-policy",
         "strict-origin-when-cross-origin".parse().unwrap(),
     );
-    headers.insert(
-        "cache-control",
-        "no-store, no-cache, must-revalidate".parse().unwrap(),
-    );
+    // `no-store` is the default for responses whose handler chose no caching policy (every JSON API handler).
+    // A handler that did set one — content-hashed dashboard chunks marked `immutable`, locale bundles, the avatar routes that pair `no-cache` with an ETag and a 304 path — keeps it; overwriting it would make the browser re-download every asset on each load and leave the 304 branches unreachable.
+    if !headers.contains_key(axum::http::header::CACHE_CONTROL) {
+        headers.insert(
+            axum::http::header::CACHE_CONTROL,
+            "no-store, no-cache, must-revalidate".parse().unwrap(),
+        );
+    }
     headers.insert(
         "strict-transport-security",
         "max-age=63072000; includeSubDomains".parse().unwrap(),
@@ -5250,6 +5254,68 @@ mod tests {
             .find(|directive| directive.trim_start().starts_with("script-src "))
             .map(|directive| directive.split_ascii_whitespace().collect())
             .unwrap_or_default()
+    }
+
+    #[tokio::test]
+    async fn security_headers_keeps_handler_cache_control_and_defaults_to_no_store() {
+        let app = Router::new()
+            .route(
+                "/dashboard/assets/app.js",
+                get(|| async {
+                    (
+                        [(
+                            axum::http::header::CACHE_CONTROL,
+                            "public, max-age=86400, immutable",
+                        )],
+                        "chunk",
+                    )
+                }),
+            )
+            .route("/api/health", get(|| async { "{}" }))
+            .layer(axum::middleware::from_fn(security_headers));
+
+        let asset = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/dashboard/assets/app.js")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            asset
+                .headers()
+                .get(axum::http::header::CACHE_CONTROL)
+                .unwrap(),
+            "public, max-age=86400, immutable",
+            "a handler-chosen cache policy must survive the security headers layer"
+        );
+
+        let api = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            api.headers()
+                .get(axum::http::header::CACHE_CONTROL)
+                .unwrap(),
+            "no-store, no-cache, must-revalidate",
+            "a response without its own cache policy must default to no-store"
+        );
+        assert_eq!(
+            api.headers()
+                .get_all(axum::http::header::CACHE_CONTROL)
+                .iter()
+                .count(),
+            1
+        );
     }
 
     /// Both pages the dashboard serves carry an inline script: the login form's submit handler and

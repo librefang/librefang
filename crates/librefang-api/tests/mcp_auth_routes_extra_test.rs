@@ -357,3 +357,87 @@ async fn auth_callback_empty_code_is_rejected_before_token_exchange() {
         );
     }
 }
+
+/// An RFC 6749 §4.1.2.1 error redirect carries `error` + `state` but no `code`.
+/// It must reach the post-state-validation error branch: the auth state becomes `Error` with the IdP's message (so the dashboard leaves PendingAuth) and the per-flow PKCE vault entries are wiped.
+/// It used to be rejected up front as "Missing authorization code.", leaving both the stale PendingAuth state and three orphaned vault entries behind.
+#[tokio::test(flavor = "multi_thread")]
+async fn auth_callback_idp_error_redirect_records_error_and_cleans_vault() {
+    librefang_testing::ensure_test_vault_key();
+    let server_url = "https://example.invalid/mcp";
+    let h = boot_with_servers(vec![entry_http("srv-deny", server_url)]);
+    let provider =
+        librefang_api::mcp_oauth::KernelOAuthProvider::new(h.state.kernel.home_dir().to_path_buf());
+    let flow_state = "flowdeny.n0nce";
+    let prefix = format!("{server_url}:flowdeny");
+    let key =
+        |field: &str| librefang_api::mcp_oauth::KernelOAuthProvider::vault_key(&prefix, field);
+    for (field, value) in [
+        ("pkce_state", flow_state),
+        ("pkce_verifier", "verifier"),
+        ("token_endpoint", "https://example.invalid/token"),
+    ] {
+        provider.vault_set(&key(field), value).expect("seed vault");
+    }
+
+    let (status, body) = send(
+        &h,
+        Method::GET,
+        &format!(
+            "/api/mcp/servers/srv-deny/auth/callback?error=access_denied&error_description=user%20denied&state={flow_state}"
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert!(body.contains("Authorization Failed"), "body: {body}");
+    assert!(
+        body.contains("access_denied"),
+        "expected the IdP error, got: {body}"
+    );
+    assert!(!body.contains("Missing authorization code"), "body: {body}");
+
+    {
+        let states = h.state.kernel.mcp_auth_states_ref().lock().await;
+        match states.get("srv-deny") {
+            Some(McpAuthState::Error { message }) => {
+                assert!(message.contains("access_denied"), "message: {message}")
+            }
+            other => panic!("expected Error state, got {other:?}"),
+        }
+    }
+    for field in ["pkce_state", "pkce_verifier", "token_endpoint"] {
+        assert!(
+            provider
+                .vault_get(&key(field))
+                .expect("vault read")
+                .is_none(),
+            "per-flow field {field} must be removed after an error redirect"
+        );
+    }
+}
+
+/// An error redirect whose `state` does not match the stored one must still be treated as a CSRF probe, not as an IdP error, so an attacker cannot inject an arbitrary error message into the auth state.
+#[tokio::test(flavor = "multi_thread")]
+async fn auth_callback_error_redirect_with_wrong_state_is_rejected_as_csrf() {
+    librefang_testing::ensure_test_vault_key();
+    let server_url = "https://example.invalid/mcp";
+    let h = boot_with_servers(vec![entry_http("srv-csrf", server_url)]);
+    let provider =
+        librefang_api::mcp_oauth::KernelOAuthProvider::new(h.state.kernel.home_dir().to_path_buf());
+    let prefix = format!("{server_url}:flowcsrf");
+    provider
+        .vault_set(
+            &librefang_api::mcp_oauth::KernelOAuthProvider::vault_key(&prefix, "pkce_state"),
+            "flowcsrf.realnonce",
+        )
+        .expect("seed vault");
+
+    let (_, body) = send(
+        &h,
+        Method::GET,
+        "/api/mcp/servers/srv-csrf/auth/callback?error=injected&error_description=evil&state=flowcsrf.wrongnonce",
+    )
+    .await;
+    assert!(body.contains("State parameter mismatch"), "body: {body}");
+    assert!(!body.contains("injected"), "body: {body}");
+}

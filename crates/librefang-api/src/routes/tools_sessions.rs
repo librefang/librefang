@@ -23,6 +23,29 @@ fn session_storage_error(error: impl std::fmt::Display) -> ApiErrorResponse {
     ApiErrorResponse::internal_scrub(error)
 }
 
+/// The set of agent ids (as the substrate's string form) whose sessions the caller may see, or `None` when the caller is unrestricted.
+///
+/// Mirrors [`super::can_access_agent`] (#6753) for the flat `/api/sessions*` routes: the trusted no-auth / loopback mode (`api_user == None`) and Admin+ see every session, while a lower role sees only sessions of agents whose manifest author matches their authenticated name.
+fn accessible_session_agents(
+    state: &AppState,
+    api_user: Option<&axum::Extension<crate::middleware::AuthenticatedApiUser>>,
+) -> Option<std::collections::HashSet<String>> {
+    let user = api_user?;
+    if user.0.role >= crate::middleware::UserRole::Admin {
+        return None;
+    }
+    Some(
+        state
+            .kernel
+            .agent_registry()
+            .list_arcs()
+            .into_iter()
+            .filter(|entry| entry.manifest.author.eq_ignore_ascii_case(&user.0.name))
+            .map(|entry| entry.id.0.to_string())
+            .collect(),
+    )
+}
+
 /// Build the tools + sessions sub-router. Mounted via `.merge(...)` from
 /// `system::router()` so all paths remain rooted at `/api/...` exactly as
 /// before.
@@ -439,9 +462,12 @@ impl PaginationParams {
 pub async fn list_sessions(
     State(state): State<Arc<AppState>>,
     Query(pagination): Query<PaginationParams>,
+    api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
 ) -> impl IntoResponse {
     let offset = pagination.effective_offset();
     let limit = pagination.effective_limit();
+    // Owner-scoping (#6753): a caller below Admin only sees sessions of agents they authored, exactly as `/api/agents/{id}/sessions` already enforces.
+    let scope = accessible_session_agents(&state, api_user.as_ref());
     // Snapshot of in-flight session IDs from the kernel runtime — the
     // SQLite substrate has no view into liveness, so we merge it in here
     // (#4290). Taken once per request before the SQL call so every row
@@ -452,12 +478,31 @@ pub async fn list_sessions(
     // the blocking pool so a large or contended sessions table cannot stall
     // the Tokio worker serving unrelated requests.
     let query_result = tokio::task::spawn_blocking(move || {
-        // Push pagination into SQLite so we don't deserialize every session
-        // blob (#3485).
-        let total = substrate.count_sessions()?;
-        substrate
-            .list_sessions_paginated(Some(limit), offset)
-            .map(|items| (items, total, offset, limit))
+        match scope {
+            // Push pagination into SQLite so we don't deserialize every session blob (#3485).
+            None => {
+                let total = substrate.count_sessions()?;
+                substrate
+                    .list_sessions_paginated(Some(limit), offset)
+                    .map(|items| (items, total, offset, limit))
+            }
+            Some(allowed) if allowed.is_empty() => Ok((Vec::new(), 0, offset, limit)),
+            // The substrate has no agent-set filter, so a scoped caller pays a full scan and the window is applied after filtering; `total` is then exact for what this caller may see.
+            Some(allowed) => {
+                let visible: Vec<serde_json::Value> = substrate
+                    .list_sessions_paginated(None, 0)?
+                    .into_iter()
+                    .filter(|row| {
+                        row.get("agent_id")
+                            .and_then(|v| v.as_str())
+                            .is_some_and(|id| allowed.contains(id))
+                    })
+                    .collect();
+                let total = visible.len();
+                let items = visible.into_iter().skip(offset).take(limit).collect();
+                Ok((items, total, offset, limit))
+            }
+        }
     })
     .await;
     // Canonical paginated envelope (#3842): {items,total,offset,limit}.
@@ -511,6 +556,7 @@ pub async fn get_session(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
     lang: Option<axum::Extension<RequestLanguage>>,
+    api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
 ) -> impl IntoResponse {
     let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
     let session_id = match id.parse::<uuid::Uuid>() {
@@ -526,6 +572,16 @@ pub async fn get_session(
         .memory_substrate()
         .get_session_with_created_at(session_id)
     {
+        // Owner-scoping (#6753): a session of an agent the caller cannot access is reported exactly like a missing one, so the full transcript is never served across owners and the id cannot be probed for existence.
+        Ok(Some((session, _)))
+            if !super::caller_may_access_agent_data(
+                &state,
+                session.agent_id,
+                api_user.as_ref(),
+            ) =>
+        {
+            ApiErrorResponse::not_found(t.t("api-error-session-not-found")).into_json_tuple()
+        }
         Ok(Some((session, created_at))) => {
             // Mirror the list endpoint and surface the kernel runtime's
             // liveness bit (#4290) so single-session fetches don't lie
@@ -797,6 +853,7 @@ pub async fn find_session_by_label(
     State(state): State<Arc<AppState>>,
     Path((agent_id_str, label)): Path<(String, String)>,
     lang: Option<axum::Extension<RequestLanguage>>,
+    api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
 ) -> impl IntoResponse {
     let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
     let agent_id = match agent_id_str.parse::<uuid::Uuid>() {
@@ -812,6 +869,11 @@ pub async fn find_session_by_label(
             }
         }
     };
+
+    // Owner-scoping (#6753): same 404 the per-agent session routes return for an agent the caller did not author.
+    if !super::caller_may_access_agent_data(&state, agent_id, api_user.as_ref()) {
+        return ApiErrorResponse::not_found(t.t("api-error-agent-not-found")).into_json_tuple();
+    }
 
     match state
         .kernel
@@ -889,13 +951,15 @@ pub async fn session_cleanup(State(state): State<Arc<AppState>>) -> impl IntoRes
     ),
     responses(
         (status = 200, description = "Search results", body = crate::types::JsonObject),
-        (status = 400, description = "Missing query parameter"),
+        (status = 400, description = "Missing query parameter or malformed agent_id"),
+        (status = 404, description = "agent_id filter names an agent the caller may not access"),
     )
 )]
 pub async fn search_sessions(
     State(state): State<Arc<AppState>>,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
     Query(pagination): Query<PaginationParams>,
+    api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
 ) -> impl IntoResponse {
     let query = match params.get("q") {
         Some(q) if !q.is_empty() => q.clone(),
@@ -905,11 +969,26 @@ pub async fn search_sessions(
         }
     };
 
-    let agent_id = params.get("agent_id").and_then(|id| {
-        uuid::Uuid::parse_str(id)
-            .ok()
-            .map(librefang_types::agent::AgentId)
-    });
+    // A malformed filter is rejected rather than dropped: silently ignoring it widened a search the caller meant to narrow to one agent into a search over every session.
+    // An empty `agent_id=` (a form or client that always sends the key) still means "no filter", as it did before.
+    let agent_id = match params.get("agent_id").map(|id| id.trim()) {
+        None | Some("") => None,
+        Some(id) => match uuid::Uuid::parse_str(id) {
+            Ok(u) => Some(librefang_types::agent::AgentId(u)),
+            Err(_) => {
+                return ApiErrorResponse::bad_request("invalid 'agent_id' parameter")
+                    .into_json_tuple();
+            }
+        },
+    };
+
+    // Owner-scoping (#6753): a caller below Admin searches only sessions of agents they authored.
+    let scope = accessible_session_agents(&state, api_user.as_ref());
+    if let (Some(allowed), Some(aid)) = (scope.as_ref(), agent_id.as_ref()) {
+        if !allowed.contains(&aid.0.to_string()) {
+            return ApiErrorResponse::not_found("Agent not found").into_json_tuple();
+        }
+    }
 
     // Reuse the shared cap policy (default 50 / max 500) instead of
     // re-implementing it from the raw query map. Multiple `Query<T>`
@@ -923,8 +1002,20 @@ pub async fn search_sessions(
     // Same rationale as /api/sessions (#6986): this FTS5 query runs a
     // synchronous SQLite connection, so keep it off the Tokio worker
     // rather than blocking whichever one happens to serve this request.
-    let search_result = tokio::task::spawn_blocking(move || {
-        substrate.search_sessions_paginated(&query, agent_id.as_ref(), Some(limit), offset)
+    // A scoped caller without an explicit (already authorized) agent filter cannot have the agent set pushed into SQL, so the unpaginated hit list is filtered here and the window applied afterwards.
+    let filter_rows = scope.filter(|_| agent_id.is_none());
+    let search_result = tokio::task::spawn_blocking(move || match filter_rows {
+        None => substrate.search_sessions_paginated(&query, agent_id.as_ref(), Some(limit), offset),
+        Some(allowed) if allowed.is_empty() => Ok(Vec::new()),
+        Some(allowed) => substrate
+            .search_sessions_paginated(&query, None, None, 0)
+            .map(|hits| {
+                hits.into_iter()
+                    .filter(|hit| allowed.contains(&hit.agent_id))
+                    .skip(offset)
+                    .take(limit)
+                    .collect()
+            }),
     })
     .await;
 

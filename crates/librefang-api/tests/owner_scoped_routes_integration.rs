@@ -254,6 +254,91 @@ async fn non_admin_agent_session_mutations_are_blocked_by_rbac_middleware() {
     }
 }
 
+/// A wrong export file is the caller's mistake: the import route must answer 400 with the kernel's reason, not a scrubbed 500, and an unknown agent must be a 404.
+#[tokio::test(flavor = "multi_thread")]
+async fn import_session_reports_bad_exports_as_400_and_unknown_agent_as_404() {
+    let h = boot().await;
+    let agent_id = spawn_authored(&h.state, "Admin");
+    let created = h
+        .state
+        .kernel
+        .create_agent_session(agent_id, Some("import-errors-test"))
+        .expect("create materialized session");
+    let session_id = created["session_id"].as_str().expect("session id");
+    let export = serde_json::to_value(
+        h.state
+            .kernel
+            .export_session(agent_id, session_id.parse().expect("parse session id"))
+            .expect("export initial session"),
+    )
+    .expect("serialize export");
+    let with = |key: &str, value: serde_json::Value| {
+        let mut body = export.clone();
+        body[key] = value;
+        body
+    };
+    let message = serde_json::to_value(librefang_types::message::Message::user("hello"))
+        .expect("serialize message");
+
+    let import = |aid: String, body: serde_json::Value| {
+        let app = h.app.clone();
+        async move {
+            let response = app
+                .oneshot(
+                    Request::builder()
+                        .method(Method::POST)
+                        .uri(format!("/api/agents/{aid}/sessions/import"))
+                        .header("authorization", format!("Bearer {ADMIN_KEY}"))
+                        .header("content-type", "application/json")
+                        .body(Body::from(serde_json::to_vec(&body).expect("serialize")))
+                        .expect("build request"),
+                )
+                .await
+                .expect("route response");
+            let status = response.status();
+            let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+                .await
+                .expect("body");
+            let json: serde_json::Value =
+                serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+            (status, json)
+        }
+    };
+
+    let aid = agent_id.to_string();
+    let cases = [
+        (
+            with("version", serde_json::json!(2)),
+            "Unsupported session export version",
+        ),
+        (
+            with("agent_id", serde_json::json!(AgentId::new().to_string())),
+            "was exported from agent",
+        ),
+        (with("messages", serde_json::json!([])), "no messages"),
+    ];
+    for (body, reason) in cases {
+        let (status, json) = import(aid.clone(), body).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{reason}: {json}");
+        assert!(
+            json["error"].as_str().is_some_and(|e| e.contains(reason)),
+            "the 400 must carry the kernel's reason ({reason}), got {json}"
+        );
+    }
+
+    // The same export with a message imports cleanly, so the 400s above are about the export and not the route.
+    let (status, json) = import(aid, with("messages", serde_json::json!([message]))).await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+
+    let missing = AgentId::new().to_string();
+    let (status, json) = import(
+        missing.clone(),
+        with("agent_id", serde_json::json!(missing)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{json}");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn trigger_routes_enforce_owner_read_and_rbac_mutations() {
     use librefang_kernel::triggers::TriggerPattern;
