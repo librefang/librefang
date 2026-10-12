@@ -5,7 +5,7 @@
 use rusqlite::Connection;
 
 /// Current schema version.
-const SCHEMA_VERSION: u32 = 62;
+const SCHEMA_VERSION: u32 = 63;
 
 /// Run all migrations to bring the database up to date.
 pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
@@ -319,6 +319,9 @@ pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
     // on `current_version < N` read once at boot, so a database that reaches N
     // with a hole below it never runs the skipped step.
     run_step!(62, migrate_v62);
+
+    // v63: indexes for the dashboard's polled listings (sessions by `created_at`, memories by `created_at`) and the `sessions_fts_map` rowid map that lets `save_session` replace its FTS row without scanning the whole index.
+    run_step!(63, migrate_v63);
 
     // Audit-trail consistency (#3538): user_version must match the count
     // of distinct rows in `migrations`. Drift means an earlier migration
@@ -1590,6 +1593,61 @@ fn migrate_v62(conn: &Connection) -> Result<(), rusqlite::Error> {
     conn.execute(
         "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
          VALUES (62, datetime('now'), 'Per-task claim TTL override on task_queue (timeout_secs)')",
+        [],
+    )?;
+    Ok(())
+}
+
+/// v63: indexes and an FTS rowid map for hot read and write paths.
+///
+/// `sessions(created_at)` serves `list_sessions_paginated`'s `ORDER BY created_at DESC LIMIT`, which `GET /api/sessions` runs on every dashboard poll, and the 24h window of `agents_stats_24h_bulk`.
+/// Without it every page was a full scan of `sessions` (whose rows carry the message blob) followed by a temp b-tree sort.
+/// `sessions(agent_id, created_at)` turns `agent_stats_24h`'s per-agent window counts into range seeks.
+/// `memories(deleted, agent_id, created_at)` and `memories(deleted, created_at)` let `SemanticStore::list_page` read one page in order instead of visiting every live memory and sorting.
+///
+/// `sessions_fts_map` records which `sessions_fts` rowid holds each session's index row.
+/// `session_id` is `UNINDEXED` in the FTS5 table and an FTS5 table has no secondary index, so `DELETE FROM sessions_fts WHERE session_id = ?` is a full scan of the index; `save_session` ran it on every save, holding the write lock for time proportional to the total number of sessions.
+/// With the map, the row is addressed by rowid.
+/// Duplicate FTS rows for one session are collapsed first so the backfill maps every session to its only row, and the `AFTER DELETE` trigger drops a session's map entry with the session, whichever delete path removes it.
+/// Only rows of live sessions are mapped: an orphan FTS row's session can never be deleted, so its map entry would never be dropped by the trigger (`reconcile_fts_index` removes such orphans at boot).
+/// A stale or missing entry is harmless: `save_session` checks the mapped row still belongs to the session and falls back to the scan otherwise.
+fn migrate_v63(conn: &Connection) -> Result<(), rusqlite::Error> {
+    conn.execute_batch(
+        "
+        CREATE INDEX IF NOT EXISTS idx_sessions_created ON sessions(created_at);
+        CREATE INDEX IF NOT EXISTS idx_sessions_agent_created ON sessions(agent_id, created_at);
+        CREATE TABLE IF NOT EXISTS sessions_fts_map (
+            session_id TEXT PRIMARY KEY,
+            fts_rowid  INTEGER NOT NULL
+        ) WITHOUT ROWID;
+        CREATE TRIGGER IF NOT EXISTS sessions_fts_map_ad AFTER DELETE ON sessions BEGIN
+            DELETE FROM sessions_fts_map WHERE session_id = old.id;
+        END;
+        ",
+    )?;
+    // Every real database has both of these from v1 / v12, but the guards keep the step honest against a database stamped above the step that created them (the ladder tests build such schemas by hand).
+    if try_column_exists(conn, "memories", "deleted")? {
+        conn.execute_batch(
+            "
+            CREATE INDEX IF NOT EXISTS idx_memories_agent_created ON memories(deleted, agent_id, created_at);
+            CREATE INDEX IF NOT EXISTS idx_memories_created ON memories(deleted, created_at);
+            ",
+        )?;
+    }
+    if try_table_exists(conn, "sessions_fts")? {
+        conn.execute_batch(
+            "
+            DELETE FROM sessions_fts
+                WHERE rowid NOT IN (SELECT MAX(rowid) FROM sessions_fts GROUP BY session_id);
+            INSERT OR REPLACE INTO sessions_fts_map (session_id, fts_rowid)
+                SELECT session_id, rowid FROM sessions_fts
+                WHERE session_id IN (SELECT id FROM sessions);
+            ",
+        )?;
+    }
+    conn.execute(
+        "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
+         VALUES (63, datetime('now'), 'sessions/memories created_at indexes + sessions_fts_map rowid map')",
         [],
     )?;
     Ok(())
@@ -5092,5 +5150,72 @@ mod tests {
             d62.contains("timeout_secs"),
             "version 62 must describe the timeout migration, got: {d62}"
         );
+    }
+
+    // ---------------------------------------------------------------------
+    // v63: created_at indexes + sessions_fts_map
+    // ---------------------------------------------------------------------
+
+    /// An upgraded database must come out of v63 with exactly one FTS row per session and every one of them mapped, so `save_session` can address it by rowid.
+    /// Duplicate rows left by older drift are collapsed to the newest; otherwise the mapped delete would leave the other copy searchable.
+    #[test]
+    fn migrate_v63_dedupes_and_maps_existing_fts_rows() {
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+        // Simulate a pre-v63 database: no map, one session with two FTS rows, one with a single row, and an orphan FTS row whose session is gone.
+        conn.execute_batch(
+            "DROP TRIGGER sessions_fts_map_ad;
+             DROP TABLE sessions_fts_map;
+             INSERT INTO sessions (id, agent_id, messages, created_at, updated_at) VALUES ('s1', 'a', x'90', '2026-01-01', '2026-01-01');
+             INSERT INTO sessions (id, agent_id, messages, created_at, updated_at) VALUES ('s2', 'a', x'90', '2026-01-01', '2026-01-01');
+             INSERT INTO sessions_fts (session_id, agent_id, content) VALUES ('s1', 'a', 'old');
+             INSERT INTO sessions_fts (session_id, agent_id, content) VALUES ('s1', 'a', 'new');
+             INSERT INTO sessions_fts (session_id, agent_id, content) VALUES ('s2', 'a', 'only');
+             INSERT INTO sessions_fts (session_id, agent_id, content) VALUES ('gone', 'a', 'orphan');",
+        )
+        .unwrap();
+
+        migrate_v63(&conn).unwrap();
+        migrate_v63(&conn).expect("v63 must survive a rerun");
+
+        let s1: Vec<(i64, String)> = {
+            let mut stmt = conn
+                .prepare("SELECT rowid, content FROM sessions_fts WHERE session_id = 's1'")
+                .unwrap();
+            let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+            rows.map(|r| r.unwrap()).collect()
+        };
+        assert_eq!(s1.len(), 1, "duplicates must be collapsed: {s1:?}");
+        assert_eq!(s1[0].1, "new", "the newest row is the one kept");
+        let mapped: i64 = conn
+            .query_row(
+                "SELECT fts_rowid FROM sessions_fts_map WHERE session_id = 's1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(mapped, s1[0].0);
+        let mapped_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM sessions_fts_map", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            mapped_count, 2,
+            "only live sessions are mapped; an orphan's entry would never be dropped by the delete trigger"
+        );
+        for index in [
+            "idx_sessions_created",
+            "idx_sessions_agent_created",
+            "idx_memories_agent_created",
+            "idx_memories_created",
+        ] {
+            let n: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = ?1",
+                    [index],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(n, 1, "{index} must exist after v63");
+        }
     }
 }

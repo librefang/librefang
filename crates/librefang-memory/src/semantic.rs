@@ -1565,50 +1565,36 @@ impl SemanticStore {
         let offset = i64::try_from(offset).unwrap_or(i64::MAX);
         let limit = i64::try_from(limit).unwrap_or(i64::MAX);
 
+        let (count_sql, page_sql) =
+            list_page_sql(agent_id.is_some(), category.is_some(), scope.is_some());
+        // Bound in the order `list_page_sql` appends the filters.
+        let mut filter_params: Vec<&dyn rusqlite::ToSql> = Vec::new();
+        if let Some(agent_id) = agent_id.as_ref() {
+            filter_params.push(agent_id);
+        }
+        if let Some(category) = category.as_ref() {
+            filter_params.push(category);
+        }
+        if let Some(scope) = scope.as_ref() {
+            filter_params.push(scope);
+        }
+
         let total: i64 = tx
             .query_row(
-                "SELECT COUNT(*) FROM memories
-                 WHERE deleted = 0
-                   AND CASE
-                         WHEN json_valid(metadata) THEN json_type(metadata) = 'object'
-                         ELSE 0
-                       END
-                   AND (?1 IS NULL OR agent_id = ?1)
-                   AND (?2 IS NULL OR json_extract(
-                         CASE WHEN json_valid(metadata) THEN metadata ELSE '{}' END,
-                         '$.category'
-                       ) = ?2)
-                   AND (?3 IS NULL OR scope = ?3)",
-                rusqlite::params![agent_id.as_deref(), category, scope],
+                &count_sql,
+                rusqlite::params_from_iter(filter_params.iter()),
                 |row| row.get(0),
             )
             .map_err(LibreFangError::memory)?;
 
         let fragments = {
-            let mut stmt = tx
-                .prepare(
-                    "SELECT id, agent_id, content, source, scope, confidence, metadata,
-                            created_at, accessed_at, access_count, embedding, image_url,
-                            image_embedding, modality
-                     FROM memories
-                     WHERE deleted = 0
-                       AND CASE
-                             WHEN json_valid(metadata) THEN json_type(metadata) = 'object'
-                             ELSE 0
-                           END
-                       AND (?1 IS NULL OR agent_id = ?1)
-                       AND (?2 IS NULL OR json_extract(
-                             CASE WHEN json_valid(metadata) THEN metadata ELSE '{}' END,
-                             '$.category'
-                           ) = ?2)
-                       AND (?3 IS NULL OR scope = ?3)
-                     ORDER BY created_at DESC, id DESC
-                     LIMIT ?4 OFFSET ?5",
-                )
-                .map_err(LibreFangError::memory)?;
+            let mut stmt = tx.prepare(&page_sql).map_err(LibreFangError::memory)?;
+            let mut page_params = filter_params.clone();
+            page_params.push(&limit);
+            page_params.push(&offset);
             let rows = stmt
                 .query_map(
-                    rusqlite::params![agent_id.as_deref(), category, scope, limit, offset],
+                    rusqlite::params_from_iter(page_params.iter()),
                     decode_memory_row,
                 )
                 .map_err(LibreFangError::memory)?;
@@ -1948,6 +1934,46 @@ fn embedding_from_bytes(bytes: &[u8]) -> Vec<f32> {
         .iter()
         .map(|chunk| f32::from_le_bytes(*chunk))
         .collect()
+}
+
+/// Build the COUNT and page queries for `SemanticStore::list_page`.
+///
+/// Each filter is appended only when it is present, binding one positional `?` in the order agent, category, scope; the page query then binds `LIMIT ?` and `OFFSET ?`.
+/// The previous `(?1 IS NULL OR agent_id = ?1)` form cannot use an index, so every listing visited every live memory of every agent, ran the JSON checks on each and sorted them all.
+/// A plain `agent_id = ?` lets the planner read `idx_memories_agent_created` (v63) in `created_at` order and stop after one page.
+fn list_page_sql(has_agent: bool, has_category: bool, has_scope: bool) -> (String, String) {
+    let mut filter = String::from(
+        "deleted = 0
+           AND CASE
+                 WHEN json_valid(metadata) THEN json_type(metadata) = 'object'
+                 ELSE 0
+               END",
+    );
+    if has_agent {
+        filter.push_str("\n           AND agent_id = ?");
+    }
+    if has_category {
+        filter.push_str(
+            "\n           AND json_extract(
+                 CASE WHEN json_valid(metadata) THEN metadata ELSE '{}' END,
+                 '$.category'
+               ) = ?",
+        );
+    }
+    if has_scope {
+        filter.push_str("\n           AND scope = ?");
+    }
+    let count_sql = format!("SELECT COUNT(*) FROM memories WHERE {filter}");
+    let page_sql = format!(
+        "SELECT id, agent_id, content, source, scope, confidence, metadata,
+                created_at, accessed_at, access_count, embedding, image_url,
+                image_embedding, modality
+         FROM memories
+         WHERE {filter}
+         ORDER BY created_at DESC, id DESC
+         LIMIT ? OFFSET ?"
+    );
+    (count_sql, page_sql)
 }
 
 /// Row decoder shared by `MemoryStore::get_by_id` and
@@ -2294,6 +2320,50 @@ mod tests {
             .unwrap();
         run_migrations(&pool.get().unwrap()).unwrap();
         SemanticStore::new(pool)
+    }
+
+    fn list_page_plan(store: &SemanticStore, sql: &str) -> String {
+        let conn = store.pool.get().unwrap();
+        let mut stmt = conn.prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap();
+        let params: Vec<String> = (0..stmt.parameter_count())
+            .map(|_| "x".to_string())
+            .collect();
+        let rows = stmt
+            .query_map(rusqlite::params_from_iter(params.iter()), |row| {
+                row.get::<_, String>(3)
+            })
+            .unwrap();
+        rows.map(|r| r.unwrap()).collect::<Vec<_>>().join("\n")
+    }
+
+    /// A per-agent memory page must seek the agent's rows in `created_at` order and stop after one page.
+    /// The previous `(?1 IS NULL OR agent_id = ?1)` filter could not use an index, so it visited every live memory of every agent and sorted them all.
+    #[test]
+    fn list_page_per_agent_plan_reads_one_page_in_order() {
+        let store = setup();
+        let (count_sql, page_sql) = list_page_sql(true, false, false);
+        let page_plan = list_page_plan(&store, &page_sql);
+        assert!(
+            page_plan.contains("idx_memories_agent_created") && page_plan.contains("agent_id=?"),
+            "page must seek idx_memories_agent_created by agent; plan:\n{page_plan}"
+        );
+        assert!(
+            !page_plan.contains("TEMP B-TREE FOR ORDER BY"),
+            "page must not sort every matching memory; plan:\n{page_plan}"
+        );
+        let count_plan = list_page_plan(&store, &count_sql);
+        assert!(
+            count_plan.contains("agent_id=?"),
+            "count must seek by agent; plan:\n{count_plan}"
+        );
+
+        let (_, global_sql) = list_page_sql(false, false, false);
+        let global_plan = list_page_plan(&store, &global_sql);
+        assert!(
+            global_plan.contains("idx_memories_created")
+                && !global_plan.contains("TEMP B-TREE FOR ORDER BY"),
+            "the unfiltered page must read idx_memories_created in order; plan:\n{global_plan}"
+        );
     }
 
     /// Overwrite a row's confidence so eviction ordering can be exercised without

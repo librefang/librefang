@@ -546,6 +546,14 @@ impl MemorySubstrate {
         self.structured.set_returning_existed(agent_id, key, value)
     }
 
+    /// Read a session's scalar columns (owner, model override, token estimate, peer) without decoding its message history.
+    pub fn session_meta(
+        &self,
+        session_id: SessionId,
+    ) -> LibreFangResult<Option<crate::session::SessionMeta>> {
+        self.sessions.session_meta(session_id)
+    }
+
     /// Get a session by ID.
     pub fn get_session(&self, session_id: SessionId) -> LibreFangResult<Option<Session>> {
         self.sessions.get_session(session_id)
@@ -721,13 +729,13 @@ impl MemorySubstrate {
         self.sessions.create_session_with_label(agent_id, label)
     }
 
-    /// Delete sessions older than `retention_days`. Returns count deleted.
-    pub fn cleanup_expired_sessions(&self, retention_days: u32) -> LibreFangResult<u64> {
+    /// Delete sessions older than `retention_days`. Returns the ids deleted.
+    pub fn cleanup_expired_sessions(&self, retention_days: u32) -> LibreFangResult<Vec<SessionId>> {
         self.sessions.cleanup_expired_sessions(retention_days)
     }
 
-    /// For each agent, keep only the newest `max_per_agent` sessions. Returns count deleted.
-    pub fn cleanup_excess_sessions(&self, max_per_agent: u32) -> LibreFangResult<u64> {
+    /// For each agent, keep only the newest `max_per_agent` sessions. Returns the ids deleted.
+    pub fn cleanup_excess_sessions(&self, max_per_agent: u32) -> LibreFangResult<Vec<SessionId>> {
         self.sessions.cleanup_excess_sessions(max_per_agent)
     }
 
@@ -1914,6 +1922,20 @@ impl MemorySubstrate {
         .map_err(|e| LibreFangError::Internal(e.to_string()))?
     }
 
+    /// Async wrapper for [`Self::write_jsonl_mirror`].
+    ///
+    /// The mirror re-serializes the whole session on every turn, so on a long session it is real blocking file I/O and must not run on a Tokio worker.
+    pub async fn write_jsonl_mirror_async(
+        &self,
+        session: Session,
+        sessions_dir: std::path::PathBuf,
+    ) -> Result<(), std::io::Error> {
+        let store = self.sessions.clone();
+        tokio::task::spawn_blocking(move || store.write_jsonl_mirror(&session, &sessions_dir))
+            .await
+            .map_err(std::io::Error::other)?
+    }
+
     /// Async wrapper for [`Self::vacuum_if_shrank`]. VACUUM rewrites the
     /// whole DB file and can take seconds — keeping it on the blocking
     /// pool is even more important than for the small CRUD wrappers above.
@@ -2202,6 +2224,40 @@ mod tests {
         // Zero is the documented "no cap" value and must survive as zero rather than being coerced back to the default.
         substrate.set_max_episodic_chars(0);
         assert_eq!(substrate.max_episodic_chars(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_write_jsonl_mirror_async_runs_off_the_worker() {
+        // A current-thread runtime has a single worker: a task spawned before the mirror write can only run while that write yields, which the old synchronous call never did.
+        let substrate = MemorySubstrate::open_in_memory(0.1).unwrap();
+        let mut session = substrate.create_session(AgentId::new()).unwrap();
+        for i in 0..200 {
+            session.push_message(librefang_types::message::Message::user(format!(
+                "message {i}"
+            )));
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let ran = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let observer = {
+            let ran = Arc::clone(&ran);
+            tokio::spawn(async move { ran.store(true, std::sync::atomic::Ordering::SeqCst) })
+        };
+        substrate
+            .write_jsonl_mirror_async(session.clone(), dir.path().join("sessions"))
+            .await
+            .unwrap();
+        assert!(
+            ran.load(std::sync::atomic::Ordering::SeqCst),
+            "the mirror write must yield the worker while the file is written"
+        );
+        observer.await.unwrap();
+        let written = std::fs::read_to_string(
+            dir.path()
+                .join("sessions")
+                .join(format!("{}.jsonl", session.id.0)),
+        )
+        .unwrap();
+        assert_eq!(written.lines().count(), 200);
     }
 
     #[tokio::test]
