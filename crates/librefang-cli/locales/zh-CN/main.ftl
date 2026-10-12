@@ -317,6 +317,8 @@ config-update-key-hint = 更新密钥：librefang config set-key { $provider }
 
 # --- Hand commands ---
 hand-install-deps-success = 已为 hand '{ $id }' 安装依赖。
+hand-install-deps-dep-failed = { $key }（{ $status }）：{ $message }
+hand-install-deps-dep-still-missing = { $key }：必需的依赖仍然缺失
 hand-paused = Hand 实例 '{ $id }' 已暂停。
 hand-resumed = Hand 实例 '{ $id }' 已恢复。
 

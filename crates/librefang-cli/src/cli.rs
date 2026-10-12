@@ -1042,7 +1042,7 @@ pub(crate) enum HandCommands {
     },
     /// Check dependency status for a hand.
     #[command(
-        long_about = "Check whether all required dependencies for a hand are installed.\n\nExamples:\n  librefang hand check-deps clip"
+        long_about = "Check whether all required dependencies for a hand are installed.\n\nExits 1 when a required (non-optional) dependency is unmet.\n\nExamples:\n  librefang hand check-deps clip"
     )]
     CheckDeps {
         /// Hand ID.
@@ -1050,7 +1050,7 @@ pub(crate) enum HandCommands {
     },
     /// Install missing dependencies for a hand.
     #[command(
-        long_about = "Install any missing dependencies required by a hand.\n\nExamples:\n  librefang hand install-deps clip"
+        long_about = "Install any missing dependencies required by a hand.\n\nExits 1 when a required (non-optional) dependency is still unmet afterwards; a failed optional install is reported but does not fail the command.\n\nExamples:\n  librefang hand install-deps clip"
     )]
     InstallDeps {
         /// Hand ID.
