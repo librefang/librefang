@@ -1057,9 +1057,14 @@ impl AuditLog {
         // update `chain_anchor` to the hash of the last dropped entry
         // so `verify_integrity()` keeps working across the trim
         // boundary.
+        //
+        // The drain goes down to a low-water mark a tenth below the cap rather than to the cap itself.
+        // Draining to exactly the cap made every append past it shift the whole window (about 2 MB at the 10k default) one slot forward while holding the `entries` lock, which also stalls `recent()` and `verify_integrity`.
+        // With the gap, the shift happens once per `soft_cap / 10` appends, and the window still never exceeds the cap.
         let soft_cap = self.effective_soft_cap();
         if entries.len() > soft_cap {
-            let overflow = entries.len() - soft_cap;
+            let low_water = soft_cap - soft_cap / 10;
+            let overflow = entries.len() - low_water;
             let new_anchor = entries[overflow - 1].hash.clone();
             {
                 let mut anchor = lock_audit_recover(&self.chain_anchor, "chain_anchor");
