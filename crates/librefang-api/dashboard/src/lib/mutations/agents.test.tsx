@@ -18,6 +18,7 @@ import {
   useRestoreAgentManifestVersion,
 } from "./agents";
 import {
+  agentFileKeys,
   agentKeys,
   approvalKeys,
   budgetKeys,
@@ -135,6 +136,26 @@ describe("usePatchAgent", () => {
     });
     expect(invalidateSpy).toHaveBeenCalledWith({
       queryKey: agentKeys.detail("agent-1"),
+    });
+    // The daemon rewrites IDENTITY.md's `name:` on a rename; a cached pre-rename copy would let the IDENTITY.md editor write the old name back (#8516).
+    expect(invalidateSpy).toHaveBeenCalledWith({
+      queryKey: agentFileKeys.detail("agent-1", "IDENTITY.md"),
+    });
+  });
+
+  it("leaves the cached IDENTITY.md alone for a write that cannot touch it", async () => {
+    const { queryClient, wrapper } = createQueryClientWrapper();
+    const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");
+
+    const { result } = renderHook(() => usePatchAgent(), { wrapper });
+
+    await result.current.mutateAsync({
+      agentId: "agent-1",
+      body: { auto_evolve: false },
+    });
+
+    expect(invalidateSpy).not.toHaveBeenCalledWith({
+      queryKey: agentFileKeys.detail("agent-1", "IDENTITY.md"),
     });
   });
 });

@@ -1,6 +1,13 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { render, screen } from "@testing-library/react";
 import { CollapsibleSection } from "./CollapsibleSection";
+
+vi.mock("react-i18next", () => ({
+  useTranslation: () => ({
+    t: (_key: string, opts?: { defaultValue?: string }) =>
+      opts?.defaultValue ?? _key,
+  }),
+}));
 
 describe("CollapsibleSection", () => {
   it("starts folded so a long form does not open as a wall", () => {
@@ -98,5 +105,31 @@ describe("CollapsibleSection", () => {
     // The value is still in the DOM: folding must not unmount a control, or
     // the field would silently reset every time the section was collapsed.
     expect(screen.getByLabelText("threshold")).toHaveValue("100");
+  });
+
+  it("shows the count next to the title, and nothing at zero or when absent", () => {
+    const { rerender } = render(
+      <CollapsibleSection title="Routing" count={3}>
+        <p>body</p>
+      </CollapsibleSection>,
+    );
+    const summary = screen.getByText("Routing").closest("summary")!;
+    expect(summary).toHaveTextContent("3");
+
+    // Zero and undefined are the same answer — no fields to advertise — and a
+    // "0" would read as a section that failed to load.
+    rerender(
+      <CollapsibleSection title="Routing" count={0}>
+        <p>body</p>
+      </CollapsibleSection>,
+    );
+    expect(summary).not.toHaveTextContent(/\d/);
+
+    rerender(
+      <CollapsibleSection title="Routing">
+        <p>body</p>
+      </CollapsibleSection>,
+    );
+    expect(summary).not.toHaveTextContent(/\d/);
   });
 });

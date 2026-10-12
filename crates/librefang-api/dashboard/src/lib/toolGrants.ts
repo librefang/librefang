@@ -50,6 +50,36 @@ export function toolPatternMatches(pattern: string, value: string): boolean {
   );
 }
 
+/** Whether an agent's `capabilities.tools` admits `toolName`.
+ *
+ * The kernel's Step 1 filter (`tools_and_skills.rs`) has two branches, and the
+ * first is the one that is easy to get wrong:
+ *
+ * ```text
+ * tools_unrestricted = declared_tools.is_empty() || declared_tools.iter().any(|t| t == "*")
+ * ```
+ *
+ * An empty list means **unrestricted**, not "nothing granted" — a lint that
+ * read it as the latter would flag every agent that never wrote a
+ * `[capabilities]` block, which is most of them. Otherwise a builtin survives
+ * when any declared pattern matches it via `glob_matches`, which is what
+ * `toolPatternMatches` above mirrors. `"*"` needs no special case here because
+ * `toolPatternMatches` already returns `true` for it.
+ *
+ * Read-only display helper, like the rest of this module: the kernel is the
+ * gate, and this exists so the dashboard can say what the gate will do without
+ * restating the rule differently.
+ */
+export function isToolAdmittedByCapabilities(
+  toolName: string,
+  declaredTools: readonly string[],
+): boolean {
+  return (
+    declaredTools.length === 0 ||
+    declaredTools.some((pattern) => toolPatternMatches(pattern, toolName))
+  );
+}
+
 /** Whether `toolName` is filtered out by a `tool_blocklist`. */
 export function isToolBlocked(toolName: string, blocklist: readonly string[]): boolean {
   return blocklist.some((pattern) => toolPatternMatches(pattern, toolName));

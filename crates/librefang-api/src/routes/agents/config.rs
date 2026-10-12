@@ -231,6 +231,10 @@ pub struct SetAgentToolsRequest {
     /// Until #7742 the GET returned it and no request could write it, and every successful write forced it back to `false` — so an operator editing a blocklist re-enabled every tool without asking.
     #[serde(default)]
     pub disabled: Option<bool>,
+    /// Manifest ETag from `GET /api/agents/{id}/manifest` (#8424).
+    /// When present and no longer current the request is refused with 409 instead of silently overwriting a write made after the read.
+    #[serde(default)]
+    pub expected_version: Option<String>,
 }
 
 /// PUT /api/agents/{id}/tools — Update an agent's tool allowlist/blocklist.
@@ -245,6 +249,7 @@ pub struct SetAgentToolsRequest {
     ),
     responses(
         (status = 200, description = "Updated tool configuration, echoing the stored `capabilities_tools`, `tool_allowlist`, `tool_blocklist` and `disabled` values. Carries an additional `warnings` array of strings naming each stored `tool_allowlist` entry that provably cannot admit any tool; the key is absent when there is nothing to report. The check runs whenever the request submits `tool_allowlist` or `capabilities_tools` — narrowing the grant surface is itself a way to render a stored entry inert — and is skipped for a request that submits only `tool_blocklist` or only `disabled`, and for an agent left with `tools_disabled = true`, where no allowlist entry can admit anything anyway.", body = crate::types::JsonObject),
+        (status = 409, description = "The `expected_version` no longer matches the live manifest; another writer saved after the read. Reload and re-apply (#8424)", body = crate::types::JsonObject),
         (status = 423, description = "This agent is provisioned by the deployment; its manifest cannot be changed through the API", body = crate::types::JsonObject)
     )
 )]
@@ -268,6 +273,14 @@ pub async fn set_agent_tools(
     // #6695: refuse to change the manifest of an agent the deployment provisioned.
     if let Some(refusal) = super::guard_provisioned_agent(&state, agent_id) {
         return refusal;
+    }
+
+    // #8424: this PUT writes the same manifest the editor's form writes, so it
+    // accepts the same optimistic-concurrency token.
+    if let Some(conflict) =
+        check_expected_manifest_version(&state, agent_id, body.expected_version.as_deref(), &t)
+    {
+        return conflict;
     }
 
     if body.capabilities_tools.is_none()
@@ -421,9 +434,10 @@ pub async fn get_agent_skills(
     path = "/api/agents/{id}/skills",
     tag = "agents",
     params(("id" = String, Path, description = "Agent ID")),
-    request_body(content = crate::types::JsonArray, description = "Array of skill names"),
+    request_body(content = crate::types::JsonObject, description = "Object with the `skills` array to store. `expected_version` (optional) is the `ETag` from `GET /api/agents/{id}/manifest`; a mismatch answers 409 (#8424)."),
     responses(
         (status = 200, description = "Update an agent's skill allowlist", body = crate::types::JsonObject),
+        (status = 409, description = "The `expected_version` no longer matches the live manifest; another writer saved after the read. Reload and re-apply (#8424)", body = crate::types::JsonObject),
         (status = 423, description = "This agent is provisioned by the deployment; its manifest cannot be changed through the API", body = crate::types::JsonObject)
     )
 )]
@@ -447,6 +461,16 @@ pub async fn set_agent_skills(
     // #6695: refuse to change the manifest of an agent the deployment provisioned.
     if let Some(refusal) = super::guard_provisioned_agent(&state, agent_id) {
         return refusal;
+    }
+    // #8424: this PUT writes the same manifest the editor's form writes, so it
+    // accepts the same optimistic-concurrency token.
+    if let Some(conflict) = check_expected_manifest_version(
+        &state,
+        agent_id,
+        body.get("expected_version").and_then(|v| v.as_str()),
+        &t,
+    ) {
+        return conflict;
     }
     let skills: Vec<String> = body["skills"]
         .as_array()
@@ -558,6 +582,10 @@ pub struct SetAgentMcpServersRequest {
     /// MCP server names assigned to the agent.
     /// An empty list disables MCP servers for the agent; `["*"]` enables all connected servers.
     pub mcp_servers: Vec<String>,
+    /// Manifest ETag from `GET /api/agents/{id}/manifest` (#8424).
+    /// When present and no longer current the request is refused with 409 instead of silently overwriting a write made after the read.
+    #[serde(default)]
+    pub expected_version: Option<String>,
 }
 
 #[utoipa::path(
@@ -565,10 +593,11 @@ pub struct SetAgentMcpServersRequest {
     path = "/api/agents/{id}/mcp_servers",
     tag = "agents",
     params(("id" = String, Path, description = "Agent ID")),
-    request_body(content = SetAgentMcpServersRequest, description = "Object containing the MCP server allowlist"),
+    request_body(content = SetAgentMcpServersRequest, description = "Object containing the MCP server allowlist. `expected_version` (optional) is the `ETag` from `GET /api/agents/{id}/manifest`; a mismatch answers 409 (#8424)."),
     responses(
         (status = 200, description = "Update an agent's MCP server allowlist", body = crate::types::JsonObject),
         (status = 400, description = "Malformed request body", body = crate::types::JsonObject),
+        (status = 409, description = "The `expected_version` no longer matches the live manifest; another writer saved after the read. Reload and re-apply (#8424)", body = crate::types::JsonObject),
         (status = 423, description = "This agent is provisioned by the deployment; its manifest cannot be changed through the API", body = crate::types::JsonObject)
     )
 )]
@@ -601,6 +630,13 @@ pub async fn set_agent_mcp_servers(
     // #6695: refuse to change the manifest of an agent the deployment provisioned.
     if let Some(refusal) = super::guard_provisioned_agent(&state, agent_id) {
         return refusal;
+    }
+    // #8424: this PUT writes the same manifest the editor's form writes, so it
+    // accepts the same optimistic-concurrency token.
+    if let Some(conflict) =
+        check_expected_manifest_version(&state, agent_id, body.expected_version.as_deref(), &t)
+    {
+        return conflict;
     }
     let servers = body.mcp_servers;
     match state
@@ -733,6 +769,10 @@ pub struct SetAgentChannelsRequest {
     /// `channel_type` strings the agent may receive messages from.
     /// An empty list clears the allowlist, which means "all channels" (`mode = "all"`).
     pub channels: Vec<String>,
+    /// Manifest ETag from `GET /api/agents/{id}/manifest` (#8424).
+    /// When present and no longer current the request is refused with 409 instead of silently overwriting a write made after the read.
+    #[serde(default)]
+    pub expected_version: Option<String>,
 }
 
 /// PUT /api/agents/{id}/channels — Update an agent's channel allowlist.
@@ -749,10 +789,11 @@ pub struct SetAgentChannelsRequest {
     path = "/api/agents/{id}/channels",
     tag = "agents",
     params(("id" = String, Path, description = "Agent ID")),
-    request_body(content = SetAgentChannelsRequest, description = "Object containing the channel allowlist"),
+    request_body(content = SetAgentChannelsRequest, description = "Object containing the channel allowlist. `expected_version` (optional) is the `ETag` from `GET /api/agents/{id}/manifest`; a mismatch answers 409 (#8424)."),
     responses(
         (status = 200, description = "Update an agent's channel allowlist", body = crate::types::JsonObject),
         (status = 400, description = "Malformed request body", body = crate::types::JsonObject),
+        (status = 409, description = "The `expected_version` no longer matches the live manifest; another writer saved after the read. Reload and re-apply (#8424)", body = crate::types::JsonObject),
         (status = 423, description = "This agent is provisioned by the deployment; its manifest cannot be changed through the API", body = crate::types::JsonObject)
     )
 )]
@@ -785,6 +826,13 @@ pub async fn set_agent_channels(
     // #6695: refuse to change the manifest of an agent the deployment provisioned.
     if let Some(refusal) = super::guard_provisioned_agent(&state, agent_id) {
         return refusal;
+    }
+    // #8424: this PUT writes the same manifest the editor's form writes, so it
+    // accepts the same optimistic-concurrency token.
+    if let Some(conflict) =
+        check_expected_manifest_version(&state, agent_id, body.expected_version.as_deref(), &t)
+    {
+        return conflict;
     }
     let channels = body.channels;
     match state.kernel.set_agent_channels(agent_id, channels.clone()) {

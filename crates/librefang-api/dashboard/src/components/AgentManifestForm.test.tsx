@@ -1,24 +1,46 @@
-import { render, screen, within } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { useState } from "react";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { describe, it, expect, vi } from "vitest";
-import { AgentManifestForm, type ManifestCatalogEntry } from "./AgentManifestForm";
+import {
+  AgentManifestForm,
+  type ManifestCatalogEntry,
+  type ManifestSectionId,
+  MANIFEST_SECTION_IDS,
+  sectionForInvalidField,
+  skillNeedsAgainstGrants,
+} from "./AgentManifestForm";
 import {
   emptyManifestExtras,
   emptyManifestForm,
+  parseManifestToml,
+  serializeManifestForm,
   type ManifestFormState,
 } from "../lib/agentManifest";
+import { applyRoutingEngine } from "../lib/routingEngine";
 
-vi.mock("react-i18next", () => ({
-  useTranslation: () => ({
-    t: (_key: string, opts?: { defaultValue?: string } | Record<string, unknown>) => {
-      if (opts && typeof opts === "object" && "defaultValue" in opts) {
-        return (opts as { defaultValue?: string }).defaultValue ?? _key;
-      }
-      return _key;
-    },
-  }),
-}));
+// Spread the real module rather than replacing it. The identity section now
+// renders the `IDENTITY.md` editor, which reads the UI store, and `lib/store`
+// initialises i18n at module load — so `initReactI18next` has to exist on this
+// mock or the suite fails to collect before a single test runs. Same reason and
+// same shape as `KnowledgePage.test.tsx`.
+vi.mock("react-i18next", async () => {
+  const actual = await vi.importActual<typeof import("react-i18next")>("react-i18next");
+  return {
+    ...actual,
+    useTranslation: () => ({
+      t: (_key: string, opts?: { defaultValue?: string } | Record<string, unknown>) => {
+        if (opts && typeof opts === "object" && "defaultValue" in opts) {
+          return (opts as { defaultValue?: string }).defaultValue ?? _key;
+        }
+        return _key;
+      },
+      i18n: { language: "en" },
+    }),
+  };
+});
 
 interface HarnessModel {
   provider: string;
@@ -32,12 +54,16 @@ function Harness({
   skillCatalog,
   toolCatalog,
   mcpCatalog,
+  routerProfileCatalog,
+  routerProfilesEnabled,
   initialState,
   invalidFields = new Set(),
   models = [{ provider: "openai", id: "gpt-4o" }],
   providers = [{ name: "openai" }],
   nameField,
   routingInertReason,
+  sections,
+  onState,
   modelsFetching,
   modelsError,
   onModelsRetry,
@@ -45,12 +71,17 @@ function Harness({
   skillCatalog?: ManifestCatalogEntry[];
   toolCatalog?: ManifestCatalogEntry[];
   mcpCatalog?: ManifestCatalogEntry[];
+  routerProfileCatalog?: ManifestCatalogEntry[];
+  routerProfilesEnabled?: boolean;
   initialState?: ManifestFormState;
   invalidFields?: Set<string>;
   models?: HarnessModel[];
   providers?: { name: string }[];
   nameField?: "editable" | "readonly" | "hidden";
   routingInertReason?: "stable_mode" | null;
+  sections?: ManifestSectionId[];
+  /** Receives every state the form produces, so a test can read what would be saved. */
+  onState?: (next: ManifestFormState) => void;
   modelsFetching?: boolean;
   modelsError?: boolean;
   onModelsRetry?: () => void;
@@ -59,7 +90,10 @@ function Harness({
   return (
     <AgentManifestForm
       value={state}
-      onChange={setState}
+      onChange={(next) => {
+        setState(next);
+        onState?.(next);
+      }}
       providers={providers}
       models={models}
       modelsFetching={modelsFetching}
@@ -70,8 +104,11 @@ function Harness({
       skillCatalog={skillCatalog}
       toolCatalog={toolCatalog}
       mcpCatalog={mcpCatalog}
+      routerProfileCatalog={routerProfileCatalog}
+      routerProfilesEnabled={routerProfilesEnabled}
       nameField={nameField}
       routingInertReason={routingInertReason}
+      sections={sections}
     />
   );
 }
@@ -84,7 +121,10 @@ describe("AgentManifestForm — complexity routing tiers", () => {
 
   async function openRouting(user: ReturnType<typeof userEvent.setup>) {
     await user.click(screen.getByText("agents.form.routing"));
-    await user.click(screen.getByLabelText("agents.form.routing_enabled"));
+    // The tiers belong to the effort engine and are not rendered under any
+    // other one, so opening the section is not enough — the engine has to be
+    // chosen, which is the same two clicks an operator makes.
+    await user.selectOptions(screen.getByLabelText("agents.form.routing_engine"), "effort");
   }
 
   // The tier fields hold a bare model name — the daemon resolves it against the
@@ -137,6 +177,248 @@ describe("AgentManifestForm — complexity routing tiers", () => {
   });
 });
 
+// Four controls across two sections used to describe one decision — a "Router
+// mode" select and an "Opt out of routing" toggle in the model section, an
+// enable toggle in the routing one — and they could name one engine while
+// running another: `mode = "flexible"` with the override on runs the tiers
+// rather than the profile router, and a manifest with no `[routing]` table runs
+// neither. The selector is now the only place the choice is made, and it writes
+// the fields together (lib/routingEngine.ts).
+describe("AgentManifestForm — the routing engine selector", () => {
+  async function openRouting(user: ReturnType<typeof userEvent.setup>) {
+    await user.click(screen.getByText("agents.form.routing"));
+  }
+
+  const engineSelect = () => screen.getByLabelText("agents.form.routing_engine");
+
+  it("no longer offers the mode select or the opt-out toggle", () => {
+    render(<Harness sections={["model", "routing"]} />);
+
+    expect(screen.queryByLabelText("agents.form.router_mode")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("agents.form.router_fixed")).not.toBeInTheDocument();
+  });
+
+  // A manifest that arrives from the API carries no engine field, so the
+  // selector reads the state it is given — the same three fields the kernel
+  // resolves — and not the last option anyone clicked. One case per engine,
+  // with the note that says what the engine does.
+  it.each([
+    ["fixed", "agents.form.routing_engine_fixed_note"],
+    ["effort", "agents.form.routing_engine_effort_note"],
+    ["profile", "agents.form.routing_engine_profile_note"],
+  ] as const)("shows %s for a manifest in that state", (engine, noteKey) => {
+    render(
+      <Harness
+        sections={["routing"]}
+        initialState={applyRoutingEngine(emptyManifestForm(), engine)}
+      />,
+    );
+
+    expect(engineSelect()).toHaveValue(engine);
+    expect(screen.getByText(noteKey)).toBeInTheDocument();
+  });
+
+  it("writes each engine's fields together, in the file the daemon reads", async () => {
+    const user = userEvent.setup();
+    let latest: ManifestFormState | undefined;
+    render(
+      <Harness
+        sections={["routing"]}
+        onState={(next) => {
+          latest = next;
+        }}
+      />,
+    );
+    await openRouting(user);
+
+    expect(engineSelect()).toHaveValue("fixed");
+
+    await user.selectOptions(engineSelect(), "effort");
+    expect(latest!.model.mode).toBe("fixed");
+    expect(latest!.routing.enabled).toBe(true);
+    const effort = serializeManifestForm(latest!);
+    expect(effort).toContain("[routing]");
+    // No `router_override`: the pin is not a routing field, and writing it here
+    // would refuse every profile to the agents this one spawns.
+    expect(effort).not.toContain("router_override");
+
+    await user.selectOptions(engineSelect(), "profile");
+    expect(latest!.model.mode).toBe("flexible");
+    expect(latest!.model.router_fixed).toBe(false);
+    // The tier table is left exactly as the effort engine wrote it: it is the
+    // fallback the kernel reaches for when no profile matches, and dropping it
+    // would not switch an engine off — it would delete the fallback and every
+    // `[routing]` key the form has no widget for.
+    expect(latest!.routing.enabled).toBe(true);
+    const profile = serializeManifestForm(latest!);
+    expect(profile).toContain("[routing]");
+    // `fixed = false` is what the absent key means, so the override is not
+    // written at all — and its absence is the profile router being armed.
+    expect(profile).not.toContain("router_override");
+
+    await user.selectOptions(engineSelect(), "fixed");
+    expect(latest!.model.mode).toBe("fixed");
+    expect(latest!.routing.enabled).toBe(false);
+    expect(serializeManifestForm(latest!)).not.toContain("[routing]");
+  });
+
+  it("shows the tiers only while the effort engine runs", async () => {
+    const user = userEvent.setup();
+    render(<Harness sections={["routing"]} />);
+    await openRouting(user);
+
+    const simpleTier = () =>
+      screen.queryByRole("button", { name: /agents\.form\.simple_model/ });
+
+    // The default form is the fixed engine, where no router reads the tiers at
+    // all. Under the profile engine they are the preserved fallback rather than
+    // the choice, so they are not offered there either — but they stay in the
+    // file, which the TOML test below pins.
+    expect(simpleTier()).not.toBeInTheDocument();
+
+    await user.selectOptions(engineSelect(), "profile");
+    expect(simpleTier()).not.toBeInTheDocument();
+
+    await user.selectOptions(engineSelect(), "effort");
+    expect(simpleTier()).toBeInTheDocument();
+  });
+
+  it("names the daemon's defaults for the effort engine's blank slots", async () => {
+    const user = userEvent.setup();
+    render(<Harness sections={["routing"]} />);
+    await openRouting(user);
+    await user.selectOptions(engineSelect(), "effort");
+
+    // A blank picker reads as "no model" and is not one: the `[routing]` table
+    // arms the router by its presence and the daemon fills every slot the
+    // manifest leaves out, so the block has to say so. (The harness echoes the
+    // key rather than the sentence; the values it interpolates are pinned by
+    // `routing-engine.test.ts` against the Rust `Default`.)
+    expect(screen.getByText("agents.form.routing_tier_blank_defaults")).toBeInTheDocument();
+  });
+
+  it("says what an unmatched turn runs on under the profile engine", async () => {
+    const user = userEvent.setup();
+    let latest: ManifestFormState | undefined;
+    render(
+      <Harness
+        sections={["routing"]}
+        onState={(next) => {
+          latest = next;
+        }}
+      />,
+    );
+    await openRouting(user);
+
+    await user.selectOptions(engineSelect(), "effort");
+    await user.selectOptions(engineSelect(), "profile");
+
+    // With a tier table the profile router falls back to it, and those models
+    // are not editable from this engine — so this line is the only place they
+    // are visible.
+    expect(latest!.routing.enabled).toBe(true);
+    expect(screen.getByText("agents.form.routing_engine_profile_fallback")).toBeInTheDocument();
+    expect(
+      screen.queryByText("agents.form.routing_engine_profile_fallback_none"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("says so when the profile engine has no tier table to fall back to", () => {
+    // The state this engine no longer creates, and still has to describe: a
+    // manifest that was flexible before the editor ever saw it.
+    render(
+      <Harness
+        sections={["routing"]}
+        initialState={applyRoutingEngine(emptyManifestForm(), "profile")}
+      />,
+    );
+
+    expect(
+      screen.getByText("agents.form.routing_engine_profile_fallback_none"),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText("agents.form.routing_engine_profile_fallback"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("offers the override settings under the effort engine too", () => {
+    render(
+      <Harness
+        sections={["model"]}
+        initialState={applyRoutingEngine(emptyManifestForm(), "effort")}
+      />,
+    );
+
+    // They are not the profile engine's own settings: `allowed_profiles` and
+    // `cost_budget` bound what this agent's spawns may ask for in any mode, so
+    // hiding them here would put a live cap behind an engine switch.
+    expect(
+      screen.getByPlaceholderText("agents.form.router_allowed_profiles_placeholder"),
+    ).toBeInTheDocument();
+    expect(screen.getByText("agents.form.router_cost_budget")).toBeInTheDocument();
+    expect(screen.getByText("agents.form.router_hint")).toBeInTheDocument();
+  });
+
+  it("leaves a pin alone when the engine changes, and clears it only for profile", async () => {
+    // `fixed = true` is a capability, not a routing preference: the spawn gate
+    // refuses every profile to an agent pinned with it, without consulting
+    // `mode`. So no engine may set it — and the one that needs it clear has to
+    // say so, or choosing that engine would do nothing.
+    const pinned = emptyManifestForm();
+    pinned.model.router_fixed = true;
+
+    const user = userEvent.setup();
+    let latest: ManifestFormState | undefined;
+    render(
+      <Harness
+        sections={["routing"]}
+        initialState={pinned}
+        onState={(next) => {
+          latest = next;
+        }}
+      />,
+    );
+    await openRouting(user);
+
+    await user.selectOptions(engineSelect(), "effort");
+    expect(latest!.model.router_fixed).toBe(true);
+    expect(serializeManifestForm(latest!)).toContain("router_override = { fixed = true }");
+
+    await user.selectOptions(engineSelect(), "profile");
+    expect(latest!.model.router_fixed).toBe(false);
+    expect(serializeManifestForm(latest!)).not.toContain("router_override");
+  });
+});
+
+// The pin is a capability, not a routing preference, and since the engine
+// table stopped writing it nothing in the editor mentioned it either: an agent
+// that arrived with `fixed = true` — by hand, from an older editor, from the
+// API — kept it invisibly, and the operator met it as a refused `agent_spawn`
+// naming `[model.router_override] fixed`. The line names the pin, what it
+// costs, and how it is cleared; it does not offer to set it, because a control
+// for that would reopen a state range the engine table just closed.
+describe("AgentManifestForm — a pinned agent says so", () => {
+  const pinned = (): ManifestFormState => {
+    const state = emptyManifestForm();
+    state.model.router_fixed = true;
+    return state;
+  };
+
+  it("names the pin wherever the routing engine is", () => {
+    render(<Harness sections={["model"]} initialState={pinned()} />);
+
+    // Asserted on the rendered sentence, which the harness echoes as its key;
+    // the wording itself is pinned by the locale coverage guards.
+    expect(screen.getByText("agents.form.router_pinned_note")).toBeInTheDocument();
+  });
+
+  it("says nothing when the pin is not set", () => {
+    render(<Harness sections={["model"]} />);
+
+    expect(screen.queryByText("agents.form.router_pinned_note")).not.toBeInTheDocument();
+  });
+});
+
 describe("AgentManifestForm — catalog state and clearing", () => {
   const MODELS = [
     { provider: "openai", id: "gpt-4o" },
@@ -145,7 +427,7 @@ describe("AgentManifestForm — catalog state and clearing", () => {
 
   async function openRouting(user: ReturnType<typeof userEvent.setup>) {
     await user.click(screen.getByText("agents.form.routing"));
-    await user.click(screen.getByLabelText("agents.form.routing_enabled"));
+    await user.selectOptions(screen.getByLabelText("agents.form.routing_engine"), "effort");
   }
 
   it("offers the whole catalog to a tier, not just the main provider's models", async () => {
@@ -259,42 +541,39 @@ describe("AgentManifestForm — fallback providers", () => {
 
 describe("AgentManifestForm — provider selection", () => {
   // The caller passes only providers that can serve a request, so an agent
-  // assigned to one whose key was rejected (or whose local service is down)
-  // would face a `required` <select> with no matching <option>: React sets
-  // selectedIndex -1 and the field renders blank, unable to show or re-pick
-  // the provider the agent is actually on.
-  it("lists the provider the agent already uses even when it is not selectable anew", () => {
+  // assigned to one whose key was rejected (or whose local service is down) is
+  // not in that list. The control has to offer it anyway: an operator who
+  // cannot see the provider their agent runs on cannot change the model
+  // without first moving the agent somewhere it is not.
+  //
+  // This is deliberately asserted here rather than left to the picker's own
+  // suite. The picker only knows the list it is handed; adding the current
+  // provider back is `providerOptions`, which is this component's job.
+  async function openModelPicker() {
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: /^agents\.form\.model:/ }));
+    return user;
+  }
+
+  it("offers the provider the agent already uses even when it is not selectable anew", async () => {
     const state = emptyManifestForm();
     state.model = { ...state.model, provider: "deepseek", model: "deepseek-chat" };
 
     render(<Harness initialState={state} providers={[{ name: "openai" }]} />);
+    await openModelPicker();
 
-    // `Field` renders its label as an unassociated <span> (#5246), so the
-    // select has no accessible name to query by — anchor on its own placeholder
-    // option instead.
-    const select = screen
-      .getByRole("option", { name: "agents.form.select_provider" })
-      .closest("select") as HTMLSelectElement;
-    expect(select).toHaveValue("deepseek");
-    expect(
-      within(select).getByRole("option", { name: "deepseek" }),
-    ).toBeInTheDocument();
-    expect(within(select).getByRole("option", { name: "openai" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "deepseek" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "openai" })).toBeInTheDocument();
   });
 
-  it("does not duplicate a current provider that is already offered", () => {
+  it("does not list a current provider that is already offered, twice", async () => {
     const state = emptyManifestForm();
     state.model = { ...state.model, provider: "openai", model: "gpt-4o" };
 
     render(<Harness initialState={state} providers={[{ name: "openai" }]} />);
+    await openModelPicker();
 
-    // `Field` renders its label as an unassociated <span> (#5246), so the
-    // select has no accessible name to query by — anchor on its own placeholder
-    // option instead.
-    const select = screen
-      .getByRole("option", { name: "agents.form.select_provider" })
-      .closest("select") as HTMLSelectElement;
-    expect(within(select).getAllByRole("option", { name: "openai" })).toHaveLength(1);
+    expect(screen.getAllByRole("button", { name: "openai" })).toHaveLength(1);
   });
 });
 
@@ -735,5 +1014,949 @@ describe("AgentManifestForm — routing in Stable mode", () => {
     render(<Harness routingInertReason={null} />);
 
     expect(screen.queryByText("agents.form.routing_stable_inert")).not.toBeInTheDocument();
+  });
+});
+
+// The agent drawer hosts this form *inside* its tabs, so the same editor
+// backs "Conversation", "Routing", "Tools" … rather than living in a second
+// "Edit full configuration" drawer. That only works if a caller can name the
+// sections it wants, and if naming a subset actually drops the rest — an
+// ignored `sections` prop would render the whole manifest on every tab and
+// look, to a reader, exactly like the feature working.
+describe("AgentManifestForm — section addressing", () => {
+  const renderedSections = (container: HTMLElement): string[] =>
+    Array.from(container.querySelectorAll("[data-section]")).map(
+      (el) => el.getAttribute("data-section") ?? "",
+    );
+
+  it("renders every section when the caller passes no list", () => {
+    const { container } = render(<Harness />);
+    expect(renderedSections(container)).toEqual([...MANIFEST_SECTION_IDS]);
+  });
+
+  it("renders only the sections the caller asked for", () => {
+    const { container } = render(<Harness sections={["routing"]} />);
+    expect(renderedSections(container)).toEqual(["routing"]);
+  });
+
+  it("renders one section per tab set, in the order asked", () => {
+    // The Routing tab. Each of these used to sit elsewhere: the tiers were
+    // two drawers deep and the fallback chain was its own collapsed block in
+    // the other surface.
+    const routingTab: ManifestSectionId[] = [
+      "model",
+      "fallback_models",
+      "thinking",
+      "routing",
+    ];
+    const { container } = render(<Harness sections={routingTab} />);
+    expect(renderedSections(container)).toEqual(routingTab);
+  });
+
+  it("renders in the order asked, not the editor's canonical one", () => {
+    // The General group lists Lifecycle before Response format, while the JSX
+    // (and MANIFEST_SECTION_IDS) lists response_format first. The list is a
+    // statement about order as much as about membership, so this must come
+    // out in the group's sequence, not the canonical one.
+    const { container } = render(
+      <Harness sections={["response_format", "lifecycle"]} />,
+    );
+    expect(renderedSections(container)).toEqual(["response_format", "lifecycle"]);
+  });
+
+  it("drops an id the editor does not implement and collapses a duplicate", () => {
+    const { container } = render(
+      <Harness
+        sections={
+          [
+            "lifecycle",
+            "not_a_section",
+            "lifecycle",
+            "identity",
+          ] as ManifestSectionId[]
+        }
+      />,
+    );
+    // An out-of-repo caller can name a section this editor never implemented
+    // and repeat one it did; the result is one section per known id, in first
+    // mention order, and no hole where the unknown id was.
+    expect(renderedSections(container)).toEqual(["lifecycle", "identity"]);
+  });
+
+  it("renders nothing, not everything, for an empty list", () => {
+    // The failure mode worth guarding: an empty array is falsy-ish in the
+    // places a caller might spread it, and falling back to "all sections"
+    // would put the entire manifest on a tab that asked for none of it.
+    const { container } = render(<Harness sections={[]} />);
+    expect(renderedSections(container)).toEqual([]);
+  });
+});
+
+// A validation message that names a field on a tab the operator is not
+// looking at is indistinguishable from no message at all, and with the
+// sections split across tabs that became possible for the first time.
+// `sectionForInvalidField` is what lets the caller jump to the right tab, and
+// it is only correct while it covers everything the validator can report.
+describe("AgentManifestForm — validation paths are routable", () => {
+  it("maps every field path validateManifestForm can report to a section", () => {
+    const source = readFileSync(
+      join(__dirname, "..", "lib", "agentManifest.ts"),
+      "utf8",
+    );
+    // Every `errors.push("…")` in the validator. Template literals included:
+    // `workspaces.${ws._uid}.name` is captured with its placeholder intact,
+    // which still matches the `workspaces.` prefix.
+    const reported = [...source.matchAll(/errors\.push\(\s*["`]([^"`]+)["`]/g)].map(
+      (m) => m[1],
+    );
+
+    expect(reported.length).toBeGreaterThan(0);
+
+    const unrouted = reported.filter((path) => sectionForInvalidField(path) === undefined);
+    expect(
+      unrouted,
+      `validateManifestForm reports field paths that no section claims, so an ` +
+        `operator who trips one would be told to fix a field the editor cannot ` +
+        `navigate to. Add the prefix to FIELD_PREFIX_TO_SECTION.\n\n` +
+        `Unrouted: ${unrouted.join(", ")}`,
+    ).toEqual([]);
+  });
+});
+
+describe("AgentManifestForm — quantity ladders", () => {
+  // The ladders replaced bare number boxes, and a number box carries
+  // constraints the ladder's custom rung has to keep carrying.
+  //
+  // The dollar fields are the ones where dropping them is invisible: an unset
+  // `step` defaults to 1, so `min={0}` alone makes 0.50 a step mismatch and the
+  // browser marks the input invalid — a legitimate half-dollar cap that the
+  // form would refuse to submit, with the reason visible only to the browser.
+  it("keeps the custom cost box able to accept cents", async () => {
+    const user = userEvent.setup();
+    render(<Harness />);
+
+    const group = screen.getByRole("group", { name: "agents.form.cost_per_hour" });
+    await user.click(within(group).getByRole("button", { name: "model_param.custom" }));
+
+    // The custom box is a sibling of the `role="group"` div, not a child of
+    // it, so it is reached by its own label rather than through `within`.
+    const input = screen.getByRole("spinbutton", {
+      name: "agents.form.cost_per_hour — model_param.custom",
+    });
+    expect(input).toHaveAttribute("step", "0.01");
+    expect(input).toHaveAttribute("min", "0");
+  });
+
+  // Each converted field must still offer the inherit state, which is what an
+  // empty value means and what the manifest writes when the agent has no
+  // opinion. A ladder without it would force every agent to state a number.
+  it("offers the inherit rung on a converted quantity", async () => {
+    const user = userEvent.setup();
+    render(<Harness />);
+    // Two gates: the fields live in a collapsed section, and they only render
+    // once autonomy is on — a disabled feature's tuning knobs are not shown.
+    await user.click(screen.getByText("agents.form.autonomous"));
+    await user.click(screen.getByLabelText("agents.form.autonomous_enabled"));
+
+    const group = screen.getByRole("group", { name: "agents.form.max_iterations" });
+    expect(
+      within(group).getByRole("button", { name: "model_param.inherit" }),
+    ).toBeInTheDocument();
+  });
+});
+
+// Swapping a control is only safe if the thing it writes is unchanged. The
+// provider+model `<select>` pair stored `[model] provider` and `[model] model`
+// as two keys; the picker hands back a pair. That they agree is not something
+// the DOM can show — the trigger renders the pair either way — so this asserts
+// what would actually be saved, and then reads it back.
+//
+// This is deliberately a write-then-read rather than a check of the captured
+// state alone: a control that writes the right value to the wrong path passes
+// any assertion made against the control's own output.
+describe("AgentManifestForm — the model picker persists the pair it replaced", () => {
+  it("writes provider and model where the selects wrote them, and reads them back", async () => {
+    const user = userEvent.setup();
+    let latest: ManifestFormState | null = null;
+    render(<Harness onState={(next) => { latest = next; }} />);
+
+    await user.click(screen.getByRole("button", { name: /^agents\.form\.model:/ }));
+    await user.click(screen.getByRole("button", { name: "openai" }));
+    await user.click(screen.getByRole("button", { name: "openai/gpt-4o" }));
+
+    expect(latest).not.toBeNull();
+    const form = latest as unknown as ManifestFormState;
+    expect(form.model.provider).toBe("openai");
+    expect(form.model.model).toBe("gpt-4o");
+
+    // What the daemon reads.
+    const toml = serializeManifestForm(form);
+    expect(toml).toContain("provider = \"openai\"");
+    expect(toml).toContain("model = \"gpt-4o\"");
+
+    // And what comes back when the same manifest is opened again.
+    const parsed = parseManifestToml(toml);
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(parsed.form.model.provider).toBe("openai");
+    expect(parsed.form.model.model).toBe("gpt-4o");
+  });
+});
+
+// A field marked invalid without a reason tells the operator that something is
+// wrong and not what — which is the half of the message that does not help, and
+// it is what makes the tab jump land on something that still does not explain
+// itself. The cron and JSON-schema paths already carried `error=`; this is the
+// one that did not.
+describe("AgentManifestForm — a marked field says why", () => {
+  it("explains a missing name, and associates it with the input", () => {
+    const state = emptyManifestForm();
+    state.name = "";
+
+    render(<Harness initialState={state} invalidFields={new Set(["name"])} />);
+
+    const input = screen.getByRole("textbox", { name: "agents.form.name" });
+    expect(input).toHaveAttribute("aria-invalid", "true");
+    expect(input).toHaveAccessibleDescription("agents.form.name_required");
+  });
+});
+
+// A component declared inside a render body is a new function on every render,
+// and React compares element types by reference — so it unmounts and remounts
+// its whole subtree on every keystroke.
+//
+// The two cases below are a pair on purpose: the module-scope `Section` and the
+// section wrapper must both survive a re-render, so a regression in either is
+// visible. A test on one alone cannot tell a wrapper-wide defect from a
+// field-specific one — and that is precisely how this one read, because the
+// seven sections using the module-scope `Section` never had it.
+//
+// What it cost: a controlled input inside one of the twelve wrapper sections
+// kept only the first character typed into it (the element the second keystroke
+// was headed for had already been destroyed), and an open `<select>` was
+// dismissed under the operator by any re-render.
+describe("AgentManifestForm — a re-render must not remount the fields", () => {
+  it("keeps every character typed into a section field", async () => {
+    const user = userEvent.setup();
+    let latest: ManifestFormState | null = null;
+    render(
+      <Harness
+        sections={["proactive_memory"]}
+        onState={(n) => {
+          latest = n;
+        }}
+      />,
+    );
+
+    await user.click(screen.getByText("config.sec_proactive_memory"));
+    await user.type(screen.getByRole("textbox"), "abc");
+
+    // `"a"` is what a remount produces: the remaining keystrokes go to a node
+    // that is no longer in the document.
+    expect(
+      (latest as unknown as ManifestFormState | null)?.proactive_memory.extraction_model,
+    ).toBe("abc");
+  });
+
+  it("keeps a select's DOM node across a re-render, so an open dropdown is not dismissed", async () => {
+    const user = userEvent.setup();
+    render(<Harness sections={["proactive_memory"]} onState={() => {}} />);
+
+    await user.click(screen.getByText("config.sec_proactive_memory"));
+    const before = screen.getAllByRole("combobox")[0];
+
+    await user.type(screen.getByRole("textbox"), "x");
+
+    expect(screen.getAllByRole("combobox")[0]).toBe(before);
+  });
+
+  // Reordering a caller's list is a re-render too. The section ids double as
+  // React keys, so a moved section must be the same DOM node in a new place —
+  // a remount would close the fold and wipe what was typed inside it.
+  it("moves a section without remounting it when the caller reorders the list", async () => {
+    const user = userEvent.setup();
+    const { container, rerender } = render(
+      <Harness sections={["proactive_memory", "shared_folders"]} />,
+    );
+
+    await user.click(screen.getByText("config.sec_proactive_memory"));
+    await user.type(screen.getByRole("textbox"), "abc");
+
+    const details = document.querySelector('[data-section="proactive_memory"]');
+    expect(details, "the section renders").toBeTruthy();
+    expect(details).toHaveAttribute("open");
+
+    rerender(<Harness sections={["shared_folders", "proactive_memory"]} />);
+
+    const order = Array.from(container.querySelectorAll("[data-section]")).map(
+      (el) => el.getAttribute("data-section"),
+    );
+    expect(order).toEqual(["shared_folders", "proactive_memory"]);
+    expect(document.querySelector('[data-section="proactive_memory"]')).toBe(details);
+    expect(details).toHaveAttribute("open");
+    expect(screen.getByRole("textbox")).toHaveValue("abc");
+  });
+});
+
+describe("AgentManifestForm — the counters report before the server does", () => {
+  it("names the rule on a counter that is not a whole number", () => {
+    const state = emptyManifestForm();
+    state.max_history_messages = "1.5";
+
+    render(
+      <Harness
+        initialState={state}
+        invalidFields={new Set(["max_history_messages"])}
+        sections={["lifecycle"]}
+      />,
+    );
+
+    // A red label with no text is the shape review already rejected once: it
+    // tells the operator a field is wrong and not what would make it right.
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "agents.form.whole_number_required",
+    );
+  });
+});
+
+// The user's brief for the unified editor: "everything in the same place, with
+// an ADVANCED button to give each section more depth, and in BASIC mode each
+// section shows what matters most." The basic/advanced split is per section:
+// the fields an operator sets first render always, and everything beyond them
+// folds behind the section's own Advanced disclosure — the same details/sum-
+// mary mechanism CollapsibleSection uses for the section itself.
+/**
+ * The Advanced disclosure inside one section, addressed by section id.
+ * File scope: more describes than the fold's own need to reach it.
+ */
+function advancedGroup(sectionId: string): HTMLDetailsElement | null {
+  const section = document.querySelector(`[data-section="${sectionId}"]`);
+  if (!section) return null;
+  const summary = Array.from(section.querySelectorAll("summary")).find(
+    // The harness's i18n stub echoes the key; the advanced group's summary
+    // is the only one this component renders itself.
+    (s) => s.textContent === "agents.form.advanced",
+  );
+  return summary ? (summary.closest("details") as HTMLDetailsElement) : null;
+}
+
+describe("AgentManifestForm — basic and advanced per section", () => {
+  it("keeps the model section basic: the sampling knobs fold behind Advanced", () => {
+    render(<Harness />);
+    const group = advancedGroup("model");
+    expect(group, "the model section has an Advanced disclosure").toBeTruthy();
+    // BASIC: closed. The temperature field exists in the DOM (a closed
+    // details still contains its children) but the disclosure says so.
+    expect(group).not.toHaveAttribute("open");
+    expect(group!.querySelector("input")).toBeTruthy();
+  });
+
+  it("opens the advanced group when a validation error lands inside it", () => {
+    // A hidden error reads as no error — the same rule CollapsibleSection
+    // applies to a folded section, one level down.
+    render(<Harness invalidFields={new Set(["model.temperature"])} />);
+    expect(advancedGroup("model")).toHaveAttribute("open");
+  });
+
+  it("opens and closes on its own summary, like any details", async () => {
+    const user = userEvent.setup();
+    render(<Harness />);
+    const group = advancedGroup("model");
+    expect(group).not.toHaveAttribute("open");
+    await user.click(group!.querySelector("summary")!);
+    expect(group).toHaveAttribute("open");
+    await user.click(group!.querySelector("summary")!);
+    expect(group).not.toHaveAttribute("open");
+  });
+
+  it("folds the identity extras behind Advanced too", () => {
+    render(<Harness />);
+    const group = advancedGroup("identity");
+    expect(group).toBeTruthy();
+    expect(group).not.toHaveAttribute("open");
+    // Name stays outside the fold: it is the field the section is about.
+    expect(
+      group!.querySelector('input[aria-label="agents.form.name"]'),
+    ).toBeNull();
+  });
+
+  it("hides nothing when the caller never asked for a split section", () => {
+    // A section list without `model` renders no model section at all; the
+    // split must not break a caller that hosts other sections.
+    render(<Harness sections={["identity"]} />);
+    expect(advancedGroup("identity")).toBeTruthy();
+    expect(advancedGroup("model")).toBeNull();
+  });
+});
+
+// A folded section says how much is behind the fold. The count has to include
+// the fields inside the section's own "Advanced" disclosure — they are in the
+// DOM whether or not it is open, and they are exactly what opening the section
+// reveals — and it has to follow the fields as they appear and disappear.
+describe("AgentManifestForm — folded section field count", () => {
+  const sectionSummary = (id: string): HTMLElement => {
+    const summary = document
+      .querySelector(`[data-section="${id}"]`)
+      ?.querySelector("summary");
+    if (!summary) throw new Error(`no summary for section ${id}`);
+    return summary as HTMLElement;
+  };
+
+  // The badge's digit, not a substring match on the whole summary: the check
+  // has to fail when the number is 18 and the expectation is 8.
+  const badgeCount = (id: string): number => {
+    const badge = sectionSummary(id).querySelector('span[aria-hidden="true"]');
+    return badge ? Number(badge.textContent) : 0;
+  };
+
+  it("counts the fields behind the fold, the Advanced ones included", () => {
+    render(<Harness sections={["proactive_memory"]} />);
+
+    // Three tri-state selects on the open half; the Advanced fold adds two
+    // more selects, the extraction-model text box and the similarity ladder
+    // (a button set, counted as the one field it is): seven. The fold is
+    // closed, so a count that only saw rendered state would read three.
+    expect(badgeCount("proactive_memory")).toBe(7);
+    expect(
+      document.querySelector('[data-section="proactive_memory"] [data-advanced]'),
+    ).not.toHaveAttribute("open");
+  });
+
+  it("counts a button-set control as one field, so the routing badge moves when the effort engine is picked", async () => {
+    const user = userEvent.setup();
+    render(<Harness sections={["routing"]} />);
+
+    // Fixed: the engine selector and the two Advanced selects. The tier
+    // pickers and the threshold ladders the effort engine reveals do not
+    // exist yet.
+    expect(badgeCount("routing")).toBe(3);
+
+    await user.click(screen.getByText("agents.form.routing"));
+    await user.selectOptions(screen.getByLabelText("agents.form.routing_engine"), "effort");
+
+    // Effort: three pickers and two ladders join them. Every one of the five
+    // is a button set, so before they opted in with `data-field` the badge
+    // read the same 3 on both sides of the engine choice.
+    await waitFor(() => expect(badgeCount("routing")).toBe(8));
+  });
+
+  it("leaves the count alone when a picker is opened, because its search box is not a manifest field", async () => {
+    const user = userEvent.setup();
+    render(<Harness sections={["routing"]} />);
+    await user.click(screen.getByText("agents.form.routing"));
+    await user.selectOptions(screen.getByLabelText("agents.form.routing_engine"), "effort");
+    await waitFor(() => expect(badgeCount("routing")).toBe(8));
+
+    await user.click(screen.getByRole("button", { name: "agents.form.simple_model: None" }));
+
+    // The popover's search box is an <input>; browsing the catalog is not
+    // configuring another field, so the badge must stay where it was. The
+    // hand-entry panel is the same kind of not-a-field.
+    expect(screen.getByPlaceholderText("Search models...")).toBeInTheDocument();
+    expect(badgeCount("routing")).toBe(8);
+
+    await user.click(screen.getByRole("button", { name: "Custom" }));
+    expect(screen.getByLabelText("Model")).toBeInTheDocument();
+    expect(badgeCount("routing")).toBe(8);
+  });
+
+  it("leaves the count alone when a ladder's custom rung opens, because the box edits the ladder and is not another field", async () => {
+    const user = userEvent.setup();
+    render(<Harness sections={["routing"]} />);
+    await user.click(screen.getByText("agents.form.routing"));
+    await user.selectOptions(screen.getByLabelText("agents.form.routing_engine"), "effort");
+    await waitFor(() => expect(badgeCount("routing")).toBe(8));
+
+    const ladder = screen.getByRole("group", { name: "agents.form.simple_threshold" });
+    await user.click(within(ladder).getByRole("button", { name: "model_param.custom" }));
+
+    // The box that takes the off-ladder number belongs to the ladder counted
+    // above; without the opt-out it would read as a ninth field.
+    expect(
+      screen.getByRole("spinbutton", {
+        name: "agents.form.simple_threshold — model_param.custom",
+      }),
+    ).toBeInTheDocument();
+    expect(badgeCount("routing")).toBe(8);
+  });
+
+  it("shows no count at all for a section with no fields", () => {
+    render(<Harness sections={["shared_folders"]} />);
+
+    // No workspace rows yet: only the "add folder" button, which is an
+    // affordance and not a field. A "0" badge would read as a section that
+    // failed to load rather than one with nothing to configure.
+    expect(sectionSummary("shared_folders")).not.toHaveTextContent(/\d/);
+  });
+
+  it("refreshes the count as fields appear", async () => {
+    const user = userEvent.setup();
+    render(<Harness sections={["shared_folders"]} />);
+
+    await user.click(screen.getByRole("button", { name: /add_folder/ }));
+
+    // One workspace row: name, path and mode.
+    expect(await within(sectionSummary("shared_folders")).findByText("3")).toBeInTheDocument();
+  });
+});
+
+// The operator's feedback on the first cut: "Algunas secciones tienen un
+// número, otras secciones no, y desde luego no hay un contador global en
+// configuración." Two answers: the always-open sections carry the badge too,
+// and the form sums every mounted section once per view.
+describe("AgentManifestForm — the field tally covers every section", () => {
+  // The always-open `Section` has no summary to scope to; its badge lives in
+  // the title row, the root's own `<p>`.
+  const openSectionCount = (id: string): number => {
+    const digit = document.querySelector(
+      `[data-section="${id}"] > p span[aria-hidden="true"]`,
+    );
+    return digit ? Number(digit.textContent) : 0;
+  };
+
+  // Folded sections keep their badge in the summary, the same place the
+  // suite above reads it from.
+  const foldedSectionCount = (id: string): number => {
+    const digit = document
+      .querySelector(`[data-section="${id}"] summary`)
+      ?.querySelector('span[aria-hidden="true"]');
+    return digit ? Number(digit.textContent) : 0;
+  };
+
+  const totalCount = (): number | null => {
+    const total = screen.queryByTestId("manifest-fields-total");
+    if (!total) return null;
+    const digit = total.querySelector('span[aria-hidden="true"]');
+    return digit ? Number(digit.textContent) : 0;
+  };
+
+  // Every badge the form rendered, whatever the section folds. The Advanced
+  // disclosure's summary carries no badge, so a match is a section badge.
+  const countOfEveryBadge = (): number =>
+    Array.from(
+      document.querySelectorAll(
+        '[data-section] summary span[aria-hidden="true"], [data-section] > p span[aria-hidden="true"]',
+      ),
+    ).reduce((sum, digit) => sum + Number(digit.textContent), 0);
+
+  it("badges an always-open section too", () => {
+    render(<Harness sections={["identity"]} />);
+
+    // Name, description, version, author, module, priority and the tag box.
+    // Identity never folds, and before this it was a section the operator
+    // could not size up at all.
+    expect(openSectionCount("identity")).toBe(7);
+    expect(totalCount()).toBe(7);
+  });
+
+  it("withdraws a group's total when a switch unmounts its sections", () => {
+    // The agent view mounts one config group at a time. Leaving identity for
+    // routing unmounts identity's sections, and their counts have to leave the
+    // total with them: 7 + 3 would be a total for a form that is not on
+    // screen, and it would grow with every group the operator visits.
+    const { rerender } = render(<Harness sections={["identity"]} />);
+    expect(openSectionCount("identity")).toBe(7);
+    expect(totalCount()).toBe(7);
+
+    rerender(<Harness sections={["routing"]} />);
+
+    expect(foldedSectionCount("routing")).toBe(3);
+    expect(totalCount()).toBe(3);
+
+    // And back: identity's sections report again on the way in.
+    rerender(<Harness sections={["identity"]} />);
+    expect(openSectionCount("identity")).toBe(7);
+    expect(totalCount()).toBe(7);
+  });
+
+  it("keeps the total equal to the sum of the badges as a count changes", async () => {
+    const user = userEvent.setup();
+    render(<Harness sections={["routing"]} />);
+
+    expect(foldedSectionCount("routing")).toBe(3);
+    expect(totalCount()).toBe(3);
+
+    await user.click(screen.getByText("agents.form.routing"));
+    await user.selectOptions(screen.getByLabelText("agents.form.routing_engine"), "effort");
+
+    // The effort engine brings five more fields with it, and the total has to
+    // follow the badge rather than lag behind it.
+    await waitFor(() => expect(foldedSectionCount("routing")).toBe(8));
+    await waitFor(() => expect(totalCount()).toBe(8));
+  });
+
+  it("hides the total when no section has a field to count", () => {
+    render(<Harness sections={[]} />);
+
+    // A "0" would read as a form that failed to load, the same reason the
+    // section badges hide at zero.
+    expect(screen.queryByTestId("manifest-fields-total")).toBeNull();
+  });
+
+  it("sums every section in the create modal, where they all render", () => {
+    render(<Harness />);
+
+    const total = totalCount();
+    expect(total).not.toBeNull();
+    expect(total).toBeGreaterThan(0);
+    // The modal is the whole manifest: what it says must be the sum of the
+    // numbers down the page, no more and no less.
+    expect(total).toBe(countOfEveryBadge());
+  });
+});
+
+
+// ALTO 1, remedied: the routing panel was the only surface with the
+// server-backed profile catalog, and the unified editor's allowed_profiles
+// was a blind tag box — a capability loss, not a unification. The catalog
+// comes in as a prop like every other catalog the form merges, and a name
+// the catalog does not know is still typeable.
+describe("AgentManifestForm — the router's profile picker", () => {
+  const PROFILES: ManifestCatalogEntry[] = [
+    { name: "coding", description: "openai/gpt-4o · cheap" },
+    { name: "research", description: "anthropic/claude-sonnet-5 · expensive" },
+  ];
+
+  /**
+   * A form carrying an allowlist — the state these fields are about. Its
+   * engine is deliberately irrelevant: the override's settings render under
+   * every engine, because the spawn gate reads them in every mode (see
+   * lib/routingEngine.ts and `check_profile_against_parent`).
+   */
+  function withAllowedProfiles(...profiles: string[]): ManifestFormState {
+    const state = emptyManifestForm();
+    state.model.router_allowed_profiles = profiles;
+    return state;
+  }
+
+  async function openRouterFields(user: ReturnType<typeof userEvent.setup>) {
+    const group = advancedGroup("model");
+    if (!group) throw new Error("model advanced group not found");
+    await user.click(group.querySelector("summary")!);
+  }
+
+  it("offers the override settings under the default engine too", () => {
+    // They are not the profile engine's controls: `allowed_profiles` and
+    // `cost_budget` are checked against every profile an `agent_spawn` names,
+    // whatever `mode` says, so the fixed engine has to show them as well. (A
+    // closed `<details>` still renders its children in jsdom.)
+    render(<Harness routerProfileCatalog={PROFILES} />);
+
+    expect(screen.getByPlaceholderText("Search model profiles…")).toBeInTheDocument();
+    expect(screen.getByText("agents.form.router_hint")).toBeInTheDocument();
+  });
+
+  it("offers the server-backed catalog for allowed_profiles", async () => {
+    const user = userEvent.setup();
+    render(<Harness routerProfileCatalog={PROFILES} initialState={withAllowedProfiles()} />);
+    await openRouterFields(user);
+    const group = advancedGroup("model")!;
+
+    const input = within(group).getByPlaceholderText("Search model profiles…");
+    await user.click(input);
+    // Scoped to the section: the routing tab's tool-profile select offers a
+    // `coding` option of its own, and a closed details still queries in jsdom.
+    expect(await within(group).findByText("coding")).toBeInTheDocument();
+    expect(within(group).getByText("research")).toBeInTheDocument();
+
+    await user.click(within(group).getByText("coding"));
+    expect(screen.getByRole("button", { name: "Remove coding" })).toBeInTheDocument();
+  });
+
+  it("still accepts a profile the catalog does not know", async () => {
+    const user = userEvent.setup();
+    render(
+      <Harness
+        routerProfileCatalog={PROFILES}
+        initialState={withAllowedProfiles("hand-written-profile")}
+      />,
+    );
+    await openRouterFields(user);
+
+    // The union merge keeps a hand-typed profile selectable, the way the
+    // skill finder keeps an uninstalled skill.
+    const group = advancedGroup("model")!;
+    expect(screen.getByRole("button", { name: "Remove hand-written-profile" })).toBeInTheDocument();
+    // With chips present the finder's placeholder is the add-more one (the
+    // stub resolves this key's defaultValue).
+    const input = within(group).getByPlaceholderText("Add more…");
+    await user.click(input);
+    expect(await within(group).findByText("hand-written-profile")).toBeInTheDocument();
+  });
+
+  it("keeps the plain tag box when the caller carries no catalog", async () => {
+    const user = userEvent.setup();
+    render(<Harness initialState={withAllowedProfiles()} />);
+    await openRouterFields(user);
+
+    // No catalog prop, no picker — the TagInput the field had before, so a
+    // caller without the profiles query loses nothing it ever had. (The
+    // harness's i18n stub echoes keys, so the tag box carries the key.)
+    expect(screen.queryByPlaceholderText("Search model profiles…")).not.toBeInTheDocument();
+    expect(
+      screen.getByPlaceholderText("agents.form.router_allowed_profiles_placeholder"),
+    ).toBeInTheDocument();
+  });
+
+  it("says when the router is off kernel-wide, instead of offering choices silently", async () => {
+    const user = userEvent.setup();
+    render(
+      <Harness
+        routerProfileCatalog={PROFILES}
+        routerProfilesEnabled={false}
+        initialState={withAllowedProfiles()}
+      />,
+    );
+    await openRouterFields(user);
+
+    expect(screen.getByText("agents.form.router_kernel_off")).toBeInTheDocument();
+  });
+});
+
+// A skill declares the built-in tools it needs (`required_tools`), and
+// nothing checks them against the agent it lands on — the check exists, but
+// only for hands. So the skill stays assigned, silently unable to work. These
+// pin both directions: the notice fires when a tool is genuinely missing, and
+// it does not fire when the grants are merely unrestricted, which is what an
+// empty `capabilities.tools` means.
+describe("AgentManifestForm — a skill's declared needs against the agent's grants", () => {
+  const CATALOG: ManifestCatalogEntry[] = [
+    {
+      name: "scraper",
+      description: "Fetches pages",
+      required_tools: ["web_fetch", "file_read"],
+    },
+    { name: "quiet", description: "Declares no needs", required_tools: [] },
+    // An older catalog, or a daemon predating the field: no `required_tools`.
+    { name: "silent" },
+  ];
+
+  it("reports only the needs the declared list does not cover", () => {
+    expect(skillNeedsAgainstGrants(["scraper"], CATALOG, ["file_read"], false)).toEqual([
+      { name: "scraper", needs: ["web_fetch", "file_read"], missing: ["web_fetch"] },
+    ]);
+  });
+
+  // The false-positive guard, and the reason this must be read the kernel's
+  // way: `capabilities.tools = []` grants every tool (`tools_and_skills.rs`),
+  // so a check that read it as "nothing granted" would warn on every agent
+  // that never wrote a `[capabilities]` block.
+  //
+  // The entry survives with an empty `missing`, not as no entry at all: the
+  // skill still declares what it needs and the section still names it — that
+  // line is what the notice means, and hiding it when all is well would leave
+  // the notice unexplained when it appears.
+  it("reports no missing tools when the declared tool list is empty", () => {
+    expect(skillNeedsAgainstGrants(["scraper"], CATALOG, [], false)).toEqual([
+      { name: "scraper", needs: ["web_fetch", "file_read"], missing: [] },
+    ]);
+  });
+
+  it("reports no missing tools when globs cover every need", () => {
+    expect(skillNeedsAgainstGrants(["scraper"], CATALOG, ["web_*", "file_*"], false)).toEqual([
+      { name: "scraper", needs: ["web_fetch", "file_read"], missing: [] },
+    ]);
+  });
+
+  // `tools_disabled` empties the agent's tool set before any allowlist is
+  // consulted, so the empty list that otherwise grants everything grants
+  // nothing here — and the notice must not be silent in that case.
+  it("reports every need when the agent's tools are disabled outright", () => {
+    expect(skillNeedsAgainstGrants(["scraper"], CATALOG, [], true)).toEqual([
+      { name: "scraper", needs: ["web_fetch", "file_read"], missing: ["web_fetch", "file_read"] },
+    ]);
+  });
+
+  it("omits a skill that declares no needs", () => {
+    expect(skillNeedsAgainstGrants(["quiet"], CATALOG, ["file_read"], false)).toEqual([]);
+  });
+
+  // Unknown is not "needs nothing" and not "cannot run" — it is not a fact the
+  // notice can be built on, so it makes no claim either way.
+  it("omits a skill the catalog does not carry, or carries without required_tools", () => {
+    expect(skillNeedsAgainstGrants(["unlisted"], CATALOG, ["file_read"], false)).toEqual([]);
+    expect(skillNeedsAgainstGrants(["silent"], CATALOG, ["file_read"], false)).toEqual([]);
+  });
+
+  it("renders the needs line and the notice for an assigned skill", () => {
+    const state = emptyManifestForm();
+    state.skills = ["scraper"];
+    state.capabilities.tools = ["file_read"];
+    render(<Harness skillCatalog={CATALOG} initialState={state} sections={["skills"]} />);
+
+    // This file's i18n stub returns the key without interpolating, so the
+    // per-skill names and the missing tools are asserted through the pure
+    // function above; what the render proves is that the block reaches the
+    // DOM, and that the needs line and the notice are separate elements.
+    expect(screen.getByText("agents.form.skills_needs")).toBeInTheDocument();
+    expect(screen.getByText("agents.form.skills_missing_tools")).toBeInTheDocument();
+  });
+
+  it("renders no block at all when no assigned skill declares a need", () => {
+    const state = emptyManifestForm();
+    state.skills = ["quiet", "silent"];
+    render(<Harness skillCatalog={CATALOG} initialState={state} sections={["skills"]} />);
+
+    expect(screen.queryByText("agents.form.skills_needs")).not.toBeInTheDocument();
+  });
+});
+
+// The grant fields edit one layer of a four-layer intersection, and the layer
+// most likely to subtract from them — the per-user policy — is configured
+// somewhere this editor cannot show. An operator reading only the controls
+// would believe a grant here is the decision.
+describe("AgentManifestForm — the capabilities section names the intersection", () => {
+  it("states it inside the section, ahead of the grant fields", () => {
+    render(<Harness sections={["capabilities"]} />);
+
+    const section = document.querySelector('[data-section="capabilities"]');
+    expect(section, "the capabilities section renders").toBeTruthy();
+    expect(
+      within(section as HTMLElement).getByText("agents.form.capabilities_layers_note"),
+    ).toBeInTheDocument();
+  });
+});
+
+// The skill workshop's FormSection sat nested inside compaction's — a rebase
+// artifact, not a design. The drawer's tabs made it worse than cosmetic: the
+// memory tab hosts compaction without workshop and the skills tab hosts
+// workshop without compaction, so the shows guard zeroed the outer section
+// on both tabs and the workshop rendered NOWHERE. Unnested, each section
+// appears on the tab that hosts it and nowhere else.
+describe("AgentManifestForm — the workshop is not nested inside compaction", () => {
+  it("renders skill_workshop on the skills tab, which hosts it", () => {
+    render(<Harness sections={["skills", "skill_workshop"]} />);
+
+    const section = document.querySelector('[data-section="skill_workshop"]');
+    expect(section, "the skills tab hosts skill_workshop, so it renders").toBeTruthy();
+    expect(
+      within(section as HTMLElement).getByText("agents.form.skill_workshop_enabled"),
+    ).toBeInTheDocument();
+    // And compaction stays off the tab that does not host it.
+    expect(document.querySelector('[data-section="compaction"]')).toBeNull();
+  });
+
+  it("renders compaction on the memory tab without carrying the workshop in it", () => {
+    render(<Harness sections={["proactive_memory", "auto_dream", "compaction"]} />);
+
+    const section = document.querySelector('[data-section="compaction"]');
+    expect(section).toBeTruthy();
+    expect(
+      within(section as HTMLElement).queryByText("agents.form.skill_workshop_enabled"),
+    ).toBeNull();
+    expect(document.querySelector('[data-section="skill_workshop"]')).toBeNull();
+  });
+});
+
+// The inherit-the-deployment-default capability, which the unified editor lost
+// when the drawer's model editor went: it used to send `provider = "default"`
+// and the daemon resolves that (and an empty provider) to whatever the kernel
+// boots with (`kernel/llm_drivers.rs:178`). Without a way back, an agent pinned
+// to one model could never be unpinned — the picker cannot emit an empty
+// commit, so the only route was hand-editing `agent.toml`.
+//
+// Driven through the serializer as well as the control: `provider = "default"`
+// is what the daemon reads, and a control that set the state without the
+// serializer carrying it would be a capability that looks restored and is not.
+describe("AgentManifestForm — inheriting the deployment default model", () => {
+  const pinned = () => {
+    const form = emptyManifestForm();
+    form.name = "pinned-agent";
+    form.model.provider = "anthropic";
+    form.model.model = "claude-sonnet-5";
+    return form;
+  };
+
+  // Matched by its English label, not the key: this file's i18n mock resolves
+  // `defaultValue`, which is what the control ships to an operator.
+  const resetControl = () =>
+    screen.getByRole("button", { name: /use global default/i });
+
+  it("offers a way back to the global default from a pinned model", () => {
+    render(<Harness initialState={pinned()} />);
+    expect(resetControl()).toBeInTheDocument();
+  });
+
+  it("resets the pair to the sentinel the daemon resolves", async () => {
+    const user = userEvent.setup();
+    let latest: ManifestFormState | null = null;
+    render(<Harness initialState={pinned()} onState={(next) => { latest = next; }} />);
+
+    await user.click(resetControl());
+
+    expect(latest).not.toBeNull();
+    expect(latest!.model.provider).toBe("default");
+    expect(latest!.model.model).toBe("default");
+
+    // And the file the daemon reads carries it.
+    const toml = serializeManifestForm(latest!, emptyManifestExtras());
+    expect(toml).toContain('provider = "default"');
+    expect(toml).toContain('model = "default"');
+  });
+});
+
+// A validation error inside a folded section has to open that section. The
+// inner `AdvancedFields` opens its own fold and `Field` marks the control, but
+// the section's outer `<details>` is the one the operator has to see through:
+// with it closed the marked field is `aria-invalid=1` and invisible, which is
+// the same failure the group jump in AgentsPage exists to prevent one level up.
+//
+// Every section that can host one of the validator's paths is listed, not just
+// the five that were broken — the three that worked would have caught a
+// regression here, and they are the shape the others had to copy.
+describe("AgentManifestForm — a validation error opens its folded section", () => {
+  const cases: Array<[string, string[]]> = [
+    ["scheduling", ["schedule.cron"]],
+    ["response_format", ["response_format.schema"]],
+    ["autonomous", ["autonomous.heartbeat_timeout_secs"]],
+    ["compaction", ["compaction.max_retries"]],
+    ["compaction", ["compaction.max_loop_steps_before_aggregate"]],
+    ["compaction", ["compaction.strip_reasoning_after_turns"]],
+    ["lifecycle", ["max_history_messages"]],
+    ["lifecycle", ["max_concurrent_invocations"]],
+    ["auto_dream", ["auto_dream_min_sessions"]],
+    ["skill_workshop", ["skill_workshop.max_pending_age_days"]],
+    ["skill_workshop", ["skill_workshop.max_pending"]],
+    ["channel_overrides", ["channel_overrides.rate_limit_per_minute"]],
+    ["channel_overrides", ["channel_overrides.message_debounce_ms"]],
+  ];
+
+  it.each(cases)("opens %s for %s", (section, path) => {
+    // `new Set(path)`, not `new Set([path])`: the case's second element is
+    // already the list of paths, and wrapping it again puts an array in the
+    // set, which `has()` then answers false for — every section reads closed
+    // and the test looks like it is finding a real defect.
+    render(<Harness invalidFields={new Set(path)} />);
+
+    const details = document.querySelector(`[data-section="${section}"]`);
+    expect(details, `no section rendered for ${section}`).toBeTruthy();
+    expect((details as HTMLDetailsElement).open).toBe(true);
+  });
+
+  // `shared_folders` keys its errors by row, so the section opens when any of
+  // its rendered workspaces is the one complained about.
+  it("opens shared_folders for the row the error names", () => {
+    const form = emptyManifestForm();
+    form.name = "an-agent";
+    form.workspaces = [{ _uid: "u1", name: "docs", path: "", mode: "rw" }];
+    render(<Harness initialState={form} invalidFields={new Set(["workspaces.u1.path"])} />);
+
+    const details = document.querySelector('[data-section="shared_folders"]');
+    expect(details).toBeTruthy();
+    // `.open` is the element's own view of itself, which is what decides
+    // whether the row is on screen. `toHaveAttribute("open")` answers the same
+    // question here — React writes the attribute and the DOM reflects it — so
+    // either spelling is fine; this one is the property the browser reads.
+    expect((details as HTMLDetailsElement).open).toBe(true);
+  });
+
+  // And it does not open a section the error is not about: an always-open
+  // section would defeat the point of folding the rest.
+  it("leaves a section the error does not name closed", () => {
+    render(<Harness invalidFields={new Set(["compaction.max_retries"])} />);
+
+    expect(
+      (document.querySelector('[data-section="skill_workshop"]') as HTMLDetailsElement).open,
+    ).toBe(false);
   });
 });

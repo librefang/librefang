@@ -14,6 +14,7 @@ use std::sync::{mpsc, Arc, OnceLock};
 use std::time::Duration;
 
 use super::screens::{
+    agents::ManifestVersion,
     audit::AuditEntry,
     channels::{ChannelAdapterInfo, ChannelFieldInfo, ChannelInstance, ConfigureRequest},
     config_editor::{parse_config_sections, ConfigSection},
@@ -486,6 +487,22 @@ pub enum AppEvent {
     },
     /// Agent model routing updated.
     AgentModelRoutingUpdated(String),
+    /// The agent's recorded manifest snapshots, newest first.
+    /// An empty vector is a real answer — an agent whose manifest was never persisted has none.
+    ///
+    /// `agent_id` is the agent the fetch was issued for.
+    /// This pane renders another agent's entire `agent.toml`, so a response that outlived its request has to be droppable rather than displayed under whichever header is open now.
+    AgentManifestHistoryLoaded {
+        agent_id: String,
+        versions: Vec<ManifestVersion>,
+    },
+    /// The agent's manifest snapshots could not be read — see [`FetchFailure`].
+    ///
+    /// Separate from the catch-all `FetchError` so that clearing the history pane's loading flag is scoped to a history failure, instead of any agent-tab fetch failure standing in for one.
+    AgentManifestHistoryFailed {
+        agent_id: String,
+        failure: FetchFailure,
+    },
     /// Comms topology loaded.
     CommsTopologyLoaded {
         nodes: Vec<super::screens::comms::CommsNode>,
@@ -2470,6 +2487,100 @@ pub fn spawn_fetch_agent_model_params(
                 "tui-event-model-params-daemon-only",
             )));
         }
+    });
+}
+
+/// Largest page `GET /api/agents/{id}/manifest-history` will serve.
+///
+/// Asked for in full because the endpoint has no offset parameter: whatever the first response omits cannot be paged to afterwards, and the store keeps far fewer snapshots per agent than this anyway.
+const MANIFEST_HISTORY_LIMIT: u32 = 200;
+
+/// Map a `GET /api/agents/{id}/manifest-history` 200 body to the pane's rows.
+///
+/// A body without a `versions` array is a broken answer, not an agent with no history: reporting an empty pane would hide the malformed response behind "nothing recorded".
+fn manifest_versions_from_body(body: &serde_json::Value) -> Result<Vec<ManifestVersion>, String> {
+    let Some(versions) = body["versions"].as_array() else {
+        return Err(crate::i18n::t("tui-event-manifest-history-fetch-failed"));
+    };
+    Ok(versions
+        .iter()
+        .map(|v| ManifestVersion {
+            timestamp: v["timestamp"].as_str().unwrap_or_default().to_string(),
+            change_source: v["change_source"].as_str().unwrap_or_default().to_string(),
+            manifest_toml: v["manifest_toml"].as_str().unwrap_or_default().to_string(),
+        })
+        .collect())
+}
+
+/// Read an agent's snapshots straight from the substrate, for the in-process backend.
+///
+/// Snapshots are written into the substrate by the same kernel the in-process TUI holds, so it can read them directly — including rows a daemon wrote in an earlier session against the same `~/.librefang`.
+/// Unlike the model-params fetch this is modelled on, there is no advisory limit check that only the endpoint performs; it is a pure read.
+fn manifest_versions_from_store(
+    store: &librefang_memory::ManifestVersionStore,
+    agent_id: &str,
+    limit: usize,
+) -> Result<Vec<ManifestVersion>, String> {
+    store
+        .list_for_agent(agent_id, limit)
+        .map(|rows| {
+            rows.into_iter()
+                .map(|r| ManifestVersion {
+                    timestamp: r.timestamp,
+                    change_source: r.change_source,
+                    manifest_toml: r.manifest_toml,
+                })
+                .collect()
+        })
+        .map_err(|e| e.to_string())
+}
+
+/// Fetch an agent's recorded manifest snapshots for the view-only history pane.
+pub fn spawn_fetch_agent_manifest_history(
+    backend: BackendRef,
+    agent_id: String,
+    tx: mpsc::Sender<AppEvent>,
+) {
+    let limit = MANIFEST_HISTORY_LIMIT;
+    std::thread::spawn(move || {
+        let fail = |tx: &mpsc::Sender<AppEvent>, failure: FetchFailure| {
+            let _ = tx.send(AppEvent::AgentManifestHistoryFailed {
+                agent_id: agent_id.clone(),
+                failure,
+            });
+        };
+        let versions = match backend {
+            BackendRef::Daemon { base_url, api_key } => {
+                let client = make_daemon_client(api_key.as_deref());
+                // A bad agent id is answered by the endpoint (400 for a non-UUID, 404 for one it does not know), so the reason it gives is reported instead of a generic failure.
+                fetch_json(
+                    client
+                        .get(format!(
+                            "{base_url}/api/agents/{agent_id}/manifest-history?limit={limit}"
+                        ))
+                        .send(),
+                    || crate::i18n::t("tui-event-manifest-history-fetch-failed"),
+                )
+                .and_then(|body| manifest_versions_from_body(&body))
+            }
+            BackendRef::InProcess(kernel) => {
+                use librefang_kernel::KernelApi;
+                let store =
+                    librefang_memory::ManifestVersionStore::new(kernel.memory_substrate().pool());
+                manifest_versions_from_store(&store, &agent_id, limit as usize)
+            }
+        };
+        let versions = match versions {
+            Ok(versions) => versions,
+            Err(message) => {
+                fail(&tx, FetchFailure::Error(message));
+                return;
+            }
+        };
+        let _ = tx.send(AppEvent::AgentManifestHistoryLoaded {
+            agent_id: agent_id.clone(),
+            versions,
+        });
     });
 }
 
@@ -6822,6 +6933,83 @@ pub fn spawn_fetch_agents_for_chat(
 mod tests {
     use super::*;
     use std::sync::atomic::AtomicBool;
+
+    // ── manifest history fetch: body and store mapping ────────────────────
+
+    /// A 200 without a `versions` array is a malformed answer and must surface as a failure, not as an agent with no history.
+    #[test]
+    fn a_history_body_without_versions_is_an_error() {
+        assert_eq!(
+            manifest_versions_from_body(&serde_json::json!({})),
+            Err(crate::i18n::t("tui-event-manifest-history-fetch-failed"))
+        );
+        assert!(manifest_versions_from_body(&serde_json::json!({ "versions": null })).is_err());
+    }
+
+    #[test]
+    fn an_empty_versions_array_is_an_empty_history() {
+        assert_eq!(
+            manifest_versions_from_body(&serde_json::json!({ "versions": [] })),
+            Ok(Vec::new())
+        );
+    }
+
+    #[test]
+    fn a_populated_history_body_keeps_order_and_fields() {
+        let body = serde_json::json!({
+            "versions": [
+                { "id": 2, "timestamp": "2026-09-07 10:00:00", "change_source": "restore", "manifest_toml": "name = \"b\"" },
+                { "id": 1, "timestamp": "2026-09-06 09:00:00", "change_source": "api", "manifest_toml": "name = \"a\"" },
+            ]
+        });
+        assert_eq!(
+            manifest_versions_from_body(&body),
+            Ok(vec![
+                ManifestVersion {
+                    timestamp: "2026-09-07 10:00:00".to_string(),
+                    change_source: "restore".to_string(),
+                    manifest_toml: "name = \"b\"".to_string(),
+                },
+                ManifestVersion {
+                    timestamp: "2026-09-06 09:00:00".to_string(),
+                    change_source: "api".to_string(),
+                    manifest_toml: "name = \"a\"".to_string(),
+                },
+            ])
+        );
+    }
+
+    /// The in-process backend reads the same substrate the kernel writes, newest first, scoped to the agent asked for.
+    #[test]
+    fn the_in_process_history_read_returns_the_agents_rows_newest_first() {
+        let substrate = librefang_memory::MemorySubstrate::open_in_memory(0.1).unwrap();
+        let store = librefang_memory::ManifestVersionStore::new(substrate.pool());
+        store
+            .record_version("agent_a", "a", "name = \"a\"\nversion = 1", "api")
+            .unwrap();
+        store
+            .record_version("agent_a", "a", "name = \"a\"\nversion = 2", "restore")
+            .unwrap();
+        store
+            .record_version("agent_b", "b", "name = \"b\"", "api")
+            .unwrap();
+
+        let versions = manifest_versions_from_store(&store, "agent_a", 200).unwrap();
+
+        assert_eq!(
+            versions
+                .iter()
+                .map(|v| (v.change_source.as_str(), v.manifest_toml.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("restore", "name = \"a\"\nversion = 2"),
+                ("api", "name = \"a\"\nversion = 1"),
+            ]
+        );
+        assert!(manifest_versions_from_store(&store, "agent_unknown", 200)
+            .unwrap()
+            .is_empty());
+    }
 
     // ── the memory-config PATCH reports its outcome in the body ───────────
 
