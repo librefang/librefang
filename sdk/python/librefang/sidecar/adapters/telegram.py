@@ -869,6 +869,14 @@ def _is_ogg_opus(data: bytes) -> bool:
     return len(data) >= 36 and data[28:36] == b"OpusHead"
 
 
+def _is_voice_messages_forbidden(resp) -> bool:
+    """Telegram refused ``sendVoice`` because the recipient restricts voice messages (Privacy and Security → Voice Messages → "My contacts" / "Nobody").
+    A bot is never one of the user's contacts, so the refusal is permanent for that chat, while ``sendDocument`` sits behind a different gate and still delivers the same audio as a playable file (#8584).
+    Matched on the description rather than the status code, so a 429 or 5xx keeps its own retry semantics instead of being re-sent as a document."""
+    return (bool(resp) and resp.get("ok") is not True
+            and "VOICE_MESSAGES_FORBIDDEN" in str(resp.get("description", "")))
+
+
 def _extract_retry_after(body, default: int) -> int:
     """Resolve a 429 delay: HTTP delta-seconds ``Retry-After`` header first (stashed by ``_api_post`` / ``_multipart`` as ``_retry_after_header``), then Telegram's JSON ``parameters.retry_after``, then ``default``.
     Mirrors ``telegram.rs``'s ``resolve_retry_after``: a header that isn't a bare non-negative integer (HTTP-date form, a decimal, a stray sign) falls through to the JSON value instead of raising or producing a negative delay."""
@@ -1196,17 +1204,33 @@ class TelegramAdapter(SidecarAdapter):
 
     def _send_media_request(self, endpoint: str, chat_id, body: dict,
                             thread_id=None) -> dict:
+        return self._report_send_failure(
+            endpoint, chat_id,
+            self._post_media_request(endpoint, chat_id, body, thread_id),
+        )
+
+    def _post_media_request(self, endpoint: str, chat_id, body: dict,
+                            thread_id=None) -> dict:
+        """`_send_media_request` without the failure report, for a caller that may still recover from the refusal."""
         body = dict(body)
         body["chat_id"] = chat_id
         if thread_id:
             body["message_thread_id"] = thread_id
-        return self._report_send_failure(
-            endpoint, chat_id, self._call_retrying(endpoint, body),
-        )
+        return self._call_retrying(endpoint, body)
 
     def _send_media_upload(self, endpoint: str, field: str, chat_id,
                            data: bytes, filename: str, mime: str,
                            extra: dict = None, thread_id=None) -> dict:
+        return self._report_send_failure(
+            endpoint, chat_id,
+            self._post_media_upload(endpoint, field, chat_id, data, filename,
+                                    mime, extra, thread_id),
+        )
+
+    def _post_media_upload(self, endpoint: str, field: str, chat_id,
+                           data: bytes, filename: str, mime: str,
+                           extra: dict = None, thread_id=None) -> dict:
+        """`_send_media_upload` without the failure report, for a caller that may still recover from the refusal."""
         fields = {"chat_id": str(chat_id)}
         if thread_id:
             fields["message_thread_id"] = str(thread_id)
@@ -1225,7 +1249,13 @@ class TelegramAdapter(SidecarAdapter):
             time.sleep(delay)
             resp = _multipart(url, fields, field, filename, mime, data,
                               SEND_TIMEOUT_SECS)
-        return self._report_send_failure(endpoint, chat_id, resp)
+        return resp
+
+    def _log_voice_downgrade(self, chat_id) -> None:
+        # A downgrade nobody can see is its own trap: say which path actually served the send.
+        log.warn("telegram refused sendVoice with VOICE_MESSAGES_FORBIDDEN; "
+                 "resending the same audio via sendDocument",
+                 chat_id=str(chat_id))
 
     def _fetch_bytes(self, url: str):
         req = urllib.request.Request(url, method="GET")
@@ -1257,20 +1287,35 @@ class TelegramAdapter(SidecarAdapter):
             {"document": url, "caption": filename}, thread_id)
 
     def _send_voice(self, chat_id, url, caption, thread_id):
+        """``sendVoice``, downgraded to ``sendDocument`` (same audio, same caption) when the recipient refuses voice messages (#8584)."""
         if _is_private_url(url):
             data, ct = self._fetch_bytes(url)
             extra = {}
             if caption:
                 extra = {"caption": caption, "parse_mode": PARSE_MODE_HTML}
-            return self._send_media_upload(
-                "sendVoice", "voice", chat_id, data,
-                _url_filename(url, "voice.ogg"), ct or "audio/ogg",
+            filename = _url_filename(url, "voice.ogg")
+            mime = ct or "audio/ogg"
+            resp = self._post_media_upload(
+                "sendVoice", "voice", chat_id, data, filename, mime,
                 extra, thread_id)
+            if _is_voice_messages_forbidden(resp):
+                self._log_voice_downgrade(chat_id)
+                return self._send_media_upload(
+                    "sendDocument", "document", chat_id, data, filename,
+                    mime, extra, thread_id)
+            return self._report_send_failure("sendVoice", chat_id, resp)
         body = {"voice": url}
         if caption:
             body["caption"] = caption
             body["parse_mode"] = PARSE_MODE_HTML
-        return self._send_media_request("sendVoice", chat_id, body, thread_id)
+        resp = self._post_media_request("sendVoice", chat_id, body, thread_id)
+        if _is_voice_messages_forbidden(resp):
+            self._log_voice_downgrade(chat_id)
+            body = dict(body)
+            body["document"] = body.pop("voice")
+            return self._send_media_request(
+                "sendDocument", chat_id, body, thread_id)
+        return self._report_send_failure("sendVoice", chat_id, resp)
 
     def _send_audio(self, chat_id, url, caption, title, performer, thread_id):
         if _is_private_url(url):
@@ -1500,11 +1545,15 @@ class TelegramAdapter(SidecarAdapter):
         sniff = data[:36]
         if (_is_telegram_voice_payload(mime, fn)
                 and sniff[:4] == b"OggS" and _is_ogg_opus(sniff)):
-            self._send_media_upload("sendVoice", "voice", chat_id, data, fn,
-                                    mime, None, thread_id)
-        else:
-            self._send_media_upload("sendDocument", "document", chat_id, data,
-                                    fn, mime, None, thread_id)
+            resp = self._post_media_upload("sendVoice", "voice", chat_id,
+                                           data, fn, mime, None, thread_id)
+            if not _is_voice_messages_forbidden(resp):
+                self._report_send_failure("sendVoice", chat_id, resp)
+                return
+            # The recipient refuses voice notes; the same bytes still arrive as a file (#8584).
+            self._log_voice_downgrade(chat_id)
+        self._send_media_upload("sendDocument", "document", chat_id, data,
+                                fn, mime, None, thread_id)
 
     # ---- inbound -----------------------------------------------------
 
