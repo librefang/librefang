@@ -1,0 +1,4 @@
+Close isolation gaps found in a second workspace audit.
+`/api/sessions`, `/api/sessions/{id}` and session search are now owner-scoped, so a non-admin role can no longer read every user's transcripts, and `web_fetch` no longer serves one agent's authenticated response from cache to another.
+A cron `LocalFile` delivery target resolves inside the agent workspace instead of the daemon's working directory, persistent hook processes run under the same plugin sandbox as one-shot hooks, sidecar and subprocess-transport children no longer inherit `LIBREFANG_VAULT_KEY` and vault secrets, and combined shell flags such as `bash -lc` can no longer slip past the exec allowlist.
+A scalar value in a manifest allowlist no longer reads as "unrestricted", and the channel model-picker button now applies the same RBAC and command-policy check as the `/model` command (#8588) (@houko)
