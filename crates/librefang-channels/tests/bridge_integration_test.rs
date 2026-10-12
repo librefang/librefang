@@ -4840,3 +4840,184 @@ async fn test_agent_command_sticks_and_commands_follow_chat_routing() {
 
     manager.stop().await;
 }
+
+// ---------------------------------------------------------------------------
+// Model-picker button callbacks honour RBAC and the channel command policy
+// ---------------------------------------------------------------------------
+
+/// Handle whose RBAC denies one platform user and which records every `set_model` call.
+struct ModelGateHandle {
+    agent: AgentId,
+    denied_user: Option<String>,
+    set_model_calls: Arc<Mutex<Vec<(AgentId, String)>>>,
+}
+
+#[async_trait]
+impl ChannelBridgeHandle for ModelGateHandle {
+    async fn send_message(&self, _agent_id: AgentId, message: &str) -> Result<String, String> {
+        Ok(format!("Echo: {message}"))
+    }
+    async fn find_agent_by_name(&self, _name: &str) -> Result<Option<AgentId>, String> {
+        Ok(None)
+    }
+    async fn list_agents(&self) -> Result<Vec<(AgentId, String)>, String> {
+        Ok(vec![(self.agent, "coder".to_string())])
+    }
+    async fn spawn_agent_by_name(&self, _manifest_name: &str) -> Result<AgentId, String> {
+        Err("mock: spawn not implemented".to_string())
+    }
+    async fn set_model(&self, agent_id: AgentId, model: &str) -> Result<String, String> {
+        self.set_model_calls
+            .lock()
+            .unwrap()
+            .push((agent_id, model.to_string()));
+        Ok("ok".to_string())
+    }
+    async fn authorize_channel_user(
+        &self,
+        _channel_type: &str,
+        platform_id: &str,
+        _action: &str,
+    ) -> Result<(), String> {
+        match &self.denied_user {
+            Some(u) if u == platform_id => Err("not a member".to_string()),
+            _ => Ok(()),
+        }
+    }
+    fn record_consumer_lag(&self, _n: u64, _ctx: &'static str) {}
+}
+
+fn make_model_callback(user_id: &str, action: &str) -> ChannelMessage {
+    let mut metadata = HashMap::new();
+    metadata.insert("message_id".to_string(), serde_json::json!("4242"));
+    ChannelMessage {
+        channel: ChannelType::Telegram,
+        platform_message_id: "4242".to_string(),
+        sender: ChannelUser {
+            platform_id: user_id.to_string(),
+            display_name: "TestUser".to_string(),
+            librefang_user: None,
+        },
+        content: ChannelContent::ButtonCallback {
+            action: action.to_string(),
+            message_text: None,
+        },
+        target_agent: None,
+        timestamp: chrono::Utc::now(),
+        is_group: false,
+        thread_id: None,
+        metadata,
+    }
+}
+
+/// A `model:` button callback from a user RBAC rejects must not switch the agent's model.
+#[tokio::test]
+async fn model_button_callback_is_rejected_for_unauthorized_user() {
+    let agent = AgentId::new();
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let handle = Arc::new(ModelGateHandle {
+        agent,
+        denied_user: Some("intruder".to_string()),
+        set_model_calls: calls.clone(),
+    });
+    let router = Arc::new(AgentRouter::new());
+    router.set_user_default("intruder".to_string(), agent);
+
+    let (adapter, tx) = MockAdapter::new("test-adapter", ChannelType::Telegram);
+    let adapter_ref = adapter.clone();
+    let mut manager = BridgeManager::new(handle, router);
+    manager.start_adapter(adapter.clone()).await.unwrap();
+
+    tx.send(make_model_callback("intruder", "model:most-expensive"))
+        .await
+        .unwrap();
+
+    wait_until("access-denied reply", || !adapter_ref.get_sent().is_empty()).await;
+    let sent = adapter_ref.get_sent();
+    assert!(
+        sent[0].1.starts_with("Access denied"),
+        "unauthorized callback must be denied, got {sent:?}"
+    );
+    assert!(
+        calls.lock().unwrap().is_empty(),
+        "set_model must not run for an unauthorized user"
+    );
+
+    manager.stop().await;
+}
+
+/// A `model:` button callback must not switch the model when the channel blocks `/model`.
+#[tokio::test]
+async fn model_button_callback_respects_blocked_model_command() {
+    let agent = AgentId::new();
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let handle = Arc::new(ModelGateHandle {
+        agent,
+        denied_user: None,
+        set_model_calls: calls.clone(),
+    });
+    let router = Arc::new(AgentRouter::new());
+    router.set_user_default("member".to_string(), agent);
+
+    let (adapter, tx) = MockAdapter::new_with_overrides(
+        "test-adapter",
+        ChannelType::Telegram,
+        Some(ChannelOverrides {
+            blocked_commands: vec!["model".to_string()],
+            ..Default::default()
+        }),
+    );
+    let adapter_ref = adapter.clone();
+    let mut manager = BridgeManager::new(handle, router);
+    manager.start_adapter(adapter.clone()).await.unwrap();
+
+    tx.send(make_model_callback("member", "model:most-expensive"))
+        .await
+        .unwrap();
+
+    wait_until("disabled-command reply", || {
+        !adapter_ref.get_sent().is_empty()
+    })
+    .await;
+    let sent = adapter_ref.get_sent();
+    assert!(
+        sent[0].1.contains("/model is disabled"),
+        "blocked /model callback must be refused, got {sent:?}"
+    );
+    assert!(
+        calls.lock().unwrap().is_empty(),
+        "set_model must not run when /model is blocked on the channel"
+    );
+
+    manager.stop().await;
+}
+
+/// The gate must not break the authorized path: an allowed member's `model:` callback still switches the model.
+#[tokio::test]
+async fn model_button_callback_switches_model_for_authorized_user() {
+    let agent = AgentId::new();
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let handle = Arc::new(ModelGateHandle {
+        agent,
+        denied_user: Some("intruder".to_string()),
+        set_model_calls: calls.clone(),
+    });
+    let router = Arc::new(AgentRouter::new());
+    router.set_user_default("member".to_string(), agent);
+
+    let (adapter, tx) = MockAdapter::new("test-adapter", ChannelType::Telegram);
+    let mut manager = BridgeManager::new(handle, router);
+    manager.start_adapter(adapter.clone()).await.unwrap();
+
+    tx.send(make_model_callback("member", "model:fast-model"))
+        .await
+        .unwrap();
+
+    wait_until("set_model call", || !calls.lock().unwrap().is_empty()).await;
+    assert_eq!(
+        calls.lock().unwrap().clone(),
+        vec![(agent, "fast-model".to_string())]
+    );
+
+    manager.stop().await;
+}
