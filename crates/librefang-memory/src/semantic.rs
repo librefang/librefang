@@ -46,6 +46,13 @@ const MAX_BRUTEFORCE_CANDIDATES: usize = 5000;
 /// cut, which is why it over-fetches at all rather than stopping at `limit`.
 const MAX_FTS_CANDIDATES: usize = 500;
 
+/// Rank offset of the reciprocal-rank fusion that merges the cosine and bm25 orderings when a recall has both (#8521).
+///
+/// A fragment scores `1 / (RRF_K + rank)` in each list it appears in, so a memory ranked well by *either* signal reaches the top and one ranked well by both outranks either alone.
+/// 60 is the constant from the original RRF paper and the de-facto default in hybrid search engines; it keeps the head of each list from dominating so completely that a strong keyword hit cannot overtake a merely-adjacent cosine neighbour.
+/// Rank-based fusion is used rather than mixing the raw scores because cosine and bm25 are on unrelated scales, and the bm25 scores are not even read out of the index.
+const RRF_K: f32 = 60.0;
+
 /// Upper bound on how many terms a natural-language query contributes to the
 /// FTS5 `MATCH` expression, so a pathological paste cannot build a query string
 /// SQLite has to parse into thousands of OR-ed phrases.
@@ -381,7 +388,14 @@ impl SemanticStore {
     ) -> LibreFangResult<Vec<MemoryFragment>> {
         // ── Delegate to external vector store when available ──────────
         if let (Some(vs), Some(qe)) = (&self.vector_store, query_embedding) {
-            return self.recall_via_vector_store(vs, qe, limit, filter.clone(), track_access);
+            return self.recall_via_vector_store(
+                vs,
+                query,
+                qe,
+                limit,
+                filter.clone(),
+                track_access,
+            );
         }
 
         // mut: needed for the `transaction()` call inside
@@ -390,20 +404,23 @@ impl SemanticStore {
         // before that borrow occurs.
         let mut conn = self.pool.get().map_err(LibreFangError::memory)?;
 
-        // ── Full-text pre-selection when there is no query embedding ──
+        // ── Full-text lookup ──
         //
-        // Without this the no-embedding path was `content LIKE '%{query}%'`
-        // (#7808): a substring scan that only matches when the caller's entire
-        // phrasing appears verbatim inside a memory, which a natural-language
-        // question essentially never does. `memories_fts` (v49) turns the same
-        // path into a real inverted-index lookup ranked by bm25.
+        // Without a query embedding this is the pre-selection.
+        // The path used to be `content LIKE '%{query}%'` (#7808): a substring scan that only matches when the caller's entire phrasing appears verbatim inside a memory, which a natural-language question essentially never does.
+        // `memories_fts` (v49) turns the same path into a real inverted-index lookup ranked by bm25.
         //
         // Strictly additive: a query that yields no FTS hits falls through to
         // the LIKE predicate below, so substring matches that FTS's word
         // boundaries would miss ("fang" inside "librefang") still work, and a
         // deployment whose index has not been built yet degrades to exactly
         // the old behaviour instead of going silent.
-        let fts_ranked: Option<Vec<String>> = if query_embedding.is_none() && !query.is_empty() {
+        //
+        // With a query embedding the same bm25 ranking is the second signal of a hybrid ranking (#8521).
+        // It used to be skipped outright, so every deployment with a working embedding provider ranked by cosine alone and a memory holding the exact token searched for (a URL, an id, a proper noun) lost to merely topical neighbours.
+        // Here it neither filters the candidates nor replaces cosine: it guarantees its hits a place in the candidate window and is fused with the cosine order by reciprocal rank below.
+        // A caller that wants pure nearest neighbours passes an empty query.
+        let fts_ranked: Option<Vec<String>> = if !query.is_empty() {
             fts_candidate_ids(
                 &conn,
                 query,
@@ -445,7 +462,7 @@ impl SemanticStore {
         // Text search filter (only when no embeddings — vector search handles
         // relevance). The FTS index answers first when it matched anything;
         // LIKE remains the fallback for the queries it cannot serve.
-        if let Some(ref ids) = fts_ranked {
+        if let (Some(ids), None) = (&fts_ranked, query_embedding) {
             let placeholders = ids
                 .iter()
                 .enumerate()
@@ -565,10 +582,24 @@ impl SemanticStore {
                 params.push(Box::new(pid.clone()));
                 param_idx += 1;
             }
-            let _ = param_idx;
         }
 
-        if query_embedding.is_some() || fts_ranked.is_some() {
+        if let (Some(ids), Some(_)) = (&fts_ranked, query_embedding) {
+            // Hybrid ranking (#8521): the keyword hits are ordered ahead of the rest so the MAX_BRUTEFORCE_CANDIDATES cap can never cut a literal match out of the window that the fusion below ranks.
+            // They are not a filter — every other row still competes on cosine.
+            let placeholders = ids
+                .iter()
+                .enumerate()
+                .map(|(offset, _)| format!("?{}", param_idx + offset))
+                .collect::<Vec<_>>()
+                .join(",");
+            sql.push_str(&format!(
+                " ORDER BY CASE WHEN id IN ({placeholders}) THEN 0 ELSE 1 END, created_at DESC"
+            ));
+            for id in ids {
+                params.push(Box::new(id.clone()));
+            }
+        } else if query_embedding.is_some() || fts_ranked.is_some() {
             // Relevance-neutral candidate ordering: recency (accessed_at) must
             // not decide which rows reach cosine or bm25 re-ranking, or an
             // old-but-relevant memory outside the recency window is silently
@@ -734,7 +765,8 @@ impl SemanticStore {
         // of them survive the truncation, which is the recency bias the
         // over-fetch exists to avoid. Rows the FTS lookup did not rank cannot
         // occur (they came from that id list) but sort last if they ever do.
-        if let Some(ref ids) = fts_ranked {
+        // With a query embedding the bm25 order is fused into the cosine ranking below instead.
+        if let (Some(ids), None) = (&fts_ranked, query_embedding) {
             let rank: HashMap<&str, usize> = ids
                 .iter()
                 .enumerate()
@@ -796,6 +828,9 @@ impl SemanticStore {
                     .partial_cmp(&sim_a)
                     .unwrap_or(std::cmp::Ordering::Equal)
             });
+            if let Some(ref ids) = fts_ranked {
+                fragments = fuse_keyword_ranking(std::mem::take(&mut fragments), ids);
+            }
             // Similarity floor (#7808): "nothing rather than noise".
             // Applied after ranking and before truncation, so the floor
             // decides membership rather than merely reordering the same top-k.
@@ -856,6 +891,7 @@ impl SemanticStore {
     fn recall_via_vector_store(
         &self,
         vs: &Arc<dyn VectorStore>,
+        query: &str,
         query_embedding: &[f32],
         limit: usize,
         filter: Option<MemoryFilter>,
@@ -947,9 +983,21 @@ impl SemanticStore {
         for frag in &mut fragments {
             frag.similarity = scores.get(frag.id.0.to_string().as_str()).copied();
         }
+
+        // Hybrid ranking (#8521), same contract as the SQLite path: the backend only knows vectors, so the literal matches come from the local keyword path (FTS, else LIKE), which applies the caller's filter in SQL.
+        // A keyword-only hit carries no backend score, so it is unmeasured — the floor below drops it, exactly as it drops any row it cannot measure.
+        if !query.is_empty() {
+            let keyword = self.recall_impl(query, limit, filter.clone(), None, false)?;
+            let keyword_ids: Vec<String> = keyword.iter().map(|f| f.id.0.to_string()).collect();
+            let seen: HashSet<MemoryId> = fragments.iter().map(|f| f.id).collect();
+            fragments.extend(keyword.into_iter().filter(|f| !seen.contains(&f.id)));
+            fragments = fuse_keyword_ranking(fragments, &keyword_ids);
+        }
+
         if let Some(floor) = filter.as_ref().and_then(|f| f.min_similarity) {
             fragments.retain(|frag| frag.similarity.is_some_and(|s| s >= floor));
         }
+        fragments.truncate(limit);
 
         // Update access counts — see note on the SQLite-path
         // update above for why silent drops would corrupt decay
@@ -1230,6 +1278,33 @@ impl SemanticStore {
                 active_model = %active.as_deref().unwrap_or("unknown"),
                 "Withheld stored vectors embedded by a different model; dedup falls back to text similarity for them"
             );
+        }
+        Ok(map)
+    }
+
+    /// Load the `peer_id` column for a batch of memory IDs.
+    ///
+    /// Returns `id_string -> peer_id` for the rows that carry a peer; unscoped and unknown rows are omitted.
+    /// `MemoryFragment` does not carry `peer_id`, so `ProactiveMemoryStore::find_duplicates` reads it here to keep two users' memories out of one duplicate group (#8524).
+    pub fn get_peer_ids_batch(&self, ids: &[&str]) -> LibreFangResult<HashMap<String, String>> {
+        if ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let conn = self.pool.get().map_err(LibreFangError::memory)?;
+        let mut stmt = conn
+            .prepare("SELECT peer_id FROM memories WHERE id = ?1")
+            .map_err(LibreFangError::memory)?;
+        let mut map = HashMap::new();
+        for id in ids {
+            let peer: Option<String> =
+                match stmt.query_row(rusqlite::params![*id], |row| row.get(0)) {
+                    Ok(peer) => peer,
+                    Err(rusqlite::Error::QueryReturnedNoRows) => None,
+                    Err(e) => return Err(LibreFangError::memory(e)),
+                };
+            if let Some(peer) = peer {
+                map.insert(id.to_string(), peer);
+            }
         }
         Ok(map)
     }
@@ -1685,6 +1760,38 @@ fn fts_match_expression(query: &str) -> Option<String> {
     } else {
         Some(terms.join(" OR "))
     }
+}
+
+/// Re-order a cosine-ranked candidate list by reciprocal-rank fusion with the bm25-ranked `keyword_ranked` ids (#8521).
+///
+/// `fragments` must arrive in cosine order, measured rows first: the cosine rank of a fragment is its position among the rows that carry a `similarity`, so an unmeasured row contributes nothing on that side rather than a fictional rank.
+/// The sort is stable, so fragments with equal fused scores keep their cosine order and the result is deterministic.
+fn fuse_keyword_ranking(
+    fragments: Vec<MemoryFragment>,
+    keyword_ranked: &[String],
+) -> Vec<MemoryFragment> {
+    let keyword_rank: HashMap<&str, usize> = keyword_ranked
+        .iter()
+        .enumerate()
+        .map(|(position, id)| (id.as_str(), position + 1))
+        .collect();
+    let mut semantic_rank = 0usize;
+    let mut scored: Vec<(f32, MemoryFragment)> = fragments
+        .into_iter()
+        .map(|frag| {
+            let mut score = 0.0f32;
+            if frag.similarity.is_some() {
+                semantic_rank += 1;
+                score += 1.0 / (RRF_K + semantic_rank as f32);
+            }
+            if let Some(rank) = keyword_rank.get(frag.id.0.to_string().as_str()) {
+                score += 1.0 / (RRF_K + *rank as f32);
+            }
+            (score, frag)
+        })
+        .collect();
+    scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+    scored.into_iter().map(|(_, frag)| frag).collect()
 }
 
 /// Look up bm25-ranked memory ids for `query` in the `memories_fts` index.
@@ -4098,5 +4205,227 @@ mod tests {
             "corrupt metadata must surface as Err from get_by_id, not be silently defaulted; \
              got: {res:?}"
         );
+    }
+
+    // -----------------------------------------------------------------
+    // #8521 — keyword matches in embedding recall.
+    // -----------------------------------------------------------------
+
+    /// Store `count` memories that are cosine neighbours of `[1, 0, 0]` and share no word with "brief", then one memory holding the literal token with an orthogonal vector.
+    /// Returns the id of that literal-match memory.
+    fn seed_topical_neighbours_and_a_literal_match(
+        store: &SemanticStore,
+        agent: AgentId,
+        count: usize,
+    ) -> MemoryId {
+        for i in 0..count {
+            let neighbour = [1.0_f32, 0.001 * i as f32, 0.0];
+            store
+                .remember_with_embedding(
+                    agent,
+                    &format!("planning notes number {i} about the roadmap"),
+                    MemorySource::Conversation,
+                    "episodic",
+                    HashMap::new(),
+                    Some(&neighbour),
+                    None,
+                    None,
+                    MemoryModality::Text,
+                )
+                .unwrap();
+        }
+        store
+            .remember_with_embedding(
+                agent,
+                "the brief lives at https://docs.example/brief-42",
+                MemorySource::Conversation,
+                "episodic",
+                HashMap::new(),
+                Some(&[0.0, 1.0, 0.0]),
+                None,
+                None,
+                MemoryModality::Text,
+            )
+            .unwrap()
+    }
+
+    /// The reported bug: with a query embedding the bm25 lookup was skipped entirely, so a memory containing the exact searched token ranked purely by cosine and fell out of the top-k behind merely topical neighbours.
+    #[test]
+    fn embedding_recall_surfaces_a_literal_keyword_match() {
+        let store = setup();
+        let agent = AgentId::new();
+        let target = seed_topical_neighbours_and_a_literal_match(&store, agent, 12);
+
+        let results = store
+            .recall_with_embedding(
+                "brief",
+                10,
+                Some(MemoryFilter::agent(agent)),
+                Some(&[1.0, 0.0, 0.0]),
+            )
+            .unwrap();
+        assert_eq!(results.len(), 10);
+        let hit = results.iter().find(|f| f.id == target).unwrap_or_else(|| {
+            panic!(
+                "a memory containing the searched token must reach the top-k; got {:?}",
+                results.iter().map(|f| &f.content).collect::<Vec<_>>()
+            )
+        });
+        assert_eq!(
+            results[0].id, target,
+            "the only memory matching on both keyword and (weak) cosine must rank first"
+        );
+        assert!(
+            hit.similarity.is_some_and(|s| s.abs() < 1e-6),
+            "the cosine score is still measured and reported honestly, not inflated by the keyword match; got {:?}",
+            hit.similarity
+        );
+        // Everything else is still ranked by cosine.
+        assert!(results[1].content.contains("planning notes number 0"));
+    }
+
+    /// The keyword signal reorders; it does not override a caller's similarity floor, which stays a statement about measured cosine.
+    #[test]
+    fn embedding_recall_floor_still_applies_to_keyword_matches() {
+        let store = setup();
+        let agent = AgentId::new();
+        let target = seed_topical_neighbours_and_a_literal_match(&store, agent, 3);
+
+        let results = store
+            .recall_with_embedding(
+                "brief",
+                10,
+                Some(MemoryFilter {
+                    min_similarity: Some(0.5),
+                    ..MemoryFilter::agent(agent)
+                }),
+                Some(&[1.0, 0.0, 0.0]),
+            )
+            .unwrap();
+        assert_eq!(results.len(), 3);
+        assert!(results.iter().all(|f| f.id != target));
+    }
+
+    /// The bounded candidate window is ordered by `created_at DESC`, so on a store larger than the cap the oldest rows are never scored.
+    /// A literal match must be ordered into the window regardless of its age.
+    #[test]
+    fn embedding_recall_keeps_an_old_literal_match_inside_the_candidate_window() {
+        let store = setup();
+        let agent = AgentId::new();
+        // Written first, so it is the oldest row and the first one the cap cuts.
+        let target = store
+            .remember_with_embedding(
+                agent,
+                "the brief lives at https://docs.example/brief-42",
+                MemorySource::Conversation,
+                "episodic",
+                HashMap::new(),
+                Some(&[0.0, 1.0, 0.0]),
+                None,
+                None,
+                MemoryModality::Text,
+            )
+            .unwrap();
+        {
+            let mut conn = store.pool.get().unwrap();
+            let tx = conn.transaction().unwrap();
+            {
+                let mut stmt = tx
+                    .prepare(
+                        "INSERT INTO memories (id, agent_id, content, source, scope, confidence, metadata, created_at, accessed_at, access_count, deleted, embedding) \
+                         VALUES (?1, ?2, ?3, '\"conversation\"', 'episodic', 1.0, '{}', ?4, ?4, 0, 0, ?5)",
+                    )
+                    .unwrap();
+                let later = Utc::now() + chrono::Duration::minutes(1);
+                for i in 0..MAX_BRUTEFORCE_CANDIDATES {
+                    stmt.execute(rusqlite::params![
+                        uuid::Uuid::new_v4().to_string(),
+                        agent.0.to_string(),
+                        format!("planning notes number {i}"),
+                        (later + chrono::Duration::milliseconds(i as i64)).to_rfc3339(),
+                        embedding_to_bytes(&[1.0, 0.0, 0.0]),
+                    ])
+                    .unwrap();
+                }
+            }
+            tx.commit().unwrap();
+        }
+
+        let results = store
+            .recall_with_embedding(
+                "brief",
+                10,
+                Some(MemoryFilter::agent(agent)),
+                Some(&[1.0, 0.0, 0.0]),
+            )
+            .unwrap();
+        assert!(
+            results.iter().any(|f| f.id == target),
+            "a literal match older than the candidate cap must still be ranked"
+        );
+    }
+
+    /// The external VectorStore path has no bm25 of its own, so the keyword hits come from the local index and are fused the same way, still under the caller's filter.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn vector_store_recall_fuses_local_keyword_matches() {
+        let mut store = setup();
+        let agent = AgentId::new();
+        let other_agent = AgentId::new();
+        let mut neighbour_ids = Vec::new();
+        for i in 0..5 {
+            neighbour_ids.push(
+                store
+                    .remember(
+                        agent,
+                        &format!("planning notes number {i}"),
+                        MemorySource::Conversation,
+                        "episodic",
+                        HashMap::new(),
+                    )
+                    .unwrap()
+                    .0
+                    .to_string(),
+            );
+        }
+        let target = store
+            .remember(
+                agent,
+                "the brief lives at https://docs.example/brief-42",
+                MemorySource::Conversation,
+                "episodic",
+                HashMap::new(),
+            )
+            .unwrap();
+        let foreign = store
+            .remember(
+                other_agent,
+                "another agent's brief",
+                MemorySource::Conversation,
+                "episodic",
+                HashMap::new(),
+            )
+            .unwrap();
+        // The backend knows only the topical neighbours.
+        store.set_vector_store(Arc::new(LeakyVectorStore { ids: neighbour_ids }));
+
+        let results = store
+            .recall_with_embedding(
+                "brief",
+                3,
+                Some(MemoryFilter::agent(agent)),
+                Some(&[1.0, 0.0, 0.0]),
+            )
+            .unwrap();
+        assert_eq!(
+            results.len(),
+            3,
+            "the fused list is still truncated to the limit"
+        );
+        assert!(
+            results.iter().any(|f| f.id == target),
+            "a local keyword match must be fused into an external-backend recall; got {:?}",
+            results.iter().map(|f| &f.content).collect::<Vec<_>>()
+        );
+        assert!(results.iter().all(|f| f.id != foreign));
     }
 }
