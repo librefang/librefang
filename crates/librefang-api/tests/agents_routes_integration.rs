@@ -650,6 +650,65 @@ async fn test_patch_agent_rejects_malformed_schedule_payload() {
     assert!(body["error"].is_string());
 }
 
+/// A PATCH that is refused for a field parsed on shape alone must leave every other field in the same request unapplied.
+/// `mcp_servers` and `schedule` used to be parsed only after the rename, description and prompt writes, so the 400 came back with those already live in memory.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_patch_agent_400_leaves_earlier_fields_unapplied() {
+    let h = boot(TEST_TOKEN).await;
+    let id = spawn_named(&h.state, "atomic-patch-target");
+
+    for bad in [
+        serde_json::json!({"schedule": "manual"}),
+        serde_json::json!({"mcp_servers": [{"oops": true}]}),
+    ] {
+        let mut body = serde_json::json!({
+            "name": "atomic-patch-renamed",
+            "description": "must not stick",
+            "system_prompt": "must not stick either",
+        });
+        body.as_object_mut()
+            .unwrap()
+            .extend(bad.as_object().unwrap().clone());
+        let (status, resp) = send(
+            h.app.clone(),
+            patch_json(&format!("/api/agents/{id}"), body, Some(TEST_TOKEN)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "body={resp:?}");
+
+        let entry = h.state.kernel.agent_registry().get(id).expect("agent");
+        assert_eq!(entry.name, "atomic-patch-target");
+        assert_ne!(entry.manifest.description, "must not stick");
+        assert_ne!(entry.manifest.model.system_prompt, "must not stick either");
+    }
+}
+
+/// `PATCH /api/agents/{id}/config` range-checks sampling values before the first write, so an out-of-range temperature does not leave the rename and prompt change from the same request applied.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_patch_config_out_of_range_sampling_leaves_name_and_prompt() {
+    let h = boot(TEST_TOKEN).await;
+    let id = spawn_named(&h.state, "config-atomic-target");
+
+    let (status, body) = send(
+        h.app.clone(),
+        patch_json(
+            &format!("/api/agents/{id}/config"),
+            serde_json::json!({
+                "name": "config-atomic-renamed",
+                "system_prompt": "must not stick",
+                "temperature": 5.0,
+            }),
+            Some(TEST_TOKEN),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body={body:?}");
+
+    let entry = h.state.kernel.agent_registry().get(id).expect("agent");
+    assert_eq!(entry.name, "config-atomic-target");
+    assert_ne!(entry.manifest.model.system_prompt, "must not stick");
+}
+
 /// Schedule field absent → existing schedule must be preserved. PATCH is
 /// a partial update, so a name-only PATCH should not touch the schedule.
 /// This pins the "unrelated field updates leave schedule alone" guarantee.

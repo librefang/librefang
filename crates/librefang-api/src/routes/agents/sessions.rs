@@ -547,7 +547,8 @@ pub async fn get_agent_session_context(
     // messages yet) is only accepted when it is this agent's own canonical id.
     let session_override = params.session_id.map(librefang_types::agent::SessionId);
     if let Some(target) = session_override {
-        match state.kernel.memory_substrate().get_session(target) {
+        // Column-only read: `context_report_for_session` below loads the history once, so the ownership check must not decode it a second time on every poll.
+        match state.kernel.memory_substrate().session_meta(target) {
             Ok(Some(s)) if s.agent_id != agent_id => {
                 return ApiErrorResponse::not_found(t.t("api-error-session-not-found"))
                     .with_code("session_agent_mismatch")
@@ -690,7 +691,7 @@ pub async fn attach_session_stream(
     //      a memory row would forbid attach-before-first-turn.
     // Anything else is rejected — a caller cannot attach to an arbitrary
     // session UUID without first proving the agent–session binding.
-    let session_lookup = state.kernel.memory_substrate().get_session(session_id);
+    let session_lookup = state.kernel.memory_substrate().session_meta(session_id);
     let session_valid = match &session_lookup {
         Ok(Some(s)) => s.agent_id == agent_id,
         Ok(None) => agent_entry.session_id == session_id,

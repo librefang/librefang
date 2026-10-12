@@ -1119,6 +1119,67 @@ async fn schedule_create_rejects_missing_cron() {
     );
 }
 
+/// A schedule change that never reached `cron_jobs.json` reverts on the next restart, so `/api/schedules` reports it as a 500 `cron_persist_failed`, the same contract as the `/api/cron/jobs` write handlers (#3515).
+#[tokio::test(flavor = "multi_thread")]
+async fn schedule_writes_report_cron_persist_failure() {
+    let h = boot().await;
+    let agent_id = spawn_test_agent(&h);
+    let (status, created) = json_request(
+        &h,
+        Method::POST,
+        "/api/schedules",
+        Some(serde_json::json!({
+            "name": "persist-probe",
+            "cron": "0 3 * * *",
+            "agent_id": agent_id.to_string(),
+            "message": "hello",
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created:?}");
+    let id = created["id"].as_str().expect("schedule id").to_string();
+
+    // A non-empty directory where the persist file belongs makes the atomic rename fail.
+    let persist_path = h
+        ._state
+        .kernel
+        .home_dir()
+        .join("data")
+        .join("cron_jobs.json");
+    let _ = std::fs::remove_file(&persist_path);
+    std::fs::create_dir_all(persist_path.join("blocker")).unwrap();
+
+    let (status, body) = json_request(
+        &h,
+        Method::PUT,
+        &format!("/api/schedules/{id}"),
+        Some(serde_json::json!({"name": "persist-probe-renamed"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body:?}");
+    assert_eq!(body["code"], "cron_persist_failed", "{body:?}");
+
+    let (status, body) =
+        json_request(&h, Method::DELETE, &format!("/api/schedules/{id}"), None).await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body:?}");
+    assert_eq!(body["operation"], "delete", "{body:?}");
+
+    let (status, body) = json_request(
+        &h,
+        Method::POST,
+        "/api/schedules",
+        Some(serde_json::json!({
+            "name": "persist-probe-2",
+            "cron": "0 4 * * *",
+            "agent_id": agent_id.to_string(),
+            "message": "hello",
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body:?}");
+    assert_eq!(body["operation"], "create", "{body:?}");
+}
+
 // ---------------------------------------------------------------------------
 // /api/cron/jobs
 // ---------------------------------------------------------------------------

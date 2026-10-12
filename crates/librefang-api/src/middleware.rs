@@ -189,6 +189,10 @@ pub struct AuthState {
     /// rejected by the role gate. Wrapped in `Option` because some test
     /// harnesses construct `AuthState` without a kernel attached.
     pub audit_log: Option<Arc<librefang_kernel::audit::AuditLog>>,
+    /// The A2A agent-listing path when `[a2a] listen_path` mounts the protocol endpoints somewhere other than `/a2a`.
+    /// `PUBLIC_ROUTES_GET_ONLY` can only name the default `/a2a/agents`, so without this the listing that the A2A spec makes public would demand a bearer token under a custom prefix.
+    /// `None` when the default mount is in use; the mount is decided at boot, so this never changes while the daemon runs.
+    pub a2a_agents_path: Option<String>,
 }
 
 #[derive(Clone)]
@@ -322,6 +326,8 @@ fn is_owner_only_write(method: &axum::http::Method, path: &str) -> bool {
             // expanding the trust surface; restrict to Owner so non-Owner API keys
             // cannot fill the registry or stage impersonation attempts (#3483).
             | "/api/a2a/discover"
+            // A restore writes the archive's config.toml back — master `api_key`, `[[users]]` roles and key hashes, `[[mcp_servers]]` stdio commands — so it is a superset of `/api/config` + `/api/users*` and sits on the same side of the line.
+            | "/api/restore"
     ) {
         return true;
     }
@@ -384,6 +390,23 @@ fn is_owner_only_write(method: &axum::http::Method, path: &str) -> bool {
     if (*method == axum::http::Method::PUT || *method == axum::http::Method::DELETE)
         && path.starts_with("/api/mcp/servers/")
         && !path["/api/mcp/servers/".len()..].contains('/')
+    {
+        return true;
+    }
+    // `POST /api/extensions/install` is a documented alias of `POST /api/mcp/servers`: it upserts a catalog entry into config.toml and calls `reload_mcp_servers()`, which spawns a stdio entry's `command` under the daemon UID.
+    // Leaving the alias at Admin would reopen the exact gate above.
+    if *method == axum::http::Method::POST && path == "/api/extensions/install" {
+        return true;
+    }
+    // `POST` / `PUT /api/registry/content/{mcp,plugin}` write the on-disk MCP catalog entry and the plugin manifest.
+    // An MCP catalog entry carries a raw stdio `command` + `args` that the extensions-install alias spawns, and a freshly written plugin directory has no `.disabled` marker, so it is enabled by default and an overwrite can drop the manifest's `[integrity]` table.
+    // Both therefore cross the same "config write" to "process spawn" line as the MCP server and plugin install gates, so they are Owner-only too.
+    // The other content types (`provider`, `agent`, `hand`, `skill`) stay at Admin: `hand` is covered by the Owner-only `install-deps` gate above at the point where it would execute anything.
+    if (*method == axum::http::Method::POST || *method == axum::http::Method::PUT)
+        && matches!(
+            path,
+            "/api/registry/content/mcp" | "/api/registry/content/plugin"
+        )
     {
         return true;
     }
@@ -1972,7 +1995,8 @@ pub async fn auth(
         && (PUBLIC_ROUTES_GET_ONLY
             .iter()
             .any(|r| matches_route(r, path, is_get))
-            || dashboard_shell_public);
+            || dashboard_shell_public
+            || auth_state.a2a_agents_path.as_deref() == Some(path));
 
     let always_public =
         always_public_method_free || always_public_get_only || is_mcp_oauth_callback;
@@ -2428,6 +2452,7 @@ mod tests {
             require_auth_for_reads: false,
             allow_no_auth: false,
             audit_log: None,
+            a2a_agents_path: None,
         }
     }
 
@@ -2531,6 +2556,7 @@ mod tests {
             require_auth_for_reads: false,
             allow_no_auth: false,
             audit_log: None,
+            a2a_agents_path: None,
         }
     }
 
@@ -2651,6 +2677,7 @@ mod tests {
             require_auth_for_reads: false,
             allow_no_auth: false,
             audit_log: None,
+            a2a_agents_path: None,
         };
         assert!(write_api_key_upgrade_hint(&state, "plain-master-key").is_none());
     }
@@ -2747,6 +2774,7 @@ mod tests {
             require_auth_for_reads: false,
             allow_no_auth: false,
             audit_log: None,
+            a2a_agents_path: None,
         };
         let app = Router::new()
             .route("/api/private", get(|| async { "ok" }))
@@ -3182,6 +3210,43 @@ mod tests {
             assert!(
                 user_role_allows_request(UserRole::Admin, &method, path),
                 "Admin must still be allowed to {method} {path} (not a spawn-command mutation)"
+            );
+        }
+    }
+
+    // The extensions-install alias and the MCP / plugin registry content writes reach the same spawn path as `POST /api/mcp/servers`, so they share its Owner gate.
+    #[test]
+    fn test_mcp_spawn_aliases_are_owner_only() {
+        let owner_only = [
+            (axum::http::Method::POST, "/api/extensions/install"),
+            (axum::http::Method::POST, "/api/registry/content/mcp"),
+            (axum::http::Method::PUT, "/api/registry/content/mcp"),
+            (axum::http::Method::POST, "/api/registry/content/plugin"),
+            (axum::http::Method::PUT, "/api/registry/content/plugin"),
+            (axum::http::Method::POST, "/api/restore"),
+        ];
+        for (method, path) in owner_only {
+            for role in [UserRole::Viewer, UserRole::User, UserRole::Admin] {
+                assert!(
+                    !user_role_allows_request(role, &method, path),
+                    "{role:?} must NOT be allowed to {method} {path}"
+                );
+            }
+            assert!(
+                user_role_allows_request(UserRole::Owner, &method, path),
+                "Owner must be allowed to {method} {path}"
+            );
+        }
+        // Content types that do not carry a spawn command stay at Admin, and uninstall removes code rather than adding it.
+        for (method, path) in [
+            (axum::http::Method::POST, "/api/registry/content/provider"),
+            (axum::http::Method::PUT, "/api/registry/content/agent"),
+            (axum::http::Method::POST, "/api/registry/content/skill"),
+            (axum::http::Method::POST, "/api/extensions/uninstall"),
+        ] {
+            assert!(
+                user_role_allows_request(UserRole::Admin, &method, path),
+                "Admin must still be allowed to {method} {path}"
             );
         }
     }
@@ -3725,6 +3790,7 @@ mod tests {
             require_auth_for_reads: false,
             allow_no_auth: false,
             audit_log: None,
+            a2a_agents_path: None,
         };
         let app = Router::new()
             .route("/api/private", get(|| async { "ok" }))
@@ -3761,6 +3827,7 @@ mod tests {
             require_auth_for_reads: false,
             allow_no_auth: false,
             audit_log: None,
+            a2a_agents_path: None,
         };
         let app = Router::new()
             .route(
@@ -3800,6 +3867,7 @@ mod tests {
             require_auth_for_reads: false,
             allow_no_auth: false,
             audit_log: None,
+            a2a_agents_path: None,
         };
         let app = Router::new()
             .route(
@@ -3839,6 +3907,7 @@ mod tests {
             require_auth_for_reads: false,
             allow_no_auth: false,
             audit_log: None,
+            a2a_agents_path: None,
         };
         let app = Router::new()
             .route(
@@ -3878,6 +3947,7 @@ mod tests {
             require_auth_for_reads: false,
             allow_no_auth: false,
             audit_log: None,
+            a2a_agents_path: None,
         };
         let app = Router::new()
             .route("/api/budget", get(|| async { "ok" }))
@@ -3916,6 +3986,7 @@ mod tests {
             require_auth_for_reads: false,
             allow_no_auth: false,
             audit_log: None,
+            a2a_agents_path: None,
         };
         let app = Router::new()
             .route(
@@ -3960,6 +4031,7 @@ mod tests {
             require_auth_for_reads: false,
             allow_no_auth: false,
             audit_log: None,
+            a2a_agents_path: None,
         };
         let app = Router::new()
             .route("/", get(|| async { "dashboard html" }))
@@ -3999,6 +4071,7 @@ mod tests {
             require_auth_for_reads: false,
             allow_no_auth: false,
             audit_log: None,
+            a2a_agents_path: None,
         };
         let app = Router::new()
             .route(
@@ -4037,6 +4110,7 @@ mod tests {
             require_auth_for_reads: true,
             allow_no_auth: false,
             audit_log: None,
+            a2a_agents_path: None,
         };
         let app = Router::new()
             .route("/api/agents", get(|| async { "agents listing" }))
@@ -4073,6 +4147,7 @@ mod tests {
             require_auth_for_reads: true,
             allow_no_auth: false,
             audit_log: None,
+            a2a_agents_path: None,
         };
         let app = Router::new()
             .route("/api/agents", get(|| async { "agents listing" }))
@@ -4106,6 +4181,7 @@ mod tests {
             require_auth_for_reads: true,
             allow_no_auth: false,
             audit_log: None,
+            a2a_agents_path: None,
         };
         let app = Router::new()
             .route("/api/health", get(|| async { "ok" }))
@@ -4138,6 +4214,7 @@ mod tests {
             require_auth_for_reads: false,
             allow_no_auth: false,
             audit_log: None,
+            a2a_agents_path: None,
         };
         let app = Router::new()
             .route("/api/agents", get(|| async { "agents listing" }))
@@ -4174,6 +4251,7 @@ mod tests {
             require_auth_for_reads: false,
             allow_no_auth: false,
             audit_log: None,
+            a2a_agents_path: None,
         };
         let app = Router::new()
             .route("/api/auto-dream/status", get(|| async { "status" }))
@@ -4213,6 +4291,7 @@ mod tests {
             require_auth_for_reads: false,
             allow_no_auth: false,
             audit_log: None,
+            a2a_agents_path: None,
         };
         let app_off = Router::new()
             .route("/api/health", get(|| async { "ok" }))
@@ -4261,6 +4340,7 @@ mod tests {
             require_auth_for_reads: true,
             allow_no_auth: false,
             audit_log: None,
+            a2a_agents_path: None,
         };
         let app_on = Router::new()
             .route("/api/health/detail", get(|| async { "detail" }))
@@ -4293,6 +4373,7 @@ mod tests {
             require_auth_for_reads: true,
             allow_no_auth: false,
             audit_log: None,
+            a2a_agents_path: None,
         };
         let app = Router::new()
             .route("/api/status", get(|| async { "status" }))
@@ -4335,6 +4416,7 @@ mod tests {
             require_auth_for_reads: true,
             allow_no_auth: false,
             audit_log: None,
+            a2a_agents_path: None,
         };
         let app = Router::new()
             .route("/api/agents", get(|| async { "agents listing" }))
@@ -4386,6 +4468,7 @@ mod tests {
             require_auth_for_reads: true,
             allow_no_auth: false,
             audit_log: None,
+            a2a_agents_path: None,
         };
         let app = Router::new()
             .route("/api/agents", get(|| async { "agents listing" }))
@@ -4429,6 +4512,7 @@ mod tests {
             require_auth_for_reads: false,
             allow_no_auth: false,
             audit_log: None,
+            a2a_agents_path: None,
         }
     }
 
@@ -4442,6 +4526,7 @@ mod tests {
             require_auth_for_reads: false,
             allow_no_auth: false,
             audit_log: None,
+            a2a_agents_path: None,
         }
     }
 
@@ -4617,6 +4702,45 @@ mod tests {
         );
     }
 
+    /// Under a custom `[a2a] listen_path` the agent listing is public at its mounted path, and only there: the tasks under the same prefix still demand a token.
+    #[tokio::test]
+    async fn a2a_agents_listing_is_public_under_a_custom_listen_path() {
+        let state = AuthState {
+            a2a_agents_path: Some("/peers/agents".to_string()),
+            ..with_key_state("secret")
+        };
+        let app = Router::new()
+            .route("/peers/agents", get(|| async { "agent list" }))
+            .route(
+                "/peers/tasks/{id}",
+                get(|| async { "full task transcript" }),
+            )
+            .layer(axum::middleware::from_fn_with_state(state, auth));
+
+        let listing = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/peers/agents")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(listing.status(), StatusCode::OK);
+
+        let task = app
+            .oneshot(
+                Request::builder()
+                    .uri("/peers/tasks/some-uuid")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(task.status(), StatusCode::UNAUTHORIZED);
+    }
+
     /// GET /a2a/tasks/{id} must require auth (Bug #3781). Task transcripts
     /// contain full agent prompts and LLM outputs — sensitive operational data.
     #[tokio::test]
@@ -4735,6 +4859,7 @@ mod tests {
             require_auth_for_reads: false,
             allow_no_auth: false,
             audit_log: None,
+            a2a_agents_path: None,
         };
 
         let app = Router::new()
@@ -4775,6 +4900,7 @@ mod tests {
             require_auth_for_reads: false,
             allow_no_auth: false,
             audit_log: None,
+            a2a_agents_path: None,
         };
 
         let app = Router::new()
@@ -4821,6 +4947,7 @@ mod tests {
             require_auth_for_reads: false,
             allow_no_auth: false,
             audit_log: None,
+            a2a_agents_path: None,
         };
 
         let app = Router::new()
@@ -4873,6 +5000,7 @@ mod tests {
             require_auth_for_reads: false,
             allow_no_auth: false,
             audit_log: None,
+            a2a_agents_path: None,
         };
 
         let app = Router::new()
@@ -4912,6 +5040,7 @@ mod tests {
             require_auth_for_reads: false,
             allow_no_auth: false,
             audit_log: None,
+            a2a_agents_path: None,
         };
 
         let app = Router::new()
@@ -5272,6 +5401,7 @@ mod tests {
             require_auth_for_reads: true,
             allow_no_auth: false,
             audit_log: None,
+            a2a_agents_path: None,
         };
         let app = Router::new()
             .route("/dashboard", get(|| async { "dashboard shell" }))

@@ -3286,3 +3286,83 @@ async fn discovery_opt_in_does_not_mark_a_keyed_provider_unconfigured() {
 
     librefang_api::secrets_env::remove_env_var_guarded(KEY_ENV).await;
 }
+
+/// A 204 must not advertise a JSON body: the generated JS / Python SDKs JSON-decode any response whose content-type says `application/json`, and hyper strips a 204's body on the wire, so the decode throws on a successful delete.
+#[tokio::test(flavor = "multi_thread")]
+async fn delete_model_overrides_204_has_no_json_content_type() {
+    let h = boot();
+    let (status, _) = json_request(
+        &h,
+        Method::PUT,
+        "/api/models/overrides/openai:gpt-4o-mini",
+        Some(serde_json::json!({ "temperature": 0.3 })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let req = Request::builder()
+        .method(Method::DELETE)
+        .uri("/api/models/overrides/openai:gpt-4o-mini")
+        .body(Body::empty())
+        .unwrap();
+    let resp = h.app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    assert!(
+        resp.headers().get("content-type").is_none(),
+        "a 204 must not carry a content-type, got {:?}",
+        resp.headers().get("content-type")
+    );
+    let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20)
+        .await
+        .unwrap();
+    assert!(bytes.is_empty());
+}
+
+/// A removal that cannot be persisted must not report 204: the entry would come back on the next restart.
+/// The handler restores the in-memory entry and answers 500, matching `set_model_overrides`.
+#[tokio::test(flavor = "multi_thread")]
+async fn delete_model_overrides_persist_failure_is_500_and_keeps_entry() {
+    let h = boot();
+    for key in ["openai:gpt-4o-mini", "openai:keep-me"] {
+        let (status, _) = json_request(
+            &h,
+            Method::PUT,
+            &format!("/api/models/overrides/{key}"),
+            Some(serde_json::json!({ "temperature": 0.3 })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+    }
+
+    // Replace the overrides file with a directory so the next write fails.
+    let overrides_path = h
+        ._state
+        .kernel
+        .home_dir()
+        .join("data")
+        .join("model_overrides.json");
+    std::fs::remove_file(&overrides_path).expect("overrides file was written by PUT");
+    std::fs::create_dir_all(overrides_path.join("blocker")).unwrap();
+
+    let (status, _) = json_request(
+        &h,
+        Method::DELETE,
+        "/api/models/overrides/openai:gpt-4o-mini",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+
+    let (status, body) = json_request(
+        &h,
+        Method::GET,
+        "/api/models/overrides/openai:gpt-4o-mini",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        body.as_object().is_some_and(|o| !o.is_empty()),
+        "the failed removal must leave the override in place, got {body}"
+    );
+}

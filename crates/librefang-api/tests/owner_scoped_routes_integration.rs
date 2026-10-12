@@ -73,6 +73,7 @@ async fn boot() -> Harness {
         require_auth_for_reads: true,
         allow_no_auth: false,
         audit_log: Some(state.kernel.audit().clone()),
+        a2a_agents_path: None,
     };
     let app = Router::new()
         .nest("/api", routes::agents::router())

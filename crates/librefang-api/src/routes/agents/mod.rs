@@ -848,7 +848,8 @@ fn patch_agent_only_updates_mcp_servers(body: &serde_json::Value) -> bool {
 /// Variants covered today:
 /// - `AgentNotFound`      → 404 (was 500 across 5 sites)
 /// - `AgentAlreadyExists` → 409 (was 500 in `clone_agent`)
-/// - everything else      → 500 (preserves the pre-fix default)
+/// - any other `LibreFangError` → `crate::error::kernel_op_status` (400 for `InvalidInput` / `InvalidState` / `ManifestParse`, 409 `Conflict`, 403 auth / capability denials, 429 `QuotaExceeded`, 500 otherwise)
+/// - non-`LibreFang` kernel errors → 500
 ///
 /// The `send_message` handler at `agents.rs:1936-1951` predates this
 /// helper and adds its own arms for `QuotaExceeded → 429` and a
@@ -868,6 +869,8 @@ fn kernel_err_to_status(e: &crate::error::KernelError) -> StatusCode {
         KernelError::LibreFang(LibreFangError::SessionNotFound(_)) => StatusCode::NOT_FOUND,
         KernelError::LibreFang(LibreFangError::ResourceNotFound { .. }) => StatusCode::NOT_FOUND,
         KernelError::LibreFang(LibreFangError::AgentAlreadyExists(_)) => StatusCode::CONFLICT,
+        // Everything else a `LibreFangError` can carry follows the canonical table, so a caller mistake the kernel types as `InvalidInput` / `InvalidState` / `ManifestParse` (reserved name prefix, unsatisfiable `tool_exec_backend`, a model missing from the live catalog) is a 400 with its reason kept, not a scrubbed 500.
+        KernelError::LibreFang(inner) => crate::error::kernel_op_status(inner),
         _ => StatusCode::INTERNAL_SERVER_ERROR,
     }
 }
@@ -2900,6 +2903,24 @@ mod kernel_err_to_status_tests {
         let err =
             KernelError::LibreFang(LibreFangError::AgentAlreadyExists("dup-name".to_string()));
         assert_eq!(kernel_err_to_status(&err), StatusCode::CONFLICT);
+    }
+
+    #[test]
+    fn invalid_input_maps_to_400_and_keeps_its_reason() {
+        let err = KernelError::LibreFang(LibreFangError::InvalidInput(
+            "agent name must not start with '_operator:'".to_string(),
+        ));
+        let status = kernel_err_to_status(&err);
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let t = librefang_types::i18n::ErrorTranslator::new("en");
+        let body = super::kernel_err_body(status, &err, &t);
+        assert!(body.contains("_operator:"), "{body}");
+    }
+
+    #[test]
+    fn quota_exceeded_maps_to_429() {
+        let err = KernelError::LibreFang(LibreFangError::QuotaExceeded("hourly".to_string()));
+        assert_eq!(kernel_err_to_status(&err), StatusCode::TOO_MANY_REQUESTS);
     }
 
     #[test]

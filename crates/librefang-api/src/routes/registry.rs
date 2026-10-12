@@ -283,6 +283,39 @@ async fn create_registry_content(
     } else {
         body_without_secret
     };
+
+    // The provider's `api_key_env` names a process environment variable: the key is planted under it in `secrets.env` and the daemon's own environment, and the persisted catalog value is what `set_provider_key` trusts on later calls.
+    // A name the existing catalog entry already declares is operator-curated and stays accepted, so re-saving a shipped provider keeps working; any other name must pass `check_provider_api_key_env`, which refuses loader / interpreter knobs like `NODE_OPTIONS` and the daemon-reserved `GITHUB_TOKEN`.
+    if content_type == "provider" {
+        let catalog_env = state
+            .kernel
+            .model_catalog_ref()
+            .load()
+            .get_provider(&identifier)
+            .map(|p| p.api_key_env.clone())
+            .filter(|env| !env.is_empty());
+        let toml_env = body_for_toml
+            .get("provider")
+            .and_then(|p| p.get("api_key_env"))
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty());
+        let candidates = api_key_to_save
+            .as_ref()
+            .map(|(env, _)| env.as_str())
+            .into_iter()
+            .chain(toml_env);
+        for env in candidates {
+            if catalog_env.as_deref() == Some(env) {
+                continue;
+            }
+            if let Err(msg) = crate::validation::check_provider_api_key_env(env) {
+                return ApiErrorResponse::bad_request(msg)
+                    .into_json_tuple()
+                    .into_response();
+            }
+        }
+    }
+
     let toml_value = json_to_toml_value(&body_for_toml);
     let toml_string = match toml::to_string_pretty(&toml_value) {
         Ok(s) => s,
