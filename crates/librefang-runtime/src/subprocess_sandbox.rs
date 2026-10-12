@@ -792,10 +792,155 @@ pub(crate) fn extract_all_commands(command: &str) -> Vec<&str> {
     extract_all_commands_checked(command).unwrap_or_default()
 }
 
+/// Commands whose own arguments name the program they run (`sudo git …`, `timeout 5 git …`, `bash -c "git …"`).
+///
+/// When one of these sits in command position, every later word of the segment is screened against `denied_commands`, because their option grammars differ too much to find the executed word reliably (`sudo -u bob git`, `nice -n 5 git`).
+/// Over-matching here only refuses a command such as `xargs grep git`, which is the safe direction for a denylist.
+const DENYLIST_COMMAND_RUNNERS: &[&str] = &[
+    "sh",
+    "bash",
+    "zsh",
+    "dash",
+    "ksh",
+    "fish",
+    "csh",
+    "tcsh",
+    "cmd",
+    "powershell",
+    "pwsh",
+    "env",
+    "sudo",
+    "doas",
+    "su",
+    "nohup",
+    "nice",
+    "ionice",
+    "timeout",
+    "time",
+    "stdbuf",
+    "xargs",
+    "exec",
+    "command",
+    "builtin",
+    "eval",
+    "watch",
+    "setsid",
+    "flock",
+    "chrt",
+    "taskset",
+    "caffeinate",
+    "start",
+    "call",
+    "!",
+];
+
+/// Shell reserved words that may precede a command without being one (`if git diff --quiet; then …`).
+const DENYLIST_SHELL_KEYWORDS: &[&str] = &[
+    "if", "then", "else", "elif", "do", "while", "until", "fi", "done",
+];
+
+/// Executable suffixes Windows resolves without being typed, stripped before comparing names.
+const DENYLIST_EXECUTABLE_SUFFIXES: &[&str] = &[".exe", ".cmd", ".bat", ".com"];
+
+/// Reduce a denylist entry or a command word to the name `denied_commands` compares: unquoted, last path component, ASCII-lowercased, without a Windows executable suffix.
+///
+/// Returns up to two candidates because a backslash is ambiguous: it is a path separator on Windows (`C:\Git\bin\git.exe`) and an escape in POSIX shells (`g\it` runs `git`).
+/// Anything from the first `$` on is an expansion appended to the name (`git${IFS}checkout`), so it is cut off before comparing.
+fn denylist_names(word: &str) -> Vec<String> {
+    let word = word.split('$').next().unwrap_or("");
+    let unquoted: String = word.chars().filter(|c| !matches!(c, '\'' | '"')).collect();
+    let as_path = strip_executable_path(&unquoted).to_string();
+    let unescaped: String = unquoted.chars().filter(|c| *c != '\\').collect();
+    let as_escape = unescaped.rsplit('/').next().unwrap_or("").to_string();
+
+    let mut names = Vec::with_capacity(2);
+    for candidate in [as_path, as_escape] {
+        let mut name = candidate.to_ascii_lowercase();
+        for suffix in DENYLIST_EXECUTABLE_SUFFIXES {
+            if let Some(stripped) = name.strip_suffix(suffix) {
+                name = stripped.to_string();
+                break;
+            }
+        }
+        if !name.is_empty() && !names.contains(&name) {
+            names.push(name);
+        }
+    }
+    names
+}
+
+/// Refuse a command that invokes anything listed in `exec_policy.denied_commands` (#8536).
+///
+/// The scan is deliberately coarser than a shell parser: the raw string is cut at every control character a shell could start a new command after (`;`, `|`, `&`, newlines, backticks, parentheses, braces) without regard to quoting.
+/// Ignoring quotes can only add segments, so a quoted separator (`echo "a; git"`) over-matches rather than hiding a real `$(git …)` or `bash -c "…; git …"` from the scan.
+/// Within a segment, leading `NAME=value` assignments and shell keywords are skipped, the first remaining word is the command, and when that command is a runner or shell wrapper every later word is screened too.
+/// A policy in `deny` mode refuses everything already, so this returns `Ok` for it and leaves the refusal to [`validate_command_allowlist`].
+pub(crate) fn check_denied_commands(command: &str, policy: &ExecPolicy) -> Result<(), String> {
+    if policy.mode == ExecSecurityMode::Deny {
+        return Ok(());
+    }
+    let denied: Vec<String> = policy
+        .denied_commands
+        .iter()
+        .flat_map(|entry| denylist_names(entry.trim()))
+        .collect();
+    if denied.is_empty() {
+        return Ok(());
+    }
+
+    let is_denied = |word: &str| -> Option<String> {
+        denylist_names(word)
+            .into_iter()
+            .find(|name| denied.contains(name))
+    };
+    let refuse = |name: String| {
+        Err(format!(
+            "Command '{name}' is denied by exec_policy.denied_commands"
+        ))
+    };
+
+    // Returns the first denied name among the words of one segment, read as a command line.
+    let screen = |words: Vec<String>| -> Option<String> {
+        let mut words = words
+            .into_iter()
+            .filter(|w| !w.trim_matches(|c| c == '\'' || c == '"').is_empty())
+            .skip_while(|w| {
+                is_env_assignment(w)
+                    || DENYLIST_SHELL_KEYWORDS.contains(&w.to_ascii_lowercase().as_str())
+            });
+        let head = words.next()?;
+        if let Some(name) = is_denied(&head) {
+            return Some(name);
+        }
+        let head_is_runner = denylist_names(&head)
+            .iter()
+            .any(|name| DENYLIST_COMMAND_RUNNERS.contains(&name.as_str()));
+        if head_is_runner {
+            return words.find_map(|word| is_denied(&word));
+        }
+        None
+    };
+
+    let separators = [';', '|', '&', '\n', '\r', '`', '(', ')', '{', '}'];
+    for segment in command.split(|c: char| separators.contains(&c)) {
+        // Each segment is read twice, and a match in either reading refuses it.
+        // Splitting on whitespace alone keeps the words of a quoted `bash -c "git …"` payload apart, and keeps a Windows path's backslashes as separators.
+        // A quote-aware reading keeps a quoted value with spaces in one word, so `GIT_AUTHOR_NAME="A B" git commit` and `"C:\Program Files\Git\cmd\git.exe"` still find their command; an unterminated quote left by the segment split just ends that reading early.
+        let plain: Vec<String> = segment.split_whitespace().map(str::to_string).collect();
+        let quoted: Vec<String> = shlex::Shlex::new(segment).collect();
+        if let Some(name) = screen(plain).or_else(|| screen(quoted)) {
+            return refuse(name);
+        }
+    }
+    Ok(())
+}
+
 /// Validate a shell command against the exec policy.
 ///
 /// Returns `Ok(())` if the command is allowed, `Err(reason)` if blocked.
+/// `denied_commands` is checked before the mode-specific rules, so it binds under `full` and outranks `safe_bins` / `allowed_commands` under `allowlist`.
 pub fn validate_command_allowlist(command: &str, policy: &ExecPolicy) -> Result<(), String> {
+    check_denied_commands(command, policy)?;
     match policy.mode {
         ExecSecurityMode::Deny => {
             Err("Shell execution is disabled (exec_policy.mode = deny)".to_string())
@@ -1416,6 +1561,167 @@ mod tests {
         };
         assert!(validate_command_allowlist("ls", &policy).is_err());
         assert!(validate_command_allowlist("echo hi", &policy).is_err());
+    }
+
+    fn full_mode_denying(denied: &[&str]) -> ExecPolicy {
+        ExecPolicy {
+            mode: ExecSecurityMode::Full,
+            denied_commands: denied.iter().map(|s| s.to_string()).collect(),
+            ..ExecPolicy::default()
+        }
+    }
+
+    /// #8536: `mode = "full"` with `denied_commands = ["git"]` runs everything except git.
+    #[test]
+    fn test_denied_commands_block_git_in_full_mode() {
+        let policy = full_mode_denying(&["git"]);
+        assert!(validate_command_allowlist("ls -la", &policy).is_ok());
+        assert!(validate_command_allowlist("cargo test && npm run build", &policy).is_ok());
+
+        let err = validate_command_allowlist("git checkout .", &policy).unwrap_err();
+        assert!(err.contains("'git'"), "{err}");
+        assert!(err.contains("denied_commands"), "{err}");
+        assert!(validate_command_allowlist("git", &policy).is_err());
+    }
+
+    #[test]
+    fn test_denied_commands_see_through_paths_case_quotes_and_suffixes() {
+        let policy = full_mode_denying(&["git"]);
+        for cmd in [
+            "/usr/bin/git status",
+            "./git status",
+            "GIT status",
+            "\"git\" checkout .",
+            "'git' checkout .",
+            "g\\it checkout .",
+            "git.exe checkout .",
+            "C:\\Git\\cmd\\git.cmd checkout .",
+            "  git checkout .",
+        ] {
+            assert!(
+                validate_command_allowlist(cmd, &policy).is_err(),
+                "should be denied: {cmd}"
+            );
+        }
+        // An entry written as a path or in upper case still names the same command.
+        let policy = full_mode_denying(&["/usr/bin/GIT"]);
+        assert!(validate_command_allowlist("git status", &policy).is_err());
+    }
+
+    #[test]
+    fn test_denied_commands_scan_every_segment() {
+        let policy = full_mode_denying(&["git"]);
+        for cmd in [
+            "cd repo && git checkout main",
+            "ls; git stash",
+            "false || git reset --hard",
+            "echo y | git clean -fd",
+            "sleep 1 & git checkout .",
+            "ls\ngit checkout .",
+            "echo $(git rev-parse HEAD)",
+            "echo \"$(git rev-parse HEAD)\"",
+            "echo `git rev-parse HEAD`",
+            "(git checkout .)",
+            "{ git checkout .; }",
+            "if git diff --quiet; then echo clean; fi",
+            "FOO=1 BAR=2 git checkout .",
+            "FOO=$HOME git checkout .",
+            "git${IFS}checkout${IFS}.",
+        ] {
+            assert!(
+                validate_command_allowlist(cmd, &policy).is_err(),
+                "should be denied: {cmd}"
+            );
+        }
+    }
+
+    /// A quoted value containing spaces is one shell word, so it must not push the real command out of command position.
+    #[test]
+    fn test_denied_commands_see_past_quoted_words_with_spaces() {
+        let policy = full_mode_denying(&["git"]);
+        for cmd in [
+            "GIT_AUTHOR_NAME=\"John Doe\" git commit -m wip",
+            "GIT_AUTHOR_NAME='John Doe' GIT_AUTHOR_EMAIL=j@d.dev git commit -m \"fix; tidy\"",
+            "\"C:\\Program Files\\Git\\cmd\\git.exe\" status",
+            "& \"C:\\Program Files\\Git\\cmd\\git.exe\" checkout .",
+            "'/opt/my tools/git' checkout .",
+            "sudo -E \"/opt/my tools/git\" checkout .",
+        ] {
+            assert!(
+                validate_command_allowlist(cmd, &policy).is_err(),
+                "should be denied: {cmd}"
+            );
+        }
+        assert!(validate_command_allowlist("echo \"git is fine here\"", &policy).is_ok());
+    }
+
+    #[test]
+    fn test_denied_commands_see_through_runners_and_shell_wrappers() {
+        let policy = full_mode_denying(&["git"]);
+        for cmd in [
+            "env FOO=bar git checkout .",
+            "/usr/bin/env -i git checkout .",
+            "sudo -u bob git checkout .",
+            "nohup git checkout . ",
+            "timeout 10 git checkout .",
+            "nice -n 5 git checkout .",
+            "xargs git checkout",
+            "exec git checkout .",
+            "command git checkout .",
+            "bash -c \"git checkout .\"",
+            "sh -c 'cd repo && git checkout .'",
+            "bash -lc 'git checkout .'",
+            "cmd /c git checkout .",
+            "powershell -Command \"git checkout .\"",
+        ] {
+            assert!(
+                validate_command_allowlist(cmd, &policy).is_err(),
+                "should be denied: {cmd}"
+            );
+        }
+    }
+
+    /// Only command position is screened outside runners, so the denied name may still appear as an argument or inside a longer name.
+    #[test]
+    fn test_denied_commands_do_not_match_arguments_or_similar_names() {
+        let policy = full_mode_denying(&["git"]);
+        for cmd in [
+            "grep -r git src",
+            "ls .git",
+            "cat .gitignore",
+            "gitk --all",
+            "git-lfs version",
+            "pip install gitpython",
+            "echo git",
+        ] {
+            assert!(
+                validate_command_allowlist(cmd, &policy).is_ok(),
+                "should be allowed: {cmd}"
+            );
+        }
+    }
+
+    /// The denylist outranks both `safe_bins` and `allowed_commands` in allowlist mode.
+    #[test]
+    fn test_denied_commands_override_allowlist() {
+        let policy = ExecPolicy {
+            mode: ExecSecurityMode::Allowlist,
+            allowed_commands: vec!["git".to_string(), "cargo".to_string()],
+            denied_commands: vec!["git".to_string(), "cat".to_string()],
+            ..ExecPolicy::default()
+        };
+        assert!(validate_command_allowlist("cargo check", &policy).is_ok());
+        assert!(validate_command_allowlist("git status", &policy).is_err());
+        assert!(validate_command_allowlist("cat file.txt", &policy).is_err());
+        assert!(validate_command_allowlist("echo hi", &policy).is_ok());
+    }
+
+    #[test]
+    fn test_empty_denied_commands_change_nothing() {
+        let policy = full_mode_denying(&[]);
+        assert!(validate_command_allowlist("git checkout .", &policy).is_ok());
+        let policy = full_mode_denying(&["", "   "]);
+        assert!(validate_command_allowlist("git checkout .", &policy).is_ok());
     }
 
     #[test]

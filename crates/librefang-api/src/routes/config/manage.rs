@@ -437,6 +437,7 @@ fn redacted_config_json(
         "safe_bins_skip_approval": config.exec_policy.safe_bins_skip_approval,
         "full_mode_skips_approval": config.exec_policy.full_mode_skips_approval,
         "allowed_commands": config.exec_policy.allowed_commands,
+        "denied_commands": config.exec_policy.denied_commands,
         "allowed_env_vars": config.exec_policy.allowed_env_vars,
         "timeout_secs": config.exec_policy.timeout_secs,
         "max_output_bytes": config.exec_policy.max_output_bytes,
@@ -1832,7 +1833,7 @@ mod config_read_write_parity_tests {
     /// Arrays are leaves — a numeric index is not a config key path.
     ///
     /// Known blind spot: a field carrying `#[serde(skip_serializing_if = …)]` whose default value satisfies that predicate is absent from `value`, so the walk cannot see it.
-    /// Every writable path in that category today (`exec_policy.allowed_env_vars`, `default_model.cli_profile_dirs`, `budget.providers`, `tool_invoke.allowlist`, `agent_max_iterations`, `max_history_messages`) is in the read payload, checked by hand; a future one has to be added by hand too.
+    /// Every writable path in that category today (`exec_policy.allowed_env_vars`, `exec_policy.denied_commands`, `default_model.cli_profile_dirs`, `budget.providers`, `tool_invoke.allowlist`, `agent_max_iterations`, `max_history_messages`) is in the read payload, checked by hand; a future one has to be added by hand too.
     fn candidate_paths(value: &serde_json::Value) -> Vec<String> {
         let mut paths = Vec::new();
         let Some(root) = value.as_object() else {
@@ -2015,6 +2016,28 @@ mod config_read_write_parity_tests {
             lookup(&payload, "tool_exec.default_timeout_secs").and_then(serde_json::Value::as_u64),
             Some(300),
             "a saved value must read back"
+        );
+    }
+
+    /// `exec_policy.denied_commands` (#8536), pinned by hand for the same reason as `tool_exec.default_timeout_secs` above: it is writable under the `exec_policy.` prefix, but `skip_serializing_if = "Vec::is_empty"` hides its default from the bulk guard.
+    /// Unreadable, the dashboard would show an operator's denylist as empty right after saving it, which for a safety list reads as "nothing is blocked".
+    #[test]
+    fn exec_policy_denied_commands_is_readable_both_empty_and_configured() {
+        let config = KernelConfig::default();
+        let payload = super::redacted_config_json(&config, &BudgetConfig::default());
+        assert_eq!(
+            lookup(&payload, "exec_policy.denied_commands"),
+            Some(&serde_json::json!([])),
+            "an empty denylist must still be reported, as []"
+        );
+
+        let mut config = KernelConfig::default();
+        config.exec_policy.denied_commands = vec!["git".to_string()];
+        let payload = super::redacted_config_json(&config, &BudgetConfig::default());
+        assert_eq!(
+            lookup(&payload, "exec_policy.denied_commands"),
+            Some(&serde_json::json!(["git"])),
+            "a saved denylist must read back"
         );
     }
 

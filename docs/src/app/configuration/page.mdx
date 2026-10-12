@@ -1568,6 +1568,7 @@ no_output_timeout_secs = 30
 | `safe_bins_skip_approval` | bool | `false` | Opt-in: in `allowlist` mode, a `shell_exec` whose every base command is a declared `safe_bin` also skips the human-approval prompt. A chained command with any non-safe base still routes through approval. |
 | `full_mode_skips_approval` | bool | `true` | Whether `mode = "full"` also waives the global `approval.require_approval` list for `shell_exec`. Set `false` for unrestricted commands that still prompt. |
 | `allowed_commands` | list of strings | `[]` | Additional commands permitted when `mode = "allowlist"`. |
+| `denied_commands` | list of strings | `[]` | Commands refused under every `mode`, outranking `safe_bins` and `allowed_commands`. See below. |
 | `timeout_secs` | u64 | `30` | Maximum wall-clock execution time per command in seconds. |
 | `max_output_bytes` | usize | `102400` | Maximum combined stdout+stderr output size in bytes (100 KB default). |
 | `no_output_timeout_secs` | u64 | `30` | Kill processes that produce no output for this many seconds. `0` = disabled. |
@@ -1590,6 +1591,24 @@ Without that step, setting it to `false` looks like a silent no-op: no new promp
 The dangerous-command denylist is independent of `mode` and screens every command under `deny`, `allowlist`, and `full` alike -- `full` disables allowlist *validation*, not the denylist.
 It covers, among others, LibreFang daemon lifecycle commands (`librefang stop` / `start` / `restart`, including the `gateway` alias and path-qualified invocations), which bounce every agent and channel adapter sharing the daemon, and mutating SQL or output redirection against the daemon's own `librefang.db`.
 Read-only inspection of that database (`select`, `.schema`, `.dump`) and `librefang status` are deliberately not matched.
+
+**Allow everything except some commands.** `denied_commands` names programs an agent may not run whatever the mode, so `full` plus a short denylist gives "anything but git":
+
+```toml
+[exec_policy]
+mode = "full"
+denied_commands = ["git"]
+```
+
+It applies to `shell_exec` and `process_start`.
+Names match case-insensitively and regardless of a leading directory, quoting, or a Windows `.exe` / `.cmd` / `.bat` / `.com` suffix.
+A denied name is caught as the command of any segment of a chain, pipeline, subshell or command substitution (`cd repo && git checkout .`, `echo $(git rev-parse HEAD)`), after leading `NAME=value` assignments, and anywhere in the arguments of a prefix runner or shell wrapper (`env`, `sudo`, `nohup`, `timeout`, `xargs`, `bash -c "…"`, `cmd /c …`).
+As an argument of any other command it is left alone, so `grep -r git src` and `cat .gitignore` still run.
+
+This stops an agent from reaching for the command; it is not a sandbox against an agent trying to evade it.
+A script file, an interpreter (`python -c "…"`), `find -exec`, an alias, or a name built in a variable is not inspected.
+For a hard guarantee use `mode = "allowlist"`, or take the binary off the daemon's `PATH`.
+An agent whose `agent.toml` declares its own `[exec_policy]` does not inherit the global list and needs its own `denied_commands`.
 
 ---
 
@@ -2408,7 +2427,7 @@ session_scoped_recall = true
 | `extraction_model` | string or null | `null` | LLM model for extraction. Supports `provider/model` (e.g. `"anthropic/claude-haiku-4"`), `provider:model`, or bare model name (uses default provider). If `null`, uses rule-based extraction. There is no separate `extraction_provider` field. |
 | `extract_categories` | list of strings | `["user_preference", "important_fact", "task_context", "relationship"]` | Categories to extract from conversations. |
 | `session_ttl_hours` | u32 | `24` | Session memory TTL in hours. Memories older than this are cleaned up before each agent execution. |
-| `duplicate_threshold` | f32 | `0.5` | Similarity threshold for duplicate detection (0.0–1.0). Uses vector cosine similarity when embeddings are available, otherwise falls back to Jaccard word overlap. |
+| `duplicate_threshold` | f32 | `0.85` | Similarity threshold for duplicate detection (0.0–1.0), calibrated as Jaccard word overlap. When both memories carry embeddings, vector cosine similarity is compared against `max(duplicate_threshold, 0.95)` instead, because cosine on sentence embeddings runs much higher than word overlap for the same pair. Rows that differ in peer, chat, session or storage scope, or in an identifier (URL, email, UUID, number of 4+ digits), are never merged. |
 | `confidence_decay_rate` | f64 | `0.01` | Confidence decay rate per day. Follows exponential decay: `conf × e^(−rate × days)`. Default of `0.01` takes ~70 days to halve. |
 | `max_memories_per_agent` | usize | `1000` | Maximum memories per agent. When exceeded, raw dialogue rows are evicted before extracted facts, lowest-confidence first within each class. `0` = no cap. |
 | `session_scoped_recall` | bool | `true` | (#7605) Stamp each auto-memorized memory with the session that produced it, and refuse to auto-retrieve a memory stamped for a different session. Keeps one visitor's content out of another visitor's turn on an agent that serves several people. Memories written before this shipped carry no stamp and stay recallable everywhere. Set `false` for a single agent-wide pool — the pre-#7605 behaviour, and what an agent with `session_mode = "new"` wants if its runs are meant to build on each other. |
