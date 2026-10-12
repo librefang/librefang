@@ -81,6 +81,98 @@ fn default_true() -> bool {
     true
 }
 
+/// An HTTP header an MCP catalog entry sends to its SSE / Streamable-HTTP server.
+///
+/// `value` is a template: every `${NAME}` placeholder must name one of the entry's `required_env` credentials and is replaced with that credential when the connection is opened, never earlier.
+/// The installer copies the template — not a resolved secret — into the installed server's `headers`, so the persisted config carries a reference and the secret itself stays in the vault / environment.
+/// A value without placeholders is a fixed header and is sent verbatim.
+///
+/// ```toml
+/// [[headers]]
+/// name = "Authorization"
+/// value = "Bearer ${EXAMPLE_API_KEY}"
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct McpCatalogHeader {
+    /// Header name (e.g., "Authorization").
+    pub name: String,
+    /// Header value template (e.g., "Bearer ${EXAMPLE_API_KEY}").
+    pub value: String,
+}
+
+/// Render a header value template, replacing each `${NAME}` placeholder with `lookup(NAME)`.
+///
+/// Only the braced form is a placeholder: a bare `$` is literal text, so fixed header values that happen to contain `$` keep their meaning.
+/// A placeholder name is one or more ASCII letters, digits or underscores and does not start with a digit.
+/// An unterminated `${`, an empty name or an invalid name is an error, as is any error `lookup` returns.
+/// Error messages name the placeholder but never include a resolved value.
+pub fn render_header_template(
+    template: &str,
+    mut lookup: impl FnMut(&str) -> Result<String, String>,
+) -> Result<String, String> {
+    let mut out = String::with_capacity(template.len());
+    let mut rest = template;
+    while let Some(start) = rest.find("${") {
+        out.push_str(&rest[..start]);
+        let after = &rest[start + 2..];
+        let Some(end) = after.find('}') else {
+            return Err("unterminated '${' placeholder in header value".to_string());
+        };
+        let name = &after[..end];
+        if !is_valid_placeholder_name(name) {
+            return Err(format!("invalid placeholder '${{{name}}}' in header value"));
+        }
+        out.push_str(&lookup(name)?);
+        rest = &after[end + 1..];
+    }
+    out.push_str(rest);
+    Ok(out)
+}
+
+/// The `${NAME}` placeholder names a header value template references, in order of appearance.
+pub fn header_template_placeholders(template: &str) -> Result<Vec<String>, String> {
+    let mut names = Vec::new();
+    render_header_template(template, |name| {
+        names.push(name.to_string());
+        Ok(String::new())
+    })?;
+    Ok(names)
+}
+
+fn is_valid_placeholder_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    match chars.next() {
+        Some(first) if first.is_ascii_alphabetic() || first == '_' => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// Whether `name` is a valid HTTP header field name (an RFC 9110 `token`).
+fn is_valid_header_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.bytes().all(|b| {
+            b.is_ascii_alphanumeric()
+                || matches!(
+                    b,
+                    b'!' | b'#'
+                        | b'$'
+                        | b'%'
+                        | b'&'
+                        | b'\''
+                        | b'*'
+                        | b'+'
+                        | b'-'
+                        | b'.'
+                        | b'^'
+                        | b'_'
+                        | b'`'
+                        | b'|'
+                        | b'~'
+                )
+        })
+}
+
 /// Health check tuning for an MCP catalog entry.
 ///
 /// Renamed from `HealthCheckConfig` during the move into `librefang-types`
@@ -126,6 +218,10 @@ pub struct McpCatalogEntry {
     /// Required credentials.
     #[serde(default)]
     pub required_env: Vec<McpCatalogRequiredEnv>,
+    /// HTTP headers for an SSE / Streamable-HTTP transport, typically mapping a `required_env` credential to an `Authorization` header.
+    /// See [`McpCatalogHeader`]; checked by [`McpCatalogEntry::validate`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub headers: Vec<McpCatalogHeader>,
     /// OAuth configuration (None = API key only).
     #[serde(default)]
     pub oauth: Option<crate::oauth::OAuthTemplate>,
@@ -144,6 +240,51 @@ pub struct McpCatalogEntry {
     /// back to the top-level English fields when no entry matches.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub i18n: HashMap<String, McpCatalogI18n>,
+}
+
+impl McpCatalogEntry {
+    /// Check the entry's header bindings, so a broken template is rejected when the catalog loads instead of when a server built from it first connects.
+    ///
+    /// Headers are only meaningful on the `sse` and `http` transports, each header name must be a valid, unique (case-insensitive) HTTP field name, a value must not contain CR, LF or NUL, and every `${NAME}` placeholder must name one of this entry's `required_env` credentials.
+    /// The last rule is what keeps a template from reading an arbitrary daemon secret: the runtime only substitutes variables the installed server declares in its `env` list, which the installer fills from `required_env`.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.headers.is_empty() {
+            return Ok(());
+        }
+        if matches!(self.transport, McpCatalogTransport::Stdio { .. }) {
+            return Err("headers are only supported on the sse and http transports".to_string());
+        }
+        let mut seen = std::collections::HashSet::new();
+        for header in &self.headers {
+            if !is_valid_header_name(&header.name) {
+                return Err(format!("invalid header name '{}'", header.name));
+            }
+            if !seen.insert(header.name.to_ascii_lowercase()) {
+                return Err(format!("duplicate header '{}'", header.name));
+            }
+            if header
+                .value
+                .chars()
+                .any(|c| c == '\r' || c == '\n' || c == '\0')
+            {
+                return Err(format!(
+                    "header '{}' value contains a control character",
+                    header.name
+                ));
+            }
+            let placeholders = header_template_placeholders(&header.value)
+                .map_err(|e| format!("header '{}': {e}", header.name))?;
+            for placeholder in placeholders {
+                if !self.required_env.iter().any(|env| env.name == placeholder) {
+                    return Err(format!(
+                        "header '{}' references '${{{placeholder}}}', which is not one of this entry's required_env names",
+                        header.name
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Per-language overrides for an MCP catalog entry's user-facing strings.
@@ -327,5 +468,146 @@ url = "https://example.com"
 "#;
         let entry: McpCatalogEntry = toml::from_str(toml_str).unwrap();
         assert!(entry.i18n.is_empty());
+    }
+
+    fn http_entry_with_headers(headers: &str) -> McpCatalogEntry {
+        let toml_str = format!(
+            r#"
+id = "remote"
+name = "Remote"
+description = "Remote MCP over Streamable HTTP"
+category = "ai"
+
+[transport]
+type = "http"
+url = "https://mcp.example.com/mcp"
+
+[[required_env]]
+name = "REMOTE_API_KEY"
+label = "API Key"
+help = "Create one in the account settings"
+
+{headers}
+"#
+        );
+        toml::from_str(&toml_str).expect("fixture parses")
+    }
+
+    /// #8578: a catalog entry can bind a credential to a header, and the binding survives a JSON round-trip (the shape the catalog API serves).
+    #[test]
+    fn catalog_entry_header_binding_parses_and_validates() {
+        let entry = http_entry_with_headers(
+            r#"
+[[headers]]
+name = "Authorization"
+value = "Bearer ${REMOTE_API_KEY}"
+
+[[headers]]
+name = "X-Client"
+value = "librefang"
+"#,
+        );
+        assert_eq!(entry.headers.len(), 2);
+        assert_eq!(entry.headers[0].value, "Bearer ${REMOTE_API_KEY}");
+        entry.validate().expect("valid binding");
+
+        let json = serde_json::to_value(&entry).unwrap();
+        let back: McpCatalogEntry = serde_json::from_value(json).unwrap();
+        assert_eq!(back.headers, entry.headers);
+    }
+
+    /// Entries without `[[headers]]` (every entry that predates #8578) still parse, validate, and serialize without a `headers` key.
+    #[test]
+    fn catalog_entry_without_headers_is_unchanged() {
+        let entry = http_entry_with_headers("");
+        assert!(entry.headers.is_empty());
+        entry.validate().expect("no headers is valid");
+        let json = serde_json::to_value(&entry).unwrap();
+        assert!(json.get("headers").is_none());
+    }
+
+    #[test]
+    fn catalog_entry_rejects_placeholder_outside_required_env() {
+        let entry = http_entry_with_headers(
+            r#"
+[[headers]]
+name = "Authorization"
+value = "Bearer ${ANTHROPIC_API_KEY}"
+"#,
+        );
+        let err = entry.validate().unwrap_err();
+        assert!(err.contains("ANTHROPIC_API_KEY"), "{err}");
+    }
+
+    #[test]
+    fn catalog_entry_rejects_malformed_header_bindings() {
+        for (headers, needle) in [
+            (
+                "[[headers]]\nname = \"Authorization\"\nvalue = \"Bearer ${REMOTE_API_KEY\"",
+                "unterminated",
+            ),
+            (
+                "[[headers]]\nname = \"Authorization\"\nvalue = \"Bearer ${}\"",
+                "invalid placeholder",
+            ),
+            (
+                "[[headers]]\nname = \"Bad Name\"\nvalue = \"x\"",
+                "invalid header name",
+            ),
+            (
+                "[[headers]]\nname = \"X-Key\"\nvalue = \"a\\nb\"",
+                "control character",
+            ),
+            (
+                "[[headers]]\nname = \"X-Key\"\nvalue = \"a\"\n[[headers]]\nname = \"x-key\"\nvalue = \"b\"",
+                "duplicate header",
+            ),
+        ] {
+            let entry = http_entry_with_headers(headers);
+            let err = entry.validate().unwrap_err();
+            assert!(err.contains(needle), "expected '{needle}' in '{err}'");
+        }
+    }
+
+    #[test]
+    fn catalog_entry_rejects_headers_on_stdio_transport() {
+        let toml_str = r#"
+id = "local"
+name = "Local"
+description = "stdio"
+category = "devtools"
+
+[transport]
+type = "stdio"
+command = "local-mcp"
+
+[[required_env]]
+name = "LOCAL_KEY"
+label = "Key"
+help = "h"
+
+[[headers]]
+name = "Authorization"
+value = "Bearer ${LOCAL_KEY}"
+"#;
+        let entry: McpCatalogEntry = toml::from_str(toml_str).unwrap();
+        let err = entry.validate().unwrap_err();
+        assert!(err.contains("sse and http"), "{err}");
+    }
+
+    #[test]
+    fn render_header_template_substitutes_only_braced_placeholders() {
+        let rendered =
+            render_header_template("Bearer ${A}-$B-${C_2}", |name| Ok(format!("<{name}>")))
+                .unwrap();
+        assert_eq!(rendered, "Bearer <A>-$B-<C_2>");
+        assert_eq!(
+            header_template_placeholders("x ${ONE} y ${TWO}").unwrap(),
+            vec!["ONE".to_string(), "TWO".to_string()]
+        );
+        assert!(header_template_placeholders("${1ABC}").is_err());
+        let err =
+            render_header_template("${MISSING}", |name| Err(format!("{name} unset"))).unwrap_err();
+        assert_eq!(err, "MISSING unset");
     }
 }
