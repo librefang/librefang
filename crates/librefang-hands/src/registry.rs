@@ -212,7 +212,8 @@ fn copy_missing_skill_files(src: &Path, dst: &Path) -> std::io::Result<()> {
         if target.exists() {
             continue;
         }
-        std::fs::copy(entry.path(), &target)?;
+        // Through a temp file and a rename: a copy cut short would leave a truncated file that the `exists()` check above then preserves on every later edit, shadowing the intact upstream skill for good.
+        atomic_write(&target, std::fs::read(entry.path())?)?;
     }
     Ok(())
 }
@@ -459,7 +460,7 @@ impl HandRegistry {
         };
         let json = serde_json::to_string_pretty(&state)
             .map_err(|e| HandError::Config(format!("serialize hand state: {e}")))?;
-        atomic_write_json(path, &json)
+        atomic_write(path, &json)
             .map_err(|e| HandError::Config(format!("write hand state: {e}")))?;
         Ok(())
     }
@@ -821,9 +822,9 @@ impl HandRegistry {
 
         let hand_dir = home_dir.join("workspaces").join(&def.id);
         std::fs::create_dir_all(&hand_dir)?;
-        std::fs::write(hand_dir.join("HAND.toml"), toml_content)?;
+        atomic_write(&hand_dir.join("HAND.toml"), toml_content)?;
         if !skill_content.is_empty() {
-            std::fs::write(hand_dir.join("SKILL.md"), skill_content)?;
+            atomic_write(&hand_dir.join("SKILL.md"), skill_content)?;
         }
 
         let stored = self.register_definition(def)?;
@@ -939,7 +940,8 @@ impl HandRegistry {
         }
 
         let target = target_dir.join("HAND.toml");
-        std::fs::write(&target, toml_content)?;
+        // Replace the file atomically: the validation above guarantees the content is good, but a plain in-place write that is interrupted (full disk, daemon killed) would still truncate the operator's only copy of the manifest.
+        atomic_write(&target, toml_content)?;
 
         // 5. Refresh in-memory definitions (and any SKILL.md) from disk.
         self.reload_from_disk(home_dir);
@@ -1585,7 +1587,10 @@ impl HandRegistry {
     }
 }
 
-fn atomic_write_json(path: &Path, content: &str) -> std::io::Result<()> {
+/// Write `content` to `path` via a fsynced sibling temp file and a rename, so a crash or a full disk mid-write leaves the previous file intact instead of a truncated one.
+///
+/// Used for `hand_state.json`, for the `HAND.toml` / `SKILL.md` files the install and edit paths persist, where the operator's manifest may be the only copy, and for the skill files an override seeds from the registry copy.
+fn atomic_write(path: &Path, content: impl AsRef<[u8]>) -> std::io::Result<()> {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static SEQ: AtomicU64 = AtomicU64::new(0);
@@ -1607,7 +1612,7 @@ fn atomic_write_json(path: &Path, content: &str) -> std::io::Result<()> {
 
     let write_result = (|| -> std::io::Result<()> {
         let mut file = std::fs::File::create(&tmp)?;
-        file.write_all(content.as_bytes())?;
+        file.write_all(content.as_ref())?;
         file.sync_all()?;
         Ok(())
     })();
@@ -2148,6 +2153,46 @@ system_prompt = "Test"
         assert!(
             tmp.path().join("workspaces/local-y/HAND.toml").exists(),
             "the workspaces copy stays the source of truth"
+        );
+    }
+
+    /// An edit replaces `HAND.toml` with a new file instead of rewriting the live one in place.
+    ///
+    /// A hard link to the old file observes the difference: an in-place write mutates the shared inode (so an interrupted write truncates the operator's only copy), while a temp-file-and-rename leaves the old inode untouched.
+    #[test]
+    fn editing_a_hand_replaces_the_manifest_atomically() {
+        let reg = HandRegistry::new();
+        let tmp = tempfile::tempdir().unwrap();
+        install_custom_for_uninstall(&reg, tmp.path(), "atomic-z");
+        let manifest = tmp.path().join("workspaces/atomic-z/HAND.toml");
+        let original = std::fs::read_to_string(&manifest).unwrap();
+        let witness = tmp.path().join("witness.toml");
+        std::fs::hard_link(&manifest, &witness).unwrap();
+
+        let edited = UNINSTALL_TEST_TOML
+            .replace("__PLACEHOLDER__", "atomic-z")
+            .replace(
+                "description = \"Fixture for uninstall_hand tests\"",
+                "description = \"tweaked\"",
+            );
+        reg.update_manifest_persisted(tmp.path(), "atomic-z", &edited)
+            .expect("edit must persist");
+
+        assert_eq!(std::fs::read_to_string(&manifest).unwrap(), edited);
+        assert_eq!(
+            std::fs::read_to_string(&witness).unwrap(),
+            original,
+            "the old HAND.toml must be replaced by rename, not overwritten in place"
+        );
+        let leftovers: Vec<_> = std::fs::read_dir(manifest.parent().unwrap())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.ends_with(".tmp"))
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "temp files left behind: {leftovers:?}"
         );
     }
 
