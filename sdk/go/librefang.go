@@ -288,11 +288,11 @@ func (r *A2AResource) A2AListExternalAgents() (interface{}, error) {
 }
 
 func (r *A2AResource) A2AGetExternalAgent(id string) (interface{}, error) {
-	return r.client.request("GET", fmt.Sprintf("/api/a2a/agents/%s", id), nil, nil)
+	return r.client.request("GET", fmt.Sprintf("/api/a2a/agents/%s", url.PathEscape(id)), nil, nil)
 }
 
 func (r *A2AResource) A2AApproveExternal(id string) (interface{}, error) {
-	return r.client.request("POST", fmt.Sprintf("/api/a2a/agents/%s/approve", id), nil, nil)
+	return r.client.request("POST", fmt.Sprintf("/api/a2a/agents/%s/approve", url.PathEscape(id)), nil, nil)
 }
 
 func (r *A2AResource) A2ADiscoverExternal(data map[string]interface{}) (interface{}, error) {
@@ -304,7 +304,7 @@ func (r *A2AResource) A2ASendExternal(data map[string]interface{}) (interface{},
 }
 
 func (r *A2AResource) A2AExternalTaskStatus(id string, query map[string]string) (interface{}, error) {
-	return r.client.request("GET", fmt.Sprintf("/api/a2a/tasks/%s/status", id), nil, query)
+	return r.client.request("GET", fmt.Sprintf("/api/a2a/tasks/%s/status", url.PathEscape(id)), nil, query)
 }
 
 // ── Agents Resource
@@ -340,7 +340,7 @@ func (r *AgentsResource) ListAgentIdentities() (interface{}, error) {
 }
 
 func (r *AgentsResource) ResetAgentIdentity(name string, query map[string]string) (interface{}, error) {
-	return r.client.request("POST", fmt.Sprintf("/api/agents/identities/%s/reset", name), nil, query)
+	return r.client.request("POST", fmt.Sprintf("/api/agents/identities/%s/reset", url.PathEscape(name)), nil, query)
 }
 
 func (r *AgentsResource) SpawnEphemeralAgent(data map[string]interface{}) (interface{}, error) {
@@ -348,19 +348,19 @@ func (r *AgentsResource) SpawnEphemeralAgent(data map[string]interface{}) (inter
 }
 
 func (r *AgentsResource) GetAgent(id string) (interface{}, error) {
-	return r.client.request("GET", fmt.Sprintf("/api/agents/%s", id), nil, nil)
+	return r.client.request("GET", fmt.Sprintf("/api/agents/%s", url.PathEscape(id)), nil, nil)
 }
 
 func (r *AgentsResource) KillAgent(id string, query map[string]string) (interface{}, error) {
-	return r.client.request("DELETE", fmt.Sprintf("/api/agents/%s", id), nil, query)
+	return r.client.request("DELETE", fmt.Sprintf("/api/agents/%s", url.PathEscape(id)), nil, query)
 }
 
 func (r *AgentsResource) PatchAgent(id string, data map[string]interface{}) (interface{}, error) {
-	return r.client.request("PATCH", fmt.Sprintf("/api/agents/%s", id), data, nil)
+	return r.client.request("PATCH", fmt.Sprintf("/api/agents/%s", url.PathEscape(id)), data, nil)
 }
 
 func (r *AgentsResource) ServeAgentAvatar(id string) (interface{}, error) {
-	return r.client.request("GET", fmt.Sprintf("/api/agents/%s/avatar", id), nil, nil)
+	return r.client.request("GET", fmt.Sprintf("/api/agents/%s/avatar", url.PathEscape(id)), nil, nil)
 }
 
 // UploadAgentAvatar sends a raw application/octet-stream body. An empty contentType defaults to it.
@@ -368,223 +368,223 @@ func (r *AgentsResource) UploadAgentAvatar(id string, body []byte, contentType s
 	if contentType == "" {
 		contentType = "application/octet-stream"
 	}
-	return r.client.requestRaw("POST", fmt.Sprintf("/api/agents/%s/avatar", id), body, contentType)
+	return r.client.requestRaw("POST", fmt.Sprintf("/api/agents/%s/avatar", url.PathEscape(id)), body, contentType)
 }
 
 func (r *AgentsResource) DeleteAgentAvatar(id string) (interface{}, error) {
-	return r.client.request("DELETE", fmt.Sprintf("/api/agents/%s/avatar", id), nil, nil)
+	return r.client.request("DELETE", fmt.Sprintf("/api/agents/%s/avatar", url.PathEscape(id)), nil, nil)
 }
 
 func (r *AgentsResource) GetAgentChannels(id string) (interface{}, error) {
-	return r.client.request("GET", fmt.Sprintf("/api/agents/%s/channels", id), nil, nil)
+	return r.client.request("GET", fmt.Sprintf("/api/agents/%s/channels", url.PathEscape(id)), nil, nil)
 }
 
 func (r *AgentsResource) SetAgentChannels(id string, data map[string]interface{}) (interface{}, error) {
-	return r.client.request("PUT", fmt.Sprintf("/api/agents/%s/channels", id), data, nil)
+	return r.client.request("PUT", fmt.Sprintf("/api/agents/%s/channels", url.PathEscape(id)), data, nil)
 }
 
 func (r *AgentsResource) CloneAgent(id string, data map[string]interface{}) (interface{}, error) {
-	return r.client.request("POST", fmt.Sprintf("/api/agents/%s/clone", id), data, nil)
+	return r.client.request("POST", fmt.Sprintf("/api/agents/%s/clone", url.PathEscape(id)), data, nil)
 }
 
 func (r *AgentsResource) PatchAgentConfig(id string, data map[string]interface{}) (interface{}, error) {
-	return r.client.request("PATCH", fmt.Sprintf("/api/agents/%s/config", id), data, nil)
+	return r.client.request("PATCH", fmt.Sprintf("/api/agents/%s/config", url.PathEscape(id)), data, nil)
 }
 
 func (r *AgentsResource) GetAgentDeliveries(id string) (interface{}, error) {
-	return r.client.request("GET", fmt.Sprintf("/api/agents/%s/deliveries", id), nil, nil)
+	return r.client.request("GET", fmt.Sprintf("/api/agents/%s/deliveries", url.PathEscape(id)), nil, nil)
 }
 
 func (r *AgentsResource) ListAgentEphemeralRuns(id string, query map[string]string) (interface{}, error) {
-	return r.client.request("GET", fmt.Sprintf("/api/agents/%s/ephemeral-runs", id), nil, query)
+	return r.client.request("GET", fmt.Sprintf("/api/agents/%s/ephemeral-runs", url.PathEscape(id)), nil, query)
 }
 
 func (r *AgentsResource) ListAgentEvents(id string, query map[string]string) (interface{}, error) {
-	return r.client.request("GET", fmt.Sprintf("/api/agents/%s/events", id), nil, query)
+	return r.client.request("GET", fmt.Sprintf("/api/agents/%s/events", url.PathEscape(id)), nil, query)
 }
 
 func (r *AgentsResource) ListAgentFiles(id string) (interface{}, error) {
-	return r.client.request("GET", fmt.Sprintf("/api/agents/%s/files", id), nil, nil)
+	return r.client.request("GET", fmt.Sprintf("/api/agents/%s/files", url.PathEscape(id)), nil, nil)
 }
 
 func (r *AgentsResource) GetAgentFile(id string, filename string) (interface{}, error) {
-	return r.client.request("GET", fmt.Sprintf("/api/agents/%s/files/%s", id, filename), nil, nil)
+	return r.client.request("GET", fmt.Sprintf("/api/agents/%s/files/%s", url.PathEscape(id), url.PathEscape(filename)), nil, nil)
 }
 
 func (r *AgentsResource) SetAgentFile(id string, filename string, data map[string]interface{}) (interface{}, error) {
-	return r.client.request("PUT", fmt.Sprintf("/api/agents/%s/files/%s", id, filename), data, nil)
+	return r.client.request("PUT", fmt.Sprintf("/api/agents/%s/files/%s", url.PathEscape(id), url.PathEscape(filename)), data, nil)
 }
 
 func (r *AgentsResource) DeleteAgentFile(id string, filename string) (interface{}, error) {
-	return r.client.request("DELETE", fmt.Sprintf("/api/agents/%s/files/%s", id, filename), nil, nil)
+	return r.client.request("DELETE", fmt.Sprintf("/api/agents/%s/files/%s", url.PathEscape(id), url.PathEscape(filename)), nil, nil)
 }
 
 func (r *AgentsResource) DeleteHandAgentRuntimeConfig(id string) (interface{}, error) {
-	return r.client.request("DELETE", fmt.Sprintf("/api/agents/%s/hand-runtime-config", id), nil, nil)
+	return r.client.request("DELETE", fmt.Sprintf("/api/agents/%s/hand-runtime-config", url.PathEscape(id)), nil, nil)
 }
 
 func (r *AgentsResource) PatchHandAgentRuntimeConfig(id string, data map[string]interface{}) (interface{}, error) {
-	return r.client.request("PATCH", fmt.Sprintf("/api/agents/%s/hand-runtime-config", id), data, nil)
+	return r.client.request("PATCH", fmt.Sprintf("/api/agents/%s/hand-runtime-config", url.PathEscape(id)), data, nil)
 }
 
 func (r *AgentsResource) ClearAgentHistory(id string) (interface{}, error) {
-	return r.client.request("DELETE", fmt.Sprintf("/api/agents/%s/history", id), nil, nil)
+	return r.client.request("DELETE", fmt.Sprintf("/api/agents/%s/history", url.PathEscape(id)), nil, nil)
 }
 
 func (r *AgentsResource) UpdateAgentIdentity(id string, data map[string]interface{}) (interface{}, error) {
-	return r.client.request("PATCH", fmt.Sprintf("/api/agents/%s/identity", id), data, nil)
+	return r.client.request("PATCH", fmt.Sprintf("/api/agents/%s/identity", url.PathEscape(id)), data, nil)
 }
 
 func (r *AgentsResource) InjectMessage(id string, data map[string]interface{}) (interface{}, error) {
-	return r.client.request("POST", fmt.Sprintf("/api/agents/%s/inject", id), data, nil)
+	return r.client.request("POST", fmt.Sprintf("/api/agents/%s/inject", url.PathEscape(id)), data, nil)
 }
 
 func (r *AgentsResource) AgentLogs(id string, query map[string]string) (interface{}, error) {
-	return r.client.request("GET", fmt.Sprintf("/api/agents/%s/logs", id), nil, query)
+	return r.client.request("GET", fmt.Sprintf("/api/agents/%s/logs", url.PathEscape(id)), nil, query)
 }
 
 func (r *AgentsResource) GetAgentManifestToml(id string) (interface{}, error) {
-	return r.client.request("GET", fmt.Sprintf("/api/agents/%s/manifest", id), nil, nil)
+	return r.client.request("GET", fmt.Sprintf("/api/agents/%s/manifest", url.PathEscape(id)), nil, nil)
 }
 
 func (r *AgentsResource) GetAgentMcpServers(id string) (interface{}, error) {
-	return r.client.request("GET", fmt.Sprintf("/api/agents/%s/mcp_servers", id), nil, nil)
+	return r.client.request("GET", fmt.Sprintf("/api/agents/%s/mcp_servers", url.PathEscape(id)), nil, nil)
 }
 
 func (r *AgentsResource) SetAgentMcpServers(id string, data map[string]interface{}) (interface{}, error) {
-	return r.client.request("PUT", fmt.Sprintf("/api/agents/%s/mcp_servers", id), data, nil)
+	return r.client.request("PUT", fmt.Sprintf("/api/agents/%s/mcp_servers", url.PathEscape(id)), data, nil)
 }
 
 func (r *AgentsResource) SendMessage(id string, data map[string]interface{}) (interface{}, error) {
-	return r.client.request("POST", fmt.Sprintf("/api/agents/%s/message", id), data, nil)
+	return r.client.request("POST", fmt.Sprintf("/api/agents/%s/message", url.PathEscape(id)), data, nil)
 }
 
 func (r *AgentsResource) SendMessageStream(id string, data map[string]interface{}) <-chan map[string]interface{} {
-	return r.client.stream("POST", fmt.Sprintf("/api/agents/%s/message/stream", id), data, nil)
+	return r.client.stream("POST", fmt.Sprintf("/api/agents/%s/message/stream", url.PathEscape(id)), data, nil)
 }
 
 func (r *AgentsResource) AgentMetrics(id string) (interface{}, error) {
-	return r.client.request("GET", fmt.Sprintf("/api/agents/%s/metrics", id), nil, nil)
+	return r.client.request("GET", fmt.Sprintf("/api/agents/%s/metrics", url.PathEscape(id)), nil, nil)
 }
 
 func (r *AgentsResource) SetAgentMode(id string, data map[string]interface{}) (interface{}, error) {
-	return r.client.request("PUT", fmt.Sprintf("/api/agents/%s/mode", id), data, nil)
+	return r.client.request("PUT", fmt.Sprintf("/api/agents/%s/mode", url.PathEscape(id)), data, nil)
 }
 
 func (r *AgentsResource) SetModel(id string, data map[string]interface{}) (interface{}, error) {
-	return r.client.request("PUT", fmt.Sprintf("/api/agents/%s/model", id), data, nil)
+	return r.client.request("PUT", fmt.Sprintf("/api/agents/%s/model", url.PathEscape(id)), data, nil)
 }
 
 func (r *AgentsResource) GetAgentModelRouting(id string) (interface{}, error) {
-	return r.client.request("GET", fmt.Sprintf("/api/agents/%s/model_routing", id), nil, nil)
+	return r.client.request("GET", fmt.Sprintf("/api/agents/%s/model_routing", url.PathEscape(id)), nil, nil)
 }
 
 func (r *AgentsResource) SetAgentModelRouting(id string, data map[string]interface{}) (interface{}, error) {
-	return r.client.request("PUT", fmt.Sprintf("/api/agents/%s/model_routing", id), data, nil)
+	return r.client.request("PUT", fmt.Sprintf("/api/agents/%s/model_routing", url.PathEscape(id)), data, nil)
 }
 
 func (r *AgentsResource) PushMessage(id string, data map[string]interface{}) (interface{}, error) {
-	return r.client.request("POST", fmt.Sprintf("/api/agents/%s/push", id), data, nil)
+	return r.client.request("POST", fmt.Sprintf("/api/agents/%s/push", url.PathEscape(id)), data, nil)
 }
 
 func (r *AgentsResource) ReloadAgentManifest(id string) (interface{}, error) {
-	return r.client.request("POST", fmt.Sprintf("/api/agents/%s/reload", id), nil, nil)
+	return r.client.request("POST", fmt.Sprintf("/api/agents/%s/reload", url.PathEscape(id)), nil, nil)
 }
 
 func (r *AgentsResource) ResumeAgent(id string) (interface{}, error) {
-	return r.client.request("PUT", fmt.Sprintf("/api/agents/%s/resume", id), nil, nil)
+	return r.client.request("PUT", fmt.Sprintf("/api/agents/%s/resume", url.PathEscape(id)), nil, nil)
 }
 
 func (r *AgentsResource) ListAgentRuntime(id string) (interface{}, error) {
-	return r.client.request("GET", fmt.Sprintf("/api/agents/%s/runtime", id), nil, nil)
+	return r.client.request("GET", fmt.Sprintf("/api/agents/%s/runtime", url.PathEscape(id)), nil, nil)
 }
 
 func (r *AgentsResource) SaveAgentAsAgentType(id string, data map[string]interface{}) (interface{}, error) {
-	return r.client.request("POST", fmt.Sprintf("/api/agents/%s/save-as-agent-type", id), data, nil)
+	return r.client.request("POST", fmt.Sprintf("/api/agents/%s/save-as-agent-type", url.PathEscape(id)), data, nil)
 }
 
 func (r *AgentsResource) GetAgentSession(id string, query map[string]string) (interface{}, error) {
-	return r.client.request("GET", fmt.Sprintf("/api/agents/%s/session", id), nil, query)
+	return r.client.request("GET", fmt.Sprintf("/api/agents/%s/session", url.PathEscape(id)), nil, query)
 }
 
 func (r *AgentsResource) CompactSession(id string) (interface{}, error) {
-	return r.client.request("POST", fmt.Sprintf("/api/agents/%s/session/compact", id), nil, nil)
+	return r.client.request("POST", fmt.Sprintf("/api/agents/%s/session/compact", url.PathEscape(id)), nil, nil)
 }
 
 func (r *AgentsResource) GetAgentSessionContext(id string, query map[string]string) (interface{}, error) {
-	return r.client.request("GET", fmt.Sprintf("/api/agents/%s/session/context", id), nil, query)
+	return r.client.request("GET", fmt.Sprintf("/api/agents/%s/session/context", url.PathEscape(id)), nil, query)
 }
 
 func (r *AgentsResource) RebootSession(id string) (interface{}, error) {
-	return r.client.request("POST", fmt.Sprintf("/api/agents/%s/session/reboot", id), nil, nil)
+	return r.client.request("POST", fmt.Sprintf("/api/agents/%s/session/reboot", url.PathEscape(id)), nil, nil)
 }
 
 func (r *AgentsResource) ResetSession(id string) (interface{}, error) {
-	return r.client.request("POST", fmt.Sprintf("/api/agents/%s/session/reset", id), nil, nil)
+	return r.client.request("POST", fmt.Sprintf("/api/agents/%s/session/reset", url.PathEscape(id)), nil, nil)
 }
 
 func (r *AgentsResource) ListAgentSessions(id string) (interface{}, error) {
-	return r.client.request("GET", fmt.Sprintf("/api/agents/%s/sessions", id), nil, nil)
+	return r.client.request("GET", fmt.Sprintf("/api/agents/%s/sessions", url.PathEscape(id)), nil, nil)
 }
 
 func (r *AgentsResource) CreateAgentSession(id string, data map[string]interface{}) (interface{}, error) {
-	return r.client.request("POST", fmt.Sprintf("/api/agents/%s/sessions", id), data, nil)
+	return r.client.request("POST", fmt.Sprintf("/api/agents/%s/sessions", url.PathEscape(id)), data, nil)
 }
 
 func (r *AgentsResource) ImportSession(id string, data map[string]interface{}) (interface{}, error) {
-	return r.client.request("POST", fmt.Sprintf("/api/agents/%s/sessions/import", id), data, nil)
+	return r.client.request("POST", fmt.Sprintf("/api/agents/%s/sessions/import", url.PathEscape(id)), data, nil)
 }
 
 func (r *AgentsResource) ExportSession(id string, session_id string) (interface{}, error) {
-	return r.client.request("GET", fmt.Sprintf("/api/agents/%s/sessions/%s/export", id, session_id), nil, nil)
+	return r.client.request("GET", fmt.Sprintf("/api/agents/%s/sessions/%s/export", url.PathEscape(id), url.PathEscape(session_id)), nil, nil)
 }
 
 func (r *AgentsResource) StopSession(id string, session_id string) (interface{}, error) {
-	return r.client.request("POST", fmt.Sprintf("/api/agents/%s/sessions/%s/stop", id, session_id), nil, nil)
+	return r.client.request("POST", fmt.Sprintf("/api/agents/%s/sessions/%s/stop", url.PathEscape(id), url.PathEscape(session_id)), nil, nil)
 }
 
 func (r *AgentsResource) AttachSessionStream(id string, session_id string) <-chan map[string]interface{} {
-	return r.client.stream("GET", fmt.Sprintf("/api/agents/%s/sessions/%s/stream", id, session_id), nil, nil)
+	return r.client.stream("GET", fmt.Sprintf("/api/agents/%s/sessions/%s/stream", url.PathEscape(id), url.PathEscape(session_id)), nil, nil)
 }
 
 func (r *AgentsResource) SwitchAgentSession(id string, session_id string) (interface{}, error) {
-	return r.client.request("POST", fmt.Sprintf("/api/agents/%s/sessions/%s/switch", id, session_id), nil, nil)
+	return r.client.request("POST", fmt.Sprintf("/api/agents/%s/sessions/%s/switch", url.PathEscape(id), url.PathEscape(session_id)), nil, nil)
 }
 
 func (r *AgentsResource) ExportSessionTrajectory(id string, session_id string, query map[string]string) (interface{}, error) {
-	return r.client.request("GET", fmt.Sprintf("/api/agents/%s/sessions/%s/trajectory", id, session_id), nil, query)
+	return r.client.request("GET", fmt.Sprintf("/api/agents/%s/sessions/%s/trajectory", url.PathEscape(id), url.PathEscape(session_id)), nil, query)
 }
 
 func (r *AgentsResource) GetAgentSkills(id string) (interface{}, error) {
-	return r.client.request("GET", fmt.Sprintf("/api/agents/%s/skills", id), nil, nil)
+	return r.client.request("GET", fmt.Sprintf("/api/agents/%s/skills", url.PathEscape(id)), nil, nil)
 }
 
 func (r *AgentsResource) SetAgentSkills(id string, data map[string]interface{}) (interface{}, error) {
-	return r.client.request("PUT", fmt.Sprintf("/api/agents/%s/skills", id), data, nil)
+	return r.client.request("PUT", fmt.Sprintf("/api/agents/%s/skills", url.PathEscape(id)), data, nil)
 }
 
 func (r *AgentsResource) GetAgentStats(id string) (interface{}, error) {
-	return r.client.request("GET", fmt.Sprintf("/api/agents/%s/stats", id), nil, nil)
+	return r.client.request("GET", fmt.Sprintf("/api/agents/%s/stats", url.PathEscape(id)), nil, nil)
 }
 
 func (r *AgentsResource) StopAgent(id string) (interface{}, error) {
-	return r.client.request("POST", fmt.Sprintf("/api/agents/%s/stop", id), nil, nil)
+	return r.client.request("POST", fmt.Sprintf("/api/agents/%s/stop", url.PathEscape(id)), nil, nil)
 }
 
 func (r *AgentsResource) SuspendAgent(id string) (interface{}, error) {
-	return r.client.request("PUT", fmt.Sprintf("/api/agents/%s/suspend", id), nil, nil)
+	return r.client.request("PUT", fmt.Sprintf("/api/agents/%s/suspend", url.PathEscape(id)), nil, nil)
 }
 
 func (r *AgentsResource) GetAgentTools(id string) (interface{}, error) {
-	return r.client.request("GET", fmt.Sprintf("/api/agents/%s/tools", id), nil, nil)
+	return r.client.request("GET", fmt.Sprintf("/api/agents/%s/tools", url.PathEscape(id)), nil, nil)
 }
 
 func (r *AgentsResource) SetAgentTools(id string, data map[string]interface{}) (interface{}, error) {
-	return r.client.request("PUT", fmt.Sprintf("/api/agents/%s/tools", id), data, nil)
+	return r.client.request("PUT", fmt.Sprintf("/api/agents/%s/tools", url.PathEscape(id)), data, nil)
 }
 
 func (r *AgentsResource) GetAgentTraces(id string) (interface{}, error) {
-	return r.client.request("GET", fmt.Sprintf("/api/agents/%s/traces", id), nil, nil)
+	return r.client.request("GET", fmt.Sprintf("/api/agents/%s/traces", url.PathEscape(id)), nil, nil)
 }
 
 // UploadFile sends a raw application/octet-stream body. An empty contentType defaults to it.
@@ -592,11 +592,11 @@ func (r *AgentsResource) UploadFile(id string, body []byte, contentType string) 
 	if contentType == "" {
 		contentType = "application/octet-stream"
 	}
-	return r.client.requestRaw("POST", fmt.Sprintf("/api/agents/%s/upload", id), body, contentType)
+	return r.client.requestRaw("POST", fmt.Sprintf("/api/agents/%s/upload", url.PathEscape(id)), body, contentType)
 }
 
 func (r *AgentsResource) ServeUpload(file_id string) (interface{}, error) {
-	return r.client.request("GET", fmt.Sprintf("/api/uploads/%s", file_id), nil, nil)
+	return r.client.request("GET", fmt.Sprintf("/api/uploads/%s", url.PathEscape(file_id)), nil, nil)
 }
 
 // ── Approvals Resource
@@ -624,31 +624,31 @@ func (r *ApprovalsResource) ApprovalCount() (interface{}, error) {
 }
 
 func (r *ApprovalsResource) ListApprovalsForSession(session_id string) (interface{}, error) {
-	return r.client.request("GET", fmt.Sprintf("/api/approvals/session/%s", session_id), nil, nil)
+	return r.client.request("GET", fmt.Sprintf("/api/approvals/session/%s", url.PathEscape(session_id)), nil, nil)
 }
 
 func (r *ApprovalsResource) ApproveAllForSession(session_id string, data map[string]interface{}) (interface{}, error) {
-	return r.client.request("POST", fmt.Sprintf("/api/approvals/session/%s/approve_all", session_id), data, nil)
+	return r.client.request("POST", fmt.Sprintf("/api/approvals/session/%s/approve_all", url.PathEscape(session_id)), data, nil)
 }
 
 func (r *ApprovalsResource) RejectAllForSession(session_id string) (interface{}, error) {
-	return r.client.request("POST", fmt.Sprintf("/api/approvals/session/%s/reject_all", session_id), nil, nil)
+	return r.client.request("POST", fmt.Sprintf("/api/approvals/session/%s/reject_all", url.PathEscape(session_id)), nil, nil)
 }
 
 func (r *ApprovalsResource) GetApproval(id string) (interface{}, error) {
-	return r.client.request("GET", fmt.Sprintf("/api/approvals/%s", id), nil, nil)
+	return r.client.request("GET", fmt.Sprintf("/api/approvals/%s", url.PathEscape(id)), nil, nil)
 }
 
 func (r *ApprovalsResource) ApproveRequest(id string, data map[string]interface{}) (interface{}, error) {
-	return r.client.request("POST", fmt.Sprintf("/api/approvals/%s/approve", id), data, nil)
+	return r.client.request("POST", fmt.Sprintf("/api/approvals/%s/approve", url.PathEscape(id)), data, nil)
 }
 
 func (r *ApprovalsResource) ModifyRequest(id string, data map[string]interface{}) (interface{}, error) {
-	return r.client.request("POST", fmt.Sprintf("/api/approvals/%s/modify", id), data, nil)
+	return r.client.request("POST", fmt.Sprintf("/api/approvals/%s/modify", url.PathEscape(id)), data, nil)
 }
 
 func (r *ApprovalsResource) RejectRequest(id string) (interface{}, error) {
-	return r.client.request("POST", fmt.Sprintf("/api/approvals/%s/reject", id), nil, nil)
+	return r.client.request("POST", fmt.Sprintf("/api/approvals/%s/reject", url.PathEscape(id)), nil, nil)
 }
 
 // ── Auth Resource
@@ -684,7 +684,7 @@ func (r *AuthResource) AuthLogin() (interface{}, error) {
 }
 
 func (r *AuthResource) AuthLoginProvider(provider string) (interface{}, error) {
-	return r.client.request("GET", fmt.Sprintf("/api/auth/login/%s", provider), nil, nil)
+	return r.client.request("GET", fmt.Sprintf("/api/auth/login/%s", url.PathEscape(provider)), nil, nil)
 }
 
 func (r *AuthResource) DashboardLogout() (interface{}, error) {
@@ -704,7 +704,7 @@ func (r *AuthResource) ListCredentials() (interface{}, error) {
 }
 
 func (r *AuthResource) RevokeCredential(id string) (interface{}, error) {
-	return r.client.request("DELETE", fmt.Sprintf("/api/auth/passkey/credentials/%s", id), nil, nil)
+	return r.client.request("DELETE", fmt.Sprintf("/api/auth/passkey/credentials/%s", url.PathEscape(id)), nil, nil)
 }
 
 func (r *AuthResource) RegistrationOptions(data map[string]interface{}) (interface{}, error) {
@@ -732,15 +732,15 @@ func (r *AuthResource) AuthUserinfo() (interface{}, error) {
 type AutoDreamResource struct{ client *Client }
 
 func (r *AutoDreamResource) AutoDreamAbort(id string) (interface{}, error) {
-	return r.client.request("POST", fmt.Sprintf("/api/auto-dream/agents/%s/abort", id), nil, nil)
+	return r.client.request("POST", fmt.Sprintf("/api/auto-dream/agents/%s/abort", url.PathEscape(id)), nil, nil)
 }
 
 func (r *AutoDreamResource) AutoDreamSetEnabled(id string, data map[string]interface{}) (interface{}, error) {
-	return r.client.request("PUT", fmt.Sprintf("/api/auto-dream/agents/%s/enabled", id), data, nil)
+	return r.client.request("PUT", fmt.Sprintf("/api/auto-dream/agents/%s/enabled", url.PathEscape(id)), data, nil)
 }
 
 func (r *AutoDreamResource) AutoDreamTrigger(id string) (interface{}, error) {
-	return r.client.request("POST", fmt.Sprintf("/api/auto-dream/agents/%s/trigger", id), nil, nil)
+	return r.client.request("POST", fmt.Sprintf("/api/auto-dream/agents/%s/trigger", url.PathEscape(id)), nil, nil)
 }
 
 func (r *AutoDreamResource) AutoDreamStatus() (interface{}, error) {
@@ -764,11 +764,11 @@ func (r *BudgetResource) AgentBudgetRanking() (interface{}, error) {
 }
 
 func (r *BudgetResource) AgentBudgetStatus(id string) (interface{}, error) {
-	return r.client.request("GET", fmt.Sprintf("/api/budget/agents/%s", id), nil, nil)
+	return r.client.request("GET", fmt.Sprintf("/api/budget/agents/%s", url.PathEscape(id)), nil, nil)
 }
 
 func (r *BudgetResource) UpdateAgentBudget(id string, data map[string]interface{}) (interface{}, error) {
-	return r.client.request("PUT", fmt.Sprintf("/api/budget/agents/%s", id), data, nil)
+	return r.client.request("PUT", fmt.Sprintf("/api/budget/agents/%s", url.PathEscape(id)), data, nil)
 }
 
 func (r *BudgetResource) ProviderBudgetList() (interface{}, error) {
@@ -776,7 +776,7 @@ func (r *BudgetResource) ProviderBudgetList() (interface{}, error) {
 }
 
 func (r *BudgetResource) UpdateProviderBudget(provider_id string, data map[string]interface{}) (interface{}, error) {
-	return r.client.request("PUT", fmt.Sprintf("/api/budget/providers/%s", provider_id), data, nil)
+	return r.client.request("PUT", fmt.Sprintf("/api/budget/providers/%s", url.PathEscape(provider_id)), data, nil)
 }
 
 func (r *BudgetResource) UserBudgetRanking(query map[string]string) (interface{}, error) {
@@ -784,15 +784,15 @@ func (r *BudgetResource) UserBudgetRanking(query map[string]string) (interface{}
 }
 
 func (r *BudgetResource) UserBudgetDetail(user_id string) (interface{}, error) {
-	return r.client.request("GET", fmt.Sprintf("/api/budget/users/%s", user_id), nil, nil)
+	return r.client.request("GET", fmt.Sprintf("/api/budget/users/%s", url.PathEscape(user_id)), nil, nil)
 }
 
 func (r *BudgetResource) UpdateUserBudget(user_id string, data map[string]interface{}) (interface{}, error) {
-	return r.client.request("PUT", fmt.Sprintf("/api/budget/users/%s", user_id), data, nil)
+	return r.client.request("PUT", fmt.Sprintf("/api/budget/users/%s", url.PathEscape(user_id)), data, nil)
 }
 
 func (r *BudgetResource) DeleteUserBudget(user_id string) (interface{}, error) {
-	return r.client.request("DELETE", fmt.Sprintf("/api/budget/users/%s", user_id), nil, nil)
+	return r.client.request("DELETE", fmt.Sprintf("/api/budget/users/%s", url.PathEscape(user_id)), nil, nil)
 }
 
 func (r *BudgetResource) UsageStats(query map[string]string) (interface{}, error) {
@@ -836,15 +836,15 @@ func (r *ChannelsResource) ReloadChannels() (interface{}, error) {
 }
 
 func (r *ChannelsResource) DeleteSidecarChannel(name string) (interface{}, error) {
-	return r.client.request("DELETE", fmt.Sprintf("/api/channels/sidecar/%s", name), nil, nil)
+	return r.client.request("DELETE", fmt.Sprintf("/api/channels/sidecar/%s", url.PathEscape(name)), nil, nil)
 }
 
 func (r *ChannelsResource) ConfigureSidecarChannel(name string, data map[string]interface{}) (interface{}, error) {
-	return r.client.request("POST", fmt.Sprintf("/api/channels/sidecar/%s/configure", name), data, nil)
+	return r.client.request("POST", fmt.Sprintf("/api/channels/sidecar/%s/configure", url.PathEscape(name)), data, nil)
 }
 
 func (r *ChannelsResource) GetChannelQr(name string) (interface{}, error) {
-	return r.client.request("GET", fmt.Sprintf("/api/channels/%s/qr", name), nil, nil)
+	return r.client.request("GET", fmt.Sprintf("/api/channels/%s/qr", url.PathEscape(name)), nil, nil)
 }
 
 // ── Extensions Resource
@@ -864,7 +864,7 @@ func (r *ExtensionsResource) UninstallExtension(data map[string]interface{}) (in
 }
 
 func (r *ExtensionsResource) GetExtension(name string) (interface{}, error) {
-	return r.client.request("GET", fmt.Sprintf("/api/extensions/%s", name), nil, nil)
+	return r.client.request("GET", fmt.Sprintf("/api/extensions/%s", url.PathEscape(name)), nil, nil)
 }
 
 // ── Goals Resource
@@ -888,27 +888,27 @@ func (r *GroupsResource) CreateGroup(data map[string]interface{}) (interface{}, 
 }
 
 func (r *GroupsResource) GetGroup(name string) (interface{}, error) {
-	return r.client.request("GET", fmt.Sprintf("/api/groups/%s", name), nil, nil)
+	return r.client.request("GET", fmt.Sprintf("/api/groups/%s", url.PathEscape(name)), nil, nil)
 }
 
 func (r *GroupsResource) UpdateGroup(name string, data map[string]interface{}) (interface{}, error) {
-	return r.client.request("PUT", fmt.Sprintf("/api/groups/%s", name), data, nil)
+	return r.client.request("PUT", fmt.Sprintf("/api/groups/%s", url.PathEscape(name)), data, nil)
 }
 
 func (r *GroupsResource) DeleteGroup(name string) (interface{}, error) {
-	return r.client.request("DELETE", fmt.Sprintf("/api/groups/%s", name), nil, nil)
+	return r.client.request("DELETE", fmt.Sprintf("/api/groups/%s", url.PathEscape(name)), nil, nil)
 }
 
 func (r *GroupsResource) AddGroupMember(name string, user string) (interface{}, error) {
-	return r.client.request("PUT", fmt.Sprintf("/api/groups/%s/members/%s", name, user), nil, nil)
+	return r.client.request("PUT", fmt.Sprintf("/api/groups/%s/members/%s", url.PathEscape(name), url.PathEscape(user)), nil, nil)
 }
 
 func (r *GroupsResource) RemoveGroupMember(name string, user string) (interface{}, error) {
-	return r.client.request("DELETE", fmt.Sprintf("/api/groups/%s/members/%s", name, user), nil, nil)
+	return r.client.request("DELETE", fmt.Sprintf("/api/groups/%s/members/%s", url.PathEscape(name), url.PathEscape(user)), nil, nil)
 }
 
 func (r *GroupsResource) UserGroups(name string) (interface{}, error) {
-	return r.client.request("GET", fmt.Sprintf("/api/users/%s/groups", name), nil, nil)
+	return r.client.request("GET", fmt.Sprintf("/api/users/%s/groups", url.PathEscape(name)), nil, nil)
 }
 
 // ── Hands Resource
@@ -928,23 +928,23 @@ func (r *HandsResource) InstallHand(data map[string]interface{}) (interface{}, e
 }
 
 func (r *HandsResource) DeactivateHand(id string) (interface{}, error) {
-	return r.client.request("DELETE", fmt.Sprintf("/api/hands/instances/%s", id), nil, nil)
+	return r.client.request("DELETE", fmt.Sprintf("/api/hands/instances/%s", url.PathEscape(id)), nil, nil)
 }
 
 func (r *HandsResource) HandInstanceBrowser(id string) (interface{}, error) {
-	return r.client.request("GET", fmt.Sprintf("/api/hands/instances/%s/browser", id), nil, nil)
+	return r.client.request("GET", fmt.Sprintf("/api/hands/instances/%s/browser", url.PathEscape(id)), nil, nil)
 }
 
 func (r *HandsResource) PauseHand(id string) (interface{}, error) {
-	return r.client.request("POST", fmt.Sprintf("/api/hands/instances/%s/pause", id), nil, nil)
+	return r.client.request("POST", fmt.Sprintf("/api/hands/instances/%s/pause", url.PathEscape(id)), nil, nil)
 }
 
 func (r *HandsResource) ResumeHand(id string) (interface{}, error) {
-	return r.client.request("POST", fmt.Sprintf("/api/hands/instances/%s/resume", id), nil, nil)
+	return r.client.request("POST", fmt.Sprintf("/api/hands/instances/%s/resume", url.PathEscape(id)), nil, nil)
 }
 
 func (r *HandsResource) HandStats(id string) (interface{}, error) {
-	return r.client.request("GET", fmt.Sprintf("/api/hands/instances/%s/stats", id), nil, nil)
+	return r.client.request("GET", fmt.Sprintf("/api/hands/instances/%s/stats", url.PathEscape(id)), nil, nil)
 }
 
 func (r *HandsResource) InstallHandFromMarketplace(data map[string]interface{}) (interface{}, error) {
@@ -956,43 +956,43 @@ func (r *HandsResource) ReloadHands() (interface{}, error) {
 }
 
 func (r *HandsResource) GetHand(hand_id string) (interface{}, error) {
-	return r.client.request("GET", fmt.Sprintf("/api/hands/%s", hand_id), nil, nil)
+	return r.client.request("GET", fmt.Sprintf("/api/hands/%s", url.PathEscape(hand_id)), nil, nil)
 }
 
 func (r *HandsResource) UninstallHand(hand_id string) (interface{}, error) {
-	return r.client.request("DELETE", fmt.Sprintf("/api/hands/%s", hand_id), nil, nil)
+	return r.client.request("DELETE", fmt.Sprintf("/api/hands/%s", url.PathEscape(hand_id)), nil, nil)
 }
 
 func (r *HandsResource) ActivateHand(hand_id string, data map[string]interface{}) (interface{}, error) {
-	return r.client.request("POST", fmt.Sprintf("/api/hands/%s/activate", hand_id), data, nil)
+	return r.client.request("POST", fmt.Sprintf("/api/hands/%s/activate", url.PathEscape(hand_id)), data, nil)
 }
 
 func (r *HandsResource) CheckHandDeps(hand_id string) (interface{}, error) {
-	return r.client.request("POST", fmt.Sprintf("/api/hands/%s/check-deps", hand_id), nil, nil)
+	return r.client.request("POST", fmt.Sprintf("/api/hands/%s/check-deps", url.PathEscape(hand_id)), nil, nil)
 }
 
 func (r *HandsResource) InstallHandDeps(hand_id string) (interface{}, error) {
-	return r.client.request("POST", fmt.Sprintf("/api/hands/%s/install-deps", hand_id), nil, nil)
+	return r.client.request("POST", fmt.Sprintf("/api/hands/%s/install-deps", url.PathEscape(hand_id)), nil, nil)
 }
 
 func (r *HandsResource) GetHandManifest(hand_id string) (interface{}, error) {
-	return r.client.request("GET", fmt.Sprintf("/api/hands/%s/manifest", hand_id), nil, nil)
+	return r.client.request("GET", fmt.Sprintf("/api/hands/%s/manifest", url.PathEscape(hand_id)), nil, nil)
 }
 
 func (r *HandsResource) UpdateHandManifest(hand_id string, data map[string]interface{}) (interface{}, error) {
-	return r.client.request("PUT", fmt.Sprintf("/api/hands/%s/manifest", hand_id), data, nil)
+	return r.client.request("PUT", fmt.Sprintf("/api/hands/%s/manifest", url.PathEscape(hand_id)), data, nil)
 }
 
 func (r *HandsResource) SetHandSecret(hand_id string, data map[string]interface{}) (interface{}, error) {
-	return r.client.request("POST", fmt.Sprintf("/api/hands/%s/secret", hand_id), data, nil)
+	return r.client.request("POST", fmt.Sprintf("/api/hands/%s/secret", url.PathEscape(hand_id)), data, nil)
 }
 
 func (r *HandsResource) GetHandSettings(hand_id string) (interface{}, error) {
-	return r.client.request("GET", fmt.Sprintf("/api/hands/%s/settings", hand_id), nil, nil)
+	return r.client.request("GET", fmt.Sprintf("/api/hands/%s/settings", url.PathEscape(hand_id)), nil, nil)
 }
 
 func (r *HandsResource) UpdateHandSettings(hand_id string, data map[string]interface{}) (interface{}, error) {
-	return r.client.request("PUT", fmt.Sprintf("/api/hands/%s/settings", hand_id), data, nil)
+	return r.client.request("PUT", fmt.Sprintf("/api/hands/%s/settings", url.PathEscape(hand_id)), data, nil)
 }
 
 // ── Inbox Resource
@@ -1016,15 +1016,15 @@ func (r *KnowledgeResource) CreateBase(data map[string]interface{}) (interface{}
 }
 
 func (r *KnowledgeResource) DeleteBase(name string) (interface{}, error) {
-	return r.client.request("DELETE", fmt.Sprintf("/api/knowledge/%s", name), nil, nil)
+	return r.client.request("DELETE", fmt.Sprintf("/api/knowledge/%s", url.PathEscape(name)), nil, nil)
 }
 
 func (r *KnowledgeResource) SetHolders(name string, data map[string]interface{}) (interface{}, error) {
-	return r.client.request("PUT", fmt.Sprintf("/api/knowledge/%s/agents", name), data, nil)
+	return r.client.request("PUT", fmt.Sprintf("/api/knowledge/%s/agents", url.PathEscape(name)), data, nil)
 }
 
 func (r *KnowledgeResource) ListDocuments(name string) (interface{}, error) {
-	return r.client.request("GET", fmt.Sprintf("/api/knowledge/%s/documents", name), nil, nil)
+	return r.client.request("GET", fmt.Sprintf("/api/knowledge/%s/documents", url.PathEscape(name)), nil, nil)
 }
 
 // PutDocument sends a raw application/octet-stream body. An empty contentType defaults to it.
@@ -1032,11 +1032,11 @@ func (r *KnowledgeResource) PutDocument(name string, filename string, body []byt
 	if contentType == "" {
 		contentType = "application/octet-stream"
 	}
-	return r.client.requestRaw("PUT", fmt.Sprintf("/api/knowledge/%s/documents/%s", name, filename), body, contentType)
+	return r.client.requestRaw("PUT", fmt.Sprintf("/api/knowledge/%s/documents/%s", url.PathEscape(name), url.PathEscape(filename)), body, contentType)
 }
 
 func (r *KnowledgeResource) DeleteDocument(name string, filename string) (interface{}, error) {
-	return r.client.request("DELETE", fmt.Sprintf("/api/knowledge/%s/documents/%s", name, filename), nil, nil)
+	return r.client.request("DELETE", fmt.Sprintf("/api/knowledge/%s/documents/%s", url.PathEscape(name), url.PathEscape(filename)), nil, nil)
 }
 
 // ── Mcp Resource
@@ -1048,7 +1048,7 @@ func (r *McpResource) ListMcpCatalog() (interface{}, error) {
 }
 
 func (r *McpResource) GetMcpCatalogEntry(id string) (interface{}, error) {
-	return r.client.request("GET", fmt.Sprintf("/api/mcp/catalog/%s", id), nil, nil)
+	return r.client.request("GET", fmt.Sprintf("/api/mcp/catalog/%s", url.PathEscape(id)), nil, nil)
 }
 
 func (r *McpResource) McpHealthHandler() (interface{}, error) {
@@ -1068,35 +1068,35 @@ func (r *McpResource) AddMcpServer(data map[string]interface{}) (interface{}, er
 }
 
 func (r *McpResource) GetMcpServer(name string) (interface{}, error) {
-	return r.client.request("GET", fmt.Sprintf("/api/mcp/servers/%s", name), nil, nil)
+	return r.client.request("GET", fmt.Sprintf("/api/mcp/servers/%s", url.PathEscape(name)), nil, nil)
 }
 
 func (r *McpResource) UpdateMcpServer(name string, data map[string]interface{}) (interface{}, error) {
-	return r.client.request("PUT", fmt.Sprintf("/api/mcp/servers/%s", name), data, nil)
+	return r.client.request("PUT", fmt.Sprintf("/api/mcp/servers/%s", url.PathEscape(name)), data, nil)
 }
 
 func (r *McpResource) DeleteMcpServer(name string) (interface{}, error) {
-	return r.client.request("DELETE", fmt.Sprintf("/api/mcp/servers/%s", name), nil, nil)
+	return r.client.request("DELETE", fmt.Sprintf("/api/mcp/servers/%s", url.PathEscape(name)), nil, nil)
 }
 
 func (r *McpResource) AuthRevoke(name string) (interface{}, error) {
-	return r.client.request("DELETE", fmt.Sprintf("/api/mcp/servers/%s/auth/revoke", name), nil, nil)
+	return r.client.request("DELETE", fmt.Sprintf("/api/mcp/servers/%s/auth/revoke", url.PathEscape(name)), nil, nil)
 }
 
 func (r *McpResource) AuthStart(name string) (interface{}, error) {
-	return r.client.request("POST", fmt.Sprintf("/api/mcp/servers/%s/auth/start", name), nil, nil)
+	return r.client.request("POST", fmt.Sprintf("/api/mcp/servers/%s/auth/start", url.PathEscape(name)), nil, nil)
 }
 
 func (r *McpResource) AuthStatus(name string) (interface{}, error) {
-	return r.client.request("GET", fmt.Sprintf("/api/mcp/servers/%s/auth/status", name), nil, nil)
+	return r.client.request("GET", fmt.Sprintf("/api/mcp/servers/%s/auth/status", url.PathEscape(name)), nil, nil)
 }
 
 func (r *McpResource) ReconnectMcpServerHandler(name string) (interface{}, error) {
-	return r.client.request("POST", fmt.Sprintf("/api/mcp/servers/%s/reconnect", name), nil, nil)
+	return r.client.request("POST", fmt.Sprintf("/api/mcp/servers/%s/reconnect", url.PathEscape(name)), nil, nil)
 }
 
 func (r *McpResource) PatchMcpServerTaint(name string, data map[string]interface{}) (interface{}, error) {
-	return r.client.request("PATCH", fmt.Sprintf("/api/mcp/servers/%s/taint", name), data, nil)
+	return r.client.request("PATCH", fmt.Sprintf("/api/mcp/servers/%s/taint", url.PathEscape(name)), data, nil)
 }
 
 func (r *McpResource) ListMcpTaintRules() (interface{}, error) {
@@ -1136,7 +1136,7 @@ func (r *MediaResource) SubmitVideo(data map[string]interface{}) (interface{}, e
 }
 
 func (r *MediaResource) PollVideoTask(task_id string, query map[string]string) (interface{}, error) {
-	return r.client.request("GET", fmt.Sprintf("/api/media/video/%s", task_id), nil, query)
+	return r.client.request("GET", fmt.Sprintf("/api/media/video/%s", url.PathEscape(task_id)), nil, query)
 }
 
 // ── Memory Resource
@@ -1144,27 +1144,27 @@ func (r *MediaResource) PollVideoTask(task_id string, query map[string]string) (
 type MemoryResource struct{ client *Client }
 
 func (r *MemoryResource) ExportAgentMemory(id string) (interface{}, error) {
-	return r.client.request("GET", fmt.Sprintf("/api/agents/%s/memory/export", id), nil, nil)
+	return r.client.request("GET", fmt.Sprintf("/api/agents/%s/memory/export", url.PathEscape(id)), nil, nil)
 }
 
 func (r *MemoryResource) ImportAgentMemory(id string, data map[string]interface{}) (interface{}, error) {
-	return r.client.request("POST", fmt.Sprintf("/api/agents/%s/memory/import", id), data, nil)
+	return r.client.request("POST", fmt.Sprintf("/api/agents/%s/memory/import", url.PathEscape(id)), data, nil)
 }
 
 func (r *MemoryResource) GetAgentKv(id string) (interface{}, error) {
-	return r.client.request("GET", fmt.Sprintf("/api/memory/agents/%s/kv", id), nil, nil)
+	return r.client.request("GET", fmt.Sprintf("/api/memory/agents/%s/kv", url.PathEscape(id)), nil, nil)
 }
 
 func (r *MemoryResource) GetAgentKvKey(id string, key string) (interface{}, error) {
-	return r.client.request("GET", fmt.Sprintf("/api/memory/agents/%s/kv/%s", id, key), nil, nil)
+	return r.client.request("GET", fmt.Sprintf("/api/memory/agents/%s/kv/%s", url.PathEscape(id), url.PathEscape(key)), nil, nil)
 }
 
 func (r *MemoryResource) SetAgentKvKey(id string, key string, data map[string]interface{}) (interface{}, error) {
-	return r.client.request("PUT", fmt.Sprintf("/api/memory/agents/%s/kv/%s", id, key), data, nil)
+	return r.client.request("PUT", fmt.Sprintf("/api/memory/agents/%s/kv/%s", url.PathEscape(id), url.PathEscape(key)), data, nil)
 }
 
 func (r *MemoryResource) DeleteAgentKvKey(id string, key string) (interface{}, error) {
-	return r.client.request("DELETE", fmt.Sprintf("/api/memory/agents/%s/kv/%s", id, key), nil, nil)
+	return r.client.request("DELETE", fmt.Sprintf("/api/memory/agents/%s/kv/%s", url.PathEscape(id), url.PathEscape(key)), nil, nil)
 }
 
 func (r *MemoryResource) MemoryConfigGet() (interface{}, error) {
@@ -1208,7 +1208,7 @@ func (r *ModelsResource) CreateAlias(data map[string]interface{}) (interface{}, 
 }
 
 func (r *ModelsResource) DeleteAlias(alias string) (interface{}, error) {
-	return r.client.request("DELETE", fmt.Sprintf("/api/models/aliases/%s", alias), nil, nil)
+	return r.client.request("DELETE", fmt.Sprintf("/api/models/aliases/%s", url.PathEscape(alias)), nil, nil)
 }
 
 func (r *ModelsResource) AddCustomModel(data map[string]interface{}) (interface{}, error) {
@@ -1216,23 +1216,23 @@ func (r *ModelsResource) AddCustomModel(data map[string]interface{}) (interface{
 }
 
 func (r *ModelsResource) RemoveCustomModel(id string) (interface{}, error) {
-	return r.client.request("DELETE", fmt.Sprintf("/api/models/custom/%s", id), nil, nil)
+	return r.client.request("DELETE", fmt.Sprintf("/api/models/custom/%s", url.PathEscape(id)), nil, nil)
 }
 
 func (r *ModelsResource) GetModelOverrides(id string) (interface{}, error) {
-	return r.client.request("GET", fmt.Sprintf("/api/models/overrides/%s", id), nil, nil)
+	return r.client.request("GET", fmt.Sprintf("/api/models/overrides/%s", url.PathEscape(id)), nil, nil)
 }
 
 func (r *ModelsResource) SetModelOverrides(id string, data map[string]interface{}) (interface{}, error) {
-	return r.client.request("PUT", fmt.Sprintf("/api/models/overrides/%s", id), data, nil)
+	return r.client.request("PUT", fmt.Sprintf("/api/models/overrides/%s", url.PathEscape(id)), data, nil)
 }
 
 func (r *ModelsResource) DeleteModelOverrides(id string) (interface{}, error) {
-	return r.client.request("DELETE", fmt.Sprintf("/api/models/overrides/%s", id), nil, nil)
+	return r.client.request("DELETE", fmt.Sprintf("/api/models/overrides/%s", url.PathEscape(id)), nil, nil)
 }
 
 func (r *ModelsResource) GetModel(id string) (interface{}, error) {
-	return r.client.request("GET", fmt.Sprintf("/api/models/%s", id), nil, nil)
+	return r.client.request("GET", fmt.Sprintf("/api/models/%s", url.PathEscape(id)), nil, nil)
 }
 
 func (r *ModelsResource) ListProviders() (interface{}, error) {
@@ -1240,7 +1240,7 @@ func (r *ModelsResource) ListProviders() (interface{}, error) {
 }
 
 func (r *ModelsResource) CopilotOauthPoll(poll_id string) (interface{}, error) {
-	return r.client.request("GET", fmt.Sprintf("/api/providers/github-copilot/oauth/poll/%s", poll_id), nil, nil)
+	return r.client.request("GET", fmt.Sprintf("/api/providers/github-copilot/oauth/poll/%s", url.PathEscape(poll_id)), nil, nil)
 }
 
 func (r *ModelsResource) CopilotOauthStart() (interface{}, error) {
@@ -1248,35 +1248,35 @@ func (r *ModelsResource) CopilotOauthStart() (interface{}, error) {
 }
 
 func (r *ModelsResource) GetProvider(name string) (interface{}, error) {
-	return r.client.request("GET", fmt.Sprintf("/api/providers/%s", name), nil, nil)
+	return r.client.request("GET", fmt.Sprintf("/api/providers/%s", url.PathEscape(name)), nil, nil)
 }
 
 func (r *ModelsResource) SetDefaultProvider(name string, data map[string]interface{}) (interface{}, error) {
-	return r.client.request("POST", fmt.Sprintf("/api/providers/%s/default", name), data, nil)
+	return r.client.request("POST", fmt.Sprintf("/api/providers/%s/default", url.PathEscape(name)), data, nil)
 }
 
 func (r *ModelsResource) SetProviderDiscovery(name string, data map[string]interface{}) (interface{}, error) {
-	return r.client.request("PUT", fmt.Sprintf("/api/providers/%s/discovery", name), data, nil)
+	return r.client.request("PUT", fmt.Sprintf("/api/providers/%s/discovery", url.PathEscape(name)), data, nil)
 }
 
 func (r *ModelsResource) EnableProvider(name string) (interface{}, error) {
-	return r.client.request("POST", fmt.Sprintf("/api/providers/%s/enable", name), nil, nil)
+	return r.client.request("POST", fmt.Sprintf("/api/providers/%s/enable", url.PathEscape(name)), nil, nil)
 }
 
 func (r *ModelsResource) SetProviderKey(name string, data map[string]interface{}) (interface{}, error) {
-	return r.client.request("POST", fmt.Sprintf("/api/providers/%s/key", name), data, nil)
+	return r.client.request("POST", fmt.Sprintf("/api/providers/%s/key", url.PathEscape(name)), data, nil)
 }
 
 func (r *ModelsResource) DeleteProviderKey(name string) (interface{}, error) {
-	return r.client.request("DELETE", fmt.Sprintf("/api/providers/%s/key", name), nil, nil)
+	return r.client.request("DELETE", fmt.Sprintf("/api/providers/%s/key", url.PathEscape(name)), nil, nil)
 }
 
 func (r *ModelsResource) TestProvider(name string) (interface{}, error) {
-	return r.client.request("POST", fmt.Sprintf("/api/providers/%s/test", name), nil, nil)
+	return r.client.request("POST", fmt.Sprintf("/api/providers/%s/test", url.PathEscape(name)), nil, nil)
 }
 
 func (r *ModelsResource) SetProviderUrl(name string, data map[string]interface{}) (interface{}, error) {
-	return r.client.request("PUT", fmt.Sprintf("/api/providers/%s/url", name), data, nil)
+	return r.client.request("PUT", fmt.Sprintf("/api/providers/%s/url", url.PathEscape(name)), data, nil)
 }
 
 // ── Network Resource
@@ -1316,7 +1316,7 @@ func (r *NetworkResource) ListPeers(query map[string]string) (interface{}, error
 }
 
 func (r *NetworkResource) GetPeer(id string) (interface{}, error) {
-	return r.client.request("GET", fmt.Sprintf("/api/peers/%s", id), nil, nil)
+	return r.client.request("GET", fmt.Sprintf("/api/peers/%s", url.PathEscape(id)), nil, nil)
 }
 
 // ── Pairing Resource
@@ -1332,7 +1332,7 @@ func (r *PairingResource) PairingDevices() (interface{}, error) {
 }
 
 func (r *PairingResource) PairingRemoveDevice(id string) (interface{}, error) {
-	return r.client.request("DELETE", fmt.Sprintf("/api/pairing/devices/%s", id), nil, nil)
+	return r.client.request("DELETE", fmt.Sprintf("/api/pairing/devices/%s", url.PathEscape(id)), nil, nil)
 }
 
 func (r *PairingResource) PairingNotify(data map[string]interface{}) (interface{}, error) {
@@ -1396,55 +1396,55 @@ func (r *PluginsResource) UninstallPlugin(data map[string]interface{}) (interfac
 }
 
 func (r *PluginsResource) GetPlugin(name string) (interface{}, error) {
-	return r.client.request("GET", fmt.Sprintf("/api/plugins/%s", name), nil, nil)
+	return r.client.request("GET", fmt.Sprintf("/api/plugins/%s", url.PathEscape(name)), nil, nil)
 }
 
 func (r *PluginsResource) PluginAdvancedConfig(name string) (interface{}, error) {
-	return r.client.request("GET", fmt.Sprintf("/api/plugins/%s/advanced-config", name), nil, nil)
+	return r.client.request("GET", fmt.Sprintf("/api/plugins/%s/advanced-config", url.PathEscape(name)), nil, nil)
 }
 
 func (r *PluginsResource) DisablePlugin(name string) (interface{}, error) {
-	return r.client.request("POST", fmt.Sprintf("/api/plugins/%s/disable", name), nil, nil)
+	return r.client.request("POST", fmt.Sprintf("/api/plugins/%s/disable", url.PathEscape(name)), nil, nil)
 }
 
 func (r *PluginsResource) EnablePlugin(name string) (interface{}, error) {
-	return r.client.request("POST", fmt.Sprintf("/api/plugins/%s/enable", name), nil, nil)
+	return r.client.request("POST", fmt.Sprintf("/api/plugins/%s/enable", url.PathEscape(name)), nil, nil)
 }
 
 func (r *PluginsResource) PluginEnv(name string) (interface{}, error) {
-	return r.client.request("GET", fmt.Sprintf("/api/plugins/%s/env", name), nil, nil)
+	return r.client.request("GET", fmt.Sprintf("/api/plugins/%s/env", url.PathEscape(name)), nil, nil)
 }
 
 func (r *PluginsResource) InstallPluginDeps(name string) (interface{}, error) {
-	return r.client.request("POST", fmt.Sprintf("/api/plugins/%s/install-deps", name), nil, nil)
+	return r.client.request("POST", fmt.Sprintf("/api/plugins/%s/install-deps", url.PathEscape(name)), nil, nil)
 }
 
 func (r *PluginsResource) LintPlugin(name string) (interface{}, error) {
-	return r.client.request("GET", fmt.Sprintf("/api/plugins/%s/lint", name), nil, nil)
+	return r.client.request("GET", fmt.Sprintf("/api/plugins/%s/lint", url.PathEscape(name)), nil, nil)
 }
 
 func (r *PluginsResource) PrewarmPlugin(name string) (interface{}, error) {
-	return r.client.request("POST", fmt.Sprintf("/api/plugins/%s/prewarm", name), nil, nil)
+	return r.client.request("POST", fmt.Sprintf("/api/plugins/%s/prewarm", url.PathEscape(name)), nil, nil)
 }
 
 func (r *PluginsResource) ReloadPlugin(name string) (interface{}, error) {
-	return r.client.request("POST", fmt.Sprintf("/api/plugins/%s/reload", name), nil, nil)
+	return r.client.request("POST", fmt.Sprintf("/api/plugins/%s/reload", url.PathEscape(name)), nil, nil)
 }
 
 func (r *PluginsResource) SignPlugin(name string) (interface{}, error) {
-	return r.client.request("POST", fmt.Sprintf("/api/plugins/%s/sign", name), nil, nil)
+	return r.client.request("POST", fmt.Sprintf("/api/plugins/%s/sign", url.PathEscape(name)), nil, nil)
 }
 
 func (r *PluginsResource) PluginStatus(name string) (interface{}, error) {
-	return r.client.request("GET", fmt.Sprintf("/api/plugins/%s/status", name), nil, nil)
+	return r.client.request("GET", fmt.Sprintf("/api/plugins/%s/status", url.PathEscape(name)), nil, nil)
 }
 
 func (r *PluginsResource) TestPluginHook(name string, data map[string]interface{}) (interface{}, error) {
-	return r.client.request("POST", fmt.Sprintf("/api/plugins/%s/test-hook", name), data, nil)
+	return r.client.request("POST", fmt.Sprintf("/api/plugins/%s/test-hook", url.PathEscape(name)), data, nil)
 }
 
 func (r *PluginsResource) UpgradePlugin(name string, data map[string]interface{}) (interface{}, error) {
-	return r.client.request("POST", fmt.Sprintf("/api/plugins/%s/upgrade", name), data, nil)
+	return r.client.request("POST", fmt.Sprintf("/api/plugins/%s/upgrade", url.PathEscape(name)), data, nil)
 }
 
 // ── ProactiveMemory Resource
@@ -1460,51 +1460,51 @@ func (r *ProactiveMemoryResource) MemoryAdd(data map[string]interface{}) (interf
 }
 
 func (r *ProactiveMemoryResource) MemoryListAgent(id string, query map[string]string) (interface{}, error) {
-	return r.client.request("GET", fmt.Sprintf("/api/memory/agents/%s", id), nil, query)
+	return r.client.request("GET", fmt.Sprintf("/api/memory/agents/%s", url.PathEscape(id)), nil, query)
 }
 
 func (r *ProactiveMemoryResource) MemoryResetAgent(id string) (interface{}, error) {
-	return r.client.request("DELETE", fmt.Sprintf("/api/memory/agents/%s", id), nil, nil)
+	return r.client.request("DELETE", fmt.Sprintf("/api/memory/agents/%s", url.PathEscape(id)), nil, nil)
 }
 
 func (r *ProactiveMemoryResource) MemoryConsolidate(id string) (interface{}, error) {
-	return r.client.request("POST", fmt.Sprintf("/api/memory/agents/%s/consolidate", id), nil, nil)
+	return r.client.request("POST", fmt.Sprintf("/api/memory/agents/%s/consolidate", url.PathEscape(id)), nil, nil)
 }
 
 func (r *ProactiveMemoryResource) MemoryCountAgent(id string, query map[string]string) (interface{}, error) {
-	return r.client.request("GET", fmt.Sprintf("/api/memory/agents/%s/count", id), nil, query)
+	return r.client.request("GET", fmt.Sprintf("/api/memory/agents/%s/count", url.PathEscape(id)), nil, query)
 }
 
 func (r *ProactiveMemoryResource) MemoryDuplicates(id string) (interface{}, error) {
-	return r.client.request("GET", fmt.Sprintf("/api/memory/agents/%s/duplicates", id), nil, nil)
+	return r.client.request("GET", fmt.Sprintf("/api/memory/agents/%s/duplicates", url.PathEscape(id)), nil, nil)
 }
 
 func (r *ProactiveMemoryResource) MemoryExportAgent(id string) (interface{}, error) {
-	return r.client.request("GET", fmt.Sprintf("/api/memory/agents/%s/export", id), nil, nil)
+	return r.client.request("GET", fmt.Sprintf("/api/memory/agents/%s/export", url.PathEscape(id)), nil, nil)
 }
 
 func (r *ProactiveMemoryResource) MemoryImportAgent(id string, data map[string]interface{}) (interface{}, error) {
-	return r.client.request("POST", fmt.Sprintf("/api/memory/agents/%s/import", id), data, nil)
+	return r.client.request("POST", fmt.Sprintf("/api/memory/agents/%s/import", url.PathEscape(id)), data, nil)
 }
 
 func (r *ProactiveMemoryResource) MemoryClearLevel(id string, level string) (interface{}, error) {
-	return r.client.request("DELETE", fmt.Sprintf("/api/memory/agents/%s/level/%s", id, level), nil, nil)
+	return r.client.request("DELETE", fmt.Sprintf("/api/memory/agents/%s/level/%s", url.PathEscape(id), url.PathEscape(level)), nil, nil)
 }
 
 func (r *ProactiveMemoryResource) MemoryQueryRelations(id string, query map[string]string) (interface{}, error) {
-	return r.client.request("GET", fmt.Sprintf("/api/memory/agents/%s/relations", id), nil, query)
+	return r.client.request("GET", fmt.Sprintf("/api/memory/agents/%s/relations", url.PathEscape(id)), nil, query)
 }
 
 func (r *ProactiveMemoryResource) MemoryStoreRelations(id string, data map[string]interface{}) (interface{}, error) {
-	return r.client.request("POST", fmt.Sprintf("/api/memory/agents/%s/relations", id), data, nil)
+	return r.client.request("POST", fmt.Sprintf("/api/memory/agents/%s/relations", url.PathEscape(id)), data, nil)
 }
 
 func (r *ProactiveMemoryResource) MemorySearchAgent(id string, query map[string]string) (interface{}, error) {
-	return r.client.request("GET", fmt.Sprintf("/api/memory/agents/%s/search", id), nil, query)
+	return r.client.request("GET", fmt.Sprintf("/api/memory/agents/%s/search", url.PathEscape(id)), nil, query)
 }
 
 func (r *ProactiveMemoryResource) MemoryStatsAgent(id string) (interface{}, error) {
-	return r.client.request("GET", fmt.Sprintf("/api/memory/agents/%s/stats", id), nil, nil)
+	return r.client.request("GET", fmt.Sprintf("/api/memory/agents/%s/stats", url.PathEscape(id)), nil, nil)
 }
 
 func (r *ProactiveMemoryResource) MemoryBulkDelete(data map[string]interface{}) (interface{}, error) {
@@ -1520,15 +1520,15 @@ func (r *ProactiveMemoryResource) MemoryDecay() (interface{}, error) {
 }
 
 func (r *ProactiveMemoryResource) MemoryUpdate(memory_id string, data map[string]interface{}) (interface{}, error) {
-	return r.client.request("PUT", fmt.Sprintf("/api/memory/items/%s", memory_id), data, nil)
+	return r.client.request("PUT", fmt.Sprintf("/api/memory/items/%s", url.PathEscape(memory_id)), data, nil)
 }
 
 func (r *ProactiveMemoryResource) MemoryDelete(memory_id string) (interface{}, error) {
-	return r.client.request("DELETE", fmt.Sprintf("/api/memory/items/%s", memory_id), nil, nil)
+	return r.client.request("DELETE", fmt.Sprintf("/api/memory/items/%s", url.PathEscape(memory_id)), nil, nil)
 }
 
 func (r *ProactiveMemoryResource) MemoryHistory(memory_id string) (interface{}, error) {
-	return r.client.request("GET", fmt.Sprintf("/api/memory/items/%s/history", memory_id), nil, nil)
+	return r.client.request("GET", fmt.Sprintf("/api/memory/items/%s/history", url.PathEscape(memory_id)), nil, nil)
 }
 
 func (r *ProactiveMemoryResource) MemorySearch(query map[string]string) (interface{}, error) {
@@ -1540,7 +1540,7 @@ func (r *ProactiveMemoryResource) MemoryStats() (interface{}, error) {
 }
 
 func (r *ProactiveMemoryResource) MemoryGetUser(user_id string) (interface{}, error) {
-	return r.client.request("GET", fmt.Sprintf("/api/memory/user/%s", user_id), nil, nil)
+	return r.client.request("GET", fmt.Sprintf("/api/memory/user/%s", url.PathEscape(user_id)), nil, nil)
 }
 
 // ── Sessions Resource
@@ -1548,7 +1548,7 @@ func (r *ProactiveMemoryResource) MemoryGetUser(user_id string) (interface{}, er
 type SessionsResource struct{ client *Client }
 
 func (r *SessionsResource) FindSessionByLabel(id string, label string) (interface{}, error) {
-	return r.client.request("GET", fmt.Sprintf("/api/agents/%s/sessions/by-label/%s", id, label), nil, nil)
+	return r.client.request("GET", fmt.Sprintf("/api/agents/%s/sessions/by-label/%s", url.PathEscape(id), url.PathEscape(label)), nil, nil)
 }
 
 func (r *SessionsResource) ListSessions(query map[string]string) (interface{}, error) {
@@ -1564,19 +1564,19 @@ func (r *SessionsResource) SearchSessions(query map[string]string) (interface{},
 }
 
 func (r *SessionsResource) GetSession(id string) (interface{}, error) {
-	return r.client.request("GET", fmt.Sprintf("/api/sessions/%s", id), nil, nil)
+	return r.client.request("GET", fmt.Sprintf("/api/sessions/%s", url.PathEscape(id)), nil, nil)
 }
 
 func (r *SessionsResource) DeleteSession(id string) (interface{}, error) {
-	return r.client.request("DELETE", fmt.Sprintf("/api/sessions/%s", id), nil, nil)
+	return r.client.request("DELETE", fmt.Sprintf("/api/sessions/%s", url.PathEscape(id)), nil, nil)
 }
 
 func (r *SessionsResource) SetSessionLabel(id string, data map[string]interface{}) (interface{}, error) {
-	return r.client.request("PUT", fmt.Sprintf("/api/sessions/%s/label", id), data, nil)
+	return r.client.request("PUT", fmt.Sprintf("/api/sessions/%s/label", url.PathEscape(id)), data, nil)
 }
 
 func (r *SessionsResource) PatchSessionModel(id string, data map[string]interface{}) (interface{}, error) {
-	return r.client.request("PATCH", fmt.Sprintf("/api/sessions/%s/model", id), data, nil)
+	return r.client.request("PATCH", fmt.Sprintf("/api/sessions/%s/model", url.PathEscape(id)), data, nil)
 }
 
 // ── Skills Resource
@@ -1596,11 +1596,11 @@ func (r *SkillsResource) ClawhubSearch(query map[string]string) (interface{}, er
 }
 
 func (r *SkillsResource) ClawhubSkillDetail(slug string) (interface{}, error) {
-	return r.client.request("GET", fmt.Sprintf("/api/clawhub/skill/%s", slug), nil, nil)
+	return r.client.request("GET", fmt.Sprintf("/api/clawhub/skill/%s", url.PathEscape(slug)), nil, nil)
 }
 
 func (r *SkillsResource) ClawhubSkillCode(slug string) (interface{}, error) {
-	return r.client.request("GET", fmt.Sprintf("/api/clawhub/skill/%s/code", slug), nil, nil)
+	return r.client.request("GET", fmt.Sprintf("/api/clawhub/skill/%s/code", url.PathEscape(slug)), nil, nil)
 }
 
 func (r *SkillsResource) MarketplaceSearch(query map[string]string) (interface{}, error) {
@@ -1624,19 +1624,19 @@ func (r *SkillsResource) ListPendingCandidates(query map[string]string) (interfa
 }
 
 func (r *SkillsResource) ShowPendingCandidate(id string) (interface{}, error) {
-	return r.client.request("GET", fmt.Sprintf("/api/skills/pending/%s", id), nil, nil)
+	return r.client.request("GET", fmt.Sprintf("/api/skills/pending/%s", url.PathEscape(id)), nil, nil)
 }
 
 func (r *SkillsResource) ApprovePendingCandidate(id string) (interface{}, error) {
-	return r.client.request("POST", fmt.Sprintf("/api/skills/pending/%s/approve", id), nil, nil)
+	return r.client.request("POST", fmt.Sprintf("/api/skills/pending/%s/approve", url.PathEscape(id)), nil, nil)
 }
 
 func (r *SkillsResource) ProposePendingToRegistry(id string) (interface{}, error) {
-	return r.client.request("POST", fmt.Sprintf("/api/skills/pending/%s/propose-to-registry", id), nil, nil)
+	return r.client.request("POST", fmt.Sprintf("/api/skills/pending/%s/propose-to-registry", url.PathEscape(id)), nil, nil)
 }
 
 func (r *SkillsResource) RejectPendingCandidate(id string) (interface{}, error) {
-	return r.client.request("POST", fmt.Sprintf("/api/skills/pending/%s/reject", id), nil, nil)
+	return r.client.request("POST", fmt.Sprintf("/api/skills/pending/%s/reject", url.PathEscape(id)), nil, nil)
 }
 
 func (r *SkillsResource) ListSkillRegistry() (interface{}, error) {
@@ -1652,39 +1652,39 @@ func (r *SkillsResource) UninstallSkill(data map[string]interface{}) (interface{
 }
 
 func (r *SkillsResource) GetSkillDetail(name string) (interface{}, error) {
-	return r.client.request("GET", fmt.Sprintf("/api/skills/%s", name), nil, nil)
+	return r.client.request("GET", fmt.Sprintf("/api/skills/%s", url.PathEscape(name)), nil, nil)
 }
 
 func (r *SkillsResource) EvolveDeleteSkill(name string) (interface{}, error) {
-	return r.client.request("POST", fmt.Sprintf("/api/skills/%s/evolve/delete", name), nil, nil)
+	return r.client.request("POST", fmt.Sprintf("/api/skills/%s/evolve/delete", url.PathEscape(name)), nil, nil)
 }
 
 func (r *SkillsResource) EvolveWriteFile(name string, data map[string]interface{}) (interface{}, error) {
-	return r.client.request("POST", fmt.Sprintf("/api/skills/%s/evolve/file", name), data, nil)
+	return r.client.request("POST", fmt.Sprintf("/api/skills/%s/evolve/file", url.PathEscape(name)), data, nil)
 }
 
 func (r *SkillsResource) EvolveRemoveFile(name string, query map[string]string) (interface{}, error) {
-	return r.client.request("DELETE", fmt.Sprintf("/api/skills/%s/evolve/file", name), nil, query)
+	return r.client.request("DELETE", fmt.Sprintf("/api/skills/%s/evolve/file", url.PathEscape(name)), nil, query)
 }
 
 func (r *SkillsResource) EvolvePatchSkill(name string, data map[string]interface{}) (interface{}, error) {
-	return r.client.request("POST", fmt.Sprintf("/api/skills/%s/evolve/patch", name), data, nil)
+	return r.client.request("POST", fmt.Sprintf("/api/skills/%s/evolve/patch", url.PathEscape(name)), data, nil)
 }
 
 func (r *SkillsResource) EvolveRollbackSkill(name string) (interface{}, error) {
-	return r.client.request("POST", fmt.Sprintf("/api/skills/%s/evolve/rollback", name), nil, nil)
+	return r.client.request("POST", fmt.Sprintf("/api/skills/%s/evolve/rollback", url.PathEscape(name)), nil, nil)
 }
 
 func (r *SkillsResource) EvolveUpdateSkill(name string, data map[string]interface{}) (interface{}, error) {
-	return r.client.request("POST", fmt.Sprintf("/api/skills/%s/evolve/update", name), data, nil)
+	return r.client.request("POST", fmt.Sprintf("/api/skills/%s/evolve/update", url.PathEscape(name)), data, nil)
 }
 
 func (r *SkillsResource) GetSupportingFile(name string, query map[string]string) (interface{}, error) {
-	return r.client.request("GET", fmt.Sprintf("/api/skills/%s/file", name), nil, query)
+	return r.client.request("GET", fmt.Sprintf("/api/skills/%s/file", url.PathEscape(name)), nil, query)
 }
 
 func (r *SkillsResource) ProposeSkillToRegistry(name string) (interface{}, error) {
-	return r.client.request("POST", fmt.Sprintf("/api/skills/%s/propose", name), nil, nil)
+	return r.client.request("POST", fmt.Sprintf("/api/skills/%s/propose", url.PathEscape(name)), nil, nil)
 }
 
 func (r *SkillsResource) ListTools() (interface{}, error) {
@@ -1692,7 +1692,7 @@ func (r *SkillsResource) ListTools() (interface{}, error) {
 }
 
 func (r *SkillsResource) GetTool(name string) (interface{}, error) {
-	return r.client.request("GET", fmt.Sprintf("/api/tools/%s", name), nil, nil)
+	return r.client.request("GET", fmt.Sprintf("/api/tools/%s", url.PathEscape(name)), nil, nil)
 }
 
 // ── System Resource
@@ -1720,7 +1720,7 @@ func (r *SystemResource) Check(query map[string]string) (interface{}, error) {
 }
 
 func (r *SystemResource) EffectivePermissions(user_id string) (interface{}, error) {
-	return r.client.request("GET", fmt.Sprintf("/api/authz/effective/%s", user_id), nil, nil)
+	return r.client.request("GET", fmt.Sprintf("/api/authz/effective/%s", url.PathEscape(user_id)), nil, nil)
 }
 
 func (r *SystemResource) Whoami() (interface{}, error) {
@@ -1736,7 +1736,7 @@ func (r *SystemResource) ListBackups() (interface{}, error) {
 }
 
 func (r *SystemResource) DeleteBackup(filename string) (interface{}, error) {
-	return r.client.request("DELETE", fmt.Sprintf("/api/backups/%s", filename), nil, nil)
+	return r.client.request("DELETE", fmt.Sprintf("/api/backups/%s", url.PathEscape(filename)), nil, nil)
 }
 
 func (r *SystemResource) ListBindings() (interface{}, error) {
@@ -1748,7 +1748,7 @@ func (r *SystemResource) AddBinding(data map[string]interface{}) (interface{}, e
 }
 
 func (r *SystemResource) RemoveBinding(index string) (interface{}, error) {
-	return r.client.request("DELETE", fmt.Sprintf("/api/bindings/%s", index), nil, nil)
+	return r.client.request("DELETE", fmt.Sprintf("/api/bindings/%s", url.PathEscape(index)), nil, nil)
 }
 
 func (r *SystemResource) ListCommands() (interface{}, error) {
@@ -1756,7 +1756,7 @@ func (r *SystemResource) ListCommands() (interface{}, error) {
 }
 
 func (r *SystemResource) GetCommand(name string) (interface{}, error) {
-	return r.client.request("GET", fmt.Sprintf("/api/commands/%s", name), nil, nil)
+	return r.client.request("GET", fmt.Sprintf("/api/commands/%s", url.PathEscape(name)), nil, nil)
 }
 
 func (r *SystemResource) GetConfig() (interface{}, error) {
@@ -1820,7 +1820,7 @@ func (r *SystemResource) ListProfiles() (interface{}, error) {
 }
 
 func (r *SystemResource) GetProfile(name string) (interface{}, error) {
-	return r.client.request("GET", fmt.Sprintf("/api/profiles/%s", name), nil, nil)
+	return r.client.request("GET", fmt.Sprintf("/api/profiles/%s", url.PathEscape(name)), nil, nil)
 }
 
 func (r *SystemResource) ProvisioningStatus() (interface{}, error) {
@@ -1860,39 +1860,39 @@ func (r *SystemResource) CreateAgentType(data map[string]interface{}) (interface
 }
 
 func (r *SystemResource) GetAgentTemplate(name string) (interface{}, error) {
-	return r.client.request("GET", fmt.Sprintf("/api/templates/%s", name), nil, nil)
+	return r.client.request("GET", fmt.Sprintf("/api/templates/%s", url.PathEscape(name)), nil, nil)
 }
 
 func (r *SystemResource) UpdateAgentType(name string, data map[string]interface{}) (interface{}, error) {
-	return r.client.request("PUT", fmt.Sprintf("/api/templates/%s", name), data, nil)
+	return r.client.request("PUT", fmt.Sprintf("/api/templates/%s", url.PathEscape(name)), data, nil)
 }
 
 func (r *SystemResource) DeleteAgentType(name string) (interface{}, error) {
-	return r.client.request("DELETE", fmt.Sprintf("/api/templates/%s", name), nil, nil)
+	return r.client.request("DELETE", fmt.Sprintf("/api/templates/%s", url.PathEscape(name)), nil, nil)
 }
 
 func (r *SystemResource) ListTemplateHistory(name string, query map[string]string) (interface{}, error) {
-	return r.client.request("GET", fmt.Sprintf("/api/templates/%s/history", name), nil, query)
+	return r.client.request("GET", fmt.Sprintf("/api/templates/%s/history", url.PathEscape(name)), nil, query)
 }
 
 func (r *SystemResource) RestoreTemplateVersion(name string, version_id string) (interface{}, error) {
-	return r.client.request("POST", fmt.Sprintf("/api/templates/%s/history/%s/restore", name, version_id), nil, nil)
+	return r.client.request("POST", fmt.Sprintf("/api/templates/%s/history/%s/restore", url.PathEscape(name), url.PathEscape(version_id)), nil, nil)
 }
 
 func (r *SystemResource) PromoteAgentType(name string) (interface{}, error) {
-	return r.client.request("POST", fmt.Sprintf("/api/templates/%s/promote", name), nil, nil)
+	return r.client.request("POST", fmt.Sprintf("/api/templates/%s/promote", url.PathEscape(name)), nil, nil)
 }
 
 func (r *SystemResource) GetAgentTypeRegistryDiff(name string) (interface{}, error) {
-	return r.client.request("GET", fmt.Sprintf("/api/templates/%s/registry-diff", name), nil, nil)
+	return r.client.request("GET", fmt.Sprintf("/api/templates/%s/registry-diff", url.PathEscape(name)), nil, nil)
 }
 
 func (r *SystemResource) RestoreAgentTypeFromRegistry(name string) (interface{}, error) {
-	return r.client.request("POST", fmt.Sprintf("/api/templates/%s/restore", name), nil, nil)
+	return r.client.request("POST", fmt.Sprintf("/api/templates/%s/restore", url.PathEscape(name)), nil, nil)
 }
 
 func (r *SystemResource) GetAgentTemplateToml(name string) (interface{}, error) {
-	return r.client.request("GET", fmt.Sprintf("/api/templates/%s/toml", name), nil, nil)
+	return r.client.request("GET", fmt.Sprintf("/api/templates/%s/toml", url.PathEscape(name)), nil, nil)
 }
 
 // PutAgentTemplateToml sends a raw text/plain body. An empty contentType defaults to it.
@@ -1900,7 +1900,7 @@ func (r *SystemResource) PutAgentTemplateToml(name string, body []byte, contentT
 	if contentType == "" {
 		contentType = "text/plain"
 	}
-	return r.client.requestRaw("PUT", fmt.Sprintf("/api/templates/%s/toml", name), body, contentType)
+	return r.client.requestRaw("PUT", fmt.Sprintf("/api/templates/%s/toml", url.PathEscape(name)), body, contentType)
 }
 
 // PostAgentTemplateToml sends a raw text/plain body. An empty contentType defaults to it.
@@ -1908,7 +1908,7 @@ func (r *SystemResource) PostAgentTemplateToml(name string, body []byte, content
 	if contentType == "" {
 		contentType = "text/plain"
 	}
-	return r.client.requestRaw("POST", fmt.Sprintf("/api/templates/%s/toml", name), body, contentType)
+	return r.client.requestRaw("POST", fmt.Sprintf("/api/templates/%s/toml", url.PathEscape(name)), body, contentType)
 }
 
 func (r *SystemResource) Version() (interface{}, error) {
@@ -1932,7 +1932,7 @@ func (r *TasksResource) TaskQueuePostRoot(data map[string]interface{}) (interfac
 type ToolsResource struct{ client *Client }
 
 func (r *ToolsResource) InvokeTool(name string, data map[string]interface{}, query map[string]string) (interface{}, error) {
-	return r.client.request("POST", fmt.Sprintf("/api/tools/%s/invoke", name), data, query)
+	return r.client.request("POST", fmt.Sprintf("/api/tools/%s/invoke", url.PathEscape(name)), data, query)
 }
 
 // ── Users Resource
@@ -1956,19 +1956,19 @@ func (r *UsersResource) ServeMyAvatar() (interface{}, error) {
 }
 
 func (r *UsersResource) GetUser(name string) (interface{}, error) {
-	return r.client.request("GET", fmt.Sprintf("/api/users/%s", name), nil, nil)
+	return r.client.request("GET", fmt.Sprintf("/api/users/%s", url.PathEscape(name)), nil, nil)
 }
 
 func (r *UsersResource) UpdateUser(name string, data map[string]interface{}) (interface{}, error) {
-	return r.client.request("PUT", fmt.Sprintf("/api/users/%s", name), data, nil)
+	return r.client.request("PUT", fmt.Sprintf("/api/users/%s", url.PathEscape(name)), data, nil)
 }
 
 func (r *UsersResource) DeleteUser(name string) (interface{}, error) {
-	return r.client.request("DELETE", fmt.Sprintf("/api/users/%s", name), nil, nil)
+	return r.client.request("DELETE", fmt.Sprintf("/api/users/%s", url.PathEscape(name)), nil, nil)
 }
 
 func (r *UsersResource) ServeUserAvatar(name string) (interface{}, error) {
-	return r.client.request("GET", fmt.Sprintf("/api/users/%s/avatar", name), nil, nil)
+	return r.client.request("GET", fmt.Sprintf("/api/users/%s/avatar", url.PathEscape(name)), nil, nil)
 }
 
 // UploadUserAvatar sends a raw application/octet-stream body. An empty contentType defaults to it.
@@ -1976,39 +1976,39 @@ func (r *UsersResource) UploadUserAvatar(name string, body []byte, contentType s
 	if contentType == "" {
 		contentType = "application/octet-stream"
 	}
-	return r.client.requestRaw("POST", fmt.Sprintf("/api/users/%s/avatar", name), body, contentType)
+	return r.client.requestRaw("POST", fmt.Sprintf("/api/users/%s/avatar", url.PathEscape(name)), body, contentType)
 }
 
 func (r *UsersResource) DeleteUserAvatar(name string) (interface{}, error) {
-	return r.client.request("DELETE", fmt.Sprintf("/api/users/%s/avatar", name), nil, nil)
+	return r.client.request("DELETE", fmt.Sprintf("/api/users/%s/avatar", url.PathEscape(name)), nil, nil)
 }
 
 func (r *UsersResource) UpdateUserIdentity(name string, data map[string]interface{}) (interface{}, error) {
-	return r.client.request("PATCH", fmt.Sprintf("/api/users/%s/identity", name), data, nil)
+	return r.client.request("PATCH", fmt.Sprintf("/api/users/%s/identity", url.PathEscape(name)), data, nil)
 }
 
 func (r *UsersResource) GetUserPolicy(name string) (interface{}, error) {
-	return r.client.request("GET", fmt.Sprintf("/api/users/%s/policy", name), nil, nil)
+	return r.client.request("GET", fmt.Sprintf("/api/users/%s/policy", url.PathEscape(name)), nil, nil)
 }
 
 func (r *UsersResource) UpdateUserPolicy(name string, data map[string]interface{}) (interface{}, error) {
-	return r.client.request("PUT", fmt.Sprintf("/api/users/%s/policy", name), data, nil)
+	return r.client.request("PUT", fmt.Sprintf("/api/users/%s/policy", url.PathEscape(name)), data, nil)
 }
 
 func (r *UsersResource) ListUserProviderKeys(name string) (interface{}, error) {
-	return r.client.request("GET", fmt.Sprintf("/api/users/%s/provider-keys", name), nil, nil)
+	return r.client.request("GET", fmt.Sprintf("/api/users/%s/provider-keys", url.PathEscape(name)), nil, nil)
 }
 
 func (r *UsersResource) SetUserProviderKey(name string, provider string, data map[string]interface{}) (interface{}, error) {
-	return r.client.request("PUT", fmt.Sprintf("/api/users/%s/provider-keys/%s", name, provider), data, nil)
+	return r.client.request("PUT", fmt.Sprintf("/api/users/%s/provider-keys/%s", url.PathEscape(name), url.PathEscape(provider)), data, nil)
 }
 
 func (r *UsersResource) DeleteUserProviderKey(name string, provider string) (interface{}, error) {
-	return r.client.request("DELETE", fmt.Sprintf("/api/users/%s/provider-keys/%s", name, provider), nil, nil)
+	return r.client.request("DELETE", fmt.Sprintf("/api/users/%s/provider-keys/%s", url.PathEscape(name), url.PathEscape(provider)), nil, nil)
 }
 
 func (r *UsersResource) RotateUserKey(name string) (interface{}, error) {
-	return r.client.request("POST", fmt.Sprintf("/api/users/%s/rotate-key", name), nil, nil)
+	return r.client.request("POST", fmt.Sprintf("/api/users/%s/rotate-key", url.PathEscape(name)), nil, nil)
 }
 
 // ── Vault Resource
@@ -2020,11 +2020,11 @@ func (r *VaultResource) VaultListKeys() (interface{}, error) {
 }
 
 func (r *VaultResource) VaultPutKey(key string, data map[string]interface{}) (interface{}, error) {
-	return r.client.request("PUT", fmt.Sprintf("/api/vault/keys/%s", key), data, nil)
+	return r.client.request("PUT", fmt.Sprintf("/api/vault/keys/%s", url.PathEscape(key)), data, nil)
 }
 
 func (r *VaultResource) VaultDeleteKey(key string) (interface{}, error) {
-	return r.client.request("DELETE", fmt.Sprintf("/api/vault/keys/%s", key), nil, nil)
+	return r.client.request("DELETE", fmt.Sprintf("/api/vault/keys/%s", url.PathEscape(key)), nil, nil)
 }
 
 // ── Webhooks Resource
@@ -2052,23 +2052,23 @@ func (r *WorkflowsResource) CreateCronJob(data map[string]interface{}) (interfac
 }
 
 func (r *WorkflowsResource) GetCronJob(id string) (interface{}, error) {
-	return r.client.request("GET", fmt.Sprintf("/api/cron/jobs/%s", id), nil, nil)
+	return r.client.request("GET", fmt.Sprintf("/api/cron/jobs/%s", url.PathEscape(id)), nil, nil)
 }
 
 func (r *WorkflowsResource) UpdateCronJob(id string, data map[string]interface{}) (interface{}, error) {
-	return r.client.request("PUT", fmt.Sprintf("/api/cron/jobs/%s", id), data, nil)
+	return r.client.request("PUT", fmt.Sprintf("/api/cron/jobs/%s", url.PathEscape(id)), data, nil)
 }
 
 func (r *WorkflowsResource) DeleteCronJob(id string) (interface{}, error) {
-	return r.client.request("DELETE", fmt.Sprintf("/api/cron/jobs/%s", id), nil, nil)
+	return r.client.request("DELETE", fmt.Sprintf("/api/cron/jobs/%s", url.PathEscape(id)), nil, nil)
 }
 
 func (r *WorkflowsResource) ToggleCronJob(id string, data map[string]interface{}) (interface{}, error) {
-	return r.client.request("PUT", fmt.Sprintf("/api/cron/jobs/%s/enable", id), data, nil)
+	return r.client.request("PUT", fmt.Sprintf("/api/cron/jobs/%s/enable", url.PathEscape(id)), data, nil)
 }
 
 func (r *WorkflowsResource) CronJobStatus(id string) (interface{}, error) {
-	return r.client.request("GET", fmt.Sprintf("/api/cron/jobs/%s/status", id), nil, nil)
+	return r.client.request("GET", fmt.Sprintf("/api/cron/jobs/%s/status", url.PathEscape(id)), nil, nil)
 }
 
 func (r *WorkflowsResource) ListSchedules() (interface{}, error) {
@@ -2080,19 +2080,19 @@ func (r *WorkflowsResource) CreateSchedule(data map[string]interface{}) (interfa
 }
 
 func (r *WorkflowsResource) GetSchedule(id string) (interface{}, error) {
-	return r.client.request("GET", fmt.Sprintf("/api/schedules/%s", id), nil, nil)
+	return r.client.request("GET", fmt.Sprintf("/api/schedules/%s", url.PathEscape(id)), nil, nil)
 }
 
 func (r *WorkflowsResource) UpdateSchedule(id string, data map[string]interface{}) (interface{}, error) {
-	return r.client.request("PUT", fmt.Sprintf("/api/schedules/%s", id), data, nil)
+	return r.client.request("PUT", fmt.Sprintf("/api/schedules/%s", url.PathEscape(id)), data, nil)
 }
 
 func (r *WorkflowsResource) DeleteSchedule(id string) (interface{}, error) {
-	return r.client.request("DELETE", fmt.Sprintf("/api/schedules/%s", id), nil, nil)
+	return r.client.request("DELETE", fmt.Sprintf("/api/schedules/%s", url.PathEscape(id)), nil, nil)
 }
 
 func (r *WorkflowsResource) RunSchedule(id string) (interface{}, error) {
-	return r.client.request("POST", fmt.Sprintf("/api/schedules/%s/run", id), nil, nil)
+	return r.client.request("POST", fmt.Sprintf("/api/schedules/%s/run", url.PathEscape(id)), nil, nil)
 }
 
 func (r *WorkflowsResource) ListTriggers(query map[string]string) (interface{}, error) {
@@ -2104,15 +2104,15 @@ func (r *WorkflowsResource) CreateTrigger(data map[string]interface{}) (interfac
 }
 
 func (r *WorkflowsResource) GetTrigger(id string) (interface{}, error) {
-	return r.client.request("GET", fmt.Sprintf("/api/triggers/%s", id), nil, nil)
+	return r.client.request("GET", fmt.Sprintf("/api/triggers/%s", url.PathEscape(id)), nil, nil)
 }
 
 func (r *WorkflowsResource) DeleteTrigger(id string) (interface{}, error) {
-	return r.client.request("DELETE", fmt.Sprintf("/api/triggers/%s", id), nil, nil)
+	return r.client.request("DELETE", fmt.Sprintf("/api/triggers/%s", url.PathEscape(id)), nil, nil)
 }
 
 func (r *WorkflowsResource) UpdateTrigger(id string, data map[string]interface{}) (interface{}, error) {
-	return r.client.request("PATCH", fmt.Sprintf("/api/triggers/%s", id), data, nil)
+	return r.client.request("PATCH", fmt.Sprintf("/api/triggers/%s", url.PathEscape(id)), data, nil)
 }
 
 func (r *WorkflowsResource) ListWorkflowTemplates(query map[string]string) (interface{}, error) {
@@ -2120,11 +2120,11 @@ func (r *WorkflowsResource) ListWorkflowTemplates(query map[string]string) (inte
 }
 
 func (r *WorkflowsResource) GetWorkflowTemplate(id string) (interface{}, error) {
-	return r.client.request("GET", fmt.Sprintf("/api/workflow-templates/%s", id), nil, nil)
+	return r.client.request("GET", fmt.Sprintf("/api/workflow-templates/%s", url.PathEscape(id)), nil, nil)
 }
 
 func (r *WorkflowsResource) InstantiateTemplate(id string, data map[string]interface{}) (interface{}, error) {
-	return r.client.request("POST", fmt.Sprintf("/api/workflow-templates/%s/instantiate", id), data, nil)
+	return r.client.request("POST", fmt.Sprintf("/api/workflow-templates/%s/instantiate", url.PathEscape(id)), data, nil)
 }
 
 func (r *WorkflowsResource) ListWorkflows() (interface{}, error) {
@@ -2136,54 +2136,54 @@ func (r *WorkflowsResource) CreateWorkflow(data map[string]interface{}) (interfa
 }
 
 func (r *WorkflowsResource) GetWorkflowRun(run_id string) (interface{}, error) {
-	return r.client.request("GET", fmt.Sprintf("/api/workflows/runs/%s", run_id), nil, nil)
+	return r.client.request("GET", fmt.Sprintf("/api/workflows/runs/%s", url.PathEscape(run_id)), nil, nil)
 }
 
 func (r *WorkflowsResource) CancelWorkflowRun(run_id string) (interface{}, error) {
-	return r.client.request("POST", fmt.Sprintf("/api/workflows/runs/%s/cancel", run_id), nil, nil)
+	return r.client.request("POST", fmt.Sprintf("/api/workflows/runs/%s/cancel", url.PathEscape(run_id)), nil, nil)
 }
 
 func (r *WorkflowsResource) OperatorActionWorkflowRun(run_id string, data map[string]interface{}) (interface{}, error) {
-	return r.client.request("POST", fmt.Sprintf("/api/workflows/runs/%s/operator", run_id), data, nil)
+	return r.client.request("POST", fmt.Sprintf("/api/workflows/runs/%s/operator", url.PathEscape(run_id)), data, nil)
 }
 
 func (r *WorkflowsResource) PauseWorkflowRun(run_id string, data map[string]interface{}) (interface{}, error) {
-	return r.client.request("POST", fmt.Sprintf("/api/workflows/runs/%s/pause", run_id), data, nil)
+	return r.client.request("POST", fmt.Sprintf("/api/workflows/runs/%s/pause", url.PathEscape(run_id)), data, nil)
 }
 
 func (r *WorkflowsResource) RerunWorkflowRun(run_id string) (interface{}, error) {
-	return r.client.request("POST", fmt.Sprintf("/api/workflows/runs/%s/rerun", run_id), nil, nil)
+	return r.client.request("POST", fmt.Sprintf("/api/workflows/runs/%s/rerun", url.PathEscape(run_id)), nil, nil)
 }
 
 func (r *WorkflowsResource) ResumeWorkflowRun(run_id string, data map[string]interface{}) (interface{}, error) {
-	return r.client.request("POST", fmt.Sprintf("/api/workflows/runs/%s/resume", run_id), data, nil)
+	return r.client.request("POST", fmt.Sprintf("/api/workflows/runs/%s/resume", url.PathEscape(run_id)), data, nil)
 }
 
 func (r *WorkflowsResource) GetWorkflow(id string) (interface{}, error) {
-	return r.client.request("GET", fmt.Sprintf("/api/workflows/%s", id), nil, nil)
+	return r.client.request("GET", fmt.Sprintf("/api/workflows/%s", url.PathEscape(id)), nil, nil)
 }
 
 func (r *WorkflowsResource) UpdateWorkflow(id string, data map[string]interface{}) (interface{}, error) {
-	return r.client.request("PUT", fmt.Sprintf("/api/workflows/%s", id), data, nil)
+	return r.client.request("PUT", fmt.Sprintf("/api/workflows/%s", url.PathEscape(id)), data, nil)
 }
 
 func (r *WorkflowsResource) DeleteWorkflow(id string) (interface{}, error) {
-	return r.client.request("DELETE", fmt.Sprintf("/api/workflows/%s", id), nil, nil)
+	return r.client.request("DELETE", fmt.Sprintf("/api/workflows/%s", url.PathEscape(id)), nil, nil)
 }
 
 func (r *WorkflowsResource) DryRunWorkflow(id string, data map[string]interface{}) (interface{}, error) {
-	return r.client.request("POST", fmt.Sprintf("/api/workflows/%s/dry-run", id), data, nil)
+	return r.client.request("POST", fmt.Sprintf("/api/workflows/%s/dry-run", url.PathEscape(id)), data, nil)
 }
 
 func (r *WorkflowsResource) RunWorkflow(id string, data map[string]interface{}) (interface{}, error) {
-	return r.client.request("POST", fmt.Sprintf("/api/workflows/%s/run", id), data, nil)
+	return r.client.request("POST", fmt.Sprintf("/api/workflows/%s/run", url.PathEscape(id)), data, nil)
 }
 
 func (r *WorkflowsResource) ListWorkflowRuns(id string) (interface{}, error) {
-	return r.client.request("GET", fmt.Sprintf("/api/workflows/%s/runs", id), nil, nil)
+	return r.client.request("GET", fmt.Sprintf("/api/workflows/%s/runs", url.PathEscape(id)), nil, nil)
 }
 
 func (r *WorkflowsResource) SaveWorkflowAsTemplate(id string) (interface{}, error) {
-	return r.client.request("POST", fmt.Sprintf("/api/workflows/%s/save-as-template", id), nil, nil)
+	return r.client.request("POST", fmt.Sprintf("/api/workflows/%s/save-as-template", url.PathEscape(id)), nil, nil)
 }
 

@@ -19,7 +19,7 @@ import sys
 from typing import Any, Dict, Generator, Optional
 from urllib.request import urlopen, Request
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlencode
+from urllib.parse import quote, urlencode
 
 DEFAULT_TIMEOUT = 30.0
 
@@ -81,7 +81,8 @@ class LibreFang:
         """Send a request. `content_type` sends `body` as raw bytes instead of JSON."""
         url = self.base_url + path
         if query:
-            filtered = {k: v for k, v in query.items() if v is not None}
+            # serde on the server accepts only `true` / `false`; `urlencode` would send Python's `True` / `False`.
+            filtered = {k: (("true" if v else "false") if isinstance(v, bool) else v) for k, v in query.items() if v is not None}
             if filtered:
                 url += ("&" if "?" in url else "?") + urlencode(filtered, doseq=True)
         headers = self._headers
@@ -111,7 +112,8 @@ class LibreFang:
         """SSE streaming — yields parsed JSON events."""
         url = self.base_url + path
         if query:
-            filtered = {k: v for k, v in query.items() if v is not None}
+            # serde on the server accepts only `true` / `false`; `urlencode` would send Python's `True` / `False`.
+            filtered = {k: (("true" if v else "false") if isinstance(v, bool) else v) for k, v in query.items() if v is not None}
             if filtered:
                 url += ("&" if "?" in url else "?") + urlencode(filtered, doseq=True)
         data = json.dumps(body).encode() if body is not None else None
@@ -191,10 +193,10 @@ class _A2AResource(_Resource):
         return self._c._request("GET", "/api/a2a/agents")
 
     def a2a_get_external_agent(self, id: str):
-        return self._c._request("GET", f"/api/a2a/agents/{id}")
+        return self._c._request("GET", f"/api/a2a/agents/{quote(str(id), safe='')}")
 
     def a2a_approve_external(self, id: str):
-        return self._c._request("POST", f"/api/a2a/agents/{id}/approve")
+        return self._c._request("POST", f"/api/a2a/agents/{quote(str(id), safe='')}/approve")
 
     def a2a_discover_external(self, **data):
         return self._c._request("POST", "/api/a2a/discover", data)
@@ -203,7 +205,7 @@ class _A2AResource(_Resource):
         return self._c._request("POST", "/api/a2a/send", data)
 
     def a2a_external_task_status(self, id: str, url: Any = None):
-        return self._c._request("GET", f"/api/a2a/tasks/{id}/status", None, query={"url": url})
+        return self._c._request("GET", f"/api/a2a/tasks/{quote(str(id), safe='')}/status", None, query={"url": url})
 
 
 # ── Agents Resource ────────────────────────────────────────────
@@ -232,193 +234,193 @@ class _AgentsResource(_Resource):
         return self._c._request("GET", "/api/agents/identities")
 
     def reset_agent_identity(self, name: str, confirm: Any = None):
-        return self._c._request("POST", f"/api/agents/identities/{name}/reset", None, query={"confirm": confirm})
+        return self._c._request("POST", f"/api/agents/identities/{quote(str(name), safe='')}/reset", None, query={"confirm": confirm})
 
     def spawn_ephemeral_agent(self, **data):
         return self._c._request("POST", "/api/agents/spawn-ephemeral", data)
 
     def get_agent(self, id: str):
-        return self._c._request("GET", f"/api/agents/{id}")
+        return self._c._request("GET", f"/api/agents/{quote(str(id), safe='')}")
 
     def kill_agent(self, id: str, confirm: Any = None):
-        return self._c._request("DELETE", f"/api/agents/{id}", None, query={"confirm": confirm})
+        return self._c._request("DELETE", f"/api/agents/{quote(str(id), safe='')}", None, query={"confirm": confirm})
 
     def patch_agent(self, id: str, **data):
-        return self._c._request("PATCH", f"/api/agents/{id}", data)
+        return self._c._request("PATCH", f"/api/agents/{quote(str(id), safe='')}", data)
 
     def serve_agent_avatar(self, id: str):
-        return self._c._request("GET", f"/api/agents/{id}/avatar")
+        return self._c._request("GET", f"/api/agents/{quote(str(id), safe='')}/avatar")
 
     def upload_agent_avatar(self, id: str, body: bytes, content_type: str = "application/octet-stream"):
-        return self._c._request("POST", f"/api/agents/{id}/avatar", body, content_type=content_type)
+        return self._c._request("POST", f"/api/agents/{quote(str(id), safe='')}/avatar", body, content_type=content_type)
 
     def delete_agent_avatar(self, id: str):
-        return self._c._request("DELETE", f"/api/agents/{id}/avatar")
+        return self._c._request("DELETE", f"/api/agents/{quote(str(id), safe='')}/avatar")
 
     def get_agent_channels(self, id: str):
-        return self._c._request("GET", f"/api/agents/{id}/channels")
+        return self._c._request("GET", f"/api/agents/{quote(str(id), safe='')}/channels")
 
     def set_agent_channels(self, id: str, **data):
-        return self._c._request("PUT", f"/api/agents/{id}/channels", data)
+        return self._c._request("PUT", f"/api/agents/{quote(str(id), safe='')}/channels", data)
 
     def clone_agent(self, id: str, **data):
-        return self._c._request("POST", f"/api/agents/{id}/clone", data)
+        return self._c._request("POST", f"/api/agents/{quote(str(id), safe='')}/clone", data)
 
     def patch_agent_config(self, id: str, **data):
-        return self._c._request("PATCH", f"/api/agents/{id}/config", data)
+        return self._c._request("PATCH", f"/api/agents/{quote(str(id), safe='')}/config", data)
 
     def get_agent_deliveries(self, id: str):
-        return self._c._request("GET", f"/api/agents/{id}/deliveries")
+        return self._c._request("GET", f"/api/agents/{quote(str(id), safe='')}/deliveries")
 
     def list_agent_ephemeral_runs(self, id: str, limit: Any = None):
-        return self._c._request("GET", f"/api/agents/{id}/ephemeral-runs", None, query={"limit": limit})
+        return self._c._request("GET", f"/api/agents/{quote(str(id), safe='')}/ephemeral-runs", None, query={"limit": limit})
 
     def list_agent_events(self, id: str, limit: Any = None):
-        return self._c._request("GET", f"/api/agents/{id}/events", None, query={"limit": limit})
+        return self._c._request("GET", f"/api/agents/{quote(str(id), safe='')}/events", None, query={"limit": limit})
 
     def list_agent_files(self, id: str):
-        return self._c._request("GET", f"/api/agents/{id}/files")
+        return self._c._request("GET", f"/api/agents/{quote(str(id), safe='')}/files")
 
     def get_agent_file(self, id: str, filename: str):
-        return self._c._request("GET", f"/api/agents/{id}/files/{filename}")
+        return self._c._request("GET", f"/api/agents/{quote(str(id), safe='')}/files/{quote(str(filename), safe='')}")
 
     def set_agent_file(self, id: str, filename: str, **data):
-        return self._c._request("PUT", f"/api/agents/{id}/files/{filename}", data)
+        return self._c._request("PUT", f"/api/agents/{quote(str(id), safe='')}/files/{quote(str(filename), safe='')}", data)
 
     def delete_agent_file(self, id: str, filename: str):
-        return self._c._request("DELETE", f"/api/agents/{id}/files/{filename}")
+        return self._c._request("DELETE", f"/api/agents/{quote(str(id), safe='')}/files/{quote(str(filename), safe='')}")
 
     def delete_hand_agent_runtime_config(self, id: str):
-        return self._c._request("DELETE", f"/api/agents/{id}/hand-runtime-config")
+        return self._c._request("DELETE", f"/api/agents/{quote(str(id), safe='')}/hand-runtime-config")
 
     def patch_hand_agent_runtime_config(self, id: str, **data):
-        return self._c._request("PATCH", f"/api/agents/{id}/hand-runtime-config", data)
+        return self._c._request("PATCH", f"/api/agents/{quote(str(id), safe='')}/hand-runtime-config", data)
 
     def clear_agent_history(self, id: str):
-        return self._c._request("DELETE", f"/api/agents/{id}/history")
+        return self._c._request("DELETE", f"/api/agents/{quote(str(id), safe='')}/history")
 
     def update_agent_identity(self, id: str, **data):
-        return self._c._request("PATCH", f"/api/agents/{id}/identity", data)
+        return self._c._request("PATCH", f"/api/agents/{quote(str(id), safe='')}/identity", data)
 
     def inject_message(self, id: str, **data):
-        return self._c._request("POST", f"/api/agents/{id}/inject", data)
+        return self._c._request("POST", f"/api/agents/{quote(str(id), safe='')}/inject", data)
 
     def agent_logs(self, id: str, n: Any = None, level: Any = None, offset: Any = None):
-        return self._c._request("GET", f"/api/agents/{id}/logs", None, query={"n": n, "level": level, "offset": offset})
+        return self._c._request("GET", f"/api/agents/{quote(str(id), safe='')}/logs", None, query={"n": n, "level": level, "offset": offset})
 
     def get_agent_manifest_toml(self, id: str):
-        return self._c._request("GET", f"/api/agents/{id}/manifest")
+        return self._c._request("GET", f"/api/agents/{quote(str(id), safe='')}/manifest")
 
     def get_agent_mcp_servers(self, id: str):
-        return self._c._request("GET", f"/api/agents/{id}/mcp_servers")
+        return self._c._request("GET", f"/api/agents/{quote(str(id), safe='')}/mcp_servers")
 
     def set_agent_mcp_servers(self, id: str, **data):
-        return self._c._request("PUT", f"/api/agents/{id}/mcp_servers", data)
+        return self._c._request("PUT", f"/api/agents/{quote(str(id), safe='')}/mcp_servers", data)
 
     def send_message(self, id: str, **data):
-        return self._c._request("POST", f"/api/agents/{id}/message", data)
+        return self._c._request("POST", f"/api/agents/{quote(str(id), safe='')}/message", data)
 
     def send_message_stream(self, id: str, **data) -> Generator[Dict, None, None]:
-        return self._c._stream("POST", f"/api/agents/{id}/message/stream", data)
+        return self._c._stream("POST", f"/api/agents/{quote(str(id), safe='')}/message/stream", data)
 
     def agent_metrics(self, id: str):
-        return self._c._request("GET", f"/api/agents/{id}/metrics")
+        return self._c._request("GET", f"/api/agents/{quote(str(id), safe='')}/metrics")
 
     def set_agent_mode(self, id: str, **data):
-        return self._c._request("PUT", f"/api/agents/{id}/mode", data)
+        return self._c._request("PUT", f"/api/agents/{quote(str(id), safe='')}/mode", data)
 
     def set_model(self, id: str, **data):
-        return self._c._request("PUT", f"/api/agents/{id}/model", data)
+        return self._c._request("PUT", f"/api/agents/{quote(str(id), safe='')}/model", data)
 
     def get_agent_model_routing(self, id: str):
-        return self._c._request("GET", f"/api/agents/{id}/model_routing")
+        return self._c._request("GET", f"/api/agents/{quote(str(id), safe='')}/model_routing")
 
     def set_agent_model_routing(self, id: str, **data):
-        return self._c._request("PUT", f"/api/agents/{id}/model_routing", data)
+        return self._c._request("PUT", f"/api/agents/{quote(str(id), safe='')}/model_routing", data)
 
     def push_message(self, id: str, **data):
-        return self._c._request("POST", f"/api/agents/{id}/push", data)
+        return self._c._request("POST", f"/api/agents/{quote(str(id), safe='')}/push", data)
 
     def reload_agent_manifest(self, id: str):
-        return self._c._request("POST", f"/api/agents/{id}/reload")
+        return self._c._request("POST", f"/api/agents/{quote(str(id), safe='')}/reload")
 
     def resume_agent(self, id: str):
-        return self._c._request("PUT", f"/api/agents/{id}/resume")
+        return self._c._request("PUT", f"/api/agents/{quote(str(id), safe='')}/resume")
 
     def list_agent_runtime(self, id: str):
-        return self._c._request("GET", f"/api/agents/{id}/runtime")
+        return self._c._request("GET", f"/api/agents/{quote(str(id), safe='')}/runtime")
 
     def save_agent_as_agent_type(self, id: str, **data):
-        return self._c._request("POST", f"/api/agents/{id}/save-as-agent-type", data)
+        return self._c._request("POST", f"/api/agents/{quote(str(id), safe='')}/save-as-agent-type", data)
 
     def get_agent_session(self, id: str, session_id: Any = None):
-        return self._c._request("GET", f"/api/agents/{id}/session", None, query={"session_id": session_id})
+        return self._c._request("GET", f"/api/agents/{quote(str(id), safe='')}/session", None, query={"session_id": session_id})
 
     def compact_session(self, id: str):
-        return self._c._request("POST", f"/api/agents/{id}/session/compact")
+        return self._c._request("POST", f"/api/agents/{quote(str(id), safe='')}/session/compact")
 
     def get_agent_session_context(self, id: str, session_id: Any = None):
-        return self._c._request("GET", f"/api/agents/{id}/session/context", None, query={"session_id": session_id})
+        return self._c._request("GET", f"/api/agents/{quote(str(id), safe='')}/session/context", None, query={"session_id": session_id})
 
     def reboot_session(self, id: str):
-        return self._c._request("POST", f"/api/agents/{id}/session/reboot")
+        return self._c._request("POST", f"/api/agents/{quote(str(id), safe='')}/session/reboot")
 
     def reset_session(self, id: str):
-        return self._c._request("POST", f"/api/agents/{id}/session/reset")
+        return self._c._request("POST", f"/api/agents/{quote(str(id), safe='')}/session/reset")
 
     def list_agent_sessions(self, id: str):
-        return self._c._request("GET", f"/api/agents/{id}/sessions")
+        return self._c._request("GET", f"/api/agents/{quote(str(id), safe='')}/sessions")
 
     def create_agent_session(self, id: str, **data):
-        return self._c._request("POST", f"/api/agents/{id}/sessions", data)
+        return self._c._request("POST", f"/api/agents/{quote(str(id), safe='')}/sessions", data)
 
     def import_session(self, id: str, **data):
-        return self._c._request("POST", f"/api/agents/{id}/sessions/import", data)
+        return self._c._request("POST", f"/api/agents/{quote(str(id), safe='')}/sessions/import", data)
 
     def export_session(self, id: str, session_id: str):
-        return self._c._request("GET", f"/api/agents/{id}/sessions/{session_id}/export")
+        return self._c._request("GET", f"/api/agents/{quote(str(id), safe='')}/sessions/{quote(str(session_id), safe='')}/export")
 
     def stop_session(self, id: str, session_id: str):
-        return self._c._request("POST", f"/api/agents/{id}/sessions/{session_id}/stop")
+        return self._c._request("POST", f"/api/agents/{quote(str(id), safe='')}/sessions/{quote(str(session_id), safe='')}/stop")
 
     def attach_session_stream(self, id: str, session_id: str) -> Generator[Dict, None, None]:
-        return self._c._stream("GET", f"/api/agents/{id}/sessions/{session_id}/stream")
+        return self._c._stream("GET", f"/api/agents/{quote(str(id), safe='')}/sessions/{quote(str(session_id), safe='')}/stream")
 
     def switch_agent_session(self, id: str, session_id: str):
-        return self._c._request("POST", f"/api/agents/{id}/sessions/{session_id}/switch")
+        return self._c._request("POST", f"/api/agents/{quote(str(id), safe='')}/sessions/{quote(str(session_id), safe='')}/switch")
 
     def export_session_trajectory(self, id: str, session_id: str, format: Any = None):
-        return self._c._request("GET", f"/api/agents/{id}/sessions/{session_id}/trajectory", None, query={"format": format})
+        return self._c._request("GET", f"/api/agents/{quote(str(id), safe='')}/sessions/{quote(str(session_id), safe='')}/trajectory", None, query={"format": format})
 
     def get_agent_skills(self, id: str):
-        return self._c._request("GET", f"/api/agents/{id}/skills")
+        return self._c._request("GET", f"/api/agents/{quote(str(id), safe='')}/skills")
 
     def set_agent_skills(self, id: str, **data):
-        return self._c._request("PUT", f"/api/agents/{id}/skills", data)
+        return self._c._request("PUT", f"/api/agents/{quote(str(id), safe='')}/skills", data)
 
     def get_agent_stats(self, id: str):
-        return self._c._request("GET", f"/api/agents/{id}/stats")
+        return self._c._request("GET", f"/api/agents/{quote(str(id), safe='')}/stats")
 
     def stop_agent(self, id: str):
-        return self._c._request("POST", f"/api/agents/{id}/stop")
+        return self._c._request("POST", f"/api/agents/{quote(str(id), safe='')}/stop")
 
     def suspend_agent(self, id: str):
-        return self._c._request("PUT", f"/api/agents/{id}/suspend")
+        return self._c._request("PUT", f"/api/agents/{quote(str(id), safe='')}/suspend")
 
     def get_agent_tools(self, id: str):
-        return self._c._request("GET", f"/api/agents/{id}/tools")
+        return self._c._request("GET", f"/api/agents/{quote(str(id), safe='')}/tools")
 
     def set_agent_tools(self, id: str, **data):
-        return self._c._request("PUT", f"/api/agents/{id}/tools", data)
+        return self._c._request("PUT", f"/api/agents/{quote(str(id), safe='')}/tools", data)
 
     def get_agent_traces(self, id: str):
-        return self._c._request("GET", f"/api/agents/{id}/traces")
+        return self._c._request("GET", f"/api/agents/{quote(str(id), safe='')}/traces")
 
     def upload_file(self, id: str, body: bytes, content_type: str = "application/octet-stream"):
-        return self._c._request("POST", f"/api/agents/{id}/upload", body, content_type=content_type)
+        return self._c._request("POST", f"/api/agents/{quote(str(id), safe='')}/upload", body, content_type=content_type)
 
     def serve_upload(self, file_id: str):
-        return self._c._request("GET", f"/api/uploads/{file_id}")
+        return self._c._request("GET", f"/api/uploads/{quote(str(file_id), safe='')}")
 
 
 # ── Approvals Resource ─────────────────────────────────────────
@@ -441,25 +443,25 @@ class _ApprovalsResource(_Resource):
         return self._c._request("GET", "/api/approvals/count")
 
     def list_approvals_for_session(self, session_id: str):
-        return self._c._request("GET", f"/api/approvals/session/{session_id}")
+        return self._c._request("GET", f"/api/approvals/session/{quote(str(session_id), safe='')}")
 
     def approve_all_for_session(self, session_id: str, **data):
-        return self._c._request("POST", f"/api/approvals/session/{session_id}/approve_all", data)
+        return self._c._request("POST", f"/api/approvals/session/{quote(str(session_id), safe='')}/approve_all", data)
 
     def reject_all_for_session(self, session_id: str):
-        return self._c._request("POST", f"/api/approvals/session/{session_id}/reject_all")
+        return self._c._request("POST", f"/api/approvals/session/{quote(str(session_id), safe='')}/reject_all")
 
     def get_approval(self, id: str):
-        return self._c._request("GET", f"/api/approvals/{id}")
+        return self._c._request("GET", f"/api/approvals/{quote(str(id), safe='')}")
 
     def approve_request(self, id: str, **data):
-        return self._c._request("POST", f"/api/approvals/{id}/approve", data)
+        return self._c._request("POST", f"/api/approvals/{quote(str(id), safe='')}/approve", data)
 
     def modify_request(self, id: str, **data):
-        return self._c._request("POST", f"/api/approvals/{id}/modify", data)
+        return self._c._request("POST", f"/api/approvals/{quote(str(id), safe='')}/modify", data)
 
     def reject_request(self, id: str):
-        return self._c._request("POST", f"/api/approvals/{id}/reject")
+        return self._c._request("POST", f"/api/approvals/{quote(str(id), safe='')}/reject")
 
 
 # ── Auth Resource ──────────────────────────────────────────────
@@ -488,7 +490,7 @@ class _AuthResource(_Resource):
         return self._c._request("GET", "/api/auth/login")
 
     def auth_login_provider(self, provider: str):
-        return self._c._request("GET", f"/api/auth/login/{provider}")
+        return self._c._request("GET", f"/api/auth/login/{quote(str(provider), safe='')}")
 
     def dashboard_logout(self):
         return self._c._request("POST", "/api/auth/logout")
@@ -503,7 +505,7 @@ class _AuthResource(_Resource):
         return self._c._request("GET", "/api/auth/passkey/credentials")
 
     def revoke_credential(self, id: str):
-        return self._c._request("DELETE", f"/api/auth/passkey/credentials/{id}")
+        return self._c._request("DELETE", f"/api/auth/passkey/credentials/{quote(str(id), safe='')}")
 
     def registration_options(self, **data):
         return self._c._request("POST", "/api/auth/passkey/registration-options", data)
@@ -526,13 +528,13 @@ class _AuthResource(_Resource):
 class _AutoDreamResource(_Resource):
 
     def auto_dream_abort(self, id: str):
-        return self._c._request("POST", f"/api/auto-dream/agents/{id}/abort")
+        return self._c._request("POST", f"/api/auto-dream/agents/{quote(str(id), safe='')}/abort")
 
     def auto_dream_set_enabled(self, id: str, **data):
-        return self._c._request("PUT", f"/api/auto-dream/agents/{id}/enabled", data)
+        return self._c._request("PUT", f"/api/auto-dream/agents/{quote(str(id), safe='')}/enabled", data)
 
     def auto_dream_trigger(self, id: str):
-        return self._c._request("POST", f"/api/auto-dream/agents/{id}/trigger")
+        return self._c._request("POST", f"/api/auto-dream/agents/{quote(str(id), safe='')}/trigger")
 
     def auto_dream_status(self):
         return self._c._request("GET", "/api/auto-dream/status")
@@ -552,28 +554,28 @@ class _BudgetResource(_Resource):
         return self._c._request("GET", "/api/budget/agents")
 
     def agent_budget_status(self, id: str):
-        return self._c._request("GET", f"/api/budget/agents/{id}")
+        return self._c._request("GET", f"/api/budget/agents/{quote(str(id), safe='')}")
 
     def update_agent_budget(self, id: str, **data):
-        return self._c._request("PUT", f"/api/budget/agents/{id}", data)
+        return self._c._request("PUT", f"/api/budget/agents/{quote(str(id), safe='')}", data)
 
     def provider_budget_list(self):
         return self._c._request("GET", "/api/budget/providers")
 
     def update_provider_budget(self, provider_id: str, **data):
-        return self._c._request("PUT", f"/api/budget/providers/{provider_id}", data)
+        return self._c._request("PUT", f"/api/budget/providers/{quote(str(provider_id), safe='')}", data)
 
     def user_budget_ranking(self, limit: Any = None):
         return self._c._request("GET", "/api/budget/users", None, query={"limit": limit})
 
     def user_budget_detail(self, user_id: str):
-        return self._c._request("GET", f"/api/budget/users/{user_id}")
+        return self._c._request("GET", f"/api/budget/users/{quote(str(user_id), safe='')}")
 
     def update_user_budget(self, user_id: str, **data):
-        return self._c._request("PUT", f"/api/budget/users/{user_id}", data)
+        return self._c._request("PUT", f"/api/budget/users/{quote(str(user_id), safe='')}", data)
 
     def delete_user_budget(self, user_id: str):
-        return self._c._request("DELETE", f"/api/budget/users/{user_id}")
+        return self._c._request("DELETE", f"/api/budget/users/{quote(str(user_id), safe='')}")
 
     def usage_stats(self, start_date: Any = None, end_date: Any = None):
         return self._c._request("GET", "/api/usage", None, query={"start_date": start_date, "end_date": end_date})
@@ -608,13 +610,13 @@ class _ChannelsResource(_Resource):
         return self._c._request("POST", "/api/channels/reload")
 
     def delete_sidecar_channel(self, name: str):
-        return self._c._request("DELETE", f"/api/channels/sidecar/{name}")
+        return self._c._request("DELETE", f"/api/channels/sidecar/{quote(str(name), safe='')}")
 
     def configure_sidecar_channel(self, name: str, **data):
-        return self._c._request("POST", f"/api/channels/sidecar/{name}/configure", data)
+        return self._c._request("POST", f"/api/channels/sidecar/{quote(str(name), safe='')}/configure", data)
 
     def get_channel_qr(self, name: str):
-        return self._c._request("GET", f"/api/channels/{name}/qr")
+        return self._c._request("GET", f"/api/channels/{quote(str(name), safe='')}/qr")
 
 
 # ── Extensions Resource ────────────────────────────────────────
@@ -631,7 +633,7 @@ class _ExtensionsResource(_Resource):
         return self._c._request("POST", "/api/extensions/uninstall", data)
 
     def get_extension(self, name: str):
-        return self._c._request("GET", f"/api/extensions/{name}")
+        return self._c._request("GET", f"/api/extensions/{quote(str(name), safe='')}")
 
 
 # ── Goals Resource ─────────────────────────────────────────────
@@ -653,22 +655,22 @@ class _GroupsResource(_Resource):
         return self._c._request("POST", "/api/groups", data)
 
     def get_group(self, name: str):
-        return self._c._request("GET", f"/api/groups/{name}")
+        return self._c._request("GET", f"/api/groups/{quote(str(name), safe='')}")
 
     def update_group(self, name: str, **data):
-        return self._c._request("PUT", f"/api/groups/{name}", data)
+        return self._c._request("PUT", f"/api/groups/{quote(str(name), safe='')}", data)
 
     def delete_group(self, name: str):
-        return self._c._request("DELETE", f"/api/groups/{name}")
+        return self._c._request("DELETE", f"/api/groups/{quote(str(name), safe='')}")
 
     def add_group_member(self, name: str, user: str):
-        return self._c._request("PUT", f"/api/groups/{name}/members/{user}")
+        return self._c._request("PUT", f"/api/groups/{quote(str(name), safe='')}/members/{quote(str(user), safe='')}")
 
     def remove_group_member(self, name: str, user: str):
-        return self._c._request("DELETE", f"/api/groups/{name}/members/{user}")
+        return self._c._request("DELETE", f"/api/groups/{quote(str(name), safe='')}/members/{quote(str(user), safe='')}")
 
     def user_groups(self, name: str):
-        return self._c._request("GET", f"/api/users/{name}/groups")
+        return self._c._request("GET", f"/api/users/{quote(str(name), safe='')}/groups")
 
 
 # ── Hands Resource ─────────────────────────────────────────────
@@ -685,19 +687,19 @@ class _HandsResource(_Resource):
         return self._c._request("POST", "/api/hands/install", data)
 
     def deactivate_hand(self, id: str):
-        return self._c._request("DELETE", f"/api/hands/instances/{id}")
+        return self._c._request("DELETE", f"/api/hands/instances/{quote(str(id), safe='')}")
 
     def hand_instance_browser(self, id: str):
-        return self._c._request("GET", f"/api/hands/instances/{id}/browser")
+        return self._c._request("GET", f"/api/hands/instances/{quote(str(id), safe='')}/browser")
 
     def pause_hand(self, id: str):
-        return self._c._request("POST", f"/api/hands/instances/{id}/pause")
+        return self._c._request("POST", f"/api/hands/instances/{quote(str(id), safe='')}/pause")
 
     def resume_hand(self, id: str):
-        return self._c._request("POST", f"/api/hands/instances/{id}/resume")
+        return self._c._request("POST", f"/api/hands/instances/{quote(str(id), safe='')}/resume")
 
     def hand_stats(self, id: str):
-        return self._c._request("GET", f"/api/hands/instances/{id}/stats")
+        return self._c._request("GET", f"/api/hands/instances/{quote(str(id), safe='')}/stats")
 
     def install_hand_from_marketplace(self, **data):
         return self._c._request("POST", "/api/hands/marketplace/install", data)
@@ -706,34 +708,34 @@ class _HandsResource(_Resource):
         return self._c._request("POST", "/api/hands/reload")
 
     def get_hand(self, hand_id: str):
-        return self._c._request("GET", f"/api/hands/{hand_id}")
+        return self._c._request("GET", f"/api/hands/{quote(str(hand_id), safe='')}")
 
     def uninstall_hand(self, hand_id: str):
-        return self._c._request("DELETE", f"/api/hands/{hand_id}")
+        return self._c._request("DELETE", f"/api/hands/{quote(str(hand_id), safe='')}")
 
     def activate_hand(self, hand_id: str, **data):
-        return self._c._request("POST", f"/api/hands/{hand_id}/activate", data)
+        return self._c._request("POST", f"/api/hands/{quote(str(hand_id), safe='')}/activate", data)
 
     def check_hand_deps(self, hand_id: str):
-        return self._c._request("POST", f"/api/hands/{hand_id}/check-deps")
+        return self._c._request("POST", f"/api/hands/{quote(str(hand_id), safe='')}/check-deps")
 
     def install_hand_deps(self, hand_id: str):
-        return self._c._request("POST", f"/api/hands/{hand_id}/install-deps")
+        return self._c._request("POST", f"/api/hands/{quote(str(hand_id), safe='')}/install-deps")
 
     def get_hand_manifest(self, hand_id: str):
-        return self._c._request("GET", f"/api/hands/{hand_id}/manifest")
+        return self._c._request("GET", f"/api/hands/{quote(str(hand_id), safe='')}/manifest")
 
     def update_hand_manifest(self, hand_id: str, **data):
-        return self._c._request("PUT", f"/api/hands/{hand_id}/manifest", data)
+        return self._c._request("PUT", f"/api/hands/{quote(str(hand_id), safe='')}/manifest", data)
 
     def set_hand_secret(self, hand_id: str, **data):
-        return self._c._request("POST", f"/api/hands/{hand_id}/secret", data)
+        return self._c._request("POST", f"/api/hands/{quote(str(hand_id), safe='')}/secret", data)
 
     def get_hand_settings(self, hand_id: str):
-        return self._c._request("GET", f"/api/hands/{hand_id}/settings")
+        return self._c._request("GET", f"/api/hands/{quote(str(hand_id), safe='')}/settings")
 
     def update_hand_settings(self, hand_id: str, **data):
-        return self._c._request("PUT", f"/api/hands/{hand_id}/settings", data)
+        return self._c._request("PUT", f"/api/hands/{quote(str(hand_id), safe='')}/settings", data)
 
 
 # ── Inbox Resource ─────────────────────────────────────────────
@@ -755,19 +757,19 @@ class _KnowledgeResource(_Resource):
         return self._c._request("POST", "/api/knowledge", data)
 
     def delete_base(self, name: str):
-        return self._c._request("DELETE", f"/api/knowledge/{name}")
+        return self._c._request("DELETE", f"/api/knowledge/{quote(str(name), safe='')}")
 
     def set_holders(self, name: str, **data):
-        return self._c._request("PUT", f"/api/knowledge/{name}/agents", data)
+        return self._c._request("PUT", f"/api/knowledge/{quote(str(name), safe='')}/agents", data)
 
     def list_documents(self, name: str):
-        return self._c._request("GET", f"/api/knowledge/{name}/documents")
+        return self._c._request("GET", f"/api/knowledge/{quote(str(name), safe='')}/documents")
 
     def put_document(self, name: str, filename: str, body: bytes, content_type: str = "application/octet-stream"):
-        return self._c._request("PUT", f"/api/knowledge/{name}/documents/{filename}", body, content_type=content_type)
+        return self._c._request("PUT", f"/api/knowledge/{quote(str(name), safe='')}/documents/{quote(str(filename), safe='')}", body, content_type=content_type)
 
     def delete_document(self, name: str, filename: str):
-        return self._c._request("DELETE", f"/api/knowledge/{name}/documents/{filename}")
+        return self._c._request("DELETE", f"/api/knowledge/{quote(str(name), safe='')}/documents/{quote(str(filename), safe='')}")
 
 
 # ── Mcp Resource ───────────────────────────────────────────────
@@ -778,7 +780,7 @@ class _McpResource(_Resource):
         return self._c._request("GET", "/api/mcp/catalog")
 
     def get_mcp_catalog_entry(self, id: str):
-        return self._c._request("GET", f"/api/mcp/catalog/{id}")
+        return self._c._request("GET", f"/api/mcp/catalog/{quote(str(id), safe='')}")
 
     def mcp_health_handler(self):
         return self._c._request("GET", "/api/mcp/health")
@@ -793,28 +795,28 @@ class _McpResource(_Resource):
         return self._c._request("POST", "/api/mcp/servers", data)
 
     def get_mcp_server(self, name: str):
-        return self._c._request("GET", f"/api/mcp/servers/{name}")
+        return self._c._request("GET", f"/api/mcp/servers/{quote(str(name), safe='')}")
 
     def update_mcp_server(self, name: str, **data):
-        return self._c._request("PUT", f"/api/mcp/servers/{name}", data)
+        return self._c._request("PUT", f"/api/mcp/servers/{quote(str(name), safe='')}", data)
 
     def delete_mcp_server(self, name: str):
-        return self._c._request("DELETE", f"/api/mcp/servers/{name}")
+        return self._c._request("DELETE", f"/api/mcp/servers/{quote(str(name), safe='')}")
 
     def auth_revoke(self, name: str):
-        return self._c._request("DELETE", f"/api/mcp/servers/{name}/auth/revoke")
+        return self._c._request("DELETE", f"/api/mcp/servers/{quote(str(name), safe='')}/auth/revoke")
 
     def auth_start(self, name: str):
-        return self._c._request("POST", f"/api/mcp/servers/{name}/auth/start")
+        return self._c._request("POST", f"/api/mcp/servers/{quote(str(name), safe='')}/auth/start")
 
     def auth_status(self, name: str):
-        return self._c._request("GET", f"/api/mcp/servers/{name}/auth/status")
+        return self._c._request("GET", f"/api/mcp/servers/{quote(str(name), safe='')}/auth/status")
 
     def reconnect_mcp_server_handler(self, name: str):
-        return self._c._request("POST", f"/api/mcp/servers/{name}/reconnect")
+        return self._c._request("POST", f"/api/mcp/servers/{quote(str(name), safe='')}/reconnect")
 
     def patch_mcp_server_taint(self, name: str, **data):
-        return self._c._request("PATCH", f"/api/mcp/servers/{name}/taint", data)
+        return self._c._request("PATCH", f"/api/mcp/servers/{quote(str(name), safe='')}/taint", data)
 
     def list_mcp_taint_rules(self):
         return self._c._request("GET", "/api/mcp/taint-rules")
@@ -843,7 +845,7 @@ class _MediaResource(_Resource):
         return self._c._request("POST", "/api/media/video", data)
 
     def poll_video_task(self, task_id: str, provider: Any = None):
-        return self._c._request("GET", f"/api/media/video/{task_id}", None, query={"provider": provider})
+        return self._c._request("GET", f"/api/media/video/{quote(str(task_id), safe='')}", None, query={"provider": provider})
 
 
 # ── Memory Resource ────────────────────────────────────────────
@@ -851,22 +853,22 @@ class _MediaResource(_Resource):
 class _MemoryResource(_Resource):
 
     def export_agent_memory(self, id: str):
-        return self._c._request("GET", f"/api/agents/{id}/memory/export")
+        return self._c._request("GET", f"/api/agents/{quote(str(id), safe='')}/memory/export")
 
     def import_agent_memory(self, id: str, **data):
-        return self._c._request("POST", f"/api/agents/{id}/memory/import", data)
+        return self._c._request("POST", f"/api/agents/{quote(str(id), safe='')}/memory/import", data)
 
     def get_agent_kv(self, id: str):
-        return self._c._request("GET", f"/api/memory/agents/{id}/kv")
+        return self._c._request("GET", f"/api/memory/agents/{quote(str(id), safe='')}/kv")
 
     def get_agent_kv_key(self, id: str, key: str):
-        return self._c._request("GET", f"/api/memory/agents/{id}/kv/{key}")
+        return self._c._request("GET", f"/api/memory/agents/{quote(str(id), safe='')}/kv/{quote(str(key), safe='')}")
 
     def set_agent_kv_key(self, id: str, key: str, **data):
-        return self._c._request("PUT", f"/api/memory/agents/{id}/kv/{key}", data)
+        return self._c._request("PUT", f"/api/memory/agents/{quote(str(id), safe='')}/kv/{quote(str(key), safe='')}", data)
 
     def delete_agent_kv_key(self, id: str, key: str):
-        return self._c._request("DELETE", f"/api/memory/agents/{id}/kv/{key}")
+        return self._c._request("DELETE", f"/api/memory/agents/{quote(str(id), safe='')}/kv/{quote(str(key), safe='')}")
 
     def memory_config_get(self):
         return self._c._request("GET", "/api/memory/config")
@@ -901,58 +903,58 @@ class _ModelsResource(_Resource):
         return self._c._request("POST", "/api/models/aliases", data)
 
     def delete_alias(self, alias: str):
-        return self._c._request("DELETE", f"/api/models/aliases/{alias}")
+        return self._c._request("DELETE", f"/api/models/aliases/{quote(str(alias), safe='')}")
 
     def add_custom_model(self, **data):
         return self._c._request("POST", "/api/models/custom", data)
 
     def remove_custom_model(self, id: str):
-        return self._c._request("DELETE", f"/api/models/custom/{id}")
+        return self._c._request("DELETE", f"/api/models/custom/{quote(str(id), safe='')}")
 
     def get_model_overrides(self, id: str):
-        return self._c._request("GET", f"/api/models/overrides/{id}")
+        return self._c._request("GET", f"/api/models/overrides/{quote(str(id), safe='')}")
 
     def set_model_overrides(self, id: str, **data):
-        return self._c._request("PUT", f"/api/models/overrides/{id}", data)
+        return self._c._request("PUT", f"/api/models/overrides/{quote(str(id), safe='')}", data)
 
     def delete_model_overrides(self, id: str):
-        return self._c._request("DELETE", f"/api/models/overrides/{id}")
+        return self._c._request("DELETE", f"/api/models/overrides/{quote(str(id), safe='')}")
 
     def get_model(self, id: str):
-        return self._c._request("GET", f"/api/models/{id}")
+        return self._c._request("GET", f"/api/models/{quote(str(id), safe='')}")
 
     def list_providers(self):
         return self._c._request("GET", "/api/providers")
 
     def copilot_oauth_poll(self, poll_id: str):
-        return self._c._request("GET", f"/api/providers/github-copilot/oauth/poll/{poll_id}")
+        return self._c._request("GET", f"/api/providers/github-copilot/oauth/poll/{quote(str(poll_id), safe='')}")
 
     def copilot_oauth_start(self):
         return self._c._request("POST", "/api/providers/github-copilot/oauth/start")
 
     def get_provider(self, name: str):
-        return self._c._request("GET", f"/api/providers/{name}")
+        return self._c._request("GET", f"/api/providers/{quote(str(name), safe='')}")
 
     def set_default_provider(self, name: str, **data):
-        return self._c._request("POST", f"/api/providers/{name}/default", data)
+        return self._c._request("POST", f"/api/providers/{quote(str(name), safe='')}/default", data)
 
     def set_provider_discovery(self, name: str, **data):
-        return self._c._request("PUT", f"/api/providers/{name}/discovery", data)
+        return self._c._request("PUT", f"/api/providers/{quote(str(name), safe='')}/discovery", data)
 
     def enable_provider(self, name: str):
-        return self._c._request("POST", f"/api/providers/{name}/enable")
+        return self._c._request("POST", f"/api/providers/{quote(str(name), safe='')}/enable")
 
     def set_provider_key(self, name: str, **data):
-        return self._c._request("POST", f"/api/providers/{name}/key", data)
+        return self._c._request("POST", f"/api/providers/{quote(str(name), safe='')}/key", data)
 
     def delete_provider_key(self, name: str):
-        return self._c._request("DELETE", f"/api/providers/{name}/key")
+        return self._c._request("DELETE", f"/api/providers/{quote(str(name), safe='')}/key")
 
     def test_provider(self, name: str):
-        return self._c._request("POST", f"/api/providers/{name}/test")
+        return self._c._request("POST", f"/api/providers/{quote(str(name), safe='')}/test")
 
     def set_provider_url(self, name: str, **data):
-        return self._c._request("PUT", f"/api/providers/{name}/url", data)
+        return self._c._request("PUT", f"/api/providers/{quote(str(name), safe='')}/url", data)
 
 
 # ── Network Resource ───────────────────────────────────────────
@@ -984,7 +986,7 @@ class _NetworkResource(_Resource):
         return self._c._request("GET", "/api/peers", None, query={"offset": offset, "limit": limit})
 
     def get_peer(self, id: str):
-        return self._c._request("GET", f"/api/peers/{id}")
+        return self._c._request("GET", f"/api/peers/{quote(str(id), safe='')}")
 
 
 # ── Pairing Resource ───────────────────────────────────────────
@@ -998,7 +1000,7 @@ class _PairingResource(_Resource):
         return self._c._request("GET", "/api/pairing/devices")
 
     def pairing_remove_device(self, id: str):
-        return self._c._request("DELETE", f"/api/pairing/devices/{id}")
+        return self._c._request("DELETE", f"/api/pairing/devices/{quote(str(id), safe='')}")
 
     def pairing_notify(self, **data):
         return self._c._request("POST", "/api/pairing/notify", data)
@@ -1048,43 +1050,43 @@ class _PluginsResource(_Resource):
         return self._c._request("POST", "/api/plugins/uninstall", data)
 
     def get_plugin(self, name: str):
-        return self._c._request("GET", f"/api/plugins/{name}")
+        return self._c._request("GET", f"/api/plugins/{quote(str(name), safe='')}")
 
     def plugin_advanced_config(self, name: str):
-        return self._c._request("GET", f"/api/plugins/{name}/advanced-config")
+        return self._c._request("GET", f"/api/plugins/{quote(str(name), safe='')}/advanced-config")
 
     def disable_plugin(self, name: str):
-        return self._c._request("POST", f"/api/plugins/{name}/disable")
+        return self._c._request("POST", f"/api/plugins/{quote(str(name), safe='')}/disable")
 
     def enable_plugin(self, name: str):
-        return self._c._request("POST", f"/api/plugins/{name}/enable")
+        return self._c._request("POST", f"/api/plugins/{quote(str(name), safe='')}/enable")
 
     def plugin_env(self, name: str):
-        return self._c._request("GET", f"/api/plugins/{name}/env")
+        return self._c._request("GET", f"/api/plugins/{quote(str(name), safe='')}/env")
 
     def install_plugin_deps(self, name: str):
-        return self._c._request("POST", f"/api/plugins/{name}/install-deps")
+        return self._c._request("POST", f"/api/plugins/{quote(str(name), safe='')}/install-deps")
 
     def lint_plugin(self, name: str):
-        return self._c._request("GET", f"/api/plugins/{name}/lint")
+        return self._c._request("GET", f"/api/plugins/{quote(str(name), safe='')}/lint")
 
     def prewarm_plugin(self, name: str):
-        return self._c._request("POST", f"/api/plugins/{name}/prewarm")
+        return self._c._request("POST", f"/api/plugins/{quote(str(name), safe='')}/prewarm")
 
     def reload_plugin(self, name: str):
-        return self._c._request("POST", f"/api/plugins/{name}/reload")
+        return self._c._request("POST", f"/api/plugins/{quote(str(name), safe='')}/reload")
 
     def sign_plugin(self, name: str):
-        return self._c._request("POST", f"/api/plugins/{name}/sign")
+        return self._c._request("POST", f"/api/plugins/{quote(str(name), safe='')}/sign")
 
     def plugin_status(self, name: str):
-        return self._c._request("GET", f"/api/plugins/{name}/status")
+        return self._c._request("GET", f"/api/plugins/{quote(str(name), safe='')}/status")
 
     def test_plugin_hook(self, name: str, **data):
-        return self._c._request("POST", f"/api/plugins/{name}/test-hook", data)
+        return self._c._request("POST", f"/api/plugins/{quote(str(name), safe='')}/test-hook", data)
 
     def upgrade_plugin(self, name: str, **data):
-        return self._c._request("POST", f"/api/plugins/{name}/upgrade", data)
+        return self._c._request("POST", f"/api/plugins/{quote(str(name), safe='')}/upgrade", data)
 
 
 # ── ProactiveMemory Resource ──────────────────────────────────
@@ -1098,40 +1100,40 @@ class _ProactiveMemoryResource(_Resource):
         return self._c._request("POST", "/api/memory", data)
 
     def memory_list_agent(self, id: str, category: Any = None, level: Any = None, offset: Any = None, limit: Any = None):
-        return self._c._request("GET", f"/api/memory/agents/{id}", None, query={"category": category, "level": level, "offset": offset, "limit": limit})
+        return self._c._request("GET", f"/api/memory/agents/{quote(str(id), safe='')}", None, query={"category": category, "level": level, "offset": offset, "limit": limit})
 
     def memory_reset_agent(self, id: str):
-        return self._c._request("DELETE", f"/api/memory/agents/{id}")
+        return self._c._request("DELETE", f"/api/memory/agents/{quote(str(id), safe='')}")
 
     def memory_consolidate(self, id: str):
-        return self._c._request("POST", f"/api/memory/agents/{id}/consolidate")
+        return self._c._request("POST", f"/api/memory/agents/{quote(str(id), safe='')}/consolidate")
 
     def memory_count_agent(self, id: str, level: Any = None):
-        return self._c._request("GET", f"/api/memory/agents/{id}/count", None, query={"level": level})
+        return self._c._request("GET", f"/api/memory/agents/{quote(str(id), safe='')}/count", None, query={"level": level})
 
     def memory_duplicates(self, id: str):
-        return self._c._request("GET", f"/api/memory/agents/{id}/duplicates")
+        return self._c._request("GET", f"/api/memory/agents/{quote(str(id), safe='')}/duplicates")
 
     def memory_export_agent(self, id: str):
-        return self._c._request("GET", f"/api/memory/agents/{id}/export")
+        return self._c._request("GET", f"/api/memory/agents/{quote(str(id), safe='')}/export")
 
     def memory_import_agent(self, id: str, **data):
-        return self._c._request("POST", f"/api/memory/agents/{id}/import", data)
+        return self._c._request("POST", f"/api/memory/agents/{quote(str(id), safe='')}/import", data)
 
     def memory_clear_level(self, id: str, level: str):
-        return self._c._request("DELETE", f"/api/memory/agents/{id}/level/{level}")
+        return self._c._request("DELETE", f"/api/memory/agents/{quote(str(id), safe='')}/level/{quote(str(level), safe='')}")
 
     def memory_query_relations(self, id: str, source: Any = None, relation: Any = None, target: Any = None):
-        return self._c._request("GET", f"/api/memory/agents/{id}/relations", None, query={"source": source, "relation": relation, "target": target})
+        return self._c._request("GET", f"/api/memory/agents/{quote(str(id), safe='')}/relations", None, query={"source": source, "relation": relation, "target": target})
 
     def memory_store_relations(self, id: str, **data):
-        return self._c._request("POST", f"/api/memory/agents/{id}/relations", data)
+        return self._c._request("POST", f"/api/memory/agents/{quote(str(id), safe='')}/relations", data)
 
     def memory_search_agent(self, id: str, q: Any = None, level: Any = None, limit: Any = None):
-        return self._c._request("GET", f"/api/memory/agents/{id}/search", None, query={"q": q, "level": level, "limit": limit})
+        return self._c._request("GET", f"/api/memory/agents/{quote(str(id), safe='')}/search", None, query={"q": q, "level": level, "limit": limit})
 
     def memory_stats_agent(self, id: str):
-        return self._c._request("GET", f"/api/memory/agents/{id}/stats")
+        return self._c._request("GET", f"/api/memory/agents/{quote(str(id), safe='')}/stats")
 
     def memory_bulk_delete(self, **data):
         return self._c._request("POST", "/api/memory/bulk-delete", data)
@@ -1143,13 +1145,13 @@ class _ProactiveMemoryResource(_Resource):
         return self._c._request("POST", "/api/memory/decay")
 
     def memory_update(self, memory_id: str, **data):
-        return self._c._request("PUT", f"/api/memory/items/{memory_id}", data)
+        return self._c._request("PUT", f"/api/memory/items/{quote(str(memory_id), safe='')}", data)
 
     def memory_delete(self, memory_id: str):
-        return self._c._request("DELETE", f"/api/memory/items/{memory_id}")
+        return self._c._request("DELETE", f"/api/memory/items/{quote(str(memory_id), safe='')}")
 
     def memory_history(self, memory_id: str):
-        return self._c._request("GET", f"/api/memory/items/{memory_id}/history")
+        return self._c._request("GET", f"/api/memory/items/{quote(str(memory_id), safe='')}/history")
 
     def memory_search(self, q: Any = None, level: Any = None, limit: Any = None):
         return self._c._request("GET", "/api/memory/search", None, query={"q": q, "level": level, "limit": limit})
@@ -1158,7 +1160,7 @@ class _ProactiveMemoryResource(_Resource):
         return self._c._request("GET", "/api/memory/stats")
 
     def memory_get_user(self, user_id: str):
-        return self._c._request("GET", f"/api/memory/user/{user_id}")
+        return self._c._request("GET", f"/api/memory/user/{quote(str(user_id), safe='')}")
 
 
 # ── Sessions Resource ──────────────────────────────────────────
@@ -1166,7 +1168,7 @@ class _ProactiveMemoryResource(_Resource):
 class _SessionsResource(_Resource):
 
     def find_session_by_label(self, id: str, label: str):
-        return self._c._request("GET", f"/api/agents/{id}/sessions/by-label/{label}")
+        return self._c._request("GET", f"/api/agents/{quote(str(id), safe='')}/sessions/by-label/{quote(str(label), safe='')}")
 
     def list_sessions(self, limit: Any = None, offset: Any = None):
         return self._c._request("GET", "/api/sessions", None, query={"limit": limit, "offset": offset})
@@ -1178,16 +1180,16 @@ class _SessionsResource(_Resource):
         return self._c._request("GET", "/api/sessions/search", None, query={"q": q, "agent_id": agent_id, "limit": limit, "offset": offset})
 
     def get_session(self, id: str):
-        return self._c._request("GET", f"/api/sessions/{id}")
+        return self._c._request("GET", f"/api/sessions/{quote(str(id), safe='')}")
 
     def delete_session(self, id: str):
-        return self._c._request("DELETE", f"/api/sessions/{id}")
+        return self._c._request("DELETE", f"/api/sessions/{quote(str(id), safe='')}")
 
     def set_session_label(self, id: str, **data):
-        return self._c._request("PUT", f"/api/sessions/{id}/label", data)
+        return self._c._request("PUT", f"/api/sessions/{quote(str(id), safe='')}/label", data)
 
     def patch_session_model(self, id: str, **data):
-        return self._c._request("PATCH", f"/api/sessions/{id}/model", data)
+        return self._c._request("PATCH", f"/api/sessions/{quote(str(id), safe='')}/model", data)
 
 
 # ── Skills Resource ────────────────────────────────────────────
@@ -1204,10 +1206,10 @@ class _SkillsResource(_Resource):
         return self._c._request("GET", "/api/clawhub/search", None, query={"q": q})
 
     def clawhub_skill_detail(self, slug: str):
-        return self._c._request("GET", f"/api/clawhub/skill/{slug}")
+        return self._c._request("GET", f"/api/clawhub/skill/{quote(str(slug), safe='')}")
 
     def clawhub_skill_code(self, slug: str):
-        return self._c._request("GET", f"/api/clawhub/skill/{slug}/code")
+        return self._c._request("GET", f"/api/clawhub/skill/{quote(str(slug), safe='')}/code")
 
     def marketplace_search(self, q: Any = None):
         return self._c._request("GET", "/api/marketplace/search", None, query={"q": q})
@@ -1225,16 +1227,16 @@ class _SkillsResource(_Resource):
         return self._c._request("GET", "/api/skills/pending", None, query={"agent": agent})
 
     def show_pending_candidate(self, id: str):
-        return self._c._request("GET", f"/api/skills/pending/{id}")
+        return self._c._request("GET", f"/api/skills/pending/{quote(str(id), safe='')}")
 
     def approve_pending_candidate(self, id: str):
-        return self._c._request("POST", f"/api/skills/pending/{id}/approve")
+        return self._c._request("POST", f"/api/skills/pending/{quote(str(id), safe='')}/approve")
 
     def propose_pending_to_registry(self, id: str):
-        return self._c._request("POST", f"/api/skills/pending/{id}/propose-to-registry")
+        return self._c._request("POST", f"/api/skills/pending/{quote(str(id), safe='')}/propose-to-registry")
 
     def reject_pending_candidate(self, id: str):
-        return self._c._request("POST", f"/api/skills/pending/{id}/reject")
+        return self._c._request("POST", f"/api/skills/pending/{quote(str(id), safe='')}/reject")
 
     def list_skill_registry(self):
         return self._c._request("GET", "/api/skills/registry")
@@ -1246,37 +1248,37 @@ class _SkillsResource(_Resource):
         return self._c._request("POST", "/api/skills/uninstall", data)
 
     def get_skill_detail(self, name: str):
-        return self._c._request("GET", f"/api/skills/{name}")
+        return self._c._request("GET", f"/api/skills/{quote(str(name), safe='')}")
 
     def evolve_delete_skill(self, name: str):
-        return self._c._request("POST", f"/api/skills/{name}/evolve/delete")
+        return self._c._request("POST", f"/api/skills/{quote(str(name), safe='')}/evolve/delete")
 
     def evolve_write_file(self, name: str, **data):
-        return self._c._request("POST", f"/api/skills/{name}/evolve/file", data)
+        return self._c._request("POST", f"/api/skills/{quote(str(name), safe='')}/evolve/file", data)
 
     def evolve_remove_file(self, name: str, path: Any = None):
-        return self._c._request("DELETE", f"/api/skills/{name}/evolve/file", None, query={"path": path})
+        return self._c._request("DELETE", f"/api/skills/{quote(str(name), safe='')}/evolve/file", None, query={"path": path})
 
     def evolve_patch_skill(self, name: str, **data):
-        return self._c._request("POST", f"/api/skills/{name}/evolve/patch", data)
+        return self._c._request("POST", f"/api/skills/{quote(str(name), safe='')}/evolve/patch", data)
 
     def evolve_rollback_skill(self, name: str):
-        return self._c._request("POST", f"/api/skills/{name}/evolve/rollback")
+        return self._c._request("POST", f"/api/skills/{quote(str(name), safe='')}/evolve/rollback")
 
     def evolve_update_skill(self, name: str, **data):
-        return self._c._request("POST", f"/api/skills/{name}/evolve/update", data)
+        return self._c._request("POST", f"/api/skills/{quote(str(name), safe='')}/evolve/update", data)
 
     def get_supporting_file(self, name: str, path: Any = None):
-        return self._c._request("GET", f"/api/skills/{name}/file", None, query={"path": path})
+        return self._c._request("GET", f"/api/skills/{quote(str(name), safe='')}/file", None, query={"path": path})
 
     def propose_skill_to_registry(self, name: str):
-        return self._c._request("POST", f"/api/skills/{name}/propose")
+        return self._c._request("POST", f"/api/skills/{quote(str(name), safe='')}/propose")
 
     def list_tools(self):
         return self._c._request("GET", "/api/tools")
 
     def get_tool(self, name: str):
-        return self._c._request("GET", f"/api/tools/{name}")
+        return self._c._request("GET", f"/api/tools/{quote(str(name), safe='')}")
 
 
 # ── System Resource ────────────────────────────────────────────
@@ -1299,7 +1301,7 @@ class _SystemResource(_Resource):
         return self._c._request("GET", "/api/authz/check", None, query={"user": user, "action": action, "channel": channel})
 
     def effective_permissions(self, user_id: str):
-        return self._c._request("GET", f"/api/authz/effective/{user_id}")
+        return self._c._request("GET", f"/api/authz/effective/{quote(str(user_id), safe='')}")
 
     def whoami(self):
         return self._c._request("GET", "/api/authz/whoami")
@@ -1311,7 +1313,7 @@ class _SystemResource(_Resource):
         return self._c._request("GET", "/api/backups")
 
     def delete_backup(self, filename: str):
-        return self._c._request("DELETE", f"/api/backups/{filename}")
+        return self._c._request("DELETE", f"/api/backups/{quote(str(filename), safe='')}")
 
     def list_bindings(self):
         return self._c._request("GET", "/api/bindings")
@@ -1320,13 +1322,13 @@ class _SystemResource(_Resource):
         return self._c._request("POST", "/api/bindings", data)
 
     def remove_binding(self, index: str):
-        return self._c._request("DELETE", f"/api/bindings/{index}")
+        return self._c._request("DELETE", f"/api/bindings/{quote(str(index), safe='')}")
 
     def list_commands(self):
         return self._c._request("GET", "/api/commands")
 
     def get_command(self, name: str):
-        return self._c._request("GET", f"/api/commands/{name}")
+        return self._c._request("GET", f"/api/commands/{quote(str(name), safe='')}")
 
     def get_config(self):
         return self._c._request("GET", "/api/config")
@@ -1374,7 +1376,7 @@ class _SystemResource(_Resource):
         return self._c._request("GET", "/api/profiles")
 
     def get_profile(self, name: str):
-        return self._c._request("GET", f"/api/profiles/{name}")
+        return self._c._request("GET", f"/api/profiles/{quote(str(name), safe='')}")
 
     def provisioning_status(self):
         return self._c._request("GET", "/api/provisioning/status")
@@ -1404,37 +1406,37 @@ class _SystemResource(_Resource):
         return self._c._request("POST", "/api/templates", data)
 
     def get_agent_template(self, name: str):
-        return self._c._request("GET", f"/api/templates/{name}")
+        return self._c._request("GET", f"/api/templates/{quote(str(name), safe='')}")
 
     def update_agent_type(self, name: str, **data):
-        return self._c._request("PUT", f"/api/templates/{name}", data)
+        return self._c._request("PUT", f"/api/templates/{quote(str(name), safe='')}", data)
 
     def delete_agent_type(self, name: str):
-        return self._c._request("DELETE", f"/api/templates/{name}")
+        return self._c._request("DELETE", f"/api/templates/{quote(str(name), safe='')}")
 
     def list_template_history(self, name: str, limit: Any = None):
-        return self._c._request("GET", f"/api/templates/{name}/history", None, query={"limit": limit})
+        return self._c._request("GET", f"/api/templates/{quote(str(name), safe='')}/history", None, query={"limit": limit})
 
     def restore_template_version(self, name: str, version_id: str):
-        return self._c._request("POST", f"/api/templates/{name}/history/{version_id}/restore")
+        return self._c._request("POST", f"/api/templates/{quote(str(name), safe='')}/history/{quote(str(version_id), safe='')}/restore")
 
     def promote_agent_type(self, name: str):
-        return self._c._request("POST", f"/api/templates/{name}/promote")
+        return self._c._request("POST", f"/api/templates/{quote(str(name), safe='')}/promote")
 
     def get_agent_type_registry_diff(self, name: str):
-        return self._c._request("GET", f"/api/templates/{name}/registry-diff")
+        return self._c._request("GET", f"/api/templates/{quote(str(name), safe='')}/registry-diff")
 
     def restore_agent_type_from_registry(self, name: str):
-        return self._c._request("POST", f"/api/templates/{name}/restore")
+        return self._c._request("POST", f"/api/templates/{quote(str(name), safe='')}/restore")
 
     def get_agent_template_toml(self, name: str):
-        return self._c._request("GET", f"/api/templates/{name}/toml")
+        return self._c._request("GET", f"/api/templates/{quote(str(name), safe='')}/toml")
 
     def put_agent_template_toml(self, name: str, body: bytes, content_type: str = "text/plain"):
-        return self._c._request("PUT", f"/api/templates/{name}/toml", body, content_type=content_type)
+        return self._c._request("PUT", f"/api/templates/{quote(str(name), safe='')}/toml", body, content_type=content_type)
 
     def post_agent_template_toml(self, name: str, body: bytes, content_type: str = "text/plain"):
-        return self._c._request("POST", f"/api/templates/{name}/toml", body, content_type=content_type)
+        return self._c._request("POST", f"/api/templates/{quote(str(name), safe='')}/toml", body, content_type=content_type)
 
     def version(self):
         return self._c._request("GET", "/api/version")
@@ -1456,7 +1458,7 @@ class _TasksResource(_Resource):
 class _ToolsResource(_Resource):
 
     def invoke_tool(self, name: str, agent_id: Any = None, **data):
-        return self._c._request("POST", f"/api/tools/{name}/invoke", data, query={"agent_id": agent_id})
+        return self._c._request("POST", f"/api/tools/{quote(str(name), safe='')}/invoke", data, query={"agent_id": agent_id})
 
 
 # ── Users Resource ─────────────────────────────────────────────
@@ -1476,43 +1478,43 @@ class _UsersResource(_Resource):
         return self._c._request("GET", "/api/users/me/avatar")
 
     def get_user(self, name: str):
-        return self._c._request("GET", f"/api/users/{name}")
+        return self._c._request("GET", f"/api/users/{quote(str(name), safe='')}")
 
     def update_user(self, name: str, **data):
-        return self._c._request("PUT", f"/api/users/{name}", data)
+        return self._c._request("PUT", f"/api/users/{quote(str(name), safe='')}", data)
 
     def delete_user(self, name: str):
-        return self._c._request("DELETE", f"/api/users/{name}")
+        return self._c._request("DELETE", f"/api/users/{quote(str(name), safe='')}")
 
     def serve_user_avatar(self, name: str):
-        return self._c._request("GET", f"/api/users/{name}/avatar")
+        return self._c._request("GET", f"/api/users/{quote(str(name), safe='')}/avatar")
 
     def upload_user_avatar(self, name: str, body: bytes, content_type: str = "application/octet-stream"):
-        return self._c._request("POST", f"/api/users/{name}/avatar", body, content_type=content_type)
+        return self._c._request("POST", f"/api/users/{quote(str(name), safe='')}/avatar", body, content_type=content_type)
 
     def delete_user_avatar(self, name: str):
-        return self._c._request("DELETE", f"/api/users/{name}/avatar")
+        return self._c._request("DELETE", f"/api/users/{quote(str(name), safe='')}/avatar")
 
     def update_user_identity(self, name: str, **data):
-        return self._c._request("PATCH", f"/api/users/{name}/identity", data)
+        return self._c._request("PATCH", f"/api/users/{quote(str(name), safe='')}/identity", data)
 
     def get_user_policy(self, name: str):
-        return self._c._request("GET", f"/api/users/{name}/policy")
+        return self._c._request("GET", f"/api/users/{quote(str(name), safe='')}/policy")
 
     def update_user_policy(self, name: str, **data):
-        return self._c._request("PUT", f"/api/users/{name}/policy", data)
+        return self._c._request("PUT", f"/api/users/{quote(str(name), safe='')}/policy", data)
 
     def list_user_provider_keys(self, name: str):
-        return self._c._request("GET", f"/api/users/{name}/provider-keys")
+        return self._c._request("GET", f"/api/users/{quote(str(name), safe='')}/provider-keys")
 
     def set_user_provider_key(self, name: str, provider: str, **data):
-        return self._c._request("PUT", f"/api/users/{name}/provider-keys/{provider}", data)
+        return self._c._request("PUT", f"/api/users/{quote(str(name), safe='')}/provider-keys/{quote(str(provider), safe='')}", data)
 
     def delete_user_provider_key(self, name: str, provider: str):
-        return self._c._request("DELETE", f"/api/users/{name}/provider-keys/{provider}")
+        return self._c._request("DELETE", f"/api/users/{quote(str(name), safe='')}/provider-keys/{quote(str(provider), safe='')}")
 
     def rotate_user_key(self, name: str):
-        return self._c._request("POST", f"/api/users/{name}/rotate-key")
+        return self._c._request("POST", f"/api/users/{quote(str(name), safe='')}/rotate-key")
 
 
 # ── Vault Resource ─────────────────────────────────────────────
@@ -1523,10 +1525,10 @@ class _VaultResource(_Resource):
         return self._c._request("GET", "/api/vault/keys")
 
     def vault_put_key(self, key: str, **data):
-        return self._c._request("PUT", f"/api/vault/keys/{key}", data)
+        return self._c._request("PUT", f"/api/vault/keys/{quote(str(key), safe='')}", data)
 
     def vault_delete_key(self, key: str):
-        return self._c._request("DELETE", f"/api/vault/keys/{key}")
+        return self._c._request("DELETE", f"/api/vault/keys/{quote(str(key), safe='')}")
 
 
 # ── Webhooks Resource ──────────────────────────────────────────
@@ -1551,19 +1553,19 @@ class _WorkflowsResource(_Resource):
         return self._c._request("POST", "/api/cron/jobs", data)
 
     def get_cron_job(self, id: str):
-        return self._c._request("GET", f"/api/cron/jobs/{id}")
+        return self._c._request("GET", f"/api/cron/jobs/{quote(str(id), safe='')}")
 
     def update_cron_job(self, id: str, **data):
-        return self._c._request("PUT", f"/api/cron/jobs/{id}", data)
+        return self._c._request("PUT", f"/api/cron/jobs/{quote(str(id), safe='')}", data)
 
     def delete_cron_job(self, id: str):
-        return self._c._request("DELETE", f"/api/cron/jobs/{id}")
+        return self._c._request("DELETE", f"/api/cron/jobs/{quote(str(id), safe='')}")
 
     def toggle_cron_job(self, id: str, **data):
-        return self._c._request("PUT", f"/api/cron/jobs/{id}/enable", data)
+        return self._c._request("PUT", f"/api/cron/jobs/{quote(str(id), safe='')}/enable", data)
 
     def cron_job_status(self, id: str):
-        return self._c._request("GET", f"/api/cron/jobs/{id}/status")
+        return self._c._request("GET", f"/api/cron/jobs/{quote(str(id), safe='')}/status")
 
     def list_schedules(self):
         return self._c._request("GET", "/api/schedules")
@@ -1572,16 +1574,16 @@ class _WorkflowsResource(_Resource):
         return self._c._request("POST", "/api/schedules", data)
 
     def get_schedule(self, id: str):
-        return self._c._request("GET", f"/api/schedules/{id}")
+        return self._c._request("GET", f"/api/schedules/{quote(str(id), safe='')}")
 
     def update_schedule(self, id: str, **data):
-        return self._c._request("PUT", f"/api/schedules/{id}", data)
+        return self._c._request("PUT", f"/api/schedules/{quote(str(id), safe='')}", data)
 
     def delete_schedule(self, id: str):
-        return self._c._request("DELETE", f"/api/schedules/{id}")
+        return self._c._request("DELETE", f"/api/schedules/{quote(str(id), safe='')}")
 
     def run_schedule(self, id: str):
-        return self._c._request("POST", f"/api/schedules/{id}/run")
+        return self._c._request("POST", f"/api/schedules/{quote(str(id), safe='')}/run")
 
     def list_triggers(self, agent_id: Any = None):
         return self._c._request("GET", "/api/triggers", None, query={"agent_id": agent_id})
@@ -1590,22 +1592,22 @@ class _WorkflowsResource(_Resource):
         return self._c._request("POST", "/api/triggers", data)
 
     def get_trigger(self, id: str):
-        return self._c._request("GET", f"/api/triggers/{id}")
+        return self._c._request("GET", f"/api/triggers/{quote(str(id), safe='')}")
 
     def delete_trigger(self, id: str):
-        return self._c._request("DELETE", f"/api/triggers/{id}")
+        return self._c._request("DELETE", f"/api/triggers/{quote(str(id), safe='')}")
 
     def update_trigger(self, id: str, **data):
-        return self._c._request("PATCH", f"/api/triggers/{id}", data)
+        return self._c._request("PATCH", f"/api/triggers/{quote(str(id), safe='')}", data)
 
     def list_workflow_templates(self, q: Any = None, category: Any = None):
         return self._c._request("GET", "/api/workflow-templates", None, query={"q": q, "category": category})
 
     def get_workflow_template(self, id: str):
-        return self._c._request("GET", f"/api/workflow-templates/{id}")
+        return self._c._request("GET", f"/api/workflow-templates/{quote(str(id), safe='')}")
 
     def instantiate_template(self, id: str, **data):
-        return self._c._request("POST", f"/api/workflow-templates/{id}/instantiate", data)
+        return self._c._request("POST", f"/api/workflow-templates/{quote(str(id), safe='')}/instantiate", data)
 
     def list_workflows(self):
         return self._c._request("GET", "/api/workflows")
@@ -1614,41 +1616,41 @@ class _WorkflowsResource(_Resource):
         return self._c._request("POST", "/api/workflows", data)
 
     def get_workflow_run(self, run_id: str):
-        return self._c._request("GET", f"/api/workflows/runs/{run_id}")
+        return self._c._request("GET", f"/api/workflows/runs/{quote(str(run_id), safe='')}")
 
     def cancel_workflow_run(self, run_id: str):
-        return self._c._request("POST", f"/api/workflows/runs/{run_id}/cancel")
+        return self._c._request("POST", f"/api/workflows/runs/{quote(str(run_id), safe='')}/cancel")
 
     def operator_action_workflow_run(self, run_id: str, **data):
-        return self._c._request("POST", f"/api/workflows/runs/{run_id}/operator", data)
+        return self._c._request("POST", f"/api/workflows/runs/{quote(str(run_id), safe='')}/operator", data)
 
     def pause_workflow_run(self, run_id: str, **data):
-        return self._c._request("POST", f"/api/workflows/runs/{run_id}/pause", data)
+        return self._c._request("POST", f"/api/workflows/runs/{quote(str(run_id), safe='')}/pause", data)
 
     def rerun_workflow_run(self, run_id: str):
-        return self._c._request("POST", f"/api/workflows/runs/{run_id}/rerun")
+        return self._c._request("POST", f"/api/workflows/runs/{quote(str(run_id), safe='')}/rerun")
 
     def resume_workflow_run(self, run_id: str, **data):
-        return self._c._request("POST", f"/api/workflows/runs/{run_id}/resume", data)
+        return self._c._request("POST", f"/api/workflows/runs/{quote(str(run_id), safe='')}/resume", data)
 
     def get_workflow(self, id: str):
-        return self._c._request("GET", f"/api/workflows/{id}")
+        return self._c._request("GET", f"/api/workflows/{quote(str(id), safe='')}")
 
     def update_workflow(self, id: str, **data):
-        return self._c._request("PUT", f"/api/workflows/{id}", data)
+        return self._c._request("PUT", f"/api/workflows/{quote(str(id), safe='')}", data)
 
     def delete_workflow(self, id: str):
-        return self._c._request("DELETE", f"/api/workflows/{id}")
+        return self._c._request("DELETE", f"/api/workflows/{quote(str(id), safe='')}")
 
     def dry_run_workflow(self, id: str, **data):
-        return self._c._request("POST", f"/api/workflows/{id}/dry-run", data)
+        return self._c._request("POST", f"/api/workflows/{quote(str(id), safe='')}/dry-run", data)
 
     def run_workflow(self, id: str, **data):
-        return self._c._request("POST", f"/api/workflows/{id}/run", data)
+        return self._c._request("POST", f"/api/workflows/{quote(str(id), safe='')}/run", data)
 
     def list_workflow_runs(self, id: str):
-        return self._c._request("GET", f"/api/workflows/{id}/runs")
+        return self._c._request("GET", f"/api/workflows/{quote(str(id), safe='')}/runs")
 
     def save_workflow_as_template(self, id: str):
-        return self._c._request("POST", f"/api/workflows/{id}/save-as-template")
+        return self._c._request("POST", f"/api/workflows/{quote(str(id), safe='')}/save-as-template")
 
