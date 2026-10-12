@@ -734,7 +734,7 @@ impl AgentMode {
 }
 
 /// How an agent is scheduled to run.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ScheduleMode {
     /// Agent wakes up when a message/event arrives (default).
@@ -1128,10 +1128,25 @@ pub struct FallbackModel {
     pub extra_params: std::collections::BTreeMap<String, serde_json::Value>,
 }
 
+/// Serialize a `HashMap` field in key order.
+///
+/// Each `HashMap` gets its own random hasher seed, so serializing one directly emits its entries in a different order every time.
+/// The manifest's map fields are written to `agent.toml` and recorded in the manifest version history, where two snapshots of the same content would then differ only in key order — the history's exact-text dedup misses them and a diff between neighbouring rows shows changes that never happened.
+/// Sorting at serialization keeps the in-memory type and every caller unchanged.
+fn serialize_sorted_map<S, K, V>(map: &HashMap<K, V>, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+    K: Serialize + Ord,
+    V: Serialize,
+{
+    serializer.collect_map(map.iter().collect::<std::collections::BTreeMap<_, _>>())
+}
+
 /// Tool configuration within an agent manifest.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolConfig {
     /// Tool-specific configuration parameters.
+    #[serde(serialize_with = "serialize_sorted_map")]
     pub params: HashMap<String, serde_json::Value>,
 }
 
@@ -1355,7 +1370,11 @@ pub struct AgentManifest {
     #[serde(default)]
     pub profile: Option<ToolProfile>,
     /// Tool-specific configurations.
-    #[serde(default, deserialize_with = "crate::serde_compat::map_lenient")]
+    #[serde(
+        default,
+        deserialize_with = "crate::serde_compat::map_lenient",
+        serialize_with = "serialize_sorted_map"
+    )]
     pub tools: HashMap<String, ToolConfig>,
     /// Installed skill references (empty = all skills available).
     #[serde(default, deserialize_with = "crate::serde_compat::vec_lenient")]
@@ -1398,7 +1417,11 @@ pub struct AgentManifest {
     #[serde(default)]
     pub mcp_disabled: bool,
     /// Custom metadata.
-    #[serde(default, deserialize_with = "crate::serde_compat::map_lenient")]
+    #[serde(
+        default,
+        deserialize_with = "crate::serde_compat::map_lenient",
+        serialize_with = "serialize_sorted_map"
+    )]
     pub metadata: HashMap<String, serde_json::Value>,
     /// Tags for agent discovery and categorization.
     #[serde(default, deserialize_with = "crate::serde_compat::vec_lenient")]
@@ -1431,7 +1454,7 @@ pub struct AgentManifest {
     /// library  = { path = "shared/library",  mode = "rw" }
     /// archive  = { path = "shared/archive",  mode = "r"  }
     /// ```
-    #[serde(default)]
+    #[serde(default, serialize_with = "serialize_sorted_map")]
     pub workspaces: HashMap<String, WorkspaceDecl>,
     /// Per-agent exec policy override. If None, uses global exec_policy.
     /// Accepts string shorthand ("allow", "deny", "full", "allowlist") or full table.
@@ -4726,6 +4749,61 @@ model = "claude-3-haiku-20240307"
         assert!(
             err.to_string().contains("unknown variant"),
             "explicit `session_mode = \"New\"` must error, not fall back to None / Persistent: {err}"
+        );
+    }
+
+    /// Every map field of the manifest must serialize in key order regardless of insertion order, or two identical manifests produce different `agent.toml` text and the version history records spurious changes (#8504).
+    #[test]
+    fn manifest_map_fields_serialize_in_key_order() {
+        let keys = [
+            "zeta", "alpha", "mu", "beta", "omega", "gamma", "kappa", "delta",
+        ];
+        let build = |order: &[&str]| {
+            let mut manifest = AgentManifest {
+                name: "sorted-maps".to_string(),
+                ..Default::default()
+            };
+            for key in order {
+                manifest
+                    .metadata
+                    .insert((*key).to_string(), serde_json::json!(key));
+                let mut params = HashMap::new();
+                for inner in order {
+                    params.insert((*inner).to_string(), serde_json::json!(1));
+                }
+                manifest
+                    .tools
+                    .insert((*key).to_string(), ToolConfig { params });
+                manifest.workspaces.insert(
+                    (*key).to_string(),
+                    WorkspaceDecl {
+                        path: Some(PathBuf::from(format!("shared/{key}"))),
+                        mount: None,
+                        mode: WorkspaceMode::default(),
+                    },
+                );
+            }
+            toml::to_string_pretty(&manifest).expect("manifest serializes")
+        };
+
+        let forward = build(&keys);
+        let mut reversed_keys = keys;
+        reversed_keys.reverse();
+        assert_eq!(forward, build(&reversed_keys));
+
+        let mut sorted = keys;
+        sorted.sort_unstable();
+        let positions: Vec<usize> = sorted
+            .iter()
+            .map(|key| {
+                forward
+                    .find(&format!("[workspaces.{key}]"))
+                    .unwrap_or_else(|| panic!("workspace {key} missing:\n{forward}"))
+            })
+            .collect();
+        assert!(
+            positions.windows(2).all(|pair| pair[0] < pair[1]),
+            "workspaces must be emitted in key order:\n{forward}"
         );
     }
 }

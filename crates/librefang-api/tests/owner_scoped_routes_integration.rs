@@ -182,6 +182,12 @@ async fn non_owner_cannot_read_agent_scoped_resources() {
             format!("/api/agents/{aid}/sessions/{sid}/trajectory"),
             None,
         ),
+        // A manifest snapshot is the agent's whole `agent.toml` (system prompt, capabilities, budgets, allowlists), so the read belongs in this inventory with the other agent-scoped reads — the handler's own `can_access_agent` check is what answers 404 rather than the middleware, which lets every authenticated GET through.
+        (
+            Method::GET,
+            format!("/api/agents/{aid}/manifest-history"),
+            None,
+        ),
     ];
 
     let mut failures = Vec::new();
@@ -337,6 +343,25 @@ async fn import_session_reports_bad_exports_as_400_and_unknown_agent_as_404() {
     )
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND, "{json}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn non_admin_cannot_restore_an_agent_manifest_version() {
+    let h = boot().await;
+    let agent_id = spawn_authored(&h.state, "Alice");
+    let aid = agent_id.to_string();
+
+    // Restoring overwrites the agent's manifest, so the User-role POST allowlist in `user_role_allows_request` (messages, clone, approvals) must not admit it.
+    // The id resolves and the version id is deliberately arbitrary: the middleware refuses before any handler runs.
+    let status = request_status(
+        &h.app,
+        Method::POST,
+        &format!("/api/agents/{aid}/manifest-history/1/restore"),
+        BOB_KEY,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
 }
 
 #[tokio::test(flavor = "multi_thread")]

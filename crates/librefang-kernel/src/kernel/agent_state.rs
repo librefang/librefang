@@ -93,6 +93,19 @@ fn patch_root_enabled(source: &str, enabled: bool) -> Result<String, String> {
     Ok(patched)
 }
 
+/// Re-serialize a patched `agent.toml` into the canonical layout `persist_full_manifest_at` records, so suspend/resume history rows are directly comparable with the `update` rows they sit next to.
+///
+/// `persist_agent_enabled` writes the operator's file with only the root `enabled` value patched, preserving comments and key order.
+/// Snapshotting that text verbatim would make consecutive rows alternate between the operator's layout and the serializer's, so the History tab would report nearly every line as changed when only `enabled` moved.
+///
+/// Falls back to the raw text when the file does not parse; `patch_root_enabled` has already validated it, so that branch is defensive only.
+fn normalize_manifest_toml(content: &str) -> String {
+    match toml::from_str::<AgentManifest>(content) {
+        Ok(manifest) => toml::to_string_pretty(&manifest).unwrap_or_else(|_| content.to_string()),
+        Err(_) => content.to_string(),
+    }
+}
+
 /// Carry a resolved `exec_policy` from the running registry entry onto a replacement manifest that leaves it unset.
 ///
 /// `exec_policy` is normally absent from `agent.toml`.
@@ -134,10 +147,15 @@ impl LibreFangKernel {
             .clone()
     }
 
+    /// Serialize `entry`'s manifest to `toml_path` and record the write in the manifest version history.
+    ///
+    /// `change_source` is forwarded verbatim to [`Self::record_manifest_version`] — the call site names where the write came from (`model`, `skills`, `mcp-servers`, `restore`, …) rather than this funnel guessing.
+    /// The snapshot is only recorded once the disk write succeeded: a failed write leaves `agent.toml` at its previous content, so recording the in-memory manifest would put a version in the history that never existed on disk.
     fn persist_full_manifest_at(
         &self,
         entry: &librefang_types::agent::AgentEntry,
         toml_path: &std::path::Path,
+        change_source: &str,
     ) {
         let Some(dir) = toml_path.parent() else {
             warn!(agent = %entry.name, "Failed to derive parent dir for manifest persist");
@@ -153,6 +171,7 @@ impl LibreFangKernel {
                     warn!(agent = %entry.name, "Failed to persist manifest to disk: {error}");
                 } else {
                     debug!(agent = %entry.name, path = %toml_path.display(), "Persisted manifest to disk");
+                    self.record_manifest_version(entry, &toml_str, change_source);
                 }
             }
             // Not a cosmetic warning: boot reconciliation re-syncs each agent from its on-disk
@@ -189,7 +208,9 @@ impl LibreFangKernel {
     ///
     /// This is best-effort: a failure to write is logged but does not
     /// propagate as an error — the authoritative copy lives in SQLite.
-    pub fn persist_manifest_to_disk(&self, agent_id: AgentId) {
+    ///
+    /// `change_source` is the tag recorded in the version history for this write; callers pass what actually changed (`model`, `skills`, `api`, …).
+    pub fn persist_manifest_to_disk(&self, agent_id: AgentId, change_source: &str) {
         let Some(entry) = self.agents.registry.get(agent_id) else {
             return;
         };
@@ -199,7 +220,7 @@ impl LibreFangKernel {
         let Some(current_entry) = self.agents.registry.get(agent_id) else {
             return;
         };
-        self.persist_full_manifest_at(&current_entry, &toml_path);
+        self.persist_full_manifest_at(&current_entry, &toml_path, change_source);
     }
 
     /// Persist a suspend / resume to the root `enabled` key of the agent's `agent.toml`.
@@ -248,12 +269,24 @@ impl LibreFangKernel {
                 return;
             }
         };
+        // Suspend/resume rewrites `agent.toml` outside `persist_full_manifest_at`, so it records its own history snapshot or the one path an operator toggles from the dashboard would be missing from the History tab.
+        // Record the serializer's canonical layout, not `patched` (the operator's file with the `enabled` value patched), so this row is comparable with the `update` rows it sits next to instead of differing on every comment and key.
+        let snapshot = normalize_manifest_toml(&patched);
+        let change_source = if enabled { "resume" } else { "suspend" };
         if let Err(error) = atomic_write_toml(&toml_path, &patched) {
             warn!(agent = %entry.name, "Failed to persist enabled={enabled}: {error}");
+            // The registry has already moved (suspend/resume call `set_state` first), so a disk-write failure leaves state and disk disagreeing; record the attempted snapshot as `*-persist-failed` so the History tab can show it rather than going silent.
+            self.record_manifest_version(
+                entry,
+                &snapshot,
+                &format!("{change_source}-persist-failed"),
+            );
+            return;
         }
+        self.record_manifest_version(entry, &snapshot, change_source);
     }
 
-    fn persist_mcp_servers_to_disk(&self, agent_id: AgentId) {
+    fn persist_mcp_servers_to_disk(&self, agent_id: AgentId, change_source: &str) {
         let Some(entry) = self.agents.registry.get(agent_id) else {
             return;
         };
@@ -266,7 +299,7 @@ impl LibreFangKernel {
         let source = match std::fs::read_to_string(&toml_path) {
             Ok(source) => source,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                self.persist_full_manifest_at(&current_entry, &toml_path);
+                self.persist_full_manifest_at(&current_entry, &toml_path, change_source);
                 return;
             }
             Err(error) => {
@@ -285,6 +318,8 @@ impl LibreFangKernel {
             warn!(agent = %entry.name, "Failed to persist MCP servers to agent manifest: {error}");
         } else {
             debug!(agent = %entry.name, path = %toml_path.display(), "Persisted MCP servers to agent manifest");
+            // This path patches the `mcp_servers` line in place rather than re-serializing the whole manifest, so it does not pass through `persist_full_manifest_at` — without its own snapshot the MCP allowlist would be the one config change the History tab misses.
+            self.record_manifest_version(&current_entry, &patched, change_source);
         }
     }
 
@@ -409,7 +444,7 @@ impl LibreFangKernel {
         }
 
         // Write updated manifest to agent.toml so changes survive restart (#996, #1018)
-        self.persist_manifest_to_disk(agent_id);
+        self.persist_manifest_to_disk(agent_id, "model");
 
         // Clear canonical session to prevent memory poisoning from old model's responses
         let _ = self.memory.substrate.delete_canonical_session(agent_id);
@@ -532,45 +567,9 @@ impl LibreFangKernel {
         // by allowlist content so it self-invalidates when the list changes.
         self.prompt_metadata_cache.tools.remove(&agent_id);
 
-        // Reconcile declarative `[[triggers]]` from the freshly loaded
-        // manifest (#5014). Same shape as the spawn path — runs after the
-        // registry has the new manifest so the orphan policy can compare
-        // the live runtime store against the latest TOML state. Skipped
-        // when the manifest has no `[[triggers]]` and no orphan policy
-        // override, so unrelated reloads pay no work.
-        if let Some(refreshed) = self.agents.registry.get(agent_id) {
-            if !refreshed.manifest.triggers.is_empty()
-                || matches!(
-                    refreshed.manifest.reconcile_orphans,
-                    librefang_types::agent::OrphanPolicy::Warn
-                        | librefang_types::agent::OrphanPolicy::Delete
-                )
-            {
-                let report = self.workflows.triggers.reconcile_manifest_triggers(
-                    agent_id,
-                    &refreshed.manifest.triggers,
-                    refreshed.manifest.reconcile_orphans,
-                    |target_name| self.agents.registry.find_by_name(target_name).map(|e| e.id),
-                );
-                if report.mutated() {
-                    if let Err(e) = self.workflows.triggers.persist() {
-                        warn!(
-                            agent_id = %agent_id,
-                            "Failed to persist trigger reconcile on reload: {e}"
-                        );
-                    }
-                    info!(
-                        agent_id = %agent_id,
-                        created = report.created,
-                        updated = report.updated,
-                        deleted = report.deleted,
-                        skipped = report.skipped,
-                        orphans_kept = report.orphans_kept,
-                        "Reconciled manifest triggers on reload"
-                    );
-                }
-            }
-        }
+        // Reconcile declarative `[[triggers]]` from the freshly loaded manifest (#5014).
+        // Same shape as the spawn path — runs after the registry has the new manifest so the orphan policy can compare the live runtime store against the latest TOML state.
+        self.reconcile_declarative_triggers(agent_id, "reload");
 
         info!(agent_id = %agent_id, path = %toml_path.display(), "Reloaded agent manifest from disk");
         Ok(())
@@ -594,6 +593,7 @@ impl LibreFangKernel {
         &self,
         agent_id: AgentId,
         mut new_manifest: librefang_types::agent::AgentManifest,
+        change_source: &str,
     ) -> KernelResult<()> {
         let entry = self.agents.registry.get(agent_id).ok_or_else(|| {
             KernelError::LibreFang(LibreFangError::AgentNotFound(agent_id.to_string()))
@@ -643,9 +643,90 @@ impl LibreFangKernel {
         self.prompt_metadata_cache.tools.remove(&agent_id);
 
         // Persist to disk so the change survives a daemon restart.
-        self.persist_manifest_to_disk(agent_id);
+        self.persist_manifest_to_disk(agent_id, change_source);
 
         info!(agent_id = %agent_id, "Applied and persisted updated agent manifest");
+        Ok(())
+    }
+
+    /// Apply a stored manifest snapshot and reconcile the runtime side effects `update_manifest` does not run.
+    ///
+    /// A full-manifest replacement swaps the registry entry, refreshes capabilities / quota / memory, invalidates the tool cache and persists; it does not touch the runtime objects the per-field setters own.
+    /// Restoring a snapshot that moves one of those fields must run the same reconciliation they do, or the change only takes effect on the next daemon restart: a Reactive snapshot restored onto a Continuous agent keeps ticking, and the reverse starts no loop.
+    ///
+    /// - Schedule change: stop the running background loop and start the new one ([`Self::set_agent_schedule`]).
+    /// - Workspaces change: create the named workspaces and rewrite the identity files that advertise them ([`Self::set_agent_workspaces`]).
+    /// - Model or endpoint change: drop the canonical session so the previous model's responses cannot poison the new one ([`Self::set_agent_model`]).
+    /// - Declarative `[[triggers]]`: reconcile the trigger engine against the restored list, the same way `reload_agent_from_disk` does, so a restored trigger fires (or a removed one stops, under a `Warn` / `Delete` orphan policy) without waiting for a restart.
+    ///
+    /// `enabled` is live suspend/resume state, not snapshot content.
+    /// A `suspend` row records `enabled = false`, and writing that onto a running agent would leave the dashboard reporting Running while `boot.rs` reads the flag on the next start and refuses to spawn it.
+    /// The current value is pinned the same way `name`, `tags`, `workspace` and `exec_policy` are.
+    pub fn restore_manifest_snapshot(
+        self: &Arc<Self>,
+        agent_id: AgentId,
+        mut new_manifest: librefang_types::agent::AgentManifest,
+        change_source: &str,
+    ) -> KernelResult<()> {
+        let entry = self.agents.registry.get(agent_id).ok_or_else(|| {
+            KernelError::LibreFang(LibreFangError::AgentNotFound(agent_id.to_string()))
+        })?;
+        let previous = entry.manifest.clone();
+        drop(entry);
+
+        new_manifest.enabled = previous.enabled;
+        self.update_manifest(agent_id, new_manifest, change_source)?;
+
+        let Some(refreshed) = self
+            .agents
+            .registry
+            .get(agent_id)
+            .map(|entry| entry.manifest.clone())
+        else {
+            return Ok(());
+        };
+
+        if refreshed.schedule != previous.schedule {
+            self.workflows.background.stop_agent(agent_id);
+            if !matches!(
+                refreshed.schedule,
+                librefang_types::agent::ScheduleMode::Reactive
+            ) {
+                Arc::clone(self).start_background_for_agent(
+                    agent_id,
+                    &refreshed.name,
+                    &refreshed.schedule,
+                );
+            }
+        }
+
+        if refreshed.workspaces != previous.workspaces {
+            let cfg = self.config_snapshot();
+            let resolved = super::workspace_setup::ensure_named_workspaces(
+                &cfg.effective_workspaces_dir(),
+                &refreshed.workspaces,
+                &cfg.allowed_mount_roots,
+            );
+            if refreshed.generate_identity_files {
+                if let Some(workspace) = refreshed.workspace.as_ref() {
+                    super::workspace_setup::generate_identity_files(
+                        workspace, &refreshed, &resolved,
+                    );
+                }
+            }
+        }
+
+        let model_identity_changed = refreshed.model.provider != previous.model.provider
+            || refreshed.model.model != previous.model.model
+            || refreshed.model.base_url != previous.model.base_url
+            || refreshed.model.api_key_env != previous.model.api_key_env;
+        if model_identity_changed {
+            let _ = self.memory.substrate.delete_canonical_session(agent_id);
+            debug!(agent_id = %agent_id, "Cleared canonical session after manifest restore changed the model");
+        }
+
+        self.reconcile_declarative_triggers(agent_id, "restore");
+
         Ok(())
     }
 
@@ -781,7 +862,7 @@ impl LibreFangKernel {
         // only in SQLite and is wiped on the next restart. Mirrors
         // set_agent_tool_filters / set_agent_channels / set_agent_schedule /
         // set_agent_model, which all persist to disk.
-        self.persist_manifest_to_disk(agent_id);
+        self.persist_manifest_to_disk(agent_id, "skills");
 
         info!(agent_id = %agent_id, skills = ?skills, "Agent skills updated");
         Ok(())
@@ -914,7 +995,7 @@ impl LibreFangKernel {
         // reason as set_agent_skills: boot reconciliation overwrites DB-only
         // fields from the on-disk manifest, so an MCP allowlist set via the
         // dashboard would otherwise be wiped on the next restart.
-        self.persist_mcp_servers_to_disk(agent_id);
+        self.persist_mcp_servers_to_disk(agent_id, "mcp-servers");
 
         info!(agent_id = %agent_id, servers = ?servers, "Agent MCP servers updated");
         Ok(())
@@ -973,7 +1054,7 @@ impl LibreFangKernel {
             }
         }
 
-        self.persist_manifest_to_disk(agent_id);
+        self.persist_manifest_to_disk(agent_id, "workspaces");
 
         info!(agent_id = %agent_id, "Agent named workspaces updated");
         Ok(())
@@ -1003,7 +1084,7 @@ impl LibreFangKernel {
         }
 
         // Persist manifest to disk so the change survives a daemon restart.
-        self.persist_manifest_to_disk(agent_id);
+        self.persist_manifest_to_disk(agent_id, "channels");
 
         info!(agent_id = %agent_id, channels = ?channels, "Agent channel allowlist updated");
         Ok(())
@@ -1053,7 +1134,7 @@ impl LibreFangKernel {
 
         // Persist to agent.toml so the change survives a daemon restart —
         // same reasoning as set_agent_channels above.
-        self.persist_manifest_to_disk(agent_id);
+        self.persist_manifest_to_disk(agent_id, "routing");
 
         info!(
             agent_id = %agent_id,
@@ -1130,7 +1211,7 @@ impl LibreFangKernel {
         // restart doesn't replay the stale on-disk manifest over the
         // dashboard edit (#996, #1018). Best-effort: failures are logged
         // inside `persist_manifest_to_disk`.
-        self.persist_manifest_to_disk(agent_id);
+        self.persist_manifest_to_disk(agent_id, "schedule");
 
         // Stop the previous loop (no-op if none was running, e.g. agent was
         // previously Reactive) so a Reactive transition actually halts the
@@ -1211,12 +1292,80 @@ impl LibreFangKernel {
             }
         }
 
-        self.persist_manifest_to_disk(agent_id);
+        self.persist_manifest_to_disk(agent_id, "tool-filters");
 
         // Invalidate cached tool list — tool filter change affects available tools
         self.prompt_metadata_cache.tools.remove(&agent_id);
 
         Ok(())
+    }
+
+    /// Reconcile the trigger engine against the registered manifest's declarative `[[triggers]]` (#5014).
+    ///
+    /// Shared by `reload_agent_from_disk` and `restore_manifest_snapshot`, the two paths that replace a running agent's manifest wholesale.
+    /// Skipped when the manifest has no `[[triggers]]` and no orphan policy override, so unrelated reloads pay no work.
+    /// `context` only labels the log lines.
+    fn reconcile_declarative_triggers(&self, agent_id: AgentId, context: &str) {
+        let Some(refreshed) = self.agents.registry.get(agent_id) else {
+            return;
+        };
+        if refreshed.manifest.triggers.is_empty()
+            && !matches!(
+                refreshed.manifest.reconcile_orphans,
+                librefang_types::agent::OrphanPolicy::Warn
+                    | librefang_types::agent::OrphanPolicy::Delete
+            )
+        {
+            return;
+        }
+        let report = self.workflows.triggers.reconcile_manifest_triggers(
+            agent_id,
+            &refreshed.manifest.triggers,
+            refreshed.manifest.reconcile_orphans,
+            |target_name| self.agents.registry.find_by_name(target_name).map(|e| e.id),
+        );
+        if report.mutated() {
+            if let Err(e) = self.workflows.triggers.persist() {
+                warn!(
+                    agent_id = %agent_id,
+                    context,
+                    "Failed to persist manifest trigger reconcile: {e}"
+                );
+            }
+            info!(
+                agent_id = %agent_id,
+                context,
+                created = report.created,
+                updated = report.updated,
+                deleted = report.deleted,
+                skipped = report.skipped,
+                orphans_kept = report.orphans_kept,
+                "Reconciled manifest triggers"
+            );
+        }
+    }
+
+    /// Best-effort record of a manifest snapshot for version history.
+    ///
+    /// `change_source` is the call site's own tag for what changed (`model`, `skills`, `mcp-servers`, `restore`, …).
+    /// A failed snapshot costs one history row, never the config change itself, so the error is logged rather than propagated.
+    /// The schema default `unknown` covers rows written by a producer that does not classify its persist.
+    fn record_manifest_version(
+        &self,
+        entry: &librefang_types::agent::AgentEntry,
+        toml_str: &str,
+        change_source: &str,
+    ) {
+        let store = librefang_memory::ManifestVersionStore::new(self.memory.substrate.pool());
+        if let Err(e) =
+            store.record_version(&entry.id.to_string(), &entry.name, toml_str, change_source)
+        {
+            warn!(
+                agent = %entry.name,
+                error = %e,
+                "Failed to record manifest version snapshot"
+            );
+        }
     }
 }
 
@@ -1316,6 +1465,63 @@ mod mcp_manifest_patch_tests {
         assert!(patched.starts_with("enabled = false\n"));
         assert!(!toml::from_str::<AgentManifest>(&patched).unwrap().enabled);
         assert!(super::super::manifest_helpers::toml_enabled_false(&patched));
+    }
+
+    const MANIFEST_WITH_NESTED_FLAGS: &str = r#"# operator comment
+name = "nested"
+enabled = true
+module = "builtin:chat"
+
+[model]
+provider = "openai"
+model = "gpt-4o"
+
+[skill_workshop]
+enabled = false
+
+[[triggers]]
+name = "on-spawn"
+pattern = "lifecycle"
+enabled = true
+
+[rl_export]
+enabled = false
+"#;
+
+    #[test]
+    fn patch_root_enabled_rewrites_only_the_root_key() {
+        let patched = patch_root_enabled(MANIFEST_WITH_NESTED_FLAGS, false).expect("patch");
+        let expected = MANIFEST_WITH_NESTED_FLAGS.replacen(
+            "name = \"nested\"\nenabled = true",
+            "name = \"nested\"\nenabled = false",
+            1,
+        );
+        assert_eq!(patched, expected);
+
+        let value: toml::Value = toml::from_str(&patched).expect("patched file parses");
+        assert_eq!(value["enabled"].as_bool(), Some(false));
+        assert_eq!(value["skill_workshop"]["enabled"].as_bool(), Some(false));
+        assert_eq!(value["triggers"][0]["enabled"].as_bool(), Some(true));
+        assert_eq!(value["rl_export"]["enabled"].as_bool(), Some(false));
+
+        let resumed = patch_root_enabled(&patched, true).expect("patch back");
+        assert_eq!(resumed, MANIFEST_WITH_NESTED_FLAGS);
+    }
+
+    #[test]
+    fn patch_root_enabled_prepends_a_missing_root_key_instead_of_appending_into_the_last_table() {
+        let source = "name = \"bare\"\n\n[skill_workshop]\nenabled = true\n";
+        let patched = patch_root_enabled(source, false).expect("patch");
+        assert_eq!(patched, format!("enabled = false\n{source}"));
+
+        let value: toml::Value = toml::from_str(&patched).expect("patched file parses");
+        assert_eq!(value["enabled"].as_bool(), Some(false));
+        assert_eq!(value["skill_workshop"]["enabled"].as_bool(), Some(true));
+    }
+
+    #[test]
+    fn patch_root_enabled_refuses_a_file_that_does_not_parse() {
+        assert!(patch_root_enabled("name = \"broken\n[", true).is_err());
     }
 
     #[test]
