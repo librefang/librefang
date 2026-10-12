@@ -4075,7 +4075,10 @@
     "save_failed": "无法保存用户组",
     "delete_failed": "无法删除用户组",
     "member_add_failed": "无法添加成员",
-    "member_remove_failed": "无法移除成员"
+    "member_remove_failed": "无法移除成员",
+    "load_failed": "无法加载用户组",
+    "no_match_title": "没有匹配的用户组",
+    "no_match_desc": "没有用户组的名称、描述、成员或角色与搜索内容匹配。"
   },
   "userBudget": {
     "fields": {

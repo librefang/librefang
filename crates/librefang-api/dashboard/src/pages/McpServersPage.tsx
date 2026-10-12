@@ -24,6 +24,7 @@ import { Badge } from "../components/ui/Badge";
 import { PageHeader } from "../components/ui/PageHeader";
 import { ListSkeleton } from "../components/ui/Skeleton";
 import { EmptyState } from "../components/ui/EmptyState";
+import { ErrorState } from "../components/ui/ErrorState";
 import { DrawerPanel } from "../components/ui/DrawerPanel";
 import { ConfirmDialog } from "../components/ui/ConfirmDialog";
 import { Input } from "../components/ui/Input";
@@ -440,7 +441,8 @@ export function AuthBadge({
         pollInFlightRef.current = true;
         pollAttemptsRef.current += 1;
         try {
-          const status = await queryClient.fetchQuery(mcpQueries.authStatus(serverIdentity));
+          // `staleTime: 0` forces a network read: the shared options keep a status fresh for as long as the poll interval, so every other tick would otherwise be answered from cache and still count toward the attempt budget.
+          const status = await queryClient.fetchQuery({ ...mcpQueries.authStatus(serverIdentity), staleTime: 0 });
           const termination = authPollTermination(
             status.auth.state,
             popupClosed,
@@ -1741,8 +1743,16 @@ export function McpServersPage() {
           {/* Loading */}
           {serversQuery.isLoading && <ListSkeleton rows={3} />}
 
+          {/* Load failure: without this a failed list reads as "no servers configured" and pushes the operator to re-add servers that are still in config.toml. */}
+          {serversQuery.isError && data === undefined && (
+            <ErrorState
+              message={errorMessage(serversQuery.error, t("common.error"))}
+              onRetry={() => void serversQuery.refetch()}
+            />
+          )}
+
           {/* Empty */}
-          {!serversQuery.isLoading && configured.length === 0 && (
+          {data !== undefined && configured.length === 0 && (
             <EmptyState
               icon={<Plug className="h-10 w-10" />}
               title={t("mcp.empty")}
@@ -1801,7 +1811,13 @@ export function McpServersPage() {
               />
             </div>
           )}
-          {!catalogQuery.isLoading && catalogEntries.length === 0 && (
+          {catalogQuery.isError && catalogQuery.data === undefined && (
+            <ErrorState
+              message={errorMessage(catalogQuery.error, t("common.error"))}
+              onRetry={() => void catalogQuery.refetch()}
+            />
+          )}
+          {catalogQuery.data !== undefined && catalogEntries.length === 0 && (
             <EmptyState
               icon={<Store className="h-10 w-10" />}
               title={t("mcp.catalog_empty")}

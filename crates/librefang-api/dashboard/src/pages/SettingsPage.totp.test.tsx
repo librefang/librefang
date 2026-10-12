@@ -448,7 +448,11 @@ describe("SettingsPage security helpers", () => {
     expect(getRawConfigTomlMock).toHaveBeenCalledTimes(1);
     expect(createObjectUrl).toHaveBeenCalledWith(expect.any(Blob));
     expect(click).toHaveBeenCalledTimes(1);
-    expect(revokeObjectUrl).toHaveBeenCalledWith("blob:config-export");
+    // Revoking in the same task as the click can cancel the download in Safari, so the URL must outlive the click.
+    expect(revokeObjectUrl).not.toHaveBeenCalled();
+    await waitFor(() => expect(revokeObjectUrl).toHaveBeenCalledWith("blob:config-export"), {
+      timeout: 2000,
+    });
     vi.unstubAllGlobals();
   });
 });

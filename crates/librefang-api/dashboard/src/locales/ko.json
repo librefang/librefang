@@ -4074,7 +4074,10 @@
     "save_failed": "그룹을 저장하지 못했습니다",
     "delete_failed": "그룹을 삭제하지 못했습니다",
     "member_add_failed": "구성원을 추가하지 못했습니다",
-    "member_remove_failed": "구성원을 제거하지 못했습니다"
+    "member_remove_failed": "구성원을 제거하지 못했습니다",
+    "load_failed": "그룹을 불러올 수 없습니다",
+    "no_match_title": "일치하는 그룹 없음",
+    "no_match_desc": "이름, 설명, 멤버 또는 역할이 검색어와 일치하는 그룹이 없습니다."
   },
   "userBudget": {
     "fields": {

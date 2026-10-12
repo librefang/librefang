@@ -4088,7 +4088,10 @@
     "save_failed": "Nie udało się zapisać grupy",
     "delete_failed": "Nie udało się usunąć grupy",
     "member_add_failed": "Nie udało się dodać członka",
-    "member_remove_failed": "Nie udało się usunąć członka"
+    "member_remove_failed": "Nie udało się usunąć członka",
+    "load_failed": "Nie udało się wczytać grup",
+    "no_match_title": "Brak pasujących grup",
+    "no_match_desc": "Nazwa, opis, członkowie ani role żadnej grupy nie pasują do wyszukiwania."
   },
   "userBudget": {
     "fields": {

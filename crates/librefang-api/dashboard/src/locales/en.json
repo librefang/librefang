@@ -4076,7 +4076,10 @@
     "save_failed": "Could not save group",
     "delete_failed": "Could not delete group",
     "member_add_failed": "Could not add member",
-    "member_remove_failed": "Could not remove member"
+    "member_remove_failed": "Could not remove member",
+    "load_failed": "Could not load groups",
+    "no_match_title": "No matching groups",
+    "no_match_desc": "No group's name, description, members or roles match the search."
   },
   "userBudget": {
     "fields": {
