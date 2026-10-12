@@ -741,6 +741,9 @@ pub enum ScheduleMode {
     #[default]
     Reactive,
     /// Agent wakes up on a cron schedule.
+    ///
+    /// `cron` is either a fixed interval (`"every 30s"`, `"every 5m"`, `"every 2h"`, `"every 1d"`) or a 5/6-field cron expression whose fire times are evaluated in UTC, e.g. `"0 9 * * *"` for daily at 09:00 UTC (#8532).
+    /// A 5/6-field expression that does not parse or never fires leaves the loop unstarted with a `WARN`; use a cron job (`cron_create`) when a timezone is needed.
     Periodic { cron: String },
     /// Agent monitors conditions and acts when thresholds are met.
     Proactive { conditions: Vec<String> },
@@ -1248,6 +1251,25 @@ impl Default for ManifestTrigger {
     }
 }
 
+/// Tag prefixes the kernel owns rather than the operator.
+///
+/// These three are written by hand-role activation (`kernel/hands_lifecycle.rs`) and are the only tags any code branches on.
+/// `hand:` and `hand_role:` route the agent's workspace under `hands/<hand>/<role>` instead of `agents/<name>`, and `hand:` alone marks an agent autonomous for idle-wake purposes, decides whether a tool call needs an approval gate, and scopes structured memory.
+/// An operator who could add or drop one would be relocating a workspace and re-deciding an approval boundary through a field that reads like free-form metadata, so `merge_agent_tags` keeps them out of operator reach in both directions.
+///
+/// Lives here, next to [`AgentManifest::tags`], so every surface that has to
+/// tell a kernel-owned tag from an operator one — the kernel's tag merge and the
+/// API's save-as-agent-type snapshot — reads one definition rather than two.
+pub const SYSTEM_TAG_PREFIXES: [&str; 3] = ["hand:", "hand_instance:", "hand_role:"];
+
+/// Whether a tag belongs to the kernel rather than the operator.
+#[must_use]
+pub fn is_system_tag(tag: &str) -> bool {
+    SYSTEM_TAG_PREFIXES
+        .iter()
+        .any(|prefix| tag.starts_with(prefix))
+}
+
 /// Complete agent manifest — defines everything about an agent.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -1278,8 +1300,8 @@ pub struct AgentManifest {
     /// Scheduling mode.
     pub schedule: ScheduleMode,
     /// Session mode for automated (non-channel) invocations.
-    /// Controls whether background ticks, triggers, and `agent_send` calls
-    /// reuse the agent's persistent session or create a fresh one.
+    /// Controls whether triggers, `agent_send` calls, cron agent turns and workflow steps reuse the agent's persistent session or create a fresh one.
+    /// `Continuous` / `Periodic` background ticks are not among them: they run under the reserved `"autonomous"` channel, so the channel branch below always lands them on the `(agent, "autonomous")` session.
     ///
     /// Resolved session id precedence (highest first):
     /// 1. Explicit `session_id_override` from the dispatch caller (HTTP /

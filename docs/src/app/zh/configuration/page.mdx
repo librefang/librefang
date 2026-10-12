@@ -1560,6 +1560,7 @@ no_output_timeout_secs = 30
 | `safe_bins_skip_approval` | bool | `false` | 可选开启：在 `allowlist` 模式下，若 `shell_exec` 的每个基础命令都在 `safe_bins` 中，则同时跳过人工审批提示。链式命令中只要有一个基础命令不在其中，仍走审批流程。 |
 | `full_mode_skips_approval` | bool | `true` | `mode = "full"` 是否同时对 `shell_exec` 豁免全局 `approval.require_approval` 列表。设为 `false` 即可实现"命令不受限但仍需审批"。 |
 | `allowed_commands` | list of strings | `[]` | 当 `mode = "allowlist"` 时额外允许的命令。 |
+| `denied_commands` | list of strings | `[]` | 在任何 `mode` 下都拒绝执行的命令，优先级高于 `safe_bins` 与 `allowed_commands`。见下文。 |
 | `timeout_secs` | u64 | `30` | 每条命令的最大挂钟执行时间（秒）。 |
 | `max_output_bytes` | usize | `102400` | stdout+stderr 合并输出的最大大小（字节）。默认 100 KB。 |
 | `no_output_timeout_secs` | u64 | `30` | 进程在此秒数内无输出则被终止。`0` = 禁用。 |
@@ -1582,6 +1583,24 @@ no_output_timeout_secs = 30
 危险命令黑名单与 `mode` 无关，在 `deny`、`allowlist`、`full` 下都会扫描每条命令——`full` 关闭的是白名单*校验*，而不是这份黑名单。
 其覆盖范围包括 LibreFang 守护进程生命周期命令（`librefang stop` / `start` / `restart`，含 `gateway` 别名与带路径的调用形式），它们会连带重启同一守护进程上的所有 Agent 与频道适配器；以及针对守护进程自身 `librefang.db` 的写入型 SQL 与输出重定向。
 对该数据库的只读检查（`select`、`.schema`、`.dump`）以及 `librefang status` 被有意排除在外。
+
+**允许除少数命令以外的一切。** `denied_commands` 列出无论哪种模式下 Agent 都不能运行的程序，因此 `full` 加上一份简短的拒绝列表即可实现"除了 git 什么都能跑"：
+
+```toml
+[exec_policy]
+mode = "full"
+denied_commands = ["git"]
+```
+
+它对 `shell_exec` 与 `process_start` 生效。
+名称匹配不区分大小写，并忽略前导目录、引号以及 Windows 的 `.exe` / `.cmd` / `.bat` / `.com` 后缀。
+被拒绝的名称只要出现在链式命令、管道、子 shell 或命令替换中任一段的命令位置（`cd repo && git checkout .`、`echo $(git rev-parse HEAD)`）、跟在开头的 `NAME=value` 赋值之后，或出现在前缀执行器与 shell 包装器的任意参数中（`env`、`sudo`、`nohup`、`timeout`、`xargs`、`bash -c "…"`、`cmd /c …`），就会被拦截。
+作为其他命令的参数时不受影响，因此 `grep -r git src` 和 `cat .gitignore` 仍可运行。
+
+它防止的是 Agent 直接调用该命令，而不是一个刻意绕过它的 Agent 的沙箱。
+脚本文件、解释器（`python -c "…"`）、`find -exec`、别名或通过变量拼出的命令名都不会被检查。
+需要硬性保证时请使用 `mode = "allowlist"`，或把该程序从守护进程的 `PATH` 中移除。
+在 `agent.toml` 中声明了自己的 `[exec_policy]` 的 Agent 不会继承全局列表，需要单独配置 `denied_commands`。
 
 ---
 
@@ -2401,7 +2420,7 @@ max_memories_per_agent = 1000
 | `extraction_model` | string 或 null | `null` | 用于提取的 LLM 模型。支持 `提供商/模型` 格式（如 `"anthropic/claude-haiku-4"`）、`提供商:模型` 格式，或裸模型名（使用默认提供商）。为 `null` 时使用基于规则的提取。没有单独的 `extraction_provider` 字段。 |
 | `extract_categories` | list of strings | `["user_preference", "important_fact", "task_context", "relationship"]` | 从对话中提取的类别。 |
 | `session_ttl_hours` | u32 | `24` | 会话记忆的 TTL（小时）。超过此时间的记忆在每次 Agent 执行前被清理。 |
-| `duplicate_threshold` | f32 | `0.5` | 重复检测的相似度阈值（0.0-1.0）。有嵌入向量时使用余弦相似度，否则回退到 Jaccard 词重叠。 |
+| `duplicate_threshold` | f32 | `0.85` | 重复检测的相似度阈值（0.0-1.0），按 Jaccard 词重叠校准。两条记忆都有嵌入向量时改用余弦相似度，并与 `max(duplicate_threshold, 0.95)` 比较，因为同一对文本的句向量余弦远高于词重叠。peer、chat、session 或存储 scope 不同，或标识符（URL、邮箱、UUID、4 位以上数字）不同的记忆永不合并。 |
 | `confidence_decay_rate` | f64 | `0.01` | 每天的置信度衰减率。遵循指数衰减：`conf x e^(-rate x days)`。默认 `0.01` 约 70 天减半。 |
 | `max_memories_per_agent` | usize | `1000` | 每个 Agent 的最大记忆数。超出时优先淘汰原始对话行，其次才是抽取出的事实；同类之内按置信度从低到高淘汰。`0` = 无上限。 |
 

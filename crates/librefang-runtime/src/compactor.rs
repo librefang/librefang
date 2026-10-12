@@ -11,7 +11,7 @@
 //! 3. Minimal fallback without LLM (when summarization is unavailable)
 
 use crate::llm_driver::{CompletionRequest, LlmDriver};
-use crate::session_repair::{message_has_tool_use, message_is_only_tool_results};
+use crate::session_repair::message_has_tool_use;
 use crate::str_utils::safe_truncate_str;
 use librefang_memory::session::Session;
 use librefang_types::message::{ContentBlock, Message, MessageContent, Role};
@@ -529,57 +529,54 @@ fn is_oversized(message: &Message, config: &CompactionConfig) -> bool {
     message.content.text_length() > config.max_chunk_chars / 2
 }
 
-/// Extract the first `tool_use_id` from a message's ToolUse blocks.
-fn extract_first_tool_use_id(msg: &Message) -> Option<String> {
+/// Collect every `tool_use_id` from a message's ToolUse blocks.
+///
+/// An assistant turn that issues several calls carries one id per call, and its results can arrive in any order or across several deliveries, so the split guard has to consider all of them rather than the first (#8545).
+fn extract_tool_use_ids(msg: &Message) -> Vec<&str> {
     match &msg.content {
         MessageContent::Blocks(blocks) => blocks
             .iter()
             .filter_map(|b| match b {
-                ContentBlock::ToolUse { id, .. } => Some(id.clone()),
+                ContentBlock::ToolUse { id, .. } => Some(id.as_str()),
                 _ => None,
             })
-            .next(),
-        _ => None,
+            .collect(),
+        _ => Vec::new(),
     }
 }
 
-/// Check if a message is a tool-result delivery: it is a User message
-/// containing only ToolResult blocks.
+/// Check if a message is a tool-result delivery: a User message carrying at least one ToolResult block.
+///
+/// Matching on the presence of a ToolResult rather than on "only ToolResult blocks" is what keeps mixed deliveries visible to the split guard (#8545).
+/// The runtime routinely appends a `Text` note to the same user turn as the results (for example when some calls returned no output, or guidance for a denied call), and such a `[ToolResult, Text]` delivery is just as bound to its assistant ToolUse as a pure one.
+/// `context_compressor::msg_is_tool_result_delivery` uses the same definition for the same reason.
 fn is_tool_result_delivery(msg: &Message) -> bool {
-    msg.role == Role::User && message_is_only_tool_results(msg)
+    msg.role == Role::User
+        && matches!(&msg.content, MessageContent::Blocks(blocks)
+            if blocks.iter().any(|b| matches!(b, ContentBlock::ToolResult { .. })))
 }
 
-/// Scan the tail messages and look for a ToolResult whose `tool_use_id`
-/// matches the given `tool_use_id`.  Returns `true` if one is found.
-fn tail_has_matching_result(messages: &[Message], from_idx: usize, tool_use_id: &str) -> bool {
-    messages[from_idx..].iter().any(|msg| {
-        if !is_tool_result_delivery(msg) {
-            return false;
-        }
-        if let MessageContent::Blocks(blocks) = &msg.content {
-            blocks.iter().any(|b| {
-                if let ContentBlock::ToolResult {
-                    tool_use_id: id, ..
-                } = b
-                {
-                    id == tool_use_id
-                } else {
-                    false
-                }
-            })
-        } else {
-            false
-        }
-    })
+/// Whether `msg` is a tool-result delivery answering any of `tool_use_ids`.
+fn delivers_result_for(msg: &Message, tool_use_ids: &[&str]) -> bool {
+    if !is_tool_result_delivery(msg) {
+        return false;
+    }
+    match &msg.content {
+        MessageContent::Blocks(blocks) => blocks.iter().any(|b| {
+            matches!(b, ContentBlock::ToolResult { tool_use_id, .. }
+                if tool_use_ids.contains(&tool_use_id.as_str()))
+        }),
+        _ => false,
+    }
 }
 
 /// Adjust the head/tail split point to avoid splitting a ToolUse/ToolResult
 /// pair that spans the boundary.
 ///
-/// If the head ends with an assistant ToolUse and the tail begins with the
-/// matching ToolResult delivery, the pair would be incorrectly separated by
-/// summarization.  We detect this and shift the split so the ToolResult
-/// delivery is included in the head instead.
+/// The tool cycle straddling the boundary is the assistant ToolUse turn at the end of the head, or the one just before any tool-result deliveries the head already ends with (a split landing between two deliveries of the same cycle).
+/// When the head ends with the assistant turn itself, the first delivery in the kept region that answers one of its calls starts the cycle's results; when the head already ends with some of its deliveries, only a delivery opening the kept region can continue it.
+/// The split is then moved past that delivery and every directly following delivery that also answers one of the turn's calls, so the whole cycle is summarised together and the kept window cannot begin with an orphaned ToolResult — which a strict provider rejects with a 400 (#8545).
+/// The extension stops at the end of that contiguous run rather than at the last matching delivery anywhere in the kept region: some OpenAI-compatible servers reuse ids such as `call_0` on every turn, and a later turn's delivery carrying a reused id would otherwise pull most of the kept window into the summary, or move a boundary that already falls between two complete cycles.
 ///
 /// Returns the adjusted split index (or the original `split_at` if no
 /// adjustment is needed).
@@ -594,61 +591,53 @@ pub fn adjust_split_for_tool_pair(
     split_at: usize,
     keep_recent: usize,
 ) -> usize {
-    if split_at == 0 {
+    if split_at == 0 || split_at >= messages.len() {
         return split_at;
     }
 
-    // The head is [0, split_at), the tail is [split_at, len)
-    let head_end_idx = split_at - 1;
-    let head_end = &messages[head_end_idx];
+    // The head is [0, split_at), the tail is [split_at, len).
+    // Step back over deliveries the head already ends with to reach the assistant turn that opened the cycle.
+    let mut anchor_idx = split_at - 1;
+    while anchor_idx > 0 && is_tool_result_delivery(&messages[anchor_idx]) {
+        anchor_idx -= 1;
+    }
+    let anchor = &messages[anchor_idx];
 
-    // Only consider the case where the head ends with an unresolved ToolUse
-    if head_end.role != Role::Assistant || !message_has_tool_use(head_end) {
+    // Only consider the case where the cycle opens with an assistant ToolUse.
+    if anchor.role != Role::Assistant || !message_has_tool_use(anchor) {
+        return split_at;
+    }
+    let tool_use_ids = extract_tool_use_ids(anchor);
+    if tool_use_ids.is_empty() {
         return split_at;
     }
 
-    let Some(tool_use_id) = extract_first_tool_use_id(head_end) else {
+    // Locate the first of the cycle's deliveries in the kept region.
+    let scan_end = split_at.saturating_add(keep_recent).min(messages.len());
+    let head_ends_inside_results = anchor_idx + 1 < split_at;
+    let first_match = if head_ends_inside_results {
+        // The head already holds part of the cycle's results, so only a delivery opening the kept region continues it.
+        delivers_result_for(&messages[split_at], &tool_use_ids).then_some(split_at)
+    } else {
+        (split_at..scan_end).find(|&i| delivers_result_for(&messages[i], &tool_use_ids))
+    };
+    let Some(first_match) = first_match else {
         return split_at;
     };
 
-    // Check if any message in the tail (within the kept region) is a matching
-    // ToolResult delivery
-    if !tail_has_matching_result(messages, split_at, &tool_use_id) {
-        return split_at;
+    // Extend over the deliveries that directly follow it and still answer the cycle's calls.
+    let mut last_match = first_match;
+    while last_match + 1 < scan_end && delivers_result_for(&messages[last_match + 1], &tool_use_ids)
+    {
+        last_match += 1;
     }
 
-    // The tail starts with the matching ToolResult -- shift split_at to include
-    // that result delivery message in the head so the pair stays together.
-    // Walk forward from split_at to find the ToolResult delivery.
-    for i in split_at..(split_at + keep_recent) {
-        if i >= messages.len() {
-            break;
-        }
-        if is_tool_result_delivery(&messages[i]) {
-            if let MessageContent::Blocks(blocks) = &messages[i].content {
-                let has_match = blocks.iter().any(|b| {
-                    if let ContentBlock::ToolResult {
-                        tool_use_id: id, ..
-                    } = b
-                    {
-                        id == &tool_use_id
-                    } else {
-                        false
-                    }
-                });
-                if has_match {
-                    debug!(
-                        split_at,
-                        new_split = i + 1,
-                        "Head boundary would split ToolUse/ToolResult pair -- extending head"
-                    );
-                    return i + 1;
-                }
-            }
-        }
-    }
-
-    split_at
+    debug!(
+        split_at,
+        new_split = last_match + 1,
+        "Head boundary would split ToolUse/ToolResult pair -- extending head"
+    );
+    last_match + 1
 }
 
 /// Build conversation text from a slice of messages (block-aware).
@@ -2737,5 +2726,236 @@ mod tests {
         assert_eq!(merged.threshold, baseline.threshold);
         assert_eq!(merged.keep_recent, baseline.keep_recent);
         assert_eq!(merged.max_summary_tokens, baseline.max_summary_tokens);
+    }
+
+    // --- Split guard on mixed tool-result deliveries (#8545) -------------
+
+    fn tool_use_turn(ids: &[&str]) -> Message {
+        Message {
+            role: Role::Assistant,
+            content: MessageContent::Blocks(
+                ids.iter()
+                    .map(|id| ContentBlock::ToolUse {
+                        id: id.to_string(),
+                        name: "shell_exec".to_string(),
+                        input: serde_json::json!({}),
+                        provider_metadata: None,
+                    })
+                    .collect(),
+            ),
+            pinned: false,
+            timestamp: None,
+        }
+    }
+
+    /// A delivery answering `ids`, followed by the trailing note the runtime appends to the same user turn when some calls produced no output.
+    fn mixed_delivery(ids: &[&str]) -> Message {
+        let mut blocks: Vec<ContentBlock> = ids
+            .iter()
+            .map(|id| ContentBlock::ToolResult {
+                tool_use_id: id.to_string(),
+                tool_name: "shell_exec".to_string(),
+                content: "ok".to_string(),
+                is_error: false,
+                status: Default::default(),
+                approval_request_id: None,
+            })
+            .collect();
+        blocks.push(ContentBlock::Text {
+            text: "[System: 1 tool(s) returned no output]".to_string(),
+            provider_metadata: None,
+        });
+        Message {
+            role: Role::User,
+            content: MessageContent::Blocks(blocks),
+            pinned: false,
+            timestamp: None,
+        }
+    }
+
+    /// Plain conversation, then a tool cycle whose assistant turn ends the head, then more conversation.
+    /// Returns the messages and the raw split index that lands right after the assistant ToolUse.
+    fn history_with_cycle_at_boundary(
+        delivery: Message,
+        keep_recent: usize,
+    ) -> (Vec<Message>, usize) {
+        let mut messages = Vec::new();
+        for i in 0..6 {
+            messages.push(Message::user(format!("question {i}")));
+            messages.push(Message::assistant(format!("answer {i}")));
+        }
+        messages.push(Message::user("run the tools"));
+        messages.push(tool_use_turn(&["call_a", "call_b"]));
+        let raw_split = messages.len();
+        messages.push(delivery);
+        messages.push(Message::assistant("done"));
+        while messages.len() < raw_split + keep_recent {
+            let n = messages.len();
+            messages.push(Message::user(format!("follow-up {n}")));
+            messages.push(Message::assistant(format!("reply {n}")));
+        }
+        messages.truncate(raw_split + keep_recent);
+        (messages, raw_split)
+    }
+
+    fn starts_with_orphan_result(kept: &[Message]) -> bool {
+        let mut seen = std::collections::BTreeSet::new();
+        for m in kept {
+            if let MessageContent::Blocks(blocks) = &m.content {
+                for b in blocks {
+                    match b {
+                        ContentBlock::ToolUse { id, .. } => {
+                            seen.insert(id.clone());
+                        }
+                        ContentBlock::ToolResult { tool_use_id, .. }
+                            if !seen.contains(tool_use_id) =>
+                        {
+                            return true;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    #[test]
+    fn split_guard_keeps_mixed_delivery_with_its_tool_use() {
+        let keep_recent = 10;
+        let (messages, raw_split) =
+            history_with_cycle_at_boundary(mixed_delivery(&["call_a", "call_b"]), keep_recent);
+        assert_eq!(
+            messages.len() - keep_recent,
+            raw_split,
+            "test invariant: the keep_recent boundary must land right after the assistant ToolUse"
+        );
+
+        let adjusted = adjust_split_for_tool_pair(&messages, raw_split, keep_recent);
+        assert_eq!(
+            adjusted,
+            raw_split + 1,
+            "a [ToolResult, ToolResult, Text] delivery must move into the head with its ToolUse"
+        );
+        assert!(!starts_with_orphan_result(&messages[adjusted..]));
+    }
+
+    #[test]
+    fn split_guard_matches_any_tool_use_id_not_only_the_first() {
+        // The delivery answers only the assistant turn's second call: matching on the first id alone would leave the split unchanged.
+        let keep_recent = 10;
+        let (messages, raw_split) =
+            history_with_cycle_at_boundary(mixed_delivery(&["call_b"]), keep_recent);
+
+        let adjusted = adjust_split_for_tool_pair(&messages, raw_split, keep_recent);
+        assert_eq!(adjusted, raw_split + 1);
+        assert!(!starts_with_orphan_result(&messages[adjusted..]));
+    }
+
+    #[test]
+    fn split_guard_covers_split_between_two_deliveries_of_one_cycle() {
+        // Results for one assistant turn arriving in two deliveries, with the split landing between them.
+        let mut messages = vec![
+            Message::user("old question"),
+            Message::assistant("old answer"),
+            Message::user("run the tools"),
+            tool_use_turn(&["call_a", "call_b"]),
+            mixed_delivery(&["call_a"]),
+        ];
+        let raw_split = messages.len();
+        messages.push(mixed_delivery(&["call_b"]));
+        messages.push(Message::assistant("done"));
+        messages.push(Message::user("next"));
+
+        let adjusted = adjust_split_for_tool_pair(&messages, raw_split, 10);
+        assert_eq!(adjusted, raw_split + 1);
+        assert!(!starts_with_orphan_result(&messages[adjusted..]));
+    }
+
+    #[test]
+    fn split_guard_leaves_clean_boundary_unchanged() {
+        let mut messages = vec![
+            Message::user("q"),
+            tool_use_turn(&["call_a"]),
+            mixed_delivery(&["call_a"]),
+            Message::assistant("done"),
+        ];
+        let raw_split = messages.len();
+        messages.push(Message::user("next"));
+        messages.push(Message::assistant("reply"));
+        assert_eq!(
+            adjust_split_for_tool_pair(&messages, raw_split, 10),
+            raw_split
+        );
+        // A split right after a delivery that completed its cycle is clean too.
+        assert_eq!(adjust_split_for_tool_pair(&messages, 3, 10), 3);
+    }
+
+    #[test]
+    fn split_guard_ignores_a_later_turn_reusing_the_same_tool_use_id() {
+        // Some OpenAI-compatible servers emit `call_0` on every turn, so a later cycle's delivery can carry the boundary cycle's id.
+        let mut messages = vec![
+            Message::user("q1"),
+            tool_use_turn(&["call_0"]),
+            mixed_delivery(&["call_0"]),
+        ];
+        let complete_cycle_split = messages.len();
+        messages.push(Message::assistant("done 1"));
+        messages.push(Message::user("q2"));
+        messages.push(tool_use_turn(&["call_0"]));
+        messages.push(mixed_delivery(&["call_0"]));
+        messages.push(Message::assistant("done 2"));
+
+        // A boundary right after a complete cycle is clean and must not move.
+        assert_eq!(
+            adjust_split_for_tool_pair(&messages, complete_cycle_split, 10),
+            complete_cycle_split
+        );
+        // A boundary inside the first cycle moves past its own delivery only, not the later turn's.
+        assert_eq!(adjust_split_for_tool_pair(&messages, 2, 10), 3);
+    }
+
+    #[tokio::test]
+    async fn compact_messages_never_keeps_an_orphaned_mixed_delivery() {
+        use crate::llm_driver::{CompletionResponse, LlmError};
+        use async_trait::async_trait;
+
+        struct FailingDriver;
+
+        #[async_trait]
+        impl LlmDriver for FailingDriver {
+            async fn complete(
+                &self,
+                _req: CompletionRequest,
+            ) -> Result<CompletionResponse, LlmError> {
+                Err(LlmError::Http("connection refused".to_string()))
+            }
+        }
+
+        let keep_recent = 10;
+        let (messages, raw_split) =
+            history_with_cycle_at_boundary(mixed_delivery(&["call_a", "call_b"]), keep_recent);
+        let config = CompactionConfig {
+            threshold: 10,
+            keep_recent,
+            max_retries: 0,
+            ..CompactionConfig::default()
+        };
+
+        let result = compact_messages(
+            Arc::new(FailingDriver),
+            "test-model",
+            &messages,
+            &config,
+            librefang_types::model_catalog::ReasoningEchoPolicy::None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.compacted_count, raw_split + 1);
+        assert!(
+            !starts_with_orphan_result(&result.kept_messages),
+            "the kept window must not begin with a ToolResult whose ToolUse was summarised away"
+        );
     }
 }

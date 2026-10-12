@@ -33,6 +33,7 @@ api-error-manifest-too-large = Manifest zu gross (max 1MB)
 api-error-manifest-invalid-format = Ungueltiges Manifest-Format
 api-error-manifest-signature-mismatch = Signierter Manifest-Inhalt stimmt nicht mit manifest_toml ueberein
 api-error-manifest-signature-failed = Manifest-Signaturpruefung fehlgeschlagen
+api-error-manifest-signed-template-conflict = signed_manifest kann nicht mit template kombiniert werden; signiere stattdessen das inline manifest_toml
 
 # Auth errors
 api-error-auth-invalid-key = Ungueltiger API-Schluessel

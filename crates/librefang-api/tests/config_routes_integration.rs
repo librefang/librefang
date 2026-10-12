@@ -234,6 +234,8 @@ async fn get_config_exposes_writable_fields_that_used_to_be_write_only() {
         "exec_policy.allowed_env_vars",
         "exec_policy.safe_bins_skip_approval",
         "exec_policy.full_mode_skips_approval",
+        // #8536: writable under `exec_policy.`, and its empty default is skipped on serialize, so only an explicit entry in the response builder makes it readable.
+        "exec_policy.denied_commands",
         "session.reset",
         "session.context_injection",
         "memory.decay",

@@ -536,10 +536,7 @@ pub(super) fn ensure_workspace(workspace: &Path) -> KernelResult<()> {
 }
 
 pub(crate) fn safe_path_component(input: &str, fallback: &str) -> String {
-    let sanitized: String = input
-        .chars()
-        .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
-        .collect();
+    let sanitized = librefang_types::agent_type_store::workspace_component(input);
     if sanitized.is_empty() {
         fallback.to_string()
     } else {

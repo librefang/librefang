@@ -16103,6 +16103,187 @@ async fn non_streaming_turn_on_canonical_session_auto_compacts_without_self_dead
     kernel.shutdown();
 }
 
+/// Boot a driverless kernel and spawn an agent pinned to a small context window, with `messages` seeded messages of roughly 200 estimated tokens each in its canonical session.
+/// Shared by the #8519 tests below.
+async fn kernel_with_small_window_session(
+    name: &str,
+    context_window: u64,
+    messages: usize,
+) -> (Arc<LibreFangKernel>, AgentId, SessionId) {
+    use librefang_memory::session::Session as MemSession;
+    use librefang_types::message::Message;
+
+    let dir = tempfile::tempdir().unwrap();
+    let home_dir = dir.path().to_path_buf();
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+    // Same discipline as `reentrant_test_kernel`: keep the tempdir alive until process exit so a background write that outlives `shutdown()` cannot race its teardown.
+    std::mem::forget(dir);
+    let kernel = Arc::new(
+        LibreFangKernel::boot_with_config(KernelConfig {
+            home_dir: home_dir.clone(),
+            data_dir: home_dir.join("data"),
+            default_model: DefaultModelConfig::driverless(),
+            ..KernelConfig::default()
+        })
+        .expect("kernel should boot"),
+    );
+    kernel.set_self_handle();
+    let mut manifest = test_manifest(name, "tool-heavy compaction trigger regression", vec![]);
+    manifest.model.context_window = Some(context_window);
+    let agent_id = kernel.spawn_agent(manifest).expect("spawn should succeed");
+    let session_id = kernel
+        .agents
+        .registry
+        .get(agent_id)
+        .expect("agent entry")
+        .session_id;
+    kernel
+        .memory
+        .substrate
+        .save_session(&MemSession {
+            id: session_id,
+            agent_id,
+            parent_session_id: None,
+            messages: (0..messages)
+                .map(|i| Message::user(format!("seeded message {i}: {}", "word ".repeat(160))))
+                .collect(),
+            context_window_tokens: 0,
+            label: None,
+            model_override: None,
+            messages_generation: 0,
+            last_repaired_generation: None,
+            peer_id: None,
+        })
+        .expect("seeding the session should succeed");
+    (kernel, agent_id, session_id)
+}
+
+/// A tool set large enough to carry the request over a 10K-token window's 70% threshold on its own schemas.
+fn heavy_tool_set() -> Vec<librefang_types::tool::ToolDefinition> {
+    (0..20)
+        .map(|i| librefang_types::tool::ToolDefinition {
+            name: format!("mcp_bundle_tool_{i:02}"),
+            description: "Performs one operation of a large MCP bundle. ".repeat(10),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "query text ".repeat(20)},
+                    "options": {"type": "string", "description": "option text ".repeat(20)},
+                },
+                "required": ["query"],
+            }),
+        })
+        .collect()
+}
+
+/// The pre-turn compaction trigger must price the tool schemas the turn sends (#8519).
+/// The agent loop's overflow guard counts them; the trigger did not, and it also compared against the 200K default window rather than the agent's own, so on a tool-heavy agent the guard trimmed history every turn while compaction never fired on tokens.
+/// Here the history and prompt alone stay under 70% of the 10K window, the tool schemas carry the request over it, and the message count is under `threshold_messages`, so only a trigger that prices the whole request compacts.
+#[tokio::test(flavor = "multi_thread")]
+async fn auto_compaction_before_turn_prices_tool_schemas() {
+    use librefang_runtime::compactor::{estimate_token_count, CompactionConfig};
+
+    const CONTEXT_WINDOW: u64 = 10_000;
+    const SEEDED_MESSAGES: usize = 20;
+    let (kernel, agent_id, session_id) =
+        kernel_with_small_window_session("tool-heavy-pre-turn", CONTEXT_WINDOW, SEEDED_MESSAGES)
+            .await;
+    let mut session = kernel
+        .memory
+        .substrate
+        .get_session(session_id)
+        .unwrap()
+        .expect("seeded session");
+    let tools = heavy_tool_set();
+    let config = CompactionConfig::default();
+    let threshold = (CONTEXT_WINDOW as f64 * config.token_threshold_ratio) as usize;
+    assert!(
+        session.messages.len() < config.threshold,
+        "test invariant: the message-count trigger must not fire"
+    );
+    assert!(
+        estimate_token_count(&session.messages, Some("sys"), None) < threshold,
+        "test invariant: history and prompt alone must stay under the token threshold"
+    );
+    assert!(
+        estimate_token_count(&session.messages, Some("sys"), Some(&tools)) > threshold,
+        "test invariant: the tool schemas must carry the request over the token threshold"
+    );
+
+    kernel
+        .auto_compact_before_turn(agent_id, &mut session, "sys", &tools, &config, true)
+        .await;
+
+    assert!(
+        session.messages.len() < SEEDED_MESSAGES,
+        "the pre-turn trigger must compact once the tool schemas push the request over the threshold, but the session still holds {} of {SEEDED_MESSAGES} messages",
+        session.messages.len()
+    );
+
+    kernel.shutdown();
+}
+
+/// Control for the test above: the same session with no tools stays under the threshold, so the trigger must leave it alone.
+/// Without it, the test above would also pass for a trigger that compacts unconditionally.
+#[tokio::test(flavor = "multi_thread")]
+async fn auto_compaction_before_turn_skips_when_request_fits() {
+    use librefang_runtime::compactor::CompactionConfig;
+
+    const SEEDED_MESSAGES: usize = 20;
+    let (kernel, agent_id, session_id) =
+        kernel_with_small_window_session("tool-light-pre-turn", 10_000, SEEDED_MESSAGES).await;
+    let mut session = kernel
+        .memory
+        .substrate
+        .get_session(session_id)
+        .unwrap()
+        .expect("seeded session");
+
+    kernel
+        .auto_compact_before_turn(
+            agent_id,
+            &mut session,
+            "sys",
+            &[],
+            &CompactionConfig::default(),
+            true,
+        )
+        .await;
+
+    assert_eq!(session.messages.len(), SEEDED_MESSAGES);
+    kernel.shutdown();
+}
+
+/// The gate inside `compact_agent_session_in_lock_scope` must agree with the trigger that called it (#8519).
+/// The automatic trigger hands over the request it measured; a gate that re-estimated without the tool schemas answered "No compaction needed" to a trigger that had just decided otherwise.
+#[tokio::test(flavor = "multi_thread")]
+async fn compaction_gate_prices_the_triggers_request_footprint() {
+    const SEEDED_MESSAGES: usize = 20;
+    let (kernel, agent_id, session_id) =
+        kernel_with_small_window_session("tool-heavy-gate", 10_000, SEEDED_MESSAGES).await;
+    let tools = heavy_tool_set();
+
+    let result = kernel
+        .compact_agent_session_in_lock_scope(
+            agent_id,
+            Some(session_id),
+            false,
+            true,
+            Some(super::agent_runtime::TurnRequestFootprint {
+                system_prompt: "sys",
+                tools: &tools,
+            }),
+        )
+        .await
+        .expect("compaction should complete with the fallback summary");
+    assert!(
+        !result.starts_with("No compaction needed"),
+        "the gate must price the trigger's tool schemas; got: {result}"
+    );
+
+    kernel.shutdown();
+}
+
 /// `compact_agent_session_with_id` with no explicit session id must not take the per-agent lock twice.
 /// It acquires `agent_msg_locks[agent]` on the caller's behalf and then delegates with `agent_scoped = false`; when `session_id_override` is `None` the helper falls past its session arm into a fallback that reaches for that same mutex.
 /// The `is_held` check guarding that fallback is what lets it through rather than what stops it: a caller arriving through `KernelApi` has no `held_agent_locks::scope`, registration outside one is inert, so `is_held` answers `false` at both acquisitions and the second parks the task on a lock only that task could release.

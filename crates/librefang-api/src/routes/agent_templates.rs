@@ -976,7 +976,10 @@ fn create_agent_type_from_manifest_versioned(
 ) -> Result<String, CreateAgentTypeError> {
     use librefang_types::agent_type_store::create_agent_type_from_manifest_in;
 
-    let rendered = create_agent_type_from_manifest_in(home_dir, name, manifest)?;
+    // `None`: this funnel is the caller-authoring path (raw TOML from the
+    // operator), with no source agent whose own name it may collide with — the
+    // shadow check then applies unconditionally, as its `snapshot_of` doc says.
+    let rendered = create_agent_type_from_manifest_in(home_dir, name, manifest, None)?;
     let _ = record_template_version(state, name, &rendered, source.as_str());
     Ok(rendered)
 }
@@ -1747,7 +1750,10 @@ pub async fn promote_agent_type(
 /// The failure is returned as well as logged because it is not equally harmless at every call site.
 /// A snapshot taken *after* a write costs one history row when it fails, and the content it describes is still on disk — those callers discard the `Result` on purpose.
 /// The `pre-registry-restore` snapshot in [`restore_from_registry`] is the opposite case: it is the only copy of content the very next line overwrites, so it has to be able to refuse.
-fn record_template_version(
+///
+/// `pub(crate)` so `save_agent_as_agent_type` can record the same baseline every
+/// other agent-type write path records.
+pub(crate) fn record_template_version(
     state: &AppState,
     name: &str,
     toml: &str,

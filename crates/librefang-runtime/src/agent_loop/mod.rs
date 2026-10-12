@@ -290,6 +290,28 @@ fn apply_context_compaction(
             start
         });
 
+    // The kernel's compaction path audits its kept window before saving it; this in-turn path installs the engine's window directly, and nothing between here and the request builder repairs it unless an overflow recovery also fires (#8545).
+    // A window cut inside a tool cycle opens with ToolResults whose calls were summarised away, which strict providers reject with a non-retryable 400.
+    // Only the history before the current turn is repaired, so the turn boundary located above stays exact, and only when it is actually broken, so a clean window keeps its message shape.
+    let (history, current_turn_messages) = compacted.split_at(compacted_new_messages_start);
+    let (compacted, compacted_new_messages_start) =
+        if crate::session_repair::has_orphaned_tool_results(history) {
+            let (repaired, stats) = crate::session_repair::validate_and_repair_with_stats(history);
+            warn!(
+                orphaned_results_removed = stats.orphaned_results_removed,
+                results_reordered = stats.results_reordered,
+                synthetic_results_inserted = stats.synthetic_results_inserted,
+                messages_merged = stats.messages_merged,
+                "Context compaction left a split tool cycle in the kept window; repaired it before the next request"
+            );
+            let start = repaired.len();
+            let mut joined = repaired;
+            joined.extend_from_slice(current_turn_messages);
+            (joined, start)
+        } else {
+            (compacted, compacted_new_messages_start)
+        };
+
     let mut rebuilt = Vec::with_capacity(injections.head.len() + compacted.len() + 1 + tail.len());
     rebuilt.extend(injections.head.iter().cloned());
     let history_offset = rebuilt.len();

@@ -1435,3 +1435,115 @@ def test_negotiated_fallbacks_that_deliver_report_nothing(monkeypatch, capsys):
         "a negotiated fallback that delivers the message must stay silent: "
         f"{captured.err}"
     )
+
+
+# ---- voice refused by the recipient's privacy setting (#8584) -----
+
+_VOICE_FORBIDDEN = {"ok": False, "_http": 400, "error_code": 400,
+                    "description": "Bad Request: VOICE_MESSAGES_FORBIDDEN"}
+
+
+def _ogg_opus_bytes() -> bytes:
+    page = bytearray(27)
+    page[:4] = b"OggS"
+    page[26] = 1
+    return bytes(page) + bytes([19]) + b"OpusHead" + bytes(11)
+
+
+@pytest.mark.asyncio
+async def test_voice_refused_by_recipient_is_resent_as_document(monkeypatch):
+    calls = []
+
+    def fake(self, method, payload):
+        calls.append((method, payload))
+        if method == "sendVoice":
+            return dict(_VOICE_FORBIDDEN)
+        return {"ok": True, "result": {"message_id": 1}}
+
+    monkeypatch.setattr(tg.TelegramAdapter, "_call", fake)
+    a = _adapter()
+    await a.on_command(tg.protocol.Send(
+        "c1", "", {"Voice": {"url": "https://example.com/tts.ogg",
+                             "caption": "your answer"}}, None, {}))
+
+    assert [m for m, _ in calls] == ["sendVoice", "sendDocument"]
+    doc = calls[1][1]
+    assert doc["document"] == "https://example.com/tts.ogg"
+    assert "voice" not in doc
+    assert doc["caption"] == "your answer"
+    assert doc["chat_id"] == "c1"
+
+
+@pytest.mark.asyncio
+async def test_voice_file_refused_by_recipient_is_resent_as_document(
+        monkeypatch):
+    calls = []
+
+    def fake(self, method, payload):
+        calls.append((method, payload))
+        if method == "sendVoice":
+            return dict(_VOICE_FORBIDDEN)
+        return {"ok": True}
+
+    monkeypatch.setattr(tg.TelegramAdapter, "_call", fake)
+    a = _adapter()
+    await a.on_command(tg.protocol.Send(
+        "c1", "", {"File": {"url": "https://example.com/note.ogg",
+                            "filename": "note.ogg"}}, None, {}))
+
+    assert [m for m, _ in calls] == ["sendVoice", "sendDocument"]
+    assert calls[1][1]["document"] == "https://example.com/note.ogg"
+
+
+@pytest.mark.asyncio
+async def test_inline_voice_refused_by_recipient_is_uploaded_as_document(
+        monkeypatch):
+    """The `channel_send(file_path=….ogg)` path: inline Ogg/Opus bytes."""
+    uploads = []
+
+    def fake_multipart(url, fields, file_field, filename, mime, data,
+                       timeout):
+        uploads.append((url.rsplit("/", 1)[-1], file_field, filename, data))
+        if file_field == "voice":
+            return dict(_VOICE_FORBIDDEN)
+        return {"ok": True}
+
+    monkeypatch.setattr(tg, "_multipart", fake_multipart)
+    errors = []
+    monkeypatch.setattr(tg.log, "error",
+                        lambda *a_, **k_: errors.append((a_, k_)))
+    voice = _ogg_opus_bytes()
+    a = _adapter()
+    await a.on_command(tg.protocol.Send(
+        "c1", "", {"FileData": {"data": list(voice), "filename": "tts.ogg",
+                                "mime_type": "audio/ogg"}}, None, {}))
+
+    assert [(m, f, n) for m, f, n, _ in uploads] == [
+        ("sendVoice", "voice", "tts.ogg"),
+        ("sendDocument", "document", "tts.ogg"),
+    ]
+    assert uploads[1][3] == voice
+    # The audio reached the chat, so nothing may claim it did not.
+    assert errors == []
+
+
+@pytest.mark.asyncio
+async def test_other_voice_refusals_are_not_downgraded(monkeypatch):
+    calls = []
+
+    def fake(self, method, payload):
+        calls.append(method)
+        return {"ok": False, "_http": 400, "error_code": 400,
+                "description": "Bad Request: chat not found"}
+
+    monkeypatch.setattr(tg.TelegramAdapter, "_call", fake)
+    errors = []
+    monkeypatch.setattr(tg.log, "error",
+                        lambda *a_, **k_: errors.append(k_))
+    a = _adapter()
+    await a.on_command(tg.protocol.Send(
+        "c1", "", {"Voice": {"url": "https://example.com/tts.ogg"}},
+        None, {}))
+
+    assert calls == ["sendVoice"]
+    assert errors and errors[0]["method"] == "sendVoice"

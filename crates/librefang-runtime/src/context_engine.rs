@@ -647,6 +647,10 @@ impl ContextEngine for DefaultContextEngine {
                     "ContextEngine: leading-user repair left no user turn — keeping history as-is"
                 );
             }
+        } else if crate::session_repair::has_orphaned_tool_results(messages) {
+            // A split tool cycle is not specific to overflow: a compaction just before this call keeps the window small by design, so the branch above does not run, and an orphaned ToolResult would reach the wire as a `role: "tool"` message without its `tool_calls` (#8545).
+            warn!("ContextEngine: history carries orphaned tool results — repairing before the request");
+            *messages = crate::session_repair::validate_and_repair(messages);
         }
 
         // Stage 2: Context guard — compact oversized tool results

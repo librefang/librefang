@@ -740,21 +740,9 @@ pub(super) fn peer_scoped_key(
     }
 }
 
-/// Tag prefixes the kernel owns rather than the operator.
-///
-/// These three are written by hand-role activation (`kernel/hands_lifecycle.rs`) and are the only tags any code branches on.
-/// `hand:` and `hand_role:` route the agent's workspace under `hands/<hand>/<role>` instead of `agents/<name>` (`backfill_workspace_dir` in `kernel/workspace_setup.rs`), and `hand:` alone marks an agent autonomous for idle-wake purposes (`kernel/messaging.rs`), decides whether a tool call needs an approval gate (`kernel/handles/approval_gate.rs`), and scopes structured memory (`librefang-memory/src/structured.rs`).
-/// An operator who could add or drop one would be relocating a workspace and re-deciding an approval boundary through a field that reads like free-form metadata, so [`merge_agent_tags`] keeps them out of operator reach in both directions.
-const SYSTEM_TAG_PREFIXES: [&str; 3] = ["hand:", "hand_instance:", "hand_role:"];
-
-/// Whether a tag belongs to the kernel rather than the operator.
-fn is_system_tag(tag: &str) -> bool {
-    SYSTEM_TAG_PREFIXES
-        .iter()
-        .any(|prefix| tag.starts_with(prefix))
-}
-
 /// Merge an incoming tag list over the tags an agent is currently running with.
+///
+/// Kernel-owned tag prefixes — kept out of operator reach in both directions — are defined in `librefang_types::agent::SYSTEM_TAG_PREFIXES`; see that definition for why the set matters.
 ///
 /// System-owned tags are taken from `live` and operator-owned tags from `incoming`, so a caller that submits a whole manifest can freely rewrite the operator half without being able to forge, drop or preserve-by-accident the kernel half.
 /// A submitted system tag is dropped rather than rejected: the round-trip a dashboard performs is GET-manifest / edit-one-field / PUT-manifest, and echoing back the `hand:` tags it was just shown must not fail the write.

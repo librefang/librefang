@@ -1259,6 +1259,34 @@ pub fn message_has_tool_use(msg: &Message) -> bool {
     }
 }
 
+/// Whether any `ToolResult` in `messages` answers a `ToolUse` id that no earlier message issued.
+///
+/// This is the shape a history narrowed at the front leaves behind when the cut lands inside a tool cycle: the kept window opens with results whose calls were summarised or trimmed away.
+/// OpenAI-compatible providers serialize each such result as a `role: "tool"` message with no preceding `tool_calls` and reject the whole request with a 400 (#8545).
+/// It is a read-only scan with no allocation beyond the id set, so callers can run it on every request and pay for [`validate_and_repair`] only when it reports a defect.
+pub fn has_orphaned_tool_results(messages: &[Message]) -> bool {
+    let mut issued: HashSet<&str> = HashSet::new();
+    for msg in messages {
+        let MessageContent::Blocks(blocks) = &msg.content else {
+            continue;
+        };
+        for block in blocks {
+            match block {
+                ContentBlock::ToolUse { id, .. } => {
+                    issued.insert(id.as_str());
+                }
+                ContentBlock::ToolResult { tool_use_id, .. }
+                    if !issued.contains(tool_use_id.as_str()) =>
+                {
+                    return true;
+                }
+                _ => {}
+            }
+        }
+    }
+    false
+}
+
 /// Check if a message contains only `ToolResult` blocks (i.e. it is a tool-
 /// result delivery, not a fresh user question).
 pub fn message_is_only_tool_results(msg: &Message) -> bool {

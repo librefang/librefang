@@ -528,6 +528,78 @@ fn context_compaction_resets_file_read_dedup_tracker() {
     );
 }
 
+/// An engine whose kept window opens inside a tool cycle must not leave an orphaned ToolResult in the working or persisted history (#8545).
+/// The kernel audits its compaction output before saving it; this in-turn path is the one the issue's 400s came from.
+#[test]
+fn context_compaction_repairs_a_kept_window_opening_with_an_orphaned_tool_result() {
+    let orphan_delivery = Message {
+        role: Role::User,
+        content: MessageContent::Blocks(vec![
+            ContentBlock::ToolResult {
+                tool_use_id: "call_summarised_away".to_string(),
+                tool_name: "shell_exec".to_string(),
+                content: "ok".to_string(),
+                is_error: false,
+                status: Default::default(),
+                approval_request_id: None,
+            },
+            ContentBlock::Text {
+                text: "[System: 1 tool(s) returned no output]".to_string(),
+                provider_metadata: None,
+            },
+        ]),
+        pinned: false,
+        timestamp: None,
+    };
+    let current_user = Message::user("current user");
+    let original = vec![
+        Message::user("old user"),
+        Message::assistant("old answer"),
+        orphan_delivery.clone(),
+        Message::assistant("old tool answer"),
+        current_user.clone(),
+    ];
+    let mut session = Session {
+        id: librefang_types::agent::SessionId::new(),
+        agent_id: librefang_types::agent::AgentId::new(),
+        parent_session_id: None,
+        messages: original.clone(),
+        context_window_tokens: 0,
+        label: None,
+        model_override: None,
+        messages_generation: 0,
+        last_repaired_generation: None,
+        peer_id: None,
+    };
+    let mut working = original;
+    let mut new_messages_start = 4;
+
+    apply_context_compaction(
+        &mut session,
+        &mut working,
+        &mut new_messages_start,
+        "earlier facts".to_string(),
+        vec![
+            orphan_delivery,
+            Message::assistant("old tool answer"),
+            current_user.clone(),
+        ],
+        &TurnInjections::default(),
+    );
+
+    assert!(!crate::session_repair::has_orphaned_tool_results(&working));
+    assert!(!crate::session_repair::has_orphaned_tool_results(
+        &session.messages
+    ));
+    assert_eq!(working.len(), session.messages.len());
+    // The current-turn boundary still points at the turn's own first message.
+    assert_eq!(
+        session.messages[new_messages_start].content.text_content(),
+        current_user.content.text_content()
+    );
+    assert_eq!(new_messages_start, session.messages.len() - 1);
+}
+
 // ── push_accumulated_text bounded growth ──────────────────────────────
 
 #[test]

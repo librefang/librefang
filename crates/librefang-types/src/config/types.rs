@@ -2501,6 +2501,16 @@ pub struct ExecPolicy {
     pub full_mode_skips_approval: bool,
     /// Global command allowlist (when mode = allowlist).
     pub allowed_commands: Vec<String>,
+    /// Commands that are refused in every mode, e.g. `["git"]` to let an agent run anything except git (#8536).
+    ///
+    /// Applies to `shell_exec` and `process_start` under both `allowlist` and `full`, and wins over `safe_bins` and `allowed_commands`.
+    /// Entries are bare executable names; matching ignores ASCII case, a leading directory (`/usr/bin/git`), quoting (`"git"`, `g\it`) and a Windows `.exe` / `.cmd` / `.bat` / `.com` suffix.
+    /// A command is refused when a denied name sits in command position in any segment of a chain, pipeline, subshell or command substitution, when it follows a prefix runner such as `env`, `sudo`, `nohup`, `timeout` or `xargs`, or when it appears anywhere in the arguments of a shell wrapper (`bash -c "…"`, `cmd /c …`).
+    ///
+    /// This guards against an agent reaching for the command, not against an agent determined to evade it: a script file, an interpreter (`python -c`), `find -exec`, an alias, or a command name assembled in a variable is not inspected.
+    /// When that matters, use `mode = "allowlist"`, or remove the binary from the daemon's `PATH`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub denied_commands: Vec<String>,
     /// Environment variables explicitly allowed to pass through to `shell_exec`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub allowed_env_vars: Vec<String>,
@@ -2536,6 +2546,7 @@ impl Default for ExecPolicy {
             safe_bins_skip_approval: false,
             full_mode_skips_approval: default_full_mode_skips_approval(),
             allowed_commands: Vec::new(),
+            denied_commands: Vec::new(),
             allowed_env_vars: Vec::new(),
             timeout_secs: 30,
             max_output_bytes: 100 * 1024,

@@ -14,6 +14,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use librefang_types::agent::{AgentId, RunningSessionSnapshot, RunningSessionState, SessionId};
 use librefang_types::error::LibreFangError;
+use librefang_types::tool::ToolDefinition;
 use tracing::{error, info, warn};
 
 use crate::error::{KernelError, KernelResult};
@@ -57,6 +58,60 @@ fn register_agent_watcher_slot(
     }
     guard.retain(|h| !h.is_finished());
     guard.push(handle);
+}
+
+/// The request a turn sends, as automatic compaction prices it (#8519).
+///
+/// The agent loop's overflow guard estimates the history together with the system prompt and every tool schema the turn offers, so a compaction threshold that leaves either out is crossed later than the guard's, by exactly the size of the tool set.
+/// On a tool-heavy agent the guard then trimmed history turn after turn while compaction saw nothing to do.
+/// Every automatic compaction decision prices this footprint, so compaction fires first and the guard stays the emergency backstop.
+#[derive(Clone, Copy)]
+pub(crate) struct TurnRequestFootprint<'a> {
+    /// The turn's assembled system prompt.
+    pub(crate) system_prompt: &'a str,
+    /// The tool definitions the turn hands the agent loop.
+    pub(crate) tools: &'a [ToolDefinition],
+}
+
+impl TurnRequestFootprint<'_> {
+    /// Estimated prompt tokens of a request carrying `messages` with this footprint.
+    pub(crate) fn estimate(&self, messages: &[librefang_types::message::Message]) -> usize {
+        librefang_runtime::compactor::estimate_token_count(
+            messages,
+            Some(self.system_prompt),
+            Some(self.tools),
+        )
+    }
+}
+
+/// The context window automatic and manual compaction measure an agent's token threshold against.
+///
+/// Uses the real per-agent window (e.g. 128K GPT-4o, 1M Gemini) instead of the global 200K default that `CompactionConfig::from_toml_…` would otherwise hand us.
+/// The triggers used to compare against that 200K default while the gate they call, and the overflow guard, used the agent's own window, so on a 64K agent the token trigger could never fire before the guard trimmed (#8519).
+///
+/// Honours the agent.toml override, then the per-model operator override (#7774), then the catalog (#6568).
+/// `resolve_context_window` filters 0 out so image/audio entries (no context window) fall back to the 200K default instead of feeding 0 into compaction math.
+///
+/// `session_hint` is deliberately `None` here, unlike the execution paths and the context report.
+/// This gate's miss-default is a *global default window* (200K), not the agent loop's conservative unknown-model fallback — and `session.context_window_tokens` is whatever the last turn resolved, which for an agent affected by #6568 is 8192.
+/// Feeding that in would rank a stale 8192 above the 200K default and make the compaction trigger fire far earlier than before this change.
+fn compaction_context_window_for(
+    kernel: &LibreFangKernel,
+    model: &librefang_types::agent::ModelConfig,
+) -> usize {
+    super::manifest_helpers::resolve_context_window(&kernel.llm.model_catalog.load(), model, None)
+        .map(|resolved| resolved.tokens)
+        .unwrap_or(200_000)
+}
+
+impl LibreFangKernel {
+    /// [`compaction_context_window_for`] the agent's registered manifest, or `None` when the agent is gone.
+    fn compaction_context_window(&self, agent_id: AgentId) -> Option<usize> {
+        self.agents
+            .registry
+            .get_arc(agent_id)
+            .map(|entry| compaction_context_window_for(self, &entry.manifest.model))
+    }
 }
 
 impl LibreFangKernel {
@@ -327,7 +382,7 @@ impl LibreFangKernel {
         agent_id: AgentId,
         force: bool,
     ) -> KernelResult<String> {
-        self.compact_agent_session_in_lock_scope(agent_id, None, force, true)
+        self.compact_agent_session_in_lock_scope(agent_id, None, force, true, None)
             .await
     }
 
@@ -365,12 +420,13 @@ impl LibreFangKernel {
         } else {
             None
         };
-        self.compact_agent_session_in_lock_scope(agent_id, session_id_override, force, false)
+        self.compact_agent_session_in_lock_scope(agent_id, session_id_override, force, false, None)
             .await
     }
 
     /// Pre-turn automatic compaction, shared by the streaming and non-streaming senders (#8507).
     /// Compacts `session` when it is over the message or token threshold, then reloads it from storage so the turn runs on the compacted history.
+    /// `system_prompt` and `tools` are the ones the turn hands the agent loop: the token threshold prices the request the loop will actually send, which is what the loop's overflow guard prices, so compaction fires before the guard has to trim (#8519).
     /// Must be called with the turn's serialization lock held and registered in `held_agent_locks`; `agent_scoped` names which of the two locks that is, so the compactor does not re-acquire it.
     /// Callers skip it for fork turns: compaction rewrites the canonical session on disk, which a fork must never touch.
     pub(crate) async fn auto_compact_before_turn(
@@ -378,15 +434,23 @@ impl LibreFangKernel {
         agent_id: AgentId,
         session: &mut librefang_memory::session::Session,
         system_prompt: &str,
+        tools: &[ToolDefinition],
         config: &librefang_runtime::compactor::CompactionConfig,
         agent_scoped: bool,
     ) {
-        use librefang_runtime::compactor::{
-            estimate_token_count, needs_compaction, needs_compaction_by_tokens,
+        use librefang_runtime::compactor::{needs_compaction, needs_compaction_by_tokens};
+        let Some(context_window) = self.compaction_context_window(agent_id) else {
+            return;
         };
-        let by_messages = needs_compaction(session, config);
-        let estimated = estimate_token_count(&session.messages, Some(system_prompt), None);
-        let by_tokens = needs_compaction_by_tokens(estimated, config);
+        let mut config = config.clone();
+        config.context_window_tokens = context_window;
+        let footprint = TurnRequestFootprint {
+            system_prompt,
+            tools,
+        };
+        let by_messages = needs_compaction(session, &config);
+        let estimated = footprint.estimate(&session.messages);
+        let by_tokens = needs_compaction_by_tokens(estimated, &config);
         if by_tokens && !by_messages {
             info!(
                 agent_id = %agent_id,
@@ -401,7 +465,13 @@ impl LibreFangKernel {
         // Pass the in-turn session id so the compactor operates on the same session just measured; `entry.session_id` points at a different session for channel-derived and `session_mode = "new"` turns.
         info!(agent_id = %agent_id, messages = session.messages.len(), "Auto-compacting session");
         match self
-            .compact_agent_session_in_lock_scope(agent_id, Some(session.id), false, agent_scoped)
+            .compact_agent_session_in_lock_scope(
+                agent_id,
+                Some(session.id),
+                false,
+                agent_scoped,
+                Some(footprint),
+            )
             .await
         {
             Ok(msg) => {
@@ -418,33 +488,54 @@ impl LibreFangKernel {
 
     /// Post-turn automatic compaction, shared by the streaming and non-streaming senders (#8507).
     /// When the session a turn just wrote is over the token threshold, compacts it in the background so the next turn starts from a summary.
+    /// `system_prompt` and `tools` are the turn's, priced for the same reason as in [`Self::auto_compact_before_turn`] (#8519).
     /// The spawned task runs outside the turn's `held_agent_locks` scope, so it waits for the turn's lock to be released before loading the session.
     /// Callers skip it for fork turns, for the same reason as [`Self::auto_compact_before_turn`].
     pub(crate) fn spawn_compaction_after_turn(
         self: &Arc<Self>,
         agent_id: AgentId,
         session: &librefang_memory::session::Session,
+        system_prompt: &str,
+        tools: &[ToolDefinition],
         manifest_compaction: Option<&librefang_types::agent::CompactionOverrides>,
         agent_scoped: bool,
     ) {
-        use librefang_runtime::compactor::{
-            estimate_token_count, needs_compaction_by_tokens, CompactionConfig,
+        use librefang_runtime::compactor::{needs_compaction_by_tokens, CompactionConfig};
+        let Some(context_window) = self.compaction_context_window(agent_id) else {
+            return;
         };
         let cfg = self.config.load();
         // #4976: per-agent [compaction] overrides on top of the global config; the token threshold ratio is the field that gates this check.
-        let config =
+        let mut config =
             CompactionConfig::from_toml_with_overrides(&cfg.compaction, manifest_compaction);
-        let estimated = estimate_token_count(&session.messages, None, None);
+        config.context_window_tokens = context_window;
+        let estimated = TurnRequestFootprint {
+            system_prompt,
+            tools,
+        }
+        .estimate(&session.messages);
         if !needs_compaction_by_tokens(estimated, &config) {
             return;
         }
         let kernel = Arc::clone(self);
         let sid = session.id;
+        // The background task re-checks under the lock against the same request footprint, so it needs owned copies.
+        let system_prompt = system_prompt.to_string();
+        let tools = tools.to_vec();
         // #3740: spawn_logged so compaction panics surface in logs.
         super::spawn_logged("post_loop_compaction", async move {
             info!(agent_id = %agent_id, estimated_tokens = estimated, "Post-loop compaction triggered");
             if let Err(e) = kernel
-                .compact_agent_session_in_lock_scope(agent_id, Some(sid), false, agent_scoped)
+                .compact_agent_session_in_lock_scope(
+                    agent_id,
+                    Some(sid),
+                    false,
+                    agent_scoped,
+                    Some(TurnRequestFootprint {
+                        system_prompt: &system_prompt,
+                        tools: &tools,
+                    }),
+                )
                 .await
             {
                 warn!(agent_id = %agent_id, "Post-loop compaction failed: {e}");
@@ -454,17 +545,19 @@ impl LibreFangKernel {
 
     /// Compact a session using the same lock domain selected by the caller's message turn.
     /// An explicit session id does not by itself identify the lock domain: agent-scoped turns also pass their resolved session id so compaction operates on the exact in-turn session.
+    /// `footprint` is the request an automatic trigger measured when it decided to compact; the threshold gate below re-checks against the same one, so the two decisions cannot disagree about the system prompt or tool schemas (#8519).
+    /// Callers with no turn in hand pass `None`, and the gate prices the agent's manifest prompt and its granted tools instead.
     pub(crate) async fn compact_agent_session_in_lock_scope(
         &self,
         agent_id: AgentId,
         session_id_override: Option<SessionId>,
         force: bool,
         agent_scoped: bool,
+        footprint: Option<TurnRequestFootprint<'_>>,
     ) -> KernelResult<String> {
         let cfg = self.config.load_full();
         use librefang_runtime::compactor::{
-            compact_session, estimate_token_count, needs_compaction, needs_compaction_by_tokens,
-            CompactionConfig,
+            compact_session, needs_compaction, needs_compaction_by_tokens, CompactionConfig,
         };
 
         // Hold the same serialization lock that a message turn writing this session uses.
@@ -549,54 +642,36 @@ impl LibreFangKernel {
             &entry.manifest.model.provider,
         );
 
-        // Resolve the agent's actual context window BEFORE the gate so the
-        // gate's token-trigger comparison uses the real per-agent window (e.g.
-        // 128K GPT-4o, 1M Gemini) instead of the global 200K default that
-        // `CompactionConfig::from_toml_…` would otherwise hand us.
-        //
-        // Honours the agent.toml override, then the per-model operator override
-        // (#7774), then the catalog (#6568).
-        // `resolve_context_window` filters 0 out so image/audio entries (no
-        // context window) fall back to the 200K default instead of feeding 0
-        // into compaction math.
-        //
-        // `session_hint` is deliberately `None` here, unlike the execution paths
-        // and the context report. This gate's miss-default is a *global default
-        // window* (200K), not the agent loop's conservative unknown-model
-        // fallback — and `session.context_window_tokens` is whatever the last
-        // turn resolved, which for an agent affected by #6568 is 8192. Feeding
-        // that in would rank a stale 8192 above the 200K default and make the
-        // compaction trigger fire far earlier than before this change.
-        let agent_ctx_window = super::manifest_helpers::resolve_context_window(
-            &self.llm.model_catalog.load(),
-            &entry.manifest.model,
-            None,
-        )
-        .map(|resolved| resolved.tokens)
-        .unwrap_or(200_000);
+        // Resolve the agent's actual context window BEFORE the gate; see `compaction_context_window_for` for the precedence and why no session hint is used.
+        let agent_ctx_window = compaction_context_window_for(self, &entry.manifest.model);
         config.context_window_tokens = agent_ctx_window;
 
-        // Match the pre-loop caller's estimator inputs in `messaging.rs`
-        // (`send_message_full` passes `Some(&manifest.model.system_prompt)`),
-        // otherwise this inner gate's estimate would skip the system prompt
-        // / tools budget and short-circuit even when the caller has already
-        // concluded compaction is warranted.
-        let estimated_tokens = estimate_token_count(
-            &session.messages,
-            Some(&entry.manifest.model.system_prompt),
-            None,
-        );
         // Forced /compact (#5202) bypasses the "nothing to do" short-circuit:
         // the user explicitly asked to compact now regardless of thresholds.
-        if !force
-            && !needs_compaction(&session, &config)
-            && !needs_compaction_by_tokens(estimated_tokens, &config)
-        {
-            return Ok(format!(
-                "No compaction needed ({} messages, threshold {})",
-                session.messages.len(),
-                config.threshold
-            ));
+        //
+        // The token estimate prices the same request the automatic triggers price (#8519): the turn's system prompt and tool schemas when a trigger handed them over, otherwise the manifest prompt and the agent's granted tools.
+        // Leaving the tools out made this gate disagree with the trigger that called it, and with the agent loop's overflow guard, which counts them; on a tool-heavy agent the guard then trimmed history every turn while this gate reported nothing to do.
+        if !force && !needs_compaction(&session, &config) {
+            let estimated_tokens = match footprint {
+                Some(footprint) => footprint.estimate(&session.messages),
+                None => {
+                    let tools = entry
+                        .mode
+                        .filter_tools((*self.available_tools(agent_id)).clone());
+                    TurnRequestFootprint {
+                        system_prompt: &entry.manifest.model.system_prompt,
+                        tools: &tools,
+                    }
+                    .estimate(&session.messages)
+                }
+            };
+            if !needs_compaction_by_tokens(estimated_tokens, &config) {
+                return Ok(format!(
+                    "No compaction needed ({} messages, threshold {})",
+                    session.messages.len(),
+                    config.threshold
+                ));
+            }
         }
 
         // Compaction is a side task — route through the auxiliary chain when

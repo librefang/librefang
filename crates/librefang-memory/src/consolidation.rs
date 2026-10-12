@@ -118,7 +118,7 @@ impl ConsolidationEngine {
         // `agent_id` alone is not the whole tenant, though.
         // One agent serves many peers (`memories.peer_id`, v16), many chats (the #5227 `chat_scope` metadata stamp) and many sessions (the #7605 `session_scope` stamp), and every read path hard-filters on all three.
         // Merging across any of them destroys availability in both directions: the lower-confidence row is soft-deleted, so the peer / chat / session it belonged to loses the fact outright with no read path left that can reach it, and `merge_metadata_json` unions loser-only keys into the keeper, so a keeper written through an unstamped path (dashboard, REST) inherits the loser's stamps and vanishes from its own reads as well.
-        // A pair therefore only becomes a merge candidate when it agrees on all three — that is what [`TenantKey`] captures.
+        // A pair therefore only becomes a merge candidate when it agrees on all three, and on the storage `scope` that decides how long the survivor lives (#8524) — that is what [`TenantKey`] captures.
         //
         // Two independent caps bound the cost of this phase:
         //   - MAX_CANDIDATES_PER_AGENT bounds the *input* — the per-agent SELECT
@@ -174,7 +174,7 @@ impl ConsolidationEngine {
             // confidence-weight embeddings before soft-deleting.
             let mut stmt = outer_tx
                 .prepare(
-                    "SELECT id, content, confidence, metadata, access_count, embedding, peer_id \
+                    "SELECT id, content, confidence, metadata, access_count, embedding, peer_id, scope \
                      FROM memories \
                      WHERE deleted = 0 AND agent_id = ?1 \
                      ORDER BY confidence DESC \
@@ -191,6 +191,7 @@ impl ConsolidationEngine {
                 i64,
                 Option<Vec<u8>>,
                 Option<String>,
+                String,
             )> = stmt
                 .query_map(
                     rusqlite::params![agent_id, MAX_CANDIDATES_PER_AGENT],
@@ -203,6 +204,7 @@ impl ConsolidationEngine {
                             row.get::<_, i64>(4)?,
                             row.get::<_, Option<Vec<u8>>>(5)?,
                             row.get::<_, Option<String>>(6)?,
+                            row.get::<_, String>(7)?,
                         ))
                     },
                 )
@@ -218,8 +220,11 @@ impl ConsolidationEngine {
             // A merge only ever unifies rows whose keys are equal, so the keeper's key is unchanged by `merge_metadata_json` and these stay valid as `rows` is mutated below.
             let tenants: Vec<TenantKey> = rows
                 .iter()
-                .map(|r| TenantKey::from_row(r.6.as_deref(), &r.3))
+                .map(|r| TenantKey::from_row(r.6.as_deref(), &r.7, &r.3))
                 .collect();
+            // Identifier-like tokens (URLs, emails, UUIDs, long digit runs) per row, for the same O(N) reason (#8524).
+            let identifiers: Vec<std::collections::BTreeSet<String>> =
+                lowered.iter().map(|c| identifier_tokens(c)).collect();
 
             // Track which row indices have been absorbed into a keeper.
             // Keyed by `usize` (row index in `rows`) rather than memory
@@ -246,6 +251,10 @@ impl ConsolidationEngine {
                     // Different peer, chat or session → different tenant, not a duplicate.
                     // Skipping the pair is the whole fix: without it one tenant's row is soft-deleted beyond the reach of any read path, and the survivor inherits the loser's scope stamps.
                     if tenants[i] != tenants[j] {
+                        continue;
+                    }
+                    // A pair that disagrees on an identifier is two facts, however much prose they share (#8524): the loser's content is not kept, so merging would delete the only copy of that URL / address / id.
+                    if identifiers[i] != identifiers[j] {
                         continue;
                     }
                     let sim = text_similarity(&lowered[i], &lowered[j]);
@@ -357,55 +366,144 @@ impl ConsolidationEngine {
     }
 }
 
-/// The isolation axes a merge must not cross, read off one `memories` row.
+/// The partition a merge must not cross, read off one `memories` row.
 ///
 /// `peer_id` is a column; `chat_scope` (#5227) and `session_scope` (#7605) are metadata stamps.
 /// All three are enforced by every read path — `peer_id` as a SQL predicate, the two stamps by `memory_scope_allows_recall` / `memory_session_scope_allows_recall` — so two rows that disagree on any of them are never both visible to the same reader and cannot be duplicates of each other.
 ///
 /// Absent, empty and whitespace-only stamps all normalise to `None`, matching the "untagged means scope-agnostic" reading the recall filters use.
 /// That makes an unstamped row its own tenant rather than a wildcard: it is visible everywhere, so folding a stamped row into it would delete the stamped copy, and folding it into a stamped row would restrict a fact that was deliberately global.
+///
+/// The storage `scope` column is the fourth axis (#8524).
+/// It is not an isolation boundary but a lifetime: a `session_memory` row is swept after `session_ttl_hours`, while a `user_memory` row is meant to last, so folding a permanent fact into a transient copy schedules the fact for deletion.
+///
+/// Both consolidation engines — this periodic sweep and the per-agent `ProactiveMemoryStore::find_duplicates` — partition on this one key, so a future axis is added here once.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct TenantKey {
     peer_id: Option<String>,
+    scope: String,
     chat_scope: Option<String>,
     session_scope: Option<String>,
 }
 
 impl TenantKey {
-    fn from_row(peer_id: Option<&str>, metadata: &str) -> Self {
+    fn from_row(peer_id: Option<&str>, scope: &str, metadata: &str) -> Self {
         let parsed = serde_json::from_str::<serde_json::Value>(metadata).ok();
-        Self::from_parts(peer_id, |key| parsed.as_ref().and_then(|v| v.get(key)))
+        let stamp = |key: &str| -> Option<String> {
+            parsed
+                .as_ref()
+                .and_then(|v| v.get(key))
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+        };
+        Self::new(
+            peer_id,
+            scope,
+            stamp(CHAT_SCOPE_METADATA_KEY).as_deref(),
+            stamp(SESSION_SCOPE_METADATA_KEY).as_deref(),
+        )
     }
 
-    /// Same key, built from an already-decoded metadata map (a `MemoryItem` / `MemoryFragment`) plus the row's `peer_id` column.
-    /// `ProactiveMemoryStore::find_duplicates` uses it so its merge groups respect the same isolation axes as this engine.
-    pub(crate) fn from_metadata_map(
+    /// Build the key from an already-parsed metadata map, as `ProactiveMemoryStore::find_duplicates` holds it.
+    pub(crate) fn from_metadata(
         peer_id: Option<&str>,
+        scope: &str,
         metadata: &HashMap<String, serde_json::Value>,
     ) -> Self {
-        Self::from_parts(peer_id, |key| metadata.get(key))
+        let stamp = |key: &str| metadata.get(key).and_then(|v| v.as_str());
+        Self::new(
+            peer_id,
+            scope,
+            stamp(CHAT_SCOPE_METADATA_KEY),
+            stamp(SESSION_SCOPE_METADATA_KEY),
+        )
     }
 
-    fn from_parts<'a>(
+    fn new(
         peer_id: Option<&str>,
-        get: impl Fn(&str) -> Option<&'a serde_json::Value>,
+        scope: &str,
+        chat_scope: Option<&str>,
+        session_scope: Option<&str>,
     ) -> Self {
-        let stamp = |key: &str| -> Option<String> {
-            get(key)
-                .and_then(|v| v.as_str())
-                .map(str::trim)
+        let normalise = |v: Option<&str>| {
+            v.map(str::trim)
                 .filter(|s| !s.is_empty())
                 .map(str::to_string)
         };
         Self {
-            peer_id: peer_id
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .map(str::to_string),
-            chat_scope: stamp(CHAT_SCOPE_METADATA_KEY),
-            session_scope: stamp(SESSION_SCOPE_METADATA_KEY),
+            peer_id: normalise(peer_id),
+            scope: scope.to_string(),
+            chat_scope: normalise(chat_scope),
+            session_scope: normalise(session_scope),
         }
     }
+}
+
+/// Minimum length of an all-digit token that counts as an identifier (a phone number, an order number, a year) for [`identifier_tokens`].
+const MIN_IDENTIFIER_DIGITS: usize = 4;
+
+/// The identifier-like tokens of `text`: URLs, email addresses, UUIDs and digit runs of at least [`MIN_IDENTIFIER_DIGITS`] (#8524).
+///
+/// A merge keeps one row's content and soft-deletes the other's, so a token present in only one of the two is destroyed whenever that row loses.
+/// For prose that is the accepted cost of deduplication; for an identifier it is the whole value of the memory, and two rows that differ in one are different facts no matter how similar the sentences around it are.
+/// Both engines therefore refuse to merge a pair whose identifier sets differ, which can only ever keep data.
+///
+/// Callers pass already-lowercased text, the form both engines compare in.
+/// Surrounding punctuation is trimmed so "see https://x/y." and "see https://x/y" agree.
+pub(crate) fn identifier_tokens(text: &str) -> std::collections::BTreeSet<String> {
+    text.split_whitespace()
+        .map(|token| {
+            token.trim_matches(|c: char| {
+                matches!(
+                    c,
+                    '(' | ')'
+                        | '['
+                        | ']'
+                        | '{'
+                        | '}'
+                        | '<'
+                        | '>'
+                        | '"'
+                        | '\''
+                        | '`'
+                        | ','
+                        | '.'
+                        | ';'
+                        | ':'
+                        | '!'
+                        | '?'
+                )
+            })
+        })
+        .filter(|token| is_identifier_token(token))
+        .map(str::to_string)
+        .collect()
+}
+
+fn is_identifier_token(token: &str) -> bool {
+    if token.contains("://") || token.starts_with("www.") {
+        return true;
+    }
+    if let Some((local, domain)) = token.split_once('@') {
+        if !local.is_empty() && domain.contains('.') {
+            return true;
+        }
+    }
+    if uuid::Uuid::parse_str(token).is_ok() {
+        return true;
+    }
+    let mut run = 0usize;
+    for c in token.chars() {
+        if c.is_ascii_digit() {
+            run += 1;
+            if run >= MIN_IDENTIFIER_DIGITS {
+                return true;
+            }
+        } else {
+            run = 0;
+        }
+    }
+    false
 }
 
 /// Merge two metadata JSON strings; on key collision keeper wins.
@@ -1303,5 +1401,83 @@ mod tests {
 
         // And (None, None) stays None.
         assert!(merge_embeddings_weighted(None, 0.0, None, 0.0).is_none());
+    }
+
+    /// #8524: a permanent `user_memory` fact must not be folded into a `session_memory` copy, which the session TTL sweep deletes a day later.
+    #[test]
+    fn test_no_cross_storage_scope_merge() {
+        let engine = setup();
+        {
+            let conn = engine.pool.get().expect("consolidation pool get");
+            insert_memory(&conn, "user-mem", "the deadline is friday", 0.7);
+            insert_memory(&conn, "session-mem", "the deadline is friday", 0.9);
+            conn.execute(
+                "UPDATE memories SET scope = 'user_memory' WHERE id = 'user-mem'",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "UPDATE memories SET scope = 'session_memory' WHERE id = 'session-mem'",
+                [],
+            )
+            .unwrap();
+        }
+
+        let report = engine.consolidate().unwrap();
+        assert_eq!(report.memories_merged, 0);
+        let conn = engine.pool.get().expect("consolidation pool get");
+        assert!(!is_deleted(&conn, "user-mem"));
+    }
+
+    /// #8524: two long rows clearing the Jaccard threshold but carrying different URLs are two facts; merging would delete the only copy of one link.
+    #[test]
+    fn test_no_merge_when_identifiers_differ() {
+        let engine = setup();
+        let prose = "the shared design document for the quarterly planning review with the whole platform team lives at";
+        {
+            let conn = engine.pool.get().expect("consolidation pool get");
+            insert_memory(
+                &conn,
+                "link-a",
+                &format!("{prose} https://docs.example/a"),
+                0.9,
+            );
+            insert_memory(
+                &conn,
+                "link-b",
+                &format!("{prose} https://docs.example/b"),
+                0.7,
+            );
+            assert!(
+                text_similarity(
+                    &format!("{prose} https://docs.example/a"),
+                    &format!("{prose} https://docs.example/b")
+                ) > DEFAULT_DUPLICATE_THRESHOLD,
+                "the fixture must clear the text threshold for the guard to be what keeps it"
+            );
+        }
+
+        let report = engine.consolidate().unwrap();
+        assert_eq!(report.memories_merged, 0);
+        let conn = engine.pool.get().expect("consolidation pool get");
+        assert!(!is_deleted(&conn, "link-b"));
+    }
+
+    #[test]
+    fn identifier_tokens_cover_urls_emails_uuids_and_digit_runs() {
+        let ids = identifier_tokens(
+            "see (https://x.example/y). mail ops@corp.example, ticket 123456, id 6f1c2a9e-3b7d-4c11-9a0e-2f4b6c8d0e1f, at 3pm",
+        );
+        let expected: std::collections::BTreeSet<String> = [
+            "https://x.example/y",
+            "ops@corp.example",
+            "123456",
+            "6f1c2a9e-3b7d-4c11-9a0e-2f4b6c8d0e1f",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+        assert_eq!(ids, expected);
+        assert!(identifier_tokens("user prefers dark mode").is_empty());
     }
 }

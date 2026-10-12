@@ -82,6 +82,11 @@ impl McpCatalog {
                 };
                 match toml::from_str::<McpCatalogEntry>(&content) {
                     Ok(entry) => {
+                        // A broken header binding is rejected here, with the entry's id, rather than surfacing later as a connect failure on a server installed from it (#8578).
+                        if let Err(e) = entry.validate() {
+                            warn!("Skipping MCP catalog entry '{}': {}", id, e);
+                            continue;
+                        }
                         self.entries.insert(id, entry);
                         count += 1;
                     }
@@ -204,5 +209,43 @@ mod tests {
             "expected at least 6 DevTools entries, got {}",
             devtools.len()
         );
+    }
+
+    /// #8578: an entry whose header binding references an undeclared credential is skipped at load, while a valid secret-backed HTTP entry next to it loads.
+    #[test]
+    fn catalog_load_skips_entries_with_invalid_header_bindings() {
+        let home = tempfile::tempdir().unwrap();
+        let dir = home.path().join("mcp").join("catalog");
+        std::fs::create_dir_all(&dir).unwrap();
+        let entry = |id: &str, placeholder: &str| {
+            format!(
+                r#"
+id = "{id}"
+name = "{id}"
+description = "remote"
+category = "ai"
+
+[transport]
+type = "http"
+url = "https://mcp.example.com/mcp"
+
+[[required_env]]
+name = "REMOTE_API_KEY"
+label = "API Key"
+help = "h"
+
+[[headers]]
+name = "Authorization"
+value = "Bearer ${{{placeholder}}}"
+"#
+            )
+        };
+        std::fs::write(dir.join("good.toml"), entry("good", "REMOTE_API_KEY")).unwrap();
+        std::fs::write(dir.join("bad.toml"), entry("bad", "ANTHROPIC_API_KEY")).unwrap();
+
+        let mut cat = McpCatalog::new(home.path());
+        assert_eq!(cat.load(home.path()), 1);
+        assert!(cat.get("good").is_some());
+        assert!(cat.get("bad").is_none());
     }
 }

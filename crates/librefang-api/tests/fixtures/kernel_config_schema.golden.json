@@ -3773,6 +3773,13 @@
             "type": "string"
           }
         },
+        "denied_commands": {
+          "description": "Commands that are refused in every mode, e.g. `[\"git\"]` to let an agent run anything except git (#8536).\n\nApplies to `shell_exec` and `process_start` under both `allowlist` and `full`, and wins over `safe_bins` and `allowed_commands`. Entries are bare executable names; matching ignores ASCII case, a leading directory (`/usr/bin/git`), quoting (`\"git\"`, `g\\it`) and a Windows `.exe` / `.cmd` / `.bat` / `.com` suffix. A command is refused when a denied name sits in command position in any segment of a chain, pipeline, subshell or command substitution, when it follows a prefix runner such as `env`, `sudo`, `nohup`, `timeout` or `xargs`, or when it appears anywhere in the arguments of a shell wrapper (`bash -c \"…\"`, `cmd /c …`).\n\nThis guards against an agent reaching for the command, not against an agent determined to evade it: a script file, an interpreter (`python -c`), `find -exec`, an alias, or a command name assembled in a variable is not inspected. When that matters, use `mode = \"allowlist\"`, or remove the binary from the daemon's `PATH`.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
         "full_mode_skips_approval": {
           "description": "Whether `mode = \"full\"` also waives the global `approval.require_approval` list for `shell_exec`.\n\nDefault `true` preserves the historical coupling, and the default is deliberately NOT flipped (#6594). Two facts make a flipped default a breaking change for ordinary installs: `ApprovalPolicy::default()` puts `shell_exec` in `require_approval`, and `Kernel::spawn` promotes any standalone agent whose `capabilities.tools` contains `shell_exec` or `*` and which declares no `exec_policy` to `mode = \"full\"`. So on a default install this waiver is the only reason ordinary agents run shell commands unattended, and flipping it would make every install prompt on every command.\n\nSet `false` to hold both positions at once — unrestricted commands that still prompt. `Full` then waives only allowlist *validation*, and `require_approval` is honoured exactly as it is for any other mode. This overrides a coupling that was deliberate rather than accidental: `Full` skipping the approval queue was documented behaviour, and `false` narrows `Full` to what its name describes — a command-validation mode — leaving who-must-confirm to `[approval]`.\n\nIndependent of this flag in both positions: a per-user RBAC `NeedsApproval` still forces the approval queue, and the dangerous-command denylist still screens every command under `full`.",
           "default": true,
@@ -5889,7 +5896,7 @@
           "format": "double"
         },
         "duplicate_threshold": {
-          "description": "Similarity threshold for duplicate detection (0.0 - 1.0). When stored embeddings are available, uses vector cosine similarity (mem0-quality); otherwise falls back to Jaccard word overlap. Default: 0.85.\n\nPre-fix this defaulted to 0.5, which is far too permissive for both metrics: cosine 0.5 matches \"topically related\" pairs (including opposite-meaning sentences that share keywords), and Jaccard 0.5 matches anything with 50% word overlap. 0.85 is the threshold mem0 recommends for \"near-duplicate\" detection and matches the industry-standard cosine cut-off for embedding-based dedup.",
+          "description": "Similarity threshold for duplicate detection (0.0 - 1.0), calibrated as Jaccard word overlap. When both memories carry comparable stored embeddings, the per-agent consolidation compares their cosine similarity against `max(duplicate_threshold, 0.95)` instead, because cosine 0.85 between sentence embeddings already means \"same topic\" rather than \"same statement\" (#8524). Default: 0.85.\n\nPre-fix this defaulted to 0.5, which is far too permissive: Jaccard 0.5 matches anything with 50% word overlap.",
           "default": 0.8500000238418579,
           "type": "number",
           "format": "float"

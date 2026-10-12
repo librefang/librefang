@@ -3074,6 +3074,7 @@ impl LibreFangKernel {
                         agent_id,
                         &mut session,
                         &manifest.model.system_prompt,
+                        &tools,
                         &compaction_config_snapshot,
                         agent_scoped,
                     )
@@ -3398,6 +3399,8 @@ impl LibreFangKernel {
                         kernel_clone.spawn_compaction_after_turn(
                             agent_id,
                             &session,
+                            &manifest.model.system_prompt,
+                            &tools,
                             manifest.compaction.as_ref(),
                             agent_scoped,
                         );

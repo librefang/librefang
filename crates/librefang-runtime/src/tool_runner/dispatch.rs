@@ -899,6 +899,20 @@ async fn dispatch_tool_call(
 
             // Exec policy enforcement (allowlist / deny / full)
             if let Some(policy) = exec_policy {
+                // Checked first, with its own message: the generic advice below to switch to `full` is wrong for a command the operator denied in every mode (#8536).
+                if let Err(reason) =
+                    crate::subprocess_sandbox::check_denied_commands(command, policy)
+                {
+                    return ToolResult {
+                        tool_use_id: tool_use_id.to_string(),
+                        content: format!(
+                            "shell_exec blocked: {reason}. The operator has forbidden this command for this agent in every exec mode; do not retry it through another command or wrapper."
+                        ),
+                        status: ToolExecutionStatus::Skipped,
+                        is_error: true,
+                        ..Default::default()
+                    };
+                }
                 if let Err(reason) =
                     crate::subprocess_sandbox::validate_command_allowlist(command, policy)
                 {

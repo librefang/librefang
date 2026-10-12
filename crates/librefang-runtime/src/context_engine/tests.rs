@@ -197,6 +197,57 @@ async fn test_assemble_no_overflow() {
     assert_eq!(result.recovery, RecoveryStage::None);
 }
 
+/// A window a compaction just narrowed is small by design, so no overflow recovery fires; an orphaned ToolResult it opens with must still be repaired before the request is built (#8545).
+#[tokio::test]
+async fn test_assemble_repairs_orphaned_tool_results_without_overflow() {
+    use librefang_types::message::{ContentBlock, MessageContent, Role};
+
+    let engine = DefaultContextEngine::new(ContextEngineConfig::default(), make_memory(), None);
+    let mixed_delivery = Message {
+        role: Role::User,
+        content: MessageContent::Blocks(vec![
+            ContentBlock::ToolResult {
+                tool_use_id: "call_summarised_away".to_string(),
+                tool_name: "shell_exec".to_string(),
+                content: "ok".to_string(),
+                is_error: false,
+                status: Default::default(),
+                approval_request_id: None,
+            },
+            ContentBlock::Text {
+                text: "[System: 1 tool(s) returned no output]".to_string(),
+                provider_metadata: None,
+            },
+        ]),
+        pinned: false,
+        timestamp: None,
+    };
+    let mut messages = vec![
+        Message::user("[Context compaction summary] earlier turns"),
+        mixed_delivery,
+        Message::assistant("done"),
+        Message::user("next question"),
+    ];
+    assert!(crate::session_repair::has_orphaned_tool_results(&messages));
+
+    let result = engine
+        .assemble(AgentId::new(), &mut messages, "system", &[], 200_000)
+        .await
+        .unwrap();
+
+    assert_eq!(result.recovery, RecoveryStage::None);
+    assert!(
+        !crate::session_repair::has_orphaned_tool_results(&messages),
+        "assemble must not hand an orphaned ToolResult to the request builder"
+    );
+    assert!(messages.iter().all(|m| match &m.content {
+        MessageContent::Blocks(blocks) => !blocks
+            .iter()
+            .any(|b| matches!(b, ContentBlock::ToolResult { .. })),
+        MessageContent::Text(_) => true,
+    }));
+}
+
 #[tokio::test]
 async fn test_assemble_triggers_overflow_recovery() {
     let config = ContextEngineConfig {

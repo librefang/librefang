@@ -130,6 +130,13 @@ pub(super) async fn tool_process_start(
     };
 
     if let Some(policy) = exec_policy {
+        // Checked first, with its own message: the generic advice below to switch to `full` is wrong for a command the operator denied in every mode (#8536).
+        if let Err(reason) = crate::subprocess_sandbox::check_denied_commands(&full_command, policy)
+        {
+            return Err(ToolError::PermissionDenied(format!(
+                "process_start blocked: {reason}. The operator has forbidden this command for this agent in every exec mode; do not retry it through another command or wrapper."
+            )));
+        }
         if let Err(reason) =
             crate::subprocess_sandbox::validate_command_allowlist(&full_command, policy)
         {
@@ -500,6 +507,43 @@ mod tests {
         )
         .await;
         assert!(matches!(res, Err(ToolError::PermissionDenied(_))));
+        assert_eq!(pm.count(), 0);
+    }
+
+    /// #8536: `denied_commands` binds `process_start` too, including when the denied program is the argv of a shell wrapper.
+    #[tokio::test]
+    async fn process_start_denied_command_blocked_in_full_mode() {
+        use librefang_types::config::{ExecPolicy, ExecSecurityMode};
+        let pm = crate::process_manager::ProcessManager::new(5);
+        let policy = ExecPolicy {
+            mode: ExecSecurityMode::Full,
+            denied_commands: vec!["git".to_string()],
+            ..Default::default()
+        };
+        for input in [
+            json!({ "command": "git", "args": ["checkout", "."] }),
+            json!({ "command": "/bin/sh", "args": ["-c", "git checkout ."] }),
+        ] {
+            let res = tool_process_start(
+                &input,
+                Some(&pm),
+                Some("agent1"),
+                Some(&policy),
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await;
+            match res {
+                Err(ToolError::PermissionDenied(msg)) => {
+                    assert!(msg.contains("denied_commands"), "{msg}");
+                    assert!(!msg.contains("set exec_policy.mode = 'full'"), "{msg}");
+                }
+                other => panic!("expected PermissionDenied for {input}, got {other:?}"),
+            }
+        }
         assert_eq!(pm.count(), 0);
     }
 

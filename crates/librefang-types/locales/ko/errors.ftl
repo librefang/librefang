@@ -46,6 +46,7 @@ api-error-manifest-too-large = 매니페스트가 너무 큽니다 (최대 1MB)
 api-error-manifest-invalid-format = 유효하지 않은 매니페스트 형식입니다
 api-error-manifest-signature-mismatch = 서명된 매니페스트 내용이 manifest_toml과 일치하지 않습니다
 api-error-manifest-signature-failed = 매니페스트 서명 검증에 실패했습니다
+api-error-manifest-signed-template-conflict = signed_manifest와 template는 함께 사용할 수 없습니다. 인라인 manifest_toml에 서명하세요
 api-error-manifest-invalid = 유효하지 않은 매니페스트입니다: { $error }
 
 # Auth errors
