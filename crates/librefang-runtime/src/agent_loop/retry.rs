@@ -366,6 +366,7 @@ pub(super) async fn stream_with_retry(
             use crate::llm_driver::CompletionResponse;
             return Ok(StreamWithRetryResult {
                 response: CompletionResponse {
+                    text_synthesized_from_thinking: false,
                     content: vec![],
                     stop_reason: StopReason::EndTurn,
                     tool_calls: vec![],
@@ -806,6 +807,7 @@ mod tests {
             }
             let full_text: String = self.chunks.concat();
             Ok(CompletionResponse {
+                text_synthesized_from_thinking: false,
                 content: vec![librefang_types::message::ContentBlock::Text {
                     text: full_text,
                     provider_metadata: None,
@@ -940,6 +942,7 @@ mod tests {
             .await
             .unwrap();
             Ok(CompletionResponse {
+                text_synthesized_from_thinking: false,
                 content: vec![librefang_types::message::ContentBlock::Text {
                     text: "Recovered answer.".to_string(),
                     provider_metadata: None,

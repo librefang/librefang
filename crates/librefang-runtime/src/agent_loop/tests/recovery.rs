@@ -683,6 +683,7 @@ impl LlmDriver for TextToolCallDriver {
         if call == 0 {
             // Simulate Groq/Llama: tool call as text, not in tool_calls field
             Ok(CompletionResponse {
+                text_synthesized_from_thinking: false,
                 content: vec![ContentBlock::Text {
                     text: r#"Let me search for that. <function=web_search>{"query":"rust async"}</function>"#.to_string(),
                     provider_metadata: None,
@@ -700,6 +701,7 @@ impl LlmDriver for TextToolCallDriver {
         } else {
             // After tool result, return normal response
             Ok(CompletionResponse {
+                text_synthesized_from_thinking: false,
                 content: vec![ContentBlock::Text {
                     text: "Based on the search results, Rust async is great!".to_string(),
                     provider_metadata: None,

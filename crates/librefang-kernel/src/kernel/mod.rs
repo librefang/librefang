@@ -1266,6 +1266,22 @@ fn agent_rule_matches(pattern: &str, agent_id: &str, agent_name: Option<&str>) -
     glob_matches(pattern, agent_id) || agent_name.is_some_and(|name| glob_matches(pattern, name))
 }
 
+/// Every `event_type` the kernel passes to `push_notification`, i.e. every value an `[[notification.agent_rules]]` entry can usefully list in `events`.
+///
+/// Boot validation warns about a rule naming anything outside this list, so an event the kernel emits must appear here or an operator who routes it gets a spurious unknown-event warning.
+pub(crate) const KNOWN_NOTIFICATION_EVENTS: &[&str] = &[
+    "approval_requested",
+    "task_completed",
+    "task_failed",
+    // Provider-safety refusals, split out of task_failed by #3450 so they can be routed separately — a rule listing this is valid and must not be warned about.
+    "content_filtered",
+    "tool_failure",
+    "health_check_failed",
+    "model_migrated",
+    // A turn that exhausted its iteration budget and delivered a partial answer (#8556).
+    "max_iterations",
+];
+
 /// Resolve which targets one notification is delivered to.
 ///
 /// Precedence, most specific first:
@@ -1309,7 +1325,9 @@ fn resolve_notification_targets(
         | "task_failed"
         | "tool_failure"
         | "health_check_failed"
-        | "model_migrated" => notification.alert_channels.clone(),
+        | "model_migrated"
+        // #8556: a capped turn used to fail and reach operators as `task_failed`; now that it delivers a partial answer it must still alert them by default.
+        | "max_iterations" => notification.alert_channels.clone(),
         _ => Vec::new(),
     }
 }

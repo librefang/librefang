@@ -1,0 +1,4 @@
+Ephemeral worker runs record whether they were cut off by the iteration cap.
+A capped ephemeral mission worker now returns `Ok` (see the iteration-cap delivery fix), so its run record said `completed` with nothing to distinguish it from a full run.
+`ephemeral_runs` gains a `truncated` column (migration v63), surfaced as `truncated` in `GET /api/agents/{id}/ephemeral-runs`.
+The spawn path also pushes a `max_iterations` operator notification for the parent (#8556, #8557) (@DaBlitzStein)

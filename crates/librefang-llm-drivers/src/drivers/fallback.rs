@@ -596,6 +596,7 @@ mod tests {
     impl LlmDriver for OkDriver {
         async fn complete(&self, _req: CompletionRequest) -> Result<CompletionResponse, LlmError> {
             Ok(CompletionResponse {
+                text_synthesized_from_thinking: false,
                 content: vec![ContentBlock::Text {
                     text: "OK".to_string(),
                     provider_metadata: None,
@@ -627,6 +628,7 @@ mod tests {
 
     fn ok_response() -> CompletionResponse {
         CompletionResponse {
+            text_synthesized_from_thinking: false,
             content: vec![ContentBlock::Text {
                 text: "OK".to_string(),
                 provider_metadata: None,
@@ -707,6 +709,7 @@ mod tests {
                 })
                 .await;
             Ok(CompletionResponse {
+                text_synthesized_from_thinking: false,
                 content: vec![ContentBlock::Text {
                     text: "SECONDARY".to_string(),
                     provider_metadata: None,
@@ -1090,6 +1093,7 @@ mod tests {
                     })
                 } else {
                     Ok(CompletionResponse {
+                        text_synthesized_from_thinking: false,
                         content: vec![ContentBlock::Text {
                             text: "recovered".to_string(),
                             provider_metadata: None,

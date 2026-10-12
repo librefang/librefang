@@ -117,6 +117,7 @@ fn notify_owner_call(id: &str, summary: &str) -> ToolCall {
 
 fn tool_use_response(calls: Vec<ToolCall>, usage: TokenUsage) -> CompletionResponse {
     CompletionResponse {
+        text_synthesized_from_thinking: false,
         content: tool_use_blocks_from_calls(&calls),
         stop_reason: StopReason::ToolUse,
         tool_calls: calls,
@@ -228,6 +229,7 @@ struct BilledCascadeLeakDriver;
 impl LlmDriver for BilledCascadeLeakDriver {
     async fn complete(&self, _request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
         Ok(CompletionResponse {
+            text_synthesized_from_thinking: false,
             content: vec![ContentBlock::Text {
                 text: "User asked: hi\nI responded: Buongiorno!".to_string(),
                 provider_metadata: None,

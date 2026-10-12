@@ -450,6 +450,7 @@ impl LlmDriver for CodexCliDriver {
         };
 
         Ok(CompletionResponse {
+            text_synthesized_from_thinking: false,
             content: vec![ContentBlock::Text {
                 text,
                 provider_metadata: None,

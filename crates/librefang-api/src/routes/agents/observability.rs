@@ -539,6 +539,9 @@ pub struct EphemeralRunView {
     pub response: String,
     /// `completed` or `failed`.
     pub status: String,
+    /// True when the worker hit its per-turn iteration cap and delivered a
+    /// partial answer (#8556) — the run completed, but was cut off.
+    pub truncated: bool,
     /// Why the run failed, when it did.
     pub error: Option<String>,
     pub provider: String,
@@ -564,6 +567,7 @@ impl From<librefang_memory::EphemeralRunRow> for EphemeralRunView {
             task: r.task,
             response: r.response,
             status: r.status,
+            truncated: r.truncated,
             error: r.error,
             provider: r.provider,
             model: r.model,

@@ -542,6 +542,7 @@ mod tests {
             _req: crate::llm_driver::CompletionRequest,
         ) -> Result<CompletionResponse, LlmError> {
             Ok(CompletionResponse {
+                text_synthesized_from_thinking: false,
                 content: vec![ContentBlock::Text {
                     text: "Summary of earlier conversation turns.".to_string(),
                     provider_metadata: None,

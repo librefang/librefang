@@ -1265,6 +1265,7 @@ fn agent_loop_result_owner_notice_defaults_none() {
 #[test]
 fn agent_loop_result_owner_notice_can_be_set() {
     let r = AgentLoopResult {
+        hit_iteration_cap: false,
         owner_notice: Some("Sir, the appointment is at 3pm.".into()),
         ..AgentLoopResult::default()
     };
@@ -1289,6 +1290,7 @@ fn agent_loop_result_actual_provider_can_be_set() {
     // The kernel metering path falls back to the configured provider
     // when this is None, and bills the named provider when set.
     let r = AgentLoopResult {
+        hit_iteration_cap: false,
         actual_provider: Some("anthropic-backup".into()),
         actual_model: None,
         ..AgentLoopResult::default()
@@ -1467,6 +1469,124 @@ fn safe_trim_messages_respects_custom_cap() {
         Some(Role::User),
         "history must start with a user turn after trim+repair"
     );
+}
+
+/// #8556: the trim must keep the *current turn's* task — the last user message of a turn-shaped working copy — and not merely "some user message".
+/// `max_history = 0` is below the production floor (`resolve_max_history` clamps to `MIN_HISTORY_MESSAGES`), so this pins the guard in `ensure_post_trim_minimum` itself: before it, the guard returned early as soon as any user message survived and fell back to the raw `user_message` string otherwise.
+/// `safe_trim_messages_keeps_current_turn_task_at_production_floor` covers the reachable configuration.
+#[test]
+fn safe_trim_messages_preserves_current_turn_task_under_tiny_cap() {
+    let mut messages = vec![
+        Message::user("old user turn"),
+        Message::assistant("old assistant turn"),
+        Message::user("CURRENT TASK"),
+    ];
+    let mut session_messages = messages.clone();
+
+    // A cap so small the front-drain would otherwise empty the history: the
+    // exact task message must still survive in both copies.
+    safe_trim_messages(
+        &mut messages,
+        &mut session_messages,
+        "test-agent",
+        "fallback-for-a-different-turn",
+        0,
+    );
+
+    for (label, history) in [
+        ("working copy", &messages),
+        ("persistent session", &session_messages),
+    ] {
+        assert!(
+            history
+                .iter()
+                .any(|m| { m.role == Role::User && m.content.text_content() == "CURRENT TASK" }),
+            "{label} must retain the current-turn task; got {:?}",
+            history
+                .iter()
+                .map(|m| m.content.text_content())
+                .collect::<Vec<_>>()
+        );
+    }
+}
+
+/// #8556: the same guarantee at the smallest cap production can reach, on a history whose earlier turns include a full tool cycle.
+/// The task carries a sender prefix, so it differs from the raw `user_message` fallback, and it must survive the drain and the repair passes exactly once, as the last message of both copies.
+#[test]
+fn safe_trim_messages_keeps_current_turn_task_at_production_floor() {
+    use librefang_types::message::{ContentBlock, MessageContent};
+
+    let tool_use = Message {
+        role: Role::Assistant,
+        content: MessageContent::Blocks(vec![ContentBlock::ToolUse {
+            id: "t1".into(),
+            name: "file_read".into(),
+            input: serde_json::json!({}),
+            provider_metadata: None,
+        }]),
+        pinned: false,
+        timestamp: None,
+    };
+    let tool_result = Message {
+        role: Role::User,
+        content: MessageContent::Blocks(vec![ContentBlock::ToolResult {
+            tool_use_id: "t1".into(),
+            tool_name: "file_read".into(),
+            content: "result".into(),
+            is_error: false,
+            status: librefang_types::tool::ToolExecutionStatus::Completed,
+            approval_request_id: None,
+        }]),
+        pinned: false,
+        timestamp: None,
+    };
+    let task = "[from alice] CURRENT TASK";
+    let mut messages = vec![
+        Message::user("turn 1"),
+        Message::assistant("reply 1"),
+        Message::user("turn 2"),
+        tool_use,
+        tool_result,
+        Message::assistant("reply 2"),
+        Message::user("turn 3"),
+        Message::assistant("reply 3"),
+        Message::user(task),
+    ];
+    let mut session_messages = messages.clone();
+
+    safe_trim_messages(
+        &mut messages,
+        &mut session_messages,
+        "test-agent",
+        "CURRENT TASK",
+        crate::agent_loop::history::MIN_HISTORY_MESSAGES,
+    );
+
+    for (label, history) in [
+        ("working copy", &messages),
+        ("persistent session", &session_messages),
+    ] {
+        let texts: Vec<String> = history.iter().map(|m| m.content.text_content()).collect();
+        assert!(
+            history.len() < 9,
+            "{label} must actually have been trimmed; got {texts:?}"
+        );
+        assert_eq!(
+            history.first().map(|m| m.role),
+            Some(Role::User),
+            "{label} must start with a user turn; got {texts:?}"
+        );
+        assert_eq!(
+            texts.last().map(String::as_str),
+            Some(task),
+            "{label} must end with the current-turn task; got {texts:?}"
+        );
+        assert_eq!(
+            texts.iter().filter(|t| t.contains("CURRENT TASK")).count(),
+            1,
+            "{label} must hold the task exactly once; got {texts:?}"
+        );
+    }
 }
 
 // ── record_tool_call_metric covers failure paths ───────────────────────
@@ -1907,7 +2027,17 @@ fn test_classify_exit_reason_covers_every_branch() {
         classify_exit_reason(&Ok(AgentLoopResult::default())),
         "completed"
     );
-    // max_iterations — the for-loop ran out.
+    // max_iterations — #8556: the loop delivered its best-so-far text and
+    // returned Ok with `hit_iteration_cap`. This is the path the cap fix
+    // produces; the Err arm below is retained defensively.
+    assert_eq!(
+        classify_exit_reason(&Ok(AgentLoopResult {
+            hit_iteration_cap: true,
+            ..Default::default()
+        })),
+        "max_iterations"
+    );
+    // max_iterations — legacy Err shape.
     assert_eq!(
         classify_exit_reason(&Err(LibreFangError::MaxIterationsExceeded(40))),
         "max_iterations"
@@ -1951,11 +2081,19 @@ fn test_classify_exit_reason_covers_every_branch() {
 fn test_record_agent_loop_exit_increments_once_with_labels() {
     use metrics_util::debugging::{DebugValue, DebuggingRecorder};
 
-    // One representative per reason: an Ok (completed) and a structured Err
-    // (max_iterations). Both must produce a single increment with the right
-    // reason label and the agent label.
+    // One representative per reason: an Ok (completed), the #8556 cap-
+    // delivered Ok (max_iterations), and a structured Err (max_iterations).
+    // Each must produce a single increment with the right reason label and
+    // the agent label.
     let cases: &[(LibreFangResult<AgentLoopResult>, &str)] = &[
         (Ok(AgentLoopResult::default()), "completed"),
+        (
+            Ok(AgentLoopResult {
+                hit_iteration_cap: true,
+                ..Default::default()
+            }),
+            "max_iterations",
+        ),
         (
             Err(LibreFangError::MaxIterationsExceeded(40)),
             "max_iterations",

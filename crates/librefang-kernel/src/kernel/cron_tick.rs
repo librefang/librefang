@@ -27,6 +27,28 @@ use super::{
     LibreFangKernel, SYSTEM_CHANNEL_CRON,
 };
 
+/// Record the outcome of an `AgentTurn` fire whose agent loop returned `Ok`.
+///
+/// A turn that exhausted its iteration budget returns `Ok` with a partial answer (#8556), but it did not finish the job.
+/// Recording it as a success would reset `consecutive_errors`, so a job that caps on every fire would never be auto-disabled and would keep spending up to `max_iterations` LLM calls each time; it is recorded as a failure instead, while the caller still delivers the partial output.
+fn record_agent_turn_outcome(
+    scheduler: &crate::cron::CronScheduler,
+    job_id: librefang_types::scheduler::CronJobId,
+    result: &librefang_runtime::agent_loop::AgentLoopResult,
+) {
+    if result.hit_iteration_cap {
+        scheduler.record_failure(
+            job_id,
+            &format!(
+                "hit the iteration cap after {} iterations before finishing (partial response delivered)",
+                result.iterations
+            ),
+        );
+    } else {
+        scheduler.record_success(job_id);
+    }
+}
+
 /// Drive the cron scheduler tick loop until the kernel begins shutdown.
 ///
 /// Captured state (formerly closure captures): `kernel: Arc<Self>`. The
@@ -385,8 +407,16 @@ pub(super) async fn dispatch_due_jobs(
                     .await
                     {
                         Ok(Ok(result)) => {
-                            tracing::info!(job = %job_name, "Cron job completed successfully");
-                            kernel_job.workflows.cron_scheduler.record_success(job_id);
+                            if result.hit_iteration_cap {
+                                tracing::warn!(job = %job_name, iterations = result.iterations, "Cron job hit the iteration cap; delivering the partial response");
+                            } else {
+                                tracing::info!(job = %job_name, "Cron job completed successfully");
+                            }
+                            record_agent_turn_outcome(
+                                &kernel_job.workflows.cron_scheduler,
+                                job_id,
+                                &result,
+                            );
                             // Persist last_run before delivery
                             // so a slow/failed channel push
                             // can't strand last_run on disk.
@@ -1283,6 +1313,86 @@ mod tests {
         task.await.unwrap();
         assert!(agent_lock.try_lock().is_ok());
         assert!(session_lock.try_lock().is_ok());
+    }
+}
+
+#[cfg(test)]
+mod agent_turn_outcome_tests {
+    use super::*;
+    use crate::cron::CronScheduler;
+    use librefang_runtime::agent_loop::AgentLoopResult;
+    use librefang_types::scheduler::{CronAction, CronDelivery, CronJob, CronJobId, CronSchedule};
+
+    fn recurring_job(sched: &CronScheduler) -> CronJobId {
+        let job = CronJob {
+            id: CronJobId::new(),
+            agent_id: AgentId::new(),
+            name: "capped-job".into(),
+            enabled: true,
+            schedule: CronSchedule::Every { every_secs: 3600 },
+            action: CronAction::SystemEvent {
+                text: "ping".into(),
+            },
+            delivery: CronDelivery::None,
+            delivery_targets: Vec::new(),
+            peer_id: None,
+            session_mode: None,
+            created_at: chrono::Utc::now(),
+            last_run: None,
+            next_run: None,
+            owner: None,
+        };
+        sched.add_job(job, false).unwrap()
+    }
+
+    #[test]
+    fn capped_agent_turn_counts_toward_auto_disable() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sched = CronScheduler::new(tmp.path(), 100);
+        let id = recurring_job(&sched);
+        let capped = AgentLoopResult {
+            hit_iteration_cap: true,
+            iterations: 50,
+            response: "partial".into(),
+            ..Default::default()
+        };
+
+        for _ in 0..crate::cron::MAX_CONSECUTIVE_ERRORS {
+            record_agent_turn_outcome(&sched, id, &capped);
+        }
+
+        let meta = sched.get_meta(id).unwrap();
+        assert_eq!(meta.consecutive_errors, crate::cron::MAX_CONSECUTIVE_ERRORS);
+        assert!(
+            meta.last_status
+                .as_deref()
+                .is_some_and(|s| s.starts_with("error: hit the iteration cap after 50 iterations")),
+            "unexpected last_status: {:?}",
+            meta.last_status
+        );
+        assert!(
+            !meta.job.enabled && meta.auto_disabled,
+            "a job that caps on every fire must be auto-disabled like any repeatedly failing job"
+        );
+    }
+
+    #[test]
+    fn completed_agent_turn_resets_the_error_counter() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sched = CronScheduler::new(tmp.path(), 100);
+        let id = recurring_job(&sched);
+        let capped = AgentLoopResult {
+            hit_iteration_cap: true,
+            ..Default::default()
+        };
+        record_agent_turn_outcome(&sched, id, &capped);
+        assert_eq!(sched.get_meta(id).unwrap().consecutive_errors, 1);
+
+        record_agent_turn_outcome(&sched, id, &AgentLoopResult::default());
+
+        let meta = sched.get_meta(id).unwrap();
+        assert_eq!(meta.consecutive_errors, 0);
+        assert_eq!(meta.last_status.as_deref(), Some("ok"));
     }
 }
 

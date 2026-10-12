@@ -356,6 +356,7 @@ mod tests {
     impl LlmDriver for BilledQueryDriver {
         async fn complete(&self, _req: CompletionRequest) -> Result<CompletionResponse, LlmError> {
             Ok(CompletionResponse {
+                text_synthesized_from_thinking: false,
                 content: vec![ContentBlock::Text {
                     text: r#"{"queries": []}"#.to_string(),
                     provider_metadata: None,
@@ -393,6 +394,7 @@ mod tests {
                 .unwrap()
                 .push(req.response_format.clone());
             Ok(CompletionResponse {
+                text_synthesized_from_thinking: false,
                 content: vec![ContentBlock::Text {
                     text: r#"{"queries": []}"#.to_string(),
                     provider_metadata: None,
@@ -410,6 +412,7 @@ mod tests {
     impl LlmDriver for QueryResponseDriver {
         async fn complete(&self, _req: CompletionRequest) -> Result<CompletionResponse, LlmError> {
             Ok(CompletionResponse {
+                text_synthesized_from_thinking: false,
                 content: vec![ContentBlock::Text {
                     text: self.response.clone(),
                     provider_metadata: None,

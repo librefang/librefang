@@ -18,7 +18,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use tracing::{debug, info, warn};
 
 /// Maximum consecutive errors before a job is auto-disabled.
-const MAX_CONSECUTIVE_ERRORS: u32 = 5;
+pub(crate) const MAX_CONSECUTIVE_ERRORS: u32 = 5;
 
 fn lock_cron_serialization<'a>(
     lock: &'a std::sync::Mutex<()>,

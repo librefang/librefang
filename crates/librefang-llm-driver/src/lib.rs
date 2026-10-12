@@ -458,6 +458,17 @@ pub struct CompletionResponse {
     /// `UsageRecord` construction honours it so metering reflects reality
     /// rather than the nominated id. `None` means "use the requested model".
     pub actual_model: Option<String>,
+    /// True when the driver *synthesized* the response's text from a
+    /// thinking/reasoning-only response (no native text, no tool calls) —
+    /// see the synthesis sites in the OpenAI-compatible driver (#8556).
+    ///
+    /// The agent loop treats such text as terminal: it must not be
+    /// re-promoted into tool calls by text recovery, and it must not be
+    /// nudged into a retry. A synthesized summary is a best-effort answer,
+    /// not an action to resume, so forcing it through the tool-call path
+    /// only keeps the turn alive. `false` for every driver that did not
+    /// synthesize.
+    pub text_synthesized_from_thinking: bool,
 }
 
 impl CompletionResponse {
@@ -918,6 +929,7 @@ mod tests {
     #[test]
     fn test_completion_response_text() {
         let response = CompletionResponse {
+            text_synthesized_from_thinking: false,
             content: vec![
                 ContentBlock::Text {
                     text: "Hello ".to_string(),
@@ -1081,6 +1093,7 @@ mod tests {
                 _request: CompletionRequest,
             ) -> Result<CompletionResponse, LlmError> {
                 Ok(CompletionResponse {
+                    text_synthesized_from_thinking: false,
                     content: vec![ContentBlock::Text {
                         text: "Hello!".to_string(),
                         provider_metadata: None,
@@ -1154,6 +1167,7 @@ mod tests {
                 _request: CompletionRequest,
             ) -> Result<CompletionResponse, LlmError> {
                 Ok(CompletionResponse {
+                    text_synthesized_from_thinking: false,
                     content: vec![ContentBlock::Text {
                         text: "hi".to_string(),
                         provider_metadata: None,

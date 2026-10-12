@@ -1355,6 +1355,7 @@ mod request_llm_summary_tests {
     impl LlmDriver for StubDriver {
         async fn complete(&self, _req: CompletionRequest) -> Result<CompletionResponse, LlmError> {
             Ok(CompletionResponse {
+                text_synthesized_from_thinking: false,
                 content: vec![ContentBlock::Text {
                     text: self.text.clone(),
                     provider_metadata: None,

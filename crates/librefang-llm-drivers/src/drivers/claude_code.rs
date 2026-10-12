@@ -1289,6 +1289,7 @@ impl LlmDriver for ClaudeCodeDriver {
 
             let usage = parsed.usage.unwrap_or_default();
             return Ok(CompletionResponse {
+                text_synthesized_from_thinking: false,
                 content: vec![ContentBlock::Text {
                     text: text.clone(),
                     provider_metadata: None,
@@ -1311,6 +1312,7 @@ impl LlmDriver for ClaudeCodeDriver {
         }
 
         Ok(CompletionResponse {
+            text_synthesized_from_thinking: false,
             content: vec![ContentBlock::Text {
                 text,
                 provider_metadata: None,
@@ -1766,6 +1768,7 @@ impl LlmDriver for ClaudeCodeDriver {
             .await;
 
         Ok(CompletionResponse {
+            text_synthesized_from_thinking: false,
             content: vec![ContentBlock::Text {
                 text: full_text,
                 provider_metadata: None,

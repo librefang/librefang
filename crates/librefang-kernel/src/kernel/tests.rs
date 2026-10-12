@@ -9946,6 +9946,86 @@ async fn test_push_notification_health_check_failed_agent_rule_overrides_alert_c
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn test_max_iterations_notification_falls_back_to_alert_channels() {
+    // #8556: a capped turn now returns Ok with a partial answer instead of reaching the Err arm's `task_failed` push, so its `max_iterations` notification must reach `alert_channels` by default or operators lose the alert entirely.
+    let dir = tempfile::tempdir().unwrap();
+    let home_dir = dir.path().to_path_buf();
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+
+    let mut config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    config.notification = NotificationConfig {
+        approval_channels: Vec::new(),
+        alert_channels: vec![NotificationTarget {
+            channel_type: "test".to_string(),
+            recipient: "ops".to_string(),
+            thread_id: None,
+        }],
+        agent_rules: Vec::new(),
+    };
+
+    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+    let adapter = Arc::new(RecordingChannelAdapter::new("test"));
+    let sent = adapter.sent.clone();
+    kernel
+        .mesh
+        .channel_adapters
+        .insert("test".to_string(), adapter);
+
+    kernel
+        .push_notification("agent-xyz", "max_iterations", "hit the cap", None)
+        .await;
+
+    let recorded = sent.lock().unwrap().clone();
+    assert_eq!(
+        recorded,
+        vec!["ops:hit the cap".to_string()],
+        "max_iterations must fall back to alert_channels when no agent_rule matches"
+    );
+
+    kernel.shutdown();
+}
+
+#[test]
+fn test_every_alert_event_is_a_known_notification_event() {
+    // Boot validation warns about an agent_rule naming an event outside KNOWN_NOTIFICATION_EVENTS, so every event the kernel routes must be listed there.
+    let notification = NotificationConfig {
+        approval_channels: vec![NotificationTarget {
+            channel_type: "test".to_string(),
+            recipient: "approvals".to_string(),
+            thread_id: None,
+        }],
+        alert_channels: vec![NotificationTarget {
+            channel_type: "test".to_string(),
+            recipient: "ops".to_string(),
+            thread_id: None,
+        }],
+        agent_rules: Vec::new(),
+    };
+    for event in [
+        "approval_requested",
+        "task_completed",
+        "task_failed",
+        "tool_failure",
+        "health_check_failed",
+        "model_migrated",
+        "max_iterations",
+    ] {
+        assert!(
+            !super::resolve_notification_targets(&notification, "a", None, event, None).is_empty(),
+            "{event} must route to a global channel list"
+        );
+        assert!(
+            super::KNOWN_NOTIFICATION_EVENTS.contains(&event),
+            "{event} must be a known notification event"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn test_model_migrated_notification_falls_back_to_alert_channels() {
     let dir = tempfile::tempdir().unwrap();
     let home_dir = dir.path().to_path_buf();
@@ -14670,6 +14750,7 @@ mod try_summarize_trim_tests {
         async fn complete(&self, _req: CompletionRequest) -> Result<CompletionResponse, LlmError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             Ok(CompletionResponse {
+                text_synthesized_from_thinking: false,
                 content: vec![ContentBlock::Text {
                     text: self.summary.clone(),
                     provider_metadata: None,
@@ -18993,6 +19074,7 @@ mod provider_budget_gate_5980 {
                 _req: CompletionRequest,
             ) -> Result<CompletionResponse, LlmError> {
                 Ok(CompletionResponse {
+                    text_synthesized_from_thinking: false,
                     content: vec![ContentBlock::Text {
                         text: "served by healthy provider".to_string(),
                         provider_metadata: None,

@@ -724,6 +724,7 @@ fn convert_response(resp: ConverseResponse) -> Result<CompletionResponse, LlmErr
     };
 
     Ok(CompletionResponse {
+        text_synthesized_from_thinking: false,
         content,
         stop_reason,
         tool_calls,
