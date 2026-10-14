@@ -935,7 +935,7 @@ fn extract_bundle_zip_bytes(bytes: &[u8], skill_dir: &Path) -> Result<(), SkillE
         let file = archive
             .by_index(index)
             .map_err(|err| SkillError::InvalidManifest(format!("Read zip entry: {err}")))?;
-        if let Some(path) = sanitize_zip_path(file.name()) {
+        if let Some(path) = file.name().ok().and_then(|n| sanitize_zip_path(&n)) {
             safe_paths.push(path);
         }
     }
@@ -946,7 +946,7 @@ fn extract_bundle_zip_bytes(bytes: &[u8], skill_dir: &Path) -> Result<(), SkillE
         let mut file = archive
             .by_index(index)
             .map_err(|err| SkillError::InvalidManifest(format!("Read zip entry: {err}")))?;
-        let Some(mut relative_path) = sanitize_zip_path(file.name()) else {
+        let Some(mut relative_path) = file.name().ok().and_then(|n| sanitize_zip_path(&n)) else {
             continue;
         };
         if let Some(ref root) = shared_root {
