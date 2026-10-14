@@ -42,9 +42,21 @@ const MAX_BRUTEFORCE_CANDIDATES: usize = 5000;
 /// both close to SQLite's variable ceiling and slower to prepare than the
 /// relevance it buys — bm25 has already ordered the matches, so a caller asking
 /// for at most 50 fragments gains nothing from a 5000th-ranked candidate.
-/// The remaining SQL predicates (scope, confidence, peer_id, …) run after this
+/// `deleted`, `agent_id`, `scope` and `peer_id` are applied inside the FTS lookup; the remaining SQL predicates (confidence, source, time window, metadata) run after this
 /// cut, which is why it over-fetches at all rather than stopping at `limit`.
 const MAX_FTS_CANDIDATES: usize = 500;
+
+/// Upper bound on the extra hits `recall_via_vector_store` asks an external backend for beyond `limit`.
+///
+/// The backend may still hold vectors for memories SQLite has since soft-deleted, and hydration drops those, so the request is doubled to keep them from starving the result; this cap keeps a large `limit` from doubling an expensive ANN query.
+const MAX_VECTOR_OVERFETCH: usize = 100;
+
+/// Rank offset of the reciprocal-rank fusion that merges the cosine and bm25 orderings when a recall has both (#8521).
+///
+/// A fragment scores `1 / (RRF_K + rank)` in each list it appears in, so a memory ranked well by *either* signal reaches the top and one ranked well by both outranks either alone.
+/// 60 is the constant from the original RRF paper and the de-facto default in hybrid search engines; it keeps the head of each list from dominating so completely that a strong keyword hit cannot overtake a merely-adjacent cosine neighbour.
+/// Rank-based fusion is used rather than mixing the raw scores because cosine and bm25 are on unrelated scales, and the bm25 scores are not even read out of the index.
+const RRF_K: f32 = 60.0;
 
 /// Upper bound on how many terms a natural-language query contributes to the
 /// FTS5 `MATCH` expression, so a pathological paste cannot build a query string
@@ -349,7 +361,7 @@ impl SemanticStore {
         filter: Option<MemoryFilter>,
         query_embedding: Option<&[f32]>,
     ) -> LibreFangResult<Vec<MemoryFragment>> {
-        self.recall_impl(query, limit, filter, query_embedding, true)
+        self.recall_impl(query, limit, filter, query_embedding, true, true)
     }
 
     /// Read-only listing recall: same query/filter semantics as [`Self::recall`]
@@ -368,9 +380,10 @@ impl SemanticStore {
         limit: usize,
         filter: Option<MemoryFilter>,
     ) -> LibreFangResult<Vec<MemoryFragment>> {
-        self.recall_impl(query, limit, filter, None, false)
+        self.recall_impl(query, limit, filter, None, false, true)
     }
 
+    /// `allow_fts` is `false` only for the LIKE retry below, after an FTS pre-selection hydrated nothing.
     fn recall_impl(
         &self,
         query: &str,
@@ -378,10 +391,18 @@ impl SemanticStore {
         filter: Option<MemoryFilter>,
         query_embedding: Option<&[f32]>,
         track_access: bool,
+        allow_fts: bool,
     ) -> LibreFangResult<Vec<MemoryFragment>> {
         // ── Delegate to external vector store when available ──────────
         if let (Some(vs), Some(qe)) = (&self.vector_store, query_embedding) {
-            return self.recall_via_vector_store(vs, qe, limit, filter.clone(), track_access);
+            return self.recall_via_vector_store(
+                vs,
+                query,
+                qe,
+                limit,
+                filter.clone(),
+                track_access,
+            );
         }
 
         // mut: needed for the `transaction()` call inside
@@ -390,26 +411,24 @@ impl SemanticStore {
         // before that borrow occurs.
         let mut conn = self.pool.get().map_err(LibreFangError::memory)?;
 
-        // ── Full-text pre-selection when there is no query embedding ──
+        // ── Full-text lookup ──
         //
-        // Without this the no-embedding path was `content LIKE '%{query}%'`
-        // (#7808): a substring scan that only matches when the caller's entire
-        // phrasing appears verbatim inside a memory, which a natural-language
-        // question essentially never does. `memories_fts` (v49) turns the same
-        // path into a real inverted-index lookup ranked by bm25.
+        // Without a query embedding this is the pre-selection.
+        // The path used to be `content LIKE '%{query}%'` (#7808): a substring scan that only matches when the caller's entire phrasing appears verbatim inside a memory, which a natural-language question essentially never does.
+        // `memories_fts` (v49) turns the same path into a real inverted-index lookup ranked by bm25.
         //
         // Strictly additive: a query that yields no FTS hits falls through to
         // the LIKE predicate below, so substring matches that FTS's word
         // boundaries would miss ("fang" inside "librefang") still work, and a
         // deployment whose index has not been built yet degrades to exactly
         // the old behaviour instead of going silent.
-        let fts_ranked: Option<Vec<String>> = if query_embedding.is_none() && !query.is_empty() {
-            fts_candidate_ids(
-                &conn,
-                query,
-                filter.as_ref().and_then(|f| f.agent_id),
-                MAX_FTS_CANDIDATES,
-            )
+        //
+        // With a query embedding the same bm25 ranking is the second signal of a hybrid ranking (#8521).
+        // It used to be skipped outright, so every deployment with a working embedding provider ranked by cosine alone and a memory holding the exact token searched for (a URL, an id, a proper noun) lost to merely topical neighbours.
+        // Here it neither filters the candidates nor replaces cosine: it guarantees its hits a place in the candidate window and is fused with the cosine order by reciprocal rank below.
+        // A caller that wants pure nearest neighbours passes an empty query.
+        let fts_ranked: Option<Vec<String>> = if allow_fts && !query.is_empty() {
+            fts_candidate_ids(&conn, query, filter.as_ref(), MAX_FTS_CANDIDATES)
         } else {
             None
         };
@@ -445,7 +464,7 @@ impl SemanticStore {
         // Text search filter (only when no embeddings — vector search handles
         // relevance). The FTS index answers first when it matched anything;
         // LIKE remains the fallback for the queries it cannot serve.
-        if let Some(ref ids) = fts_ranked {
+        if let (Some(ids), None) = (&fts_ranked, query_embedding) {
             let placeholders = ids
                 .iter()
                 .enumerate()
@@ -565,10 +584,24 @@ impl SemanticStore {
                 params.push(Box::new(pid.clone()));
                 param_idx += 1;
             }
-            let _ = param_idx;
         }
 
-        if query_embedding.is_some() || fts_ranked.is_some() {
+        if let (Some(ids), Some(_)) = (&fts_ranked, query_embedding) {
+            // Hybrid ranking (#8521): the keyword hits are ordered ahead of the rest so the MAX_BRUTEFORCE_CANDIDATES cap can never cut a literal match out of the window that the fusion below ranks.
+            // They are not a filter — every other row still competes on cosine.
+            let placeholders = ids
+                .iter()
+                .enumerate()
+                .map(|(offset, _)| format!("?{}", param_idx + offset))
+                .collect::<Vec<_>>()
+                .join(",");
+            sql.push_str(&format!(
+                " ORDER BY CASE WHEN id IN ({placeholders}) THEN 0 ELSE 1 END, created_at DESC"
+            ));
+            for id in ids {
+                params.push(Box::new(id.clone()));
+            }
+        } else if query_embedding.is_some() || fts_ranked.is_some() {
             // Relevance-neutral candidate ordering: recency (accessed_at) must
             // not decide which rows reach cosine or bm25 re-ranking, or an
             // old-but-relevant memory outside the recency window is silently
@@ -734,7 +767,8 @@ impl SemanticStore {
         // of them survive the truncation, which is the recency bias the
         // over-fetch exists to avoid. Rows the FTS lookup did not rank cannot
         // occur (they came from that id list) but sort last if they ever do.
-        if let Some(ref ids) = fts_ranked {
+        // With a query embedding the bm25 order is fused into the cosine ranking below instead.
+        if let (Some(ids), None) = (&fts_ranked, query_embedding) {
             let rank: HashMap<&str, usize> = ids
                 .iter()
                 .enumerate()
@@ -750,6 +784,20 @@ impl SemanticStore {
                 "FTS recall: {} results from {candidate_count} candidates",
                 fragments.len(),
             );
+            // The FTS lookup only pre-filters on deleted / agent / peer / scope; the remaining predicates (confidence, source, time window, metadata) and the corrupt-row skip run on the hydrated window and can empty it.
+            // Retry with the LIKE predicate so FTS stays strictly additive: it may add matches LIKE would miss, but must never turn a LIKE hit into an empty recall.
+            if fragments.is_empty() {
+                drop(stmt);
+                drop(conn);
+                return self.recall_impl(
+                    query,
+                    limit,
+                    filter,
+                    query_embedding,
+                    track_access,
+                    false,
+                );
+            }
         }
 
         // If we have a query embedding, re-rank by cosine similarity.
@@ -796,6 +844,9 @@ impl SemanticStore {
                     .partial_cmp(&sim_a)
                     .unwrap_or(std::cmp::Ordering::Equal)
             });
+            if let Some(ref ids) = fts_ranked {
+                fragments = fuse_keyword_ranking(std::mem::take(&mut fragments), ids);
+            }
             // Similarity floor (#7808): "nothing rather than noise".
             // Applied after ranking and before truncation, so the floor
             // decides membership rather than merely reordering the same top-k.
@@ -856,6 +907,7 @@ impl SemanticStore {
     fn recall_via_vector_store(
         &self,
         vs: &Arc<dyn VectorStore>,
+        query: &str,
         query_embedding: &[f32],
         limit: usize,
         filter: Option<MemoryFilter>,
@@ -865,9 +917,18 @@ impl SemanticStore {
         let vs = Arc::clone(vs);
         let qe = query_embedding.to_vec();
         let filter_clone = filter.clone();
+        // Over-fetch: hits that no longer hydrate (soft-deleted by a path that never reaches the backend, such as consolidation or decay) or that fail the filter re-check below are dropped, and must not starve the result.
+        // The final list is truncated back to `limit`.
+        let fetch_limit = limit
+            .saturating_mul(2)
+            .min(limit.saturating_add(MAX_VECTOR_OVERFETCH));
         let results: Vec<librefang_types::memory::VectorSearchResult> =
             tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current().block_on(vs.search(&qe, limit, filter_clone))
+                tokio::runtime::Handle::current().block_on(vs.search(
+                    &qe,
+                    fetch_limit,
+                    filter_clone,
+                ))
             })?;
 
         debug!(
@@ -947,9 +1008,21 @@ impl SemanticStore {
         for frag in &mut fragments {
             frag.similarity = scores.get(frag.id.0.to_string().as_str()).copied();
         }
+
+        // Hybrid ranking (#8521), same contract as the SQLite path: the backend only knows vectors, so the literal matches come from the local keyword path (FTS, else LIKE), which applies the caller's filter in SQL.
+        // A keyword-only hit carries no backend score, so it is unmeasured — the floor below drops it, exactly as it drops any row it cannot measure.
+        if !query.is_empty() {
+            let keyword = self.recall_impl(query, limit, filter.clone(), None, false, true)?;
+            let keyword_ids: Vec<String> = keyword.iter().map(|f| f.id.0.to_string()).collect();
+            let seen: HashSet<MemoryId> = fragments.iter().map(|f| f.id).collect();
+            fragments.extend(keyword.into_iter().filter(|f| !seen.contains(&f.id)));
+            fragments = fuse_keyword_ranking(fragments, &keyword_ids);
+        }
+
         if let Some(floor) = filter.as_ref().and_then(|f| f.min_similarity) {
             fragments.retain(|frag| frag.similarity.is_some_and(|s| s >= floor));
         }
+        fragments.truncate(limit);
 
         // Update access counts — see note on the SQLite-path
         // update above for why silent drops would corrupt decay
@@ -1065,14 +1138,70 @@ impl SemanticStore {
     /// later. Without the timestamp the prune filter (`deleted_at IS NOT NULL`)
     /// would skip it forever, leaking the embedding BLOB indefinitely.
     pub fn forget(&self, id: MemoryId) -> LibreFangResult<()> {
-        let conn = self.pool.get().map_err(LibreFangError::memory)?;
-        conn.execute(
+        let ids = self.soft_delete_returning_ids(
             "UPDATE memories SET deleted = 1, deleted_at = ?1 \
-             WHERE id = ?2 AND deleted = 0",
+             WHERE id = ?2 AND deleted = 0 RETURNING id",
             rusqlite::params![Utc::now().timestamp(), id.0.to_string()],
-        )
-        .map_err(LibreFangError::memory)?;
+        )?;
+        self.delete_from_vector_store(&ids);
         Ok(())
+    }
+
+    /// Run a soft-delete `UPDATE … RETURNING id` and collect the ids it actually flipped.
+    ///
+    /// The pooled connection is released before returning, so the caller can mirror the delete into an external vector backend without holding it.
+    fn soft_delete_returning_ids(
+        &self,
+        sql: &str,
+        params: impl rusqlite::Params,
+    ) -> LibreFangResult<Vec<String>> {
+        let conn = self.pool.get().map_err(LibreFangError::memory)?;
+        let mut stmt = conn.prepare(sql).map_err(LibreFangError::memory)?;
+        let ids = stmt
+            .query_map(params, |row| row.get::<_, String>(0))
+            .map_err(LibreFangError::memory)?
+            .collect::<rusqlite::Result<Vec<String>>>()
+            .map_err(LibreFangError::memory)?;
+        Ok(ids)
+    }
+
+    /// Mirror soft-deletes into the external vector backend, when one is attached.
+    ///
+    /// `remember` copies each embedding and its full content into the backend, so without this a forgotten memory stayed searchable there indefinitely and its dead vector kept taking top-k slots from live ones.
+    /// Backend failures are logged, not returned: the SQLite row is already deleted and is the source of truth, and hydration drops any id that no longer resolves.
+    /// The async call is bridged the same way `remember` does it, and skipped with a warning when there is no multi-threaded runtime to bridge on.
+    fn delete_from_vector_store(&self, ids: &[String]) {
+        let Some(vs) = &self.vector_store else {
+            return;
+        };
+        if ids.is_empty() {
+            return;
+        }
+        let handle = match tokio::runtime::Handle::try_current() {
+            Ok(h) if h.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => h,
+            _ => {
+                warn!(
+                    backend = vs.backend_name(),
+                    count = ids.len(),
+                    "no multi-threaded tokio runtime; forgotten memories were not removed from the external vector store"
+                );
+                return;
+            }
+        };
+        tokio::task::block_in_place(|| {
+            handle.block_on(async {
+                for id in ids {
+                    if let Err(e) = vs.delete(id).await {
+                        warn!(
+                            backend = vs.backend_name(),
+                            memory_id = %id,
+                            error = %e,
+                            "failed to delete forgotten memory from the external vector store"
+                        );
+                    }
+                }
+            })
+        });
     }
 
     /// Update the content (and optionally metadata) of an existing memory in-place.
@@ -1234,32 +1363,55 @@ impl SemanticStore {
         Ok(map)
     }
 
+    /// Load the `peer_id` column for a batch of memory IDs.
+    ///
+    /// Returns `id_string -> peer_id` for the live rows that carry a peer; unscoped, unknown and soft-deleted rows are omitted.
+    /// `MemoryFragment` does not carry `peer_id`, so `ProactiveMemoryStore::find_duplicates` reads it here to keep two users' memories out of one duplicate group (#8524).
+    pub fn get_peer_ids_batch(&self, ids: &[&str]) -> LibreFangResult<HashMap<String, String>> {
+        if ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let conn = self.pool.get().map_err(LibreFangError::memory)?;
+        let mut stmt = conn
+            .prepare("SELECT peer_id FROM memories WHERE id = ?1 AND deleted = 0")
+            .map_err(LibreFangError::memory)?;
+        let mut map = HashMap::new();
+        for id in ids {
+            let peer: Option<String> =
+                match stmt.query_row(rusqlite::params![*id], |row| row.get(0)) {
+                    Ok(peer) => peer,
+                    Err(rusqlite::Error::QueryReturnedNoRows) => None,
+                    Err(e) => return Err(LibreFangError::memory(e)),
+                };
+            if let Some(peer) = peer {
+                map.insert(id.to_string(), peer);
+            }
+        }
+        Ok(map)
+    }
+
     /// Soft-delete all memories for a specific agent.
     ///
     /// See [`Self::forget`] for why `deleted_at` is stamped.
     pub fn forget_by_agent(&self, agent_id: AgentId) -> LibreFangResult<u64> {
-        let conn = self.pool.get().map_err(LibreFangError::memory)?;
-        let count = conn
-            .execute(
-                "UPDATE memories SET deleted = 1, deleted_at = ?1 \
-                 WHERE agent_id = ?2 AND deleted = 0",
-                rusqlite::params![Utc::now().timestamp(), agent_id.0.to_string()],
-            )
-            .map_err(LibreFangError::memory)?;
-        Ok(count as u64)
+        let ids = self.soft_delete_returning_ids(
+            "UPDATE memories SET deleted = 1, deleted_at = ?1 \
+             WHERE agent_id = ?2 AND deleted = 0 RETURNING id",
+            rusqlite::params![Utc::now().timestamp(), agent_id.0.to_string()],
+        )?;
+        self.delete_from_vector_store(&ids);
+        Ok(ids.len() as u64)
     }
 
     /// Soft-delete all memories for a specific agent and scope.
     pub fn forget_by_scope(&self, agent_id: AgentId, scope: &str) -> LibreFangResult<u64> {
-        let conn = self.pool.get().map_err(LibreFangError::memory)?;
-        let count = conn
-            .execute(
-                "UPDATE memories SET deleted = 1, deleted_at = ?1 \
-                 WHERE agent_id = ?2 AND scope = ?3 AND deleted = 0",
-                rusqlite::params![Utc::now().timestamp(), agent_id.0.to_string(), scope],
-            )
-            .map_err(LibreFangError::memory)?;
-        Ok(count as u64)
+        let ids = self.soft_delete_returning_ids(
+            "UPDATE memories SET deleted = 1, deleted_at = ?1 \
+             WHERE agent_id = ?2 AND scope = ?3 AND deleted = 0 RETURNING id",
+            rusqlite::params![Utc::now().timestamp(), agent_id.0.to_string(), scope],
+        )?;
+        self.delete_from_vector_store(&ids);
+        Ok(ids.len() as u64)
     }
 
     /// Soft-delete memories older than a given timestamp for a specific agent and scope.
@@ -1269,20 +1421,18 @@ impl SemanticStore {
         scope: &str,
         before: chrono::DateTime<Utc>,
     ) -> LibreFangResult<u64> {
-        let conn = self.pool.get().map_err(LibreFangError::memory)?;
-        let count = conn
-            .execute(
-                "UPDATE memories SET deleted = 1, deleted_at = ?1 \
-                 WHERE agent_id = ?2 AND scope = ?3 AND created_at < ?4 AND deleted = 0",
-                rusqlite::params![
-                    Utc::now().timestamp(),
-                    agent_id.0.to_string(),
-                    scope,
-                    before.to_rfc3339()
-                ],
-            )
-            .map_err(LibreFangError::memory)?;
-        Ok(count as u64)
+        let ids = self.soft_delete_returning_ids(
+            "UPDATE memories SET deleted = 1, deleted_at = ?1 \
+             WHERE agent_id = ?2 AND scope = ?3 AND created_at < ?4 AND deleted = 0 RETURNING id",
+            rusqlite::params![
+                Utc::now().timestamp(),
+                agent_id.0.to_string(),
+                scope,
+                before.to_rfc3339()
+            ],
+        )?;
+        self.delete_from_vector_store(&ids);
+        Ok(ids.len() as u64)
     }
 
     /// Soft-delete session memories older than a given timestamp across ALL agents.
@@ -1294,15 +1444,13 @@ impl SemanticStore {
         scope: &str,
         before: chrono::DateTime<Utc>,
     ) -> LibreFangResult<u64> {
-        let conn = self.pool.get().map_err(LibreFangError::memory)?;
-        let count = conn
-            .execute(
-                "UPDATE memories SET deleted = 1, deleted_at = ?1 \
-                 WHERE scope = ?2 AND created_at < ?3 AND deleted = 0",
-                rusqlite::params![Utc::now().timestamp(), scope, before.to_rfc3339()],
-            )
-            .map_err(LibreFangError::memory)?;
-        Ok(count as u64)
+        let ids = self.soft_delete_returning_ids(
+            "UPDATE memories SET deleted = 1, deleted_at = ?1 \
+             WHERE scope = ?2 AND created_at < ?3 AND deleted = 0 RETURNING id",
+            rusqlite::params![Utc::now().timestamp(), scope, before.to_rfc3339()],
+        )?;
+        self.delete_from_vector_store(&ids);
+        Ok(ids.len() as u64)
     }
 
     /// Count non-deleted memories for a specific agent, optionally filtered by scope.
@@ -1687,6 +1835,38 @@ fn fts_match_expression(query: &str) -> Option<String> {
     }
 }
 
+/// Re-order a cosine-ranked candidate list by reciprocal-rank fusion with the bm25-ranked `keyword_ranked` ids (#8521).
+///
+/// `fragments` must arrive in cosine order, measured rows first: the cosine rank of a fragment is its position among the rows that carry a `similarity`, so an unmeasured row contributes nothing on that side rather than a fictional rank.
+/// The sort is stable, so fragments with equal fused scores keep their cosine order and the result is deterministic.
+fn fuse_keyword_ranking(
+    fragments: Vec<MemoryFragment>,
+    keyword_ranked: &[String],
+) -> Vec<MemoryFragment> {
+    let keyword_rank: HashMap<&str, usize> = keyword_ranked
+        .iter()
+        .enumerate()
+        .map(|(position, id)| (id.as_str(), position + 1))
+        .collect();
+    let mut semantic_rank = 0usize;
+    let mut scored: Vec<(f32, MemoryFragment)> = fragments
+        .into_iter()
+        .map(|frag| {
+            let mut score = 0.0f32;
+            if frag.similarity.is_some() {
+                semantic_rank += 1;
+                score += 1.0 / (RRF_K + semantic_rank as f32);
+            }
+            if let Some(rank) = keyword_rank.get(frag.id.0.to_string().as_str()) {
+                score += 1.0 / (RRF_K + *rank as f32);
+            }
+            (score, frag)
+        })
+        .collect();
+    scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+    scored.into_iter().map(|(_, frag)| frag).collect()
+}
+
 /// Look up bm25-ranked memory ids for `query` in the `memories_fts` index.
 ///
 /// `None` means "no usable FTS pre-selection" — no parseable term, no matching
@@ -1702,35 +1882,45 @@ fn fts_match_expression(query: &str) -> Option<String> {
 fn fts_candidate_ids(
     conn: &rusqlite::Connection,
     query: &str,
-    agent_id: Option<AgentId>,
+    filter: Option<&MemoryFilter>,
     limit: usize,
 ) -> Option<Vec<String>> {
     let expression = fts_match_expression(query)?;
 
-    // `agent_id` is UNINDEXED in the FTS table, so this is a filter over the
-    // matched rows rather than an index probe — still far cheaper than
-    // hydrating another agent's matches only to discard them in SQL.
-    let (sql, params): (&str, Vec<Box<dyn rusqlite::types::ToSql>>) = match agent_id {
-        Some(agent) => (
-            "SELECT memory_id FROM memories_fts \
-             WHERE memories_fts MATCH ?1 AND agent_id = ?2 \
-             ORDER BY rank LIMIT ?3",
-            vec![
-                Box::new(expression),
-                Box::new(agent.0.to_string()),
-                Box::new(limit as i64),
-            ],
-        ),
-        None => (
-            "SELECT memory_id FROM memories_fts \
-             WHERE memories_fts MATCH ?1 \
-             ORDER BY rank LIMIT ?2",
-            vec![Box::new(expression), Box::new(limit as i64)],
-        ),
-    };
+    // The index keeps rows for soft-deleted memories (the update trigger only fires on content / agent_id changes), so the lookup applies the cheap `memories` row predicates here through a correlated `EXISTS`.
+    // Otherwise deleted rows, other peers' rows or other scopes' rows can fill the capped candidate window and hide every live match.
+    // `EXISTS` (rather than a JOIN) keeps the FTS table as the driving loop, which `MATCH` requires.
+    // `agent_id` is UNINDEXED in the FTS table, so the agent predicate is a filter over the matched rows rather than an index probe — still far cheaper than hydrating another agent's matches only to discard them in SQL.
+    let mut sql = String::from(
+        "SELECT memory_id FROM memories_fts \
+         WHERE memories_fts MATCH ?1",
+    );
+    let mut exists = String::from(
+        " AND EXISTS (SELECT 1 FROM memories m \
+         WHERE m.id = memories_fts.memory_id AND m.deleted = 0",
+    );
+    let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = vec![Box::new(expression)];
+    if let Some(f) = filter {
+        if let Some(agent) = f.agent_id {
+            params.push(Box::new(agent.0.to_string()));
+            sql.push_str(&format!(" AND agent_id = ?{}", params.len()));
+        }
+        if let Some(ref scope) = f.scope {
+            params.push(Box::new(scope.clone()));
+            exists.push_str(&format!(" AND m.scope = ?{}", params.len()));
+        }
+        if let Some(ref pid) = f.peer_id {
+            params.push(Box::new(pid.clone()));
+            exists.push_str(&format!(" AND m.peer_id = ?{}", params.len()));
+        }
+    }
+    exists.push(')');
+    sql.push_str(&exists);
+    params.push(Box::new(limit as i64));
+    sql.push_str(&format!(" ORDER BY rank LIMIT ?{}", params.len()));
 
     let read = || -> Result<Vec<String>, rusqlite::Error> {
-        let mut stmt = conn.prepare(sql)?;
+        let mut stmt = conn.prepare(&sql)?;
         let param_refs: Vec<&dyn rusqlite::types::ToSql> =
             params.iter().map(|p| p.as_ref()).collect();
         let rows = stmt.query_map(param_refs.as_slice(), |row| row.get::<_, String>(0))?;
@@ -2820,6 +3010,81 @@ mod tests {
         );
     }
 
+    /// `memories_fts` keeps soft-deleted rows, and the lookup used to filter only on agent, so a deleted or other-peer FTS hit switched recall to `id IN (...)` and hid a live LIKE match.
+    #[test]
+    fn fts_stale_or_foreign_hits_do_not_hide_live_substring_matches() {
+        let store = setup();
+        let agent = AgentId::new();
+        let put = |content: &str, peer: Option<&str>| {
+            store
+                .remember_with_embedding_and_peer(
+                    agent,
+                    content,
+                    MemorySource::Conversation,
+                    "episodic",
+                    HashMap::new(),
+                    None,
+                    None,
+                    None,
+                    MemoryModality::Text,
+                    peer,
+                )
+                .unwrap()
+        };
+        let deleted = put("drinks coffee daily", Some("peer-a"));
+        store.forget(deleted).unwrap();
+        put("coffee with oat milk", Some("peer-b"));
+        put("coffeeshop on 5th street", Some("peer-a"));
+
+        let filter = MemoryFilter {
+            agent_id: Some(agent),
+            peer_id: Some("peer-a".to_string()),
+            ..Default::default()
+        };
+        let results = store.recall("coffee", 10, Some(filter)).unwrap();
+        assert_eq!(
+            results
+                .iter()
+                .map(|f| f.content.as_str())
+                .collect::<Vec<_>>(),
+            vec!["coffeeshop on 5th street"]
+        );
+    }
+
+    /// Predicates applied only after hydration (here `source`) can empty the FTS window; recall must then retry with LIKE instead of reporting nothing.
+    #[test]
+    fn fts_window_emptied_by_post_filters_falls_back_to_substring() {
+        let store = setup();
+        let agent = AgentId::new();
+        store
+            .remember(
+                agent,
+                "coffee notes",
+                MemorySource::Conversation,
+                "episodic",
+                HashMap::new(),
+            )
+            .unwrap();
+        store
+            .remember(
+                agent,
+                "coffeeshop on 5th street",
+                MemorySource::System,
+                "episodic",
+                HashMap::new(),
+            )
+            .unwrap();
+
+        let filter = MemoryFilter {
+            agent_id: Some(agent),
+            source: Some(MemorySource::System),
+            ..Default::default()
+        };
+        let results = store.recall("coffee", 10, Some(filter)).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].content, "coffeeshop on 5th street");
+    }
+
     /// A query made entirely of punctuation contributes no FTS term. That must
     /// read as "no pre-selection" and fall through, not as "no results".
     #[test]
@@ -3398,7 +3663,8 @@ mod tests {
             Ok(scored)
         }
 
-        async fn delete(&self, _id: &str) -> LibreFangResult<()> {
+        async fn delete(&self, id: &str) -> LibreFangResult<()> {
+            self.inserted.lock().unwrap().retain(|(rid, _)| rid != id);
             Ok(())
         }
 
@@ -3412,6 +3678,110 @@ mod tests {
         fn backend_name(&self) -> &str {
             "recording-test"
         }
+    }
+
+    /// Every soft-delete path on the store must remove the vector from the external backend; otherwise forgotten content stays searchable there and dead vectors take live ones' top-k slots.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn forget_paths_delete_from_external_vector_store() {
+        let mut store = setup();
+        let vs = Arc::new(RecordingVectorStore {
+            inserted: std::sync::Mutex::new(Vec::new()),
+        });
+        store.set_vector_store(vs.clone());
+        let agent = AgentId::new();
+        let put = |content: &str, scope: &str, emb: [f32; 3]| {
+            store
+                .remember_with_embedding(
+                    agent,
+                    content,
+                    MemorySource::Conversation,
+                    scope,
+                    HashMap::new(),
+                    Some(&emb),
+                    None,
+                    None,
+                    Default::default(),
+                )
+                .unwrap()
+        };
+        let single = put("one", "episodic", [1.0, 0.0, 0.0]);
+        put("two", "session_memory", [0.0, 1.0, 0.0]);
+        let kept = put("three", "episodic", [0.0, 0.0, 1.0]);
+        assert_eq!(vs.inserted.lock().unwrap().len(), 3);
+
+        store.forget(single).unwrap();
+        assert_eq!(store.forget_by_scope(agent, "session_memory").unwrap(), 1);
+        let remaining: Vec<String> = vs
+            .inserted
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(id, _)| id.clone())
+            .collect();
+        assert_eq!(remaining, vec![kept.0.to_string()]);
+
+        assert_eq!(store.forget_by_agent(agent).unwrap(), 1);
+        assert!(vs.inserted.lock().unwrap().is_empty());
+    }
+
+    /// A vector whose row was soft-deleted behind the store's back (consolidation, decay) must not starve a `limit`-sized recall: the backend is over-fetched and the result truncated back to `limit`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn vector_store_recall_overfetches_past_dead_hits() {
+        let mut store = setup();
+        let vs = Arc::new(RecordingVectorStore {
+            inserted: std::sync::Mutex::new(Vec::new()),
+        });
+        store.set_vector_store(vs.clone());
+        let agent = AgentId::new();
+        let mut ids = Vec::new();
+        for (content, emb) in [
+            ("nearest", [1.0_f32, 0.0, 0.0]),
+            ("second", [0.9, 0.1, 0.0]),
+            ("third", [0.5, 0.5, 0.0]),
+        ] {
+            ids.push(
+                store
+                    .remember_with_embedding(
+                        agent,
+                        content,
+                        MemorySource::Conversation,
+                        "episodic",
+                        HashMap::new(),
+                        Some(&emb),
+                        None,
+                        None,
+                        Default::default(),
+                    )
+                    .unwrap(),
+            );
+        }
+        // Soft-delete directly in SQLite, the way the consolidation engine does, so the backend keeps the vector.
+        store
+            .pool
+            .get()
+            .unwrap()
+            .execute(
+                "UPDATE memories SET deleted = 1 WHERE id = ?1",
+                rusqlite::params![ids[0].0.to_string()],
+            )
+            .unwrap();
+        assert_eq!(vs.inserted.lock().unwrap().len(), 3);
+
+        let query = [1.0_f32, 0.0, 0.0];
+        let results = store
+            .recall_with_embedding("", 1, Some(MemoryFilter::agent(agent)), Some(&query))
+            .unwrap();
+        assert_eq!(
+            results
+                .iter()
+                .map(|f| f.content.as_str())
+                .collect::<Vec<_>>(),
+            vec!["second"]
+        );
+        let two = store
+            .recall_with_embedding("", 2, Some(MemoryFilter::agent(agent)), Some(&query))
+            .unwrap();
+        assert_eq!(two.len(), 2);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -4098,5 +4468,227 @@ mod tests {
             "corrupt metadata must surface as Err from get_by_id, not be silently defaulted; \
              got: {res:?}"
         );
+    }
+
+    // -----------------------------------------------------------------
+    // #8521 — keyword matches in embedding recall.
+    // -----------------------------------------------------------------
+
+    /// Store `count` memories that are cosine neighbours of `[1, 0, 0]` and share no word with "brief", then one memory holding the literal token with an orthogonal vector.
+    /// Returns the id of that literal-match memory.
+    fn seed_topical_neighbours_and_a_literal_match(
+        store: &SemanticStore,
+        agent: AgentId,
+        count: usize,
+    ) -> MemoryId {
+        for i in 0..count {
+            let neighbour = [1.0_f32, 0.001 * i as f32, 0.0];
+            store
+                .remember_with_embedding(
+                    agent,
+                    &format!("planning notes number {i} about the roadmap"),
+                    MemorySource::Conversation,
+                    "episodic",
+                    HashMap::new(),
+                    Some(&neighbour),
+                    None,
+                    None,
+                    MemoryModality::Text,
+                )
+                .unwrap();
+        }
+        store
+            .remember_with_embedding(
+                agent,
+                "the brief lives at https://docs.example/brief-42",
+                MemorySource::Conversation,
+                "episodic",
+                HashMap::new(),
+                Some(&[0.0, 1.0, 0.0]),
+                None,
+                None,
+                MemoryModality::Text,
+            )
+            .unwrap()
+    }
+
+    /// The reported bug: with a query embedding the bm25 lookup was skipped entirely, so a memory containing the exact searched token ranked purely by cosine and fell out of the top-k behind merely topical neighbours.
+    #[test]
+    fn embedding_recall_surfaces_a_literal_keyword_match() {
+        let store = setup();
+        let agent = AgentId::new();
+        let target = seed_topical_neighbours_and_a_literal_match(&store, agent, 12);
+
+        let results = store
+            .recall_with_embedding(
+                "brief",
+                10,
+                Some(MemoryFilter::agent(agent)),
+                Some(&[1.0, 0.0, 0.0]),
+            )
+            .unwrap();
+        assert_eq!(results.len(), 10);
+        let hit = results.iter().find(|f| f.id == target).unwrap_or_else(|| {
+            panic!(
+                "a memory containing the searched token must reach the top-k; got {:?}",
+                results.iter().map(|f| &f.content).collect::<Vec<_>>()
+            )
+        });
+        assert_eq!(
+            results[0].id, target,
+            "the only memory matching on both keyword and (weak) cosine must rank first"
+        );
+        assert!(
+            hit.similarity.is_some_and(|s| s.abs() < 1e-6),
+            "the cosine score is still measured and reported honestly, not inflated by the keyword match; got {:?}",
+            hit.similarity
+        );
+        // Everything else is still ranked by cosine.
+        assert!(results[1].content.contains("planning notes number 0"));
+    }
+
+    /// The keyword signal reorders; it does not override a caller's similarity floor, which stays a statement about measured cosine.
+    #[test]
+    fn embedding_recall_floor_still_applies_to_keyword_matches() {
+        let store = setup();
+        let agent = AgentId::new();
+        let target = seed_topical_neighbours_and_a_literal_match(&store, agent, 3);
+
+        let results = store
+            .recall_with_embedding(
+                "brief",
+                10,
+                Some(MemoryFilter {
+                    min_similarity: Some(0.5),
+                    ..MemoryFilter::agent(agent)
+                }),
+                Some(&[1.0, 0.0, 0.0]),
+            )
+            .unwrap();
+        assert_eq!(results.len(), 3);
+        assert!(results.iter().all(|f| f.id != target));
+    }
+
+    /// The bounded candidate window is ordered by `created_at DESC`, so on a store larger than the cap the oldest rows are never scored.
+    /// A literal match must be ordered into the window regardless of its age.
+    #[test]
+    fn embedding_recall_keeps_an_old_literal_match_inside_the_candidate_window() {
+        let store = setup();
+        let agent = AgentId::new();
+        // Written first, so it is the oldest row and the first one the cap cuts.
+        let target = store
+            .remember_with_embedding(
+                agent,
+                "the brief lives at https://docs.example/brief-42",
+                MemorySource::Conversation,
+                "episodic",
+                HashMap::new(),
+                Some(&[0.0, 1.0, 0.0]),
+                None,
+                None,
+                MemoryModality::Text,
+            )
+            .unwrap();
+        {
+            let mut conn = store.pool.get().unwrap();
+            let tx = conn.transaction().unwrap();
+            {
+                let mut stmt = tx
+                    .prepare(
+                        "INSERT INTO memories (id, agent_id, content, source, scope, confidence, metadata, created_at, accessed_at, access_count, deleted, embedding) \
+                         VALUES (?1, ?2, ?3, '\"conversation\"', 'episodic', 1.0, '{}', ?4, ?4, 0, 0, ?5)",
+                    )
+                    .unwrap();
+                let later = Utc::now() + chrono::Duration::minutes(1);
+                for i in 0..MAX_BRUTEFORCE_CANDIDATES {
+                    stmt.execute(rusqlite::params![
+                        uuid::Uuid::new_v4().to_string(),
+                        agent.0.to_string(),
+                        format!("planning notes number {i}"),
+                        (later + chrono::Duration::milliseconds(i as i64)).to_rfc3339(),
+                        embedding_to_bytes(&[1.0, 0.0, 0.0]),
+                    ])
+                    .unwrap();
+                }
+            }
+            tx.commit().unwrap();
+        }
+
+        let results = store
+            .recall_with_embedding(
+                "brief",
+                10,
+                Some(MemoryFilter::agent(agent)),
+                Some(&[1.0, 0.0, 0.0]),
+            )
+            .unwrap();
+        assert!(
+            results.iter().any(|f| f.id == target),
+            "a literal match older than the candidate cap must still be ranked"
+        );
+    }
+
+    /// The external VectorStore path has no bm25 of its own, so the keyword hits come from the local index and are fused the same way, still under the caller's filter.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn vector_store_recall_fuses_local_keyword_matches() {
+        let mut store = setup();
+        let agent = AgentId::new();
+        let other_agent = AgentId::new();
+        let mut neighbour_ids = Vec::new();
+        for i in 0..5 {
+            neighbour_ids.push(
+                store
+                    .remember(
+                        agent,
+                        &format!("planning notes number {i}"),
+                        MemorySource::Conversation,
+                        "episodic",
+                        HashMap::new(),
+                    )
+                    .unwrap()
+                    .0
+                    .to_string(),
+            );
+        }
+        let target = store
+            .remember(
+                agent,
+                "the brief lives at https://docs.example/brief-42",
+                MemorySource::Conversation,
+                "episodic",
+                HashMap::new(),
+            )
+            .unwrap();
+        let foreign = store
+            .remember(
+                other_agent,
+                "another agent's brief",
+                MemorySource::Conversation,
+                "episodic",
+                HashMap::new(),
+            )
+            .unwrap();
+        // The backend knows only the topical neighbours.
+        store.set_vector_store(Arc::new(LeakyVectorStore { ids: neighbour_ids }));
+
+        let results = store
+            .recall_with_embedding(
+                "brief",
+                3,
+                Some(MemoryFilter::agent(agent)),
+                Some(&[1.0, 0.0, 0.0]),
+            )
+            .unwrap();
+        assert_eq!(
+            results.len(),
+            3,
+            "the fused list is still truncated to the limit"
+        );
+        assert!(
+            results.iter().any(|f| f.id == target),
+            "a local keyword match must be fused into an external-backend recall; got {:?}",
+            results.iter().map(|f| &f.content).collect::<Vec<_>>()
+        );
+        assert!(results.iter().all(|f| f.id != foreign));
     }
 }

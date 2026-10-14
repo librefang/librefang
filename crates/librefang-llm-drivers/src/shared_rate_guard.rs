@@ -237,9 +237,9 @@ fn write_atomic(final_path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 /// header) and persist a lockout extending until the soonest reset.
 ///
 /// Precedence (matches `rate_limit_tracker`):
-///   1. requests-per-hour reset (preferred — covers Nous Portal / OpenAI
+///   1. requests-per-hour reset, when that bucket is exhausted (preferred — covers Nous Portal / OpenAI
 ///      tier-1 RPH bans)
-///   2. requests-per-minute reset
+///   2. requests-per-minute reset, when that bucket is exhausted
 ///   3. caller-supplied `retry_after` (e.g. from the `Retry-After` header)
 ///   4. [`DEFAULT_COOLDOWN`] (5 minutes)
 pub fn record_from_snapshot(
@@ -273,21 +273,19 @@ fn pick_cooldown(
         // `reset_after_secs` is parsed from an upstream `X-RateLimit-Reset`
         // header (f64). Use the checked constructor so non-finite and huge
         // finite values fall through instead of panicking in this hot path.
-        let rph = snap.requests_per_hour.reset_after_secs;
-        if snap.requests_per_hour.has_data() {
-            if let Some(duration) = reset_duration(rph) {
-                return duration;
-            }
-        }
-        let rpm = snap.requests_per_minute.reset_after_secs;
-        if snap.requests_per_minute.has_data() {
-            if let Some(duration) = reset_duration(rpm) {
-                return duration;
+        //
+        // A bucket only explains the 429 when it is actually exhausted: a provider that merely reports an hourly window with plenty of requests left must not turn a 20 s minute-bucket (or token-bucket) 429 into a near-hour lockout persisted for every process.
+        for bucket in [&snap.requests_per_hour, &snap.requests_per_minute] {
+            if bucket.has_data() && bucket.remaining == 0 {
+                if let Some(duration) = reset_duration(bucket.reset_after_secs) {
+                    return duration;
+                }
             }
         }
     }
+    // `record_429_from_headers` passes a zero `retry_after` when the response carried no usable `Retry-After` header, so zero means "no signal" here, not "no cooldown".
     if let Some(d) = retry_after {
-        if cooldown_fits_system_time(d) {
+        if !d.is_zero() && cooldown_fits_system_time(d) {
             return d;
         }
     }
@@ -574,6 +572,60 @@ mod tests {
             cooldown.as_secs(),
             3540,
             "must prefer requests-per-hour reset"
+        );
+    }
+
+    #[test]
+    fn pick_cooldown_ignores_buckets_that_are_not_exhausted() {
+        use crate::rate_limit_tracker::{RateLimitBucket, RateLimitSnapshot};
+        use std::time::Instant;
+        // The minute bucket is exhausted; the hourly bucket still has plenty left.
+        let snap = RateLimitSnapshot {
+            requests_per_minute: RateLimitBucket {
+                limit: 20,
+                remaining: 0,
+                reset_after_secs: 20.0,
+                captured_at: Instant::now(),
+            },
+            requests_per_hour: RateLimitBucket {
+                limit: 1000,
+                remaining: 450,
+                reset_after_secs: 3400.0,
+                captured_at: Instant::now(),
+            },
+            ..Default::default()
+        };
+        assert_eq!(
+            pick_cooldown(Some(&snap), Some(Duration::from_secs(5))),
+            Duration::from_secs(20),
+            "the exhausted minute bucket's reset must win over a non-exhausted hourly bucket"
+        );
+
+        // Neither request bucket is exhausted (the 429 came from a token bucket): the server's Retry-After wins.
+        let snap = RateLimitSnapshot {
+            requests_per_minute: RateLimitBucket {
+                limit: 20,
+                remaining: 12,
+                reset_after_secs: 0.05,
+                captured_at: Instant::now(),
+            },
+            requests_per_hour: RateLimitBucket {
+                limit: 1000,
+                remaining: 450,
+                reset_after_secs: 3400.0,
+                captured_at: Instant::now(),
+            },
+            ..Default::default()
+        };
+        assert_eq!(
+            pick_cooldown(Some(&snap), Some(Duration::from_secs(7))),
+            Duration::from_secs(7)
+        );
+        assert_eq!(pick_cooldown(Some(&snap), None), DEFAULT_COOLDOWN);
+        // A missing Retry-After reaches here as zero and must not become a zero-length lockout.
+        assert_eq!(
+            pick_cooldown(Some(&snap), Some(Duration::ZERO)),
+            DEFAULT_COOLDOWN
         );
     }
 

@@ -46,6 +46,7 @@ api-error-manifest-too-large = Manifest too large (max 1MB)
 api-error-manifest-invalid-format = Invalid manifest format
 api-error-manifest-signature-mismatch = Signed manifest content does not match manifest_toml
 api-error-manifest-signature-failed = Manifest signature verification failed
+api-error-manifest-signed-template-conflict = signed_manifest cannot be combined with template; sign the inline manifest_toml instead
 api-error-manifest-invalid = Invalid manifest: { $error }
 
 # Auth errors
@@ -271,6 +272,8 @@ api-error-job-disappeared-complete = Task disappeared after completion
 # Task errors
 api-error-task-not-found = Task not found
 api-error-task-disappeared = Task disappeared
+api-error-task-not-retryable = Task is not in a retryable state (must be completed or failed)
+api-error-task-transition-not-allowed = Task status transition is not allowed from its current state
 
 # Pairing errors
 api-error-pairing-not-enabled = Pairing is not enabled
@@ -323,3 +326,4 @@ api-error-rate-limited = Rate limit exceeded. Try again later.
 # typed MemoryRouteError-style helper. Without this key, every `t_args("api-error-generic", …)`
 # call returns the literal key as the response body and `$error` interpolation never runs.
 api-error-generic = An error occurred: { $error }
+api-error-agent-manifest-conflict = Stale manifest: this agent was saved by someone else after you loaded it. Reload and apply your change again.

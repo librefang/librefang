@@ -11,7 +11,7 @@ cover_image: https://raw.githubusercontent.com/librefang/librefang/main/public/a
 
 We're excited to announce **LibreFang v2026.10.12**, packed with quality-of-life improvements, power-user features, and critical fixes.
 
-_129 PRs from 6 contributors since v2026.9.19._
+_140 PRs from 6 contributors since v2026.9.19._
 
 ## The Big Picture
 

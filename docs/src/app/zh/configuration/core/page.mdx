@@ -18,7 +18,7 @@ LibreFang 核心配置节：顶层字段、默认模型、内存、网络、网�
 | `api_key` | string | `""`（空） | API 认证密钥。设置后，除 `/api/health` 外的所有端点均需要 `Authorization: Bearer <key>` 请求头。空值 + `api_listen` 绑定 loopback（`127.0.0.1` / `::1` / `localhost`）= **仅限 localhost 无认证**——非 loopback 调用方会被认证层直接拒绝。要让非 loopback 客户端无认证访问，必须显式承担风险；之前存在的 "空 key + 非 loopback" 绕过已被关闭。 |
 | `cors_origin` | list of strings | `[]` | 除 localhost 外额外允许的 CORS 来源。例如 `["https://dash.example.com"]`。 |
 | `trusted_proxies` | list of strings | `[]` | 受信任反向代理的 CIDR（或单个 IP），用于决定哪些上游可以通过转发头（`X-Forwarded-For`、`X-Real-IP`、`CF-Connecting-IP`、`Forwarded`）声明真实客户端 IP。需配合 `trust_forwarded_for` 使用：仅当 TCP 对端匹配此列表时才解析转发头。空值（默认）= 无论主开关如何，都不信任转发头。条目示例：`"172.19.0.0/16"`、`"10.0.0.0/8"`、`"2001:db8::/32"`、`"127.0.0.1"`、`"::1"`。若不设置此白名单而盲目信任转发头，任何互联网客户端都能伪造每请求的源 IP，绕过每 IP 速率限制和 WebSocket 连接上限。 |
-| `trust_forwarded_for` | bool | `false` | 转发头信任的主开关。当为 `true` 且 TCP 对端匹配 `trusted_proxies` 时，守护进程会从转发头中解析真实客户端 IP（优先级：`CF-Connecting-IP` → `X-Real-IP` → `Forwarded`（RFC 7239）→ `X-Forwarded-For` 最右侧未受信任跳）。GCRA 限流器、登录限流器以及每 IP WebSocket 连接上限均使用该解析结果。若主开关关闭或 `trusted_proxies` 为空，则始终使用 TCP 对端 —— 这是非代理部署的安全默认。 |
+| `trust_forwarded_for` | bool | `false` | 转发头信任的主开关。当为 `true` 且 TCP 对端匹配 `trusted_proxies` 时，守护进程会从转发头中解析真实客户端 IP（优先级：`CF-Connecting-IP` → `X-Real-IP` → `Forwarded`（RFC 7239）最右侧未受信任的 `for=` → `X-Forwarded-For` 最右侧未受信任跳）。GCRA 限流器、登录限流器以及每 IP WebSocket 连接上限均使用该解析结果。若主开关关闭或 `trusted_proxies` 为空，则始终使用 TCP 对端 —— 这是非代理部署的安全默认。 |
 | `mode` | string | `"default"` | 内核运行模式。见下表。 |
 | `language` | string | `"en"` | CLI 输出和系统消息的语言/区域代码。 |
 | `usage_footer` | string | `"full"` | 控制附加到回复末尾的用量信息。见下表。 |

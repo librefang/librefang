@@ -33,6 +33,7 @@ api-error-manifest-too-large = Manifest zu gross (max 1MB)
 api-error-manifest-invalid-format = Ungueltiges Manifest-Format
 api-error-manifest-signature-mismatch = Signierter Manifest-Inhalt stimmt nicht mit manifest_toml ueberein
 api-error-manifest-signature-failed = Manifest-Signaturpruefung fehlgeschlagen
+api-error-manifest-signed-template-conflict = signed_manifest kann nicht mit template kombiniert werden; signiere stattdessen das inline manifest_toml
 
 # Auth errors
 api-error-auth-invalid-key = Ungueltiger API-Schluessel
@@ -85,6 +86,7 @@ api-error-rate-limited = Anfragelimit ueberschritten. Bitte versuchen Sie es spa
 # typed MemoryRouteError-style helper. Without this key, every `t_args("api-error-generic", …)`
 # call returns the literal key as the response body and `$error` interpolation never runs.
 api-error-generic = Fehler: { $error }
+api-error-agent-manifest-conflict = Veraltetes Manifest: Dieser Agent wurde nach dem Laden von jemand anderem gespeichert. Neu laden und die Änderung erneut anwenden.
 
 api-error-validation-avatar-url-invalid = Die Avatar-URL muss die Avatar-Route sein, die dieser Daemon für den Agenten bereitstellt, oder leer. Lade das Bild hoch, statt es zu verlinken.
 api-error-validation-color-invalid = Die Farbe muss ein Hex-Code sein, der mit '#' beginnt

@@ -9,7 +9,7 @@ and this project uses [Calendar Versioning](https://calver.org/) (YYYY.M.DD).
 
 ## [2026.10.12] - 2026-10-12
 
-_129 PRs from 6 contributors since v2026.9.19._
+_140 PRs from 6 contributors since v2026.9.19._
 
 ### Highlights
 
@@ -164,6 +164,42 @@ _129 PRs from 6 contributors since v2026.9.19._
 - Agent types can be restored to their original registry definition from the dashboard.
   A diff view shows every changed field before overwriting, so the operator can review what diverged.
   New endpoints: `GET /api/templates/{name}/registry-diff` and `POST /api/templates/{name}/restore`. (#8042) (@DaBlitzStein)
+- Tool dispatch now emits a `librefang::tool_identity` debug record carrying the executing tool, the principal the turn acts for (`acting_principal`, in its canonical `kind:uuid` form), and the `sender_id` that travelled with the call, so `(tool, owner, sender_id)` for a turn is visible without a restart by raising that target on the hot log filter.
+  The owner is the resolved principal — the bearer-authenticated user when there is one, otherwise the agent manifest's `owner`, otherwise `default_owner` — so an unattended turn on a group-owned agent records `group:<uuid>` rather than no owner at all.
+  The record is needed because the audit log does not carry this attribution: a successful turn writes `AuditAction::AgentMessage` with `user_id: None`, and `AuditAction::ToolInvoke` is never written on the agent-loop path at all.
+  It stays at `debug` because it fires once per tool call. (#8583, #7744) (@DaBlitzStein)
+- The TUI can now show an agent's configuration history, which until now existed only in the HTTP API and the dashboard.
+  Press `h` on an agent's detail pane to list every recorded manifest snapshot newest-first, with the full TOML of the selected one beside it, so an operator working in a terminal can answer "what changed on this agent, and when" without opening a browser.
+  This works whether the TUI is attached to a daemon or running an in-process kernel: the snapshots live in the same substrate either way, so a terminal-only operator is not told to go and start a daemon for data already on disk.
+  The pane distinguishes the three answers that would otherwise all look like an empty box — a fetch still in flight, an agent whose manifest was never persisted, and a request that failed — and it reports only its own failures, so an unrelated error elsewhere on the agents tab is never shown as the reason this pane is empty.
+  A response is matched to the agent it was requested for before being rendered, because a slow reply arriving after the operator moved on would otherwise display one agent's entire `agent.toml` under another agent's header.
+  The pane is deliberately view-only: rolling an agent back to a snapshot stays in the dashboard's History tab and `POST /api/agents/{id}/manifest-history/{version_id}/restore`.
+  Long lines in a snapshot wrap, and paging reaches the end of a snapshot however far its `system_prompt` wraps.
+  Timestamps are read as the UTC the store writes and shown in local time, matching what the dashboard already displays. (#8231) (@DaBlitzStein)
+- An install that grew by spawning agents rather than authoring templates could not go the other way: there was no way to take an agent whose configuration already worked and make it the starting point for the next one.
+  `POST /api/agents/{id}/save-as-agent-type` now snapshots a live agent's manifest into a reusable agent type, leaving the source agent untouched.
+  The snapshot keeps only what is portable: `workspace` is cleared (a spawned agent gets a fresh one), kernel-owned `hand:*` tags and `hand_allowed_env` metadata are stripped, and `enabled` is reset to `true` — a paused source must not save a paused type whose agents boot skips.
+  A hand-spawned agent is refused outright with `409 hand_agent_save_denied`, mirroring the delete paths: hand activation sets `manifest.is_hand = true`, and a type saved from a hand would reload that flag on restart, after which boot skips the type's agents and the orphaned-hand GC deletes them along with their sessions.
+  Failures now come back as `ApiErrorResponse` bodies with codes (`template_invalid_name`, `template_exists`, `template_name_taken`, `hand_agent_save_denied`, `internal_scrub`), matching the sibling `POST /api/templates/{name}` handlers instead of a bare `{"error": ...}`.
+  Behaviour change against `main`: a request pairing `signed_manifest` with `template` is now rejected with `400 invalid_manifest` (`api-error-manifest-signed-template-conflict`); `main` verified the signature against the resolved template's content, so this turns a verified flow into a refusal — a signed spawn can now only pin content the client supplied, never whatever the template store holds at verification time.
+  The size cap (`MAX_MANIFEST_SIZE`) now bounds a resolved template's content as well as an inline `manifest_toml`, and template resolution reads candidates in the kernel-owned `agent_template_candidates` order.
+  Spawning from the result works too — `POST /api/agents {"template": name}` previously only ever looked in `workspaces/agents/`, so it answered 404 for every real agent type. (#8360) (@DaBlitzStein)
+- Let an Owner set their own emoji and avatar image from the dashboard, in the edit drawer of their own row on the users page, and draw it on the user's side of every chat message.
+  The daemon could already store both, but nothing in the web UI set or showed either, so every user message carried the same generic icon.
+  A chat bubble now draws the signed-in user's picture, then their emoji, then their initials, and keeps the generic icon for the synthetic `root` of a no-auth or master-key session, which names no user.
+  The editor appears only on the caller's own row because the dashboard can read only the caller's own emoji and picture, through `whoami` and `/api/users/me/avatar`, and only for an Owner because every write under `/api/users` is Owner-only on the daemon.
+  The users list itself is unchanged (#8387) (@DaBlitzStein)
+- Agent manifest version history: every `agent.toml` write the daemon makes — dashboard and API edits, suspend/resume, provisioning and restores — is recorded in SQLite with its change source, so operators can see what changed, when, and from where.
+  History starts at an agent's first such change: spawn records no initial version, and hand edits picked up from disk are applied without a snapshot.
+  New endpoints `GET /api/agents/{id}/manifest-history` and `POST /api/agents/{id}/manifest-history/{version_id}/restore` list timestamped TOML snapshots newest-first and roll an agent back to a prior one.
+  The dashboard gains a History tab on the agent detail panel with expandable snapshots and a confirm-gated restore.
+  Retention is capped at 50 snapshots per agent and history rows are purged with the agent through the shared agent-scoped cascade (#8504) (@DaBlitzStein)
+- `[exec_policy] denied_commands` refuses named programs under every exec mode, so an agent can run unattended with `mode = "full"` while `git` (or anything else listed) stays off-limits and a long session's uncommitted work is not wiped by a stray `git checkout`.
+  The list binds `shell_exec` and `process_start`, outranks `safe_bins` and `allowed_commands`, and catches the name in any segment of a chain, pipeline or command substitution, behind `env` / `sudo` / `timeout` / `xargs`-style runners, and inside `bash -c` / `cmd /c` wrappers, while leaving it alone as an ordinary argument such as `grep -r git src`.
+  It is a guard against an agent reaching for the command rather than a sandbox: scripts, interpreters and `find -exec` are not inspected, and `mode = "allowlist"` remains the hard boundary (#8587, #8536) (@houko)
+- MCP catalog entries for native SSE / Streamable-HTTP servers can now map a `required_env` credential to a request header with `[[headers]] name = "Authorization", value = "Bearer ${KEY}"`, so an authenticated remote MCP server can be installed from the catalog with the user's own key instead of hand-writing `headers` in `config.toml`.
+  The installed server stores only the `${KEY}` reference; the runtime substitutes it from the server's declared `env` at every connect, fails before sending anything when the credential is missing or blank, and leaves fixed headers untouched.
+  Credentials entered at install are now usable without a daemon restart, and editing a server from the dashboard no longer silently drops its configured headers. (#8587, #8578) (@houko)
 
 ### Fixed
 
@@ -358,6 +394,45 @@ _129 PRs from 6 contributors since v2026.9.19._
 - Fixed `channel_send` losing the bot account of the conversation it was called from, which let an unqualified send on a daemon running several instances of one channel type be captured by whichever instance was registered under the bare channel name (the legacy `telegram` bot) and delivered through the wrong agent's account.
   A send that targets the channel the turn arrived on now defaults to that turn's own `sender_account_id`; an explicit `account_id` still wins, and cross-channel or out-of-band sends stay account-less.
   The bare channel key keeps its pre-existing resolution meaning for account-less callers — approval notifications, owner notify, and cron or binding targets must keep reaching the instance registered under it — so #8525 is closed at the send site, not by refusing the key (#8525) (@DaBlitzStein)
+- Token-triggered compaction now fires before the overflow guard trims history on tool-heavy and small-window agents.
+  The triggers estimated tokens without the tool schemas (and, after the turn, without the system prompt) and measured against the 200K config default instead of the agent's own context window, so the guard's "older messages trimmed" path ran first; both triggers and the inner gate now price the same request against the agent's real window (#8587, #8519) (@houko)
+- Exact tokens such as URLs, ids and proper nouns are findable again when an embedding provider is configured.
+  Recall switched to vector similarity alone and never consulted the BM25 index; memory search, `memory_semantic_search` and auto-recall now rank by combined cosine and BM25 scores (#8587, #8521) (@houko)
+- Memory auto-consolidation no longer deletes memories that only share a topic.
+  One `duplicate_threshold` was applied both to word overlap and to embedding cosine, where 0.85 cosine means "same subject" rather than "same statement"; with embeddings a merge now needs cosine above `max(duplicate_threshold, 0.95)`, never crosses peer, chat, session or storage scope, and is refused when the two memories carry different URLs, emails or numbers (#8587, #8524) (@houko)
+- A periodic schedule given a cron expression now fires on its calendar instead of at a derived fixed interval.
+  `schedule = { periodic = { cron = "0 9 * * *" } }` ran hourly; 5- and 6-field expressions now follow their calendar meaning in UTC and stay on time across host suspend and wall-clock changes (#8587, #8532) (@houko)
+- Workflow schedules now reject `session_mode` with a 400 instead of storing a setting the dispatcher never reads.
+  The message points to `WorkflowStep.session_mode`, which is where per-step session behaviour is configured; a value persisted by an older daemon is dropped on load so the job keeps firing as before (#8587, #8533) (@houko)
+- Compaction no longer keeps a tool-result delivery while summarising away the tool call it answers.
+  The split guard only recognised a user message made of nothing but tool results, and only checked the first tool call id, so a mixed tool-result-plus-text delivery could open the kept window as an orphaned `role:"tool"` message that providers reject with a non-retryable 400 (#8587, #8545) (@houko)
+- Ephemeral worker runs record whether they were cut off by the iteration cap.
+  A capped ephemeral mission worker now returns `Ok` (see the iteration-cap delivery fix), so its run record said `completed` with nothing to distinguish it from a full run.
+  `ephemeral_runs` gains a `truncated` column (migration v63), surfaced as `truncated` in `GET /api/agents/{id}/ephemeral-runs`.
+  The spawn path also pushes a `max_iterations` operator notification for the parent (#8556, #8557) (@DaBlitzStein)
+- A turn that exhausts its iteration budget now delivers what it has, marked as cut off, instead of returning nothing.
+  Previously, when the per-turn cap (`agent_max_iterations`, default 50) was reached, the loop returned `MaxIterationsExceeded` and the user saw silence indistinguishable from a hang.
+  The non-streaming and streaming loops now return the prose accumulated across intermediate tool-use iterations followed by a `[Stopped after reaching the iteration limit (N) before finishing …]` notice, or the notice alone when the turn only ran tools, together with a new `AgentLoopResult::hit_iteration_cap` flag.
+  On the streaming path the notice is emitted through the stream pipe so channel and WebSocket users see it, and the WebSocket `response` frame carries `hit_iteration_cap: true`.
+  The kernel pushes a `max_iterations` notification, which routes to `alert_channels` by default and is accepted in `[[notification.agent_rules]]`, so operators keep the alert the old `task_failed` push gave them; autonomous agents no longer also report the capped turn as `task_completed`.
+  A cron job whose run hits the cap is recorded as a failed run, so a job that caps on every fire is still auto-disabled after repeated failures.
+  A capped turn never triggers a background skill review.
+  The `AgentLoopEnd` hook keeps `reason = "max_iterations_exceeded"` and adds `delivered: true` (#8556, #8557) (@DaBlitzStein)
+- Text synthesized from a thinking-only model response is now terminal, so it ends the turn instead of keeping it alive.
+  When a model returned only reasoning with no native text and no tool calls, the OpenAI-compatible driver synthesized a text block from the thinking.
+  The agent loop could then re-promote that text into a tool call via text-based tool-call recovery, or nudge it into a retry, even though the model had already answered.
+  `CompletionResponse` now carries `text_synthesized_from_thinking`, set at both synthesis sites, and the loop skips text recovery and retry classification when it is set (#8556, #8557) (@DaBlitzStein)
+- History trimming now guarantees that the current turn's task message survives, rather than only that some user message does.
+  The post-trim guard used to accept any surviving user message, and when none survived it synthesized a fresh conversation from the raw message text, losing any sender prefix or attachments.
+  It now captures the current-turn task before trimming and tests its survival by position rather than by text, so an earlier message with identical text no longer reads as the task.
+  A drained task is re-inserted ahead of any trailing tool cycle so no `ToolUse`/`ToolResult` pair is split (#8556, #8557) (@DaBlitzStein)
+- A Telegram voice reply to a user whose privacy settings forbid voice messages is now delivered as an audio document with its caption instead of vanishing.
+  `sendVoice` failed with `VOICE_MESSAGES_FORBIDDEN` and the reply was dropped without a trace; both the Python and Rust sidecars now fall back to `sendDocument` and log the refusal (#8587, #8584) (@houko)
+- Fix defects found in a workspace audit across the kernel, runtime, API, CLI and LLM drivers.
+  Notable ones: a workflow that hits its timeout now ends `Failed` instead of staying `Running` forever, disconnecting an MCP server no longer drops the tools of another server whose name starts with the same prefix, `task_complete` only succeeds for the agent holding the claim, the `librefang mcp` backend authenticates when `api_key` is set, the Claude Code and CLI drivers reap their child processes on cancellation, and Anthropic streams framed with CRLF are parsed.
+  On Windows, concurrent writes to the same agent identity file no longer fail with a spurious 403. (#8585) (@houko)
+- Editing a user from the dashboard, the identity wizard or a CSV import no longer revokes their API key.
+  Those clients never send `api_key_hash`, and the update treated the missing field as "clear"; an absent key now keeps the stored hash, while an explicit `null` or empty string still clears it. (#8585) (@houko)
 
 ### Changed
 
@@ -401,6 +476,30 @@ _129 PRs from 6 contributors since v2026.9.19._
 - The OpenTelemetry stack moves to 0.33 as one unit: `opentelemetry`, `opentelemetry_sdk`, `opentelemetry-otlp` and `opentelemetry-http` go to 0.33 and `tracing-opentelemetry` to 0.34, with no change to how traces are exported.
   Bumping any one of them alone puts two copies of `opentelemetry` in the build and breaks it, so Dependabot now groups the family into a single PR instead of one per crate.
   (#8509) (@houko)
+- An agent's whole configuration now lives in one place: a "config" tab on the agent view, organised into eight groups — General, Model & routing, Tools & skills, Memory, Limits & cost, Channels, Planning and Conversation — with a single Save and a single "advanced mode" switch that governs every group's folded fields.
+  The agent view is two tabs: "logs & info" reads the agent — a brief carrying its state, model, token footprint, last activity and the tail of its live conversation, over logs, memory and prompts & experiments — and "config" writes it, so the surface no longer splits by subsystem.
+  Every manifest section is hosted exactly once, and a guard checks it from both sides: the group tabs are drawn from the same map the sections are listed in, and the suite fails if a section has no group, a group names a section the editor does not implement, a section is hosted twice, or a group would render empty.
+  The agent page used to keep three parallel editors for the same object: the detail drawer's quick-edit widgets, a model-routing panel that was in fact the only place the manifest's own router fields could be written, and a schedule panel that mixed the manifest's scheduling mode with the runtime records of cron jobs and triggers.
+  Saving from one of them silently competed with the others instead of completing them — adjusting routing and then saving the description reverted the routing without a word, because the drawer's editor serialized the state it had seeded before the panel's change.
+  The drawer's remaining config widgets are gone with it: provider and model (a second writer through `PATCH /api/agents/{id}/config`), the description and system-prompt quick edits, the web-search toggle and the channel picker all had an equivalent in the manifest form, which is the one writer.
+  The drawer keeps what is not configuration — the agent's read-only lineage and its lifecycle actions — and the token footprint moved to where it is read, the brief above the logs.
+  Prompt versions and A/B experiments were a dialog opened from that drawer and are now the "prompts" sub-tab, and the tools and skills grants sit at the head of the group that names them, above the manifest fields for the same subject.
+  Every manifest field the form now owns round-trips: keys the form does not render are carried through a save untouched, including inside nested tables and rows — `router_override`, `compaction`, `skill_workshop`, `channel_overrides`, `response_format`, `schedule` and the rows of `context_injection`, `workspaces` and `fallback_models` all keep a key a future manifest may carry, so an editor built before a field exists no longer erases it on the first save.
+  A guard sweeps every table and row collection the form declares, so a future section cannot silently reopen the class: any collection the form's state declares as rows must prove it preserves keys, and any table the form claims must be in the sweep.
+  A failed save sends the operator to the config tab and to the group that owns the first offending field, because with the sections grouped the error is usually in a group they are not looking at.
+  The router's per-agent settings (`mode`, `router_override` with its opt-out, profile allowlist, cost budget and fallback) and the hourly burst ratio gained their own widgets, served by the same server-backed profile catalog the old panel used, which is what let the routing panel go; cron jobs and triggers moved with the manifest's scheduling fields into the Planning group, where they are edited rather than merely read.
+  Preserving an override matters beyond file shape: a child agent inherits its parent's `router_override` with no mode gate, so an agent pinned fixed still carries the constraints to flexible children — the form keeps them because deleting keys an operator did not touch was never the manifest's semantics.
+  A quantity the form cannot honour no longer serialises for the daemon to reject: every integer field the manifest stores as `u32` refuses values above its ceiling in the field itself, the `u64` counters travel as strings so they cannot lose precision through the form's own numbers, and the model parameters validate against the same range table the controls render. (#8554) (@DaBlitzStein)
+  Opening an agent in the manifest editor and saving no longer deletes the `[autonomous]` and `[routing]` keys the form has no field for, including `block_stall_degrade_after`, which the runtime reads; both sections carry the extras slot `[thinking]` already had, so switching a section off still deletes the whole table deliberately. (#8554) (@DaBlitzStein)
+  `memory_read` and `memory_write` keep absent, declared-empty (a deny) and allowlist apart, so an agent locked out of memory stays locked out after a save instead of coming back unrestricted. (#8554) (@DaBlitzStein)
+  A config group's section list now decides the order its sections render in, and each folded section shows the number of fields it holds — counting its advanced fold — while an empty section shows no count rather than a zero. (#8554) (@DaBlitzStein)
+  The grant panels and the manifest form no longer silently undo each other: a panel save adopts its write into the form's copy of the same keys, re-reads the manifest's ETag past the query client's 30 s `staleTime` (the previous refresh returned the cached snapshot and never moved the token), and sends that token on its own PUT so a panel write built on a superseded read is refused with 409 instead of overwriting the form's save. (#8554) (@DaBlitzStein)
+  Manifest writers the form has no widget for — a rename, the auto-evolve switch, a prompt bind and its rollback — refresh the editor's ETag as well, and the auto-evolve switch's new value is adopted into the form's extras, so neither a save on a rotated token nor the next form Save can undo those writes. (#8554) (@DaBlitzStein)
+  A form save refused with 409 rebases the form onto the manifest the other writer saved before it adopts the new ETag — fields the operator did not edit take the saved values, edited ones keep the edit — so "Save" again applies the operator's change without reverting the concurrent one; adopting the token alone had made the retry a silent overwrite. (#8554) (@DaBlitzStein)
+  The same rebase runs after every grant-panel write, and saving tools and MCP servers together sends the second PUT with the token the first one produced instead of answering 409 to a write nobody raced. (#8554) (@DaBlitzStein)
+  The manifest ETag hashes a canonical, key-sorted rendering, because the TOML text depends on the iteration order of the manifest's `HashMap` fields and unchanged content could otherwise come back with a new token and a spurious 409. (#8554) (@DaBlitzStein)
+  The IDENTITY.md editor no longer writes back a pre-rename `name:` or a superseded personality value: a rename and a personality write invalidate its cached read, and the refetched file is merged under the operator's in-progress edits instead of replacing them. (#8554) (@DaBlitzStein)
+  A manifest save built on a read another writer has since superseded is refused with 409 and a reload message instead of overwriting the intervening change. (#8554) (@DaBlitzStein)
 
 ### Security
 
@@ -410,6 +509,11 @@ _129 PRs from 6 contributors since v2026.9.19._
 - Upgrade russh to 0.62.5 or later, closing four SSH advisories (GHSA-5xvq-cp9x-6p6r, GHSA-cqjc-rmpq-xprq, GHSA-g9hv-x236-4qp3, GHSA-m65r-rprj-r5rg) in the optional `ssh-backend` remote-exec transport.
   The dashboard, website, docs and WhatsApp gateway lockfiles also move off vulnerable brace-expansion, js-yaml, esbuild, tmp, uuid, qs, postcss-selector-parser and protobufjs releases, mostly through in-range updates and scoped overrides only where a parent pins an old major.
   The two extract-zip advisories stay open because no patched release exists and it is reachable only through the dev-only Lighthouse CI chain (#8499) (@houko)
+- Close a set of isolation gaps found in a workspace audit: knowledge-graph enrichment and memory consolidation read and merged other agents' data, desktop agent import and `librefang skill create` built paths from unvalidated names, the OpenClaw importer followed symlinks out of the workspace, integration installs wrote caller-supplied keys into the vault, and several API side doors skipped the owner scope.
+  Each now stays within its caller's scope or refuses the input. (#8585) (@houko)
+- Cron `pre_check_script` now has to resolve under `<home>/scripts/`, the same allowlist `pre_script` already had, so an agent's `cron_create` can no longer schedule an arbitrary executable to run as the daemon.
+  The check runs at create, update and fire time; a job persisted before it, or edited by hand, is refused at fire time and wakes the agent instead of running the script.
+  Cron webhook deliveries no longer follow redirects, so an allowed endpoint cannot bounce the payload to an internal address, and a non-2xx legacy webhook response is now logged as a failed delivery. (#8585) (@houko)
 
 ### Documentation
 
@@ -489,6 +593,8 @@ _129 PRs from 6 contributors since v2026.9.19._
 - Update model snapshot (#8579) (@houko)
 - Update model snapshot (#8580) (@houko)
 - Update model snapshot (#8582) (@houko)
+- Fix main's Windows lane after #8585 and de-race a goal resume test (#8589) (@houko)
+- Shard the PR test lane when a change touches most of the workspace (#8592) (@houko)
 
 </details>
 

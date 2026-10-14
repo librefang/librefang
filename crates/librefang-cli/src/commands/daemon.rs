@@ -712,11 +712,41 @@ pub(crate) fn show_log_file(log_path: &std::path::Path, lines: usize, follow: bo
     }
 }
 
+/// The daemon log most recently written next to `daemon_log`: `daemon_log` itself (background mode) or a dated `daemon-YYYY-MM-DD.log` (written by `start --foreground`, the usual mode under Docker and systemd).
+///
+/// Picks by modification time, so whichever mode the daemon last ran in wins; `None` when neither exists.
+pub(crate) fn most_recent_daemon_log(daemon_log: &std::path::Path) -> Option<PathBuf> {
+    let modified = |p: &std::path::Path| std::fs::metadata(p).and_then(|m| m.modified()).ok();
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    if daemon_log.is_file() {
+        candidates.push(daemon_log.to_path_buf());
+    }
+    if let Some(Ok(entries)) = daemon_log.parent().map(std::fs::read_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let is_dated = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .and_then(|n| n.strip_prefix("daemon-"))
+                .and_then(|n| n.strip_suffix(".log"))
+                .and_then(parse_daily_date_timestamp)
+                .is_some();
+            if is_dated && path.is_file() {
+                candidates.push(path);
+            }
+        }
+    }
+    // Ties (or unreadable mtimes) fall back to the name, where the newest date sorts last.
+    candidates
+        .into_iter()
+        .max_by(|a, b| modified(a).cmp(&modified(b)).then_with(|| a.cmp(b)))
+}
+
 pub(crate) fn cmd_logs(config: Option<PathBuf>, lines: usize, follow: bool) {
     let daemon = daemon_config_context(config.as_deref());
     let daemon_log = daemon_log_path_for_config(config.as_deref());
-    if daemon_log.exists() {
-        show_log_file(&daemon_log, lines, follow);
+    if let Some(log) = most_recent_daemon_log(&daemon_log) {
+        show_log_file(&log, lines, follow);
         return;
     }
 
@@ -734,4 +764,51 @@ pub(crate) fn cmd_logs(config: Option<PathBuf>, lines: usize, follow: bool) {
     }
 
     show_log_file(&daemon_log, lines, follow);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn write_with_mtime(path: &std::path::Path, secs_ago: u64) {
+        std::fs::write(path, "x").unwrap();
+        let t = SystemTime::now() - std::time::Duration::from_secs(secs_ago);
+        std::fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(t)
+            .unwrap();
+    }
+
+    /// `start --foreground` writes only `daemon-YYYY-MM-DD.log`, which `librefang logs` used to never look at.
+    #[test]
+    fn most_recent_daemon_log_finds_foreground_dated_log() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let daemon_log = dir.path().join("daemon.log");
+        assert_eq!(most_recent_daemon_log(&daemon_log), None);
+
+        write_with_mtime(&dir.path().join("daemon-2026-09-25.log"), 200);
+        write_with_mtime(&dir.path().join("daemon-2026-09-26.log"), 100);
+        write_with_mtime(&dir.path().join("daemon-notadate.log"), 0);
+        write_with_mtime(&dir.path().join("tui.log"), 0);
+        assert_eq!(
+            most_recent_daemon_log(&daemon_log),
+            Some(dir.path().join("daemon-2026-09-26.log"))
+        );
+
+        // A background daemon writing `daemon.log` more recently wins over an older foreground run.
+        write_with_mtime(&daemon_log, 10);
+        assert_eq!(
+            most_recent_daemon_log(&daemon_log),
+            Some(daemon_log.clone())
+        );
+
+        // And a newer foreground run wins over a stale `daemon.log`.
+        write_with_mtime(&daemon_log, 1000);
+        assert_eq!(
+            most_recent_daemon_log(&daemon_log),
+            Some(dir.path().join("daemon-2026-09-26.log"))
+        );
+    }
 }

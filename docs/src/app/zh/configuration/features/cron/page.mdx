@@ -133,6 +133,10 @@ Webhook URL 在任务创建/更新时校验，触发前不会被拉取。校验�
 
 userinfo（`user:pass@host`）和端口在检查前剥掉，所以 `http://attacker@127.0.0.1:8080/x` 会按 `127.0.0.1` host 拒绝，跟 `http://127.0.0.1/x` 一样。
 
+webhook 客户端不跟随 HTTP 重定向。
+校验器只看得到配置的 URL，否则接收方回一个 `307 Location: http://169.254.169.254/...` 就能让守护进程绕过它。
+3xx 响应与其他非 2xx 状态一样按投递失败处理（`webhook returned HTTP 307 ...`），`[delivery]` 和 `delivery_targets` 的 webhook 都是如此。
+
 如果你确实需要扇到 loopback 段的 host —— 比如同机的 sidecar — 走 channel adapter 或者 `local_file` 目标，不要用 webhook。webhook 路径就是有意限制为非内部目标。
 
 ---
@@ -206,7 +210,7 @@ GITHUB_REPO_FILTER = "is:open"
 | 决定 | "agent 该不该跑？" | "这次跑给它什么额外上下文？" |
 | 输出协议 | stdout 最后一行非空必须是 JSON。`{"wakeAgent": false}` 跳过 LLM 调用。其他都唤醒。 | 非空时 stdout 原样追加到 prompt。 |
 | Timeout | 30 秒。timeout 唤醒 agent（failsafe）。 | 60 秒。timeout 让 agent 不带上下文触发（failsafe）。 |
-| 路径白名单 | `<home_dir>/scripts/`（canonicalize + component prefix）。路径违规唤醒 agent。 | `<home_dir>/scripts/`（canonicalize + component prefix）。校验失败让 agent 不带上下文触发。 |
+| 路径白名单 | `<home_dir>/scripts/`（canonicalize + component prefix），规则与 `pre_script.argv[0]` 相同。违规路径在创建或更新 job 时被拒绝；若仍有 job 带着违规路径到达触发（校验加入前已持久化，或手工编辑），脚本不会执行，agent 照常唤醒。 | `<home_dir>/scripts/`（canonicalize + component prefix）。校验失败让 agent 不带上下文触发。 |
 | 用例 | 没新东西就跳过 LLM 调用。省 token。 | 把确定性数据喂进 prompt。降低数字/diff 上的幻觉。 |
 
 两者可以同时挂在一个 `[action]` 上。常见模式是"用 wake gate 守卫抓取，再注入抓到的数据"：
@@ -273,6 +277,7 @@ job-create / job-update 时强制的硬性上限和校验规则：
 | Webhook host | 不在 SSRF 黑名单 |
 | `local_file.path` | 非空、相对 workspace、无 `..` |
 | `pre_script.argv[0]` | 解析在 `<home_dir>/scripts/` 之下 |
+| `pre_check_script` | 解析在 `<home_dir>/scripts/` 之下 |
 | `pre_script.env` 键 | 不属于动态链接器 / `PATH` / `IFS` denylist |
 | Pre-script timeout | 60 秒墙钟 |
 | Wake-gate timeout | 30 秒墙钟 |

@@ -160,9 +160,10 @@ async fn install_from_registry(
         ));
     }
 
-    let files: Vec<GitHubContent> = resp
-        .json()
-        .await
+    let body =
+        read_success_body_capped(resp, MAX_LISTING_SIZE, &format!("plugin '{name}' listing"))
+            .await?;
+    let files: Vec<GitHubContent> = serde_json::from_slice(&body)
         .map_err(|e| format!("Failed to parse registry response: {e}"))?;
 
     // Create target directory
@@ -400,8 +401,11 @@ async fn fetch_registry_plugin_meta(
     let url =
         format!("https://raw.githubusercontent.com/{github_repo}/main/plugins/{name}/plugin.toml");
     let text = match client.get(&url).send().await {
-        Ok(resp) if resp.status().is_success() => resp.text().await.ok(),
-        _ => None,
+        Ok(resp) => read_success_body_capped(resp, MAX_FILE_SIZE, name)
+            .await
+            .ok()
+            .and_then(|body| String::from_utf8(body).ok()),
+        Err(_) => None,
     };
     let Some(text) = text else { return entry };
 
@@ -503,9 +507,13 @@ pub async fn list_registry_plugins(github_repo: &str) -> Result<Vec<RegistryPlug
         ));
     }
 
-    let entries: Vec<GitHubContent> = resp
-        .json()
-        .await
+    let body = read_success_body_capped(
+        resp,
+        MAX_LISTING_SIZE,
+        &format!("registry '{github_repo}' listing"),
+    )
+    .await?;
+    let entries: Vec<GitHubContent> = serde_json::from_slice(&body)
         .map_err(|e| format!("Failed to parse registry listing: {e}"))?;
 
     let names: Vec<String> = entries
@@ -749,6 +757,42 @@ struct GitHubContent {
     url: Option<String>,
 }
 
+/// Maximum size of a single downloaded plugin file.
+const MAX_FILE_SIZE: u64 = 10 * 1024 * 1024;
+
+/// Maximum size of a GitHub contents-API directory listing (the API caps a listing at 1000 entries, well under this).
+const MAX_LISTING_SIZE: u64 = 4 * 1024 * 1024;
+
+/// Read a registry response body, failing on a non-success status and on a body larger than `max` bytes.
+/// The cap is enforced on the declared `Content-Length` up front and on the running total while streaming, so a chunked response without a length cannot grow without bound.
+async fn read_success_body_capped(
+    mut resp: reqwest::Response,
+    max: u64,
+    what: &str,
+) -> Result<Vec<u8>, String> {
+    let status = resp.status();
+    if !status.is_success() {
+        return Err(format!("Failed to download {what}: HTTP {status}"));
+    }
+    if let Some(len) = resp.content_length() {
+        if len > max {
+            return Err(format!("'{what}' too large ({len} bytes, max {max})"));
+        }
+    }
+    let mut body = Vec::new();
+    while let Some(chunk) = resp
+        .chunk()
+        .await
+        .map_err(|e| format!("Failed to read {what}: {e}"))?
+    {
+        if (body.len() + chunk.len()) as u64 > max {
+            return Err(format!("'{what}' too large (more than {max} bytes)"));
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
+}
+
 /// Recursively download a GitHub directory entry.
 ///
 /// `depth` limits recursion to prevent unbounded traversal (max 10 levels).
@@ -789,29 +833,8 @@ async fn download_github_entry(
                 .await
                 .map_err(|e| format!("Failed to download {}: {e}", entry.name))?;
 
-            // Check Content-Length before downloading to reject oversized files early
-            const MAX_FILE_SIZE: u64 = 10 * 1024 * 1024; // 10 MiB per file
-            if let Some(len) = resp.content_length() {
-                if len > MAX_FILE_SIZE {
-                    return Err(format!(
-                        "File '{}' too large ({len} bytes, max {MAX_FILE_SIZE})",
-                        entry.name
-                    ));
-                }
-            }
-
-            let content = resp
-                .bytes()
-                .await
-                .map_err(|e| format!("Failed to read {}: {e}", entry.name))?;
-
-            if content.len() as u64 > MAX_FILE_SIZE {
-                return Err(format!(
-                    "File '{}' too large ({} bytes, max {MAX_FILE_SIZE})",
-                    entry.name,
-                    content.len()
-                ));
-            }
+            // A 404 / 429 / 5xx body must never be written to disk as the plugin file, and the size cap must hold while the body streams in, not after a chunked response has been buffered whole.
+            let content = read_success_body_capped(resp, MAX_FILE_SIZE, &entry.name).await?;
 
             tokio::fs::write(&target_path, &content)
                 .await
@@ -841,9 +864,13 @@ async fn download_github_entry(
                 .await
                 .map_err(|e| format!("Failed to list dir {}: {e}", entry.name))?;
 
-            let sub_entries: Vec<GitHubContent> = resp
-                .json()
-                .await
+            let body = read_success_body_capped(
+                resp,
+                MAX_LISTING_SIZE,
+                &format!("dir listing {}", entry.name),
+            )
+            .await?;
+            let sub_entries: Vec<GitHubContent> = serde_json::from_slice(&body)
                 .map_err(|e| format!("Failed to parse dir listing: {e}"))?;
 
             for sub_entry in &sub_entries {
@@ -866,4 +893,107 @@ async fn download_github_entry(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod download_tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    /// Serve one canned HTTP response on a loopback port and return its base URL.
+    async fn serve_once(response: Vec<u8>) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            if let Ok((mut stream, _)) = listener.accept().await {
+                let mut buf = [0u8; 4096];
+                let _ = stream.read(&mut buf).await;
+                let _ = stream.write_all(&response).await;
+                let _ = stream.shutdown().await;
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    fn file_entry(name: &str, url: String) -> GitHubContent {
+        GitHubContent {
+            name: name.to_string(),
+            content_type: "file".to_string(),
+            download_url: Some(url),
+            url: None,
+        }
+    }
+
+    /// A rate-limited (or any non-2xx) download must fail the install instead of writing the error body as the plugin file.
+    #[tokio::test]
+    async fn download_rejects_http_error_status_without_writing_file() {
+        let body = "429: Too Many Requests";
+        let base = serve_once(
+            format!(
+                "HTTP/1.1 429 Too Many Requests\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .into_bytes(),
+        )
+        .await;
+        let dir = tempfile::tempdir().unwrap();
+        let client = reqwest::Client::new();
+        let err = download_github_entry(
+            &client,
+            &file_entry("helper.py", format!("{base}/helper.py")),
+            dir.path(),
+            0,
+        )
+        .await
+        .expect_err("HTTP 429 must fail the download");
+        assert!(err.contains("429"), "got: {err}");
+        assert!(!dir.path().join("helper.py").exists());
+    }
+
+    /// A chunked body with no `Content-Length` must be cut off at the cap while streaming.
+    #[tokio::test]
+    async fn capped_body_rejects_oversized_chunked_response() {
+        let mut response =
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n".to_vec();
+        for _ in 0..8 {
+            response.extend_from_slice(b"400\r\n");
+            response.extend_from_slice(&[b'a'; 0x400]);
+            response.extend_from_slice(b"\r\n");
+        }
+        response.extend_from_slice(b"0\r\n\r\n");
+        let base = serve_once(response).await;
+        let resp = reqwest::Client::new()
+            .get(format!("{base}/big"))
+            .send()
+            .await
+            .unwrap();
+        assert!(resp.content_length().is_none());
+        let err = read_success_body_capped(resp, 4096, "big")
+            .await
+            .expect_err("8 KiB chunked body must exceed a 4 KiB cap");
+        assert!(err.contains("too large"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn capped_body_returns_successful_body() {
+        let base = serve_once(
+            b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello".to_vec(),
+        )
+        .await;
+        let dir = tempfile::tempdir().unwrap();
+        let client = reqwest::Client::new();
+        download_github_entry(
+            &client,
+            &file_entry("plugin.toml", format!("{base}/plugin.toml")),
+            dir.path(),
+            0,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("plugin.toml")).unwrap(),
+            "hello"
+        );
+    }
 }

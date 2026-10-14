@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use dashmap::DashMap;
 use std::process::Stdio;
 use std::sync::Arc;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::Mutex;
 use tracing::{debug, warn};
 
@@ -18,6 +18,54 @@ pub type ProcessId = String;
 /// The reaper keeps only the newest bytes so a chatty long-running process
 /// does not ship its entire buffer through the completion event.
 const COMPLETION_OUTPUT_TAIL_BYTES: usize = 4 * 1024;
+
+/// Longest single captured line, in bytes. A longer run without a newline is split into segments of this size, so a newline-free stream cannot grow one buffer without limit.
+const MAX_CAPTURED_LINE_BYTES: u64 = 16 * 1024;
+
+/// Most lines kept per stream; when full, the oldest `CAPTURED_LINES_DRAIN` are dropped.
+const MAX_CAPTURED_LINES: usize = 1000;
+const CAPTURED_LINES_DRAIN: usize = 100;
+
+/// Drain a child's output pipe into `buf` until EOF.
+///
+/// Bytes that are not valid UTF-8 are replaced rather than ending the reader: stopping early would close the pipe, and the child's next write would then fail with EPIPE or kill it with SIGPIPE.
+fn spawn_line_reader<R>(pipe: R, buf: Arc<Mutex<Vec<String>>>) -> tokio::task::JoinHandle<()>
+where
+    R: tokio::io::AsyncRead + Unpin + Send + 'static,
+{
+    tokio::spawn(async move {
+        let mut reader = BufReader::new(pipe);
+        let mut raw = Vec::new();
+        loop {
+            raw.clear();
+            // A fresh `take` per iteration caps this read only, so `Ok(0)` still means real EOF.
+            match (&mut reader)
+                .take(MAX_CAPTURED_LINE_BYTES)
+                .read_until(b'\n', &mut raw)
+                .await
+            {
+                Ok(0) => break,
+                Ok(_) => {}
+                Err(e) => {
+                    debug!(error = %e, "process output reader I/O error");
+                    break;
+                }
+            }
+            if raw.last() == Some(&b'\n') {
+                raw.pop();
+                if raw.last() == Some(&b'\r') {
+                    raw.pop();
+                }
+            }
+            let line = String::from_utf8_lossy(&raw).into_owned();
+            let mut b = buf.lock().await;
+            if b.len() >= MAX_CAPTURED_LINES {
+                b.drain(..CAPTURED_LINES_DRAIN);
+            }
+            b.push(line);
+        }
+    })
+}
 
 /// Terminal outcome of a tracked background process, delivered to a
 /// [`ProcessCompletionSink`] the moment the process leaves the registry.
@@ -242,36 +290,8 @@ impl ProcessManager {
         // evicting the registry entry (#5144), and surfaces panics so a
         // crashed reader no longer silently truncates captured output
         // (#5137).
-        let stdout_reader = stdout.map(|out| {
-            let buf = stdout_buf.clone();
-            tokio::spawn(async move {
-                let reader = BufReader::new(out);
-                let mut lines = reader.lines();
-                while let Ok(Some(line)) = lines.next_line().await {
-                    let mut b = buf.lock().await;
-                    // Cap buffer at 1000 lines
-                    if b.len() >= 1000 {
-                        b.drain(..100); // remove oldest 100
-                    }
-                    b.push(line);
-                }
-            })
-        });
-
-        let stderr_reader = stderr.map(|err| {
-            let buf = stderr_buf.clone();
-            tokio::spawn(async move {
-                let reader = BufReader::new(err);
-                let mut lines = reader.lines();
-                while let Ok(Some(line)) = lines.next_line().await {
-                    let mut b = buf.lock().await;
-                    if b.len() >= 1000 {
-                        b.drain(..100);
-                    }
-                    b.push(line);
-                }
-            })
-        });
+        let stdout_reader = stdout.map(|out| spawn_line_reader(out, stdout_buf.clone()));
+        let stderr_reader = stderr.map(|err| spawn_line_reader(err, stderr_buf.clone()));
 
         let id = format!(
             "proc_{}",
@@ -412,11 +432,13 @@ impl ProcessManager {
             _ => return Err(format!("Process '{}' not found", process_id)),
         };
 
-        let mut stdout = entry.stdout_buf.lock().await;
-        let mut stderr = entry.stderr_buf.lock().await;
+        let stdout_buf = entry.stdout_buf.clone();
+        let stderr_buf = entry.stderr_buf.clone();
+        // Release the DashMap shard guard before awaiting, as `write()` does, so a contended buffer lock cannot block the reaper, kills or inserts on this shard.
+        drop(entry);
 
-        let out_lines: Vec<String> = stdout.drain(..).collect();
-        let err_lines: Vec<String> = stderr.drain(..).collect();
+        let out_lines: Vec<String> = stdout_buf.lock().await.drain(..).collect();
+        let err_lines: Vec<String> = stderr_buf.lock().await.drain(..).collect();
 
         Ok((out_lines, err_lines))
     }
@@ -772,6 +794,96 @@ mod tests {
 
         drop(write);
         drop(stdin_guard);
+        pm.kill(&id, "agent1").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn pending_output_read_does_not_hold_process_registry_guard() {
+        let pm = Arc::new(ProcessManager::new(5));
+        let (cmd, args) = long_running_proc();
+        let (id, _) = pm.start("agent1", cmd, &args, &[], &[]).await.unwrap();
+        let stdout_buf = {
+            let entry = pm.processes.get(&id).expect("registered process");
+            entry.stdout_buf.clone()
+        };
+        let buf_guard = stdout_buf.lock().await;
+
+        // Poll once while the buffer mutex is held; `read` must park only after dropping its DashMap guard.
+        let mut read = Box::pin(pm.read(&id, "agent1"));
+        assert!(matches!(
+            futures::poll!(&mut read),
+            std::task::Poll::Pending
+        ));
+
+        // A shard write lock conflicts with a held read guard, unlike `list()`, so this is what detects the leak.
+        assert!(
+            matches!(
+                pm.processes.try_get_mut(&id),
+                dashmap::try_result::TryResult::Present(_)
+            ),
+            "read() parked while holding the process registry shard guard"
+        );
+
+        drop(buf_guard);
+        let (out, err) = read.await.expect("read succeeds once the buffer is free");
+        assert!(out.is_empty() && err.is_empty());
+        pm.kill(&id, "agent1").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn line_reader_survives_invalid_utf8_and_caps_line_length() {
+        let mut input = b"ok\n\xff bad\nafter\r\n".to_vec();
+        input.extend(std::iter::repeat_n(b'a', 40 * 1024));
+        let buf = Arc::new(Mutex::new(Vec::new()));
+        spawn_line_reader(std::io::Cursor::new(input), buf.clone())
+            .await
+            .unwrap();
+        let lines = buf.lock().await.clone();
+        assert_eq!(lines[0], "ok");
+        assert_eq!(lines[1], "\u{FFFD} bad");
+        assert_eq!(lines[2], "after");
+        let tail = &lines[3..];
+        assert_eq!(
+            tail.len(),
+            3,
+            "40 KiB without a newline splits into three segments"
+        );
+        assert!(tail
+            .iter()
+            .all(|l| l.len() <= MAX_CAPTURED_LINE_BYTES as usize));
+        assert_eq!(tail.iter().map(String::len).sum::<usize>(), 40 * 1024);
+    }
+
+    /// Before the fix the stdout reader stopped at the first non-UTF-8 byte and closed the pipe, so the child's next write hit SIGPIPE and everything after was lost.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn non_utf8_output_does_not_kill_reader_or_child() {
+        let pm = ProcessManager::new(5);
+        let args = vec![
+            "-c".to_string(),
+            "printf '\\377\\n'; sleep 0.2; printf 'after\\n'; sleep 30".to_string(),
+        ];
+        let (id, _) = pm.start("agent1", "sh", &args, &[], &[]).await.unwrap();
+
+        let mut seen = Vec::new();
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !seen.iter().any(|l: &String| l == "after") {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "output after the invalid byte never arrived: {seen:?}"
+            );
+            let (out, _) = pm
+                .read(&id, "agent1")
+                .await
+                .expect("process still registered");
+            seen.extend(out);
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        assert_eq!(seen[0], "\u{FFFD}");
+        assert!(
+            pm.list("agent1").iter().any(|p| p.id == id && p.alive),
+            "child must still be alive"
+        );
         pm.kill(&id, "agent1").await.unwrap();
     }
 

@@ -70,6 +70,11 @@ const PARITY_INPUTS: &[&str] = &[
     "echo 'safe' > output.txt",
     "echo 'ok' | grep x",
     "echo 'a' && echo 'b'",
+    // Unquoted backslash-escaped quote must not open a quoted region (must be blocked)
+    r"echo \' & id \'",
+    r"echo \'> f \'",
+    r#"echo \" | id \""#,
+    r"echo \;",
     // Clean commands (must pass)
     "ls -la",
     "cat file.txt",

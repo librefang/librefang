@@ -777,15 +777,21 @@ fn try_block_anchor_replace(
     let content_lines: Vec<&str> = content.lines().collect();
     let mut candidates: Vec<(usize, usize)> = Vec::new();
 
-    for start in 0..content_lines.len() {
+    // Candidates must not overlap: an accepted window resumes the scan after its last line, matching the other strategies.
+    // Overlapping windows (identical first/last anchors) would make the reverse splice below cut into replacement text it just inserted.
+    let mut start = 0;
+    while start < content_lines.len() {
         if content_lines[start].trim() != first_anchor {
+            start += 1;
             continue;
         }
         let expected_end = start + old_lines.len() - 1;
         if expected_end >= content_lines.len() {
+            start += 1;
             continue;
         }
         if content_lines[expected_end].trim() != last_anchor {
+            start += 1;
             continue;
         }
 
@@ -808,8 +814,11 @@ fn try_block_anchor_replace(
             let threshold = if candidates.is_empty() { 0.5 } else { 0.7 };
             if similarity >= threshold {
                 candidates.push((start, expected_end));
+                start = expected_end + 1;
+                continue;
             }
         }
+        start += 1;
     }
 
     if candidates.is_empty() {
@@ -3260,6 +3269,29 @@ mod tests {
         assert!(!skill.path.join("references/a").exists());
         assert!(!skill.path.join("references").exists());
         assert!(skill.path.exists(), "skill root itself must remain");
+    }
+
+    #[test]
+    fn test_block_anchor_replace_all_skips_overlapping_windows() {
+        let content = "A\nm1\nm2\nm3\nm4\nA\nm1\nm2\nm3\nm4\nA";
+        let old = "A\nm1\nm2\nm3\nXX\nA";
+        let result = try_block_anchor_replace(content, old, "B", true)
+            .unwrap()
+            .expect("block anchor should match");
+        // The windows (0,5) and (5,10) share line 5; only the first is replaced and the text after it is preserved intact.
+        assert_eq!(result.match_count, 1);
+        assert_eq!(result.new_content, "B\nm1\nm2\nm3\nm4\nA");
+    }
+
+    #[test]
+    fn test_block_anchor_replace_all_replaces_disjoint_windows() {
+        let content = "A\nm1\nm2\nm3\nm4\nZ\nx\nA\nm1\nm2\nm3\nm4\nZ";
+        let old = "A\nm1\nm2\nm3\nXX\nZ";
+        let result = try_block_anchor_replace(content, old, "B", true)
+            .unwrap()
+            .expect("block anchor should match");
+        assert_eq!(result.match_count, 2);
+        assert_eq!(result.new_content, "B\nx\nB");
     }
 }
 

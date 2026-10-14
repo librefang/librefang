@@ -553,12 +553,9 @@ impl ClawHubClient {
         // Use get_with_retry for the download — same 429/5xx handling as all
         // other endpoints, with 5 attempts and exponential backoff.
         let response = self.get_with_retry(&url, "ClawHub download").await?;
-        let bytes = response
-            .bytes()
-            .await
-            .map_err(|e| SkillError::Network(format!("Failed to read download body: {e}")))?;
+        let bytes = crate::marketplace::read_body_capped(response).await?;
 
-        self.install_with_expected_sha256(slug, target_dir, &bytes, expected_sha256.as_deref())
+        self.install_with_expected_sha256(slug, target_dir, bytes, expected_sha256.as_deref())
             .await
     }
 
@@ -572,7 +569,7 @@ impl ClawHubClient {
         &self,
         slug: &str,
         target_dir: &Path,
-        bytes: &[u8],
+        bytes: Vec<u8>,
     ) -> Result<ClawHubInstallResult, SkillError> {
         self.install_with_expected_sha256(slug, target_dir, bytes, None)
             .await
@@ -589,7 +586,7 @@ impl ClawHubClient {
         &self,
         slug: &str,
         target_dir: &Path,
-        bytes: &[u8],
+        bytes: Vec<u8>,
         expected_sha256: Option<&str>,
     ) -> Result<ClawHubInstallResult, SkillError> {
         validate_slug(slug)?;
@@ -597,7 +594,7 @@ impl ClawHubClient {
         // Step 1: SHA256 of downloaded content
         let sha256 = {
             let mut hasher = Sha256::new();
-            hasher.update(bytes);
+            hasher.update(&bytes);
             hex::encode(hasher.finalize())
         };
         info!(slug, sha256 = %sha256, "Downloaded skill");
@@ -642,14 +639,13 @@ impl ClawHubClient {
         // the conversion step below needs.
         let is_skillmd = {
             let tmp_dir = tmp_dir.clone();
-            let bytes = bytes.to_vec();
             let slug = slug.to_string();
             tokio::task::spawn_blocking(move || -> Result<bool, SkillError> {
                 let mut cleanup = prepare_staging_dir(&tmp_dir)?;
 
                 // Detect content type and extract accordingly
-                let content_str = String::from_utf8_lossy(&bytes);
-                let is_skillmd = content_str.trim_start().starts_with("---");
+                // Byte-level prefix check: decoding a whole binary zip just to test for front matter would allocate another full-size copy.
+                let is_skillmd = bytes.trim_ascii_start().starts_with(b"---");
 
                 if is_skillmd {
                     let skill_md_path = resolve_skill_child_path(&tmp_dir, Path::new("SKILL.md"))?;
@@ -1087,6 +1083,50 @@ mod tests {
         (format!("http://{address}"), task)
     }
 
+    #[tokio::test]
+    async fn read_body_capped_rejects_oversized_content_length() {
+        let (base, task) = scripted_http_server(vec![
+            "HTTP/1.1 200 OK\r\nContent-Length: 314572800\r\nConnection: close\r\n\r\n".to_string(),
+        ])
+        .await;
+        let resp = reqwest::get(format!("{base}/skill.zip")).await.unwrap();
+        let err = crate::marketplace::read_body_capped(resp)
+            .await
+            .expect_err("a body advertised above the cap must be rejected before buffering");
+        assert!(
+            matches!(err, SkillError::Network(ref m) if m.contains("exceeds")),
+            "unexpected error: {err:?}"
+        );
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn read_body_capped_returns_small_body() {
+        let (base, task) = scripted_http_server(vec![
+            "HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello".to_string(),
+        ])
+        .await;
+        let resp = reqwest::get(format!("{base}/skill.zip")).await.unwrap();
+        let body = crate::marketplace::read_body_capped(resp).await.unwrap();
+        assert_eq!(body, b"hello");
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn install_detects_skill_md_after_leading_whitespace() {
+        let dir = tempfile::tempdir().unwrap();
+        let client = ClawHubClient::new(dir.path().join("cache"));
+        let target = dir.path().join("skills");
+        std::fs::create_dir_all(&target).unwrap();
+        let body = b"\n  \n---\nname: ws-skill\ndescription: whitespace test\n---\n# WS\nBody.\n";
+
+        client
+            .install_from_bytes("ws-skill", &target, body.to_vec())
+            .await
+            .unwrap();
+        assert!(target.join("ws-skill").join("SKILL.md").is_file());
+    }
+
     #[test]
     fn test_browse_entry_serde_real_format() {
         // Matches actual ClawHub browse API response (verified Feb 2026)
@@ -1313,7 +1353,7 @@ mod tests {
         std::fs::create_dir_all(&target).unwrap();
 
         let err = client
-            .install_with_expected_sha256("evil-skill", &target, &buf, None)
+            .install_with_expected_sha256("evil-skill", &target, buf, None)
             .await
             .expect_err("a bundle containing a .pth must be refused by the supply-chain audit");
         assert!(
@@ -1332,7 +1372,7 @@ mod tests {
         let body = b"---\nname: safe-skill\ndescription: safe test skill\nversion: 1.2.3\n---\n# Safe Skill\nUse this skill safely.\n";
 
         let result = client
-            .install_with_expected_sha256("safe-skill", &target, body, None)
+            .install_with_expected_sha256("safe-skill", &target, body.to_vec(), None)
             .await
             .unwrap();
 
@@ -1463,7 +1503,7 @@ mod tests {
         let malformed = b"---\nname: [unterminated\n---\nbody\n";
 
         client
-            .install_from_bytes("broken-skill", target.path(), malformed)
+            .install_from_bytes("broken-skill", target.path(), malformed.to_vec())
             .await
             .expect_err("malformed frontmatter must fail conversion");
 

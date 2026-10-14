@@ -821,7 +821,7 @@
           }
         ],
         "requestBody": {
-          "description": "Partial agent fields to update",
+          "description": "Partial agent fields to update. `expected_version` (optional) is the `ETag` from `GET /api/agents/{id}/manifest`; a mismatch answers 409 (#8424).",
           "content": {
             "application/json": {
               "schema": {
@@ -834,6 +834,16 @@
         "responses": {
           "200": {
             "description": "Partially update an agent (name, description, model, system prompt)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The manifest changed after this editor read it; reload before saving (#8424)",
             "content": {
               "application/json": {
                 "schema": {
@@ -1121,7 +1131,7 @@
           }
         ],
         "requestBody": {
-          "description": "Object containing the channel allowlist",
+          "description": "Object containing the channel allowlist. `expected_version` (optional) is the `ETag` from `GET /api/agents/{id}/manifest`; a mismatch answers 409 (#8424).",
           "content": {
             "application/json": {
               "schema": {
@@ -1144,6 +1154,16 @@
           },
           "400": {
             "description": "Malformed request body",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The `expected_version` no longer matches the live manifest; another writer saved after the read. Reload and re-apply (#8424)",
             "content": {
               "application/json": {
                 "schema": {
@@ -2012,6 +2032,115 @@
         }
       }
     },
+    "/api/agents/{id}/manifest-history": {
+      "get": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "GET /api/agents/{id}/manifest-history — how this agent's config changed over time.",
+        "description": "Returns an array of manifest snapshots, newest first.\nEach entry carries the full TOML so the dashboard can render a diff between consecutive versions and offer a one-click restore.",
+        "operationId": "list_agent_manifest_history",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Agent UUID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Max entries to return (default 30, max 200)",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Manifest version history, newest first",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid agent id or limit"
+          },
+          "404": {
+            "description": "Agent not found or not accessible to the caller"
+          }
+        }
+      }
+    },
+    "/api/agents/{id}/manifest-history/{version_id}/restore": {
+      "post": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "POST /api/agents/{id}/manifest-history/{version_id}/restore — roll an agent's manifest back to a stored snapshot.",
+        "description": "Mirrors `restore_template_version`: the stored TOML is parsed and applied through `restore_manifest_snapshot`, which re-runs the module-path security check, preserves the runtime-only fields (name, tags, workspace, resolved `exec_policy`, current `enabled`) and persists the result — the restore itself is recorded in the history as a fresh `restore` snapshot.\nUnlike a plain `update_manifest`, the restore also reconciles the runtime side effects a changed snapshot implies: the background loop is stopped and restarted on a schedule change, named workspaces are created on a workspaces change, and the canonical session is dropped on a model or endpoint change.",
+        "operationId": "restore_agent_manifest_version",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Agent UUID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "version_id",
+            "in": "path",
+            "description": "Version row id to restore",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Agent manifest restored",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid agent id"
+          },
+          "404": {
+            "description": "Agent or version not found, the version belongs to another agent, or the agent is not accessible to the caller"
+          },
+          "423": {
+            "description": "This agent is provisioned by the deployment; its manifest cannot be changed through the API",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/agents/{id}/mcp_servers": {
       "get": {
         "tags": [
@@ -2060,7 +2189,7 @@
           }
         ],
         "requestBody": {
-          "description": "Object containing the MCP server allowlist",
+          "description": "Object containing the MCP server allowlist. `expected_version` (optional) is the `ETag` from `GET /api/agents/{id}/manifest`; a mismatch answers 409 (#8424).",
           "content": {
             "application/json": {
               "schema": {
@@ -2083,6 +2212,16 @@
           },
           "400": {
             "description": "Malformed request body",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The `expected_version` no longer matches the live manifest; another writer saved after the read. Reload and re-apply (#8424)",
             "content": {
               "application/json": {
                 "schema": {
@@ -2665,6 +2804,58 @@
                 }
               }
             }
+          }
+        }
+      }
+    },
+    "/api/agents/{id}/save-as-agent-type": {
+      "post": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "POST /api/agents/{id}/save-as-agent-type — snapshot a live agent's manifest\ninto a reusable agent-type template file.",
+        "description": "Not gated by [`super::guard_provisioned_agent`]: that guard refuses writes\nthat would change the *definition* of a provisioned agent, and this\nhandler never touches the source agent's own manifest — it only reads it\nand writes a new, separate `agent-types/<name>.toml`. The closest sibling,\n[`super::clone_agent`], follows the same \"read source, write something\nnew\" shape and carries no such guard either.\n\nNot exposed to the `User` role: `save-as-agent-type` is absent from the\n`User`-tier POST allowlist in `middleware::user_role_allows_request`, so\nonly Admin+ callers reach this handler at all — unlike `/clone`, which\ndeliberately carves out `User` access and therefore needs its own\n`can_access_agent` ownership check to stop a non-owner from cloning an\narbitrary agent by id. An Admin+ caller already has access to every\nagent's manifest through other routes, so no equivalent check is needed\nhere; widening this endpoint to `User` later would need that check added\nalongside it.",
+        "operationId": "save_agent_as_agent_type",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Agent ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "description": "Name to save the agent type under",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SaveAsAgentTypeRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Agent type created from live agent"
+          },
+          "400": {
+            "description": "Malformed agent id, or a template_name outside [A-Za-z0-9_-]{1,64}"
+          },
+          "404": {
+            "description": "Agent not found"
+          },
+          "409": {
+            "description": "The source agent is a hand-spawned agent, the template name is already taken, or it belongs to a different live agent"
+          },
+          "422": {
+            "description": "JSON body present but missing the required 'template_name' field"
+          },
+          "500": {
+            "description": "The agent type could not be rendered or written"
           }
         }
       }
@@ -3283,11 +3474,11 @@
           }
         ],
         "requestBody": {
-          "description": "Array of skill names",
+          "description": "Object with the `skills` array to store. `expected_version` (optional) is the `ETag` from `GET /api/agents/{id}/manifest`; a mismatch answers 409 (#8424).",
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/JsonArray"
+                "$ref": "#/components/schemas/JsonObject"
               }
             }
           },
@@ -3296,6 +3487,16 @@
         "responses": {
           "200": {
             "description": "Update an agent's skill allowlist",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The `expected_version` no longer matches the live manifest; another writer saved after the read. Reload and re-apply (#8424)",
             "content": {
               "application/json": {
                 "schema": {
@@ -3472,6 +3673,16 @@
         "responses": {
           "200": {
             "description": "Updated tool configuration, echoing the stored `capabilities_tools`, `tool_allowlist`, `tool_blocklist` and `disabled` values. Carries an additional `warnings` array of strings naming each stored `tool_allowlist` entry that provably cannot admit any tool; the key is absent when there is nothing to report. The check runs whenever the request submits `tool_allowlist` or `capabilities_tools` — narrowing the grant surface is itself a way to render a stored entry inert — and is skipped for a request that submits only `tool_blocklist` or only `disabled`, and for an agent left with `tools_disabled = true`, where no allowlist entry can admit anything anyway.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The `expected_version` no longer matches the live manifest; another writer saved after the read. Reload and re-apply (#8424)",
             "content": {
               "application/json": {
                 "schema": {
@@ -8513,11 +8724,14 @@
           "system"
         ],
         "summary": "GET /api/logs/stream — SSE endpoint for real-time audit log streaming.",
-        "description": "Streams new audit entries as Server-Sent Events. Accepts optional query\nparameters for filtering:\n  - `level`  — filter by classified level (info, warn, error, debug), classified from the entry's `outcome` (leading `error` / `fail` / `denied` or a status code ending `_failed` / `_error` / `_denied` such as `db_remove_failed`, `warn`, `debug`), falling back to the action so `PermissionDenied` and `BudgetExceeded` are errors; each event carries the classification as `level`\n  - `filter` — text substring filter across action/detail/agent_id\n\nA heartbeat ping is sent every 15 seconds to keep the connection alive.\nThe endpoint polls the audit log every second. The first poll sends up\nto the most recent 200 entries as a bounded backfill (prevents a flood\nwhen subscribing against a long-running daemon); every subsequent poll\nuses a cursor (`since_seq`) so bursts faster than the previous\n`recent(200)` sliding window are no longer silently truncated.",
+        "description": "Streams new audit entries as Server-Sent Events. Accepts optional query\nparameters for filtering:\n  - `level`  — filter by classified level (info, warn, error, debug), classified from the entry's `outcome` (leading `error` / `fail` / `denied` or a status code ending `_failed` / `_error` / `_denied` such as `db_remove_failed`, `warn`, `debug`), falling back to the action so `PermissionDenied` and `BudgetExceeded` are errors; each event carries the classification as `level`\n  - `filter` — text substring filter across action/detail/agent_id\n\nA heartbeat ping is sent every 15 seconds to keep the connection alive.\nThe endpoint polls the audit log every second. The first poll sends up\nto the most recent 200 entries as a bounded backfill (prevents a flood\nwhen subscribing against a long-running daemon); every subsequent poll\nuses a cursor (`since_seq`) so bursts faster than the previous\n`recent(200)` sliding window are no longer silently truncated.\n\nAdmin-only, exactly like `/api/audit/*`: every event is a raw audit ledger row (attribution, detail string, outcome), so the stream goes through the same `require_admin` gate.\nCallers below Admin, anonymous callers and the trusted loopback / no-auth identity get 403 and a `PermissionDenied` audit entry.",
         "operationId": "logs_stream",
         "responses": {
           "200": {
             "description": "SSE log stream"
+          },
+          "403": {
+            "description": "Admin role required"
           }
         }
       }
@@ -17385,6 +17599,7 @@
           "task",
           "response",
           "status",
+          "truncated",
           "provider",
           "model",
           "iterations",
@@ -17466,6 +17681,10 @@
           "tool_calls": {
             "type": "integer",
             "format": "int64"
+          },
+          "truncated": {
+            "type": "boolean",
+            "description": "True when the worker hit its per-turn iteration cap and delivered a\npartial answer (#8556) — the run completed, but was cut off."
           },
           "worker_name": {
             "type": "string",
@@ -18195,6 +18414,19 @@
           }
         }
       },
+      "SaveAsAgentTypeRequest": {
+        "type": "object",
+        "description": "Request body for saving a live agent as an agent type.",
+        "required": [
+          "template_name"
+        ],
+        "properties": {
+          "template_name": {
+            "type": "string",
+            "description": "Name for the saved agent type, `[A-Za-z0-9_-]{1,64}`."
+          }
+        }
+      },
       "SessionContextResponse": {
         "type": "object",
         "description": "Lightweight context-window usage indicator for an agent session.\n\nDistinct from `GET /api/agents/{id}/session`: that endpoint returns the full\nmessage history and exposes only the X numerator\n(`context_window_tokens`). This endpoint resolves the Y denominator (the\nmodel's context window, via the same precedence chain the agent loop uses)\nand the percentage, so the dashboard can render a cheap polled \"how full is\nthe window\" bar without pulling the heavy history payload.",
@@ -18254,6 +18486,13 @@
               "type": "string"
             },
             "description": "`channel_type` strings the agent may receive messages from.\nAn empty list clears the allowlist, which means \"all channels\" (`mode = \"all\"`)."
+          },
+          "expected_version": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Manifest ETag from `GET /api/agents/{id}/manifest` (#8424).\nWhen present and no longer current the request is refused with 409 instead of silently overwriting a write made after the read."
           }
         },
         "additionalProperties": false
@@ -18278,6 +18517,13 @@
           "mcp_servers"
         ],
         "properties": {
+          "expected_version": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Manifest ETag from `GET /api/agents/{id}/manifest` (#8424).\nWhen present and no longer current the request is refused with 409 instead of silently overwriting a write made after the read."
+          },
           "mcp_servers": {
             "type": "array",
             "items": {
@@ -18308,6 +18554,13 @@
               "null"
             ],
             "description": "`agent.toml: tools_disabled` — the master switch that removes every tool from the agent before any of the three filters above are consulted.\n`None` = no change, `Some(true)` = disable all tools, `Some(false)` = re-enable them.\n\nNamed `disabled` to match the key `GET /api/agents/{id}/tools` already returns.\nUntil #7742 the GET returned it and no request could write it, and every successful write forced it back to `false` — so an operator editing a blocklist re-enabled every tool without asking."
+          },
+          "expected_version": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Manifest ETag from `GET /api/agents/{id}/manifest` (#8424).\nWhen present and no longer current the request is refused with 409 instead of silently overwriting a write made after the read."
           },
           "tool_allowlist": {
             "type": [
@@ -18740,7 +18993,7 @@
       },
       "UserUpsert": {
         "type": "object",
-        "description": "Payload for creating or replacing a user. `api_key_hash` is accepted\npre-hashed (Argon2 phc string) — the dashboard hashes locally before\nsending. `None` clears any existing hash on update; absent on create.",
+        "description": "Payload for creating or replacing a user. `api_key_hash` is accepted\npre-hashed (Argon2 phc string) — the dashboard hashes locally before\nsending.\n\n`api_key_hash` is tri-state on update (both `PUT /api/users/{name}` and an import row that matches an existing user).\nAn absent key keeps the stored hash, because the dashboard's edit modal, identity wizard and CSV import never send it and would otherwise revoke the user's key on every edit.\nAn explicit `null` or an empty string clears the stored hash, and a PHC string replaces it.\nOn create, absent, `null` and empty all mean \"no key\".",
         "required": [
           "name"
         ],
@@ -18749,7 +19002,8 @@
             "type": [
               "string",
               "null"
-            ]
+            ],
+            "description": "Outer `None` = key absent (keep), `Some(None)` = explicit `null` (clear)."
           },
           "channel_bindings": {
             "type": "object",

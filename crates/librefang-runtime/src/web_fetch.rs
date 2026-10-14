@@ -454,16 +454,10 @@ fn ssrf_precheck(url: &str) -> Result<SsrfPrecheck, String> {
         return Err("Only http:// and https:// URLs are allowed".to_string());
     }
 
-    // Reject userinfo (`user[:pass]@host`) in the authority. Defense in
-    // depth (issue #5141): `extract_host` splits on `://` then `/`, so
-    // `http://allowed.example.com@127.0.0.1/` yields the host
-    // `allowed.example.com@127.0.0.1` and today merely fails DNS — but
-    // that is one parser tweak away from exploitable (the #3527 shape).
-    // `is_ssrf_target` on the WASM path and the MCP-OAuth path both reject
-    // userinfo explicitly; align this path so the policy is uniform and
-    // the URL never reaches reqwest's connection-pool key with credentials
-    // embedded. Scope the `@` scan to the authority only (a `?query=a@b`
-    // or `#frag@x` is legitimate and must not be rejected).
+    // Reject userinfo (`user[:pass]@host`) in the authority (issue #5141, the #3527 host-confusion shape).
+    // `is_ssrf_target` on the WASM path and the MCP-OAuth path both reject userinfo explicitly; align this path so the policy is uniform and the URL never reaches reqwest's connection-pool key with credentials embedded.
+    // This raw scan runs before the parsed-URL check below as a second layer.
+    // Scope the `@` scan to the authority only (a `?query=a@b` or `#frag@x` is legitimate and must not be rejected).
     if let Some((_, rest)) = url.split_once("://") {
         let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
         if rest[..authority_end].contains('@') {
@@ -471,13 +465,24 @@ fn ssrf_precheck(url: &str) -> Result<SsrfPrecheck, String> {
         }
     }
 
-    let host = extract_host(url);
-    // For IPv6 bracket notation like [::1]:80, extract [::1] as hostname
-    let hostname = if host.starts_with('[') {
-        host.find(']').map(|i| &host[..=i]).unwrap_or(&host)
-    } else {
-        host.split(':').next().unwrap_or(&host)
+    // Take the host and port from the same WHATWG parser reqwest uses to pick the connection target.
+    // A hand-rolled split disagrees with it on where the authority ends (`?`, `#` and `\` all terminate it), so `http://127.0.0.1?.8.8.8.8.nip.io/` would be validated as a public wildcard-DNS name while reqwest connects to the loopback literal.
+    let parsed = url::Url::parse(url).map_err(|e| format!("SSRF blocked: invalid URL: {e}"))?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err("Only http:// and https:// URLs are allowed".to_string());
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err("SSRF blocked: URLs with userinfo are not permitted".to_string());
+    }
+    // IPv4 literals come back in dotted form even when written as decimal, octal or hex (`http://2130706433/`).
+    // IPv6 literals keep their brackets so the `[::1]` blocklist entry and the resolver input work.
+    let hostname = match parsed.host() {
+        Some(url::Host::Domain(d)) => d.to_string(),
+        Some(url::Host::Ipv4(ip)) => ip.to_string(),
+        Some(url::Host::Ipv6(ip)) => format!("[{ip}]"),
+        None => return Err("SSRF blocked: URL has no host".to_string()),
     };
+    let hostname = hostname.as_str();
 
     // Hostname-based blocklist (catches metadata endpoints — always blocked,
     // even when the hostname appears in allowed_hosts).
@@ -498,7 +503,9 @@ fn ssrf_precheck(url: &str) -> Result<SsrfPrecheck, String> {
         return Err(format!("SSRF blocked: {hostname} is a restricted hostname"));
     }
 
-    let port = if url.starts_with("https") { 443 } else { 80 };
+    let port = parsed
+        .port_or_known_default()
+        .unwrap_or(if parsed.scheme() == "https" { 443 } else { 80 });
     Ok(SsrfPrecheck {
         hostname: hostname.to_string(),
         socket_addr: format!("{hostname}:{port}"),
@@ -670,7 +677,11 @@ fn is_host_allowed(hostname: &str, ip: &IpAddr, allowed_hosts: &[String]) -> boo
                 continue; // reject "*" — too broad
             }
             // "*.foo.com" -> suffix = ".foo.com"
-            if hostname.ends_with(suffix) {
+            // The hostname comes lowercased from the URL parser, so compare case-insensitively like the literal match below.
+            if hostname
+                .to_ascii_lowercase()
+                .ends_with(&suffix.to_ascii_lowercase())
+            {
                 return true;
             }
             continue;
@@ -739,35 +750,6 @@ pub(crate) fn is_private_ip(ip: &IpAddr) -> bool {
             let segments = v6.segments();
             (segments[0] & 0xfe00) == 0xfc00 || (segments[0] & 0xffc0) == 0xfe80
         }
-    }
-}
-
-/// Extract host:port from a URL.
-fn extract_host(url: &str) -> String {
-    if let Some(after_scheme) = url.split("://").nth(1) {
-        let host_port = after_scheme.split('/').next().unwrap_or(after_scheme);
-        // Handle IPv6 bracket notation: [::1]:8080
-        if host_port.starts_with('[') {
-            // Extract [addr]:port or [addr]
-            if let Some(bracket_end) = host_port.find(']') {
-                let ipv6_host = &host_port[..=bracket_end]; // includes brackets
-                let after_bracket = &host_port[bracket_end + 1..];
-                if let Some(port) = after_bracket.strip_prefix(':') {
-                    return format!("{ipv6_host}:{port}");
-                }
-                let default_port = if url.starts_with("https") { 443 } else { 80 };
-                return format!("{ipv6_host}:{default_port}");
-            }
-        }
-        if host_port.contains(':') {
-            host_port.to_string()
-        } else if url.starts_with("https") {
-            format!("{host_port}:443")
-        } else {
-            format!("{host_port}:80")
-        }
-    } else {
-        url.to_string()
     }
 }
 
@@ -1191,12 +1173,8 @@ mod tests {
     // --- #5141: userinfo rejection (defense-in-depth, #3527 shape) ---
     #[test]
     fn test_ssrf_rejects_userinfo() {
-        // ATTACK: host-confusion via userinfo. `extract_host` splits on
-        // `://` then `/`, so the host would be
-        // `allowed.example.com@127.0.0.1` — today that merely fails DNS,
-        // but it must be rejected explicitly so a future parser change
-        // can't make it exploitable, and so credentials never reach
-        // reqwest's connection-pool key.
+        // ATTACK: host-confusion via userinfo.
+        // It must be rejected explicitly so credentials never reach reqwest's connection-pool key.
         let err = match check_ssrf("http://allowed.example.com@127.0.0.1/", &[]) {
             Err(e) => e,
             Ok(_) => panic!("userinfo URL must be rejected"),
@@ -1426,15 +1404,65 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_host_ipv6() {
-        let h = extract_host("http://[::1]:8080/path");
-        assert_eq!(h, "[::1]:8080");
+    fn test_allowlist_glob_is_case_insensitive_for_parsed_host() {
+        // The URL parser lowercases the host, so a mixed-case glob entry must still match it.
+        let ip: IpAddr = "10.0.0.5".parse().unwrap();
+        let host = ssrf_precheck("http://Svc.Internal.Corp/").unwrap().hostname;
+        assert_eq!(host, "svc.internal.corp");
+        assert!(is_host_allowed(
+            &host,
+            &ip,
+            &["*.Internal.Corp".to_string()]
+        ));
+        assert!(!is_host_allowed(&host, &ip, &["*.other.corp".to_string()]));
+    }
 
-        let h2 = extract_host("https://[::1]/path");
-        assert_eq!(h2, "[::1]:443");
+    #[test]
+    fn test_ssrf_precheck_ipv6_host_and_port() {
+        let p = ssrf_precheck("http://[2001:db8::1]:8080/path").unwrap();
+        assert_eq!(p.hostname, "[2001:db8::1]");
+        assert_eq!(p.socket_addr, "[2001:db8::1]:8080");
+        let p = ssrf_precheck("https://[2001:db8::1]/path").unwrap();
+        assert_eq!(p.socket_addr, "[2001:db8::1]:443");
+        let p = ssrf_precheck("http://[2001:db8::1]/path").unwrap();
+        assert_eq!(p.socket_addr, "[2001:db8::1]:80");
+    }
 
-        let h3 = extract_host("http://[::1]/path");
-        assert_eq!(h3, "[::1]:80");
+    #[test]
+    fn ssrf_precheck_uses_whatwg_host_for_query_fragment_backslash() {
+        // reqwest parses these with the WHATWG `url` parser and connects to the loopback / metadata literal, so the precheck must see that same host rather than a wildcard-DNS name that resolves to a public IP.
+        // IP literals need no DNS, so each case must be rejected by the literal blocklist or the resolved-IP gate, never by a DNS failure.
+        for u in [
+            "http://127.0.0.1?.8.8.8.8.nip.io/admin",
+            "http://169.254.169.254#.1.2.3.4.nip.io/latest/meta-data/",
+            "http://127.0.0.1\\.8.8.8.8.nip.io/",
+            "http://10.0.0.5?.1.2.3.4.nip.io/",
+            "http://localhost?x=1",
+            "http://[::1]#frag",
+            "http://2130706433/",
+        ] {
+            let err = match check_ssrf(u, &[]) {
+                Ok(r) => panic!("{u} must be blocked, resolved to {:?}", r.resolved),
+                Err(e) => e,
+            };
+            assert!(
+                err.contains("restricted hostname") || err.contains("private IP"),
+                "{u} must be blocked as a private host, got {err}"
+            );
+        }
+        assert_eq!(
+            ssrf_precheck("http://127.0.0.1?.8.8.8.8.nip.io/")
+                .unwrap()
+                .hostname,
+            "127.0.0.1"
+        );
+
+        // A query or fragment directly after the host is an ordinary URL, and an explicit port is honoured.
+        let p = ssrf_precheck("https://Example.com?q=1").unwrap();
+        assert_eq!(p.hostname, "example.com");
+        assert_eq!(p.socket_addr, "example.com:443");
+        let p = ssrf_precheck("http://example.com:8080#x").unwrap();
+        assert_eq!(p.socket_addr, "example.com:8080");
     }
 
     #[test]

@@ -265,7 +265,7 @@ pub(crate) fn cmd_models_set(model: Option<String>) {
     if body.get("error").is_some() {
         ui::error(&i18n::t_args(
             "model-set-failed",
-            &[("error", body["error"].as_str().unwrap_or("?"))],
+            &[("error", api_error_message(&body).unwrap_or("?"))],
         ));
         std::process::exit(1);
     }
@@ -328,9 +328,14 @@ pub(crate) fn cmd_models_overrides(
         return;
     }
 
-    let mut overrides = daemon_json(client.get(&url).send());
-    if !overrides.is_object() {
-        overrides = serde_json::json!({});
+    // The PUT replaces the whole document, so the merge base must be the stored one: merging into an error body or `{}` after a failed read would clear every other override under this key.
+    let (get_status, mut overrides) = daemon_json_checked(client.get(&url).send());
+    if !get_status.is_success() || !overrides.is_object() {
+        ui::error(&i18n::t_args(
+            "model-overrides-save-failed",
+            &[("model", model), ("status", &get_status.to_string())],
+        ));
+        std::process::exit(1);
     }
     if let Some(cw) = context_window {
         overrides["context_window"] = serde_json::json!(cw);

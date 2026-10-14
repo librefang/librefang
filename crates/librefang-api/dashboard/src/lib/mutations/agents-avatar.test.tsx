@@ -12,7 +12,7 @@ import {
   useUpdateAgentIdentity,
   useUploadAgentAvatar,
 } from "./agents";
-import { agentAvatarKeys, agentKeys, overviewKeys } from "../queries/keys";
+import { agentAvatarKeys, agentFileKeys, agentKeys, overviewKeys } from "../queries/keys";
 import { createQueryClientWrapper } from "../test/query-client";
 
 vi.mock("../http/client", () => ({
@@ -50,6 +50,10 @@ describe("useUpdateAgentIdentity", () => {
     // is a sibling of `agentKeys.all` rather than a child of it — so the two
     // agent keys above leave the row on the previous emoji.
     expect(invalidate).toHaveBeenCalledWith({ queryKey: overviewKeys.snapshot() });
+    // `PATCH /identity` writes personality into IDENTITY.md; the editor's cached copy must not outlive it (#8516).
+    expect(invalidate).toHaveBeenCalledWith({
+      queryKey: agentFileKeys.detail(AGENT, "IDENTITY.md"),
+    });
   });
 
   it("leaves the cached avatar image alone — an emoji change is not a new image", async () => {

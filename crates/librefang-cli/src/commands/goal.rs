@@ -180,11 +180,9 @@ pub(crate) fn cmd_goal(
     }
 }
 
-/// The `error` field of a daemon response, or a generic stand-in.
+/// The reason in a daemon error response (flat `error`, nested `error.message`, or `message`), or a generic stand-in.
 fn api_error(body: &serde_json::Value) -> String {
-    body["error"]
-        .as_str()
-        .filter(|e| !e.is_empty())
+    api_error_message(body)
         .map(str::to_string)
         .unwrap_or_else(|| i18n::t("cmd-goal-unknown-error"))
 }
@@ -246,6 +244,15 @@ mod tests {
     #[test]
     fn api_error_prefers_the_daemon_message() {
         let body = serde_json::json!({ "error": "Title too long (max 256 chars)" });
+        assert_eq!(api_error(&body), "Title too long (max 256 chars)");
+    }
+
+    #[test]
+    fn api_error_reads_the_nested_apierror_shape() {
+        let body = serde_json::json!({
+            "error": { "code": "bad_request", "message": "Title too long (max 256 chars)" },
+            "message": "Title too long (max 256 chars)"
+        });
         assert_eq!(api_error(&body), "Title too long (max 256 chars)");
     }
 

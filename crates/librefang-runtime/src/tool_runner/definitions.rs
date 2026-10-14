@@ -249,11 +249,13 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
             },
             ToolDefinition {
                 name: tool_name::FILE_LIST.to_string(),
-                description: "List files in a directory. Paths are relative to the agent workspace.".to_string(),
+                description: "List files in a directory. Paths are relative to the agent workspace. Long listings are paged: when entries are left over, the output ends with a trailer giving the `offset` to pass for the next page.".to_string(),
                 input_schema: serde_json::json!({
                     "type": "object",
                     "properties": {
-                        "path": { "type": "string", "description": "The directory path to list" }
+                        "path": { "type": "string", "description": "The directory path to list" },
+                        "limit": { "type": "integer", "description": "Maximum entries to return (default: 1000)" },
+                        "offset": { "type": "integer", "description": "Number of sorted entries to skip, for paging (default: 0)" }
                     },
                     "required": ["path"]
                 }),

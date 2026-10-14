@@ -127,13 +127,31 @@ fn trim_opt_string(val: Option<&str>) -> Option<&str> {
     val.map(str::trim).filter(|s| !s.is_empty())
 }
 
-/// The base channel *type*, stripping any `:<suffix>` an adapter embeds. The
-/// WhatsApp gateway stamps `sender_channel = "whatsapp:<jid>"` (#5227) while a
-/// `channel_send` targets the bare `"whatsapp"`; the #6443 cross-account guard
-/// compares base types so the embedding does not silently disable it. Channels
-/// with no colon are returned unchanged.
+/// The base channel *type*, stripping any `:<suffix>` an adapter embeds.
+/// The WhatsApp gateway stamps `sender_channel = "whatsapp:<jid>"` (#5227) while a `channel_send` targets the bare `"whatsapp"`; the #6117 cross-chat guard and the #6443 cross-account guard both compare base types so the embedding does not silently disable them.
+/// Channels with no colon are returned unchanged.
 fn channel_base(channel: &str) -> &str {
     channel.split(':').next().unwrap_or(channel)
+}
+
+/// The conversation id an adapter embeds in the channel itself, if any.
+/// The WhatsApp gateway stamps `sender_channel = "whatsapp:<jid>"` (#5227) and no separate chat id, so the jid after the first colon is the only record of which group or DM the turn arrived in.
+fn channel_embedded_chat(channel: &str) -> Option<&str> {
+    channel
+        .split_once(':')
+        .map(|(_, chat)| chat.trim())
+        .filter(|chat| !chat.is_empty())
+}
+
+/// The platform conversation id of the current turn: the stamped chat id when present, otherwise the id embedded in the channel (#5227).
+/// Without the embedded fallback a gateway group turn would treat the speaker as the conversation, so the reply target and the #6117 guard's expected chat would both be the wrong chat.
+fn turn_chat_id<'a>(
+    sender_channel: Option<&'a str>,
+    sender_chat_id: Option<&'a str>,
+) -> Option<&'a str> {
+    sender_chat_id
+        .filter(|s| !s.is_empty())
+        .or_else(|| sender_channel.and_then(channel_embedded_chat))
 }
 
 /// Resolve the `channel_send` target.
@@ -425,7 +443,8 @@ pub(super) async fn tool_channel_send(
     // room), falling back to `sender_id` only for DMs. This is the same target
     // the cross-chat guard treats as canonical, so a no-recipient send can
     // never resolve a chat the guard would have rejected.
-    let recipient = resolve_send_target(explicit_recipient, sender_chat_id, sender_id)
+    let turn_chat = turn_chat_id(sender_channel, sender_chat_id);
+    let recipient = resolve_send_target(explicit_recipient, turn_chat, sender_id)
         .ok_or("Missing 'recipient' parameter. When replying to the original sender, recipient is auto-filled — ensure channel_send is called in response to a message.")?
         .trim();
 
@@ -451,23 +470,17 @@ pub(super) async fn tool_channel_send(
     // envelope and consumed by no sidecar channel adapter, so on Slack the
     // model was refused and then sent to a path that delivered nothing (#7086).
     if let (Some(explicit), Some(turn_channel)) = (explicit_recipient, sender_channel) {
-        // The expected chat is the same canonical reply target a no-recipient
-        // send resolves to (`resolve_send_target` with no explicit recipient):
-        // the conversation id, falling back to `sender_id` for DMs. The empty
-        // filter on `sender_chat_id` is load-bearing — the in-process path
-        // stamps the raw metadata value (unlike the `/mcp` bridge, which drops
-        // empty headers), so `Some("")` must not mask the `sender_id` fallback
-        // and silently disable the guard.
-        let expected_chat = resolve_send_target(None, sender_chat_id, sender_id);
+        // The expected chat is the same canonical reply target a no-recipient send resolves to (`resolve_send_target` with no explicit recipient): the conversation id, falling back to `sender_id` for DMs.
+        // The empty filter on `sender_chat_id` is load-bearing — the in-process path stamps the raw metadata value (unlike the `/mcp` bridge, which drops empty headers), so `Some("")` must not mask the `sender_id` fallback and silently disable the guard.
+        // `turn_chat` also falls back to the jid the WhatsApp gateway embeds in `sender_channel` (#5227).
+        let expected_chat = resolve_send_target(None, turn_chat, sender_id);
         if let Some(expected) = expected_chat {
-            // Compare the recipient case-SENSITIVELY: `send_channel_*` lookups
-            // are case-sensitive (#6078), so a case-insensitive match here would
-            // let `recipient = "OWNER"` pass while the send routes to a distinct
-            // case-sensitive chat. The channel match stays case-insensitive so
-            // the guard still fires when the model varies the channel's casing.
+            // Compare the recipient case-SENSITIVELY: `send_channel_*` lookups are case-sensitive (#6078), so a case-insensitive match here would let `recipient = "OWNER"` pass while the send routes to a distinct case-sensitive chat.
+            // The channel match stays case-insensitive so the guard still fires when the model varies the channel's casing.
+            // The channels are compared by base type, as in the #6443 guard below, so a stamped `"whatsapp:<jid>"` still matches `"whatsapp"`.
             if !expected.is_empty()
                 && !turn_channel.is_empty()
-                && turn_channel.eq_ignore_ascii_case(&channel)
+                && channel_base(turn_channel).eq_ignore_ascii_case(channel_base(&channel))
                 && explicit != expected
             {
                 return Err(format!(

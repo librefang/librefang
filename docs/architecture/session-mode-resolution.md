@@ -35,8 +35,11 @@ A public multi-user front-end therefore does not need `session_mode = "new"` at 
 |---|---|
 | Event triggers | yes |
 | `agent_send` | yes |
-| Cron jobs | yes, since #3597 / #3657 |
+| Cron jobs (agent turn) | yes, since #3597 / #3657 |
+| Workflow steps | yes — per-step `WorkflowStep.session_mode` > target agent manifest > `Persistent` |
+| Cron jobs (workflow) | per step only — the job-level `CronJob.session_mode` is refused on a workflow schedule (#8533); each step resolves as above |
 | Channel messages | no — always `SessionId::for_channel(agent, "<channel>:<chat>")` |
+| `Continuous` / `Periodic` background ticks | no — they run under the reserved `"autonomous"` channel and take the channel branch, landing on `(agent, "autonomous")` |
 | Forks | no — forced `Persistent` to preserve the prompt cache |
 
 ## Cron in detail
@@ -44,6 +47,10 @@ A public multi-user front-end therefore does not need `session_mode = "new"` at 
 The resolution helper is `cron::cron_fire_session_override` (`crates/librefang-kernel/src/cron.rs`).
 
 Effective mode = per-job `CronJob.session_mode` > agent manifest `session_mode` > historical `Persistent`.
+
+This applies to `agent_turn` jobs only.
+A `workflow` job's fire runs each step through the workflow engine, which never consults the job, so creating a workflow job with `session_mode` set (via `POST /api/schedules`, `/api/cron/jobs` or the `cron_create` tool) is refused with a 400 that points at `WorkflowStep.session_mode`.
+A workflow job saved with the field by an older daemon still loads and fires unchanged, with a boot-time `WARN` that the field is ignored.
 
 **`Persistent` (or unset).**
 The cron tick synthesizes `SenderContext { channel: "cron" }` and `send_message_full` derives `SessionId::for_channel(agent, "cron")`.

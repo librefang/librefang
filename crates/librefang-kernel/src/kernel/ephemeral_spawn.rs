@@ -543,6 +543,7 @@ impl LibreFangKernel {
                     ),
                     response: String::new(),
                     status: "failed".to_string(),
+                    truncated: false,
                     error: Some(e.to_string()),
                     provider: manifest.model.provider.clone(),
                     model: manifest.model.model.clone(),
@@ -626,6 +627,10 @@ impl LibreFangKernel {
             task: librefang_memory::ephemeral_run_store::truncate_for_record(&request.message),
             response: librefang_memory::ephemeral_run_store::truncate_for_record(&result.response),
             status: "completed".to_string(),
+            // #8556: a capped worker returns `Ok` with a partial answer, so
+            // `status` alone cannot tell it apart from a full run. Persist the
+            // cap flag so the run list surfaces the truncation.
+            truncated: result.hit_iteration_cap,
             error: None,
             provider: usage_record.provider.clone(),
             model: usage_record.model.clone(),
@@ -643,9 +648,22 @@ impl LibreFangKernel {
             parent_id = %parent_id,
             mission = %mission_name,
             iterations = result.iterations,
+            truncated = result.hit_iteration_cap,
             latency_ms,
             "Ephemeral worker finished"
         );
+
+        // #8556: surface a capped worker through the same operator
+        // notification channel the messaging dispatchers use, so a partial
+        // delegation is observable without polling the run list.
+        if result.hit_iteration_cap {
+            let msg = format!(
+                "Ephemeral worker \"{}\" hit the iteration cap after {} iterations — delivered a partial response",
+                mission_name, result.iterations
+            );
+            self.push_notification(&parent_id.to_string(), "max_iterations", &msg, None)
+                .await;
+        }
 
         Ok(EphemeralSpawnResult {
             name: mission_name,

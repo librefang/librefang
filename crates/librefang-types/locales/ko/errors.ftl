@@ -46,6 +46,7 @@ api-error-manifest-too-large = 매니페스트가 너무 큽니다 (최대 1MB)
 api-error-manifest-invalid-format = 유효하지 않은 매니페스트 형식입니다
 api-error-manifest-signature-mismatch = 서명된 매니페스트 내용이 manifest_toml과 일치하지 않습니다
 api-error-manifest-signature-failed = 매니페스트 서명 검증에 실패했습니다
+api-error-manifest-signed-template-conflict = signed_manifest와 template는 함께 사용할 수 없습니다. 인라인 manifest_toml에 서명하세요
 api-error-manifest-invalid = 유효하지 않은 매니페스트입니다: { $error }
 
 # Auth errors
@@ -271,6 +272,8 @@ api-error-job-disappeared-complete = 완료 후 작업이 사라졌습니다
 # Task errors
 api-error-task-not-found = 작업을 찾을 수 없습니다
 api-error-task-disappeared = 작업이 사라졌습니다
+api-error-task-not-retryable = 작업이 재시도 가능한 상태가 아닙니다 (완료 또는 실패 상태여야 합니다)
+api-error-task-transition-not-allowed = 현재 상태에서 이 작업 상태로 전환할 수 없습니다
 
 # Pairing errors
 api-error-pairing-not-enabled = 페어링이 활성화되지 않았습니다
@@ -323,3 +326,4 @@ api-error-rate-limited = 요청 제한을 초과했습니다. 나중에 다시 �
 # typed MemoryRouteError-style helper. Without this key, every `t_args("api-error-generic", …)`
 # call returns the literal key as the response body and `$error` interpolation never runs.
 api-error-generic = 오류: { $error }
+api-error-agent-manifest-conflict = 매니페스트가 오래되었습니다. 로드한 뒤 다른 사용자가 이 에이전트를 저장했습니다. 다시 로드한 뒤 변경 사항을 다시 적용하세요.

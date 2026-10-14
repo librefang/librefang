@@ -46,6 +46,7 @@ api-error-manifest-too-large = マニフェストが大きすぎます（最大 
 api-error-manifest-invalid-format = 無効なマニフェスト形式
 api-error-manifest-signature-mismatch = 署名されたマニフェストの内容が manifest_toml と一致しません
 api-error-manifest-signature-failed = マニフェストの署名検証に失敗しました
+api-error-manifest-signed-template-conflict = signed_manifest と template は併用できません。インラインの manifest_toml に署名してください
 api-error-manifest-invalid = 無効なマニフェスト: { $error }
 
 # 認証エラー
@@ -271,6 +272,8 @@ api-error-job-disappeared-complete = 完了後にタスクが消失しました
 # タスクエラー
 api-error-task-not-found = タスクが見つかりません
 api-error-task-disappeared = タスクが消失しました
+api-error-task-not-retryable = タスクは再試行可能な状態ではありません（完了または失敗している必要があります）
+api-error-task-transition-not-allowed = 現在の状態からこのタスクのステータスには変更できません
 
 # ペアリングエラー
 api-error-pairing-not-enabled = ペアリングが有効になっていません
@@ -324,3 +327,4 @@ api-error-rate-limited = リクエスト制限を超えました。しばらく�
 # typed MemoryRouteError-style helper. Without this key, every `t_args("api-error-generic", …)`
 # call returns the literal key as the response body and `$error` interpolation never runs.
 api-error-generic = エラー: { $error }
+api-error-agent-manifest-conflict = マニフェストが古いです。読み込み後に他のユーザーがこのエージェントを保存しました。再読み込みして変更を適用し直してください。

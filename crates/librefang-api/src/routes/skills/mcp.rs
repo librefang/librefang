@@ -496,6 +496,17 @@ pub async fn add_mcp_server(
                     .into_json_tuple();
             }
         };
+        // The installer wrote the credentials to the vault, but the vault reaches the daemon environment only at boot, and the connect path resolves both stdio `env` names and `${NAME}` header placeholders from that environment (#8578).
+        // Export them now so the server connects without a restart — the same thing the provider-key and hand-setting routes do.
+        // Only names the catalog entry declares in `required_env` are exported, so a request cannot set an arbitrary daemon variable, and a blank value never overwrites a live one.
+        for required in &entry.required_env {
+            if let Some(value) = creds
+                .get(&required.name)
+                .filter(|value| !value.trim().is_empty())
+            {
+                crate::secrets_env::set_env_var_guarded(required.name.clone(), value.clone()).await;
+            }
+        }
         (result.server, result.id)
     } else {
         // Raw entry path
@@ -611,6 +622,10 @@ pub async fn update_mcp_server(
     if let Some(obj) = body.as_object_mut() {
         obj.insert("name".to_string(), serde_json::json!(name));
     }
+    // Neither read route returns top-level `headers`, and the dashboard edit form omits the key unless the operator typed headers, so an absent key means "unchanged", not "remove every header" (#8578).
+    // Without this, editing any field of a catalog-installed HTTP server silently dropped its `Authorization: Bearer ${KEY}` binding and the next connect went out unauthenticated.
+    // An explicit `"headers": []` still clears them.
+    let headers_submitted = body.get("headers").is_some();
 
     if body.get("transport").is_none() {
         return ApiErrorResponse::bad_request(t.t("api-error-mcp-missing-transport"))
@@ -637,6 +652,9 @@ pub async fn update_mcp_server(
         .find(|s| s.name == name)
     {
         entry.env = merge_env_preserving_inline_values(&entry.env, &existing.env);
+        if !headers_submitted {
+            entry.headers = existing.headers.clone();
+        }
         if let (Some(incoming_transport), Some(existing_transport)) =
             (entry.transport.as_mut(), existing.transport.as_ref())
         {

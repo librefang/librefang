@@ -245,7 +245,28 @@ impl LibreFangKernel {
     /// tracker entries, invisibly, because nothing told this layer they were
     /// gone (#7991 review). Returns every id actually removed so the caller
     /// (the API route) can report the cascade instead of a silent 204.
-    pub fn delete_session(&self, session_id: SessionId) -> KernelResult<Vec<SessionId>> {
+    ///
+    /// Lock discipline: an in-flight turn holds EITHER `agent_msg_locks[agent_id]` (canonical session) OR `session_msg_locks[sid]` (a `session_id_override` turn, #2959), and its final `save_session` is an UPSERT that would bring a deleted row back.
+    /// So when the row exists, this takes the owning agent's lock and then the session lock, the same order as `reset_one_session`, and holds both across the delete.
+    /// Descendant sessions removed by the cascade are not locked: resolving the subtree needs the substrate's recursive walk, which only runs inside the delete transaction.
+    pub async fn delete_session(&self, session_id: SessionId) -> KernelResult<Vec<SessionId>> {
+        let owner = self
+            .memory
+            .substrate
+            .get_session(session_id)
+            .map_err(KernelError::LibreFang)?
+            .map(|s| s.agent_id);
+        let mut _guards: Vec<tokio::sync::OwnedMutexGuard<()>> = Vec::with_capacity(2);
+        if let Some(agent_id) = owner {
+            let agent_lock = self
+                .agents
+                .agent_msg_locks
+                .entry(agent_id)
+                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+                .clone();
+            _guards.push(agent_lock.lock_owned().await);
+            _guards.extend(self.lock_sessions_sorted(&mut [session_id]).await);
+        }
         let removed = self
             .memory
             .substrate
@@ -260,6 +281,27 @@ impl LibreFangKernel {
             librefang_runtime::file_read_tracker::forget_session(sid);
         }
         Ok(removed)
+    }
+
+    /// Take `session_msg_locks[sid]` for every sid, in sorted order so two callers locking overlapping sets can never form a deadlock cycle.
+    ///
+    /// Sorts `sids` in place; the caller must already hold the owning agent's `agent_msg_locks` entry so the agent-then-session order is kept.
+    async fn lock_sessions_sorted(
+        &self,
+        sids: &mut [SessionId],
+    ) -> Vec<tokio::sync::OwnedMutexGuard<()>> {
+        sids.sort_by_key(|s| s.0);
+        let mut guards = Vec::with_capacity(sids.len());
+        for sid in sids.iter() {
+            let lock = self
+                .agents
+                .session_msg_locks
+                .entry(*sid)
+                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+                .clone();
+            guards.push(lock.lock_owned().await);
+        }
+        guards
     }
 
     /// Implementation of [`ResetScope::Agent`] — wipe every session for this
@@ -297,22 +339,8 @@ impl LibreFangKernel {
             .substrate
             .get_agent_session_ids(agent_id)
             .unwrap_or_default();
-        // Sort so two concurrent agent-wide resets on different agents that
-        // somehow shared a sid (impossible today — sids hash in agent_id —
-        // but cheap insurance) can never form a deadlock cycle on the
-        // session locks.
-        pre_delete_sids.sort_by_key(|s| s.0);
-        let mut _session_guards: Vec<tokio::sync::OwnedMutexGuard<()>> =
-            Vec::with_capacity(pre_delete_sids.len());
-        for sid in &pre_delete_sids {
-            let lock = self
-                .agents
-                .session_msg_locks
-                .entry(*sid)
-                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
-                .clone();
-            _session_guards.push(lock.lock_owned().await);
-        }
+        // Sorted inside the helper so two concurrent agent-wide resets on different agents that somehow shared a sid (impossible today — sids hash in agent_id — but cheap insurance) can never form a deadlock cycle on the session locks.
+        let _session_guards = self.lock_sessions_sorted(&mut pre_delete_sids).await;
         let mut cleared = 0usize;
         for sid in &pre_delete_sids {
             if let Ok(Some(old_session)) = self.memory.substrate.get_session(*sid) {
@@ -363,6 +391,8 @@ impl LibreFangKernel {
         // transcripts on disk. SQLite is the source of truth for the API
         // surface; a file-system failure here is logged but not fatal.
         Self::purge_jsonl_files(entry, &pre_delete_sids);
+        // Channel sids are deterministic, so the next inbound lands on the same id; a surviving `file_read_tracker` bucket would answer its first read with a "see above" stub pointing at the history just deleted.
+        Self::forget_file_read_state(&pre_delete_sids);
 
         // Create a fresh session and inject reset prompt if configured
         let mut new_session = self
@@ -532,6 +562,9 @@ impl LibreFangKernel {
             // Best-effort JSONL cleanup (see `reset_all_sessions` for rationale).
             Self::purge_jsonl_files(entry, std::slice::from_ref(&sid));
         }
+        // The sid is reused below, so the old `file_read_tracker` bucket must go with the history: its "see above" stubs would point at messages that no longer exist.
+        // Unconditional because it is a no-op for a sid that never had a bucket.
+        Self::forget_file_read_state(std::slice::from_ref(&sid));
 
         // Eagerly recreate an empty session at the SAME deterministic sid.
         // Without this, the next channel inbound would lazily materialise an
@@ -609,6 +642,15 @@ impl LibreFangKernel {
         Ok(cleared)
     }
 
+    /// Drop the per-session `file_read_tracker` bucket for every sid whose history was just wiped.
+    ///
+    /// The tracker answers a repeat read of an unchanged file with a stub that says "see above", which is only true while the earlier read is still in the session's history.
+    fn forget_file_read_state(sids: &[SessionId]) {
+        for sid in sids {
+            librefang_runtime::file_read_tracker::forget_session(sid);
+        }
+    }
+
     /// Best-effort removal of `<workspace>/sessions/{sid}.jsonl` mirrors after
     /// a session row is deleted from SQLite. Without this, `/new`, `/reboot`,
     /// and `clear_agent_history` accumulate orphan transcripts indefinitely
@@ -645,9 +687,8 @@ impl LibreFangKernel {
     ///
     /// Creates a fresh empty session afterward so the agent is still usable.
     ///
-    /// Acquires `agents.agent_msg_locks[agent_id]` so an in-flight inbound
-    /// turn cannot save its appended history back over the cleared session
-    /// rows (#4868 review).
+    /// Lock discipline is the same as `reset_all_sessions` (#4868 review): an in-flight turn holds EITHER `agent_msg_locks[agent_id]` OR `session_msg_locks[sid]` (a `session_id_override` turn, #2959), so holding only the agent lock would let an override turn finish after the delete and UPSERT its session row back.
+    /// This takes the agent lock, snapshots the live sids under it, then takes every per-session lock in sorted order, and holds all of them through the delete and recreate.
     pub async fn clear_agent_history(&self, agent_id: AgentId) -> KernelResult<()> {
         let entry = self.agents.registry.get(agent_id).ok_or_else(|| {
             KernelError::LibreFang(LibreFangError::AgentNotFound(agent_id.to_string()))
@@ -659,16 +700,17 @@ impl LibreFangKernel {
             .entry(agent_id)
             .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
             .clone();
-        let _guard = lock.lock().await;
+        let _agent_guard = lock.lock_owned().await;
 
-        // Emit session:end for each active session before deletion. Capture
-        // the sids list once so we can both fire hooks here and purge JSONL
-        // mirrors after the SQL delete (#4868 follow-up).
-        let pre_delete_sids = self
+        // Capture the sids list once so we can lock them, fire hooks here and purge JSONL mirrors after the SQL delete (#4868 follow-up).
+        let mut pre_delete_sids = self
             .memory
             .substrate
             .get_agent_session_ids(agent_id)
             .unwrap_or_default();
+        let _session_guards = self.lock_sessions_sorted(&mut pre_delete_sids).await;
+
+        // Emit session:end for each active session before deletion.
         for sid in &pre_delete_sids {
             self.governance.external_hooks.fire(
                 crate::hooks::ExternalHookEvent::SessionEnd,
@@ -696,6 +738,8 @@ impl LibreFangKernel {
         // an orphan transcript file the API surface no longer indexes
         // (#4868 follow-up).
         Self::purge_jsonl_files(&entry, &pre_delete_sids);
+        // Channel sids are reused by the next inbound, so their tracker buckets must not outlive the history (see `reset_all_sessions`).
+        Self::forget_file_read_state(&pre_delete_sids);
 
         // Create a fresh session and inject reset prompt if configured
         let mut new_session = self
@@ -1938,6 +1982,7 @@ mod session_summary_tests {
         ) -> Result<CompletionResponse, LlmError> {
             tokio::time::sleep(self.sleep_for).await;
             Ok(CompletionResponse {
+                text_synthesized_from_thinking: false,
                 content: vec![ContentBlock::Text {
                     text: "too-late".to_string(),
                     provider_metadata: None,
@@ -1991,5 +2036,220 @@ mod session_summary_tests {
             !out.contains("too-late"),
             "the never-resolving driver text must not leak through"
         );
+    }
+}
+
+#[cfg(test)]
+mod reset_lock_and_tracker_tests {
+    use super::*;
+    use librefang_runtime::file_read_tracker::{self, ReadOutcome};
+    use librefang_types::message::Message;
+    use std::path::Path;
+    use std::time::Duration;
+
+    fn boot(dir: &tempfile::TempDir) -> Arc<LibreFangKernel> {
+        let home_dir = dir.path().to_path_buf();
+        std::fs::create_dir_all(home_dir.join("data")).unwrap();
+        Arc::new(
+            LibreFangKernel::boot_with_config(KernelConfig {
+                home_dir: home_dir.clone(),
+                data_dir: home_dir.join("data"),
+                ..KernelConfig::default()
+            })
+            .expect("kernel should boot"),
+        )
+    }
+
+    fn spawn(kernel: &LibreFangKernel, name: &str) -> AgentId {
+        let manifest = AgentManifest {
+            name: name.to_string(),
+            source_template: None,
+            description: "test".to_string(),
+            author: "test".to_string(),
+            module: "builtin:chat".to_string(),
+            ..Default::default()
+        };
+        kernel.spawn_agent(manifest).expect("spawn should succeed")
+    }
+
+    /// A second, non-canonical session holding one message — the kind of session a `session_id_override` turn runs on.
+    fn override_session(
+        kernel: &LibreFangKernel,
+        agent_id: AgentId,
+    ) -> librefang_memory::session::Session {
+        let mut session = kernel.memory.substrate.create_session(agent_id).unwrap();
+        session.messages.push(Message::user("hello"));
+        kernel.memory.substrate.save_session(&session).unwrap();
+        session
+    }
+
+    async fn hold_session_lock(
+        kernel: &LibreFangKernel,
+        sid: SessionId,
+    ) -> tokio::sync::OwnedMutexGuard<()> {
+        kernel
+            .agents
+            .session_msg_locks
+            .entry(sid)
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone()
+            .lock_owned()
+            .await
+    }
+
+    /// An override turn holds only `session_msg_locks[sid]`; clearing history must wait for it, or the turn's final UPSERT revives the deleted row.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn clear_agent_history_waits_for_session_scoped_turn() {
+        let dir = tempfile::tempdir().unwrap();
+        let kernel = boot(&dir);
+        let agent_id = spawn(&kernel, "clear-history-lock-test");
+        let session = override_session(&kernel, agent_id);
+
+        let turn_guard = hold_session_lock(&kernel, session.id).await;
+        let task = {
+            let kernel = Arc::clone(&kernel);
+            tokio::spawn(async move { kernel.clear_agent_history(agent_id).await })
+        };
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            !task.is_finished(),
+            "clear_agent_history must wait for an in-flight session-scoped turn"
+        );
+        // The turn's final save lands while it still holds its lock, before the clear runs.
+        kernel.memory.substrate.save_session(&session).unwrap();
+        drop(turn_guard);
+
+        tokio::time::timeout(Duration::from_secs(2), task)
+            .await
+            .expect("clear should finish after the turn releases its lock")
+            .expect("clear task should not panic")
+            .expect("clear should succeed");
+        assert!(
+            kernel
+                .memory
+                .substrate
+                .get_session(session.id)
+                .unwrap()
+                .is_none(),
+            "the session saved by the in-flight turn must not survive the clear"
+        );
+        kernel.shutdown();
+    }
+
+    /// `delete_session` must serialize with both kinds of turn: an override turn (session lock) and a canonical turn (agent lock).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn delete_session_waits_for_in_flight_turns() {
+        let dir = tempfile::tempdir().unwrap();
+        let kernel = boot(&dir);
+        let agent_id = spawn(&kernel, "delete-session-lock-test");
+
+        let session = override_session(&kernel, agent_id);
+        let turn_guard = hold_session_lock(&kernel, session.id).await;
+        let task = {
+            let kernel = Arc::clone(&kernel);
+            let sid = session.id;
+            tokio::spawn(async move { kernel.delete_session(sid).await })
+        };
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            !task.is_finished(),
+            "delete_session must wait for a session-scoped turn"
+        );
+        drop(turn_guard);
+        let removed = tokio::time::timeout(Duration::from_secs(2), task)
+            .await
+            .expect("delete should finish after the turn releases its lock")
+            .expect("delete task should not panic")
+            .expect("delete should succeed");
+        assert_eq!(removed, vec![session.id]);
+
+        let session = override_session(&kernel, agent_id);
+        let agent_guard = kernel
+            .agents
+            .agent_msg_locks
+            .entry(agent_id)
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone()
+            .lock_owned()
+            .await;
+        let task = {
+            let kernel = Arc::clone(&kernel);
+            let sid = session.id;
+            tokio::spawn(async move { kernel.delete_session(sid).await })
+        };
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            !task.is_finished(),
+            "delete_session must wait for an agent-scoped turn"
+        );
+        drop(agent_guard);
+        tokio::time::timeout(Duration::from_secs(2), task)
+            .await
+            .expect("delete should finish after the turn releases its lock")
+            .expect("delete task should not panic")
+            .expect("delete should succeed");
+        assert!(kernel
+            .memory
+            .substrate
+            .get_session(session.id)
+            .unwrap()
+            .is_none());
+        kernel.shutdown();
+    }
+
+    /// Prime the tracker so the next read of `path` would be answered with the "see above" stub.
+    fn prime_tracker(sid: SessionId, path: &Path) {
+        file_read_tracker::with_session(sid, |t| t.observe(path, "a=1"));
+        assert!(matches!(
+            file_read_tracker::with_session(sid, |t| t.observe(path, "a=1")),
+            ReadOutcome::Unchanged { .. }
+        ));
+    }
+
+    fn assert_tracker_forgotten(sid: SessionId, path: &Path, op: &str) {
+        assert_eq!(
+            file_read_tracker::with_session(sid, |t| t.observe(path, "a=1")),
+            ReadOutcome::First,
+            "{op} wiped the history, so the first read afterwards must return the full body, not a stub pointing at deleted messages"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn session_resets_forget_file_read_tracker() {
+        let dir = tempfile::tempdir().unwrap();
+        let kernel = boot(&dir);
+        let agent_id = spawn(&kernel, "reset-tracker-test");
+        let path = Path::new("/ws/config.toml");
+
+        // Per-session reset and reboot reuse the same sid.
+        let sid = override_session(&kernel, agent_id).id;
+        prime_tracker(sid, path);
+        kernel
+            .reset_session(agent_id, ResetScope::Session(sid))
+            .await
+            .unwrap();
+        assert_tracker_forgotten(sid, path, "reset_session(Session)");
+
+        prime_tracker(sid, path);
+        kernel
+            .reboot_session(agent_id, ResetScope::Session(sid))
+            .await
+            .unwrap();
+        assert_tracker_forgotten(sid, path, "reboot_session(Session)");
+
+        // Agent-wide reset: a deterministic channel sid is reused by the next inbound.
+        let sid = override_session(&kernel, agent_id).id;
+        prime_tracker(sid, path);
+        kernel
+            .reset_session(agent_id, ResetScope::Agent)
+            .await
+            .unwrap();
+        assert_tracker_forgotten(sid, path, "reset_session(Agent)");
+
+        let sid = override_session(&kernel, agent_id).id;
+        prime_tracker(sid, path);
+        kernel.clear_agent_history(agent_id).await.unwrap();
+        assert_tracker_forgotten(sid, path, "clear_agent_history");
+        kernel.shutdown();
     }
 }

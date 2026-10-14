@@ -447,6 +447,14 @@ func (r *AgentsResource) GetAgentManifestToml(id string) (interface{}, error) {
 	return r.client.request("GET", fmt.Sprintf("/api/agents/%s/manifest", id), nil, nil)
 }
 
+func (r *AgentsResource) ListAgentManifestHistory(id string, query map[string]string) (interface{}, error) {
+	return r.client.request("GET", fmt.Sprintf("/api/agents/%s/manifest-history", id), nil, query)
+}
+
+func (r *AgentsResource) RestoreAgentManifestVersion(id string, version_id string) (interface{}, error) {
+	return r.client.request("POST", fmt.Sprintf("/api/agents/%s/manifest-history/%s/restore", id, version_id), nil, nil)
+}
+
 func (r *AgentsResource) GetAgentMcpServers(id string) (interface{}, error) {
 	return r.client.request("GET", fmt.Sprintf("/api/agents/%s/mcp_servers", id), nil, nil)
 }
@@ -497,6 +505,10 @@ func (r *AgentsResource) ResumeAgent(id string) (interface{}, error) {
 
 func (r *AgentsResource) ListAgentRuntime(id string) (interface{}, error) {
 	return r.client.request("GET", fmt.Sprintf("/api/agents/%s/runtime", id), nil, nil)
+}
+
+func (r *AgentsResource) SaveAgentAsAgentType(id string, data map[string]interface{}) (interface{}, error) {
+	return r.client.request("POST", fmt.Sprintf("/api/agents/%s/save-as-agent-type", id), data, nil)
 }
 
 func (r *AgentsResource) GetAgentSession(id string, query map[string]string) (interface{}, error) {

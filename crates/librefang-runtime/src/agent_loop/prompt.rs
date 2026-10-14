@@ -317,6 +317,19 @@ pub(super) struct PreparedMessages {
     pub(super) messages: Vec<Message>,
     pub(super) new_messages_start: usize,
     pub(super) repair_stats: crate::session_repair::RepairStats,
+    /// The per-turn messages spliced into `messages` that never belong in `session.messages`.
+    pub(super) injections: TurnInjections,
+}
+
+/// Per-turn messages that exist only in the LLM working copy, never in the persisted session.
+///
+/// The loops keep them so engine compaction, which rebuilds the working copy from the canonical session history, can put them back in the same places (#8131, #3298).
+#[derive(Debug, Clone, Default)]
+pub(super) struct TurnInjections {
+    /// Messages at the head of the working copy, in their final order (web-search results, recalled memory, canonical cross-channel context).
+    pub(super) head: Vec<Message>,
+    /// The precise current-time message, placed right after the first message of the current turn.
+    pub(super) time_msg: Option<Message>,
 }
 
 pub(super) fn reply_directives_from_parsed(
@@ -893,25 +906,6 @@ pub(super) fn prepare_llm_messages(
         (msgs, stats)
     };
 
-    if let Some(cc_msg) = manifest
-        .metadata
-        .get("canonical_context_msg")
-        .and_then(|v| v.as_str())
-    {
-        if !cc_msg.is_empty() {
-            messages.insert(0, Message::user(cc_msg));
-        }
-    }
-
-    if let Some(mem_msg) = memory_context_msg {
-        messages.insert(
-            0,
-            Message::user(format!(
-                "[System context — what you know about this person]\n{mem_msg}"
-            )),
-        );
-    }
-
     let (_working_trimmed, session_trimmed) = safe_trim_messages(
         &mut messages,
         &mut session.messages,
@@ -921,15 +915,28 @@ pub(super) fn prepare_llm_messages(
     );
     let new_messages_start = session.messages.len().saturating_sub(1);
 
-    // Precise (minute-resolution) current time, kept out of the cached
-    // system prompt so it doesn't invalidate provider prompt caching
-    // (#8131). Appended AFTER the trim above (unlike canonical_context_msg
-    // and mem_msg, which are inserted at the head before trimming) — the
-    // whole point of this channel is to survive exactly the long/autonomous
-    // sessions that `max_history` trims down, where the system prompt's
-    // date-only field is most likely to have gone stale. A head insertion
-    // here would be the first thing `safe_trim_messages` drains once a
-    // session crosses `max_history`.
+    // All three per-turn injections (canonical context, recalled memory, precise time) are added AFTER the trim above so they survive it.
+    // `safe_trim_messages` drains from the head, so a head insertion made before it is the first thing dropped once a session crosses `max_history` — which is exactly the long-lived session where recalled memories matter most, and in `stable_prefix_mode` this message is the only path by which they reach the model.
+    // The working copy has no System messages and `safe_trim_messages` leaves a user turn at its head, so inserting at index 0 needs no position search.
+    let mut injections = TurnInjections::default();
+    if let Some(mem_msg) = memory_context_msg {
+        injections.head.push(Message::user(format!(
+            "[System context — what you know about this person]\n{mem_msg}"
+        )));
+    }
+    if let Some(cc_msg) = manifest
+        .metadata
+        .get("canonical_context_msg")
+        .and_then(|v| v.as_str())
+    {
+        if !cc_msg.is_empty() {
+            injections.head.push(Message::user(cc_msg));
+        }
+    }
+    messages.splice(0..0, injections.head.iter().cloned());
+
+    // Precise (minute-resolution) current time, kept out of the cached system prompt so it doesn't invalidate provider prompt caching (#8131).
+    // The whole point of this channel is to survive exactly the long/autonomous sessions that `max_history` trims down, where the system prompt's date-only field is most likely to have gone stale.
     //
     // Appended strictly AFTER the last message (not inserted before it):
     // `session_repair::insert_synthetic_results` folds a synthetic
@@ -945,7 +952,9 @@ pub(super) fn prepare_llm_messages(
         .and_then(|v| v.as_str())
     {
         if !time_msg.is_empty() {
-            messages.push(Message::user(time_msg));
+            let time_msg = Message::user(time_msg);
+            messages.push(time_msg.clone());
+            injections.time_msg = Some(time_msg);
         }
     }
     let _working_stripped = strip_prior_image_data(&mut messages);
@@ -958,6 +967,7 @@ pub(super) fn prepare_llm_messages(
         messages,
         new_messages_start,
         repair_stats,
+        injections,
     }
 }
 

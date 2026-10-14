@@ -20,10 +20,13 @@ export {
   // agents
   listAgents,
   getAgentDetail,
+  // workspace identity file bytes (`GET /api/agents/{id}/files/{filename}`)
+  getAgentFile,
   getAgentManifest,
   getAgentChannels,
   getAgentStats,
   listAgentEvents,
+  getAgentManifestHistory,
   listAgentSessions,
   listAgentTemplates,
   getAgentType,
@@ -44,6 +47,8 @@ export {
   // turned into an object URL by the caller rather than given to an `<img src>` (#8339)
   fetchAuthenticatedImage,
   agentAvatarPath,
+  // the same for the signed-in user's own avatar, on a literal path (#8339)
+  currentUserAvatarPath,
   // channels & comms
   listChannels,
   getChannelQr,
@@ -90,7 +95,6 @@ export {
   getModelOverrides,
   // model router (profile-based routing)
   listModelRouterProfiles,
-  getAgentModelRouting,
   // providers
   listProviders,
   // credential pools (#4965)
@@ -184,6 +188,8 @@ export {
   getUserPolicy,
   // effective permissions snapshot (RBAC follow-up — backs the simulator)
   getEffectivePermissions,
+  // the calling credential's own name, emoji and role (#8339) — the role gates the agent editor's identity controls. `/api/auth/dashboard-check` cannot answer this: it is unauthenticated and never echoes the configured username.
+  getWhoami,
   // credential vault — names and a set/not-set boolean only (#8164)
   listVaultKeys,
 } from "../../api";
@@ -205,6 +211,9 @@ export type {
   OperatorPause,
   OperatorActionVerb,
   OperatorActionDescriptor,
+  // workspace identity file bytes (`GET|PUT /api/agents/{id}/files/{filename}`)
+  AgentIdentityFile,
+  AgentIdentityFileWriteResult,
   // agent avatar upload (#8339)
   AgentAvatarUploadResult,
 } from "../../api";
@@ -221,6 +230,7 @@ export {
   promoteAgentType,
   restoreAgentTypeFromRegistry,
   restoreTemplateVersion,
+  restoreAgentManifestVersion,
   spawnEphemeral,
   spawnAgent,
   cloneAgent,
@@ -235,10 +245,16 @@ export {
   clearHandAgentRuntimeConfig,
   resetAgentSession,
   updateAgentTools,
+  // workspace identity file bytes (`PUT /api/agents/{id}/files/{filename}`)
+  setAgentFile,
   // visual identity: emoji / colour, and the avatar image (#8339)
   updateAgentIdentity,
   uploadAgentAvatar,
   deleteAgentAvatar,
+  // the user side of the same (#8339)
+  updateUserIdentity,
+  uploadUserAvatar,
+  deleteUserAvatar,
   // per-agent skill assignment — write (#4917)
   setAgentSkills,
   // per-agent MCP server grant — write (#6565 follow-up)
@@ -321,8 +337,6 @@ export {
   removeCustomModel,
   updateModelOverrides,
   deleteModelOverrides,
-  // model router (profile-based routing)
-  updateAgentModelRouting,
   // providers
   testProvider,
   setProviderKey,
@@ -416,7 +430,6 @@ export {
 // Type re-exports used by hooks and pages
 // ---------------------------------------------------------------------------
 export type {
-  AgentModelRouting,
   ModelProfile,
   ModelRouterProfiles,
   CostTier,

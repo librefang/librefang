@@ -33,6 +33,7 @@ api-error-manifest-too-large = Manifeste trop volumineux (max. 1 Mo)
 api-error-manifest-invalid-format = Format de manifeste non valide
 api-error-manifest-signature-mismatch = Le contenu du manifeste signé ne correspond pas à manifest_toml
 api-error-manifest-signature-failed = Échec de la vérification de la signature du manifeste
+api-error-manifest-signed-template-conflict = signed_manifest ne peut pas être combiné avec template ; signez plutôt le manifest_toml en ligne
 
 # Auth errors
 api-error-auth-invalid-key = Clé API non valide
@@ -85,6 +86,7 @@ api-error-rate-limited = Limite de requêtes dépassée. Veuillez réessayer plu
 # typed MemoryRouteError-style helper. Without this key, every `t_args("api-error-generic", …)`
 # call returns the literal key as the response body and `$error` interpolation never runs.
 api-error-generic = Erreur : { $error }
+api-error-agent-manifest-conflict = Manifeste obsolète : quelqu'un a enregistré cet agent après votre chargement. Rechargez et réappliquez la modification.
 
 api-error-validation-avatar-url-invalid = L'URL de l'avatar doit être la route d'avatar que ce démon sert pour l'agent, ou être vide. Téléversez l'image au lieu de la lier.
 api-error-validation-color-invalid = La couleur doit être un code hexadécimal commençant par '#'

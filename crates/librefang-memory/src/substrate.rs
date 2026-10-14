@@ -1318,9 +1318,19 @@ impl MemorySubstrate {
     }
 
     /// Mark a task as completed with a result string.
-    pub async fn task_complete(&self, task_id: &str, result: &str) -> LibreFangResult<()> {
+    ///
+    /// Only the agent currently holding the claim may complete it: the UPDATE requires `assigned_to = completed_by`, the id `task_claim` stamped on the row.
+    /// That keeps the check atomic, so neither another agent nor a stale worker whose claim the stuck-task sweeper already handed to someone else can overwrite the result.
+    /// A missing row is `ResourceNotFound`; a row that is not `in_progress`, or is claimed by a different agent, is `Conflict`.
+    pub async fn task_complete(
+        &self,
+        task_id: &str,
+        completed_by: &str,
+        result: &str,
+    ) -> LibreFangResult<()> {
         let conn = self.pool.clone();
         let task_id = task_id.to_string();
+        let completed_by = completed_by.to_string();
         let result = result.to_string();
 
         tokio::task::spawn_blocking(move || {
@@ -1330,11 +1340,32 @@ impl MemorySubstrate {
             let db = conn.get().map_err(LibreFangError::memory)?;
             // `finished_at` is the unix-epoch column the retention sweep reads (#3466).
             let rows = db.execute(
-                "UPDATE task_queue SET status = 'completed', result = ?2, completed_at = ?3, finished_at = ?4, claimed_at = NULL WHERE id = ?1 AND status = 'in_progress'",
-                rusqlite::params![task_id, result, now, now_unix],
+                "UPDATE task_queue SET status = 'completed', result = ?2, completed_at = ?3, finished_at = ?4, claimed_at = NULL WHERE id = ?1 AND status = 'in_progress' AND assigned_to = ?5",
+                rusqlite::params![task_id, result, now, now_unix, completed_by],
             ).map_err(LibreFangError::memory)?;
             if rows == 0 {
-                return Err(LibreFangError::Internal(format!("Task not active: {task_id}")));
+                // Classify the miss so the caller gets a typed error instead of an opaque internal one.
+                use rusqlite::OptionalExtension as _;
+                let current: Option<(String, String)> = db
+                    .query_row(
+                        "SELECT status, assigned_to FROM task_queue WHERE id = ?1",
+                        rusqlite::params![task_id],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )
+                    .optional()
+                    .map_err(LibreFangError::memory)?;
+                return Err(match current {
+                    None => LibreFangError::ResourceNotFound {
+                        kind: "task".to_string(),
+                        id: task_id,
+                    },
+                    Some((status, _)) if status != "in_progress" => {
+                        LibreFangError::Conflict(format!("Task not active: {task_id}"))
+                    }
+                    Some((_, claimer)) => LibreFangError::Conflict(format!(
+                        "Task {task_id} is claimed by another agent ({claimer})"
+                    )),
+                });
             }
             Ok(())
         })
@@ -2111,7 +2142,7 @@ mod tests {
             .expect("claim")
             .expect("a pending task to claim");
         substrate
-            .task_complete(claimed["id"].as_str().unwrap(), "done")
+            .task_complete(claimed["id"].as_str().unwrap(), "agent-1", "done")
             .await
             .expect("complete");
         {
@@ -2328,7 +2359,7 @@ mod tests {
 
         // Complete the task
         substrate
-            .task_complete(&task_id, "No vulnerabilities found")
+            .task_complete(&task_id, "auditor", "No vulnerabilities found")
             .await
             .unwrap();
 
@@ -2859,7 +2890,10 @@ mod tests {
             .task_claim("worker", Some("worker"))
             .await
             .unwrap();
-        substrate.task_complete(&task_id, "ok").await.unwrap();
+        substrate
+            .task_complete(&task_id, "worker", "ok")
+            .await
+            .unwrap();
 
         let conn = substrate.pool.get().unwrap();
         let finished_at: Option<i64> = conn
@@ -2900,12 +2934,89 @@ mod tests {
             .unwrap();
 
         assert!(substrate
-            .task_complete(&task_id, "late result")
+            .task_complete(&task_id, "worker", "late result")
             .await
             .is_err());
         let task = substrate.task_get(&task_id).await.unwrap().unwrap();
         assert_eq!(task["status"], "cancelled");
         assert_ne!(task["result"], "late result");
+    }
+
+    /// Only the claim holder may complete a task; any other caller gets a typed `Conflict` and the row is untouched.
+    #[tokio::test]
+    async fn test_task_complete_rejects_non_claimer() {
+        let substrate = MemorySubstrate::open_in_memory(0.1).unwrap();
+        let task_id = substrate
+            .task_post("t", "d", Some("a"), None, 0, None, TaskQueueCaps::UNLIMITED)
+            .await
+            .unwrap();
+        substrate.task_claim("a", Some("a")).await.unwrap();
+
+        let err = substrate
+            .task_complete(&task_id, "b", "forged")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, LibreFangError::Conflict(_)), "got {err:?}");
+        let task = substrate.task_get(&task_id).await.unwrap().unwrap();
+        assert_eq!(task["status"], "in_progress");
+        assert_eq!(task["assigned_to"], "a");
+        assert_ne!(task["result"], "forged");
+
+        substrate
+            .task_complete(&task_id, "a", "real")
+            .await
+            .unwrap();
+        let task = substrate.task_get(&task_id).await.unwrap().unwrap();
+        assert_eq!(task["status"], "completed");
+        assert_eq!(task["result"], "real");
+    }
+
+    /// A worker whose claim expired and was handed to another worker by the stuck-task sweeper must not be able to complete the re-claimed row.
+    #[tokio::test]
+    async fn test_task_complete_rejects_stale_claimer_after_ttl_reset() {
+        let substrate = MemorySubstrate::open_in_memory(0.1).unwrap();
+        let task_id = substrate
+            .task_post("t", "d", None, None, 0, None, TaskQueueCaps::UNLIMITED)
+            .await
+            .unwrap();
+        substrate.task_claim("a", Some("a")).await.unwrap();
+        {
+            let conn = substrate.pool.get().unwrap();
+            let five_min_ago = (chrono::Utc::now() - chrono::Duration::minutes(5)).to_rfc3339();
+            conn.execute(
+                "UPDATE task_queue SET claimed_at = ?1 WHERE id = ?2",
+                rusqlite::params![five_min_ago, task_id],
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            substrate.task_reset_stuck(60, 0).await.unwrap(),
+            vec![task_id.clone()]
+        );
+        let reclaimed = substrate.task_claim("b", Some("b")).await.unwrap();
+        assert_eq!(reclaimed.unwrap()["id"], task_id);
+
+        let err = substrate
+            .task_complete(&task_id, "a", "late")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, LibreFangError::Conflict(_)), "got {err:?}");
+        let task = substrate.task_get(&task_id).await.unwrap().unwrap();
+        assert_eq!(task["status"], "in_progress");
+        assert_eq!(task["assigned_to"], "b");
+    }
+
+    #[tokio::test]
+    async fn test_task_complete_unknown_task_is_not_found() {
+        let substrate = MemorySubstrate::open_in_memory(0.1).unwrap();
+        let err = substrate
+            .task_complete("no-such-task", "a", "x")
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, LibreFangError::ResourceNotFound { .. }),
+            "got {err:?}"
+        );
     }
 
     #[tokio::test]

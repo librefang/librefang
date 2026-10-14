@@ -114,6 +114,9 @@ impl HookHandler for SkillWorkshopTurnEndHook {
             return Ok(());
         };
         let agent_id = AgentId(uuid);
+        // The session the turn actually ran in, which the runtime stamps onto every `AgentLoopEnd` payload.
+        // Channel turns, `agent_send` with a conversation key and `session_mode = "new"` fires all run outside the registry's `session_id`, so that pointer is only a fallback for payloads that lack the field.
+        let session_id = turn_session_id(ctx);
 
         // Cheap pre-filter: if config says off, skip the spawn entirely.
         // The detached task re-checks (mirroring auto_dream) since the
@@ -126,7 +129,7 @@ impl HookHandler for SkillWorkshopTurnEndHook {
 
         crate::supervised_spawn::spawn_supervised(
             "skill_workshop_capture",
-            run_capture(kernel, agent_id),
+            run_capture(kernel, agent_id, session_id),
         );
         Ok(())
     }
@@ -134,9 +137,26 @@ impl HookHandler for SkillWorkshopTurnEndHook {
 
 // ── Detached capture pipeline ─────────────────────────────────────────
 
+/// Parse the `session_id` field the runtime puts on `AgentLoopEnd` hook payloads.
+/// Returns `None` when the field is absent or malformed.
+pub(crate) fn turn_session_id(ctx: &HookContext) -> Option<SessionId> {
+    ctx.data
+        .get("session_id")
+        .and_then(|v| v.as_str())
+        .and_then(|s| Uuid::parse_str(s).ok())
+        .map(SessionId)
+}
+
 /// Public for direct invocation from tests / CLI; the `Hook` wires the
 /// async path on every non-fork turn.
-pub async fn run_capture(kernel: Arc<LibreFangKernel>, agent_id: AgentId) {
+///
+/// `session_id` is the session the turn ran in.
+/// `None` falls back to the agent's registry session, which is only correct for dashboard / API turns.
+pub async fn run_capture(
+    kernel: Arc<LibreFangKernel>,
+    agent_id: AgentId,
+    session_id: Option<SessionId>,
+) {
     // Post-#3565 refactor: the supervisor moved off the kernel struct
     // into `AgentSubsystem` and is exposed via `supervisor_ref()`.
     if kernel.supervisor_ref().is_shutting_down() {
@@ -149,7 +169,7 @@ pub async fn run_capture(kernel: Arc<LibreFangKernel>, agent_id: AgentId) {
         return;
     }
 
-    let recent = match load_recent_turn(&kernel, agent_id) {
+    let recent = match load_recent_turn(&kernel, agent_id, session_id) {
         Some(r) => r,
         None => {
             debug!(%agent_id, "skill_workshop: no recent session for agent");
@@ -523,38 +543,24 @@ fn read_workshop_config(
     Some(entry.manifest.skill_workshop)
 }
 
-/// Pull the most recently touched session for `agent_id` and walk it
-/// for the data the heuristic scanners need.
-fn load_recent_turn(kernel: &Arc<LibreFangKernel>, agent_id: AgentId) -> Option<RecentTurn> {
-    // Use the agent's currently-active session, NOT
-    // `memory.get_agent_session_ids().first()` — the latter orders by
-    // `created_at DESC`, which is the session-creation timestamp, not
-    // the most-recently-touched session. A long-lived agent that
-    // currently chats in an older session (e.g. channel-derived) but
-    // had a one-off newer session created (e.g. cron fire) would
-    // otherwise have the workshop scan the wrong session's last turn.
-    let entry = kernel.agent_registry_ref().get(agent_id)?;
-    let session_id = entry.session_id;
+/// Load the session the turn ran in and walk it for the data the heuristic scanners need.
+fn load_recent_turn(
+    kernel: &Arc<LibreFangKernel>,
+    agent_id: AgentId,
+    session_id: Option<SessionId>,
+) -> Option<RecentTurn> {
+    // Prefer the session carried on the `AgentLoopEnd` payload: channel-derived, conversation-keyed and `session_mode = "new"` turns never move the registry pointer, so reading `entry.session_id` for them scans a stale session.
+    // The registry pointer (not `memory.get_agent_session_ids().first()`, which orders by creation time rather than last touch) is the fallback for payloads that do not carry the field.
+    let session_id = match session_id {
+        Some(id) => id,
+        None => kernel.agent_registry_ref().get(agent_id)?.session_id,
+    };
     let memory = kernel.substrate_ref();
     let session = memory.get_session(session_id).ok().flatten()?;
 
-    // Walk newest-last (the natural append order in librefang sessions).
     let messages = &session.messages;
-    let mut last_user_idx: Option<usize> = None;
-    for (i, m) in messages.iter().enumerate().rev() {
-        if m.role == Role::User {
-            last_user_idx = Some(i);
-            break;
-        }
-    }
-    let last_user_idx = last_user_idx?;
-    let last_user_message = extract_text(&messages[last_user_idx].content);
-
-    let prev_assistant_response: Option<String> = messages[..last_user_idx]
-        .iter()
-        .rev()
-        .find(|m| m.role == Role::Assistant)
-        .map(|m| extract_text(&m.content));
+    let (last_user_idx, last_user_message, prev_assistant_response) =
+        locate_last_user_turn(messages)?;
 
     let recent_tool_names = collect_recent_tool_names(messages, 30);
     // 1-based — turn 1 is the first user message in the session.
@@ -567,6 +573,41 @@ fn load_recent_turn(kernel: &Arc<LibreFangKernel>, agent_id: AgentId) -> Option<
         recent_tool_names,
         last_user_turn_index,
     })
+}
+
+/// Find the last message the human wrote, its text, and the assistant reply that preceded it.
+///
+/// The agent loop stores tool results as `Role::User` messages built from `ToolResult` blocks (plus `[System: ...]` guidance text when a tool was denied or errored), so the newest `Role::User` row of a turn that called a tool is the tool-result carrier, not the user's input.
+/// Those carriers are skipped; a user turn that has no text for another reason (an image-only message, say) is still taken, so an older, already-handled instruction is never re-scanned.
+/// The preceding assistant reply is the newest assistant message with text, so an assistant message that only issued tool calls is not mistaken for the reply being corrected.
+fn locate_last_user_turn(
+    messages: &[librefang_types::message::Message],
+) -> Option<(usize, String, Option<String>)> {
+    // Walk newest-last (the natural append order in librefang sessions).
+    let last_user_idx = messages
+        .iter()
+        .rposition(|m| m.role == Role::User && !is_tool_result_carrier(m))?;
+    let last_user_message = extract_text(&messages[last_user_idx].content);
+
+    let prev_assistant_response: Option<String> = messages[..last_user_idx]
+        .iter()
+        .rev()
+        .filter(|m| m.role == Role::Assistant)
+        .map(|m| extract_text(&m.content))
+        .find(|t| !t.is_empty());
+
+    Some((last_user_idx, last_user_message, prev_assistant_response))
+}
+
+/// True when a message is a tool-result carrier, i.e. it holds at least one `ToolResult` block.
+/// Only the agent loop writes `ToolResult` blocks, so any `Role::User` message containing one is runtime-generated, including carriers that also hold appended `[System: ...]` guidance text.
+fn is_tool_result_carrier(m: &librefang_types::message::Message) -> bool {
+    match &m.content {
+        MessageContent::Blocks(blocks) => blocks
+            .iter()
+            .any(|b| matches!(b, ContentBlock::ToolResult { .. })),
+        MessageContent::Text(_) => false,
+    }
 }
 
 /// Concatenate plain-text portions of a message's content into a single
@@ -669,6 +710,218 @@ mod tests {
         let names = collect_recent_tool_names(&messages, 30);
         // Only the trailing 5 assistant tool-uses should have been captured.
         assert_eq!(names, vec!["read", "edit", "shell", "edit", "shell"]);
+    }
+
+    /// A turn that used a tool ends `[User(text), Assistant(ToolUse), User(ToolResult), Assistant(text)]`.
+    /// The tool-result carrier must not be taken as the user's message, or the instruction it follows is never scanned.
+    fn tool_using_turn(instruction: &str) -> Vec<Message> {
+        vec![
+            Message::user(instruction),
+            Message {
+                role: Role::Assistant,
+                content: MessageContent::Blocks(vec![ContentBlock::ToolUse {
+                    id: "t1".to_string(),
+                    name: "shell".to_string(),
+                    input: serde_json::json!({"command": "cargo fmt"}),
+                    provider_metadata: None,
+                }]),
+                pinned: false,
+                timestamp: None,
+            },
+            Message {
+                role: Role::User,
+                content: MessageContent::Blocks(vec![ContentBlock::ToolResult {
+                    tool_use_id: "t1".to_string(),
+                    tool_name: "shell".to_string(),
+                    content: "ok".to_string(),
+                    is_error: false,
+                    status: librefang_types::tool::ToolExecutionStatus::Completed,
+                    approval_request_id: None,
+                }]),
+                pinned: false,
+                timestamp: None,
+            },
+            Message::assistant("Done."),
+        ]
+    }
+
+    #[test]
+    fn last_user_turn_skips_tool_result_carrier() {
+        let instruction =
+            "From now on always run cargo fmt before committing, then commit my changes";
+        let messages = tool_using_turn(instruction);
+        let (idx, text, _prev) = locate_last_user_turn(&messages).expect("user turn located");
+        assert_eq!(idx, 0, "the tool-result carrier at index 2 must be skipped");
+        assert_eq!(text, instruction);
+        assert!(heuristic::extract_explicit_instruction(&text).is_some());
+    }
+
+    /// A denied or failed tool call makes the runtime append `[System: ...]` guidance text to the carrier.
+    /// That text must not be read as the user's message.
+    #[test]
+    fn last_user_turn_skips_carrier_with_appended_guidance_text() {
+        let instruction = "From now on always run cargo fmt before committing.";
+        let mut messages = tool_using_turn(instruction);
+        let MessageContent::Blocks(blocks) = &mut messages[2].content else {
+            panic!("carrier holds blocks");
+        };
+        blocks.push(ContentBlock::Text {
+            text: "[System: 1 tool(s) returned errors. Report the error honestly to the user.]"
+                .to_string(),
+            provider_metadata: None,
+        });
+        let (idx, text, _) = locate_last_user_turn(&messages).expect("user turn located");
+        assert_eq!(idx, 0);
+        assert_eq!(text, instruction);
+    }
+
+    #[test]
+    fn prev_assistant_response_skips_tool_call_only_message() {
+        let mut messages = vec![
+            Message::user("commit my changes"),
+            Message::assistant("I ran git commit -am 'wip'."),
+        ];
+        messages.extend(tool_using_turn(
+            "No, that's wrong. You should run cargo fmt first.",
+        ));
+        messages.push(Message::user("Actually, no — always sign commits."));
+        let (idx, _text, prev) = locate_last_user_turn(&messages).expect("user turn located");
+        assert_eq!(idx, messages.len() - 1);
+        assert_eq!(prev.as_deref(), Some("Done."));
+
+        // A tool-call-only assistant message directly before the user turn is not the reply being corrected.
+        let messages = vec![
+            Message::assistant("I ran git commit -am 'wip'."),
+            tool_using_turn("x")[1].clone(),
+            Message::user("No, that's wrong."),
+        ];
+        let (_, _, prev) = locate_last_user_turn(&messages).expect("user turn located");
+        assert_eq!(prev.as_deref(), Some("I ran git commit -am 'wip'."));
+    }
+
+    #[test]
+    fn image_only_user_turn_is_not_skipped() {
+        let messages = vec![
+            Message::user("from now on always run cargo fmt before committing."),
+            Message::assistant("Understood."),
+            Message {
+                role: Role::User,
+                content: MessageContent::Blocks(vec![ContentBlock::Image {
+                    media_type: "image/png".to_string(),
+                    data: "iVBORw0KGgo=".to_string(),
+                }]),
+                pinned: false,
+                timestamp: None,
+            },
+        ];
+        let (idx, text, _) = locate_last_user_turn(&messages).expect("user turn located");
+        assert_eq!(
+            idx, 2,
+            "only tool-result carriers are skipped, never an older handled turn"
+        );
+        assert!(text.is_empty());
+    }
+
+    #[test]
+    fn turn_session_id_parses_hook_payload() {
+        let sid = SessionId::new();
+        let ctx = HookContext {
+            agent_name: "a",
+            agent_id: "11111111-2222-3333-4444-555555555555",
+            event: HookEvent::AgentLoopEnd,
+            data: serde_json::json!({"is_fork": false, "session_id": sid.to_string()}),
+        };
+        assert_eq!(turn_session_id(&ctx), Some(sid));
+        let ctx = HookContext {
+            data: serde_json::json!({"is_fork": false}),
+            ..ctx
+        };
+        assert_eq!(turn_session_id(&ctx), None);
+    }
+
+    /// The capture pipeline must scan the session the turn ran in (carried on the hook payload), not the registry's `session_id`.
+    /// Channel turns never move the registry pointer, so reading it scans a stale session and loses the teaching signal.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn run_capture_scans_turn_session_not_registry_session() {
+        use crate::kernel::LibreFangKernel;
+        use librefang_types::config::KernelConfig;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let home_dir = tmp.path().join("home");
+        std::fs::create_dir_all(&home_dir).expect("home dir");
+        let kernel = Arc::new(
+            LibreFangKernel::boot_with_config(KernelConfig {
+                home_dir: home_dir.clone(),
+                data_dir: home_dir.join("data"),
+                ..KernelConfig::default()
+            })
+            .expect("kernel boots"),
+        );
+        let manifest = AgentManifest {
+            name: "workshop-session-agent".to_string(),
+            module: "builtin:chat".to_string(),
+            skill_workshop: SkillWorkshopConfig {
+                enabled: true,
+                auto_capture: true,
+                approval_policy: ApprovalPolicy::Pending,
+                review_mode: ReviewMode::Heuristic,
+                max_pending: 20,
+                ..SkillWorkshopConfig::default()
+            },
+            ..Default::default()
+        };
+        let agent_id = kernel.spawn_agent(manifest).expect("agent spawns");
+        let registry_session = kernel
+            .agent_registry_ref()
+            .get(agent_id)
+            .expect("agent entry")
+            .session_id;
+
+        let save = |id: SessionId, messages: Vec<librefang_types::message::Message>| {
+            kernel
+                .substrate_ref()
+                .save_session(&librefang_memory::session::Session {
+                    id,
+                    agent_id,
+                    parent_session_id: None,
+                    messages,
+                    context_window_tokens: 0,
+                    label: None,
+                    model_override: None,
+                    messages_generation: 1,
+                    last_repaired_generation: None,
+                    peer_id: None,
+                })
+                .expect("save_session");
+        };
+        save(
+            registry_session,
+            vec![Message::user("hi"), Message::assistant("hello")],
+        );
+        let channel_session = SessionId::new();
+        save(
+            channel_session,
+            tool_using_turn("from now on always run cargo fmt before committing."),
+        );
+
+        run_capture(kernel.clone(), agent_id, Some(channel_session)).await;
+
+        let pending = storage::list_pending(&home_dir.join("skills"), &agent_id.to_string())
+            .expect("list_pending");
+        assert_eq!(
+            pending.len(),
+            1,
+            "the channel turn's instruction must be captured"
+        );
+        assert_eq!(
+            pending[0].session_id.as_deref(),
+            Some(channel_session.to_string().as_str())
+        );
+        assert!(matches!(
+            pending[0].source,
+            CaptureSource::ExplicitInstruction { .. }
+        ));
+        kernel.shutdown();
     }
 
     #[test]

@@ -42,7 +42,19 @@ async fn logs_stream_task_exits_on_kernel_shutdown() {
 
     // Invoke the handler directly. It spawns a detached task that moves
     // a clone of `state` in, so the strong count must rise.
-    let resp = logs::logs_stream(State(state.clone()), Query(HashMap::new())).await;
+    // The stream is Admin-only, so call it as an authenticated Admin.
+    let admin = librefang_api::middleware::AuthenticatedApiUser {
+        name: "admin".to_string(),
+        role: librefang_api::middleware::UserRole::Admin,
+        user_id: librefang_types::agent::UserId::new(),
+    };
+    let resp = logs::logs_stream(
+        State(state.clone()),
+        Query(HashMap::new()),
+        Some(axum::Extension(admin)),
+        None,
+    )
+    .await;
 
     // The detached poll task now holds an extra Arc clone.
     let with_task = wait_for_task_to_hold_ref(&state, baseline).await;

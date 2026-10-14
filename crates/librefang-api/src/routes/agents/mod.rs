@@ -99,6 +99,14 @@ pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
             axum::routing::get(list_agent_ephemeral_runs),
         )
         .route(
+            "/agents/{id}/manifest-history",
+            axum::routing::get(list_agent_manifest_history),
+        )
+        .route(
+            "/agents/{id}/manifest-history/{version_id}/restore",
+            axum::routing::post(restore_agent_manifest_version),
+        )
+        .route(
             "/agents/{id}/mode",
             axum::routing::put(set_agent_mode),
         )
@@ -247,6 +255,10 @@ pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
         .route(
             "/agents/{id}/clone",
             axum::routing::post(clone_agent),
+        )
+        .route(
+            "/agents/{id}/save-as-agent-type",
+            axum::routing::post(save_agent_as_agent_type),
         )
         .route(
             "/agents/{id}/reload",

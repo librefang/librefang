@@ -1820,16 +1820,7 @@ impl LibreFangKernel {
 
         // Validate notification config — warn (not error) on unrecognized values
         {
-            let known_events = [
-                "approval_requested",
-                "task_completed",
-                "task_failed",
-                // Provider-safety refusals, split out of task_failed by #3450 so they can be routed separately — a rule listing this is valid and must not be warned about.
-                "content_filtered",
-                "tool_failure",
-                "health_check_failed",
-                "model_migrated",
-            ];
+            let known_events = KNOWN_NOTIFICATION_EVENTS;
             for (i, rule) in config.notification.agent_rules.iter().enumerate() {
                 for event in &rule.events {
                     if !known_events.contains(&event.as_str()) {

@@ -870,6 +870,92 @@ async fn channel_send_cross_account_blocked_on_embedded_channel() {
     );
 }
 
+// The WhatsApp gateway stamps `sender_channel = "whatsapp:<jid>"` and no chat id (#5227).
+// The #6117 recipient guard used to compare that raw string against the bare `"whatsapp"`, never matched, and let a cross-chat send through.
+#[tokio::test]
+async fn channel_send_cross_chat_blocked_on_embedded_gateway_channel() {
+    let kernel = guard_kernel();
+    let input = serde_json::json!({
+        "channel": "whatsapp",
+        "recipient": "stranger@s.whatsapp.net",
+        "message": "leak",
+    });
+    let err = tool_channel_send(
+        &input,
+        Some(&kernel),
+        None,
+        Some("393285497365@s.whatsapp.net"),
+        Some("whatsapp:393285497365-1412881543@g.us"),
+        None,
+        None,
+        Some("agent-x"),
+        &[],
+    )
+    .await
+    .expect_err("cross-chat dispatch must be blocked on an embedded gateway channel");
+    assert!(err.contains(GUARD_MSG), "expected guard error, got: {err}");
+    assert!(
+        err.contains("393285497365-1412881543@g.us"),
+        "the expected chat is the embedded group jid, not the speaker: {err}"
+    );
+}
+
+// Replying to the group the gateway turn arrived in must pass: the embedded jid, not the speaker, is the conversation.
+#[tokio::test]
+async fn channel_send_reply_to_embedded_gateway_group_passes_guard() {
+    let kernel = guard_kernel();
+    let input = serde_json::json!({
+        "channel": "whatsapp",
+        "recipient": "393285497365-1412881543@g.us",
+        "message": "hi group",
+    });
+    let err = tool_channel_send(
+        &input,
+        Some(&kernel),
+        None,
+        Some("393285497365@s.whatsapp.net"),
+        Some("whatsapp:393285497365-1412881543@g.us"),
+        None,
+        None,
+        Some("agent-x"),
+        &[],
+    )
+    .await
+    .expect_err("send fails at the transport mock, not the guard");
+    assert!(
+        !err.contains(GUARD_MSG),
+        "reply to the current group must pass: {err}"
+    );
+}
+
+// In a gateway DM the sender id is a phone number while the chat is a `@lid` jid, so only the embedded jid identifies the conversation.
+#[tokio::test]
+async fn channel_send_reply_to_embedded_gateway_dm_passes_guard() {
+    let kernel = guard_kernel();
+    let input = serde_json::json!({
+        "channel": "whatsapp",
+        "recipient": "191856289808491@lid",
+        "message": "hi",
+    });
+    let err = tool_channel_send(
+        &input,
+        Some(&kernel),
+        None,
+        Some("+393760105565"),
+        Some("whatsapp:191856289808491@lid"),
+        None,
+        None,
+        Some("agent-x"),
+        &[],
+    )
+    .await
+    .expect_err("send fails at the transport mock, not the guard");
+    assert!(
+        !err.contains(GUARD_MSG),
+        "reply to the current DM must pass: {err}"
+    );
+}
+
 // ── agent_send conversation_key routing tests ─────────────────────────────
 //
 // Verify that tool_agent_send routes to the correct KernelHandle method

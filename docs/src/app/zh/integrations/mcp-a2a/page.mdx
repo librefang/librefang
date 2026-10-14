@@ -236,6 +236,32 @@ Top-up:   https://api.everyapi.ai/wallet
 想据此判断剩余余额的 agent，必须从这段散文里解析出一个浮点数，而这正是模型在边界情况上容易出错的动作 —— 一个 `$1,234.00` 的千位分隔符，或未来一次措辞调整，都会让它悄无声息地失效。
 相比依赖精确解析的算术，更建议用粗粒度阈值（"看起来低于十美元就停下并通知"），并在无法自信读出数字时，让 agent 把原始那一行交给人来看。
 
+### 需要认证的 HTTP 服务器的目录条目
+
+原生 `sse` 或 `http` 服务器的目录条目可以把某个 `required_env` 凭据映射到请求头，于是从仪表盘目录或 `librefang mcp add` 安装时会要求填写用户自己的密钥，并以 bearer token 等形式发送：
+
+```toml
+[transport]
+type = "http"
+url = "https://mcp.example.com/mcp"
+
+[[required_env]]
+name = "EXAMPLE_API_KEY"
+label = "API Key"
+help = "在账户设置中创建密钥"
+
+[[headers]]
+name = "Authorization"
+value = "Bearer ${EXAMPLE_API_KEY}"
+```
+
+安装后的 `[[mcp_servers]]` 条目只保存引用 `Authorization: Bearer ${EXAMPLE_API_KEY}`，从不保存密钥本身；密钥存放在 vault 中，每次建立连接时才从守护进程环境中替换进去。
+在仪表盘目录中填写的密钥立即可用；守护进程运行期间通过 `librefang mcp add` 或 `librefang vault set` 保存的密钥，与其他 vault 凭据一样，要到守护进程下次启动时才进入其环境。
+`${NAME}` 占位符只能引用该服务器在 `env` 列表中声明的变量——占位符不属于其 `required_env` 的目录条目会在加载时被跳过，手写的 `headers` 条目也遵循同一规则。
+凭据缺失或为空时，连接会在发出任何请求之前失败，错误信息会指明对应的请求头和变量。
+不含 `${…}` 的请求头仍按原样发送。
+安装服务器并不会把它授予 `mcp_servers` 列表既未列出它、也不是 `["*"]` 的 agent：需要把它的名字加入该 agent 的列表。
+
 ### MCP 工具命名
 
 MCP 工具命名格式：

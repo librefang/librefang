@@ -1798,6 +1798,10 @@ impl SessionStore {
             })
             .collect::<Vec<_>>()
             .join(" ");
+        // A whitespace-only query has no tokens, and `MATCH ''` is an FTS5 syntax error rather than "no hits".
+        if sanitized.is_empty() {
+            return Ok(Vec::new());
+        }
 
         let conn = self.pool.get().map_err(LibreFangError::memory)?;
 
@@ -3309,6 +3313,24 @@ mod tests {
             .search_sessions_paginated("needle", Some(&agent_id), Some(0), 0)
             .unwrap();
         assert!(zero.is_empty(), "LIMIT 0 must return zero rows");
+    }
+
+    /// A query made only of whitespace sanitizes to an empty MATCH expression, which FTS5 rejects as a syntax error; it must return an empty result instead.
+    #[test]
+    fn test_fts_search_whitespace_only_query_is_empty_not_error() {
+        let store = setup();
+        let agent_id = AgentId::new();
+        let mut session = store.create_session(agent_id).unwrap();
+        session.messages.push(Message::user("alpha beta gamma"));
+        store.save_session(&session).unwrap();
+
+        for q in [" ", "   ", "\t\n "] {
+            assert!(store.search_sessions(q, None).unwrap().is_empty());
+            assert!(store
+                .search_sessions_paginated(q, Some(&agent_id), Some(10), 0)
+                .unwrap()
+                .is_empty());
+        }
     }
 
     #[test]

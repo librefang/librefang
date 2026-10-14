@@ -25,10 +25,17 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 ///   index 1 → text block with two text_deltas ("Hello" + " world")
 ///   index 2 → tool_use block with input_json_deltas forming {"q":"rust"}
 fn anthropic_sse_with_unknown_leading_block() -> ResponseTemplate {
+    anthropic_sse_with_unknown_leading_block_framed("\n")
+}
+
+/// Same stream, with every SSE line terminated by `line_ending` (`"\n"` or `"\r\n"`).
+fn anthropic_sse_with_unknown_leading_block_framed(line_ending: &str) -> ResponseTemplate {
     let mut body = String::new();
 
     let mut push = |event: &str, data: serde_json::Value| {
-        body.push_str(&format!("event: {event}\ndata: {data}\n\n"));
+        body.push_str(&format!(
+            "event: {event}{line_ending}data: {data}{line_ending}{line_ending}"
+        ));
     };
 
     push(
@@ -213,5 +220,51 @@ async fn unknown_leading_block_preserves_index_alignment() {
     assert!(
         saw_tool_end,
         "expected a ToolUseEnd for the index-2 tool_use, got {events:?}"
+    );
+}
+
+/// The SSE spec allows CRLF line endings, and Anthropic-compatible gateways (kimi_coding, byteplus_coding, custom base URLs) may emit them.
+/// The parser used to split only on `\n\n`, so a CRLF-framed stream yielded no events at all and ended with an empty response.
+#[tokio::test]
+#[serial_test::serial]
+async fn crlf_framed_stream_yields_events() {
+    let _env = isolated_env();
+    let server = MockServer::start().await;
+    let driver = mock_anthropic_driver(&server);
+
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(anthropic_sse_with_unknown_leading_block_framed("\r\n"))
+        .mount(&server)
+        .await;
+
+    let (result, events) = collect_stream(&driver, request_with_tools("claude-test")).await;
+    let response = result.expect("stream should succeed");
+
+    let text: String = response
+        .content
+        .iter()
+        .filter_map(|b| match b {
+            ContentBlock::Text { text, .. } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(text, "Hello world", "got content {:?}", response.content);
+    assert_eq!(response.tool_calls.len(), 1);
+    assert_eq!(
+        response.tool_calls[0].input,
+        serde_json::json!({"q": "rust"})
+    );
+
+    let streamed_text: String = events
+        .iter()
+        .filter_map(|e| match e {
+            StreamEvent::TextDelta { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        streamed_text, "Hello world",
+        "streamed text deltas, got {events:?}"
     );
 }

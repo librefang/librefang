@@ -1,4 +1,78 @@
 use super::*;
+use librefang_types::agent_type_store;
+
+/// Optimistic-concurrency token for the manifest editor (#8424): the SHA-256 of a canonical JSON rendering of the manifest, so a `PATCH` carrying `expected_version` fails with `409` when another writer changed the manifest after the editor was seeded.
+///
+/// The rendering is canonical because `AgentManifest` carries `HashMap` fields (`tools`, `metadata`, `workspaces`) whose iteration order differs between processes and between two maps built from the same content (#3298).
+/// Hashing the TOML text the client sees would hand out a different token for unchanged content after a reload or a re-insert, and the editor would answer a save nobody raced with a spurious `409`.
+/// Every object's keys are sorted explicitly rather than relying on `serde_json::Map` being a `BTreeMap`, because the workspace enables serde_json's `preserve_order` feature transitively.
+fn manifest_version(manifest: &librefang_types::agent::AgentManifest) -> String {
+    use sha2::{Digest, Sha256};
+
+    fn canonicalize(value: &mut serde_json::Value) {
+        match value {
+            serde_json::Value::Object(map) => {
+                map.sort_keys();
+                map.values_mut().for_each(canonicalize);
+            }
+            serde_json::Value::Array(items) => items.iter_mut().for_each(canonicalize),
+            _ => {}
+        }
+    }
+
+    let mut value = match serde_json::to_value(manifest) {
+        Ok(value) => value,
+        Err(e) => {
+            // An empty token would match every other failed serialization and silently disable the check, so hash the error text instead: still deterministic, never equal to a real manifest's token.
+            tracing::error!(error = %e, "failed to serialize agent manifest for its version token");
+            serde_json::Value::String(format!("unserializable manifest: {e}"))
+        }
+    };
+    canonicalize(&mut value);
+    let mut hasher = Sha256::new();
+    hasher.update(value.to_string().as_bytes());
+    format!("{:x}", hasher.finalize())
+}
+
+/// Check the `expected_version` an agent-manifest writer carried against the
+/// live manifest (#8424).
+///
+/// Returns the `409 Conflict` response (translated into the request's language)
+/// when a non-empty token no longer matches, so the caller can return it
+/// directly. A missing token, an empty token, or an agent that no longer
+/// exists all skip the check — the write path owns those outcomes.
+///
+/// Every endpoint that mutates the manifest but is *not* the full-editor
+/// `PATCH` (`PUT /tools`, `/skills`, `/mcp_servers`, `/channels`) shares this:
+/// each one moves the same ETag the editor echoes, so without the check a
+/// panel save built on a superseded read can silently overwrite whatever the
+/// concurrent writer added.
+pub(crate) fn check_expected_manifest_version(
+    state: &Arc<AppState>,
+    agent_id: AgentId,
+    expected: Option<&str>,
+    t: &ErrorTranslator,
+) -> Option<(StatusCode, Json<serde_json::Value>)> {
+    let expected = expected?;
+    if expected.is_empty() {
+        return None;
+    }
+    // Registry entry gone: no live manifest to compare against. The write
+    // path reports the not-found/invalid-agent outcome instead of a 409 that
+    // would misdescribe it.
+    let current = state
+        .kernel
+        .agent_registry()
+        .get(agent_id)
+        .map(|entry| manifest_version(&entry.manifest))?;
+    if current != expected {
+        return Some((
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({"error": t.t("api-error-agent-manifest-conflict")})),
+        ));
+    }
+    None
+}
 
 // ---------------------------------------------------------------------------
 // Shared manifest resolution helper
@@ -34,9 +108,25 @@ async fn resolve_manifest(
     req: &SpawnRequest,
     lang: &'static str,
 ) -> Result<ResolvedManifest, ManifestError> {
-    // Resolve template name → manifest_toml
+    // Resolve template name → manifest text, or take a client-supplied one.
     let mut used_template: Option<String> = None;
-    let manifest_toml = if req.manifest_toml.trim().is_empty() {
+    let manifest_toml: String = if req.manifest_toml.trim().is_empty() {
+        // A signature covers the exact bytes the client signed. Main accepted
+        // `signed_manifest` + `template` and verified the signature against
+        // the resolved template's content — a verified flow, not a skipped
+        // one: it only passed for a caller whose signed bytes equalled the
+        // template on disk. This door rejects the pair anyway, so a
+        // signature-pinned spawn can only pin content the client supplied,
+        // not whatever the template store happens to hold at verification
+        // time. Behaviour change against main, recorded in
+        // `changelog.d/added/8360-save-as-agent-type.md`.
+        if req.signed_manifest.is_some() {
+            let t = ErrorTranslator::new(lang);
+            return Err(ManifestError {
+                message: t.t("api-error-manifest-signed-template-conflict"),
+                code: Some("invalid_manifest"),
+            });
+        }
         if let Some(ref tmpl_name) = req.template {
             let safe_name: String = tmpl_name
                 .chars()
@@ -105,7 +195,10 @@ async fn resolve_manifest(
         req.manifest_toml.clone()
     };
 
-    // Size guard
+    // Size guard — bounds the inline `manifest_toml` and the content of a
+    // resolved template file alike. `MAX_MANIFEST_SIZE` no longer covers only
+    // the client-supplied body: a template is still read into memory here, so
+    // the same cap applies before either is parsed or verified.
     if manifest_toml.len() > MAX_MANIFEST_SIZE {
         let t = ErrorTranslator::new(lang);
         return Err(ManifestError {
@@ -114,7 +207,9 @@ async fn resolve_manifest(
         });
     }
 
-    // SECURITY: Verify Ed25519 signature when provided
+    // SECURITY: Verify Ed25519 signature when provided. `signed_manifest` +
+    // `template` is rejected above, so only the inline manifest reaches this
+    // comparison, against the exact content the client supplied.
     if let Some(ref signed_json) = req.signed_manifest {
         match state.kernel.verify_signed_manifest(signed_json) {
             Ok(verified_toml) => {
@@ -1341,9 +1436,10 @@ pub async fn list_agent_runtime(
     path = "/api/agents/{id}",
     tag = "agents",
     params(("id" = String, Path, description = "Agent ID")),
-    request_body(content = crate::types::JsonObject, description = "Partial agent fields to update"),
+    request_body(content = crate::types::JsonObject, description = "Partial agent fields to update. `expected_version` (optional) is the `ETag` from `GET /api/agents/{id}/manifest`; a mismatch answers 409 (#8424)."),
     responses(
         (status = 200, description = "Partially update an agent (name, description, model, system prompt)", body = crate::types::JsonObject),
+        (status = 409, description = "The manifest changed after this editor read it; reload before saving (#8424)", body = crate::types::JsonObject),
         (status = 423, description = "This agent is provisioned by the deployment; its manifest cannot be changed through the API", body = crate::types::JsonObject)
     )
 )]
@@ -1376,6 +1472,26 @@ pub async fn patch_agent(
         );
     }
 
+    // #8424: the manifest editor echoes the ETag its seed read carried in
+    // `expected_version`; a mismatch means another writer saved after that
+    // read, and applying this PATCH would silently undo their change.
+    //
+    // Known limit: this is a read-then-write pair, not a compare-and-swap — a
+    // writer that slips in between the registry read here and the kernel's
+    // lock acquisition below still wins. Every writer is an in-process
+    // handler and the window is a few instructions wide, so the practical
+    // exposure is tiny; closing it fully would mean moving the version compare
+    // into the kernel next to the manifest replacement. Recorded here instead
+    // of passing the check off as atomic.
+    if let Some(conflict) = check_expected_manifest_version(
+        &state,
+        agent_id,
+        body.get("expected_version").and_then(|v| v.as_str()),
+        &t,
+    ) {
+        return conflict;
+    }
+
     let mcp_only_patch = patch_agent_only_updates_mcp_servers(&body);
 
     // Full-manifest replacement path (folded in from the now-removed
@@ -1404,7 +1520,7 @@ pub async fn patch_agent(
         // is surfaced to the client.
         let internal_error_msg = t.t("api-error-internal");
         drop(t);
-        return match state.kernel.update_manifest(agent_id, manifest) {
+        return match state.kernel.update_manifest(agent_id, manifest, "api") {
             Ok(()) => (
                 StatusCode::OK,
                 Json(serde_json::json!({
@@ -1563,7 +1679,7 @@ pub async fn patch_agent(
             // Write updated manifest to agent.toml on disk so disk doesn't override
             // dashboard changes on next boot (#996, #1018).
             if !mcp_only_patch {
-                state.kernel.persist_manifest_to_disk(agent_id);
+                state.kernel.persist_manifest_to_disk(agent_id, "api");
             }
         }
 
@@ -1629,6 +1745,206 @@ pub async fn reload_agent_manifest(
     }
 }
 
+// ---------------------------------------------------------------------------
+// Save agent as agent type
+// ---------------------------------------------------------------------------
+
+/// Request body for saving a live agent as an agent type.
+#[derive(serde::Deserialize, utoipa::ToSchema)]
+pub struct SaveAsAgentTypeRequest {
+    /// Name for the saved agent type, `[A-Za-z0-9_-]{1,64}`.
+    pub template_name: String,
+}
+
+/// POST /api/agents/{id}/save-as-agent-type — snapshot a live agent's manifest
+/// into a reusable agent-type template file.
+///
+/// Not gated by [`super::guard_provisioned_agent`]: that guard refuses writes
+/// that would change the *definition* of a provisioned agent, and this
+/// handler never touches the source agent's own manifest — it only reads it
+/// and writes a new, separate `agent-types/<name>.toml`. The closest sibling,
+/// [`super::clone_agent`], follows the same "read source, write something
+/// new" shape and carries no such guard either.
+///
+/// Not exposed to the `User` role: `save-as-agent-type` is absent from the
+/// `User`-tier POST allowlist in `middleware::user_role_allows_request`, so
+/// only Admin+ callers reach this handler at all — unlike `/clone`, which
+/// deliberately carves out `User` access and therefore needs its own
+/// `can_access_agent` ownership check to stop a non-owner from cloning an
+/// arbitrary agent by id. An Admin+ caller already has access to every
+/// agent's manifest through other routes, so no equivalent check is needed
+/// here; widening this endpoint to `User` later would need that check added
+/// alongside it.
+#[utoipa::path(
+    post,
+    path = "/api/agents/{id}/save-as-agent-type",
+    tag = "agents",
+    params(("id" = String, Path, description = "Agent ID")),
+    request_body(content = SaveAsAgentTypeRequest, description = "Name to save the agent type under"),
+    responses(
+        (status = 201, description = "Agent type created from live agent"),
+        (status = 400, description = "Malformed agent id, or a template_name outside [A-Za-z0-9_-]{1,64}"),
+        (status = 404, description = "Agent not found"),
+        (status = 409, description = "The source agent is a hand-spawned agent, the template name is already taken, or it belongs to a different live agent"),
+        (status = 422, description = "JSON body present but missing the required 'template_name' field"),
+        (status = 500, description = "The agent type could not be rendered or written")
+    )
+)]
+pub async fn save_agent_as_agent_type(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    lang: Option<axum::Extension<RequestLanguage>>,
+    Json(req): Json<SaveAsAgentTypeRequest>,
+) -> impl IntoResponse {
+    let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
+    let agent_id: AgentId = match id.parse() {
+        Ok(id) => id,
+        Err(_) => {
+            return ApiErrorResponse::bad_request(t.t("api-error-agent-invalid-id"))
+                .with_code("invalid_agent_id")
+                .into_response();
+        }
+    };
+
+    let entry = match state.kernel.agent_registry().get(agent_id) {
+        Some(e) => e,
+        None => {
+            return ApiErrorResponse::not_found(t.t("api-error-agent-not-found"))
+                .with_code("agent_not_found")
+                .into_response();
+        }
+    };
+
+    // A hand-spawned agent is refused for the same reason the delete paths
+    // refuse one (`hand_agent_delete_denied`, `DELETE /api/agents/{id}` and
+    // the bulk delete): the hand lifecycle owns the agent's definition, so
+    // the operator makes the hand's copy reusable, not the live instance's.
+    // It also keeps state that must not be frozen into a reusable type: the
+    // live manifest carries `is_hand = true` (hand activation,
+    // `kernel/hands_lifecycle.rs`), which is persisted into
+    // `agent-types/<name>.toml` and reloaded as `entry.is_hand` on restart —
+    // boot then skips the row and the orphaned-hand GC deletes agents spawned
+    // from the type along with their sessions. The hand's injected
+    // capabilities/skills merge would travel with it too.
+    if entry.is_hand {
+        return ApiErrorResponse::conflict(
+            "Cannot save a hand-spawned agent as an agent type; deactivate or uninstall the owning hand instead.",
+        )
+        .with_code("hand_agent_save_denied")
+        .into_response();
+    }
+
+    let template_name = req.template_name.trim().to_string();
+
+    let mut manifest = entry.manifest.clone();
+    manifest.name = template_name.clone();
+    // Cleared for the same reason `clone_agent` clears it on the destination
+    // side: a template spawned from later must get a fresh workspace, not
+    // point new agents at the SOURCE agent's own workspace directory.
+    manifest.workspace = None;
+    // `enabled` is instance-local state like `workspace` above: it gates
+    // whether an agent is spawned on startup, not how one is configured. A
+    // paused source must not save a paused type — every agent spawned from it
+    // would be skipped at boot with nothing in the TOML to explain why.
+    // `manifest_privacy.rs` classifies `enabled` as `LocalState` for the same
+    // reason it classifies `is_hand` that way.
+    manifest.enabled = true;
+    // `is_hand` needs the same reset, and the guard above cannot deliver it:
+    // that guard reads `entry.is_hand`, but the flag can ride in on the
+    // manifest itself — a directly supplied `manifest_toml`, or an
+    // `agent.toml` edited by hand and reloaded at startup, where the flag is
+    // not recomputed from the tags. The saved type would then inherit
+    // `is_hand = true` and its agents would be skipped at boot and reclaimed
+    // by the orphaned-hand GC, the same failure mode the guard's comment
+    // describes. `manifest_privacy::sanitize_for_publication` resets this
+    // field (and `enabled`) for the same reason.
+    manifest.is_hand = false;
+    // Kernel-owned tags must not travel into the saved type. `spawn` recomputes
+    // `is_hand` from `manifest.tags`, and the approval gate auto-approves every
+    // tool call for a hand — so a copied `hand:*` tag would silently turn every
+    // agent spawned from this type into a hand with no approval gate, and hide
+    // it from `GET /api/agents` as well. They are not the operator's to manage
+    // anyway (`merge_agent_tags` keeps them out of operator reach).
+    manifest
+        .tags
+        .retain(|tag| !librefang_types::agent::is_system_tag(tag));
+    // Kernel-owned metadata must not travel either. `hand_allowed_env` is the
+    // env-passthrough allowlist the hand lifecycle writes on its live agent
+    // (`manifest_helpers::set_hand_allowed_env`, `AgentRegistry::update_hand_rendered_prompt`).
+    // The runtime reads it for EVERY agent (`agent_loop/mod.rs`,
+    // `agent_loop/run_streaming.rs`), and only the hand lifecycle ever clears
+    // it — nothing does for an agent spawned from a type. Leaving it in the
+    // snapshot would hand a plain agent's shell and subprocess tools the
+    // source hand's frozen passthrough allowlist.
+    manifest.metadata.remove("hand_allowed_env");
+    // Provenance for `agent_purge`: a snapshot deliberately shares its source's
+    // name, so the purge reads this to leave the operator's reusable copy alone
+    // instead of deleting `agent-types/<name>.toml` as if it were a trace of the
+    // agent.
+    manifest.metadata.insert(
+        agent_type_store::SAVED_FROM_AGENT_METADATA_KEY.to_string(),
+        serde_json::Value::String(entry.manifest.name.clone()),
+    );
+
+    let home = &state.kernel.config_ref().home_dir;
+    // The source agent's own name is the one this save is allowed to collide
+    // with; every other live agent's name would shadow it in the catalog.
+    match agent_type_store::create_agent_type_from_manifest_in(
+        home,
+        &template_name,
+        &manifest,
+        Some(&entry.manifest.name),
+    ) {
+        Ok(rendered) => {
+            // Every other agent-type write path records a history baseline; this
+            // one landed none, so the first dashboard edit had nothing to
+            // restore to.
+            let _ = crate::routes::agent_templates::record_template_version(
+                &state,
+                &template_name,
+                &rendered,
+                "create",
+            );
+            (
+                StatusCode::CREATED,
+                Json(serde_json::json!({
+                    "name": template_name,
+                    "description": manifest.description,
+                })),
+            )
+                .into_response()
+        }
+        // Same mapping (and same codes) as the sibling
+        // `post_agent_template_toml` in `routes/agent_templates.rs`, so a
+        // client can tell the two 409s apart instead of seeing one bare
+        // `{"error": ...}` shape for every failure.
+        Err(librefang_types::agent_type_store::CreateAgentTypeError::InvalidName) => {
+            ApiErrorResponse::bad_request(t.t("api-error-template-invalid-name"))
+                .with_code("template_invalid_name")
+                .into_response()
+        }
+        Err(librefang_types::agent_type_store::CreateAgentTypeError::NameTaken) => {
+            ApiErrorResponse::conflict(
+                t.t_args("api-error-agent-type-exists", &[("name", &template_name)]),
+            )
+            .with_code("template_exists")
+            .into_response()
+        }
+        Err(librefang_types::agent_type_store::CreateAgentTypeError::ShadowsLiveAgent) => {
+            ApiErrorResponse::conflict(t.t_args(
+                "api-error-agent-type-name-taken",
+                &[("name", &template_name)],
+            ))
+            .with_code("template_name_taken")
+            .into_response()
+        }
+        Err(librefang_types::agent_type_store::CreateAgentTypeError::Io(e)) => {
+            tracing::error!("failed to save agent as agent type: {e}");
+            ApiErrorResponse::internal_scrub(e).into_response()
+        }
+    }
+}
+
 /// GET /api/agents/{id}/manifest — Get the agent's full manifest as raw TOML.
 ///
 /// Powers the dashboard's full manifest editor (#7742): the Configure
@@ -1688,12 +2004,23 @@ pub async fn get_agent_manifest_toml(
     let internal_error_msg = t.t("api-error-internal");
     drop(t);
     match toml::to_string_pretty(&entry.manifest) {
-        Ok(text) => (
-            StatusCode::OK,
-            [(axum::http::header::CONTENT_TYPE, "application/toml")],
-            Body::from(text),
-        )
-            .into_response(),
+        Ok(text) => {
+            // #8424: the ETag is the optimistic-concurrency token the editor
+            // echoes back as `expected_version` when it saves, so a save built
+            // on a stale read is refused instead of silently overwriting the
+            // intervening write. Quoted per RFC 9110.
+            let version = manifest_version(&entry.manifest);
+            let etag = format!("\"{version}\"");
+            (
+                StatusCode::OK,
+                [
+                    (axum::http::header::CONTENT_TYPE, "application/toml"),
+                    (axum::http::header::ETAG, etag.as_str()),
+                ],
+                Body::from(text),
+            )
+                .into_response()
+        }
         Err(e) => {
             tracing::error!(error = %e, "failed to serialize agent manifest to TOML");
             (

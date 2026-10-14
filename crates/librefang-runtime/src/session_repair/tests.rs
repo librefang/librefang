@@ -1799,6 +1799,78 @@ fn collect_result_ids(messages: &[Message]) -> Vec<String> {
     out
 }
 
+fn orphan_scan_tool_use(id: &str) -> Message {
+    Message {
+        role: Role::Assistant,
+        content: MessageContent::Blocks(vec![ContentBlock::ToolUse {
+            id: id.to_string(),
+            name: "shell_exec".to_string(),
+            input: serde_json::json!({}),
+            provider_metadata: None,
+        }]),
+        pinned: false,
+        timestamp: None,
+    }
+}
+
+fn orphan_scan_mixed_delivery(id: &str) -> Message {
+    Message {
+        role: Role::User,
+        content: MessageContent::Blocks(vec![
+            ContentBlock::ToolResult {
+                tool_use_id: id.to_string(),
+                tool_name: "shell_exec".to_string(),
+                content: "ok".to_string(),
+                is_error: false,
+                status: Default::default(),
+                approval_request_id: None,
+            },
+            text_block("[System: 1 tool(s) returned no output]"),
+        ]),
+        pinned: false,
+        timestamp: None,
+    }
+}
+
+#[test]
+fn has_orphaned_tool_results_flags_a_window_opening_with_a_mixed_delivery() {
+    // The shape a compaction split inside a tool cycle leaves behind (#8545).
+    let window = vec![
+        Message::user("[Context compaction summary] earlier turns"),
+        orphan_scan_mixed_delivery("call_a"),
+        Message::assistant("done"),
+    ];
+    assert!(has_orphaned_tool_results(&window));
+    let repaired = validate_and_repair(&window);
+    assert!(!has_orphaned_tool_results(&repaired));
+}
+
+#[test]
+fn has_orphaned_tool_results_accepts_paired_and_plain_histories() {
+    let paired = vec![
+        Message::user("run it"),
+        orphan_scan_tool_use("call_a"),
+        orphan_scan_mixed_delivery("call_a"),
+        Message::assistant("done"),
+    ];
+    assert!(!has_orphaned_tool_results(&paired));
+    assert!(!has_orphaned_tool_results(&[
+        Message::user("hi"),
+        Message::assistant("hello")
+    ]));
+    assert!(!has_orphaned_tool_results(&[]));
+}
+
+#[test]
+fn has_orphaned_tool_results_flags_a_result_that_precedes_its_call() {
+    let reversed = vec![
+        Message::user("run it"),
+        orphan_scan_mixed_delivery("call_a"),
+        orphan_scan_tool_use("call_a"),
+    ];
+    assert!(has_orphaned_tool_results(&reversed));
+}
+
 mod prop {
     use super::{
         collect_result_ids, collect_use_ids, find_safe_trim_point, msg_atom_to_message,

@@ -297,6 +297,7 @@ no_output_timeout_secs = 30
 | `safe_bins_skip_approval` | bool | `false` | Opt-in: in `allowlist` mode, a `shell_exec` whose every base command is a declared `safe_bin` also skips the human-approval prompt. A chained command with any non-safe base still routes through approval. |
 | `full_mode_skips_approval` | bool | `true` | Whether `mode = "full"` also waives the global `approval.require_approval` list for `shell_exec`. Set `false` for unrestricted commands that still prompt. |
 | `allowed_commands` | list of strings | `[]` | Additional commands permitted when `mode = "allowlist"`. |
+| `denied_commands` | list of strings | `[]` | Commands refused under every `mode`, outranking `safe_bins` and `allowed_commands` — `mode = "full"` with `denied_commands = ["git"]` runs anything except git. See [Configuration](/configuration#exec_policy) for how names are matched and what is not inspected. |
 | `timeout_secs` | u64 | `30` | Maximum wall-clock execution time per command in seconds. |
 | `max_output_bytes` | usize | `102400` | Maximum combined stdout+stderr output size in bytes (100 KB default). |
 | `no_output_timeout_secs` | u64 | `30` | Kill processes that produce no output for this many seconds. `0` = disabled. |

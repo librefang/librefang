@@ -1195,8 +1195,10 @@ fn test_prepare_llm_messages_new_messages_start_keeps_full_turn_after_trim() {
     assert_eq!(new_messages_start, session.messages.len().saturating_sub(1));
 }
 
+/// The canonical-context and memory-context injections are added after `safe_trim_messages`, so a session long enough to be trimmed still sends them — in `stable_prefix_mode` the memory message is the only path by which recalled memories reach the model.
+/// They stay out of the persisted session, and `new_messages_start` still points at the current turn.
 #[test]
-fn test_prepare_llm_messages_new_messages_start_ignores_trimmed_context_injections() {
+fn test_prepare_llm_messages_context_injections_survive_trim() {
     let mut manifest = test_manifest();
     manifest.metadata.insert(
         "canonical_context_msg".to_string(),
@@ -1252,14 +1254,8 @@ fn test_prepare_llm_messages_new_messages_start_ignores_trimmed_context_injectio
 
     session.messages.push(Message::user("current turn"));
 
-    // Cap pinned to 40 (literal) — same rationale as the sibling
-    // `..._keeps_full_turn_after_trim` test: the 41-message
-    // construction above is sized to trigger trim only when the cap
-    // is at the historical default of 40. The invariants being
-    // pinned (canonical-context / memory-context injection
-    // stripped, new_messages_start points at the tail) are about
-    // the trim path, so we keep this test under trim by fixing the
-    // cap rather than scaling the construction.
+    // Cap pinned to 40 (literal) — same rationale as the sibling `..._keeps_full_turn_after_trim` test: the 41-message construction above is sized to trigger trim only when the cap is at the historical default of 40.
+    // The invariants being pinned (both injections survive the trim, new_messages_start points at the tail) are about the trim path, so we keep this test under trim by fixing the cap rather than scaling the construction.
     const TRIM_CAP: usize = 40;
     let PreparedMessages {
         messages,
@@ -1273,8 +1269,19 @@ fn test_prepare_llm_messages_new_messages_start_ignores_trimmed_context_injectio
         TRIM_CAP,
     );
 
-    assert!(messages.len() <= TRIM_CAP);
-    assert!(messages.iter().all(|msg| {
+    assert!(session.messages.len() <= TRIM_CAP);
+    // The two head injections sit on top of the trimmed history.
+    assert!(messages.len() <= TRIM_CAP + 2);
+    assert_eq!(
+        messages[0].content.text_content(),
+        "[System context — what you know about this person]\nmemory context"
+    );
+    assert_eq!(messages[1].content.text_content(), "canonical context");
+    assert_eq!(
+        messages.last().unwrap().content.text_content(),
+        "current turn"
+    );
+    assert!(session.messages.iter().all(|msg| {
         let text = msg.content.text_content();
         text != "canonical context"
             && text != "[System context — what you know about this person]\nmemory context"
@@ -1287,7 +1294,7 @@ fn test_prepare_llm_messages_new_messages_start_ignores_trimmed_context_injectio
     assert_eq!(new_messages_start, session.messages.len().saturating_sub(1));
 }
 
-/// Regression for #8131: `current_time_msg`, unlike `canonical_context_msg`
+/// Regression for #8131: `current_time_msg`, like `canonical_context_msg`
 /// and the memory-context injection, must survive `safe_trim_messages` —
 /// it exists specifically to give long/autonomous sessions (the ones most
 /// likely to get trimmed) an accurate clock. A head insertion made before

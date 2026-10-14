@@ -102,9 +102,12 @@ impl CronDeliveryEngine {
     /// Build a new engine using the given channel sender and a fresh
     /// `reqwest::Client`. A construction failure is retained and reported
     /// by webhook targets. Channel, file, and email targets remain usable.
+    ///
+    /// The client does not follow redirects; see the SECURITY note on `deliver_webhook`.
     pub fn new(channel_sender: Arc<dyn CronChannelSender>) -> Self {
         let http = reqwest::Client::builder()
             .timeout(Duration::from_secs(WEBHOOK_TIMEOUT_SECS))
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(|error| format!("HTTP client unavailable: {error}"));
         Self::with_http_client_result(channel_sender, http)
@@ -330,6 +333,9 @@ fn render_subject(template: Option<&str>, job_name: &str) -> String {
 /// (a documented TOCTOU we accept), so it duplicated the input-time check
 /// without adding real protection, and it broke unit tests that legitimately
 /// post to a `127.0.0.1:<port>` mock server via direct `engine.deliver()`.
+///
+/// Because the input-time check only ever sees the configured URL and never a redirect `Location`, every client handed to this function must disable redirects (`CronDeliveryEngine::new` and the kernel's shared fan-out client both do).
+/// A 3xx then comes back as `webhook returned HTTP 3xx` instead of being followed to an address the validator would have rejected.
 async fn deliver_webhook(
     http: &reqwest::Client,
     url: &str,
@@ -850,6 +856,42 @@ mod tests {
         );
         assert_eq!(render_subject(None, "daily"), "Cron: daily");
         assert_eq!(render_subject(Some(""), "daily"), "Cron: daily");
+    }
+
+    /// `CronDeliveryEngine::new` must not follow a redirect off the validated URL onto an internal address.
+    #[tokio::test]
+    async fn webhook_does_not_follow_redirects() {
+        use wiremock::matchers::any;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let internal = MockServer::start().await;
+        Mock::given(any())
+            .respond_with(ResponseTemplate::new(200))
+            .expect(0)
+            .mount(&internal)
+            .await;
+        let redirector = MockServer::start().await;
+        Mock::given(any())
+            .respond_with(
+                ResponseTemplate::new(307)
+                    .insert_header("Location", format!("{}/pwn", internal.uri()).as_str()),
+            )
+            .mount(&redirector)
+            .await;
+
+        let target = CronDeliveryTarget::Webhook {
+            url: format!("{}/hook", redirector.uri()),
+            auth_header: None,
+        };
+        let results = test_engine(MockSender::new())
+            .deliver(&[target], "job-redirect", "payload")
+            .await;
+
+        assert_eq!(results.len(), 1);
+        assert!(!results[0].success, "a 307 must not count as delivered");
+        let error = results[0].error.as_deref().unwrap_or("");
+        assert!(error.contains("307"), "got: {error}");
+        internal.verify().await;
     }
 
     // -- Minimal HTTP mock ---------------------------------------------------

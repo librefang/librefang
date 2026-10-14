@@ -359,7 +359,9 @@ LibreFang 维护一条 Merkle 哈希链审计轨迹，记录所有安全相关�
 
 ### GET /api/logs/stream
 
-守护进程输出的结构化日志行的 SSE 流。适用于实时仪表盘和日志追踪。
+审计日志条目的 SSE 流（连接时先发送最近 200 条，之后实时推送每条新条目）。适用于实时仪表盘和日志追踪。
+
+该流携带原始审计账本记录，因此与 `/api/audit/*` 一样仅限 Admin：低于 Admin 的调用方、匿名调用方或受信任的本地回环 / 免认证身份都会得到 `403 Forbidden`。
 
 ---
 
@@ -370,6 +372,8 @@ LibreFang 维护一条 Merkle 哈希链审计轨迹，记录所有安全相关�
 ### GET /api/usage
 
 获取整体用量统计。
+
+按 Agent 的行与 `GET /api/agents` 一样按所有者限定：低于 Admin 的调用方只能看到自己创建的 Agent。
 
 **查询参数：**
 - `period`（可选）：时间段（`hour`、`day`、`week`、`month`；默认：`day`）
@@ -521,6 +525,7 @@ curl "http://127.0.0.1:4545/api/usage/export?start_date=2026-01-01&end_date=2026
 ### GET /api/budget/agents
 
 获取按当前消费排名的 Agent 列表。
+低于 Admin 的调用方只能看到自己创建的 Agent。
 
 **响应** `200 OK`：
 
@@ -538,6 +543,7 @@ curl "http://127.0.0.1:4545/api/usage/export?start_date=2026-01-01&end_date=2026
 ### GET /api/budget/agents/&lbrace;id&rbrace;
 
 获取指定 Agent 的预算状态和消费详情。
+低于 Admin 的调用方请求非自己创建的 Agent 时得到 `404 Not Found`。
 
 ### PUT /api/budget/agents/&lbrace;id&rbrace;
 
@@ -789,6 +795,9 @@ Token 内省端点。验证并返回 OAuth 访问令牌的元数据。
 ## 审批端点
 
 人机协作审批工作流。Agent 在执行敏感操作前可以请求审批。
+
+审批与 Agent 路由一样按所有者限定：低于 Admin 的调用方只能列出、读取和处理自己创建的 Agent 发起的审批，其他用户的审批与不存在的审批一样返回 `404 Not Found`。
+通过 API 做出的决定会把已认证调用方的名字记录为 `decided_by`。
 
 ### GET /api/approvals
 

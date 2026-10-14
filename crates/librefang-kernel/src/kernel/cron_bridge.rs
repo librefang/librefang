@@ -66,11 +66,16 @@ static FAN_OUT_HTTP_CLIENT: OnceLock<Result<reqwest::Client, String>> = OnceLock
 /// `CronDelivery::Webhook`) uses the same helper; the fan-out path used to
 /// drift to a bare `reqwest::Client::builder()` (no proxy, no CA fallback,
 /// no UA) which was a silent regression vs. the legacy delivery.
+///
+/// Redirects are disabled.
+/// The only SSRF guard on cron webhook URLs is `validate_webhook_url`, which checks the URL the job was created with and never a redirect `Location`, so following a 3xx would let any receiver (or open redirector) pivot the daemon's POST to loopback or a cloud-metadata address.
+/// A 3xx therefore surfaces as a delivery failure, the same as on the API webhook test-send client.
 fn build_fan_out_http_client_from(
     builder: reqwest::ClientBuilder,
 ) -> Result<reqwest::Client, String> {
     builder
         .timeout(Duration::from_secs(FAN_OUT_WEBHOOK_TIMEOUT_SECS))
+        .redirect(reqwest::redirect::Policy::none())
         .build()
         .map_err(|error| format!("HTTP client unavailable for cron fan-out: {error}"))
 }
@@ -177,19 +182,26 @@ pub(super) async fn cron_fan_out_targets(
     }
 }
 
+/// POST the legacy single-destination webhook payload.
+///
+/// A non-2xx status is an error, matching `cron_delivery::deliver_webhook` on the fan-out path, so a receiver that starts answering 401 / 500 (or a refused 3xx redirect) is logged at warn level instead of being reported as delivered.
 async fn post_legacy_webhook(
     client: Result<reqwest::Client, String>,
     url: &str,
     payload: &serde_json::Value,
 ) -> Result<reqwest::StatusCode, String> {
     let client = client?;
-    client
+    let status = client
         .post(url)
         .json(payload)
         .send()
         .await
-        .map(|response| response.status())
-        .map_err(|error| error.to_string())
+        .map_err(|error| error.to_string())?
+        .status();
+    if !status.is_success() {
+        return Err(format!("webhook returned HTTP {status}"));
+    }
+    Ok(status)
 }
 
 /// Deliver a cron job's agent response to the configured delivery target.
@@ -332,6 +344,82 @@ mod tests {
         .expect_err("cached client failure must be returned");
 
         assert!(error.contains("simulated build failure"));
+    }
+
+    #[tokio::test]
+    async fn legacy_webhook_non_2xx_is_error() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+        let client = build_fan_out_http_client_from(reqwest::Client::builder().no_proxy());
+        let error = post_legacy_webhook(
+            client,
+            &format!("{}/hook", server.uri()),
+            &serde_json::json!({"response": "x"}),
+        )
+        .await
+        .expect_err("a 500 must not be reported as delivered");
+        assert!(error.contains("500"), "got: {error}");
+    }
+
+    #[tokio::test]
+    async fn legacy_webhook_2xx_is_ok() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(204))
+            .mount(&server)
+            .await;
+        let client = build_fan_out_http_client_from(reqwest::Client::builder().no_proxy());
+        let status = post_legacy_webhook(
+            client,
+            &format!("{}/hook", server.uri()),
+            &serde_json::json!({"response": "x"}),
+        )
+        .await
+        .expect("a 204 is a successful delivery");
+        assert_eq!(status, reqwest::StatusCode::NO_CONTENT);
+    }
+
+    /// The input-time SSRF check only sees the configured URL, so the delivery client must not follow a redirect to an address that check would have blocked.
+    /// Built from a plain `no_proxy()` builder rather than `proxied_client_builder()` so neither the global proxy config nor a proxy env var can route the request away from the local mock servers.
+    #[tokio::test]
+    async fn fan_out_http_client_does_not_follow_redirects() {
+        use wiremock::matchers::any;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let internal = MockServer::start().await;
+        Mock::given(any())
+            .respond_with(ResponseTemplate::new(200))
+            .expect(0)
+            .mount(&internal)
+            .await;
+        let redirector = MockServer::start().await;
+        Mock::given(any())
+            .respond_with(
+                ResponseTemplate::new(307)
+                    .insert_header("Location", format!("{}/secret", internal.uri()).as_str()),
+            )
+            .mount(&redirector)
+            .await;
+
+        let client = build_fan_out_http_client_from(reqwest::Client::builder().no_proxy());
+        let error = post_legacy_webhook(
+            client,
+            &format!("{}/hook", redirector.uri()),
+            &serde_json::json!({"response": "x"}),
+        )
+        .await
+        .expect_err("a refused redirect must surface as a delivery failure");
+        assert!(error.contains("307"), "got: {error}");
+        internal.verify().await;
     }
 
     /// `shared_fan_out_http_client` must hand back a `reqwest::Client` that

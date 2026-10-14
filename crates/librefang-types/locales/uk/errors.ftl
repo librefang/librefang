@@ -46,6 +46,7 @@ api-error-manifest-too-large = Маніфест занадто великий (�
 api-error-manifest-invalid-format = Недійсний формат маніфесту
 api-error-manifest-signature-mismatch = Підписаний вміст маніфесту не відповідає manifest_toml
 api-error-manifest-signature-failed = Помилка перевірки підпису маніфесту
+api-error-manifest-signed-template-conflict = signed_manifest не можна поєднувати з template; підпишіть вбудований manifest_toml
 api-error-manifest-invalid = Недійсний маніфест: { $error }
 
 # Auth errors
@@ -271,6 +272,8 @@ api-error-job-disappeared-complete = Таска зникла після заве
 # Task errors
 api-error-task-not-found = Таску не знайдено
 api-error-task-disappeared = Таска зникла
+api-error-task-not-retryable = Таска не в стані, що дозволяє повтор (має бути завершена або невдала)
+api-error-task-transition-not-allowed = Перехід статусу таски з поточного стану не дозволено
 
 # Pairing errors
 api-error-pairing-not-enabled = Пейринг не увімкнений
@@ -323,3 +326,4 @@ api-error-rate-limited = Перевищено ліміт запитів. Спр�
 # typed MemoryRouteError-style helper. Without this key, every `t_args("api-error-generic", …)`
 # call returns the literal key as the response body and `$error` interpolation never runs.
 api-error-generic = Помилка: { $error }
+api-error-agent-manifest-conflict = Застарілий маніфест: хтось зберіг цього агента після вашого завантаження. Перезавантажте та застосуйте зміну ще раз.

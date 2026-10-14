@@ -9,6 +9,10 @@
 //! sent as the message body.
 //!
 //! Processed files are moved to `inbox/processed/` to avoid redelivery.
+//!
+//! A file is picked up only once its mtime has been stable for `SETTLE_WINDOW` (about 2 s), so a file still being written (a `cp` of a large file, a shell `>` redirect) is not dispatched truncated or archived as empty.
+//! Hidden files (names starting with `.`) are ignored, since editors and rsync write through hidden temp names.
+//! For fully atomic delivery, write under a non-text or hidden temp name (for example `report.txt.tmp`) and rename into place.
 
 use crate::kernel::LibreFangKernel;
 use librefang_types::config::InboxConfig;
@@ -19,6 +23,11 @@ use tracing::{debug, info, warn};
 
 /// Maximum file size we will read (1 MB).
 const MAX_FILE_SIZE: u64 = 1_048_576;
+
+/// How long a file's mtime must stay unchanged before the watcher reads it.
+///
+/// Without it, a poll tick landing mid-write read a partial file (or the empty file a shell `>` redirect creates first), dispatched it, and renamed it into `processed/` while the writer kept appending to the moved inode.
+const SETTLE_WINDOW: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// Status snapshot returned by the `/api/inbox/status` endpoint.
 #[derive(Debug, Clone, serde::Serialize)]
@@ -180,11 +189,27 @@ pub fn start_inbox_watcher(kernel: Arc<LibreFangKernel>) {
                     continue;
                 }
 
-                // Skip files that are too large
+                // Skip hidden files: editors and rsync write through hidden temp names.
+                if path
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .is_some_and(is_hidden_filename)
+                {
+                    continue;
+                }
+
                 let metadata = match tokio::fs::metadata(&path).await {
                     Ok(m) => m,
                     Err(_) => continue,
                 };
+
+                // Defer files that are still being written; not marking them in-flight means the next tick re-examines them.
+                if !is_settled(metadata.modified().ok(), std::time::SystemTime::now()) {
+                    debug!(path = %path.display(), "Inbox: file modified recently, deferring until writes settle");
+                    continue;
+                }
+
+                // Skip files that are too large
                 if metadata.len() > MAX_FILE_SIZE {
                     warn!(
                         path = %path.display(),
@@ -510,6 +535,21 @@ fn is_quarantine_filename(name: &str) -> bool {
     }
 }
 
+/// Whether a file last modified at `modified` has been quiet for at least [`SETTLE_WINDOW`].
+///
+/// A missing mtime (platform without support) counts as settled, and so does an mtime in the future (clock skew, timestamps preserved by `cp -p`), so neither case can starve a file forever.
+fn is_settled(modified: Option<std::time::SystemTime>, now: std::time::SystemTime) -> bool {
+    match modified.map(|m| now.duration_since(m)) {
+        Some(Ok(age)) => age >= SETTLE_WINDOW,
+        Some(Err(_)) | None => true,
+    }
+}
+
+/// Hidden files are never dispatched or counted as pending.
+fn is_hidden_filename(name: &str) -> bool {
+    name.starts_with('.')
+}
+
 /// Heuristic to identify text files by extension.
 fn is_text_file(path: &Path) -> bool {
     match path.extension().and_then(|e| e.to_str()) {
@@ -557,7 +597,12 @@ fn count_text_files(dir: &Path) -> usize {
             .filter_map(|e| e.ok())
             .filter(|e| {
                 let path = e.path();
-                path.is_file() && is_text_file(&path)
+                path.is_file()
+                    && is_text_file(&path)
+                    && !path
+                        .file_name()
+                        .and_then(|s| s.to_str())
+                        .is_some_and(is_hidden_filename)
             })
             .count(),
         Err(_) => 0,
@@ -567,6 +612,47 @@ fn count_text_files(dir: &Path) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn is_settled_defers_recently_modified_files() {
+        let now = std::time::SystemTime::now();
+        assert!(!is_settled(Some(now), now));
+        assert!(!is_settled(
+            Some(now - std::time::Duration::from_millis(500)),
+            now
+        ));
+        assert!(is_settled(
+            Some(now - std::time::Duration::from_secs(10)),
+            now
+        ));
+        // A future mtime must not starve the file forever.
+        assert!(is_settled(
+            Some(now + std::time::Duration::from_secs(60)),
+            now
+        ));
+        assert!(is_settled(None, now));
+    }
+
+    #[test]
+    fn freshly_created_file_is_not_settled() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("daily_errors.txt");
+        // What a shell `>` redirect leaves before the producer writes anything.
+        std::fs::write(&p, "").unwrap();
+        let modified = std::fs::metadata(&p).unwrap().modified().ok();
+        assert!(!is_settled(modified, std::time::SystemTime::now()));
+    }
+
+    #[test]
+    fn hidden_files_are_not_counted_as_pending() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("task.txt"), "hi").unwrap();
+        std::fs::write(dir.path().join(".task.txt.swp"), "x").unwrap();
+        std::fs::write(dir.path().join(".DS_Store"), "x").unwrap();
+        assert_eq!(count_text_files(dir.path()), 1);
+        assert!(is_hidden_filename(".DS_Store"));
+        assert!(!is_hidden_filename("task.txt"));
+    }
 
     #[test]
     fn test_parse_inbox_file_with_agent_directive() {

@@ -488,6 +488,47 @@ async fn add_custom_model_then_get_then_delete_round_trips() {
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
+/// Deleting a custom model must recompute the provider's `model_count`, as adding one does; before, the provider tile kept reporting the deleted model until restart.
+#[tokio::test(flavor = "multi_thread")]
+async fn delete_custom_model_updates_provider_model_count() {
+    let h = boot();
+
+    let (status, _body) = json_request(
+        &h,
+        Method::POST,
+        "/api/models/custom",
+        Some(serde_json::json!({
+            "id": "test-custom-count",
+            "provider": "openai",
+            "context_window": 64_000,
+            "max_output_tokens": 4_096,
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    let (status, body) = json_request(&h, Method::GET, "/api/providers/openai", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let with_custom = body["model_count"].as_u64().expect("model_count");
+
+    let (status, _body) = json_request(
+        &h,
+        Method::DELETE,
+        "/api/models/custom/test-custom-count",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    let (status, body) = json_request(&h, Method::GET, "/api/providers/openai", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body["model_count"].as_u64().expect("model_count"),
+        with_custom - 1,
+        "model_count must drop after the custom model is deleted"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // #7957 — a custom model's vision support is reported as declared or unknown,
 // never as a guess presented as a fact

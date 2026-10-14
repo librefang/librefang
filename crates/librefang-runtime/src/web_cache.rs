@@ -1,11 +1,15 @@
 //! In-memory TTL cache for web search and fetch results.
 //!
-//! Thread-safe via `DashMap`. Lazy eviction on `get()` — expired entries
-//! are only cleaned up when accessed. A `Duration::ZERO` TTL disables
-//! caching entirely (zero-cost passthrough).
+//! Thread-safe via `DashMap`.
+//! Expired entries are evicted lazily on `get()` for the key being read, and every `SWEEP_EVERY` inserts `put()` also sweeps the whole map, so entries whose key is never requested again are still reclaimed once their TTL passes.
+//! A `Duration::ZERO` TTL disables caching entirely (zero-cost passthrough).
 
 use dashmap::DashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
+
+/// Number of `put()` calls between full sweeps of expired entries.
+const SWEEP_EVERY: u64 = 64;
 
 /// A cached entry with its insertion timestamp.
 struct CacheEntry {
@@ -17,6 +21,8 @@ struct CacheEntry {
 pub struct WebCache {
     entries: DashMap<String, CacheEntry>,
     ttl: Duration,
+    /// Insert counter that schedules the periodic sweep in `put()`.
+    puts: AtomicU64,
 }
 
 impl WebCache {
@@ -25,6 +31,7 @@ impl WebCache {
         Self {
             entries: DashMap::new(),
             ttl,
+            puts: AtomicU64::new(0),
         }
     }
 
@@ -50,6 +57,7 @@ impl WebCache {
     }
 
     /// Store a value in the cache. No-op if TTL is zero.
+    /// Every `SWEEP_EVERY` inserts this also evicts all expired entries.
     pub fn put(&self, key: String, value: String) {
         if self.ttl.is_zero() {
             return;
@@ -61,9 +69,13 @@ impl WebCache {
                 inserted_at: Instant::now(),
             },
         );
+        // No entry guard is held here, and `retain` locks one shard at a time, so sweeping cannot deadlock.
+        if self.puts.fetch_add(1, Ordering::Relaxed) % SWEEP_EVERY == SWEEP_EVERY - 1 {
+            self.evict_expired();
+        }
     }
 
-    /// Remove all expired entries. Called periodically or on demand.
+    /// Remove all expired entries. Called from `put()` every `SWEEP_EVERY` inserts, or on demand.
     pub fn evict_expired(&self) {
         self.entries
             .retain(|_, entry| entry.inserted_at.elapsed() <= self.ttl);
@@ -148,6 +160,27 @@ mod tests {
         cache.evict_key_if_expired("key1");
 
         assert_eq!(cache.get("key1"), Some("fresh".to_string()));
+    }
+
+    #[test]
+    fn put_sweeps_expired_entries_without_get() {
+        let cache = WebCache::new(Duration::from_secs(60));
+        for i in 0..100 {
+            cache.put(format!("stale-{i}"), "x".to_string());
+        }
+        for mut entry in cache.entries.iter_mut() {
+            entry.inserted_at = Instant::now() - Duration::from_secs(61);
+        }
+        // These keys are distinct and never read back with get(), so only a sweep inside put() can reclaim the stale ones.
+        for i in 0..SWEEP_EVERY {
+            cache.put(format!("fresh-{i}"), "y".to_string());
+        }
+        assert!(
+            cache.len() <= SWEEP_EVERY as usize,
+            "expired entries were not swept: len={}",
+            cache.len()
+        );
+        assert!(cache.entries.iter().all(|e| e.key().starts_with("fresh-")));
     }
 
     #[test]

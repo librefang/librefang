@@ -95,6 +95,7 @@ pub async fn task_queue_status(
             let mut in_progress = 0u64;
             let mut completed = 0u64;
             let mut failed = 0u64;
+            let mut cancelled = 0u64;
             let mut total = 0u64;
             for (status, count) in &counts {
                 total += count;
@@ -103,6 +104,8 @@ pub async fn task_queue_status(
                     "in_progress" => in_progress += count,
                     "completed" => completed += count,
                     "failed" => failed += count,
+                    // Written by `PATCH /api/tasks/{id}` and by TTL expiry of stale pending tasks, so it is a normal terminal status, not drift.
+                    "cancelled" => cancelled += count,
                     unknown => {
                         // Still reported, but once per status rather than once per row — the old warning named the offending task id, which a `GROUP BY` cannot carry.
                         // The count is the more useful half: it says how far the drift has spread.
@@ -122,6 +125,7 @@ pub async fn task_queue_status(
                     "in_progress": in_progress,
                     "completed": completed,
                     "failed": failed,
+                    "cancelled": cancelled,
                 })),
             )
         }
@@ -194,25 +198,32 @@ pub async fn task_queue_retry(
             Json(serde_json::json!({"status": "retried", "id": id})),
         ),
         Ok(false) => match state.kernel.task_get(&id).await {
-            Ok(Some(_)) => {
-                retry_not_applied_response(true, err_task_not_found, err_task_not_retryable)
-            }
-            Ok(None) => {
-                retry_not_applied_response(false, err_task_not_found, err_task_not_retryable)
-            }
+            Ok(Some(_)) => guarded_update_not_applied_response(
+                true,
+                err_task_not_found,
+                err_task_not_retryable,
+            ),
+            Ok(None) => guarded_update_not_applied_response(
+                false,
+                err_task_not_found,
+                err_task_not_retryable,
+            ),
             Err(e) => map_kernel_op_err(e).into_json_tuple(),
         },
         Err(e) => map_kernel_op_err(e).into_json_tuple(),
     }
 }
 
-fn retry_not_applied_response(
+/// Map a guarded UPDATE that matched zero rows: 409 when the task exists but its current state forbids the change, 404 when it is gone.
+///
+/// The substrate returns `false` for both cases, so callers re-read with `task_get` to tell them apart.
+fn guarded_update_not_applied_response(
     task_exists: bool,
     not_found: String,
-    not_retryable: String,
+    not_allowed: String,
 ) -> (StatusCode, Json<serde_json::Value>) {
     if task_exists {
-        ApiErrorResponse::conflict(not_retryable).into_json_tuple()
+        ApiErrorResponse::conflict(not_allowed).into_json_tuple()
     } else {
         ApiErrorResponse::not_found(not_found).into_json_tuple()
     }
@@ -413,15 +424,20 @@ pub async fn task_queue_get(
 /// - `pending`: resets a failed task so it can be re-claimed; active tasks
 ///   must not be re-queued because that can cause duplicate execution
 /// - `cancelled`: cancels a pending/in_progress task
+///
+/// A transition the task's current state does not allow (for example `pending` on a completed task, or `cancelled` on an already-cancelled one) answers 409 Conflict; 404 is reserved for an id that does not exist.
 pub async fn task_queue_patch(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
     lang: Option<axum::Extension<RequestLanguage>>,
     Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
-    let err_not_found = {
+    let (err_not_found, err_transition) = {
         let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
-        t.t("api-error-task-not-found")
+        (
+            t.t("api-error-task-not-found"),
+            t.t("api-error-task-transition-not-allowed"),
+        )
     };
     let new_status = match body["status"].as_str() {
         Some(s @ ("pending" | "cancelled")) => s.to_string(),
@@ -445,14 +461,18 @@ pub async fn task_queue_patch(
             StatusCode::OK,
             Json(serde_json::json!({"id": id, "status": new_status})),
         ),
-        Ok(false) => ApiErrorResponse::not_found(err_not_found).into_json_tuple(),
+        Ok(false) => match state.kernel.task_get(&id).await {
+            Ok(Some(_)) => guarded_update_not_applied_response(true, err_not_found, err_transition),
+            Ok(None) => guarded_update_not_applied_response(false, err_not_found, err_transition),
+            Err(e) => map_kernel_op_err(e).into_json_tuple(),
+        },
         Err(e) => map_kernel_op_err(e).into_json_tuple(),
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_page_param, resolve_task_creator, retry_not_applied_response};
+    use super::{guarded_update_not_applied_response, parse_page_param, resolve_task_creator};
     use crate::middleware::{AuthenticatedApiUser, UserRole};
     use axum::http::StatusCode;
     use librefang_types::agent::UserId;
@@ -470,12 +490,18 @@ mod tests {
 
     #[test]
     fn retry_false_distinguishes_missing_from_active_task() {
-        let (status, _) =
-            retry_not_applied_response(false, "missing".to_string(), "not retryable".to_string());
+        let (status, _) = guarded_update_not_applied_response(
+            false,
+            "missing".to_string(),
+            "not retryable".to_string(),
+        );
         assert_eq!(status, StatusCode::NOT_FOUND);
 
-        let (status, _) =
-            retry_not_applied_response(true, "missing".to_string(), "not retryable".to_string());
+        let (status, _) = guarded_update_not_applied_response(
+            true,
+            "missing".to_string(),
+            "not retryable".to_string(),
+        );
         assert_eq!(status, StatusCode::CONFLICT);
     }
 

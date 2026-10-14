@@ -1852,10 +1852,14 @@ async fn goal_run_resume_keeps_the_paused_runs_iteration_cap() {
         Some(100),
         "a resumed run must keep the cap it was started with, not the compiled default: {body:?}"
     );
-    assert_eq!(
-        body["run"]["iteration"].as_u64(),
-        Some(30),
-        "the resumed run must carry the checkpoint's iteration count: {body:?}"
+    // The loop is spawned before the route reads the run back, so its first tick can already have been dispatched (and failed, the agent does not exist), advancing the count past the checkpoint's 30.
+    // What must never happen is a reset: a resume that dropped the checkpoint's count would report 0 here, or at most the few ticks dispatched since.
+    let iteration = body["run"]["iteration"]
+        .as_u64()
+        .unwrap_or_else(|| panic!("the resumed run must report its iteration count: {body:?}"));
+    assert!(
+        iteration >= 30,
+        "the resumed run must carry the checkpoint's iteration count, not restart from 0: {body:?}"
     );
 
     json_request(&h, Method::POST, &format!("/api/goals/{id}/stop"), None).await;

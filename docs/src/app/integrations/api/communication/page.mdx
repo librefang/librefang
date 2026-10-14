@@ -359,7 +359,9 @@ Security status overview showing the state of all 16 security systems.
 
 ### GET /api/logs/stream
 
-SSE stream of structured log lines emitted by the daemon. Useful for live dashboards and log tailing.
+SSE stream of audit log entries (the last 200 on connect, then every new entry live). Useful for live dashboards and log tailing.
+
+The stream carries raw audit ledger rows, so it is Admin-only exactly like `/api/audit/*`: a caller below Admin, an anonymous caller, or the trusted loopback / no-auth identity gets `403 Forbidden`.
 
 ---
 
@@ -370,6 +372,8 @@ Track token usage, costs, and model utilization across all agents. Powered by th
 ### GET /api/usage
 
 Get overall usage statistics.
+
+Per-agent rows are owner-scoped like `GET /api/agents`: a caller below Admin only sees agents it authored.
 
 **Query Parameters:**
 - `period` (optional): Time period (`hour`, `day`, `week`, `month`; default: `day`)
@@ -521,6 +525,7 @@ Update global budget limits.
 ### GET /api/budget/agents
 
 Get a ranked list of agents by their current spending.
+A caller below Admin only sees agents it authored.
 
 **Response** `200 OK`:
 
@@ -538,6 +543,7 @@ Get a ranked list of agents by their current spending.
 ### GET /api/budget/agents/&lbrace;id&rbrace;
 
 Get budget status and spending detail for a specific agent.
+A caller below Admin gets `404 Not Found` for an agent it did not author.
 
 ### PUT /api/budget/agents/&lbrace;id&rbrace;
 
@@ -789,6 +795,9 @@ Dispatch a task via the comms layer (routed to the appropriate agent).
 ## Approvals Endpoints
 
 Human-in-the-loop approval workflow. Agents can request approval before executing sensitive actions.
+
+Approvals are owner-scoped like the agent routes: a caller below Admin only lists, reads and decides approvals raised by agents it authored, and another user's approval answers `404 Not Found` exactly like a missing one.
+Decisions made over the API record the authenticated caller's name as `decided_by`.
 
 ### GET /api/approvals
 

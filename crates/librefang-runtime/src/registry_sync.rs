@@ -8,6 +8,7 @@
 //! if the HTTP download fails, for users behind proxies that block GitHub
 //! archive downloads.
 
+use librefang_types::config::redact_proxy_url;
 use sha2::{Digest, Sha256};
 use std::path::Path;
 use std::process::Command;
@@ -598,6 +599,57 @@ fn git_network() -> Command {
     command
 }
 
+/// Whether `url` has the shape LibreFang itself generates for the registry clone: an http(s) URL, optionally mirror-prefixed, ending in the upstream repo path.
+///
+/// Anything else (an SSH remote, a fork under another owner or repo name) was set by hand for private-fork use and must be left alone.
+fn is_generated_registry_origin(url: &str) -> bool {
+    (url.starts_with("https://") || url.starts_with("http://"))
+        && url.ends_with(&format!("/{REGISTRY_REPO_PATH}.git"))
+}
+
+/// Point an existing checkout's `origin` at `repo_url` when the current origin is one LibreFang generated and differs from it.
+///
+/// Without this, changing `registry_host` or `registry_mirror` after the first clone has no effect on machines with git: every sync keeps fetching from the original origin.
+/// A hand-set origin (see [`is_generated_registry_origin`]) is kept, so private-fork checkouts keep working.
+fn repoint_generated_origin(
+    registry_cache: &Path,
+    repo_url: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let output = Command::new("git")
+        .args(["remote", "get-url", "origin"])
+        .current_dir(registry_cache)
+        .output()?;
+    if !output.status.success() {
+        return Err(format!("git remote get-url origin exited with {}", output.status).into());
+    }
+    let current = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if current == repo_url {
+        return Ok(());
+    }
+    if !is_generated_registry_origin(&current) {
+        tracing::debug!(
+            origin = %redact_proxy_url(&current),
+            configured = %redact_proxy_url(repo_url),
+            "registry checkout has a custom origin; leaving it as is"
+        );
+        return Ok(());
+    }
+    let status = Command::new("git")
+        .args(["remote", "set-url", "origin", repo_url])
+        .current_dir(registry_cache)
+        .status()?;
+    if !status.success() {
+        return Err(format!("git remote set-url exited with {status}").into());
+    }
+    // A private forge URL can carry `user:token@`, so redact before logging.
+    tracing::info!(
+        old = %redact_proxy_url(&current),
+        new = %redact_proxy_url(repo_url),
+        "registry checkout origin re-pointed to the configured host"
+    );
+    Ok(())
+}
+
 /// Fallback: clone the registry using git (for environments where HTTP tarball
 /// download fails but git is available).
 fn git_clone_fallback(
@@ -607,7 +659,11 @@ fn git_clone_fallback(
 ) -> Result<(), Box<dyn std::error::Error>> {
     tracing::info!("Attempting git clone fallback");
 
+    let repo_url = apply_mirror(registry_mirror, &registry_urls(registry_host).clone_url);
+
     if registry_cache.join(".git").exists() {
+        // An existing checkout keeps the origin it was cloned from, so re-point it when `registry_host` / `registry_mirror` changed since then.
+        repoint_generated_origin(registry_cache, &repo_url)?;
         // Already a git repo — fetch and reset to origin/main so that a
         // detached HEAD or local branch can never stall the sync.
         let fetch_ok = git_network()
@@ -631,7 +687,6 @@ fn git_clone_fallback(
         if registry_cache.exists() {
             std::fs::remove_dir_all(registry_cache)?;
         }
-        let repo_url = apply_mirror(registry_mirror, &registry_urls(registry_host).clone_url);
         let status = git_network()
             .args([
                 "clone",
@@ -1127,6 +1182,86 @@ fn copy_dir_recursive(src: &Path, dest: &Path) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn git_origin(dir: &Path) -> String {
+        let out = Command::new("git")
+            .args(["remote", "get-url", "origin"])
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    /// Init a local repo with `origin` set to `url`, or `None` when no `git` binary is available.
+    fn repo_with_origin(url: &str) -> Option<tempfile::TempDir> {
+        if Command::new("git").arg("--version").output().is_err() {
+            return None;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        assert!(Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(dir.path())
+            .status()
+            .unwrap()
+            .success());
+        assert!(Command::new("git")
+            .args(["remote", "add", "origin", url])
+            .current_dir(dir.path())
+            .status()
+            .unwrap()
+            .success());
+        Some(dir)
+    }
+
+    #[test]
+    fn generated_origin_shape_detection() {
+        assert!(is_generated_registry_origin(
+            "https://github.com/librefang/librefang-registry.git"
+        ));
+        assert!(is_generated_registry_origin(
+            "https://ghproxy.cn/https://github.com/librefang/librefang-registry.git"
+        ));
+        assert!(is_generated_registry_origin(
+            "https://codeberg.org/librefang/librefang-registry.git"
+        ));
+        assert!(!is_generated_registry_origin(
+            "git@github.com:librefang/librefang-registry.git"
+        ));
+        assert!(!is_generated_registry_origin(
+            "https://github.com/me/librefang-registry.git"
+        ));
+        assert!(!is_generated_registry_origin(
+            "https://github.com/librefang/my-registry-fork.git"
+        ));
+    }
+
+    /// Switching `registry_host` after the first clone must re-point a LibreFang-generated origin, or every later sync keeps fetching the old host.
+    #[test]
+    fn existing_checkout_origin_follows_registry_host_change() {
+        let github = registry_urls(None).clone_url;
+        let Some(repo) = repo_with_origin(&github) else {
+            return;
+        };
+        let codeberg = registry_urls(Some("https://codeberg.org")).clone_url;
+        repoint_generated_origin(repo.path(), &codeberg).unwrap();
+        assert_eq!(git_origin(repo.path()), codeberg);
+
+        let mirrored = apply_mirror("https://ghproxy.cn", &github);
+        repoint_generated_origin(repo.path(), &mirrored).unwrap();
+        assert_eq!(git_origin(repo.path()), mirrored);
+    }
+
+    /// A hand-set private-fork origin must survive a sync.
+    #[test]
+    fn existing_checkout_custom_origin_is_left_alone() {
+        let custom = "git@github.com:me/librefang-registry.git";
+        let Some(repo) = repo_with_origin(custom) else {
+            return;
+        };
+        let codeberg = registry_urls(Some("https://codeberg.org")).clone_url;
+        repoint_generated_origin(repo.path(), &codeberg).unwrap();
+        assert_eq!(git_origin(repo.path()), custom);
+    }
 
     /// The fan-out must reach the agent-type pre-install through the shared resolver, not its own `join("agents")`, so a missing directory is reported once rather than skipping the block in silence (#7767).
     ///

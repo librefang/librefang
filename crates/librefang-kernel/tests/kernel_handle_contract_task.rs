@@ -147,3 +147,66 @@ async fn test_task_post_with_no_assignment() {
         "expected null or empty created_by, got: {created:?}"
     );
 }
+
+/// Only the agent holding the claim may complete a task: another agent's `task_complete` is a `Conflict`, leaves the row in progress, and does not fire `TaskCompleted` with a forged result.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_task_complete_rejects_non_claimer() {
+    let (kernel, _tmp) = boot();
+    let kh: &dyn KernelHandle = &kernel;
+
+    let (claimer, _) = kh
+        .spawn_agent(minimal_manifest_toml(), None)
+        .await
+        .expect("spawn claimer failed");
+    let (intruder, _) = kh
+        .spawn_agent(
+            &minimal_manifest_toml().replace("task-agent", "task-intruder"),
+            None,
+        )
+        .await
+        .expect("spawn intruder failed");
+    assert_ne!(claimer, intruder);
+
+    let task_id = kh
+        .task_post(
+            "title",
+            "desc",
+            Some(&claimer),
+            None,
+            &librefang_kernel_handle::TaskPostOptions::default(),
+        )
+        .await
+        .expect("task_post failed");
+    kh.task_claim(&claimer).await.expect("task_claim failed");
+
+    let err = kh
+        .task_complete(&intruder, &task_id, "forged")
+        .await
+        .expect_err("a non-claimer must not complete the task");
+    assert!(
+        matches!(err, librefang_kernel_handle::KernelOpError::Conflict(_)),
+        "expected Conflict, got {err:?}"
+    );
+    let task = kh
+        .task_get(&task_id)
+        .await
+        .expect("task_get failed")
+        .expect("task not found");
+    assert_eq!(task["status"].as_str().unwrap(), "in_progress");
+    assert_ne!(
+        task["result"].as_str(),
+        Some("forged"),
+        "result must be untouched: {task}"
+    );
+
+    kh.task_complete(&claimer, &task_id, "real")
+        .await
+        .expect("claimer completes");
+    let task = kh
+        .task_get(&task_id)
+        .await
+        .expect("task_get failed")
+        .expect("task not found");
+    assert_eq!(task["status"].as_str().unwrap(), "completed");
+    assert_eq!(task["result"].as_str().unwrap(), "real");
+}

@@ -996,3 +996,57 @@ async fn logs_stream_level_info_keeps_successful_actions_including_agent_kill() 
         "a successful kill is a deliberate action, not a warning, and the failed ToolInvoke between them is filtered out"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Loopback attribution with Argon2id per-user keys (auth middleware)
+// ---------------------------------------------------------------------------
+
+/// Send a GET that looks like it arrived from a loopback TCP peer, which is what routes it through the auth middleware's loopback attribution block.
+async fn send_get_loopback(app: Router, path: &str, bearer: &str) -> StatusCode {
+    let mut req = Request::builder()
+        .method(Method::GET)
+        .uri(path)
+        .header("authorization", format!("Bearer {bearer}"))
+        .body(Body::empty())
+        .expect("build request");
+    req.extensions_mut()
+        .insert(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+            [127, 0, 0, 1],
+            40_000,
+        ))));
+    app.oneshot(req).await.expect("oneshot").status()
+}
+
+/// The loopback block now checks the master key before scanning the per-user table and hands its per-user scan result to the main token-check path instead of verifying twice.
+/// Both paths must still agree: an Argon2id per-user key is admitted with its own role (admin passes the in-handler gate, viewer is refused), the master key is admitted as root, and garbage is rejected.
+#[tokio::test(flavor = "multi_thread")]
+async fn loopback_argon2_user_key_and_master_key_are_attributed_correctly() {
+    let h = build_audit_harness(
+        "master-key",
+        vec![
+            ("Alice", "admin", AUDIT_ADMIN_KEY),
+            ("Victor", "viewer", "victor-viewer-key"),
+        ],
+    );
+
+    assert_eq!(
+        send_get_loopback(h.app.clone(), "/api/audit/recent", AUDIT_ADMIN_KEY).await,
+        StatusCode::OK,
+        "loopback admin per-user key must be admitted with its admin role"
+    );
+    assert_eq!(
+        send_get_loopback(h.app.clone(), "/api/audit/recent", "victor-viewer-key").await,
+        StatusCode::FORBIDDEN,
+        "loopback viewer per-user key must keep its viewer role"
+    );
+    assert_eq!(
+        send_get_loopback(h.app.clone(), "/api/audit/recent", "master-key").await,
+        StatusCode::OK,
+        "loopback master key must still be admitted as root"
+    );
+    assert_eq!(
+        send_get_loopback(h.app.clone(), "/api/audit/recent", "garbage").await,
+        StatusCode::UNAUTHORIZED,
+        "an unknown bearer must be rejected"
+    );
+}

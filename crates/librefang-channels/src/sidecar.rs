@@ -1104,11 +1104,20 @@ async fn spawn_once(
         .get("PYTHONPATH")
         .cloned()
         .or_else(|| std::env::var("PYTHONPATH").ok());
-    if let Some(composed) = crate::embedded_sdk::pythonpath_with_embedded(
-        &ctx.command,
-        &ctx.home_dir,
-        existing_pythonpath.as_deref(),
-    ) {
+    // The probe spawns and waits on the interpreter and may extract the embedded tree to disk, so it runs on the blocking pool rather than parking a runtime worker.
+    let composed_pythonpath = {
+        let command = ctx.command.clone();
+        let home_dir = ctx.home_dir.clone();
+        tokio::task::spawn_blocking(move || {
+            crate::embedded_sdk::pythonpath_with_embedded(
+                &command,
+                &home_dir,
+                existing_pythonpath.as_deref(),
+            )
+        })
+        .await?
+    };
+    if let Some(composed) = composed_pythonpath {
         env_map.insert("PYTHONPATH".to_string(), composed);
     }
     apply_spawn_env(&mut cmd, &spawn_env.withheld, &env_map);

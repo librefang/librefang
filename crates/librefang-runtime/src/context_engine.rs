@@ -363,6 +363,7 @@ pub trait ContextEngine: Send + Sync {
     /// configured LLM model name. `context_window_tokens` is the
     /// **current agent's** model context size so compaction uses the
     /// correct window, not the boot-time default.
+    /// `reasoning_echo_policy` is the catalog policy for `model`; an engine that rewrites kept messages must not strip reasoning blocks when it is `Echo`, because those providers reject a history without them (#4842).
     /// The default implementation uses LLM-based compaction with 3
     /// strategies (single-pass, chunked, fallback).
     async fn compact(
@@ -372,6 +373,7 @@ pub trait ContextEngine: Send + Sync {
         driver: Arc<dyn LlmDriver>,
         model: &str,
         context_window_tokens: usize,
+        reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy,
     ) -> LibreFangResult<CompactionResult>;
 
     /// Called after a complete turn (LLM response + tool execution).
@@ -645,6 +647,10 @@ impl ContextEngine for DefaultContextEngine {
                     "ContextEngine: leading-user repair left no user turn — keeping history as-is"
                 );
             }
+        } else if crate::session_repair::has_orphaned_tool_results(messages) {
+            // A split tool cycle is not specific to overflow: a compaction just before this call keeps the window small by design, so the branch above does not run, and an orphaned ToolResult would reach the wire as a `role: "tool"` message without its `tool_calls` (#8545).
+            warn!("ContextEngine: history carries orphaned tool results — repairing before the request");
+            *messages = crate::session_repair::validate_and_repair(messages);
         }
 
         // Stage 2: Context guard — compact oversized tool results
@@ -662,6 +668,7 @@ impl ContextEngine for DefaultContextEngine {
         driver: Arc<dyn LlmDriver>,
         model: &str,
         context_window_tokens: usize,
+        reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy,
     ) -> LibreFangResult<CompactionResult> {
         // Build a temporary session for the compactor, using the per-agent
         // context window rather than the boot-time default.
@@ -687,9 +694,7 @@ impl ContextEngine for DefaultContextEngine {
             model,
             &session,
             &compaction_config,
-            // The trait-level default ContextEngine doesn't carry a
-            // catalog reference; rely on the driver's substring fallback.
-            librefang_types::model_catalog::ReasoningEchoPolicy::None,
+            reasoning_echo_policy,
         )
         .await
         .map_err(LibreFangError::Internal)
@@ -1029,6 +1034,7 @@ impl ContextEngine for StackedContextEngine {
         driver: Arc<dyn LlmDriver>,
         model: &str,
         context_window_tokens: usize,
+        reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy,
     ) -> LibreFangResult<CompactionResult> {
         // First engine that succeeds with a non-fallback result wins.
         let mut last_fallback: Option<CompactionResult> = None;
@@ -1040,6 +1046,7 @@ impl ContextEngine for StackedContextEngine {
                     driver.clone(),
                     model,
                     context_window_tokens,
+                    reasoning_echo_policy,
                 )
                 .await
             {
@@ -1067,7 +1074,14 @@ impl ContextEngine for StackedContextEngine {
         self.engines
             .first()
             .expect("engines is non-empty")
-            .compact(agent_id, messages, driver, model, context_window_tokens)
+            .compact(
+                agent_id,
+                messages,
+                driver,
+                model,
+                context_window_tokens,
+                reasoning_echo_policy,
+            )
             .await
     }
 
@@ -1579,6 +1593,7 @@ impl ContextEngine for NoCompactContextEngine {
         _driver: Arc<dyn LlmDriver>,
         _model: &str,
         _context_window_tokens: usize,
+        _reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy,
     ) -> LibreFangResult<CompactionResult> {
         // NoCompactContextEngine must never compress — return all messages as-is.
         Ok(CompactionResult {
@@ -1626,7 +1641,7 @@ impl ContextEngine for NoCompactContextEngine {
 /// ```ignore
 /// let engine = SummaryContextEngine::new(inner, 0.80);
 /// if engine.should_compress(current_tokens, ctx_window) {
-///     engine.compact(agent_id, &messages, driver, model, ctx_window).await?;
+///     engine.compact(agent_id, &messages, driver, model, ctx_window, echo_policy).await?;
 /// }
 /// ```
 pub struct SummaryContextEngine {
@@ -1698,9 +1713,17 @@ impl ContextEngine for SummaryContextEngine {
         driver: Arc<dyn LlmDriver>,
         model: &str,
         context_window_tokens: usize,
+        reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy,
     ) -> LibreFangResult<CompactionResult> {
         self.inner
-            .compact(agent_id, messages, driver, model, context_window_tokens)
+            .compact(
+                agent_id,
+                messages,
+                driver,
+                model,
+                context_window_tokens,
+                reasoning_echo_policy,
+            )
             .await
     }
 

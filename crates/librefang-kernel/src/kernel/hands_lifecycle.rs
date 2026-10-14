@@ -599,6 +599,11 @@ impl LibreFangKernel {
                         // resilient to future changes in `add_job`.
                         job.next_run = Some(crate::cron::compute_next_run(&job.schedule));
                         job.last_run = None;
+                        // #8533: `add_job` refuses a `session_mode` on a workflow job, but one saved by an older daemon may still carry it.
+                        // The dispatcher never read it for that action, so dropping it keeps the job firing exactly as before instead of losing it on reactivation.
+                        if job.validate_session_mode().is_err() {
+                            job.session_mode = None;
+                        }
                         if self.workflows.cron_scheduler.add_job(job, false).is_ok() {
                             restored += 1;
                         }

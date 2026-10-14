@@ -10,6 +10,7 @@ import { useProviders } from "../lib/queries/providers";
 import { useModels } from "../lib/queries/models";
 import { useMcpServers } from "../lib/queries/mcp";
 import { useModelRoutingInertReason } from "../lib/queries/config";
+import { useModelRouterProfiles } from "../lib/queries/modelRouter";
 import {
   useCreateAgentTypeFromToml,
   useDeleteAgentType,
@@ -91,6 +92,7 @@ function AgentTypeEditor({
   // #8446: a template has no running agent to carry `routing_inert_reason`, so the Routing section reads the kernel-wide mode off the shared config cache, as the agent create form does.
   // The editor is mounted only while open, so this fetches nothing until then.
   const routingInertReasonQuery = useModelRoutingInertReason();
+  const routerProfilesQuery = useModelRouterProfiles();
 
   const [newName, setNewName] = useState("");
   const [formState, setFormState] = useState<ManifestFormState>(emptyManifestForm);
@@ -135,7 +137,14 @@ function AgentTypeEditor({
   );
 
   const skillCatalog = useMemo<ManifestCatalogEntry[]>(
-    () => (skillsQuery.data ?? []).map((s) => ({ name: s.name, description: s.description })),
+    () =>
+      (skillsQuery.data ?? []).map((s) => ({
+        name: s.name,
+        description: s.description,
+        // Carried so the skills field can name what each skill needs and flag
+        // the needs this agent's grants do not cover.
+        required_tools: s.required_tools,
+      })),
     [skillsQuery.data],
   );
 
@@ -150,6 +159,15 @@ function AgentTypeEditor({
         ? mcpServersQuery.data.configured.map((s: { name: string }) => ({ name: s.name }))
         : [],
     [mcpServersQuery.data],
+  );
+
+  const routerProfileCatalog = useMemo<ManifestCatalogEntry[]>(
+    () =>
+      (routerProfilesQuery.data?.profiles ?? []).map((p) => ({
+        name: p.name,
+        description: [`${p.provider}/${p.model}`, p.cost_tier].join(" · "),
+      })),
+    [routerProfilesQuery.data],
   );
 
   const saving = createMutation.isPending || updateTomlMutation.isPending;
@@ -238,6 +256,8 @@ function AgentTypeEditor({
             skillCatalog={skillCatalog}
             toolCatalog={toolCatalog}
             mcpCatalog={mcpCatalog}
+            routerProfileCatalog={routerProfileCatalog}
+            routerProfilesEnabled={routerProfilesQuery.data?.enabled}
             nameField={isCreate ? "hidden" : "readonly"}
             routingInertReason={routingInertReasonQuery.data}
           />
@@ -669,7 +689,6 @@ function AgentTypeRow({
         >
           <Plus className="h-3.5 w-3.5" />
         </button>
-
         {/* Read-only sanitized-manifest modal. Its own key, not
             `agentTypes.promote`: the Share2 button below opens the registry
             pull request, and while the two shared a key these adjacent

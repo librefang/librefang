@@ -178,11 +178,18 @@ impl kernel_handle::TaskQueue for LibreFangKernel {
                     .map(String::from)
             });
 
+        // The substrate only completes a row whose claim `resolved` holds, so another agent (or a stale worker whose claim the sweeper re-issued) cannot overwrite the result.
+        // Its typed misses are the caller's answer, not a kernel fault: pass them through so they reach the client as 404 / 409 instead of a scrubbed 500.
         self.memory
             .substrate
-            .task_complete(task_id, result)
+            .task_complete(task_id, &resolved, result)
             .await
-            .map_err(|e| KernelOpError::Internal(format!("Task complete failed: {e}")))?;
+            .map_err(|e| match e {
+                typed @ (KernelOpError::Conflict(_) | KernelOpError::ResourceNotFound { .. }) => {
+                    typed
+                }
+                other => KernelOpError::Internal(format!("Task complete failed: {other}")),
+            })?;
 
         let event = librefang_types::event::Event::new(
             AgentId::new(), // system-originated

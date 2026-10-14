@@ -5,7 +5,7 @@
 use rusqlite::Connection;
 
 /// Current schema version.
-const SCHEMA_VERSION: u32 = 62;
+const SCHEMA_VERSION: u32 = 63;
 
 /// Run all migrations to bring the database up to date.
 pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
@@ -320,6 +320,14 @@ pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
     // with a hole below it never runs the skipped step.
     run_step!(62, migrate_v62);
 
+    // v63 (#8556): mark an ephemeral run that hit its iteration cap.
+    // A capped worker still delivers a partial answer and is recorded as
+    // `completed`, which made truncation indistinguishable from a full run.
+    // `truncated` carries that signal without widening the `status` CHECK.
+    //
+    // This wanted to be 62 but #7974 took that number first, so it renumbers
+    // to 63 rather than skipping past it — same rule as the note above.
+    run_step!(63, migrate_v63);
     // Audit-trail consistency (#3538): user_version must match the count
     // of distinct rows in `migrations`. Drift means an earlier migration
     // applied DDL without recording its audit row — operator tooling
@@ -1595,6 +1603,26 @@ fn migrate_v62(conn: &Connection) -> Result<(), rusqlite::Error> {
     Ok(())
 }
 
+/// v63 (#8556): add `ephemeral_runs.truncated`.
+///
+/// The #8556 iteration-cap fix makes a capped worker return `Ok` with a
+/// delivered partial answer rather than `Err`, so the run record says
+/// `completed`. That erased the operator's only signal that the worker was
+/// cut off. A dedicated boolean keeps the existing `status` CHECK untouched.
+fn migrate_v63(conn: &Connection) -> Result<(), rusqlite::Error> {
+    if !try_column_exists(conn, "ephemeral_runs", "truncated")? {
+        conn.execute(
+            "ALTER TABLE ephemeral_runs ADD COLUMN truncated INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
+    }
+    conn.execute(
+        "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
+         VALUES (63, datetime('now'), 'Add ephemeral_runs.truncated so a cap-delivered worker run is distinguishable from a full one (#8556)')",
+        [],
+    )?;
+    Ok(())
+}
 /// Rebuild `memories_fts` from `memories`, dropping whatever was there.
 ///
 /// Idempotent and safe to call at any time: the index is a pure derivative of

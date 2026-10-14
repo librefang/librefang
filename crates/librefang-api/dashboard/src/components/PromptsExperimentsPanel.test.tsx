@@ -2,7 +2,7 @@ import { beforeEach, describe, it, expect, vi } from "vitest";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import React from "react";
-import { PromptsExperimentsModal } from "./PromptsExperimentsModal";
+import { PromptsExperimentsPanel } from "./PromptsExperimentsPanel";
 import { usePromptVersions } from "../lib/queries/agents";
 import { useDeletePromptVersion } from "../lib/mutations/agents";
 
@@ -72,7 +72,7 @@ vi.mock("./trafficSplit", () => ({
   MAX_TRAFFIC_VARIANTS: TEST_VARIANT_CAP,
 }));
 
-describe("PromptsExperimentsModal", () => {
+describe("PromptsExperimentsPanel", () => {
   beforeEach(() => {
     vi.mocked(usePromptVersions).mockReturnValue({
       data: [],
@@ -85,72 +85,18 @@ describe("PromptsExperimentsModal", () => {
     } as never);
   });
 
-  it("renders a dialog with the agent name", () => {
-    render(
-      <PromptsExperimentsModal
-        agentId="agent-1"
-        agentName="Test Agent"
-        onClose={() => {}}
-      />,
-    );
-
-    expect(screen.getByRole("dialog")).toBeInTheDocument();
-    expect(screen.getByText("Test Agent")).toBeInTheDocument();
-  });
-
+  // Promoted from a modal: the shell is gone, the two tabs are not. They are
+  // the whole reason this is a surface — versions and experiments are the two
+  // halves of one question, and a panel that lost a tab would look complete.
   it("renders two tab buttons inside the tablist", () => {
-    render(
-      <PromptsExperimentsModal
-        agentId="agent-1"
-        agentName="Test Agent"
-        onClose={() => {}}
-      />,
-    );
+    render(<PromptsExperimentsPanel agentId="agent-1" />);
 
     const tabs = screen.getAllByRole("tab");
     expect(tabs).toHaveLength(2);
   });
 
-  it("calls onClose when close button is clicked", async () => {
-    const onClose = vi.fn();
-    const user = userEvent.setup();
-
-    render(
-      <PromptsExperimentsModal
-        agentId="agent-1"
-        agentName="Test Agent"
-        onClose={onClose}
-      />,
-    );
-
-    await user.click(
-      screen.getByRole("button", { name: "common.close" }),
-    );
-
-    expect(onClose).toHaveBeenCalledOnce();
-  });
-
-  it("calls onClose when backdrop is clicked", async () => {
-    const onClose = vi.fn();
-    const user = userEvent.setup();
-
-    const { container } = render(
-      <PromptsExperimentsModal
-        agentId="agent-1"
-        agentName="Test Agent"
-        onClose={onClose}
-      />,
-    );
-
-    const backdrop = container.querySelector(".fixed.inset-0")!;
-    await user.click(backdrop);
-
-    expect(onClose).toHaveBeenCalledOnce();
-  });
-
   it("requires confirmation before deleting a prompt version", async () => {
     const user = userEvent.setup();
-    const onClose = vi.fn();
     const mutateAsync = vi.fn().mockResolvedValue(undefined);
     vi.mocked(usePromptVersions).mockReturnValue({
       data: [
@@ -171,13 +117,7 @@ describe("PromptsExperimentsModal", () => {
       isPending: false,
     } as never);
 
-    render(
-      <PromptsExperimentsModal
-        agentId="agent-1"
-        agentName="Test Agent"
-        onClose={onClose}
-      />,
-    );
+    render(<PromptsExperimentsPanel agentId="agent-1" />);
 
     await user.click(screen.getByTitle("prompts.delete"));
     expect(mutateAsync).not.toHaveBeenCalled();
@@ -192,7 +132,6 @@ describe("PromptsExperimentsModal", () => {
         agentId: "agent-1",
       }),
     );
-    expect(onClose).not.toHaveBeenCalled();
   });
 
   it("only marks a prompt preview when it is truncated", () => {
@@ -216,13 +155,7 @@ describe("PromptsExperimentsModal", () => {
       isLoading: false,
     } as never);
 
-    render(
-      <PromptsExperimentsModal
-        agentId="agent-1"
-        agentName="Test Agent"
-        onClose={() => {}}
-      />,
-    );
+    render(<PromptsExperimentsPanel agentId="agent-1" />);
 
     expect(screen.getByText("Short prompt")).toBeInTheDocument();
     expect(screen.queryByText("Short prompt...")).toBeNull();
@@ -242,13 +175,7 @@ describe("PromptsExperimentsModal", () => {
       isLoading: false,
     } as never);
 
-    const { container } = render(
-      <PromptsExperimentsModal
-        agentId="agent-1"
-        agentName="Test Agent"
-        onClose={() => {}}
-      />,
-    );
+    const { container } = render(<PromptsExperimentsPanel agentId="agent-1" />);
     await user.click(
       screen.getByRole("tab", {
         name: "agents.prompts_experiments.experiments_tab",

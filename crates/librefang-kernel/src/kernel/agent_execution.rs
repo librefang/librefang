@@ -325,6 +325,7 @@ impl LibreFangKernel {
         );
 
         Ok(AgentLoopResult {
+            hit_iteration_cap: false,
             response,
             total_usage: librefang_types::message::TokenUsage {
                 input_tokens: 0,
@@ -402,6 +403,7 @@ impl LibreFangKernel {
         info!(agent = %entry.name, "Python agent execution complete");
 
         Ok(AgentLoopResult {
+            hit_iteration_cap: false,
             response: result.response,
             total_usage: librefang_types::message::TokenUsage {
                 input_tokens: 0,
@@ -1540,6 +1542,7 @@ impl LibreFangKernel {
                 agent_id,
                 &mut session,
                 &manifest.model.system_prompt,
+                &tools,
                 &config,
                 agent_scoped,
             )
@@ -1756,6 +1759,8 @@ impl LibreFangKernel {
             kernel.spawn_compaction_after_turn(
                 agent_id,
                 &session,
+                &manifest.model.system_prompt,
+                &tools,
                 manifest.compaction.as_ref(),
                 agent_scoped,
             );

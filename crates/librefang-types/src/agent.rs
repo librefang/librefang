@@ -734,13 +734,16 @@ impl AgentMode {
 }
 
 /// How an agent is scheduled to run.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ScheduleMode {
     /// Agent wakes up when a message/event arrives (default).
     #[default]
     Reactive,
     /// Agent wakes up on a cron schedule.
+    ///
+    /// `cron` is either a fixed interval (`"every 30s"`, `"every 5m"`, `"every 2h"`, `"every 1d"`) or a 5/6-field cron expression whose fire times are evaluated in UTC, e.g. `"0 9 * * *"` for daily at 09:00 UTC (#8532).
+    /// A 5/6-field expression that does not parse or never fires leaves the loop unstarted with a `WARN`; use a cron job (`cron_create`) when a timezone is needed.
     Periodic { cron: String },
     /// Agent monitors conditions and acts when thresholds are met.
     Proactive { conditions: Vec<String> },
@@ -1125,10 +1128,25 @@ pub struct FallbackModel {
     pub extra_params: std::collections::BTreeMap<String, serde_json::Value>,
 }
 
+/// Serialize a `HashMap` field in key order.
+///
+/// Each `HashMap` gets its own random hasher seed, so serializing one directly emits its entries in a different order every time.
+/// The manifest's map fields are written to `agent.toml` and recorded in the manifest version history, where two snapshots of the same content would then differ only in key order — the history's exact-text dedup misses them and a diff between neighbouring rows shows changes that never happened.
+/// Sorting at serialization keeps the in-memory type and every caller unchanged.
+fn serialize_sorted_map<S, K, V>(map: &HashMap<K, V>, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+    K: Serialize + Ord,
+    V: Serialize,
+{
+    serializer.collect_map(map.iter().collect::<std::collections::BTreeMap<_, _>>())
+}
+
 /// Tool configuration within an agent manifest.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolConfig {
     /// Tool-specific configuration parameters.
+    #[serde(serialize_with = "serialize_sorted_map")]
     pub params: HashMap<String, serde_json::Value>,
 }
 
@@ -1248,6 +1266,25 @@ impl Default for ManifestTrigger {
     }
 }
 
+/// Tag prefixes the kernel owns rather than the operator.
+///
+/// These three are written by hand-role activation (`kernel/hands_lifecycle.rs`) and are the only tags any code branches on.
+/// `hand:` and `hand_role:` route the agent's workspace under `hands/<hand>/<role>` instead of `agents/<name>`, and `hand:` alone marks an agent autonomous for idle-wake purposes, decides whether a tool call needs an approval gate, and scopes structured memory.
+/// An operator who could add or drop one would be relocating a workspace and re-deciding an approval boundary through a field that reads like free-form metadata, so `merge_agent_tags` keeps them out of operator reach in both directions.
+///
+/// Lives here, next to [`AgentManifest::tags`], so every surface that has to
+/// tell a kernel-owned tag from an operator one — the kernel's tag merge and the
+/// API's save-as-agent-type snapshot — reads one definition rather than two.
+pub const SYSTEM_TAG_PREFIXES: [&str; 3] = ["hand:", "hand_instance:", "hand_role:"];
+
+/// Whether a tag belongs to the kernel rather than the operator.
+#[must_use]
+pub fn is_system_tag(tag: &str) -> bool {
+    SYSTEM_TAG_PREFIXES
+        .iter()
+        .any(|prefix| tag.starts_with(prefix))
+}
+
 /// Complete agent manifest — defines everything about an agent.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -1278,8 +1315,8 @@ pub struct AgentManifest {
     /// Scheduling mode.
     pub schedule: ScheduleMode,
     /// Session mode for automated (non-channel) invocations.
-    /// Controls whether background ticks, triggers, and `agent_send` calls
-    /// reuse the agent's persistent session or create a fresh one.
+    /// Controls whether triggers, `agent_send` calls, cron agent turns and workflow steps reuse the agent's persistent session or create a fresh one.
+    /// `Continuous` / `Periodic` background ticks are not among them: they run under the reserved `"autonomous"` channel, so the channel branch below always lands them on the `(agent, "autonomous")` session.
     ///
     /// Resolved session id precedence (highest first):
     /// 1. Explicit `session_id_override` from the dispatch caller (HTTP /
@@ -1333,7 +1370,11 @@ pub struct AgentManifest {
     #[serde(default)]
     pub profile: Option<ToolProfile>,
     /// Tool-specific configurations.
-    #[serde(default, deserialize_with = "crate::serde_compat::map_lenient")]
+    #[serde(
+        default,
+        deserialize_with = "crate::serde_compat::map_lenient",
+        serialize_with = "serialize_sorted_map"
+    )]
     pub tools: HashMap<String, ToolConfig>,
     /// Installed skill references (empty = all skills available).
     #[serde(default, deserialize_with = "crate::serde_compat::vec_lenient")]
@@ -1376,7 +1417,11 @@ pub struct AgentManifest {
     #[serde(default)]
     pub mcp_disabled: bool,
     /// Custom metadata.
-    #[serde(default, deserialize_with = "crate::serde_compat::map_lenient")]
+    #[serde(
+        default,
+        deserialize_with = "crate::serde_compat::map_lenient",
+        serialize_with = "serialize_sorted_map"
+    )]
     pub metadata: HashMap<String, serde_json::Value>,
     /// Tags for agent discovery and categorization.
     #[serde(default, deserialize_with = "crate::serde_compat::vec_lenient")]
@@ -1409,7 +1454,7 @@ pub struct AgentManifest {
     /// library  = { path = "shared/library",  mode = "rw" }
     /// archive  = { path = "shared/archive",  mode = "r"  }
     /// ```
-    #[serde(default)]
+    #[serde(default, serialize_with = "serialize_sorted_map")]
     pub workspaces: HashMap<String, WorkspaceDecl>,
     /// Per-agent exec policy override. If None, uses global exec_policy.
     /// Accepts string shorthand ("allow", "deny", "full", "allowlist") or full table.
@@ -2547,6 +2592,25 @@ pub struct ExperimentVariantMetrics {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // The dashboard's schedule-preservation reasoning cites this rejection:
+    // an unknown key anywhere inside [schedule] is a document the daemon
+    // refuses to load, so what the editor preserves there is never a field
+    // it was reading — the slot exists for forward compatibility and the
+    // editor's fidelity duty, not for config the daemon reads today. Pinned
+    // here because the wording is load-bearing for that comment.
+    #[test]
+    fn schedule_variant_rejects_unknown_keys() {
+        let err = toml::from_str::<AgentManifest>(
+            "name = \"x\"\n\n[schedule.periodic]\ncron = \"0 9 * * *\"\nzz = 7\n",
+        )
+        .expect_err("an unknown key inside a schedule variant must be rejected");
+        assert!(
+            err.to_string()
+                .contains("unexpected keys in table: zz, available keys: cron"),
+            "unexpected message: {err}"
+        );
+    }
 
     /// #8409 review: an `agent.toml` that declares a reserved sender key must
     /// not keep it — the kernel strips these before the runtime reads manifest
@@ -4684,6 +4748,61 @@ model = "claude-3-haiku-20240307"
         assert!(
             err.to_string().contains("unknown variant"),
             "explicit `session_mode = \"New\"` must error, not fall back to None / Persistent: {err}"
+        );
+    }
+
+    /// Every map field of the manifest must serialize in key order regardless of insertion order, or two identical manifests produce different `agent.toml` text and the version history records spurious changes (#8504).
+    #[test]
+    fn manifest_map_fields_serialize_in_key_order() {
+        let keys = [
+            "zeta", "alpha", "mu", "beta", "omega", "gamma", "kappa", "delta",
+        ];
+        let build = |order: &[&str]| {
+            let mut manifest = AgentManifest {
+                name: "sorted-maps".to_string(),
+                ..Default::default()
+            };
+            for key in order {
+                manifest
+                    .metadata
+                    .insert((*key).to_string(), serde_json::json!(key));
+                let mut params = HashMap::new();
+                for inner in order {
+                    params.insert((*inner).to_string(), serde_json::json!(1));
+                }
+                manifest
+                    .tools
+                    .insert((*key).to_string(), ToolConfig { params });
+                manifest.workspaces.insert(
+                    (*key).to_string(),
+                    WorkspaceDecl {
+                        path: Some(PathBuf::from(format!("shared/{key}"))),
+                        mount: None,
+                        mode: WorkspaceMode::default(),
+                    },
+                );
+            }
+            toml::to_string_pretty(&manifest).expect("manifest serializes")
+        };
+
+        let forward = build(&keys);
+        let mut reversed_keys = keys;
+        reversed_keys.reverse();
+        assert_eq!(forward, build(&reversed_keys));
+
+        let mut sorted = keys;
+        sorted.sort_unstable();
+        let positions: Vec<usize> = sorted
+            .iter()
+            .map(|key| {
+                forward
+                    .find(&format!("[workspaces.{key}]"))
+                    .unwrap_or_else(|| panic!("workspace {key} missing:\n{forward}"))
+            })
+            .collect();
+        assert!(
+            positions.windows(2).all(|pair| pair[0] < pair[1]),
+            "workspaces must be emitted in key order:\n{forward}"
         );
     }
 }

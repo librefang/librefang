@@ -226,17 +226,11 @@ pub struct ProactiveMemoryConfig {
     /// Session memory TTL in hours. Memories older than this are cleaned up
     /// automatically before each agent execution. Default: 24 hours.
     pub session_ttl_hours: u32,
-    /// Similarity threshold for duplicate detection (0.0 - 1.0).
-    /// When stored embeddings are available, uses vector cosine similarity
-    /// (mem0-quality); otherwise falls back to Jaccard word overlap.
+    /// Similarity threshold for duplicate detection (0.0 - 1.0), calibrated as Jaccard word overlap.
+    /// When both memories carry comparable stored embeddings, the per-agent consolidation compares their cosine similarity against `max(duplicate_threshold, 0.95)` instead, because cosine 0.85 between sentence embeddings already means "same topic" rather than "same statement" (#8524).
     /// Default: 0.85.
     ///
-    /// Pre-fix this defaulted to 0.5, which is far too permissive for both
-    /// metrics: cosine 0.5 matches "topically related" pairs (including
-    /// opposite-meaning sentences that share keywords), and Jaccard 0.5
-    /// matches anything with 50% word overlap. 0.85 is the threshold mem0
-    /// recommends for "near-duplicate" detection and matches the
-    /// industry-standard cosine cut-off for embedding-based dedup.
+    /// Pre-fix this defaulted to 0.5, which is far too permissive: Jaccard 0.5 matches anything with 50% word overlap.
     pub duplicate_threshold: f32,
     /// Confidence decay rate per day. Memories lose confidence over time when
     /// not accessed, following exponential decay: `conf * e^(-rate * days)`.
