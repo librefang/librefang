@@ -5852,6 +5852,24 @@ fn has_file_saved_block(blocks: &[ContentBlock]) -> bool {
     })
 }
 
+/// Assemble the blocks for a successfully saved non-image attachment: the
+/// `marker` first, then whatever `enrichment` produced.
+///
+/// The order is the point. The marker is the affordance an agent keys on to
+/// reach the raw file on disk, and the inlined body that follows can run to
+/// `MAX_ENRICHED_TEXT_CHARS` (200k) — trailing the marker, it pushes the
+/// affordance past the point a model reads, so the agent works from the
+/// truncated inline copy instead of the file (`#8626`).
+fn saved_file_blocks(marker: String, enrichment: Vec<ContentBlock>) -> Vec<ContentBlock> {
+    let mut blocks = Vec::with_capacity(enrichment.len() + 1);
+    blocks.push(ContentBlock::Text {
+        text: marker,
+        provider_metadata: None,
+    });
+    blocks.extend(enrichment);
+    blocks
+}
+
 /// Auto-transcribe an inbound channel audio attachment when the kernel's
 /// `[media] audio_transcription` flag is enabled (#4975).
 ///
@@ -6632,7 +6650,7 @@ async fn download_file_to_blocks(
         // enrich_saved_file does blocking std::fs reads and CPU-bound PDF
         // text extraction (pdf_extract), which can stall the tokio worker for
         // a large/complex document — offload it (refs blocking-fs-on-executor).
-        let mut blocks = {
+        let enrichment = {
             let file_path = file_path.clone();
             let media_type = media_type.clone();
             let filename = filename.to_string();
@@ -6645,11 +6663,10 @@ async fn download_file_to_blocks(
                 Vec::new()
             })
         };
-        blocks.push(ContentBlock::Text {
-            text: format!("{FILE_SAVED_BLOCK_PREFIX}{filename}] saved to {path_str}"),
-            provider_metadata: None,
-        });
-        blocks
+        saved_file_blocks(
+            format!("{FILE_SAVED_BLOCK_PREFIX}{filename}] saved to {path_str}"),
+            enrichment,
+        )
     };
     DownloadedFile {
         blocks,
@@ -12277,6 +12294,36 @@ mod tests {
                 }
                 other => panic!("Expected Text block, got: {other:?}"),
             }
+        }
+
+        /// #8626: the `[File: …] saved to …` marker is the affordance an agent
+        /// keys on to reach the raw bytes on disk, so it must lead the blocks.
+        /// It used to be pushed after the inlined enrichment, which can reach
+        /// `MAX_ENRICHED_TEXT_CHARS` and buries the marker past the point a
+        /// model reads — agents then worked from the truncated inline copy
+        /// instead of the file that was already saved.
+        #[test]
+        fn file_saved_marker_precedes_the_enriched_body() {
+            let blocks = saved_file_blocks(
+                format!("{FILE_SAVED_BLOCK_PREFIX}export.csv] saved to /tmp/9ff3f16a.csv"),
+                vec![ContentBlock::Text {
+                    text: "x".repeat(crate::attachment_enrich::MAX_ENRICHED_TEXT_CHARS),
+                    provider_metadata: None,
+                }],
+            );
+
+            assert_eq!(blocks.len(), 2, "marker plus one enrichment block");
+            match &blocks[0] {
+                ContentBlock::Text { text, .. } => assert!(
+                    text.starts_with(FILE_SAVED_BLOCK_PREFIX),
+                    "blocks[0] must be the saved-path marker, got: {text}"
+                ),
+                other => panic!("blocks[0] must be the saved-path marker, got {other:?}"),
+            }
+            assert!(
+                has_file_saved_block(&blocks),
+                "the reordered marker must still satisfy the save-success check"
+            );
         }
     }
 
