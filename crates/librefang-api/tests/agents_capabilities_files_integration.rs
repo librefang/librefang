@@ -897,7 +897,7 @@ async fn test_mcp_servers_rejects_documented_wrong_and_malformed_body_shapes() {
 async fn test_mcp_servers_update_preserves_manifest_comments_and_omitted_defaults() {
     let h = boot().await;
     let id = spawn_named(&h.state, "mcp-format-preserve");
-    h.state.kernel.persist_manifest_to_disk(id);
+    h.state.kernel.persist_manifest_to_disk(id, "test");
 
     let entry = h
         .state

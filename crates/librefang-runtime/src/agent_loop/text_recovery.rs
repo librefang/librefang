@@ -195,12 +195,21 @@ pub(super) fn user_message_has_action_intent(user_message: &str) -> bool {
 /// and the cycle repeats to `max_iterations`. The turn offered no tools, so
 /// text that merely resembles a call this turn is not a call the model was
 /// invited to make.
+///
+/// `synthesized_from_thinking` must be `false`: when the driver synthesized
+/// the response text from a thinking-only reply (`text_synthesized_from_thinking`
+/// on `CompletionResponse`, #8556), that text is a best-effort answer, not a
+/// call the model was invited to make. Promoting it back into a `ToolUse`
+/// keeps the turn alive — the model answers "in prose", recovery turns the
+/// prose into a call, and the loop never reaches a clean end.
 pub(super) fn should_attempt_text_recovery(
     forced_tools_stripped_this_turn: bool,
     stop_reason: StopReason,
     tool_calls_empty: bool,
+    synthesized_from_thinking: bool,
 ) -> bool {
     !forced_tools_stripped_this_turn
+        && !synthesized_from_thinking
         && matches!(stop_reason, StopReason::EndTurn | StopReason::StopSequence)
         && tool_calls_empty
 }
@@ -643,7 +652,7 @@ pub(super) fn recover_text_tool_calls(
         while let Some(brace_start) = text[scan_from..].find('{') {
             let abs_brace = scan_from + brace_start;
             // Try to parse a JSON object starting here
-            if let Some((tool_name, input)) =
+            if let Some((tool_name, input, end)) =
                 try_parse_bare_json_tool_call(&text[abs_brace..], &tool_names)
             {
                 if !calls
@@ -660,7 +669,11 @@ pub(super) fn recover_text_tool_calls(
                         input,
                     });
                 }
+                // Resume after the parsed object: a nested argument object that happens to carry a tool name (`{"name":"tool_load","arguments":{"name":"web_fetch"}}`) is an argument, not a second call.
+                scan_from = abs_brace + end;
+                continue;
             }
+            // Not a call itself — step by one so a wrapper object (`{"tool_calls":[...]}`) is still searched for inner calls.
             scan_from = abs_brace + 1;
         }
     }
@@ -1116,7 +1129,8 @@ pub(super) fn find_json_object_end(text: &str) -> Option<usize> {
 fn try_parse_bare_json_tool_call(
     text: &str,
     tool_names: &[&str],
-) -> Option<(String, serde_json::Value)> {
+) -> Option<(String, serde_json::Value, usize)> {
     let end = find_json_object_end(text)?;
-    parse_json_tool_call_object(&text[..end], tool_names)
+    let (name, input) = parse_json_tool_call_object(&text[..end], tool_names)?;
+    Some((name, input, end))
 }

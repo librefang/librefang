@@ -925,13 +925,11 @@ impl LlmDriver for AnthropicDriver {
                 let chunk = chunk_result.map_err(|e| LlmError::Http(e.to_string()))?;
                 buffer.push_str(&utf8.decode(&chunk));
 
-                while let Some(pos) = buffer.find("\n\n") {
-                    let event_text = buffer[..pos].to_string();
-                    buffer = buffer[pos + 2..].to_string();
-
+                while let Some(event_text) = take_sse_event(&mut buffer) {
                     let mut event_type = String::new();
                     let mut data = String::new();
                     for line in event_text.lines() {
+                        let line = line.trim_end_matches('\r');
                         if let Some(et) = line.strip_prefix("event:") {
                             event_type = et.trim_start().to_string();
                         } else if let Some(d) = line.strip_prefix("data:") {
@@ -1228,6 +1226,7 @@ impl LlmDriver for AnthropicDriver {
                 .await;
 
             return Ok(CompletionResponse {
+                text_synthesized_from_thinking: false,
                 content,
                 stop_reason,
                 tool_calls,
@@ -1247,6 +1246,22 @@ impl LlmDriver for AnthropicDriver {
     fn family(&self) -> LlmFamily {
         LlmFamily::Anthropic
     }
+}
+
+/// Pop the next complete SSE event block off the front of `buffer`, or return `None` when no full event has arrived yet.
+///
+/// The SSE spec allows CRLF line endings, so an event ends at whichever of `\r\n\r\n` or `\n\n` comes first; matching only `\n\n` would never find a boundary in a CRLF-framed stream from an Anthropic-compatible gateway and buffer the whole response.
+fn take_sse_event(buffer: &mut String) -> Option<String> {
+    let (pos, delimiter_len) = [
+        buffer.find("\r\n\r\n").map(|p| (p, 4)),
+        buffer.find("\n\n").map(|p| (p, 2)),
+    ]
+    .into_iter()
+    .flatten()
+    .min_by_key(|&(p, _)| p)?;
+    let event = buffer[..pos].to_string();
+    buffer.drain(..pos + delimiter_len);
+    Some(event)
 }
 
 /// Ensure a `serde_json::Value` is an object.  The Anthropic API requires the
@@ -1647,6 +1662,7 @@ fn convert_response(api: ApiResponse, model: &str) -> CompletionResponse {
     };
 
     CompletionResponse {
+        text_synthesized_from_thinking: false,
         content,
         stop_reason,
         tool_calls,
@@ -1674,6 +1690,27 @@ fn convert_response(api: ApiResponse, model: &str) -> CompletionResponse {
 mod tests {
     use super::*;
     use librefang_types::tool::ToolDefinition;
+
+    #[test]
+    fn take_sse_event_splits_lf_and_crlf_framing() {
+        let mut buffer =
+            "event: a\r\ndata: {}\r\n\r\nevent: b\ndata: {}\n\nevent: c\r\ndata: partial"
+                .to_string();
+        assert_eq!(
+            take_sse_event(&mut buffer).as_deref(),
+            Some("event: a\r\ndata: {}")
+        );
+        assert_eq!(
+            take_sse_event(&mut buffer).as_deref(),
+            Some("event: b\ndata: {}")
+        );
+        assert_eq!(
+            take_sse_event(&mut buffer),
+            None,
+            "an incomplete event must stay buffered"
+        );
+        assert_eq!(buffer, "event: c\r\ndata: partial");
+    }
 
     #[test]
     fn test_convert_message_text() {

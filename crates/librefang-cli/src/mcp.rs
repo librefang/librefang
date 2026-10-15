@@ -81,8 +81,7 @@ impl McpBackend {
                 if let Some(response) = body["response"].as_str() {
                     Ok(response.to_string())
                 } else {
-                    Err(body["error"]
-                        .as_str()
+                    Err(crate::commands::common::api_error_message(&body)
                         .unwrap_or("Unknown error")
                         .to_string())
                 }
@@ -163,14 +162,25 @@ enum Frame {
     ProtocolError(Value),
 }
 
+/// Build the daemon backend with the configured `api_key` attached as a Bearer default header.
+///
+/// The daemon no longer exempts loopback callers from auth (#3558), and `GET /api/agents` is public while `POST /api/agents/{id}/message` is not.
+/// A bare client therefore listed every agent as a tool but failed every `tools/call` with 401 once `api_key` was set.
+fn daemon_backend(base_url: String, api_key: Option<&str>) -> McpBackend {
+    let client = crate::commands::common::daemon_client_with_api_key_and_timeout(
+        api_key,
+        std::time::Duration::from_secs(120),
+    );
+    McpBackend::Daemon { base_url, client }
+}
+
 fn create_backend(config: Option<std::path::PathBuf>) -> McpBackend {
     // Try daemon first
     if let Some(base_url) = super::find_daemon() {
-        let client = crate::http_client::client_builder()
-            .timeout(std::time::Duration::from_secs(120))
-            .build()
-            .expect("Failed to build HTTP client");
-        return McpBackend::Daemon { base_url, client };
+        // Resolve the key from the same config file the in-process fallback would boot from, so `--config` is honoured on both paths.
+        // `daemon_config_context` reports config problems on stderr, never on stdout, which carries the MCP protocol.
+        let api_key = crate::commands::common::daemon_config_context(config.as_deref()).api_key;
+        return daemon_backend(base_url, api_key.as_deref());
     }
 
     // Fall back to in-process kernel
@@ -449,6 +459,62 @@ fn jsonrpc_error(id: Value, code: i32, message: &str) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A one-request stub daemon that answers 200 `{"response":"ok"}` only when the request carries `Authorization: Bearer secret-key`, and 401 otherwise.
+    /// The returned receiver yields whether an Authorization header was present at all.
+    fn auth_checking_daemon() -> (String, std::sync::mpsc::Receiver<bool>) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let base = format!("http://{}", listener.local_addr().expect("addr"));
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let Ok((mut stream, _)) = listener.accept() else {
+                return;
+            };
+            let mut req = Vec::new();
+            let mut buf = [0u8; 4096];
+            while !req.windows(4).any(|w| w == b"\r\n\r\n") {
+                match stream.read(&mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => req.extend_from_slice(&buf[..n]),
+                }
+            }
+            let head = String::from_utf8_lossy(&req).to_ascii_lowercase();
+            let has_auth = head.contains("\r\nauthorization:");
+            let authed = head.contains("\r\nauthorization: bearer secret-key\r\n");
+            let _ = tx.send(has_auth);
+            let (status, body) = if authed {
+                ("200 OK", r#"{"response":"ok"}"#)
+            } else {
+                ("401 Unauthorized", r#"{"error":"unauthorized"}"#)
+            };
+            let response = format!(
+                "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = stream.write_all(response.as_bytes());
+        });
+        (base, rx)
+    }
+
+    #[test]
+    fn daemon_backend_sends_bearer_on_message_post() {
+        let (base, rx) = auth_checking_daemon();
+        let backend = daemon_backend(base, Some("secret-key"));
+        assert_eq!(backend.send_message("some-id", "hi"), Ok("ok".to_string()));
+        assert!(rx.recv().expect("stub saw the request"));
+    }
+
+    #[test]
+    fn daemon_backend_without_key_sends_no_authorization_header() {
+        let (base, rx) = auth_checking_daemon();
+        let backend = daemon_backend(base, None);
+        assert_eq!(
+            backend.send_message("some-id", "hi"),
+            Err("unauthorized".to_string())
+        );
+        assert!(!rx.recv().expect("stub saw the request"));
+    }
 
     #[test]
     fn test_handle_initialize() {

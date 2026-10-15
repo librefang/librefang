@@ -281,6 +281,8 @@ Per turn:
 1. Hook gating (`AgentLoopEnd` event compare, `is_fork` flag check, kernel `Weak::upgrade`).
 2. `agent_registry().get(agent_id)` — dashmap O(1) + clone of `AgentEntry`.
 3. Three regex scanners run over the latest user message + last assistant turn — microsecond-scale.
+   The session read is the one the turn ran in, taken from the `session_id` field the runtime puts on every `AgentLoopEnd` payload, so channel-derived and `session_mode = "new"` turns are scanned too; the registry's `session_id` is only a fallback for payloads without the field.
+   The "latest user message" skips the `Role::User` rows that carry only tool results, so a turn that called a tool is scanned against what the human wrote, and the "last assistant turn" is the newest assistant message with text.
 4. On a hit (rare), one `SkillVerifier::scan_prompt_content` pass over the candidate body / description / provenance excerpts (regex over a few KB of text), then a TOML serialise + atomic file write of a few KB.
 
 No SQLite, no LLM. A turn that does not produce a hit pays only the regex scan; a turn that hits pays the security scan + a small file write.

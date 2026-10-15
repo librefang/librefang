@@ -43,6 +43,12 @@ use serde::{Deserialize, Serialize};
 use super::AppState;
 use crate::middleware::{ApiUserAuth, AuthenticatedApiUser};
 
+/// Per-user avatars and the identity emoji (#8339).
+///
+/// Its own file because it is a self-contained pair of resources with their own write discipline, and because the module docs above — which are about RBAC roles and the config write lock — do not describe it.
+pub mod avatar;
+pub use avatar::*;
+
 pub fn router() -> axum::Router<Arc<AppState>> {
     axum::Router::new()
         .route("/users", axum::routing::get(list_users).post(create_user))
@@ -69,6 +75,37 @@ pub fn router() -> axum::Router<Arc<AppState>> {
             "/users/{name}/provider-keys/{provider}",
             axum::routing::put(set_user_provider_key).delete(delete_user_provider_key),
         )
+        .route(
+            "/users/{name}/identity",
+            axum::routing::patch(update_user_identity),
+        )
+        // Registered before the `{name}` sibling below, and deliberately not
+        // because order matters: `matchit` ranks a static segment above a
+        // parameter at the same position, so `me` wins wherever it is written.
+        // The ordering here is for the reader, who should meet the literal
+        // first.
+        //
+        // The flip side is that this GET-only node owns the whole path, so the
+        // `POST` and `DELETE` on the sibling below do not answer under it and a
+        // row literally named `me` cannot be given an avatar through the API.
+        // `avatar::serve_my_avatar` carries the reasoning and
+        // `tests/user_avatar_routes_test.rs` asserts the 405.
+        .route("/users/me/avatar", axum::routing::get(serve_my_avatar))
+        .route(
+            "/users/{name}/avatar",
+            axum::routing::post(upload_user_avatar)
+                .get(serve_user_avatar)
+                .delete(delete_user_avatar)
+                // Without this the `Bytes` extractor cuts at axum's own 2 MiB
+                // default, which is *below* the handler's cap plus its
+                // headroom — so an image between the two would get a bodiless
+                // 413 instead of the message naming the limit, and the
+                // handler's own check would be dead code. See
+                // `avatar::USER_AVATAR_BODY_LIMIT_BYTES`.
+                .layer(axum::extract::DefaultBodyLimit::max(
+                    avatar::USER_AVATAR_BODY_LIMIT_BYTES,
+                )),
+        )
 }
 
 // ---------------------------------------------------------------------------
@@ -93,10 +130,20 @@ pub struct UserView {
     pub has_memory_access: bool,
     /// True when the user has a per-user budget cap configured.
     pub has_budget: bool,
+    /// The glyph the operator chose to stand for this user, or `null` when none was chosen (#8339).
+    /// Stored on the `[[users]]` row, so it survives a rename and travels with the config file.
+    pub emoji: Option<String>,
+    /// True when an avatar image for this user is on disk (#8339).
+    ///
+    /// Derived by probing the avatar directory rather than read from a stored flag, because the file is the only thing that can answer the question honestly: a copy on the `[[users]]` row would be a second answer, free to survive a restore that did not bring the image back.
+    pub has_avatar: bool,
 }
 
-impl From<&UserConfig> for UserView {
-    fn from(cfg: &UserConfig) -> Self {
+impl UserView {
+    /// Build the wire view, probing `user_avatars_dir` for the avatar.
+    ///
+    /// The directory is a required argument rather than read from a constant so that a caller cannot accidentally answer `has_avatar` from the *agent* avatar tree, which shares the `{uuid}.{ext}` shape and would produce a confident wrong answer instead of a compile error.
+    pub fn from_config(cfg: &UserConfig, user_avatars_dir: &std::path::Path) -> Self {
         let has_policy = cfg.tool_policy.is_some()
             || cfg.tool_categories.is_some()
             || !cfg.channel_tool_rules.is_empty();
@@ -112,13 +159,24 @@ impl From<&UserConfig> for UserView {
             has_policy,
             has_memory_access: cfg.memory_access.is_some(),
             has_budget: cfg.budget.is_some(),
+            emoji: cfg.emoji.clone(),
+            has_avatar: librefang_types::media::find_avatar(
+                user_avatars_dir,
+                &UserId::from_name(&cfg.name).to_string(),
+            )
+            .is_some(),
         }
     }
 }
 
 /// Payload for creating or replacing a user. `api_key_hash` is accepted
 /// pre-hashed (Argon2 phc string) — the dashboard hashes locally before
-/// sending. `None` clears any existing hash on update; absent on create.
+/// sending.
+///
+/// `api_key_hash` is tri-state on update (both `PUT /api/users/{name}` and an import row that matches an existing user).
+/// An absent key keeps the stored hash, because the dashboard's edit modal, identity wizard and CSV import never send it and would otherwise revoke the user's key on every edit.
+/// An explicit `null` or an empty string clears the stored hash, and a PHC string replaces it.
+/// On create, absent, `null` and empty all mean "no key".
 #[derive(Debug, Clone, Deserialize, utoipa::ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct UserUpsert {
@@ -127,8 +185,19 @@ pub struct UserUpsert {
     pub role: String,
     #[serde(default)]
     pub channel_bindings: HashMap<String, String>,
-    #[serde(default)]
-    pub api_key_hash: Option<String>,
+    /// Outer `None` = key absent (keep), `Some(None)` = explicit `null` (clear).
+    #[serde(default, deserialize_with = "deserialize_present")]
+    #[schema(value_type = Option<String>)]
+    pub api_key_hash: Option<Option<String>>,
+}
+
+/// Wrap any present value (including `null`) in `Some`, so a field declared `#[serde(default)] Option<Option<T>>` distinguishes an absent key (`None`) from an explicit `null` (`Some(None)`).
+fn deserialize_present<'de, T, D>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    T: serde::Deserialize<'de>,
+    D: serde::Deserializer<'de>,
+{
+    T::deserialize(deserializer).map(Some)
 }
 
 fn default_role() -> String {
@@ -271,7 +340,12 @@ fn internal_err_response(error: impl std::fmt::Display) -> axum::response::Respo
 )]
 pub async fn list_users(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let cfg = state.kernel.config_ref();
-    let users: Vec<UserView> = cfg.users.iter().map(UserView::from).collect();
+    let dir = cfg.effective_user_avatars_dir();
+    let users: Vec<UserView> = cfg
+        .users
+        .iter()
+        .map(|u| UserView::from_config(u, &dir))
+        .collect();
     Json(users).into_response()
 }
 
@@ -291,7 +365,10 @@ pub async fn get_user(
 ) -> impl IntoResponse {
     let cfg = state.kernel.config_ref();
     match cfg.users.iter().find(|u| u.name == name) {
-        Some(u) => Json(UserView::from(u)).into_response(),
+        Some(u) => {
+            let dir = cfg.effective_user_avatars_dir();
+            Json(UserView::from_config(u, &dir)).into_response()
+        }
         None => err_response(StatusCode::NOT_FOUND, format!("user '{name}' not found")),
     }
 }
@@ -319,10 +396,11 @@ pub async fn create_user(
         Ok(r) => r,
         Err(e) => return err_response(StatusCode::BAD_REQUEST, e),
     };
-    let api_key_hash = match validate_api_key_hash(req.api_key_hash.as_deref()) {
-        Ok(h) => h,
-        Err(e) => return err_response(StatusCode::BAD_REQUEST, e),
-    };
+    let api_key_hash =
+        match validate_api_key_hash(req.api_key_hash.as_ref().and_then(|h| h.as_deref())) {
+            Ok(h) => h,
+            Err(e) => return err_response(StatusCode::BAD_REQUEST, e),
+        };
 
     let new_cfg = UserConfig {
         name: req.name.trim().to_string(),
@@ -344,6 +422,9 @@ pub async fn create_user(
         tool_categories: None,
         memory_access: None,
         channel_tool_rules: HashMap::new(),
+        // Set later by `PATCH /api/users/{name}/identity`; a create has no
+        // glyph to carry.
+        emoji: None,
     };
 
     // Pre-check duplicates so we can map them to 409 cleanly. The persist
@@ -377,7 +458,14 @@ pub async fn create_user(
     })
     .await
     {
-        Ok(()) => (StatusCode::CREATED, Json(UserView::from(&new_cfg))).into_response(),
+        Ok(()) => {
+            let dir = state.kernel.config_snapshot().effective_user_avatars_dir();
+            (
+                StatusCode::CREATED,
+                Json(UserView::from_config(&new_cfg, &dir)),
+            )
+                .into_response()
+        }
         Err(PersistError::Conflict(m)) => err_response(StatusCode::CONFLICT, m),
         Err(PersistError::BadRequest(m)) => err_response(StatusCode::BAD_REQUEST, m),
         Err(PersistError::NotFound(m)) => err_response(StatusCode::NOT_FOUND, m),
@@ -414,9 +502,13 @@ pub async fn update_user(
         Err(e) => return err_response(StatusCode::BAD_REQUEST, e),
     };
 
-    let api_key_hash = match validate_api_key_hash(req.api_key_hash.as_deref()) {
-        Ok(h) => h,
-        Err(e) => return err_response(StatusCode::BAD_REQUEST, e),
+    // `None` = the body did not carry `api_key_hash`, so the stored hash is kept; `Some(h)` = the body set or cleared it.
+    let api_key_hash: Option<Option<String>> = match req.api_key_hash {
+        None => None,
+        Some(v) => match validate_api_key_hash(v.as_deref()) {
+            Ok(h) => Some(h),
+            Err(e) => return err_response(StatusCode::BAD_REQUEST, e),
+        },
     };
 
     // The PUT body's `name` is treated as the desired final name; the URL
@@ -434,7 +526,12 @@ pub async fn update_user(
     // can serialize the post-merge view (incl. preserved RBAC M3 policy
     // fields). `persist_users` is generic over the closure's `Ok` type,
     // so this avoids the Arc<Mutex> capture pattern earlier drafts used.
-    match persist_identity_sections(
+    //
+    // The avatar move below runs under the same guard: an upload that resolved
+    // the old name must not be able to publish a file after the persist and
+    // then have `move_user_avatar` overwrite it with the old picture.
+    let _identity_guard = state.config_write_lock.lock().await;
+    match persist_identity_sections_locked(
         &state,
         caller_uid,
         "users updated",
@@ -468,12 +565,17 @@ pub async fn update_user(
                 name: renamed_to_for_closure.clone(),
                 role: new_role.clone(),
                 channel_bindings: new_bindings.clone(),
-                api_key_hash: new_api_key_hash.clone(),
+                api_key_hash: new_api_key_hash.clone().unwrap_or(preserved.api_key_hash),
                 budget: preserved.budget,
                 tool_policy: preserved.tool_policy,
                 tool_categories: preserved.tool_categories,
                 memory_access: preserved.memory_access,
                 channel_tool_rules: preserved.channel_tool_rules,
+                // Same preserve-across-edit rule as the RBAC fields above: a
+                // role change or a rename must not silently drop the glyph the
+                // operator picked, and `UserUpsert` carries no emoji to
+                // restore it from.
+                emoji: preserved.emoji,
             };
             // Carry a rename into `[[groups]]` (#7745). Group membership names
             // users by string, so without this a rename reads as "this person
@@ -498,7 +600,39 @@ pub async fn update_user(
     )
     .await
     {
-        Ok(final_cfg) => (StatusCode::OK, Json(UserView::from(&final_cfg))).into_response(),
+        Ok(final_cfg) => {
+            let dir = state.kernel.config_snapshot().effective_user_avatars_dir();
+            // A rename changes the avatar's file stem, which is derived from the
+            // name rather than stored on the row (`avatar::avatar_id`), so the
+            // picture has to be moved with it. Strictly after the config write,
+            // for the same reason `delete_user` removes the file only then: a
+            // rename the write refused (BadRequest / Conflict / Managed) must
+            // not have carried the picture away first, and the file cannot join
+            // the config write's transaction.
+            //
+            // The opposite failure — row renamed, file stranded — is reported
+            // rather than warned about: the renamed user's own route would 404
+            // while the stale file sits under a freed name for its next holder
+            // to inherit, and unlike the delete sweep this picture still has a
+            // live owner waiting for it. `internal_err_response` logs the
+            // detail while the client gets the generic 500, matching how a
+            // post-write reload failure is surfaced by
+            // `persist_identity_sections`.
+            if final_cfg.name != name {
+                if let Err(error) = avatar::move_user_avatar(&dir, &name, &final_cfg.name) {
+                    return internal_err_response(format!(
+                        "user '{name}' was renamed to '{}', but its avatar could not be moved \
+                         to the new stem: {error}; the image must be re-uploaded under the new name",
+                        final_cfg.name
+                    ));
+                }
+            }
+            (
+                StatusCode::OK,
+                Json(UserView::from_config(&final_cfg, &dir)),
+            )
+                .into_response()
+        }
         Err(PersistError::Conflict(m)) => err_response(StatusCode::CONFLICT, m),
         Err(PersistError::NotFound(m)) => err_response(StatusCode::NOT_FOUND, m),
         Err(PersistError::BadRequest(m)) => err_response(StatusCode::BAD_REQUEST, m),
@@ -533,20 +667,63 @@ pub async fn delete_user(
     // being true the moment #7746 lands. Both sections are rewritten inside a
     // single `persist_identity_sections` call so there is no window where the
     // user is gone from `[[users]]` but still listed in a group.
-    match persist_identity_sections(&state, caller_uid, "users updated", move |users, groups| {
-        let before = users.len();
-        users.retain(|u| u.name != target);
-        if users.len() == before {
-            return Err(PersistError::NotFound(format!("user '{target}' not found")));
-        }
-        for group in groups.iter_mut() {
-            group.members.retain(|m| m != &target);
-        }
-        Ok(())
-    })
+    //
+    // The sweep below runs under the same guard: an upload that resolved
+    // `alice` just before this persist must not be able to publish the file
+    // after the sweep, because the next holder of the freed name would
+    // inherit the picture.
+    let _identity_guard = state.config_write_lock.lock().await;
+    match persist_identity_sections_locked(
+        &state,
+        caller_uid,
+        "users updated",
+        move |users, groups| {
+            let before = users.len();
+            users.retain(|u| u.name != target);
+            if users.len() == before {
+                return Err(PersistError::NotFound(format!("user '{target}' not found")));
+            }
+            for group in groups.iter_mut() {
+                group.members.retain(|m| m != &target);
+            }
+            Ok(())
+        },
+    )
     .await
     {
-        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Ok(()) => {
+            // The stored image is keyed on `UserId::from_name(name)`, which is a
+            // stable derivation — so leaving the file behind means whoever next
+            // takes this name inherits the previous holder's picture, and
+            // `has_avatar` then answers true for somebody who never set one. The
+            // agent side clears the same residue for the same reason
+            // (`agent_purge`), and this is the only place a user row goes away.
+            //
+            // Strictly after the persist, never before: a delete that failed
+            // must not have taken the picture with it.
+            // `remove_avatars` returns a count that cannot answer the question
+            // this warning asks: it swallows every per-file failure itself and
+            // documents "already gone" as its non-error, so a zero means "this
+            // user had no picture" and a failed unlink looks exactly the same.
+            // So ask the probe it already uses instead — a file that was there
+            // before and is still there afterwards is precisely the residue
+            // this branch exists to clear, and the one outcome worth a line,
+            // since the name can be recreated and would inherit the picture.
+            let avatar_key = UserId::from_name(&name).to_string();
+            let dir = state.kernel.config_snapshot().effective_user_avatars_dir();
+            let had_avatar = librefang_types::media::find_avatar(&dir, &avatar_key).is_some();
+            let _ = librefang_types::media::remove_avatars(&dir, &avatar_key);
+            if had_avatar {
+                if let Some(survivor) = librefang_types::media::find_avatar(&dir, &avatar_key) {
+                    tracing::warn!(
+                        user = %name,
+                        path = %survivor.display(),
+                        "avatar survived the delete-user sweep; recreating this name would inherit it"
+                    );
+                }
+            }
+            StatusCode::NO_CONTENT.into_response()
+        }
         Err(PersistError::NotFound(m)) => err_response(StatusCode::NOT_FOUND, m),
         Err(PersistError::BadRequest(m)) => err_response(StatusCode::BAD_REQUEST, m),
         Err(PersistError::Conflict(m)) => err_response(StatusCode::CONFLICT, m),
@@ -601,7 +778,8 @@ pub async fn import_users(
         let prepared_row = (|| -> Result<UserConfig, String> {
             validate_name(&row.name)?;
             let role = validate_role(&row.role)?;
-            let api_key_hash = validate_api_key_hash(row.api_key_hash.as_deref())?;
+            let api_key_hash =
+                validate_api_key_hash(row.api_key_hash.as_ref().and_then(|h| h.as_deref()))?;
             Ok(UserConfig {
                 name: row.name.trim().to_string(),
                 role,
@@ -616,6 +794,9 @@ pub async fn import_users(
                 tool_categories: None,
                 memory_access: None,
                 channel_tool_rules: HashMap::new(),
+                // A CSV row carries no glyph, and the update path below keeps
+                // whatever the matched row already had.
+                emoji: None,
             })
         })();
         prepared.push((i, prepared_row));
@@ -694,11 +875,15 @@ pub async fn import_users(
         }
     }
 
-    let payload: Vec<UserConfig> = to_apply.iter().map(|(_, u)| u.clone()).collect();
+    // Pair each row with whether it carried `api_key_hash` at all, so an update row that omits it keeps the stored hash (same tri-state rule as `update_user`).
+    let payload: Vec<(UserConfig, bool)> = to_apply
+        .iter()
+        .map(|(i, u)| (u.clone(), req.rows[*i].api_key_hash.is_some()))
+        .collect();
     let caller_uid = caller.as_ref().map(|c| c.0.user_id);
     let result = persist_users(&state, caller_uid, move |users| {
         let mut existed_before_row = Vec::with_capacity(payload.len());
-        for new_u in &payload {
+        for (new_u, hash_present) in &payload {
             if let Some(idx) = users.iter().position(|u| u.name == new_u.name) {
                 existed_before_row.push(true);
                 // RBAC M3 (#3205) + M5 (#3203): preserve existing per-
@@ -706,11 +891,20 @@ pub async fn import_users(
                 // existing user — same reasoning as `update_user`.
                 let preserved = users[idx].clone();
                 users[idx] = UserConfig {
+                    api_key_hash: if *hash_present {
+                        new_u.api_key_hash.clone()
+                    } else {
+                        preserved.api_key_hash
+                    },
                     budget: preserved.budget,
                     tool_policy: preserved.tool_policy,
                     tool_categories: preserved.tool_categories,
                     memory_access: preserved.memory_access,
                     channel_tool_rules: preserved.channel_tool_rules,
+                    // The row being replaced was built with `emoji: None`
+                    // above, so without this an import that merely re-affirms
+                    // an existing user would clear their glyph.
+                    emoji: preserved.emoji,
                     ..new_u.clone()
                 };
             } else {
@@ -1243,7 +1437,31 @@ where
 /// `audit_detail` is the text recorded against the `ConfigChange` audit action,
 /// so an operator reading the hash-chained log can tell a user edit from a
 /// group edit without diffing `config.toml`.
+///
+/// The lock is held for the whole write, and callers whose follow-up file
+/// operation must not interleave with it — `delete_user`'s avatar sweep and
+/// `update_user`'s avatar move — take [`persist_identity_sections_locked`]
+/// under the guard themselves.
 pub(crate) async fn persist_identity_sections<F, R>(
+    state: &Arc<AppState>,
+    caller: Option<UserId>,
+    audit_detail: &str,
+    mutate: F,
+) -> Result<R, PersistError>
+where
+    F: FnOnce(&mut Vec<UserConfig>, &mut Vec<GroupConfig>) -> Result<R, PersistError>,
+{
+    let _guard = state.config_write_lock.lock().await;
+    persist_identity_sections_locked(state, caller, audit_detail, mutate).await
+}
+
+/// The body of [`persist_identity_sections`], for callers that need the guard
+/// held across a follow-up file operation on the same critical section.
+///
+/// The caller must hold `state.config_write_lock`; taking it here too would
+/// deadlock, and skipping it is what would let an avatar write land between a
+/// rename's persist and its file move.
+async fn persist_identity_sections_locked<F, R>(
     state: &Arc<AppState>,
     caller: Option<UserId>,
     audit_detail: &str,
@@ -1255,7 +1473,6 @@ where
     if crate::routes::guard_config_write(state.kernel.config_path()).is_some() {
         return Err(PersistError::Managed);
     }
-    let _guard = state.config_write_lock.lock().await;
 
     let (mut users, mut groups) = {
         let cfg = state.kernel.config_ref();
@@ -1292,11 +1509,23 @@ where
         ))
     })?;
 
-    // Replace the entire `users` key with a freshly built array-of-tables
-    // (or remove it when the vector is empty so we don't leave a stranded
-    // `users = []` behind).
+    // Replace the entire `users` key with a freshly built array-of-tables, or
+    // with an explicit empty array when the vector is empty.
+    //
+    // The empty case states `users = []` rather than removing the key: the
+    // reload overlay (#8459/#8460) reads a top-level key the document does not
+    // state as "keep the live value", so deleting the last user by dropping
+    // the key resurrected that user — and its bearer — on the reload this same
+    // write triggers. An explicit empty array is a statement about the
+    // section, so the deletion sticks while a genuinely partial document still
+    // leaves the fields it never mentions on the live config.
     if users.is_empty() {
+        // Remove-then-insert rather than inserting over the existing key: a
+        // `[[users]]` key keeps the array-of-tables header's formatting decor
+        // and would render as `users= []`; a fresh key gets the standard
+        // `key = value` spacing an operator reads.
         doc.remove("users");
+        doc.insert("users", toml_edit::value(toml_edit::Array::new()));
     } else {
         let mut aot = toml_edit::ArrayOfTables::new();
         for u in &users {
@@ -1321,12 +1550,16 @@ where
         doc.insert("users", toml_edit::Item::ArrayOfTables(aot));
     }
 
-    // Same treatment for `[[groups]]` (#7745). Written on every identity
-    // mutation, not only on group edits: the vector is re-serialized from the
-    // config the kernel already parsed, so a users-only edit round-trips the
-    // groups section byte-identically and the write stays idempotent.
+    // Same treatment for `[[groups]]` (#7745), including the explicit empty
+    // array for the same resurrection reason as `users` above. Written on
+    // every identity mutation, not only on group edits: the vector is
+    // re-serialized from the config the kernel already parsed, so a users-only
+    // edit round-trips the groups section byte-identically and the write stays
+    // idempotent.
     if groups.is_empty() {
+        // Same shape and same remove-then-insert rationale as `users` above.
         doc.remove("groups");
+        doc.insert("groups", toml_edit::value(toml_edit::Array::new()));
     } else {
         let mut aot = toml_edit::ArrayOfTables::new();
         for g in &groups {
@@ -1758,6 +1991,10 @@ pub async fn update_user_policy(
 mod tests {
     use super::*;
     use http_body_util::BodyExt;
+    // Only the tests reach for these now: the identity route calls
+    // `validate_emoji` through its full path from `avatar.rs`, and the const is
+    // here to size the over-length fixture rather than to bound anything.
+    use librefang_types::config::{validate_emoji, MAX_EMOJI_CHARS};
 
     #[tokio::test]
     async fn internal_user_errors_are_scrubbed_from_http_body() {
@@ -1770,5 +2007,70 @@ mod tests {
         assert!(body.contains("Internal server error"));
         assert!(!body.contains(secret));
         assert!(!body.contains("config.toml"));
+    }
+
+    /// Absent and empty both mean "no emoji", and neither is an error.
+    ///
+    /// The empty case is the one that matters: `PATCH {"emoji": ""}` is how a
+    /// client that has already cleared its input field clears the stored
+    /// glyph, and refusing it would leave the only reachable clearing move as
+    /// `null` — which is exactly the distinction a UI with an empty text box
+    /// cannot make.
+    #[test]
+    fn an_absent_or_empty_emoji_clears_rather_than_fails() {
+        for input in [None, Some(""), Some("   "), Some("\t\n")] {
+            assert_eq!(
+                validate_emoji(input),
+                Ok(None),
+                "{input:?} must clear, not be refused"
+            );
+        }
+    }
+
+    /// Whitespace around a glyph is padding the operator cannot see, so it is
+    /// trimmed rather than stored — otherwise `" 🦀"` and `"🦀"` would be two
+    /// distinct values that render identically.
+    #[test]
+    fn an_emoji_is_trimmed_to_the_glyph() {
+        assert_eq!(validate_emoji(Some(" 🦀 ")), Ok(Some("🦀".to_string())));
+        // A joined sequence is several code points and must survive whole.
+        let family = "👨‍👩‍👧‍👦";
+        assert_eq!(validate_emoji(Some(family)), Ok(Some(family.to_string())));
+    }
+
+    /// The ceiling counts `char`s, not bytes: an emoji is up to four bytes
+    /// each, so a byte-based cap would refuse a sequence that is well inside
+    /// what the wide end of a picker emits.
+    #[test]
+    fn the_emoji_cap_counts_characters_not_bytes() {
+        let family = "👨‍👩‍👧‍👦";
+        assert!(
+            family.len() > family.chars().count(),
+            "precondition: this sequence is multi-byte per code point"
+        );
+        let under = family.repeat(MAX_EMOJI_CHARS / family.chars().count());
+        assert!(
+            validate_emoji(Some(&under)).is_ok(),
+            "{under:?} is {} chars and must be accepted",
+            under.chars().count()
+        );
+
+        let over = "a".repeat(MAX_EMOJI_CHARS + 1);
+        assert!(
+            validate_emoji(Some(&over)).is_err(),
+            "one char past the cap must be refused"
+        );
+    }
+
+    /// A control character would end up inside `config.toml` and then inside a
+    /// DOM text node, which is the one thing this value must never carry.
+    #[test]
+    fn an_emoji_may_not_carry_a_control_character() {
+        for input in ["a\u{0}b", "🦀\u{1b}[31m", "\u{7}"] {
+            assert!(
+                validate_emoji(Some(input)).is_err(),
+                "{input:?} must be refused"
+            );
+        }
     }
 }

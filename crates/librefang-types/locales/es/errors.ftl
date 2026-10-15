@@ -33,6 +33,7 @@ api-error-manifest-too-large = Manifiesto demasiado grande (máx. 1 MB)
 api-error-manifest-invalid-format = Formato de manifiesto no válido
 api-error-manifest-signature-mismatch = El contenido del manifiesto firmado no coincide con manifest_toml
 api-error-manifest-signature-failed = Falló la verificación de la firma del manifiesto
+api-error-manifest-signed-template-conflict = signed_manifest no se puede combinar con template; firma en su lugar el manifest_toml en línea
 
 # Auth errors
 api-error-auth-invalid-key = Clave API no válida
@@ -85,3 +86,7 @@ api-error-rate-limited = Límite de solicitudes excedido. Inténtelo de nuevo m�
 # typed MemoryRouteError-style helper. Without this key, every `t_args("api-error-generic", …)`
 # call returns the literal key as the response body and `$error` interpolation never runs.
 api-error-generic = Error: { $error }
+api-error-agent-manifest-conflict = Manifiesto obsoleto: alguien guardó este agente después de que lo cargara. Recargue y vuelva a aplicar el cambio.
+
+api-error-validation-avatar-url-invalid = La URL del avatar debe ser la ruta de avatar que este daemon sirve para el agente, o estar vacía. Sube la imagen en lugar de enlazarla.
+api-error-validation-color-invalid = El color debe ser un código hexadecimal que empiece por '#'

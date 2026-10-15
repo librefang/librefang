@@ -292,6 +292,7 @@ fn outcome_lines(
         (report.workspace_unresolved, "purge-workspace-unresolved"),
         (report.workspace_shared, "purge-workspace-shared"),
         (report.agent_type_removed, "purge-removed-agent-type"),
+        (report.avatar_removed, "purge-removed-avatar"),
         (report.cron_jobs_removed, "purge-removed-cron-jobs"),
         (report.trigger_jobs_removed, "purge-removed-trigger-jobs"),
         (

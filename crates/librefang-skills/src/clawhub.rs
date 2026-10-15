@@ -553,12 +553,9 @@ impl ClawHubClient {
         // Use get_with_retry for the download — same 429/5xx handling as all
         // other endpoints, with 5 attempts and exponential backoff.
         let response = self.get_with_retry(&url, "ClawHub download").await?;
-        let bytes = response
-            .bytes()
-            .await
-            .map_err(|e| SkillError::Network(format!("Failed to read download body: {e}")))?;
+        let bytes = crate::marketplace::read_body_capped(response).await?;
 
-        self.install_with_expected_sha256(slug, target_dir, &bytes, expected_sha256.as_deref())
+        self.install_with_expected_sha256(slug, target_dir, bytes, expected_sha256.as_deref())
             .await
     }
 
@@ -572,7 +569,7 @@ impl ClawHubClient {
         &self,
         slug: &str,
         target_dir: &Path,
-        bytes: &[u8],
+        bytes: Vec<u8>,
     ) -> Result<ClawHubInstallResult, SkillError> {
         self.install_with_expected_sha256(slug, target_dir, bytes, None)
             .await
@@ -589,7 +586,7 @@ impl ClawHubClient {
         &self,
         slug: &str,
         target_dir: &Path,
-        bytes: &[u8],
+        bytes: Vec<u8>,
         expected_sha256: Option<&str>,
     ) -> Result<ClawHubInstallResult, SkillError> {
         validate_slug(slug)?;
@@ -597,7 +594,7 @@ impl ClawHubClient {
         // Step 1: SHA256 of downloaded content
         let sha256 = {
             let mut hasher = Sha256::new();
-            hasher.update(bytes);
+            hasher.update(&bytes);
             hex::encode(hasher.finalize())
         };
         info!(slug, sha256 = %sha256, "Downloaded skill");
@@ -642,14 +639,13 @@ impl ClawHubClient {
         // the conversion step below needs.
         let is_skillmd = {
             let tmp_dir = tmp_dir.clone();
-            let bytes = bytes.to_vec();
             let slug = slug.to_string();
             tokio::task::spawn_blocking(move || -> Result<bool, SkillError> {
                 let mut cleanup = prepare_staging_dir(&tmp_dir)?;
 
                 // Detect content type and extract accordingly
-                let content_str = String::from_utf8_lossy(&bytes);
-                let is_skillmd = content_str.trim_start().starts_with("---");
+                // Byte-level prefix check: decoding a whole binary zip just to test for front matter would allocate another full-size copy.
+                let is_skillmd = bytes.trim_ascii_start().starts_with(b"---");
 
                 if is_skillmd {
                     let skill_md_path = resolve_skill_child_path(&tmp_dir, Path::new("SKILL.md"))?;
@@ -927,11 +923,25 @@ fn prepare_staging_dir(path: &Path) -> std::io::Result<StagingCleanup> {
     Ok(cleanup)
 }
 
-fn promote_staged_skill(staged: &Path, target: &Path) -> std::io::Result<()> {
-    static PROMOTION_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    let _guard = PROMOTION_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+/// Serializes every skill promotion in this process.
+///
+/// Two installs of the same slug can both pass an `is_installed` probe before either
+/// has promoted anything, so the existence check and the `rename` that follows it must
+/// happen as one critical section. Without the lock, the second `rename` lands on a
+/// non-empty directory and fails with `ENOTEMPTY` — a filesystem detail for what is
+/// really the same conflict the probe reports.
+///
+/// The lock is process-wide only: a second daemon (or a CLI install) over the same
+/// home takes its own lock, so that cross-process race still surfaces as `ENOTEMPTY`
+/// and the callers' scrubbed 500. That is pre-existing and out of scope here.
+static PROMOTION_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Swap `staged` into `target`, moving any existing target aside first.
+///
+/// Callers hold [`PROMOTION_LOCK`] for the whole check-and-swap. The prior directory is
+/// renamed out of the way and only removed once the new one has landed, so a failed swap
+/// restores it and a successful one leaves no backup behind.
+fn swap_staged_into_place(staged: &Path, target: &Path) -> std::io::Result<()> {
     let target_exists = match std::fs::symlink_metadata(target) {
         Ok(_) => true,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
@@ -970,6 +980,49 @@ fn promote_staged_skill(staged: &Path, target: &Path) -> std::io::Result<()> {
             ))),
         },
     }
+}
+
+fn promote_staged_skill(staged: &Path, target: &Path) -> std::io::Result<()> {
+    let _guard = PROMOTION_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    swap_staged_into_place(staged, target)
+}
+
+/// Move a complete staged directory into place, refusing to replace an installed target.
+///
+/// Public for callers outside this crate that pre-check `is_installed` and must not
+/// overwrite the result of that check: serialized on the same process-wide promotion
+/// lock as `promote_staged_skill`, so the existence probe and the move are one
+/// critical section against every other promotion in this process. The loser of that
+/// race gets `AlreadyExists` — the condition its caller's own probe reports — instead
+/// of the `ENOTEMPTY` a bare `rename` raises when the destination appeared in between.
+///
+/// "Installed" is the probe's condition, not bare existence: `ClawHubClient::is_installed`
+/// requires a `skill.toml`, so a manifestless `<slug>` directory — an interrupted uninstall,
+/// or leftovers from a manual edit — reads as absent to the caller and must not be refused
+/// here, or every reinstall would answer `AlreadyExists` for a skill the probe calls missing.
+/// A manifestless target is therefore treated as absent and swapped out with the same
+/// backup-and-swap `promote_staged_skill` uses, so a non-empty remnant cannot fail the
+/// promotion with `ENOTEMPTY` (on Windows, any existing directory would refuse the rename).
+pub fn promote_staged_skill_if_absent(staged: &Path, target: &Path) -> std::io::Result<()> {
+    let _guard = PROMOTION_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let installed = match std::fs::symlink_metadata(target) {
+        // Same criterion as the caller's pre-check (`is_installed`): only a target that
+        // carries `skill.toml` is an install to refuse.
+        Ok(_) => target.join("skill.toml").is_file(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => return Err(error),
+    };
+    if installed {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            format!("{} already exists", target.display()),
+        ));
+    }
+    swap_staged_into_place(staged, target)
 }
 
 /// RFC 3986 percent-encoding for query parameters.
@@ -1028,6 +1081,50 @@ mod tests {
             }
         });
         (format!("http://{address}"), task)
+    }
+
+    #[tokio::test]
+    async fn read_body_capped_rejects_oversized_content_length() {
+        let (base, task) = scripted_http_server(vec![
+            "HTTP/1.1 200 OK\r\nContent-Length: 314572800\r\nConnection: close\r\n\r\n".to_string(),
+        ])
+        .await;
+        let resp = reqwest::get(format!("{base}/skill.zip")).await.unwrap();
+        let err = crate::marketplace::read_body_capped(resp)
+            .await
+            .expect_err("a body advertised above the cap must be rejected before buffering");
+        assert!(
+            matches!(err, SkillError::Network(ref m) if m.contains("exceeds")),
+            "unexpected error: {err:?}"
+        );
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn read_body_capped_returns_small_body() {
+        let (base, task) = scripted_http_server(vec![
+            "HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello".to_string(),
+        ])
+        .await;
+        let resp = reqwest::get(format!("{base}/skill.zip")).await.unwrap();
+        let body = crate::marketplace::read_body_capped(resp).await.unwrap();
+        assert_eq!(body, b"hello");
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn install_detects_skill_md_after_leading_whitespace() {
+        let dir = tempfile::tempdir().unwrap();
+        let client = ClawHubClient::new(dir.path().join("cache"));
+        let target = dir.path().join("skills");
+        std::fs::create_dir_all(&target).unwrap();
+        let body = b"\n  \n---\nname: ws-skill\ndescription: whitespace test\n---\n# WS\nBody.\n";
+
+        client
+            .install_from_bytes("ws-skill", &target, body.to_vec())
+            .await
+            .unwrap();
+        assert!(target.join("ws-skill").join("SKILL.md").is_file());
     }
 
     #[test]
@@ -1256,7 +1353,7 @@ mod tests {
         std::fs::create_dir_all(&target).unwrap();
 
         let err = client
-            .install_with_expected_sha256("evil-skill", &target, &buf, None)
+            .install_with_expected_sha256("evil-skill", &target, buf, None)
             .await
             .expect_err("a bundle containing a .pth must be refused by the supply-chain audit");
         assert!(
@@ -1275,7 +1372,7 @@ mod tests {
         let body = b"---\nname: safe-skill\ndescription: safe test skill\nversion: 1.2.3\n---\n# Safe Skill\nUse this skill safely.\n";
 
         let result = client
-            .install_with_expected_sha256("safe-skill", &target, body, None)
+            .install_with_expected_sha256("safe-skill", &target, body.to_vec(), None)
             .await
             .unwrap();
 
@@ -1406,7 +1503,7 @@ mod tests {
         let malformed = b"---\nname: [unterminated\n---\nbody\n";
 
         client
-            .install_from_bytes("broken-skill", target.path(), malformed)
+            .install_from_bytes("broken-skill", target.path(), malformed.to_vec())
             .await
             .expect_err("malformed frontmatter must fail conversion");
 
@@ -1455,6 +1552,99 @@ mod tests {
             .map(|entry| entry.unwrap().file_name())
             .collect::<Vec<_>>();
         assert_eq!(entries, vec![std::ffi::OsString::from("skill")]);
+    }
+
+    #[test]
+    fn promotion_if_absent_refuses_to_replace_an_existing_install() {
+        let dir = tempfile::tempdir().unwrap();
+        let staged = dir.path().join("staged");
+        let target = dir.path().join("skill");
+        std::fs::create_dir(&staged).unwrap();
+        std::fs::write(staged.join("version"), "new").unwrap();
+        std::fs::write(staged.join("skill.toml"), "name = \"new\"\n").unwrap();
+        std::fs::create_dir(&target).unwrap();
+        std::fs::write(target.join("version"), "old").unwrap();
+        // An install is a `<slug>` directory with a manifest; that is what the caller's
+        // `is_installed` probe checks before calling this.
+        std::fs::write(target.join("skill.toml"), "name = \"old\"\n").unwrap();
+
+        let error = promote_staged_skill_if_absent(&staged, &target)
+            .expect_err("an existing install must not be replaced");
+        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(
+            std::fs::read_to_string(target.join("version")).unwrap(),
+            "old"
+        );
+        assert_eq!(
+            std::fs::read_to_string(target.join("skill.toml")).unwrap(),
+            "name = \"old\"\n"
+        );
+        assert!(
+            staged.join("version").is_file(),
+            "the losing candidate stays staged for its caller's cleanup guard"
+        );
+    }
+
+    #[test]
+    fn promotion_if_absent_replaces_a_manifestless_remnant() {
+        let dir = tempfile::tempdir().unwrap();
+        let staged = dir.path().join("staged");
+        let target = dir.path().join("skill");
+        std::fs::create_dir(&staged).unwrap();
+        std::fs::write(staged.join("skill.toml"), "name = \"new\"\n").unwrap();
+        // The residue an interrupted uninstall leaves: the `<slug>` directory is still there
+        // but carries no `skill.toml`, so the `is_installed` probe reports the skill as
+        // absent. Refusing the promotion here would wedge every reinstall.
+        std::fs::create_dir(&target).unwrap();
+
+        promote_staged_skill_if_absent(&staged, &target)
+            .expect("a manifestless remnant must not block the reinstall");
+
+        assert!(target.join("skill.toml").is_file());
+        assert!(
+            !staged.exists(),
+            "the staged candidate must have moved into place"
+        );
+    }
+
+    #[test]
+    fn promotion_if_absent_replaces_a_nonempty_manifestless_remnant() {
+        let dir = tempfile::tempdir().unwrap();
+        let staged = dir.path().join("staged");
+        let target = dir.path().join("skill");
+        std::fs::create_dir(&staged).unwrap();
+        std::fs::write(staged.join("skill.toml"), "name = \"new\"\n").unwrap();
+        // What an interrupted uninstall or a manual edit can leave: the `<slug>` directory
+        // still holds content but no `skill.toml`, so the probe calls the skill absent. A
+        // bare `rename` onto it fails with `ENOTEMPTY`, so the reinstall takes the
+        // backup-and-swap path instead of answering 500.
+        std::fs::create_dir(&target).unwrap();
+        std::fs::write(target.join("leftover"), "old\n").unwrap();
+
+        promote_staged_skill_if_absent(&staged, &target)
+            .expect("a non-empty manifestless remnant must not block the reinstall");
+
+        assert_eq!(
+            std::fs::read_to_string(target.join("skill.toml")).unwrap(),
+            "name = \"new\"\n"
+        );
+        assert!(
+            !target.join("leftover").exists(),
+            "the remnant must be swapped out, not merged with the new install"
+        );
+        assert!(
+            !staged.exists(),
+            "the staged candidate must have moved into place"
+        );
+        let entries = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            entries,
+            vec![std::ffi::OsString::from("skill")],
+            "the swapped-out remnant must not survive as a backup directory"
+        );
     }
 
     #[test]

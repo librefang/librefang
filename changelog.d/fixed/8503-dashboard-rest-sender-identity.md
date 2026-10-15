@@ -1,0 +1,3 @@
+A sender-less dashboard REST turn from an authenticated caller produced no `SenderContext` at all, so the RBAC tool gate fell to the guest gate and queued `memory_store` for approval even for a user whose own policy allowed it.
+The REST path now attributes that turn to the caller's canonical `UserId` on the `webui` channel, the same tuple the WebSocket path stamps, so the gate resolves the registered user without an `api` channel binding.
+The synthetic root credential stays sender-less, and a sender pair the registry cannot resolve still fails closed into the guest gate (#8503) (@DaBlitzStein)

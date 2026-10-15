@@ -23,6 +23,7 @@ const SPILL_DELEGATION_RESULT_ABOVE: usize = 500;
 ///
 /// The salt covers a superset of the registry's delivery key `(agent_id, session_id)`, so two distinct delivery targets can never share an entry, plus `conversation_key`, which selects a different callee session (`SessionId::for_channel(agent, "agent_send:{key}")`) and so denotes a genuinely different operation.
 /// What still dedupes is exactly the intended idempotency case: one caller re-sending the same message on the same conversation while the first is still in flight.
+/// A deduped call returns the in-flight task id and does not spawn a second callee turn, so the collapse covers the work itself, not only the registry entry.
 fn delegation_prompt_hash(
     caller_agent: AgentId,
     caller_session: SessionId,
@@ -210,7 +211,7 @@ impl kernel_handle::AgentControl for LibreFangKernel {
         // Salted with the caller and conversation — see `delegation_prompt_hash` for why (#6652).
         let prompt_hash = delegation_prompt_hash(parent_id, session_id, conversation_key, message);
 
-        let handle = self.register_async_task(
+        let (handle, created) = self.register_async_task_inner(
             parent_id,
             session_id,
             TaskKind::Delegation {
@@ -220,6 +221,17 @@ impl kernel_handle::AgentControl for LibreFangKernel {
             chat_id.map(String::from),
         );
         let task_id = handle.id;
+
+        // An identical delegation from this caller on this conversation is already in flight: its callee turn will complete the shared task entry.
+        // Spawning again would run the callee a second time (double LLM spend, repeated side-effecting tools) for a result that `complete_async_task` then discards.
+        if !created {
+            tracing::debug!(
+                task_id = %task_id,
+                target = %target_id,
+                "agent_send async: identical delegation already in flight; returning existing task id without spawning a second callee turn"
+            );
+            return Ok(AsyncSendOutcome::Tracked(task_id.to_string()));
+        }
 
         // Spawn the callee loop detached through the upgraded self-handle,
         // same as the async workflow path.
@@ -480,9 +492,14 @@ impl kernel_handle::AgentControl for LibreFangKernel {
         name: &str,
         spec: librefang_types::agent_type::AgentTypeSpec,
     ) -> Result<kernel_handle::AgentTypeSummary, kernel_handle::KernelOpError> {
-        use librefang_types::agent_type_store::{create_agent_type, CreateAgentTypeError};
+        use librefang_types::agent_type_store::{create_agent_type_in, CreateAgentTypeError};
 
-        let created = create_agent_type(name, spec).map_err(|e| match e {
+        // #8112: against this kernel's own `home_dir`, not the process-wide
+        // `LIBREFANG_HOME` env var — the same store the HTTP `POST /api/templates`
+        // handler now writes through, so the two writers can't disagree about
+        // where the file lands.
+        let home_dir = self.config_ref().home_dir.clone();
+        let created = create_agent_type_in(&home_dir, name, spec).map_err(|e| match e {
             // A name the store refuses is something the caller can fix by sending another one, so the reason travels rather than being flattened into an opaque internal failure.
             CreateAgentTypeError::InvalidName => {
                 kernel_handle::KernelOpError::InvalidInput(e.to_string())
@@ -608,5 +625,87 @@ mod tests {
             delegation_prompt_hash(caller, session, Some("k"), "something else"),
             "the message must still be part of the hash"
         );
+    }
+
+    /// A deduped async `agent_send` must return the in-flight task id without spawning a second callee turn.
+    /// Before the fix the duplicate call spawned `send_message_as` anyway; with no real provider that turn fails fast and `complete_async_task` removes the shared entry, so the pre-registered task vanished.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn deduped_async_send_does_not_spawn_second_callee_turn() {
+        use crate::kernel::LibreFangKernel;
+        use librefang_runtime::kernel_handle::{AgentControl, AsyncSendOutcome};
+        use librefang_types::config::{KernelConfig, MemoryConfig};
+        use librefang_types::task::TaskKind;
+        use std::sync::Arc;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let home_dir = tmp.path().to_path_buf();
+        let data_dir = home_dir.join("data");
+        std::fs::create_dir_all(&data_dir).expect("data dir");
+        let config = KernelConfig {
+            home_dir,
+            data_dir: data_dir.clone(),
+            network_enabled: false,
+            memory: MemoryConfig {
+                sqlite_path: Some(data_dir.join("test.db")),
+                ..Default::default()
+            },
+            ..KernelConfig::default()
+        };
+        let kernel = Arc::new(LibreFangKernel::boot_with_config(config).expect("kernel boots"));
+        kernel.set_self_handle();
+
+        let manifest = r#"
+name = "dedupe-target"
+version = "0.1.0"
+description = "test"
+author = "test"
+module = "builtin:chat"
+[model]
+provider = "none"
+model = "none"
+system_prompt = "test"
+"#;
+        let (target, _) = AgentControl::spawn_agent(&*kernel, manifest, None)
+            .await
+            .expect("spawn target");
+        let target_id: AgentId = target.parse().expect("target id");
+        let caller = AgentId::new();
+        let session = SessionId::new();
+
+        let first = kernel.register_async_task(
+            caller,
+            session,
+            TaskKind::Delegation {
+                agent_id: target_id,
+                prompt_hash: delegation_prompt_hash(caller, session, None, "ping"),
+            },
+            None,
+        );
+
+        let outcome = AgentControl::send_to_agent_async_tracked(
+            &*kernel,
+            &target,
+            "ping",
+            &caller.to_string(),
+            Some(&session.to_string()),
+            None,
+            None,
+        )
+        .await
+        .expect("async send");
+        match outcome {
+            AsyncSendOutcome::Tracked(id) => assert_eq!(id, first.id.to_string()),
+            other => panic!("expected Tracked, got {other:?}"),
+        }
+
+        // A spawned duplicate turn would fail fast against the `none` provider and complete (remove) the shared entry.
+        for _ in 0..20 {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            assert_eq!(
+                kernel.pending_async_task_count(),
+                1,
+                "the in-flight delegation entry must survive: no second callee turn may run"
+            );
+        }
     }
 }

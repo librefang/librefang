@@ -338,41 +338,47 @@ impl LibreFangKernel {
         }
     }
 
-    /// Disconnect an MCP server by name, removing it from the live connection list.
+    /// Remove every live connection named `name`, rebuild the tool cache from the connections that remain, and return the removed ones so the caller can close them after the lock is released.
     ///
-    /// The dropped `McpConnection` will shut down the underlying transport.
-    /// Returns `true` if a connection was found and removed.
-    pub async fn disconnect_mcp_server(&self, name: &str) -> bool {
-        let _connection_op = self.mcp.mcp_connection_ops.lock().await;
-        // Extract the matching connection(s) so we can close them explicitly
-        // rather than relying on the implicit Drop path.  Explicit close ensures
-        // the underlying stdio child process is reaped before we return, which
-        // prevents subprocess leaks on hot-reload. (#3800)
-        let removed_conns: Vec<librefang_runtime::mcp::McpConnection> = {
-            let mut conns = self.mcp.mcp_connections.lock().await;
-            let mut extracted = Vec::new();
-            let mut i = 0;
-            while i < conns.len() {
-                if conns[i].name() == name {
-                    extracted.push(conns.remove(i));
-                } else {
-                    i += 1;
-                }
+    /// The cache is rebuilt rather than pruned by the `mcp_{server}_` prefix because normalized server names can share a prefix: `github` would otherwise also match every `mcp_github_enterprise_*` tool of a still-connected `github-enterprise`.
+    /// Bumps `mcp_generation` when anything was removed.
+    async fn take_mcp_connections(&self, name: &str) -> Vec<librefang_runtime::mcp::McpConnection> {
+        let mut conns = self.mcp.mcp_connections.lock().await;
+        let mut extracted = Vec::new();
+        let mut i = 0;
+        while i < conns.len() {
+            if conns[i].name() == name {
+                extracted.push(conns.remove(i));
+            } else {
+                i += 1;
             }
-            extracted
-        };
-
-        let removed = !removed_conns.is_empty();
-        if removed {
-            // Remove cached tools from this server and bump generation.
-            // MCP tools are prefixed: mcp_{normalized_server_name}_{tool_name}
-            let prefix = format!("mcp_{}_", librefang_runtime::mcp::normalize_name(name));
+        }
+        if !extracted.is_empty() {
             if let Ok(mut tools) = self.mcp.mcp_tools.lock() {
-                tools.retain(|t| !t.name.starts_with(&prefix));
+                tools.clear();
+                for conn in conns.iter() {
+                    tools.extend(conn.tools().iter().cloned());
+                }
             }
             self.mcp
                 .mcp_generation
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        extracted
+    }
+
+    /// Disconnect an MCP server by name, removing it from the live connection list.
+    ///
+    /// The removed `McpConnection` is closed explicitly before this returns.
+    /// Returns `true` if a connection was found and removed.
+    pub async fn disconnect_mcp_server(&self, name: &str) -> bool {
+        let _connection_op = self.mcp.mcp_connection_ops.lock().await;
+        // Extract the matching connection(s) so we can close them explicitly rather than relying on the implicit Drop path.
+        // Explicit close ensures the underlying stdio child process is reaped before we return, which prevents subprocess leaks on hot-reload. (#3800)
+        let removed_conns = self.take_mcp_connections(name).await;
+
+        let removed = !removed_conns.is_empty();
+        if removed {
             info!(server = %name, "MCP server disconnected");
 
             // Close each extracted connection after releasing the lock.
@@ -779,23 +785,10 @@ impl LibreFangKernel {
             return Err(McpReconnectError::NeedsAuth { id: id.to_string() });
         }
 
-        // Disconnect existing connection if any
-        {
-            let mut conns = self.mcp.mcp_connections.lock().await;
-            let old_len = conns.len();
-            conns.retain(|c| c.name() != id);
-            if conns.len() < old_len {
-                // Rebuild tool cache
-                if let Ok(mut tools) = self.mcp.mcp_tools.lock() {
-                    tools.clear();
-                    for conn in conns.iter() {
-                        tools.extend(conn.tools().iter().cloned());
-                    }
-                    self.mcp
-                        .mcp_generation
-                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                }
-            }
+        // Disconnect the existing connection if any, and close it before dialing the replacement.
+        // Dropping it would only schedule a detached cleanup, so a stdio child holding an exclusive resource (lock file, port, browser profile) could still be alive when the new one starts. (#3800)
+        for conn in self.take_mcp_connections(id).await {
+            conn.close().await;
         }
 
         self.mcp.mcp_health.mark_reconnecting(id);
@@ -1027,5 +1020,110 @@ mod tests {
             "expected at least five wired connect sites (boot connect, retry, reload, \
              reconnect, per-agent pool), found {helper_calls}"
         );
+    }
+}
+
+#[cfg(test)]
+mod prefix_overlap_tests {
+    use super::super::LibreFangKernel;
+    use librefang_types::config::{
+        HttpCompatToolConfig, KernelConfig, McpServerConfigEntry, McpTransportEntry,
+    };
+    use std::sync::Arc;
+
+    fn http_compat_server(name: &str, base_url: &str) -> McpServerConfigEntry {
+        McpServerConfigEntry {
+            name: name.to_string(),
+            template_id: None,
+            transport: Some(McpTransportEntry::HttpCompat {
+                base_url: base_url.to_string(),
+                headers: Vec::new(),
+                tools: vec![HttpCompatToolConfig {
+                    name: "probe".to_string(),
+                    path: "/probe".to_string(),
+                    ..Default::default()
+                }],
+            }),
+            timeout_secs: 5,
+            env: Vec::new(),
+            headers: Vec::new(),
+            oauth: None,
+            taint_scanning: true,
+            taint_policy: None,
+        }
+    }
+
+    fn tool_names(kernel: &LibreFangKernel) -> Vec<String> {
+        let mut names: Vec<String> = kernel
+            .mcp
+            .mcp_tools
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|t| t.name.clone())
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// `github` and `github-enterprise` normalize to tool prefixes `mcp_github_` and `mcp_github_enterprise_`, so the first is a prefix of the second.
+    /// Removing one server must leave the other's tools in the cache, both on disconnect and on reconnect.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn removing_a_server_keeps_tools_of_a_server_whose_name_extends_it() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let backend = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&backend)
+            .await;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let mut config = KernelConfig {
+            home_dir: tmp.path().to_path_buf(),
+            data_dir: tmp.path().join("data"),
+            ..KernelConfig::default()
+        };
+        config
+            .mcp_servers
+            .push(http_compat_server("github", &backend.uri()));
+        config
+            .mcp_servers
+            .push(http_compat_server("github-enterprise", &backend.uri()));
+
+        let kernel = Arc::new(LibreFangKernel::boot_with_config(config).expect("boot"));
+        kernel.connect_mcp_servers().await;
+        assert_eq!(
+            tool_names(&kernel),
+            vec!["mcp_github_enterprise_probe", "mcp_github_probe"]
+        );
+
+        kernel
+            .reconnect_mcp_server("github")
+            .await
+            .expect("reconnect");
+        assert_eq!(
+            tool_names(&kernel),
+            vec!["mcp_github_enterprise_probe", "mcp_github_probe"],
+            "reconnecting github must not drop or duplicate github-enterprise's tools"
+        );
+
+        assert!(kernel.disconnect_mcp_server("github").await);
+        assert_eq!(
+            tool_names(&kernel),
+            vec!["mcp_github_enterprise_probe"],
+            "disconnecting github must not remove github-enterprise's tools"
+        );
+        let remaining: Vec<String> = kernel
+            .mcp
+            .mcp_connections
+            .lock()
+            .await
+            .iter()
+            .map(|c| c.name().to_string())
+            .collect();
+        assert_eq!(remaining, vec!["github-enterprise"]);
+        kernel.shutdown();
     }
 }

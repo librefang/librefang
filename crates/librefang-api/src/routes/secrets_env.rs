@@ -14,7 +14,8 @@ use std::sync::{Mutex, MutexGuard};
 
 static SECRET_WRITE_LOCK: Mutex<()> = Mutex::new(());
 
-fn lock_secret_writes() -> MutexGuard<'static, ()> {
+/// Process-wide lock for every read-modify-write of `secrets.env`, shared with `routes::skills::{write_secret_env, remove_secret_env}` so writers through either module cannot drop each other's keys.
+pub(crate) fn lock_secret_writes() -> MutexGuard<'static, ()> {
     match SECRET_WRITE_LOCK.lock() {
         Ok(guard) => guard,
         Err(poisoned) => {

@@ -2824,5 +2824,33 @@
     ]
    }
   ]
+ },
+ {
+  "source": "- a\n  > \n  b",
+  "blocks": [
+   {
+    "type": "list",
+    "items": [
+     {
+      "label": "•",
+      "blocks": [
+       {
+        "type": "paragraph",
+        "text": "a"
+       },
+       {
+        "type": "blockquote",
+        "blocks": [
+         {
+          "type": "paragraph",
+          "text": "b"
+         }
+        ]
+       }
+      ]
+     }
+    ]
+   }
+  ]
  }
 ]

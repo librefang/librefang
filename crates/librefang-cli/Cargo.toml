@@ -68,7 +68,7 @@ librefang-runtime = { path = "../librefang-runtime" }
 librefang-acp = { path = "../librefang-acp", features = ["kernel-adapter"] }
 rusqlite = { workspace = true }
 uuid = { workspace = true }
-ratatui = { workspace = true }
+ratatui = { workspace = true, features = ["unstable-rendered-line-info"] }
 colored = { workspace = true }
 libc = "0.2"
 fluent = "0.17"

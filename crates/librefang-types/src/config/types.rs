@@ -432,6 +432,109 @@ pub struct UserConfig {
     /// `ApprovalPolicy.channel_rules` — both must agree to allow.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub channel_tool_rules: HashMap<String, crate::user_policy::ChannelToolPolicy>,
+    /// A short glyph the operator picked to stand for this user in the dashboard (#8339).
+    ///
+    /// Free-form text rather than an enum or a validated emoji table: the set of glyphs a person may want is not something this daemon should have an opinion about, and the value only ever reaches a DOM text node.
+    /// The write path bounds its length and refuses control characters — the two properties that matter for a value that is stored in `config.toml` and rendered — and nothing else.
+    ///
+    /// `None` (or an absent key) means "no glyph chosen", which the dashboard renders as the user's initial.
+    /// The avatar *image* deliberately does not live here: it is a file on disk, and whether one exists is answered by probing the directory rather than by a second copy of the answer that can fall out of step with it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub emoji: Option<String>,
+}
+
+/// Longest emoji accepted, in `char`s.
+///
+/// A single glyph is one `char` for the common case and several for the ones built by joining or by a variation selector — `👨‍👩‍👧‍👦` is seven code points, `🏳️‍🌈` is six — so the ceiling is set to clear the widest sequence a picker emits with room to spare, and to stay far below the point where the value stops being a glyph and becomes a string someone is smuggling into `config.toml`.
+pub const MAX_EMOJI_CHARS: usize = 32;
+
+/// Normalize a user's identity emoji, or say why it was refused (#8339).
+///
+/// Lives beside the field it constrains rather than in the API crate, because a value reaches [`UserConfig::emoji`] two ways — `PATCH /api/users/{name}/identity`, and an operator editing `config.toml` — and only the first had a check.
+/// `validate_config_for_reload` in the kernel calls this for every row, so a hand-edited file is *reported* as soon as anything reloads it or writes it back through the API, and the two paths cannot drift apart because there is one implementation.
+///
+/// Neither hand-edit door refuses the value (#8339 review follow-up).
+/// A hand-edit that is only ever *loaded*, by `load_config` at boot, is not checked because refusing to start the daemon over a long glyph is a worse outcome than rendering one.
+/// A hand-edit that is rewritten through the API is checked but not refused, because a pre-existing value failing that check blocked every unrelated config write until the file was fixed by hand; the write path that actually owns the field still bounds it before persisting, and an unbounded glyph is stored in a file operators read and rendered into a DOM text node, not interpreted.
+///
+/// `None` and an empty-or-whitespace string both mean "clear the stored emoji".
+///
+/// Nothing here checks that the value *is* an emoji, and that is deliberate: deciding "is this a glyph" needs an emoji table that would go stale against Unicode, and the properties that actually matter for a value stored in `config.toml` and rendered into a DOM text node are its length and the absence of control or invisible/bidi formatting characters.
+/// A `Z` is therefore accepted as an emoji. It renders as a `Z`.
+pub fn validate_emoji(emoji: Option<&str>) -> Result<Option<String>, String> {
+    let Some(raw) = emoji else {
+        return Ok(None);
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    let len = trimmed.chars().count();
+    if len > MAX_EMOJI_CHARS {
+        return Err(format!(
+            "emoji must be at most {MAX_EMOJI_CHARS} characters; this one is {len}"
+        ));
+    }
+    if trimmed.chars().any(|c| {
+        c.is_control()
+            || crate::text::INJECTION_SIGNAL_CHARS.contains(&c)
+            || ('\u{E0000}'..='\u{E007F}').contains(&c)
+    }) {
+        return Err(
+            "emoji must not contain control or invisible/bidi formatting characters".to_string(),
+        );
+    }
+    Ok(Some(trimmed.to_string()))
+}
+
+#[cfg(test)]
+mod validate_emoji_tests {
+    use super::validate_emoji;
+
+    #[test]
+    fn refuses_invisible_and_bidi_formatting_characters() {
+        // U+202E (right-to-left override) reverses everything rendered after it
+        // in the row; U+200B is an invisible padding character; U+2066 opens a
+        // bidi isolate. None is `char::is_control`, so the old check let them
+        // through.
+        for bad in ["\u{202E}\u{200B}", "\u{200B}\u{200B}", "a\u{2066}b"] {
+            assert!(
+                validate_emoji(Some(bad)).is_err(),
+                "{bad:?} must be refused as an invisible/bidi format character"
+            );
+        }
+    }
+
+    #[test]
+    fn refuses_the_tag_block() {
+        // U+E0000-U+E007F is a coordinated smuggling channel; the filename
+        // guard already refuses it, and the emoji is written into config.toml
+        // and rendered into the DOM.
+        assert!(validate_emoji(Some("\u{E0041}\u{E0042}")).is_err());
+    }
+
+    #[test]
+    fn accepts_the_emoji_sequence_chars_the_set_excludes() {
+        // A family emoji joins four people with U+200D, and U+FE0F requests
+        // emoji presentation; both are legitimate in an emoji and must not be
+        // caught by the invisible-character check.
+        assert_eq!(
+            validate_emoji(Some("\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}"))
+                .expect("a ZWJ family emoji is a valid emoji"),
+            Some("\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}".to_string())
+        );
+        assert!(validate_emoji(Some("\u{2764}\u{FE0F}")).is_ok());
+    }
+
+    #[test]
+    fn clears_empty_and_keeps_ordinary_glyphs() {
+        assert_eq!(validate_emoji(None).expect("none is not an error"), None);
+        assert_eq!(validate_emoji(Some("   ")).expect("blank clears"), None);
+        assert_eq!(
+            validate_emoji(Some(" Z ")).expect("an ordinary glyph is accepted"),
+            Some("Z".to_string())
+        );
+    }
 }
 
 fn default_role() -> String {
@@ -510,6 +613,7 @@ impl Default for UserConfig {
             tool_categories: None,
             memory_access: None,
             channel_tool_rules: HashMap::new(),
+            emoji: None,
         }
     }
 }
@@ -1032,8 +1136,30 @@ pub struct RateLimitConfig {
     #[serde(default = "default_ws_debounce_chars")]
     pub ws_debounce_chars: usize,
     /// Max login attempts per IP per 15-minute window on auth endpoints
-    /// (`/api/auth/dashboard-login`, `/api/auth/login*`). Default: 10.
-    /// Set to 0 to disable the per-IP auth rate limiter.
+    /// (`/api/auth/dashboard-login`, `/api/auth/login*`,
+    /// `/api/auth/introspect`, `/api/auth/refresh`, the OAuth callback and the
+    /// passkey ceremonies), plus two of the endpoints that verify a TOTP or
+    /// recovery code: `/api/approvals/totp/confirm` always counts, and
+    /// `/api/approvals/{id}/approve` counts only while approving that request
+    /// would verify a code.
+    ///
+    /// An approval verifies a code only when `approval.second_factor` is `totp`
+    /// or `both`, the tool being approved is inside `approval.totp_tools` (all
+    /// tools when the list is empty), the caller is outside the TOTP grace
+    /// window a previous successful verification opened, and the id names a
+    /// pending request — an unknown or already-resolved id verifies nothing.
+    /// With the default `none`, or a tool outside a narrowed `totp_tools`, an
+    /// approval verifies nothing, and metering it would spend this login budget
+    /// on approvals that already succeeded and lock a working operator out.
+    ///
+    /// `/api/approvals/totp/setup` (the `current_code` a re-enrollment sends)
+    /// and `/api/approvals/totp/revoke` verify codes as well and are
+    /// deliberately not counted here: each is an Owner-only write performed
+    /// once, and each already fails closed on its own TOTP lockout — five
+    /// failed codes, then a five-minute refusal — so this budget would only
+    /// lengthen that brake.
+    ///
+    /// Default: 10. Set to 0 to disable the per-IP auth rate limiter.
     #[serde(default = "default_auth_rate_limit_per_ip")]
     pub auth_rate_limit_per_ip: u32,
 }
@@ -2375,6 +2501,16 @@ pub struct ExecPolicy {
     pub full_mode_skips_approval: bool,
     /// Global command allowlist (when mode = allowlist).
     pub allowed_commands: Vec<String>,
+    /// Commands that are refused in every mode, e.g. `["git"]` to let an agent run anything except git (#8536).
+    ///
+    /// Applies to `shell_exec` and `process_start` under both `allowlist` and `full`, and wins over `safe_bins` and `allowed_commands`.
+    /// Entries are bare executable names; matching ignores ASCII case, a leading directory (`/usr/bin/git`), quoting (`"git"`, `g\it`) and a Windows `.exe` / `.cmd` / `.bat` / `.com` suffix.
+    /// A command is refused when a denied name sits in command position in any segment of a chain, pipeline, subshell or command substitution, when it follows a prefix runner such as `env`, `sudo`, `nohup`, `timeout` or `xargs`, or when it appears anywhere in the arguments of a shell wrapper (`bash -c "…"`, `cmd /c …`).
+    ///
+    /// This guards against an agent reaching for the command, not against an agent determined to evade it: a script file, an interpreter (`python -c`), `find -exec`, an alias, or a command name assembled in a variable is not inspected.
+    /// When that matters, use `mode = "allowlist"`, or remove the binary from the daemon's `PATH`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub denied_commands: Vec<String>,
     /// Environment variables explicitly allowed to pass through to `shell_exec`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub allowed_env_vars: Vec<String>,
@@ -2410,6 +2546,7 @@ impl Default for ExecPolicy {
             safe_bins_skip_approval: false,
             full_mode_skips_approval: default_full_mode_skips_approval(),
             allowed_commands: Vec::new(),
+            denied_commands: Vec::new(),
             allowed_env_vars: Vec::new(),
             timeout_secs: 30,
             max_output_bytes: 100 * 1024,
@@ -3405,9 +3542,12 @@ impl Default for QueueConcurrencyConfig {
 /// assignee_wake = true         # wake the assignee even with no trigger declared
 /// ```
 ///
-/// Setting `claim_ttl_secs = 0` disables the sweeper entirely — useful
-/// for long-running human-in-the-loop tasks where a 10 minute reset
-/// would be wrong.
+/// Setting `claim_ttl_secs = 0` disables the *global* clock, not a clock a
+/// task explicitly carries: a task that declared its own `timeout_secs`
+/// still expires, because that is a more specific statement than the
+/// global default. Useful for long-running human-in-the-loop tasks where
+/// a 10 minute reset would be wrong — as long as those tasks do not
+/// carry a per-task timeout.
 ///
 /// Every field is re-read live by its consumer — the sweeper re-reads its
 /// three knobs on each tick, and `assignee_wake` is read at the synthesis
@@ -3417,7 +3557,9 @@ impl Default for QueueConcurrencyConfig {
 #[serde(default)]
 pub struct TaskBoardConfig {
     /// How long an `in_progress` task may stay claimed before the sweeper
-    /// resets it to `pending`. Default: 600 s (10 minutes). 0 disables.
+    /// resets it to `pending`. Default: 600 s (10 minutes). 0 disables the
+    /// global clock only — a task that declared its own `timeout_secs`
+    /// still expires.
     pub claim_ttl_secs: u64,
     /// How often the sweeper scans for stuck tasks. Default: 30 s.
     pub sweep_interval_secs: u64,
@@ -7377,6 +7519,31 @@ impl KernelConfig {
     /// Resolved directory for hand workspaces.
     pub fn effective_hands_workspaces_dir(&self) -> PathBuf {
         self.effective_workspaces_dir().join("hands")
+    }
+
+    /// Resolved directory holding per-agent avatar images (#8339).
+    ///
+    /// Deliberately **not** under [`Self::effective_workspaces_dir`] and **not** under `home_dir/dashboard`, and each exclusion is a security requirement rather than a preference.
+    ///
+    /// An agent can list its own workspace with `file_list`, so an image stored there puts its filename in front of the model on any turn that looks at the directory.
+    /// Everything under `home_dir/dashboard` is reachable at `/dashboard/…`, and `/dashboard/assets/**` is an unauthenticated GET, so writing uploaded bytes there would turn the directory into a way to serve chosen content from the dashboard's own origin.
+    ///
+    /// It is also not the shared upload directory: that one defaults to a subdirectory of the system temp dir and is swept by a 24-hour TTL reaper, which would delete an agent's avatar the day after it was set.
+    ///
+    /// Anchored to `home_dir` rather than to `workspaces_dir` because the latter is operator-overridable and may point anywhere, including into a tree an agent has been granted.
+    pub fn effective_avatars_dir(&self) -> PathBuf {
+        self.home_dir.join("avatars")
+    }
+
+    /// Resolved directory holding per-user avatar images (#8339).
+    ///
+    /// A subdirectory of [`Self::effective_avatars_dir`] rather than a sibling of it, so the two populations cannot be confused for one another: both name their files `{uuid}.{ext}`, and an agent id and a user id are UUIDs drawn from different namespaces that happen to render identically.
+    /// A shared directory would make "which of these is a person" answerable only by running the UUID backwards, and would let a future sweep that assumes agent avatars be confidently wrong about a user's picture.
+    ///
+    /// It inherits every property that makes the parent directory safe — outside the agent workspaces, outside the unauthenticated `/dashboard/**` tree, and outside the TTL-swept upload directory — because it is strictly below it.
+    pub fn effective_user_avatars_dir(&self) -> PathBuf {
+        self.effective_avatars_dir()
+            .join(crate::media::USER_AVATARS_SUBDIR)
     }
 
     /// Parse the TCP port number from `api_listen`.

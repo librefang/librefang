@@ -18,7 +18,11 @@ const variantStyles: Record<BadgeVariant, string> = {
   brand: "bg-brand/10 text-brand border-brand/20",
 };
 
-const dotColors: Record<BadgeVariant, string> = {
+/** Exported so the agent row can peg state to the same colour the `dot` prop
+ *  draws inside the pill (#8339): that row now shows state as a dot pinned to
+ *  the avatar's corner rather than as a pill of its own. A second copy of this
+ *  map would drift the moment a variant is added. */
+export const dotColors: Record<BadgeVariant, string> = {
   default: "bg-text-dim/40",
   success: "bg-success",
   warning: "bg-warning",

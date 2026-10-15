@@ -91,7 +91,7 @@ pub(crate) fn cmd_workflow_create(file: PathBuf) {
             i18n::t_args("automation-workflow-created-id", &[("id", id)])
         );
     } else {
-        let err_msg = body["error"].as_str().unwrap_or("Unknown error");
+        let err_msg = api_error_message(&body).unwrap_or("Unknown error");
         let err_localized = if err_msg == "Unknown error" {
             i18n::t("error-unknown")
         } else {
@@ -365,7 +365,7 @@ pub(crate) fn cmd_trigger_create(
             );
         }
     } else {
-        let err_msg = body["error"].as_str().unwrap_or("Unknown error");
+        let err_msg = api_error_message(&body).unwrap_or("Unknown error");
         let err_localized = if err_msg == "Unknown error" {
             i18n::t("error-unknown")
         } else {
@@ -397,7 +397,7 @@ pub(crate) fn cmd_trigger_delete(trigger_id: &str) {
             i18n::t_args("automation-trigger-deleted", &[("id", trigger_id)])
         );
     } else {
-        let err_msg = body["error"].as_str().unwrap_or("Unknown error");
+        let err_msg = api_error_message(&body).unwrap_or("Unknown error");
         let err_localized = if err_msg == "Unknown error" {
             i18n::t("error-unknown")
         } else {
@@ -424,7 +424,7 @@ pub(crate) fn cmd_trigger_get(trigger_id: &str) {
     );
 
     if body.get("error").is_some() {
-        let err_msg = body["error"].as_str().unwrap_or("Unknown error");
+        let err_msg = api_error_message(&body).unwrap_or("Unknown error");
         let err_localized = if err_msg == "Unknown error" {
             i18n::t("error-unknown")
         } else {
@@ -593,7 +593,7 @@ pub(crate) fn cmd_trigger_update(
     );
 
     if body.get("error").is_some() {
-        let err_msg = body["error"].as_str().unwrap_or("Unknown error");
+        let err_msg = api_error_message(&body).unwrap_or("Unknown error");
         let err_localized = if err_msg == "Unknown error" {
             i18n::t("error-unknown")
         } else {
@@ -631,7 +631,7 @@ pub(crate) fn cmd_trigger_set_enabled(trigger_id: &str, enabled: bool) {
 
     let action = if enabled { "enable" } else { "disable" };
     if body.get("error").is_some() {
-        let err_msg = body["error"].as_str().unwrap_or("Unknown error");
+        let err_msg = api_error_message(&body).unwrap_or("Unknown error");
         let err_localized = if err_msg == "Unknown error" {
             i18n::t("error-unknown")
         } else {
@@ -750,7 +750,7 @@ pub(crate) fn cmd_cron_create(agent: &str, spec: &str, prompt: &str, explicit_na
         )
     };
 
-    let body = daemon_json(
+    let (status, body) = daemon_json_checked(
         client
             .post(format!("{base}/api/cron/jobs"))
             .json(&serde_json::json!({
@@ -767,25 +767,33 @@ pub(crate) fn cmd_cron_create(agent: &str, spec: &str, prompt: &str, explicit_na
             }))
             .send(),
     );
-    if let Some(id) = body["job_id"].as_str().or_else(|| body["id"].as_str()) {
+    let created = status
+        .is_success()
+        .then(|| body["job_id"].as_str().or_else(|| body["id"].as_str()))
+        .flatten();
+    if let Some(id) = created {
         ui::success(&i18n::t_args("cron-created", &[("id", id)]));
     } else {
         ui::error(&i18n::t_args(
             "cron-create-failed",
-            &[("error", body["error"].as_str().unwrap_or("?"))],
+            &[("error", &mutation_failure_reason(status, &body))],
         ));
+        std::process::exit(1);
     }
 }
 
 pub(crate) fn cmd_cron_delete(id: &str) {
     let base = require_daemon("cron delete");
     let client = daemon_client();
-    let body = daemon_json(client.delete(format!("{base}/api/cron/jobs/{id}")).send());
-    if body.get("error").is_some() {
+    let (status, body) =
+        daemon_json_checked(client.delete(format!("{base}/api/cron/jobs/{id}")).send());
+    // Gate on the status, not only on an `error` key: a non-JSON 5xx decodes to `Null` and would otherwise print success. A 200 `{"status":"already-deleted"}` is still success.
+    if !status.is_success() || body.get("error").is_some() {
         ui::error(&i18n::t_args(
             "cron-delete-failed",
-            &[("error", body["error"].as_str().unwrap_or("?"))],
+            &[("error", &mutation_failure_reason(status, &body))],
         ));
+        std::process::exit(1);
     } else {
         ui::success(&i18n::t_args("cron-deleted", &[("id", id)]));
     }
@@ -799,20 +807,21 @@ pub(crate) fn cmd_cron_toggle(id: &str, enable: bool) {
     // there is no `/disable` route. `endpoint` is only the action label used in
     // user-facing messages below.
     let endpoint = if enable { "enable" } else { "disable" };
-    let body = daemon_json(
+    let (status, body) = daemon_json_checked(
         client
             .put(format!("{base}/api/cron/jobs/{id}/enable"))
             .json(&serde_json::json!({ "enabled": enable }))
             .send(),
     );
-    if body.get("error").is_some() {
+    if !status.is_success() || body.get("error").is_some() {
         ui::error(&i18n::t_args(
             "cron-toggle-failed",
             &[
                 ("action", endpoint),
-                ("error", body["error"].as_str().unwrap_or("?")),
+                ("error", &mutation_failure_reason(status, &body)),
             ],
         ));
+        std::process::exit(1);
     } else {
         ui::success(&i18n::t_args(
             "cron-toggled",

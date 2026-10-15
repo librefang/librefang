@@ -316,6 +316,15 @@ pub struct AgentLoopResult {
     /// provider really used (e.g. a `codex-cli` CLI that resolves its own
     /// model). `None` means "use the requested model".
     pub actual_model: Option<String>,
+    /// True when the loop ran out of its per-turn iteration budget and
+    /// delivered its best-so-far text instead of failing with
+    /// `MaxIterationsExceeded` (#8556).
+    ///
+    /// The response is still a successful `Ok` — the accumulated text is
+    /// delivered to the user — but the kernel reads this flag to also push
+    /// an operator notification (`max_iterations`) so the truncation is
+    /// observable. `false` on every ordinary end-turn exit.
+    pub hit_iteration_cap: bool,
 }
 
 #[derive(Debug, Clone)]

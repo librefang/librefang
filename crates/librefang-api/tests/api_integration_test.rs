@@ -3428,6 +3428,500 @@ async fn start_full_router_with_proactive(enabled: bool) -> FullRouterHarness {
     }
 }
 
+/// API key the approval-policy router requires; a test that wants the approve
+/// *handler* to run (not just the rate-limit middleware) must present it.
+const APPROVAL_TEST_API_KEY: &str = "approval-test-key";
+
+/// Boot the production router with a specific approval second-factor policy.
+///
+/// `second_factor` and `totp_tools` are the inputs to the question the auth
+/// rate limiter asks about `/api/approvals/{id}/approve`:
+/// `ApprovalPolicy::tool_requires_totp` short-circuits on the first and is
+/// narrowed per tool by the second, so with `none` (the shipped default) an
+/// approval verifies no code and there is nothing on that path to brute-force,
+/// while under `totp` only the tools inside `totp_tools` (or every tool, when
+/// the list is empty) do.
+///
+/// `api_key` is set so the auth layer has something the handler tests can
+/// present; the rate-limit middleware runs outside it, so requests without the
+/// key still meet the limiter first and keep those tests meaningful.
+async fn start_full_router_with_approval_policy(
+    second_factor: librefang_types::approval::SecondFactor,
+    totp_tools: Vec<String>,
+) -> FullRouterHarness {
+    let tmp = tempfile::tempdir().expect("Failed to create temp dir");
+
+    librefang_kernel::registry_sync::seed_registry_fixture_for_tests(tmp.path());
+
+    let config = KernelConfig {
+        home_dir: tmp.path().to_path_buf(),
+        data_dir: tmp.path().join("data"),
+        api_key: APPROVAL_TEST_API_KEY.to_string(),
+        approval: librefang_types::approval::ApprovalPolicy {
+            second_factor,
+            totp_tools,
+            ..Default::default()
+        },
+        ..KernelConfig::default()
+    };
+
+    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+    let kernel = Arc::new(kernel);
+    kernel.set_self_handle();
+
+    let (app, state) = server::build_router(
+        kernel,
+        "127.0.0.1:0".parse().expect("listen addr should parse"),
+    )
+    .await;
+
+    FullRouterHarness {
+        app,
+        state,
+        _tmp: tmp,
+    }
+}
+
+/// POST to `uri` as a routable public caller from `peer`.
+///
+/// The `ConnectInfo` peer is deliberately not loopback: `auth_rate_limit_layer`
+/// exempts loopback callers carrying no forwarding header, so a request from
+/// 127.0.0.1 would never be metered and the tests below would pass for the
+/// wrong reason.
+///
+/// `peer` is a parameter rather than a constant because the per-IP bucket
+/// outlives a policy change: a test that flips the policy mid-run has to spend
+/// its phases from different addresses, or the earlier phase's count decides
+/// the later phase's answer.
+fn public_post(uri: &str, peer: [u8; 4]) -> Request<Body> {
+    public_post_with_body(uri, peer, "{}")
+}
+
+/// [`public_post`] with a JSON body of choice — the approve path's TOTP tests
+/// send a `totp_code` to prove whether the handler verifies it.
+fn public_post_with_body(uri: &str, peer: [u8; 4], body: &str) -> Request<Body> {
+    let mut request = Request::builder()
+        .method("POST")
+        .uri(uri)
+        .header("content-type", "application/json")
+        .body(Body::from(body.to_string()))
+        .unwrap();
+    request
+        .extensions_mut()
+        .insert(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+            peer, 41234,
+        ))));
+    request
+}
+
+/// Register a pending approval for `tool_name` and return its id, ready to be
+/// interpolated into an `/api/approvals/{id}/approve` path.
+///
+/// The gate is answered per request — the tool behind the id decides whether a
+/// code is verified — so the tests must post to a real pending request instead
+/// of the placeholder id they used while the answer was policy-wide.
+fn seed_pending_approval(harness: &FullRouterHarness, tool_name: &str) -> String {
+    let request = librefang_types::approval::ApprovalRequest {
+        id: uuid::Uuid::new_v4(),
+        agent_id: "test-agent".to_string(),
+        tool_name: tool_name.to_string(),
+        description: "test operation".to_string(),
+        action_summary: "test action".to_string(),
+        risk_level: librefang_types::approval::RiskLevel::High,
+        requested_at: chrono::Utc::now(),
+        timeout_secs: 60,
+        sender_id: None,
+        channel: None,
+        chat_id: None,
+        route_to: Vec::new(),
+        escalation_count: 0,
+        session_id: None,
+        tool_use_id: None,
+    };
+    let id = request.id;
+    harness
+        .state
+        .kernel
+        .approvals()
+        .submit_manual_request(request)
+        .expect("pending approval should register");
+    id.to_string()
+}
+
+/// The wiring half of the approvals rate-limit gate: under the shipped-default
+/// `second_factor = none`, a burst of approvals must not be answered with 429
+/// "Too many login attempts" — the reported symptom, since approving was
+/// spending the same per-IP bucket as `dashboard-login`.
+///
+/// `rate_limiter::tests` pins the middleware's decision given a predicate, and
+/// this pins the decision the production router reaches with a policy fixed at
+/// boot. What neither holds up is the *live* read — a `bool` captured while
+/// `server::build_router` runs satisfies both. That claim is
+/// `test_approvals_gate_follows_the_policy_flipped_at_runtime`'s, which flips
+/// the policy on a running router and is the only test here a boot snapshot
+/// fails.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_approvals_are_not_rate_limited_while_policy_requires_no_totp() {
+    let harness = start_full_router_with_approval_policy(
+        librefang_types::approval::SecondFactor::None,
+        Vec::new(),
+    )
+    .await;
+    let limit = harness
+        .state
+        .kernel
+        .config_ref()
+        .rate_limit
+        .auth_rate_limit_per_ip;
+    let approval_id = seed_pending_approval(&harness, "shell_exec");
+
+    // One request past the cap: this is the one an operator's dashboard used to
+    // answer with 429, then refuse for the rest of the fifteen-minute window.
+    for i in 0..=limit {
+        let resp = harness
+            .app
+            .clone()
+            .oneshot(public_post(
+                &format!("/api/approvals/{approval_id}/approve"),
+                [203, 0, 113, 77],
+            ))
+            .await
+            .unwrap();
+        assert_ne!(
+            resp.status(),
+            StatusCode::TOO_MANY_REQUESTS,
+            "approval {} of {} was 429'd while second_factor = none verifies no code",
+            i + 1,
+            limit + 1
+        );
+    }
+}
+
+/// The gate follows the approval policy **at request time**, and this is the
+/// only test here that says so: it flips the policy on a running router and
+/// watches the middleware change its mind, in both directions.
+///
+/// A `bool` captured while `server::build_router` ran satisfies every other test
+/// in this file and fails here, whichever value it captured: a snapshot of `none`
+/// never meters approvals after the policy turns `totp` on, and a snapshot of
+/// `totp` keeps metering after the operator turns the second factor back off —
+/// the lockout this change exists to remove. Neither is hypothetical:
+/// `POST /api/config/reload` swaps the whole policy through
+/// `ApprovalManager::update_policy` (`config_reload_ops.rs:205`) without
+/// rebuilding the router, so the live read is the only thing that keeps the gate
+/// agreeing with the config.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_approvals_gate_follows_the_policy_flipped_at_runtime() {
+    let harness = start_full_router_with_approval_policy(
+        librefang_types::approval::SecondFactor::None,
+        Vec::new(),
+    )
+    .await;
+    let limit = harness
+        .state
+        .kernel
+        .config_ref()
+        .rate_limit
+        .auth_rate_limit_per_ip;
+
+    /// Whether a full burst against `approval_id` from `peer` is metered.
+    /// `limit + 1` requests, so a bucket that is being spent is guaranteed to
+    /// trip.
+    async fn burst_is_metered(
+        harness: &FullRouterHarness,
+        approval_id: &str,
+        peer: [u8; 4],
+        limit: u32,
+    ) -> bool {
+        for _ in 0..=limit {
+            let resp = harness
+                .app
+                .clone()
+                .oneshot(public_post(
+                    &format!("/api/approvals/{approval_id}/approve"),
+                    peer,
+                ))
+                .await
+                .unwrap();
+            if resp.status() == StatusCode::TOO_MANY_REQUESTS {
+                return true;
+            }
+        }
+        false
+    }
+
+    let set_second_factor = |second_factor: librefang_types::approval::SecondFactor| {
+        let mut policy = harness.state.kernel.approvals().policy();
+        policy.second_factor = second_factor;
+        harness.state.kernel.approvals().update_policy(policy);
+    };
+
+    // A distinct peer per phase: the bucket is per IP and long-lived, so a
+    // phase that reused an address would inherit the previous phase's count.
+    // Each phase seeds its own pending request: the gate is answered per
+    // request, and a `none` phase resolves the request it posts to.
+    let none_phase = seed_pending_approval(&harness, "shell_exec");
+    assert!(
+        !burst_is_metered(&harness, &none_phase, [203, 0, 113, 101], limit).await,
+        "with second_factor = none no code is verified, so approvals must not be metered"
+    );
+
+    set_second_factor(librefang_types::approval::SecondFactor::Totp);
+    let totp_phase = seed_pending_approval(&harness, "shell_exec");
+    assert!(
+        burst_is_metered(&harness, &totp_phase, [203, 0, 113, 102], limit).await,
+        "after the policy is flipped to totp at runtime, the same burst must be metered"
+    );
+
+    set_second_factor(librefang_types::approval::SecondFactor::None);
+    let none_again_phase = seed_pending_approval(&harness, "shell_exec");
+    assert!(
+        !burst_is_metered(&harness, &none_again_phase, [203, 0, 113, 103], limit).await,
+        "after the policy is flipped back to none at runtime, the burst must stop being metered"
+    );
+}
+
+/// The control for the test above: the same burst against the same router, with
+/// only `second_factor` changed, must still trip the limiter.
+///
+/// Without this, the silence in the test above would be indistinguishable from
+/// an unreachable route or a dead meter — and it is also the regression guard
+/// for #4020, which put the approve path in the auth limiter because it accepts
+/// 6-digit codes.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_approvals_stay_rate_limited_while_policy_requires_totp() {
+    let harness = start_full_router_with_approval_policy(
+        librefang_types::approval::SecondFactor::Totp,
+        Vec::new(),
+    )
+    .await;
+    let limit = harness
+        .state
+        .kernel
+        .config_ref()
+        .rate_limit
+        .auth_rate_limit_per_ip;
+    let approval_id = seed_pending_approval(&harness, "shell_exec");
+
+    let mut last_status = StatusCode::OK;
+    let mut saw_429 = false;
+    for _ in 0..=limit {
+        let resp = harness
+            .app
+            .clone()
+            .oneshot(public_post(
+                &format!("/api/approvals/{approval_id}/approve"),
+                [203, 0, 113, 78],
+            ))
+            .await
+            .unwrap();
+        last_status = resp.status();
+        if last_status == StatusCode::TOO_MANY_REQUESTS {
+            saw_429 = true;
+            break;
+        }
+    }
+    assert!(
+        saw_429,
+        "approvals must stay metered while second_factor = totp verifies a code; \
+         {} requests (limit {limit}) all answered {last_status}",
+        limit + 1
+    );
+}
+
+/// The review's residual over-metering: a policy that requires TOTP only for
+/// the tools in `totp_tools` must meter exactly those tools' approvals. A tool
+/// outside the list verifies nothing, so a burst one request past the cap must
+/// stay under the bucket; a listed tool's burst must still trip it, which
+/// proves the meter is alive.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_approvals_meter_only_tools_inside_totp_tools() {
+    let harness = start_full_router_with_approval_policy(
+        librefang_types::approval::SecondFactor::Totp,
+        vec!["shell_exec".to_string()],
+    )
+    .await;
+    let limit = harness
+        .state
+        .kernel
+        .config_ref()
+        .rate_limit
+        .auth_rate_limit_per_ip;
+
+    let unlisted_id = seed_pending_approval(&harness, "file_write");
+    for i in 0..=limit {
+        let resp = harness
+            .app
+            .clone()
+            .oneshot(public_post(
+                &format!("/api/approvals/{unlisted_id}/approve"),
+                [203, 0, 113, 121],
+            ))
+            .await
+            .unwrap();
+        assert_ne!(
+            resp.status(),
+            StatusCode::TOO_MANY_REQUESTS,
+            "approval {} of {} was 429'd for a tool outside totp_tools, \
+             which verifies no code",
+            i + 1,
+            limit + 1
+        );
+    }
+
+    let listed_id = seed_pending_approval(&harness, "shell_exec");
+    let mut saw_429 = false;
+    for _ in 0..=limit {
+        let resp = harness
+            .app
+            .clone()
+            .oneshot(public_post(
+                &format!("/api/approvals/{listed_id}/approve"),
+                [203, 0, 113, 122],
+            ))
+            .await
+            .unwrap();
+        if resp.status() == StatusCode::TOO_MANY_REQUESTS {
+            saw_429 = true;
+            break;
+        }
+    }
+    assert!(
+        saw_429,
+        "an approval for a tool inside totp_tools must stay metered (limit {limit})"
+    );
+}
+
+/// The grace half of the review's residual: after a code-verified approval,
+/// the next approvals inside `totp_grace_period_secs` are code-free, so they
+/// must stop spending the login bucket even under `second_factor = totp`.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_approvals_stop_being_metered_inside_the_totp_grace_window() {
+    let harness = start_full_router_with_approval_policy(
+        librefang_types::approval::SecondFactor::Totp,
+        Vec::new(),
+    )
+    .await;
+    let limit = harness
+        .state
+        .kernel
+        .config_ref()
+        .rate_limit
+        .auth_rate_limit_per_ip;
+
+    // Open the grace window the way a code-verified approval does: resolve a
+    // pending request with `totp_verified = true`, under the same `api_admin`
+    // identity the approve handler resolves with.
+    let first_id = seed_pending_approval(&harness, "shell_exec");
+    harness
+        .state
+        .kernel
+        .approvals()
+        .resolve(
+            uuid::Uuid::parse_str(&first_id).expect("seeded id must be a uuid"),
+            librefang_types::approval::ApprovalDecision::Approved,
+            Some("api".to_string()),
+            true,
+            Some("api_admin"),
+        )
+        .expect("a code-verified approval must resolve");
+
+    // The same burst that trips the bucket outside grace must now stay under
+    // it: the middleware cannot see the body, and a request inside the window
+    // is code-free by construction.
+    let grace_id = seed_pending_approval(&harness, "shell_exec");
+    for i in 0..=limit {
+        let resp = harness
+            .app
+            .clone()
+            .oneshot(public_post(
+                &format!("/api/approvals/{grace_id}/approve"),
+                [203, 0, 113, 131],
+            ))
+            .await
+            .unwrap();
+        assert_ne!(
+            resp.status(),
+            StatusCode::TOO_MANY_REQUESTS,
+            "approval {} of {} was 429'd inside the grace window, \
+             where no code is demanded",
+            i + 1,
+            limit + 1
+        );
+    }
+}
+
+/// The handler half of the grace exemption: inside the window no code is
+/// verified, so a code **sent anyway** must be neither verified nor recorded
+/// as a failure.
+///
+/// The middleware asks `would_verify_totp` and skips the request, but the
+/// handler used to decide from the policy's per-tool answer alone and still
+/// checked any `totp_code` in the body, recording each wrong one through
+/// `check_and_record_totp_failure("api_admin")`. Those failures live on the
+/// shared identity lockout, not on the #4020 per-IP meter — for the next 300
+/// seconds an attacker's guesses were counted on neither. The handler now
+/// derives the question from the same `would_verify_totp(uuid, "api_admin")`,
+/// so inside grace it verifies nothing and records nothing, and the approval
+/// resolves on grace alone.
+///
+/// Seven wrong codes is two past `TOTP_MAX_FAILURES` (5): before the fix the
+/// first answers 400 and the sixth answers "Too many failed TOTP attempts";
+/// after it every one approves via grace and the `api_admin` counter stays
+/// clean.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_approve_ignores_a_code_sent_inside_the_totp_grace_window() {
+    let harness = start_full_router_with_approval_policy(
+        librefang_types::approval::SecondFactor::Totp,
+        Vec::new(),
+    )
+    .await;
+
+    // Open the grace window the way a code-verified approval does.
+    let opener = seed_pending_approval(&harness, "shell_exec");
+    harness
+        .state
+        .kernel
+        .approvals()
+        .resolve(
+            uuid::Uuid::parse_str(&opener).expect("seeded id must be a uuid"),
+            librefang_types::approval::ApprovalDecision::Approved,
+            Some("api".to_string()),
+            true,
+            Some("api_admin"),
+        )
+        .expect("a code-verified approval must resolve");
+
+    for i in 0..7 {
+        let id = seed_pending_approval(&harness, "shell_exec");
+        let mut request = public_post_with_body(
+            &format!("/api/approvals/{id}/approve"),
+            [203, 0, 113, 141],
+            r#"{"totp_code":"000000"}"#,
+        );
+        request.headers_mut().insert(
+            axum::http::header::AUTHORIZATION,
+            axum::http::HeaderValue::from_str(&format!("Bearer {APPROVAL_TEST_API_KEY}")).unwrap(),
+        );
+        let resp = harness.app.clone().oneshot(request).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "wrong code {i} inside grace must be ignored, not verified: \
+             the approval resolves on grace"
+        );
+    }
+
+    assert!(
+        !harness
+            .state
+            .kernel
+            .approvals()
+            .is_totp_locked_out("api_admin"),
+        "no failed attempt may be recorded while the grace window skips verification"
+    );
+}
+
 /// Build a GET request to `uri` and inject loopback `ConnectInfo` so the
 /// auth middleware treats it as a localhost caller (matching production
 /// dev-UX semantics). Without this, oneshot tests have no `ConnectInfo`
@@ -4014,6 +4508,7 @@ async fn test_effective_permissions_admin_returns_200_with_full_payload() {
             delete_allowed: true,
         }),
         channel_tool_rules: alice_channel_rules,
+        emoji: None,
     };
 
     let server =
@@ -6520,4 +7015,547 @@ async fn test_export_session_of_another_agent_is_404_not_500() {
         StatusCode::NOT_FOUND,
         "another agent's session must be a 404, not a server fault: {body}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Task Board: assignee validation and enforced per-task limits
+// ---------------------------------------------------------------------------
+//
+// These go through `start_full_router`, i.e. `server::build_router`, because
+// the hand-rolled router in `start_test_server` never registered `/api/tasks`
+// — against it every assertion below would pass or fail on a 404 that has
+// nothing to do with the task queue.
+
+/// Drive one request through the real router and decode the JSON body.
+///
+/// `oneshot` carries no peer address, so without an explicit loopback
+/// `ConnectInfo` the auth layer classifies every request as remote and answers
+/// 401 before the handler runs — the whole suite would then assert against the
+/// auth layer rather than the task queue.
+async fn task_request(
+    harness: &FullRouterHarness,
+    method: &str,
+    uri: &str,
+    body: Option<serde_json::Value>,
+) -> (StatusCode, serde_json::Value) {
+    let builder = Request::builder().method(method).uri(uri);
+    let mut request = match body {
+        Some(b) => builder
+            .header("content-type", "application/json")
+            .body(Body::from(b.to_string()))
+            .unwrap(),
+        None => builder.body(Body::empty()).unwrap(),
+    };
+    request
+        .extensions_mut()
+        .insert(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+            [127, 0, 0, 1],
+            0,
+        ))));
+
+    let resp = harness.app.clone().oneshot(request).await.unwrap();
+    let status = resp.status();
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+    (status, json)
+}
+
+/// POST a task body against the real router, returning `(status, json)`.
+async fn post_task(
+    harness: &FullRouterHarness,
+    body: serde_json::Value,
+) -> (StatusCode, serde_json::Value) {
+    task_request(harness, "POST", "/api/tasks", Some(body)).await
+}
+
+async fn get_json(harness: &FullRouterHarness, uri: &str) -> (StatusCode, serde_json::Value) {
+    task_request(harness, "GET", uri, None).await
+}
+
+/// `POST /api/tasks` used to accept any `assigned_to` string. A task addressed
+/// to an agent that does not exist was stored `pending` and stayed there
+/// forever: the sweeper only touches `in_progress`, and `task_claim` refuses
+/// the unknown agent with `AgentNotFound`, so nothing ever moved it and nothing
+/// said why. The asymmetry between the two ends is the bug — this asserts the
+/// post end now refuses too.
+#[tokio::test(flavor = "multi_thread")]
+async fn task_post_rejects_unknown_assignee() {
+    let harness = start_full_router("").await;
+
+    let (status, body) = post_task(
+        &harness,
+        serde_json::json!({
+            "title": "Orphan",
+            "description": "Assigned to nobody real",
+            "assigned_to": "no-such-agent",
+        }),
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "an assignee that resolves to no agent must be refused, not queued forever (body: {body})"
+    );
+    let err = body["error"].as_str().unwrap_or_default();
+    assert!(
+        err.contains("assigned_to") && err.contains("no-such-agent"),
+        "the error must name the offending field and value, got: {err}"
+    );
+
+    // The decisive part: nothing was written. A 400 that still queued the row
+    // would leave the exact ghost task this rejection exists to prevent.
+    let (status, body) = get_json(&harness, "/api/tasks").await;
+    assert_eq!(status, StatusCode::OK);
+    let tasks = body["tasks"].as_array().unwrap();
+    assert!(
+        !tasks.iter().any(|t| t["title"] == "Orphan"),
+        "the rejected task must not have been stored"
+    );
+}
+
+/// `POST /api/comms/task` is the dashboard's path onto the same queue as
+/// `POST /api/tasks`, but it had its own `Err(e) => internal_scrub(e)` catch-all
+/// with no `AgentNotFound` arm, so the same unresolvable assignee that
+/// `/api/tasks` refuses with 400 blew this route up as a 500. Asserts the two
+/// routes now agree.
+#[tokio::test(flavor = "multi_thread")]
+async fn comms_task_rejects_unknown_assignee_with_400_not_500() {
+    let harness = start_full_router("").await;
+
+    let (status, body) = task_request(
+        &harness,
+        "POST",
+        "/api/comms/task",
+        Some(serde_json::json!({
+            "title": "Orphan",
+            "description": "Assigned to nobody real",
+            "assigned_to": "no-such-agent",
+        })),
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "an assignee that resolves to no agent must be refused as a bad request, not 500'd (body: {body})"
+    );
+    let err = body["error"].as_str().unwrap_or_default();
+    assert!(
+        err.contains("assigned_to") && err.contains("no-such-agent"),
+        "the error must name the offending field and value, got: {err}"
+    );
+}
+
+/// The 400/422 half of the `/api/comms/task` ↔ `/api/tasks` contract, pinned
+/// so it stays deliberate.
+///
+/// This route deserializes a typed `CommsTaskRequest`, so a value that is
+/// valid JSON but the wrong *type* — a fractional `priority` or
+/// `timeout_secs` — is rejected by the `Json` extractor as 422 before the
+/// handler runs. `/api/tasks` reads its body as `serde_json::Value` and
+/// rejects the same decimal with its own 400 (see
+/// `task_post_rejects_malformed_limits`). Both refuse; the status differs by
+/// design and both routes document which side they are on.
+#[tokio::test(flavor = "multi_thread")]
+async fn comms_task_rejects_fractional_limits_with_422() {
+    let harness = start_full_router("").await;
+
+    for (field, value) in [
+        ("priority", serde_json::json!(1.5)),
+        ("timeout_secs", serde_json::json!(1.5)),
+    ] {
+        let mut body = serde_json::json!({"title": "Fractional", "description": "d"});
+        body[field] = value.clone();
+        let (status, resp) = task_request(&harness, "POST", "/api/comms/task", Some(body)).await;
+        assert_eq!(
+            status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{field} = {value} must be refused by the typed-body extractor, not coerced to a \
+             default (got {resp})"
+        );
+    }
+}
+
+/// The other half of the `/api/comms/task` ↔ `/api/tasks` agreement: this
+/// route hardcoded `TaskPostOptions::default()`, so a client sending
+/// `priority` / `timeout_secs` got a 201 for a task queued at priority 0 with
+/// no per-task deadline, and no way to tell (#7974 review).
+///
+/// Asserts against the claim queue rather than the read-back alone: the
+/// read-back proves the columns were written, the claim proves the value is
+/// the one the `ORDER BY` uses. Both matter — a route that stored `priority`
+/// somewhere the queue never reads would pass a read-back-only assertion.
+#[tokio::test(flavor = "multi_thread")]
+async fn comms_task_honours_priority_and_timeout_secs() {
+    let harness = start_full_router("").await;
+
+    // Posted first and with the lower priority, so age alone would claim it
+    // first. Only a priority that actually reached the INSERT reorders these.
+    let (status, low) = task_request(
+        &harness,
+        "POST",
+        "/api/comms/task",
+        Some(serde_json::json!({
+            "title": "Low",
+            "description": "d",
+            "priority": 0,
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "body: {low}");
+    let low = low["task_id"].as_str().unwrap().to_string();
+
+    let (status, high) = task_request(
+        &harness,
+        "POST",
+        "/api/comms/task",
+        Some(serde_json::json!({
+            "title": "High",
+            "description": "d",
+            "priority": 5,
+            "timeout_secs": 300,
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "body: {high}");
+    let high = high["task_id"].as_str().unwrap().to_string();
+
+    let (_, task) = get_json(&harness, &format!("/api/tasks/{high}")).await;
+    assert_eq!(
+        task["priority"], 5,
+        "priority must survive `/api/comms/task`, not be replaced by the default 0"
+    );
+    assert_eq!(
+        task["timeout_secs"], 300,
+        "timeout_secs must survive `/api/comms/task`, not be dropped to NULL"
+    );
+
+    let substrate = harness.state.kernel.memory_substrate();
+    let claimed = substrate
+        .task_claim("worker", Some("worker"))
+        .await
+        .unwrap()
+        .expect("a pending task is claimable");
+    assert_eq!(
+        claimed["id"], high,
+        "the priority posted through /api/comms/task must outrank age in the claim queue"
+    );
+    let claimed = substrate
+        .task_claim("worker", Some("worker"))
+        .await
+        .unwrap()
+        .expect("the second task is still claimable");
+    assert_eq!(claimed["id"], low);
+}
+
+/// An unassigned task is legitimate — it is the "any worker may claim this"
+/// form that `task_claim` matches via `assigned_to = ''`. Validation must not
+/// have turned the optional field into a required one.
+#[tokio::test(flavor = "multi_thread")]
+async fn task_post_still_accepts_an_absent_assignee() {
+    let harness = start_full_router("").await;
+
+    for body in [
+        serde_json::json!({"title": "Unowned", "description": "anyone"}),
+        serde_json::json!({"title": "Unowned2", "description": "anyone", "assigned_to": ""}),
+    ] {
+        let (status, resp) = post_task(&harness, body.clone()).await;
+        assert_eq!(
+            status,
+            StatusCode::CREATED,
+            "unassigned tasks must still be accepted ({body} -> {resp})"
+        );
+    }
+}
+
+/// The round trip an operator actually performs: pick a real agent from the
+/// registry, post, and read the task back with the assignment intact.
+#[tokio::test(flavor = "multi_thread")]
+async fn task_post_accepts_a_real_agent_by_id_and_by_name() {
+    let harness = start_full_router("").await;
+
+    let (status, spawned) = task_request(
+        &harness,
+        "POST",
+        "/api/agents",
+        Some(serde_json::json!({"manifest_toml": TEST_MANIFEST})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "spawn failed: {spawned}");
+    let agent_id = spawned["agent_id"].as_str().unwrap().to_string();
+
+    // Both spellings are accepted because `task_claim` matches both (#2841);
+    // rejecting the name here would break every task posted before the
+    // dashboard picker started sending ids.
+    for (label, assignee) in [
+        ("uuid", agent_id.clone()),
+        ("name", "test-agent".to_string()),
+    ] {
+        let (status, created) = post_task(
+            &harness,
+            serde_json::json!({
+                "title": format!("Real {label}"),
+                "description": "Assigned to a registered agent",
+                "assigned_to": assignee,
+            }),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::CREATED,
+            "{label} assignment must be accepted (body: {created})"
+        );
+        let task_id = created["id"].as_str().unwrap().to_string();
+
+        let (status, task) = get_json(&harness, &format!("/api/tasks/{task_id}")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(task["assigned_to"], assignee, "{label} must round-trip");
+        assert_eq!(task["status"], "pending");
+    }
+}
+
+/// `priority` is enforced, not decorative: the claim queue is ordered
+/// `priority DESC, created_at ASC`. Posting the low-priority task *first* is
+/// the point — under the historical hard-coded `priority = 0` both rows tie
+/// and age alone decides, so this asserts the value survives the HTTP layer,
+/// the kernel and the INSERT all the way to the ORDER BY.
+#[tokio::test(flavor = "multi_thread")]
+async fn task_priority_is_stored_and_orders_the_claim_queue() {
+    let harness = start_full_router("").await;
+
+    let (status, low) = post_task(
+        &harness,
+        serde_json::json!({"title": "Low", "description": "d", "priority": 0}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let low = low["id"].as_str().unwrap().to_string();
+
+    let (status, high) = post_task(
+        &harness,
+        serde_json::json!({"title": "High", "description": "d", "priority": 5}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let high = high["id"].as_str().unwrap().to_string();
+
+    // Read-back: the board shows the priority the queue will order by.
+    let (_, task) = get_json(&harness, &format!("/api/tasks/{high}")).await;
+    assert_eq!(task["priority"], 5, "priority must survive the round trip");
+
+    // Enforcement: the later high-priority task is claimed before the older
+    // low-priority one.
+    let substrate = harness.state.kernel.memory_substrate();
+    let claimed = substrate
+        .task_claim("worker", Some("worker"))
+        .await
+        .unwrap()
+        .expect("a pending task is claimable");
+    assert_eq!(
+        claimed["id"], high,
+        "priority DESC must outrank age in the claim queue"
+    );
+
+    let claimed = substrate
+        .task_claim("worker", Some("worker"))
+        .await
+        .unwrap()
+        .expect("the second task is still claimable");
+    assert_eq!(claimed["id"], low);
+}
+
+/// A per-task `timeout_secs` overrides the global `[task_board]
+/// claim_ttl_secs` at the one place that enforces a claim deadline — the
+/// stuck-task sweeper.
+///
+/// The edges of that override carry the same weight as the override itself:
+/// a global `0` still sweeps a row that carries its own timeout, a row that
+/// carries none inherits the global clock, and an explicit per-task `0` opts
+/// the row out of every clock.
+#[tokio::test(flavor = "multi_thread")]
+async fn task_timeout_secs_overrides_the_global_claim_ttl() {
+    let harness = start_full_router("").await;
+
+    let (status, created) = post_task(
+        &harness,
+        serde_json::json!({
+            "title": "Quick probe",
+            "description": "one-second budget",
+            "timeout_secs": 1,
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let task_id = created["id"].as_str().unwrap().to_string();
+
+    let (_, task) = get_json(&harness, &format!("/api/tasks/{task_id}")).await;
+    assert_eq!(
+        task["timeout_secs"], 1,
+        "the deadline must be readable back"
+    );
+
+    let substrate = harness.state.kernel.memory_substrate();
+    let claimed = substrate
+        .task_claim("worker", Some("worker"))
+        .await
+        .unwrap()
+        .expect("the posted task is claimable");
+    assert_eq!(claimed["id"], task_id);
+
+    // Back-date `claimed_at` directly instead of racing a real 1s deadline
+    // against however long the test runner takes to get here — an
+    // immediate assert right after the claim, with nothing to fall back on
+    // if the process stalls even briefly, is exactly the kind of margin-free
+    // timing check that turns into a false red under load.
+    let set_claimed_at = |id: &str, age: chrono::Duration| {
+        let conn = substrate.pool().get().unwrap();
+        let claimed_at = (chrono::Utc::now() - age).to_rfc3339();
+        conn.execute(
+            "UPDATE task_queue SET claimed_at = ?1 WHERE id = ?2",
+            rusqlite::params![claimed_at, id],
+        )
+        .unwrap();
+    };
+
+    // Before the deadline the sweeper must leave it alone, so the reset below
+    // is attributable to the elapsed timeout and not to an always-reset bug.
+    set_claimed_at(&task_id, chrono::Duration::milliseconds(200));
+    let reset = substrate.task_reset_stuck(3600, 0).await.unwrap();
+    assert!(
+        reset.is_empty(),
+        "a claim 200ms old is not yet past its 1s deadline, got {reset:?}"
+    );
+
+    // A one-hour global TTL would leave this claimed; the row's own 1s wins.
+    set_claimed_at(&task_id, chrono::Duration::seconds(5));
+    let reset = substrate.task_reset_stuck(3600, 0).await.unwrap();
+    assert_eq!(
+        reset,
+        vec![task_id.clone()],
+        "the per-task timeout must be the deadline the sweeper enforces"
+    );
+
+    let (_, task) = get_json(&harness, &format!("/api/tasks/{task_id}")).await;
+    assert_eq!(
+        task["status"], "pending",
+        "the reclaimed task returns to the queue"
+    );
+
+    // Case (b): an explicit per-task `timeout_secs = 0` opts that row out of
+    // every clock. It is posted at a higher priority so the claim lands on it
+    // rather than on the probe the sweep just requeued.
+    let (status, created) = post_task(
+        &harness,
+        serde_json::json!({
+            "title": "Explicitly never reclaimed",
+            "description": "timeout_secs = 0",
+            "timeout_secs": 0,
+            "priority": 1,
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let never_id = created["id"].as_str().unwrap().to_string();
+    let (_, task) = get_json(&harness, &format!("/api/tasks/{never_id}")).await;
+    assert_eq!(
+        task["timeout_secs"], 0,
+        "an explicit zero must round-trip, not collapse into NULL"
+    );
+
+    let claimed = substrate
+        .task_claim("worker", Some("worker"))
+        .await
+        .unwrap()
+        .expect("the zero-timeout task is claimable");
+    assert_eq!(
+        claimed["id"], never_id,
+        "priority must put the zero-timeout row at the queue head"
+    );
+
+    // Aged well past any global TTL the sweeper is handed, it must still be
+    // left alone: `timeout_secs = 0` means "never reclaim", not "inherit".
+    set_claimed_at(&never_id, chrono::Duration::seconds(5));
+    let reset = substrate.task_reset_stuck(1, 0).await.unwrap();
+    assert!(
+        reset.is_empty(),
+        "an explicit timeout_secs = 0 must never be reclaimed, got {reset:?}"
+    );
+    let (_, task) = get_json(&harness, &format!("/api/tasks/{never_id}")).await;
+    assert_eq!(
+        task["status"], "in_progress",
+        "the opted-out row keeps its claim"
+    );
+
+    // Case (a): with the global clock off (`claim_ttl_secs = 0`), a row that
+    // carries its own timeout is still swept, while a row that carries none
+    // has no clock at all. The probe was requeued by the sweep above and is
+    // older, so it is claimed first; the second claim lands on the inheriting
+    // row.
+    let (status, created) = post_task(
+        &harness,
+        serde_json::json!({
+            "title": "Inherits the global clock",
+            "description": "no per-task timeout",
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let inherit_id = created["id"].as_str().unwrap().to_string();
+
+    let claimed = substrate
+        .task_claim("worker", Some("worker"))
+        .await
+        .unwrap()
+        .expect("the requeued probe is claimable");
+    assert_eq!(claimed["id"], task_id);
+    let claimed = substrate
+        .task_claim("worker", Some("worker"))
+        .await
+        .unwrap()
+        .expect("the inheriting row is claimable");
+    assert_eq!(claimed["id"], inherit_id);
+
+    set_claimed_at(&task_id, chrono::Duration::seconds(5));
+    set_claimed_at(&inherit_id, chrono::Duration::seconds(5));
+
+    let reset = substrate.task_reset_stuck(0, 0).await.unwrap();
+    assert_eq!(
+        reset,
+        vec![task_id.clone()],
+        "with the global clock off, the per-task timeout must still sweep, \
+         and a row that inherits the global clock must not"
+    );
+    let (_, task) = get_json(&harness, &format!("/api/tasks/{inherit_id}")).await;
+    assert_eq!(
+        task["status"], "in_progress",
+        "no per-task timeout and no global clock means no deadline to trip"
+    );
+}
+
+/// Malformed limits are refused rather than silently coerced to the default: a
+/// caller that sent `"priority": "high"` should learn that, not get a 201 for a
+/// task the queue orders as if it had said nothing.
+#[tokio::test(flavor = "multi_thread")]
+async fn task_post_rejects_malformed_limits() {
+    let harness = start_full_router("").await;
+
+    for (field, value) in [
+        ("priority", serde_json::json!("high")),
+        ("priority", serde_json::json!(1.5)),
+        ("timeout_secs", serde_json::json!(-5)),
+        ("timeout_secs", serde_json::json!(1.5)),
+        ("timeout_secs", serde_json::json!("soon")),
+    ] {
+        let mut body = serde_json::json!({"title": "Bad", "description": "d"});
+        body[field] = value.clone();
+        let (status, resp) = post_task(&harness, body).await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "{field} = {value} must be rejected, not coerced to the default (got {resp})"
+        );
+    }
 }

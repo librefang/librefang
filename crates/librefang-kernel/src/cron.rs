@@ -18,7 +18,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use tracing::{debug, info, warn};
 
 /// Maximum consecutive errors before a job is auto-disabled.
-const MAX_CONSECUTIVE_ERRORS: u32 = 5;
+pub(crate) const MAX_CONSECUTIVE_ERRORS: u32 = 5;
 
 fn lock_cron_serialization<'a>(
     lock: &'a std::sync::Mutex<()>,
@@ -254,6 +254,17 @@ impl CronScheduler {
                 }
             }
 
+            // #8533: a job saved before creation started refusing it may still carry a `session_mode` the dispatcher never reads.
+            // Keep it firing as it always has, but say once per boot that the field does nothing.
+            if let Err(reason) = meta.job.validate_session_mode() {
+                warn!(
+                    job_id = %meta.job.id,
+                    agent = %meta.job.agent_id,
+                    %reason,
+                    "Cron: persisted job carries a session_mode that is ignored for its action"
+                );
+            }
+
             if let CronSchedule::Cron { expr, .. } = &meta.job.schedule {
                 if compute_next_run_after_opt(&meta.job.schedule, now).is_none() {
                     warn!(
@@ -336,6 +347,10 @@ impl CronScheduler {
         // check on `pre_script.argv[0]` and the dangerous-env-key denylist
         // on `pre_script.env` (defends against `LD_PRELOAD`, `PATH`, etc.).
         job.validate_with_home(agent_count, Some(&self.home_dir))
+            .map_err(LibreFangError::InvalidInput)?;
+        // #8533: refuse a `session_mode` on a workflow job, whose dispatch branch never reads it.
+        // Enforced here rather than in `validate_with_home` so the boot-time re-validation of persisted jobs keeps legacy rows firing.
+        job.validate_session_mode()
             .map_err(LibreFangError::InvalidInput)?;
 
         // Defense against silently-wedged cron expressions (#5113). The
@@ -423,6 +438,7 @@ impl CronScheduler {
 
         let enabled_updated = updates["enabled"].as_bool();
         let schedule_updated = !updates["schedule"].is_null();
+        let action_updated = !updates["action"].is_null();
 
         if let Some(name) = updates["name"].as_str() {
             candidate.name = name.to_string();
@@ -440,7 +456,7 @@ impl CronScheduler {
                 serde_json::from_value::<CronSchedule>(updates["schedule"].clone())
                     .map_err(|e| LibreFangError::Internal(format!("Invalid schedule: {e}")))?;
         }
-        if !updates["action"].is_null() {
+        if action_updated {
             candidate.action = serde_json::from_value::<librefang_types::scheduler::CronAction>(
                 updates["action"].clone(),
             )
@@ -465,6 +481,13 @@ impl CronScheduler {
         candidate
             .validate_with_home(0, Some(&self.home_dir))
             .map_err(LibreFangError::InvalidInput)?;
+        // #8533: turning a job that carries a `session_mode` into a workflow job would leave the field stored but ignored.
+        // Only checked when the action changes, so an unrelated edit to a legacy row that already carries the field is not locked out.
+        if action_updated {
+            candidate
+                .validate_session_mode()
+                .map_err(LibreFangError::InvalidInput)?;
+        }
 
         // #5113 follow-up: shape validation only checks field count and character set of the cron expression — it doesn't detect semantically-impossible schedules like `"0 0 30 2 *"` (Feb 30, never fires).
         // `add_job` probes for this with `compute_next_run_after_opt` and rejects pre-insert; without the same probe here, a PUT could install a wedged schedule on an existing job, after which `due_jobs` would fall back to a `+1h` retry every tick until `MAX_CONSECUTIVE_ERRORS` triggers auto-disable — five wasted LLM-token fires.
@@ -2996,6 +3019,96 @@ mod tests {
             .update_job(id, &updates)
             .expect_err("oversized name must be refused");
         assert!(matches!(err, LibreFangError::InvalidInput(_)), "{err:?}");
+    }
+
+    fn workflow_action() -> CronAction {
+        CronAction::Workflow {
+            workflow_id: "nightly".into(),
+            input: None,
+            timeout_secs: None,
+        }
+    }
+
+    fn agent_turn_action() -> CronAction {
+        CronAction::AgentTurn {
+            message: "hello".into(),
+            model_override: None,
+            timeout_secs: None,
+            pre_check_script: None,
+            pre_script: None,
+            silent_marker: None,
+        }
+    }
+
+    /// #8533: the workflow branch of the cron tick never reads `job.session_mode`, so a workflow job must not be able to store one.
+    #[test]
+    fn add_job_refuses_session_mode_on_a_workflow_job() {
+        let (sched, _tmp) = make_scheduler(100);
+        let mut job = make_job(AgentId::new());
+        job.action = workflow_action();
+        job.session_mode = Some(SessionMode::New);
+        let err = sched
+            .add_job(job.clone(), false)
+            .expect_err("a workflow job carrying session_mode must be refused");
+        assert!(matches!(err, LibreFangError::InvalidInput(_)), "{err:?}");
+        assert!(sched.list_all_jobs().is_empty());
+
+        job.session_mode = None;
+        sched
+            .add_job(job, false)
+            .expect("the same workflow job without session_mode is accepted");
+
+        let mut turn = make_job(AgentId::new());
+        turn.action = agent_turn_action();
+        turn.session_mode = Some(SessionMode::New);
+        sched
+            .add_job(turn, false)
+            .expect("agent_turn keeps accepting session_mode");
+    }
+
+    /// #8533: switching an agent_turn job that carries `session_mode` to a workflow action would strand the field, so the update is refused atomically.
+    #[test]
+    fn update_job_refuses_switching_a_session_mode_job_to_workflow() {
+        let (sched, _tmp) = make_scheduler(100);
+        let mut job = make_job(AgentId::new());
+        job.action = agent_turn_action();
+        job.session_mode = Some(SessionMode::New);
+        let id = sched.add_job(job, false).unwrap();
+
+        let updates = serde_json::json!({ "action": workflow_action() });
+        let err = sched
+            .update_job(id, &updates)
+            .expect_err("switching to workflow while session_mode is set must be refused");
+        assert!(matches!(err, LibreFangError::InvalidInput(_)), "{err:?}");
+        assert!(matches!(
+            sched.get_job(id).unwrap().action,
+            CronAction::AgentTurn { .. }
+        ));
+    }
+
+    /// #8533: a workflow job persisted by an older daemon with `session_mode` set must keep loading enabled and stay editable, since refusing it only at creation is what keeps existing schedules firing.
+    #[test]
+    fn legacy_workflow_job_with_session_mode_still_loads_enabled_and_editable() {
+        let tmp = tempfile::tempdir().unwrap();
+        let agent = AgentId::new();
+        {
+            let sched = CronScheduler::new(tmp.path(), 100);
+            let mut job = make_job(agent);
+            job.action = workflow_action();
+            job.session_mode = Some(SessionMode::New);
+            sched.jobs.insert(job.id, JobMeta::new(job, false));
+            sched.persist().unwrap();
+        }
+
+        let sched = CronScheduler::new(tmp.path(), 100);
+        assert_eq!(sched.load().unwrap(), 1);
+        let jobs = sched.list_jobs(agent);
+        assert!(jobs[0].enabled, "a legacy row must not be quarantined");
+
+        let updated = sched
+            .update_job(jobs[0].id, &serde_json::json!({ "name": "renamed" }))
+            .expect("an edit that leaves the action alone must still be accepted");
+        assert_eq!(updated.name, "renamed");
     }
 
     /// Same atomicity guarantee in the other direction: failure in the

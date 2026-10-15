@@ -13,7 +13,7 @@ use librefang_types::config::{McpOAuthConfig, McpServerConfigEntry, McpTransport
 use librefang_types::mcp::{McpCatalogEntry, McpCatalogTransport, McpStatus};
 use librefang_types::oauth::OAuthTemplate;
 use std::collections::HashMap;
-use tracing::info;
+use tracing::{info, warn};
 use zeroize::Zeroizing;
 
 /// Result of an installation attempt.
@@ -76,22 +76,40 @@ pub fn install_integration(
         .ok_or_else(|| ExtensionError::NotFound(id.to_string()))?
         .clone();
 
-    // 2. Store provided keys in the vault. A success response must not claim
-    // the integration is ready unless every supplied credential is durable.
-    for (key, value) in provided_keys {
-        resolver.store_in_vault(key, Zeroizing::new(value.clone()))?;
-    }
-
-    // 3. Check all required credentials
     let required_keys: Vec<&str> = template
         .required_env
         .iter()
         .map(|e| e.name.as_str())
         .collect();
+
+    // 2. Store provided keys in the vault. A success response must not claim
+    // the integration is ready unless every supplied credential is durable.
+    // Only the template's own `required_env` names are accepted: vault entries are injected into the process env at boot with priority over `.env`, so a stray key (e.g. `OPENAI_API_KEY`) would silently overwrite an unrelated secret.
+    // Blank values are skipped rather than stored, so they neither clobber an existing credential nor count as present.
+    // An empty or whitespace-only value is not a credential: storing it would mark the requirement satisfied and, for a header binding, send `Authorization: Bearer ` (#8578).
+    let mut stored: Vec<&str> = Vec::new();
+    for (key, value) in provided_keys {
+        if !required_keys.contains(&key.as_str()) {
+            warn!(
+                integration = id,
+                key = %key,
+                "Ignoring credential that is not a required_env of this integration"
+            );
+            continue;
+        }
+        if value.trim().is_empty() {
+            warn!(integration = id, key = %key, "Ignoring empty credential value");
+            continue;
+        }
+        resolver.store_in_vault(key, Zeroizing::new(value.clone()))?;
+        stored.push(key.as_str());
+    }
+
+    // 3. Check all required credentials
     let missing = resolver.missing_credentials(&required_keys);
     let actually_missing: Vec<String> = missing
         .into_iter()
-        .filter(|k| !provided_keys.contains_key(k))
+        .filter(|k| !stored.contains(&k.as_str()))
         .collect();
 
     let status = if actually_missing.is_empty() {
@@ -156,6 +174,12 @@ pub fn catalog_entry_to_mcp_server(entry: &McpCatalogEntry) -> McpServerConfigEn
         McpCatalogTransport::Http { url } => McpTransportEntry::Http { url: url.clone() },
     };
     let env: Vec<String> = entry.required_env.iter().map(|e| e.name.clone()).collect();
+    // Header templates are copied verbatim: `${NAME}` placeholders stay unresolved in the persisted config and are substituted from the declared `env` names only when the runtime opens the connection (#8578).
+    let headers: Vec<String> = entry
+        .headers
+        .iter()
+        .map(|h| format!("{}: {}", h.name, h.value))
+        .collect();
     let oauth = entry.oauth.as_ref().map(oauth_template_to_config);
     McpServerConfigEntry {
         name: entry.id.clone(),
@@ -163,7 +187,7 @@ pub fn catalog_entry_to_mcp_server(entry: &McpCatalogEntry) -> McpServerConfigEn
         transport: Some(transport),
         timeout_secs: 30,
         env,
-        headers: Vec::new(),
+        headers,
         oauth,
         taint_scanning: true,
         taint_policy: None,
@@ -315,6 +339,34 @@ mod tests {
     }
 
     #[test]
+    fn install_ignores_unrelated_and_empty_credentials() {
+        ensure_registry();
+        let home = librefang_runtime::registry_sync::resolve_home_dir_for_tests();
+        let mut catalog = McpCatalog::new(&home);
+        catalog.load(&home);
+        let credential = catalog
+            .get("github")
+            .and_then(|entry| entry.required_env.first())
+            .expect("github fixture should require a credential")
+            .name
+            .clone();
+        let provided = HashMap::from([
+            (credential.clone(), "   ".to_string()),
+            ("OPENAI_API_KEY".to_string(), "sk-test".to_string()),
+        ]);
+        // No vault: any attempt to store either key would fail with ExtensionError::Vault.
+        let mut resolver = CredentialResolver::new(None, None);
+
+        let result = install_integration(&catalog, &mut resolver, "github", &provided)
+            .expect("unrelated and blank credentials must be skipped, not stored");
+
+        if std::env::var(&credential).is_err() {
+            assert_eq!(result.status, McpStatus::Setup);
+            assert!(result.missing_credentials.contains(&credential));
+        }
+    }
+
+    #[test]
     fn install_stdio_template_produces_stdio_transport() {
         ensure_registry();
         let home = librefang_runtime::registry_sync::resolve_home_dir_for_tests();
@@ -330,6 +382,93 @@ mod tests {
             }
             other => panic!("expected stdio transport, got {other:?}"),
         }
+    }
+
+    const REMOTE_TEMPLATE: &str = r#"
+id = "remote-http"
+name = "Remote HTTP"
+description = "Secret-backed Streamable HTTP fixture"
+category = "ai"
+
+[transport]
+type = "http"
+url = "https://mcp.example.com/mcp"
+
+[[required_env]]
+name = "LIBREFANG_TEST_8578_REMOTE_KEY"
+label = "API Key"
+help = "h"
+
+[[headers]]
+name = "Authorization"
+value = "Bearer ${LIBREFANG_TEST_8578_REMOTE_KEY}"
+
+[[headers]]
+name = "X-Client"
+value = "librefang"
+"#;
+
+    /// #8578: an HTTP catalog entry's header bindings reach the installed server as unresolved templates, next to the `env` declaration the runtime resolves them against.
+    #[test]
+    fn http_template_headers_are_installed_as_unresolved_references() {
+        let entry: McpCatalogEntry = toml::from_str(REMOTE_TEMPLATE).unwrap();
+        let server = catalog_entry_to_mcp_server(&entry);
+        assert_eq!(
+            server.headers,
+            vec![
+                "Authorization: Bearer ${LIBREFANG_TEST_8578_REMOTE_KEY}".to_string(),
+                "X-Client: librefang".to_string(),
+            ]
+        );
+        assert_eq!(server.env, vec!["LIBREFANG_TEST_8578_REMOTE_KEY"]);
+        assert!(matches!(
+            server.transport,
+            Some(McpTransportEntry::Http { ref url }) if url == "https://mcp.example.com/mcp"
+        ));
+    }
+
+    /// Entries without header bindings keep installing with no headers.
+    #[test]
+    fn template_without_headers_installs_no_headers() {
+        let entry: McpCatalogEntry = toml::from_str(
+            r#"
+id = "plain"
+name = "Plain"
+description = "d"
+category = "devtools"
+
+[transport]
+type = "http"
+url = "https://mcp.example.com/mcp"
+"#,
+        )
+        .unwrap();
+        assert!(catalog_entry_to_mcp_server(&entry).headers.is_empty());
+    }
+
+    /// #8578: an empty credential is not a credential — it must not be stored or count as provided, so the install reports `Setup` instead of a `Ready` server that sends `Authorization: Bearer `.
+    #[test]
+    fn empty_provided_credential_is_treated_as_missing() {
+        let home = tempfile::tempdir().unwrap();
+        let dir = home.path().join("mcp").join("catalog");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("remote-http.toml"), REMOTE_TEMPLATE).unwrap();
+        let mut catalog = McpCatalog::new(home.path());
+        assert_eq!(catalog.load(home.path()), 1);
+
+        // No vault: storing anything would fail with `ExtensionError::Vault`, so reaching `Ok` proves the blank value was never stored.
+        let mut resolver = CredentialResolver::new(None, None);
+        let provided = HashMap::from([(
+            "LIBREFANG_TEST_8578_REMOTE_KEY".to_string(),
+            "   ".to_string(),
+        )]);
+        let result = install_integration(&catalog, &mut resolver, "remote-http", &provided)
+            .expect("blank credential must not be written to the vault");
+        assert_eq!(result.status, McpStatus::Setup);
+        assert_eq!(
+            result.missing_credentials,
+            vec!["LIBREFANG_TEST_8578_REMOTE_KEY".to_string()]
+        );
     }
 
     #[test]

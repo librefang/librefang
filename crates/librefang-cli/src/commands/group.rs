@@ -126,7 +126,7 @@ pub(crate) fn cmd_group_show(name: &str, json: bool) {
     if !status.is_success() {
         ui::error(&i18n::t_args(
             "group-show-failed",
-            &[("error", body["error"].as_str().unwrap_or("?"))],
+            &[("error", api_error_message(&body).unwrap_or("?"))],
         ));
         return;
     }
@@ -151,7 +151,7 @@ pub(crate) fn cmd_group_create(name: &str, description: Option<&str>, roles: &[S
     if !status.is_success() {
         ui::error(&i18n::t_args(
             "group-create-failed",
-            &[("error", body["error"].as_str().unwrap_or("?"))],
+            &[("error", api_error_message(&body).unwrap_or("?"))],
         ));
         std::process::exit(1);
     }
@@ -170,7 +170,7 @@ pub(crate) fn cmd_group_delete(name: &str) {
     if !status.is_success() {
         ui::error(&i18n::t_args(
             "group-delete-failed",
-            &[("error", body["error"].as_str().unwrap_or("?"))],
+            &[("error", api_error_message(&body).unwrap_or("?"))],
         ));
         std::process::exit(1);
     }
@@ -199,7 +199,7 @@ pub(crate) fn cmd_group_member(group: &str, user: &str, add: bool) {
     if !status.is_success() {
         ui::error(&i18n::t_args(
             "group-member-failed",
-            &[("error", body["error"].as_str().unwrap_or("?"))],
+            &[("error", api_error_message(&body).unwrap_or("?"))],
         ));
         std::process::exit(1);
     }

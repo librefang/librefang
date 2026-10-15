@@ -58,9 +58,17 @@ impl Default for HeartbeatConfig {
 
 impl HeartbeatConfig {
     /// Create a `HeartbeatConfig` from the TOML-level `HeartbeatTomlConfig`.
+    ///
+    /// `check_interval_secs = 0` is clamped to 1 with a warning, because the monitor feeds it to `tokio::time::interval`, which panics on a zero period and would silently kill the heartbeat task for the life of the daemon.
     pub fn from_toml(toml: &librefang_types::config::HeartbeatTomlConfig) -> Self {
+        let check_interval_secs = toml.check_interval_secs.max(1);
+        if toml.check_interval_secs == 0 {
+            tracing::warn!(
+                "[heartbeat] check_interval_secs = 0 is invalid (tokio interval period must be non-zero); using 1s"
+            );
+        }
         Self {
-            check_interval_secs: toml.check_interval_secs,
+            check_interval_secs,
             default_timeout_secs: toml.default_timeout_secs,
             keep_recent: toml.keep_recent,
         }
@@ -100,11 +108,14 @@ pub fn check_agents(registry: &AgentRegistry, config: &HeartbeatConfig) -> Vec<H
             .autonomous
             .as_ref()
             .and_then(|a| {
-                a.heartbeat_timeout_secs
-                    .map(|t| t as u64)
-                    .or(Some(a.heartbeat_interval_secs * UNRESPONSIVE_MULTIPLIER))
+                a.heartbeat_timeout_secs.map(|t| t as u64).or(Some(
+                    a.heartbeat_interval_secs
+                        .saturating_mul(UNRESPONSIVE_MULTIPLIER),
+                ))
             })
-            .unwrap_or(config.default_timeout_secs) as i64;
+            .unwrap_or(config.default_timeout_secs);
+        // Saturate instead of wrapping: an absurd u64 timeout must not turn negative and flag every agent at once.
+        let timeout_secs = i64::try_from(timeout_secs).unwrap_or(i64::MAX);
 
         // --- Skip idle agents that have never genuinely processed a message ---
         //
@@ -359,6 +370,67 @@ mod tests {
         let _ = is_quiet_hours("22:00-06:00");
         let _ = is_quiet_hours("00:00-23:59");
         let _ = is_quiet_hours("09:00-17:00");
+    }
+
+    #[test]
+    fn from_toml_clamps_zero_check_interval() {
+        let toml = librefang_types::config::HeartbeatTomlConfig {
+            check_interval_secs: 0,
+            ..Default::default()
+        };
+        let cfg = HeartbeatConfig::from_toml(&toml);
+        assert_eq!(cfg.check_interval_secs, 1);
+        // Exactly what start_heartbeat_monitor does; panics on a zero period.
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let _ = tokio::time::interval(std::time::Duration::from_secs(cfg.check_interval_secs));
+        });
+    }
+
+    #[test]
+    fn absurd_heartbeat_interval_saturates_instead_of_overflowing() {
+        use chrono::Duration;
+        use librefang_types::agent::{AgentEntry, AgentManifest, AutonomousConfig};
+
+        let registry = AgentRegistry::new();
+        let entry = AgentEntry {
+            id: AgentId::new(),
+            name: "huge-interval".to_string(),
+            manifest: AgentManifest {
+                autonomous: Some(AutonomousConfig {
+                    heartbeat_interval_secs: u64::MAX,
+                    heartbeat_timeout_secs: None,
+                    ..Default::default()
+                }),
+                schedule: ScheduleMode::Continuous {
+                    check_interval_secs: 30,
+                },
+                ..Default::default()
+            },
+            state: AgentState::Running,
+            created_at: Utc::now() - Duration::seconds(3600),
+            last_active: Utc::now() - Duration::seconds(3600),
+            has_processed_message: true,
+            ..Default::default()
+        };
+        registry.register(entry).unwrap();
+
+        // Before saturation this multiply panicked in debug builds, and in release wrapped to a tiny timeout that flagged the agent.
+        let statuses = check_agents(&registry, &HeartbeatConfig::default());
+        assert_eq!(statuses.len(), 1);
+        assert!(!statuses[0].unresponsive);
+    }
+
+    #[test]
+    fn from_toml_keeps_nonzero_check_interval() {
+        let toml = librefang_types::config::HeartbeatTomlConfig {
+            check_interval_secs: 45,
+            ..Default::default()
+        };
+        assert_eq!(HeartbeatConfig::from_toml(&toml).check_interval_secs, 45);
     }
 
     #[test]

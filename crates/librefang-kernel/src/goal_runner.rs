@@ -1935,8 +1935,10 @@ async fn run_loop<F, Fut, L, E, Efut>(
                     }
                 }
                 // Same lock discipline as success path: release before persist_run.
+                // A failed tick was still dispatched and counts against `max_iterations` (the local counter advances below), so record it too; otherwise the run API and the pause checkpoint undercount the budget spent and a resumed run overshoots its cap.
                 let snapshot = {
                     let mut s = state.write();
+                    s.iteration = iteration + 1;
                     s.last_error = Some(e);
                     s.updated_at = Utc::now();
                     s.clone()
@@ -2562,6 +2564,112 @@ mod tests {
         assert!(
             s.iteration < 100,
             "must trip the breaker, not run to the cap"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_failed_tick_is_recorded_in_the_iteration_count() {
+        let substrate = Arc::new(MemorySubstrate::open_in_memory(0.01).unwrap());
+        let agent_id = AgentId::new();
+        let goal = test_goal(agent_id);
+        seed_goal(&substrate, &goal);
+        let (_tx, rx) = watch::channel(false);
+        let state = mk_state(goal.id, agent_id, 2);
+
+        let calls = Arc::new(AtomicU64::new(0));
+        let send = {
+            let calls = calls.clone();
+            move |_a: AgentId, _p: String| {
+                let n = calls.fetch_add(1, Ordering::SeqCst);
+                async move {
+                    if n == 0 {
+                        Ok("still working".to_string())
+                    } else {
+                        Err("transient provider error".to_string())
+                    }
+                }
+            }
+        };
+        run_loop(
+            goal.id,
+            agent_id,
+            2,
+            substrate.clone(),
+            send,
+            no_learnings_hook,
+            no_evaluator,
+            false,
+            state.clone(),
+            Arc::new(StopFlag::default()),
+            Arc::new(AtomicBool::new(false)),
+            rx,
+            None,
+            Vec::new(),
+        )
+        .await;
+
+        let s = state.read();
+        assert_eq!(s.phase, GoalRunPhase::MaxIterationsReached);
+        assert_eq!(
+            s.iteration, 2,
+            "a failed turn still spent budget and must be recorded"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_failed_tick_before_a_pause_is_recorded_in_the_checkpoint() {
+        let substrate = Arc::new(MemorySubstrate::open_in_memory(0.01).unwrap());
+        let agent_id = AgentId::new();
+        let goal = test_goal(agent_id);
+        seed_goal(&substrate, &goal);
+        let (_tx, rx) = watch::channel(false);
+        let state = mk_state(goal.id, agent_id, 10);
+        let pause = Arc::new(AtomicBool::new(false));
+
+        let calls = Arc::new(AtomicU64::new(0));
+        let send = {
+            let calls = calls.clone();
+            let pause = pause.clone();
+            move |_a: AgentId, _p: String| {
+                let n = calls.fetch_add(1, Ordering::SeqCst);
+                if n == 1 {
+                    pause.store(true, Ordering::SeqCst);
+                }
+                async move {
+                    if n == 0 {
+                        Ok("still working".to_string())
+                    } else {
+                        Err("transient provider error".to_string())
+                    }
+                }
+            }
+        };
+        run_loop(
+            goal.id,
+            agent_id,
+            10,
+            substrate.clone(),
+            send,
+            no_learnings_hook,
+            no_evaluator,
+            false,
+            state.clone(),
+            Arc::new(StopFlag::default()),
+            pause,
+            rx,
+            None,
+            Vec::new(),
+        )
+        .await;
+
+        assert_eq!(state.read().phase, GoalRunPhase::Paused);
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        let cp = load_pause_checkpoint(&substrate, goal.id)
+            .unwrap()
+            .expect("paused run writes a checkpoint");
+        assert_eq!(
+            cp.iteration, 2,
+            "the checkpoint must count the failed turn, or a resume overshoots the cap"
         );
     }
 

@@ -677,11 +677,12 @@ pub async fn update_webhook(
 ) -> impl IntoResponse {
     // Resolve translated messages before the `.await`; `ErrorTranslator` is
     // `!Send` and must be dropped first (see CLAUDE.md).
-    let (err_invalid_id, err_serialize) = {
+    let (err_invalid_id, err_serialize, err_not_found) = {
         let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
         (
             t.t("api-error-webhook-invalid-id"),
             t.t("api-error-webhook-serialize-error"),
+            t.t("api-error-webhook-not-found"),
         )
     };
     match uuid::Uuid::parse_str(&id) {
@@ -695,7 +696,15 @@ pub async fn update_webhook(
                         Err(_) => ApiErrorResponse::internal(err_serialize).into_json_tuple(),
                     }
                 }
-                Err(e) => ApiErrorResponse::not_found(e).into_json_tuple(),
+                // `WebhookStore::update` reports every failure as a string; only the missing-id case is a 404.
+                // Input validation (empty name, oversize fields, the SSRF gate on `url`) is a 400, matching `create_webhook`, and a failed save is a server fault.
+                Err(e) if e == "webhook not found" => {
+                    ApiErrorResponse::not_found(err_not_found).into_json_tuple()
+                }
+                Err(e) if e == "webhook persistence failed" => {
+                    ApiErrorResponse::internal(e).into_json_tuple()
+                }
+                Err(e) => ApiErrorResponse::bad_request(e).into_json_tuple(),
             }
         }
         Err(_) => ApiErrorResponse::bad_request(err_invalid_id).into_json_tuple(),

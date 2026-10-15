@@ -859,6 +859,56 @@ pub(crate) fn severity_label(severity: librefang_skills::verify::WarningSeverity
     }
 }
 
+/// The `skill.toml` written by `skill create`.
+///
+/// Free-text fields go through `toml::Value::String`, so a description containing `"` or `\` still yields a manifest the registry can parse.
+pub(crate) fn skill_scaffold_manifest(
+    name: &str,
+    description: &str,
+    runtime: &str,
+    entry: &str,
+) -> String {
+    let quote = |s: &str| toml::Value::String(s.to_string()).to_string();
+    let tool_name = name.replace('-', "_");
+    format!(
+        r#"[skill]
+name = {name}
+version = {version}
+description = {description}
+author = ""
+license = "MIT"
+tags = []
+
+[runtime]
+type = {runtime}
+entry = {entry}
+
+[[tools.provided]]
+name = {tool_name}
+description = {description}
+input_schema = {{ type = "object", properties = {{ input = {{ type = "string" }} }}, required = ["input"] }}
+
+[requirements]
+tools = []
+capabilities = []
+"#,
+        name = quote(name),
+        version = quote(librefang_types::VERSION),
+        description = quote(description),
+        runtime = quote(runtime),
+        entry = quote(entry),
+        tool_name = quote(&tool_name),
+    )
+}
+
+/// True when `name` uses only ASCII letters, digits, `-` and `_`, the characters `skill create` can safely splice into a tool name and scaffold source.
+fn is_scaffold_safe_name(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
 pub(crate) fn cmd_skill_create() {
     let name = prompt_input(&i18n::t("skill-prompt-name"));
     let description = prompt_input(&i18n::t("skill-prompt-description"));
@@ -869,8 +919,41 @@ pub(crate) fn cmd_skill_create() {
         runtime
     };
 
+    // The name becomes a directory under the skills root: an empty name would scaffold into the root itself, and `..` or a separator would escape it.
+    if let Err(e) = validate_skill_name(&name) {
+        eprintln!("{e}");
+        std::process::exit(1);
+    }
+    // The name is also spliced into the generated tool name and the scaffold's Python / JS / Rust source, so a quote or other punctuation would yield a skill that does not run.
+    if !is_scaffold_safe_name(&name) {
+        eprintln!(
+            "{}",
+            i18n::t_args("skill-create-name-invalid", &[("name", &name)])
+        );
+        std::process::exit(1);
+    }
+    // Reject an unknown runtime before creating anything: a directory left behind here would make the retry with a valid runtime fail as "already exists".
+    if !matches!(runtime.as_str(), "python" | "node" | "wasm") {
+        eprintln!(
+            "{}",
+            i18n::t_args("skill-unsupported-runtime", &[("runtime", &runtime)])
+        );
+        std::process::exit(1);
+    }
+
     let home = librefang_home();
     let skill_dir = home.join("skills").join(&name);
+    // Refuse rather than overwrite: the files below are written unconditionally, so an existing name would silently clobber an installed skill's manifest and entry.
+    if skill_dir.exists() {
+        eprintln!(
+            "{}",
+            i18n::t_args(
+                "skill-create-exists",
+                &[("path", &skill_dir.display().to_string())]
+            )
+        );
+        std::process::exit(1);
+    }
     std::fs::create_dir_all(skill_dir.join("src")).unwrap_or_else(|e| {
         let err_msg = e.to_string();
         eprintln!(
@@ -1032,39 +1115,31 @@ skill!(handle);
         }
     };
 
-    let manifest = format!(
-        r#"[skill]
-name = "{name}"
-version = "{version}"
-description = "{description}"
-author = ""
-license = "MIT"
-tags = []
+    let manifest = skill_scaffold_manifest(&name, &description, &runtime, &scaffold.entry);
 
-[runtime]
-type = "{runtime}"
-entry = "{entry}"
-
-[[tools.provided]]
-name = "{tool_name}"
-description = "{description}"
-input_schema = {{ type = "object", properties = {{ input = {{ type = "string" }} }}, required = ["input"] }}
-
-[requirements]
-tools = []
-capabilities = []
-"#,
-        version = librefang_types::VERSION,
-        entry = scaffold.entry,
-    );
-
-    std::fs::write(skill_dir.join("skill.toml"), &manifest).unwrap();
-    for (rel, content) in &scaffold.files {
-        let path = skill_dir.join(rel);
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).unwrap();
+    let write_or_exit = |path: &std::path::Path, content: &str| {
+        let result = match path.parent() {
+            Some(parent) => std::fs::create_dir_all(parent),
+            None => Ok(()),
         }
-        std::fs::write(&path, content).unwrap();
+        .and_then(|()| std::fs::write(path, content));
+        if let Err(e) = result {
+            eprintln!(
+                "{}",
+                i18n::t_args(
+                    "skill-create-write-failed",
+                    &[
+                        ("path", &path.display().to_string()),
+                        ("error", &e.to_string())
+                    ]
+                )
+            );
+            std::process::exit(1);
+        }
+    };
+    write_or_exit(&skill_dir.join("skill.toml"), &manifest);
+    for (rel, content) in &scaffold.files {
+        write_or_exit(&skill_dir.join(rel), content);
     }
 
     println!();
@@ -1590,7 +1665,10 @@ pub(crate) fn cmd_skill_pending(sub: PendingCommands) {
 
 #[cfg(test)]
 mod tests {
-    use super::{github_token_from_vault, resolve_github_token, validate_skill_name};
+    use super::{
+        github_token_from_vault, is_scaffold_safe_name, resolve_github_token,
+        skill_scaffold_manifest, validate_skill_name,
+    };
     use crate::test_env::with_env_vars;
 
     /// Seed a vault at `path` holding `GITHUB_TOKEN`.
@@ -1722,5 +1800,29 @@ mod tests {
         assert!(validate_skill_name("a/b").is_err());
         assert!(validate_skill_name("/etc/passwd").is_err());
         assert!(validate_skill_name("foo/").is_err());
+    }
+
+    /// A description with quotes or backslashes used to be spliced raw into `skill.toml`, producing a manifest the registry could not parse.
+    #[test]
+    fn scaffold_manifest_escapes_free_text_and_parses() {
+        let description = r#"Says "hi" with a \ backslash"#;
+        let manifest = skill_scaffold_manifest("my-skill", description, "python", "src/main.py");
+        let parsed: librefang_skills::SkillManifest =
+            toml::from_str(&manifest).expect("scaffolded manifest must parse");
+        assert_eq!(parsed.skill.name, "my-skill");
+        assert_eq!(parsed.skill.description, description);
+        assert_eq!(parsed.tools.provided.len(), 1);
+        assert_eq!(parsed.tools.provided[0].name, "my_skill");
+        assert_eq!(parsed.tools.provided[0].description, description);
+    }
+
+    /// `skill create` splices the name into the tool name and scaffold source, so it accepts a narrower set than `validate_skill_name`.
+    #[test]
+    fn scaffold_safe_name_rejects_punctuation() {
+        assert!(is_scaffold_safe_name("my-skill_2"));
+        assert!(!is_scaffold_safe_name(""));
+        assert!(!is_scaffold_safe_name("a\"b"));
+        assert!(!is_scaffold_safe_name("Skill_1.2"));
+        assert!(!is_scaffold_safe_name("has space"));
     }
 }

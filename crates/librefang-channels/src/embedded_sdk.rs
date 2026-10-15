@@ -396,39 +396,101 @@ fn parse_pyproject_version(pyproject: &str) -> Option<&str> {
 /// under a running daemon, and the cache keeps the spawn-time pre-check
 /// at one subprocess per unique command path.
 /// The probe uses the daemon's environment and is intentionally sticky, so installing the SDK or changing that environment requires a daemon restart.
+/// The one exception is a probe that hits `SDK_PROBE_TIMEOUT`: that answer is inconclusive, so it is not cached and the next spawn probes again instead of pinning a transient stall for the daemon's lifetime.
 ///
 /// Reading the version rather than only probing importability is what makes the #7140 failure visible: a pip install four months older than the daemon still imports, so an importability-only probe reported exactly the same thing for a matching install and for a stale one that silently shadows the embedded tree.
 fn installed_sdk_version(command: &str) -> Option<String> {
     static CACHE: OnceLock<Mutex<HashMap<String, Option<String>>>> = OnceLock::new();
     let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
     probe_sdk_cached(cache, command, || {
-        let out = Command::new(command)
-            .args([
-                "-c",
-                "import librefang, librefang.sidecar; print(librefang.__version__)",
-            ])
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .output()
-            .ok()?;
-        if !out.status.success() {
-            return None;
+        let mut cmd = Command::new(command);
+        cmd.args([
+            "-c",
+            "import librefang, librefang.sidecar; print(librefang.__version__)",
+        ])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null());
+        let (status, stdout) = match output_with_deadline(&mut cmd, SDK_PROBE_TIMEOUT) {
+            Ok(Some(done)) => done,
+            Ok(None) => {
+                warn!(
+                    command,
+                    timeout_secs = SDK_PROBE_TIMEOUT.as_secs(),
+                    "librefang-sdk import probe did not finish in time; treating the SDK as not installed for this spawn"
+                );
+                return None;
+            }
+            Err(_) => return Some(None),
+        };
+        if !status.success() {
+            return Some(None);
         }
         // Importable but version-less is still importable: the interpreter wins the precedence contest either way, so fall back to a marker rather than reporting "not installed" and shadowing their copy.
-        let reported = String::from_utf8_lossy(&out.stdout).trim().to_string();
-        Some(if reported.is_empty() {
+        let reported = String::from_utf8_lossy(&stdout).trim().to_string();
+        Some(Some(if reported.is_empty() {
             "0+unknown".to_string()
         } else {
             reported
-        })
+        }))
     })
 }
 
+/// Upper bound on the `import librefang` probe, so a wedged interpreter (unresponsive network home, blocking `sitecustomize`, broken venv) cannot hang a sidecar spawn while holding the probe cache lock.
+const SDK_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Run `cmd` with stdout captured and return its exit status and stdout.
+///
+/// Returns `Err` when the child cannot be spawned, and `Ok(None)` when it does not finish within `deadline` (the child is then killed and reaped).
+///
+/// stdout is drained on a helper thread so a chatty child cannot block on a full pipe while we poll for its exit.
+fn output_with_deadline(
+    cmd: &mut Command,
+    deadline: Duration,
+) -> std::io::Result<Option<(std::process::ExitStatus, Vec<u8>)>> {
+    use std::io::Read as _;
+
+    let mut child = cmd.stdout(Stdio::piped()).spawn()?;
+    let (tx, rx) = std::sync::mpsc::channel();
+    if let Some(mut stdout) = child.stdout.take() {
+        std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            let _ = stdout.read_to_end(&mut buf);
+            let _ = tx.send(buf);
+        });
+    } else {
+        drop(tx);
+    }
+
+    let started = std::time::Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if started.elapsed() < deadline => {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Ok(None);
+            }
+        }
+    };
+    // A grandchild that inherited stdout could keep the pipe open past the child's exit; bound that wait by what is left of the deadline.
+    // The short floor keeps a child that exits right at the deadline from losing its output to a reader thread that has not sent yet.
+    let remaining = deadline
+        .saturating_sub(started.elapsed())
+        .max(Duration::from_millis(500));
+    let stdout = rx.recv_timeout(remaining).unwrap_or_default();
+    Ok(Some((status, stdout)))
+}
+
+/// Return the cached probe answer for `command`, running `probe` on a miss.
+///
+/// `probe` returns `None` when its answer is inconclusive (the probe timed out); that is reported as "not installed" but not cached, so the next call probes again.
 fn probe_sdk_cached(
     cache: &Mutex<HashMap<String, Option<String>>>,
     command: &str,
-    probe: impl FnOnce() -> Option<String>,
+    probe: impl FnOnce() -> Option<Option<String>>,
 ) -> Option<String> {
     let mut guard = cache.lock().unwrap_or_else(|poisoned| {
         warn!("embedded SDK probe cache lock poisoned; recovering inner state");
@@ -439,7 +501,8 @@ fn probe_sdk_cached(
         return installed.clone();
     }
 
-    let installed = probe();
+    // An inconclusive probe returns early through `?` without touching the cache.
+    let installed = probe()?;
     guard.insert(command.to_string(), installed.clone());
     installed
 }
@@ -880,6 +943,57 @@ mod tests {
         assert_eq!(parse_pyproject_version("name = \"x\"\n"), None);
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn output_with_deadline_captures_stdout_of_fast_child() {
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", "echo 2026.8.19"]);
+        let (status, stdout) = output_with_deadline(&mut cmd, Duration::from_secs(10))
+            .unwrap()
+            .unwrap();
+        assert!(status.success());
+        assert_eq!(String::from_utf8_lossy(&stdout).trim(), "2026.8.19");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn output_with_deadline_kills_hung_child() {
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", "sleep 30"]);
+        let started = std::time::Instant::now();
+        assert!(output_with_deadline(&mut cmd, Duration::from_millis(200))
+            .unwrap()
+            .is_none());
+        assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    #[test]
+    fn output_with_deadline_errors_for_missing_binary() {
+        let mut cmd = Command::new("librefang-definitely-not-a-binary-xyz");
+        assert!(output_with_deadline(&mut cmd, Duration::from_secs(1)).is_err());
+    }
+
+    #[test]
+    fn sdk_probe_cache_does_not_cache_inconclusive_probe() {
+        let cache = Mutex::new(HashMap::new());
+        let probes = AtomicUsize::new(0);
+        assert!(probe_sdk_cached(&cache, "/slow/python3", || {
+            probes.fetch_add(1, Ordering::SeqCst);
+            None
+        })
+        .is_none());
+        assert!(cache.lock().unwrap().is_empty());
+        assert_eq!(
+            probe_sdk_cached(&cache, "/slow/python3", || {
+                probes.fetch_add(1, Ordering::SeqCst);
+                Some(Some("2026.8.19".to_string()))
+            })
+            .as_deref(),
+            Some("2026.8.19"),
+        );
+        assert_eq!(probes.load(Ordering::SeqCst), 2);
+    }
+
     #[test]
     fn sdk_probe_cache_coalesces_concurrent_misses() {
         let cache = Arc::new(Mutex::new(HashMap::new()));
@@ -896,7 +1010,7 @@ mod tests {
                 probe_sdk_cached(&cache, "/test/python3", || {
                     probes.fetch_add(1, Ordering::SeqCst);
                     std::thread::sleep(std::time::Duration::from_millis(10));
-                    Some("2026.8.19".to_string())
+                    Some(Some("2026.8.19".to_string()))
                 })
             }));
         }
@@ -925,7 +1039,7 @@ mod tests {
         assert_eq!(
             probe_sdk_cached(&cache, "/cached/python3", || {
                 probes.fetch_add(1, Ordering::SeqCst);
-                None
+                Some(None)
             })
             .as_deref(),
             Some("2026.8.19"),
@@ -935,7 +1049,7 @@ mod tests {
 
         assert!(probe_sdk_cached(&cache, "/new/python3", || {
             probes.fetch_add(1, Ordering::SeqCst);
-            None
+            Some(None)
         })
         .is_none());
         assert_eq!(probes.load(Ordering::SeqCst), 1);

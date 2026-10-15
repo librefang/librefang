@@ -319,7 +319,7 @@ const SMOKE_GET_ROUTES: &[&str] = &[
 
 /// Smoke walk: every GET path must respond without an unexpected 5xx. 4xx is
 /// fine — a handler returning "not found" or "bad request" still proves the
-/// route is wired up and the handler executed without panicking. The two exact
+/// route is wired up and the handler executed without panicking. The exact
 /// availability responses below are public handler contracts, not internal
 /// failures.
 #[tokio::test(flavor = "multi_thread")]
@@ -329,10 +329,19 @@ async fn smoke_get_routes_reject_unexpected_5xx() {
     let mut failures: Vec<String> = Vec::new();
     for path in SMOKE_GET_ROUTES {
         let (status, ct) = get(harness.app.clone(), path).await;
+        // The four ClawHub reads (`/api/clawhub[-cn]/{search,browse}`) answer from a real hub round trip through the same
+        // `within_route_budget` wrapper, and both of their availability answers are documented contracts.
+        // The hub serving a webpage rather than marketplace data maps to `503` (#7856); a failed client call falls back to `502`.
+        // #8453's 8s route budget turns a slow hub into that same `MarketplaceUnavailable`, so a `503` here is the same documented answer rather than an unexpected 5xx.
         let expected_unavailable = matches!(
             (*path, status),
-            ("/api/clawhub-cn/browse", StatusCode::BAD_GATEWAY)
-                | ("/api/auth/login", StatusCode::SERVICE_UNAVAILABLE)
+            (
+                "/api/clawhub/search"
+                    | "/api/clawhub/browse"
+                    | "/api/clawhub-cn/search"
+                    | "/api/clawhub-cn/browse",
+                StatusCode::BAD_GATEWAY | StatusCode::SERVICE_UNAVAILABLE
+            ) | ("/api/auth/login", StatusCode::SERVICE_UNAVAILABLE)
         );
         if status.is_server_error() && !expected_unavailable {
             failures.push(format!("{path} -> {status} (content-type: {ct:?})"));

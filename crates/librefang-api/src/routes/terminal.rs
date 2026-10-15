@@ -460,10 +460,12 @@ pub(super) async fn authorize_terminal_request(
             });
             sessions.contains_key(&crate::password_hash::hash_device_token(token_str))
         };
-        let user_key_auth = !session_auth
-            && user_api_keys
-                .iter()
-                .any(|user| crate::password_hash::verify_password(token_str, &user.api_key_hash));
+        // `find_user_api_key` keeps the Argon2id verifies off the async worker; skipped when the master key or a session already matched, since those win below.
+        let user_key_auth = !api_auth
+            && !session_auth
+            && crate::server::find_user_api_key(&user_api_keys, token_str)
+                .await
+                .is_some();
 
         if api_auth {
             TokenStatus::Valid(AuthMethod::ApiKey)

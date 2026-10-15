@@ -148,11 +148,14 @@ impl KnowledgeStore {
     /// B's identical triple would match user A's existing relation and be
     /// silently dropped as a duplicate. Shared/unscoped maps to the `''`
     /// sentinel, so a plain `=` comparison dedups shared relations correctly.
+    ///
+    /// `agent_id` scopes it the same way: relations are owned per agent (`delete_by_agent` and every scoped read key on `r.agent_id`), so a second agent's identical triple must not be dropped as a duplicate of the first agent's row.
     pub fn has_relation(
         &self,
         source_id: &str,
         relation_type: &RelationType,
         target_id: &str,
+        agent_id: &str,
         peer_id: Option<&str>,
     ) -> LibreFangResult<bool> {
         let conn = self.pool.get().map_err(LibreFangError::memory)?;
@@ -165,8 +168,9 @@ impl KnowledgeStore {
                  WHERE (r.source_entity = ?1 OR EXISTS (SELECT 1 FROM entities e WHERE e.id = ?1 AND e.name = r.source_entity))
                  AND r.relation_type = ?2
                  AND (r.target_entity = ?3 OR EXISTS (SELECT 1 FROM entities e WHERE e.id = ?3 AND e.name = r.target_entity))
-                 AND r.peer_id = ?4",
-                rusqlite::params![source_id, rel_str, target_id, peer],
+                 AND r.peer_id = ?4
+                 AND r.agent_id = ?5",
+                rusqlite::params![source_id, rel_str, target_id, peer, agent_id],
                 |row| row.get(0),
             )
             .map_err(LibreFangError::memory)?;
@@ -249,7 +253,8 @@ impl KnowledgeStore {
         }
         let _ = idx;
 
-        sql.push_str(" LIMIT 100");
+        // Stable order so the capped window, and the prompt text built from it, is the same across calls (#3298).
+        sql.push_str(" ORDER BY r.created_at, r.id LIMIT 100");
 
         let mut stmt = conn.prepare(&sql).map_err(LibreFangError::memory)?;
         let param_refs: Vec<&dyn rusqlite::types::ToSql> =

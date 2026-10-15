@@ -28,6 +28,15 @@ use crate::MeteringSubsystemApi;
 use super::*;
 
 impl LibreFangKernel {
+    /// The output budget this turn will send, resolved through the catalog exactly as `execute_llm_agent` resolves it.
+    ///
+    /// The pre-call holds must be sized from what the turn will actually ask for: `effective_max_tokens()` returns the manifest's `max_tokens` or the system default, skipping the registry rung the resolver applies, so a hold sized from it reserves the wrong amount for a model the catalog knows.
+    /// `ModelCatalog::resolve_turn_inference_params` is the same call the execution path makes, which keeps the estimate and the request from drifting apart.
+    fn resolved_output_budget(&self, model: &librefang_types::agent::ModelConfig) -> u64 {
+        let catalog = self.llm.model_catalog.load();
+        u64::from(catalog.resolve_turn_inference_params(model).max_tokens)
+    }
+
     /// Send a message to an agent and get a response.
     ///
     /// Automatically upgrades the kernel handle from `self_handle` so that
@@ -501,6 +510,17 @@ impl LibreFangKernel {
         // Ephemeral: no tools — prevents side effects (tool writes to memory/disk)
         let tools: Vec<librefang_types::tool::ToolDefinition> = vec![];
         let mut manifest = entry.manifest.clone();
+        // #8112: this path skipped the per-model-override resolution that
+        // `execute_llm_agent` (kernel::agent_execution) already runs, so a
+        // `top_p` / `frequency_penalty` / `presence_penalty` set as a
+        // model-catalog override never reached an ephemeral (`/btw`) turn even
+        // though it reached the same agent's persistent-session turns. No
+        // routing runs on this path, so the manifest's provider/model is
+        // already final.
+        super::manifest_helpers::apply_resolved_inference_params(
+            &self.llm.model_catalog.load(),
+            &mut manifest.model,
+        );
 
         // Reuse the prompt-builder to get a proper system prompt
         {
@@ -1219,11 +1239,11 @@ impl LibreFangKernel {
         // above for the full rationale.
 
         let estimated_usd = {
-            // Best-effort pre-call estimate: model.max_tokens worth of
-            // output, plus a conservative input estimate equal to the
-            // same token count. Real cost is settled later via
+            // Best-effort pre-call estimate: the turn's resolved output
+            // budget worth of output, plus a conservative input estimate
+            // equal to the same token count. Real cost is settled later via
             // `check_all_and_record`; this only sizes the in-memory hold.
-            let max_out = u64::from(entry.manifest.model.effective_max_tokens());
+            let max_out = self.resolved_output_budget(&entry.manifest.model);
             let est_in = max_out;
             {
                 let catalog = self.llm.model_catalog.load();
@@ -1245,7 +1265,7 @@ impl LibreFangKernel {
 
         // Enforce quota on the effective target agent (after routing).
         // Use reserve_tokens so the estimated token budget is pre-charged inside the same DashMap write-lock, closing the TOCTOU race where N concurrent callers all pass the check before any of them calls record_usage (#3736).
-        let estimated_tokens = u64::from(entry.manifest.model.effective_max_tokens());
+        let estimated_tokens = self.resolved_output_budget(&entry.manifest.model);
         let token_reservation = match self
             .agents
             .scheduler
@@ -1367,11 +1387,12 @@ impl LibreFangKernel {
                     "ok",
                 );
 
-                // Push task_completed notification for autonomous (hand) agents
+                // Push task_completed notification for autonomous (hand) agents.
+                // A capped turn (#8556) did not complete its task; it gets the `max_iterations` notification below instead.
                 if let Some(entry) = self.agents.registry.get(agent_id) {
                     let is_autonomous = entry.tags.iter().any(|t| t.starts_with("hand:"))
                         || entry.manifest.autonomous.is_some();
-                    if is_autonomous {
+                    if is_autonomous && !result.hit_iteration_cap {
                         let name = &entry.name;
                         let msg = format!(
                             "Agent \"{}\" completed task (in={}, out={} tokens)",
@@ -1385,6 +1406,38 @@ impl LibreFangKernel {
                         )
                         .await;
                     }
+                }
+
+                // #8556: the loop hit its per-turn iteration cap and delivered
+                // the best-so-far text rather than failing. The user still got
+                // a response, but surface an operator notification so the
+                // truncation is observable (mirrors the task_completed push).
+                //
+                // Deliberately NOT `supervisor.record_panic()`: this turn did
+                // not fail — it delivered an answer — and the supervisor's only
+                // event API is the panic counter, so recording here would
+                // report a healthy partial response as a crash. The
+                // `librefang_agent_loop_exits_total{reason="max_iterations"}`
+                // counter (via `classify_exit_reason`) plus this notification
+                // are the observability surface for a capped turn.
+                if result.hit_iteration_cap {
+                    let name = self
+                        .agents
+                        .registry
+                        .get(agent_id)
+                        .map(|a| a.name.clone())
+                        .unwrap_or_else(|| agent_id.to_string());
+                    let msg = format!(
+                        "Agent \"{}\" hit the iteration cap after {} iterations — delivered a partial response",
+                        name, result.iterations
+                    );
+                    self.push_notification(
+                        &agent_id.to_string(),
+                        "max_iterations",
+                        &msg,
+                        resolved_session_id.as_ref(),
+                    )
+                    .await;
                 }
 
                 // Skill evolution: check if any skill_evolve_* tools were used
@@ -1437,7 +1490,9 @@ impl LibreFangKernel {
                 // the cooldown slot if this loop actually suggested a
                 // review AND the agent didn't already evolve a skill
                 // AND the registry isn't frozen AND auto_evolve is on.
+                // A capped turn (#8556) never finished, so its trajectory is not one to distill a skill from.
                 let eligible = result.skill_evolution_suggested
+                    && !result.hit_iteration_cap
                     && !used_evolution_tool
                     && !registry_frozen
                     && entry.manifest.auto_evolve;
@@ -2206,7 +2261,7 @@ impl LibreFangKernel {
         // the duration of the spawned task and settled/released alongside the
         // token reservation below.
         let estimated_usd = {
-            let max_out = u64::from(entry.manifest.model.effective_max_tokens());
+            let max_out = self.resolved_output_budget(&entry.manifest.model);
             let est_in = max_out;
             let catalog = self.llm.model_catalog.load();
             MeteringEngine::estimate_cost_with_catalog(
@@ -2227,7 +2282,7 @@ impl LibreFangKernel {
         // Pre-charge the estimated token budget atomically to prevent the
         // TOCTOU race (#3736).  The reservation is settled inside the spawned
         // task after the LLM call completes.
-        let estimated_tokens = u64::from(entry.manifest.model.effective_max_tokens());
+        let estimated_tokens = self.resolved_output_budget(&entry.manifest.model);
         let token_reservation = match self
             .agents
             .scheduler
@@ -2557,6 +2612,19 @@ impl LibreFangKernel {
             });
         }
 
+        // #8112: resolve the per-model-override sampling preferences
+        // (`top_p` / `frequency_penalty` / `presence_penalty`, plus
+        // `temperature` / `max_tokens`) the same way `execute_llm_agent`
+        // (kernel::agent_execution) does — this streaming dispatch path
+        // skipped that resolution entirely, so a catalog override never
+        // reached a streamed turn even though it reached the same agent's
+        // non-streaming turns. Placed after the session model override so it
+        // resolves against the model the turn will actually call.
+        super::manifest_helpers::apply_resolved_inference_params(
+            &self.llm.model_catalog.load(),
+            &mut manifest.model,
+        );
+
         // Resolve the context window: agent.toml override > per-model operator
         // override > catalog > session (#6568, #7774). Computed *after* the
         // session model override is applied — the pre-#6568 code read
@@ -2824,6 +2892,13 @@ impl LibreFangKernel {
         // `sender_user_id` and triggers / `agent_send` produce
         // `[<numeric_id>]: ` instead of `[<friendly_name>]: ` for the same
         // user identity.
+        //
+        // First drop any reserved sender keys the manifest itself declared:
+        // only a turn's verified `SenderContext` may speak for a sender,
+        // otherwise an `agent.toml` could name `webui` plus a target's
+        // derivable `UserId` UUID and assume that user's policy on a
+        // sender-less turn (#8409 review).
+        librefang_types::agent::strip_reserved_sender_metadata(&mut manifest.metadata);
         if let Some(ctx) = sender_context {
             if !ctx.user_id.is_empty() {
                 manifest.metadata.insert(
@@ -3034,6 +3109,7 @@ impl LibreFangKernel {
                         agent_id,
                         &mut session,
                         &manifest.model.system_prompt,
+                        &tools,
                         &compaction_config_snapshot,
                         agent_scoped,
                     )
@@ -3358,6 +3434,8 @@ impl LibreFangKernel {
                         kernel_clone.spawn_compaction_after_turn(
                             agent_id,
                             &session,
+                            &manifest.model.system_prompt,
+                            &tools,
                             manifest.compaction.as_ref(),
                             agent_scoped,
                         );
@@ -3406,6 +3484,32 @@ impl LibreFangKernel {
                                 v.task_id == turn_task_id
                             });
                     }
+
+                    // #8556: mirror the non-streaming Ok arm — a capped turn
+                    // delivered a partial response; surface an operator
+                    // notification (the streaming path has no task_completed
+                    // push to hang it off).
+                    if result.hit_iteration_cap {
+                        let name = kernel_clone
+                            .agents
+                            .registry
+                            .get(agent_id)
+                            .map(|a| a.name.clone())
+                            .unwrap_or_else(|| agent_id.to_string());
+                        let msg = format!(
+                            "Agent \"{}\" hit the iteration cap after {} iterations — delivered a partial response",
+                            name, result.iterations
+                        );
+                        kernel_clone
+                            .push_notification(
+                                &agent_id.to_string(),
+                                "max_iterations",
+                                &msg,
+                                Some(&effective_session_id),
+                            )
+                            .await;
+                    }
+
                     Ok(result)
                 }
                 Err(e) => {

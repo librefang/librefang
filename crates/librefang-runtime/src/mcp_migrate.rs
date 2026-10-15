@@ -388,7 +388,10 @@ fn upsert_mcp_server_from_template(
     Ok(())
 }
 
-fn durable_atomic_write(path: &Path, content: &[u8]) -> std::io::Result<()> {
+/// Publish `content` at `path` by staging a temp file in the same directory and renaming it over the target, so a crash leaves either the old file or the new one and never a torn write.
+///
+/// Shared crate-wide: `model_catalog::save_discover_prefs` is the other writer that cannot afford a torn file, because its loader discards a file it cannot parse.
+pub(crate) fn durable_atomic_write(path: &Path, content: &[u8]) -> std::io::Result<()> {
     static SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
     let parent = match path.parent() {

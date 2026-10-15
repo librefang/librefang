@@ -368,6 +368,29 @@ async fn manifest_writes_to_a_provisioned_agent_are_refused_with_the_documented_
         assert_provisioned_refusal(status, &resp, "researcher");
     }
 
+    // The avatar write verbs do not fit the loop above: the upload's body is the
+    // image itself rather than JSON, and the removal takes no body at all. They
+    // reach the same guard, and the status they answer is what the OpenAPI
+    // `responses` for those two routes documents — a mismatch there ships a
+    // generated client that branches on a code the daemon never sends.
+    let png = b"\x89PNG\r\n\x1a\n";
+    let (status, body) = send(
+        h.app.clone(),
+        auth(Method::POST, &format!("/api/agents/{id}/avatar"))
+            .header(header::CONTENT_TYPE, "image/png")
+            .body(Body::from(png.to_vec()))
+            .expect("request"),
+    )
+    .await;
+    assert_provisioned_refusal(status, &body, "researcher");
+
+    let (status, body) = send(
+        h.app.clone(),
+        auth_delete(&format!("/api/agents/{id}/avatar")),
+    )
+    .await;
+    assert_provisioned_refusal(status, &body, "researcher");
+
     // And the delete path, which has its own return type.
     let (status, body) = send(
         h.app.clone(),

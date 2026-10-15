@@ -781,10 +781,27 @@ fn path_is_within(path: &str, prefix: &str) -> bool {
     }
 }
 
+/// Whether mounting `path` would expose `blocked`: the mount is inside the blocked path, or the blocked path is inside the mount (mounting `/`, `/var` or `/run`'s parent exposes everything beneath it).
+fn mount_overlaps_blocked(path: &str, blocked: &str) -> bool {
+    path_is_within(path, blocked) || path_is_within(blocked, path)
+}
+
+/// Canonical-path variant of [`mount_overlaps_blocked`]: also compares against the blocked path's own canonical form.
+/// On macOS `/etc` is a symlink to `/private/etc`, so the canonical mount `/private` overlaps no blocked entry by name while still exposing `/etc` beneath it.
+fn canonical_mount_overlaps_blocked(canonical: &str, blocked: &str) -> bool {
+    if mount_overlaps_blocked(canonical, blocked) {
+        return true;
+    }
+    match std::path::Path::new(blocked).canonicalize() {
+        Ok(resolved) => mount_overlaps_blocked(canonical, &resolved.to_string_lossy()),
+        Err(_) => false,
+    }
+}
+
 /// Validate a bind mount path for security.
 ///
 /// Blocks:
-/// - Sensitive system paths (/etc, /proc, /sys, Docker socket)
+/// - Sensitive system paths (/etc, /proc, /sys, Docker socket), and any ancestor of them such as `/` or `/var`
 /// - Non-absolute paths
 /// - Symlink escape attempts
 /// - Paths in the configured blocked_mounts list
@@ -806,7 +823,7 @@ pub fn validate_bind_mount(path: &str, blocked: &[String]) -> Result<(), String>
 
     // Check default blocked paths
     for blocked_path in BLOCKED_MOUNT_PATHS {
-        if path_is_within(path, blocked_path) {
+        if mount_overlaps_blocked(path, blocked_path) {
             return Err(format!(
                 "Bind mount to '{blocked_path}' is blocked for security"
             ));
@@ -815,7 +832,7 @@ pub fn validate_bind_mount(path: &str, blocked: &[String]) -> Result<(), String>
 
     // Check user-configured blocked paths
     for bp in blocked {
-        if path_is_within(path, bp.as_str()) {
+        if mount_overlaps_blocked(path, bp.as_str()) {
             return Err(format!("Bind mount to '{bp}' is blocked by configuration"));
         }
     }
@@ -857,7 +874,7 @@ pub fn validate_bind_mount(path: &str, blocked: &[String]) -> Result<(), String>
 
     let canonical_str = canonical.to_string_lossy();
     for blocked_path in BLOCKED_MOUNT_PATHS {
-        if path_is_within(&canonical_str, blocked_path) {
+        if canonical_mount_overlaps_blocked(&canonical_str, blocked_path) {
             return Err(format!(
                 "Bind mount resolves to blocked path via symlink: {} → {}",
                 path, canonical_str
@@ -866,7 +883,7 @@ pub fn validate_bind_mount(path: &str, blocked: &[String]) -> Result<(), String>
     }
     // Also check user-configured blocked paths against resolved path
     for bp in blocked {
-        if path_is_within(&canonical_str, bp.as_str()) {
+        if canonical_mount_overlaps_blocked(&canonical_str, bp.as_str()) {
             return Err(format!(
                 "Bind mount resolves to blocked path via symlink: {} → {}",
                 path, canonical_str
@@ -982,6 +999,17 @@ mod tests {
         // (sh treats them literally).
         assert!(contains_shell_metacharacters(r#"echo "a && b""#).is_none());
         assert!(contains_shell_metacharacters(r#"echo "a > b""#).is_none());
+    }
+
+    /// An unquoted `\'` is a literal quote under `sh -c`, so it must not open a quoted region that hides the metacharacters after it (mirrors the subprocess sandbox fix).
+    #[test]
+    fn test_docker_metachar_escaped_quote_does_not_hide_operators() {
+        use self::helpers::contains_shell_metacharacters;
+        assert!(contains_shell_metacharacters(r"echo \' & id \'").is_some());
+        assert!(contains_shell_metacharacters(r"echo \'> /tmp/x \'").is_some());
+        assert!(contains_shell_metacharacters(r#"echo \" | id \""#).is_some());
+        assert!(contains_shell_metacharacters("echo 'a & b'").is_none());
+        assert!(validate_command(r"echo \' & touch /tmp/pwn \'").is_err());
     }
 
     #[test]
@@ -1486,6 +1514,50 @@ mod tests {
         assert!(validate_bind_mount("/var/run/docker.sock", &[]).is_err());
     }
 
+    /// Mounting an ancestor of a blocked path exposes it through the mount, so `/`, `/var` (parent of `/var/run/docker.sock`) and similar must be rejected too.
+    #[test]
+    fn test_validate_bind_mount_rejects_ancestors_of_blocked_paths() {
+        for p in ["/", "//", "/var", "/var/", "/var/run"] {
+            assert!(validate_bind_mount(p, &[]).is_err(), "{p} must be rejected");
+        }
+        assert!(validate_bind_mount("/data", &["/data/secrets".to_string()]).is_err());
+        // Siblings of blocked paths remain allowed.
+        assert!(validate_bind_mount("/home/user/workspace", &[]).is_ok());
+        assert!(validate_bind_mount("/data/public", &["/data/secrets".to_string()]).is_ok());
+    }
+
+    /// A blocked path reached through a symlink must still block mounts of its real ancestors (macOS `/private` above `/etc` -> `/private/etc`).
+    #[cfg(unix)]
+    #[test]
+    fn test_validate_bind_mount_rejects_ancestor_of_symlinked_blocked_path() {
+        let tmp = std::env::temp_dir().join(format!(
+            "librefang-bind-mount-symlink-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        let real = tmp.join("real");
+        std::fs::create_dir_all(real.join("secret")).unwrap();
+        let link = tmp.join("link");
+        std::os::unix::fs::symlink(real.join("secret"), &link).unwrap();
+        let blocked = vec![link.to_string_lossy().into_owned()];
+        let ancestor = validate_bind_mount(&real.to_string_lossy(), &blocked);
+        let sibling = tmp.join("other");
+        std::fs::create_dir_all(&sibling).unwrap();
+        let sibling_result = validate_bind_mount(&sibling.to_string_lossy(), &blocked);
+        let _ = std::fs::remove_dir_all(&tmp);
+        assert!(
+            ancestor.is_err(),
+            "ancestor of symlinked blocked path must be rejected"
+        );
+        assert!(sibling_result.is_ok(), "{sibling_result:?}");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn test_validate_bind_mount_rejects_macos_private() {
+        assert!(validate_bind_mount("/private", &[]).is_err());
+    }
+
     #[test]
     fn test_validate_bind_mount_traversal() {
         assert!(validate_bind_mount("/home/user/../etc/passwd", &[]).is_err());
@@ -1862,6 +1934,15 @@ pub mod helpers {
         let mut i = 0;
         while i < len {
             match chars[i] {
+                '\\' => {
+                    result.push('\\');
+                    if i + 1 < len {
+                        result.push(chars[i + 1]);
+                        i += 2;
+                    } else {
+                        i += 1;
+                    }
+                }
                 '\'' => {
                     i += 1;
                     while i < len && chars[i] != '\'' {

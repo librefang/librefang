@@ -1,12 +1,16 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   spawnAgent,
+  spawnEphemeral,
   cloneAgent,
   stopAgent,
   suspendAgent,
   resumeAgent,
   deleteAgent,
   patchAgent,
+  updateAgentIdentity,
+  uploadAgentAvatar,
+  deleteAgentAvatar,
   patchAgentConfig,
   patchHandAgentRuntimeConfig,
   clearHandAgentRuntimeConfig,
@@ -29,10 +33,13 @@ import {
   setAgentMcpServers,
   setAgentChannels,
   getAgentTemplateToml,
+  restoreAgentManifestVersion,
 } from "../http/client";
-import type { AgentSchedulePatch, CloneAgentPayload, PromptExperiment, PromptVersion, SendAgentMessageOptions } from "../../api";
+import type { AgentSchedulePatch, CloneAgentPayload, PromptExperiment, PromptVersion, SendAgentMessageOptions, SpawnEphemeralRequest } from "../../api";
 import { clearChatSessionCacheForAgent } from "../chatSessionCache";
 import {
+  agentAvatarKeys,
+  agentFileKeys,
   agentKeys,
   approvalKeys,
   budgetKeys,
@@ -41,6 +48,12 @@ import {
   sessionKeys,
   usageKeys,
 } from "../queries/keys";
+
+/**
+ * The workspace file the daemon rewrites as a side effect of agent writes that are not file writes: a rename moves its front-matter `name:` (#8469), and personality sent to `/identity` or `/config` lands in its front matter (#8447).
+ * Each hook below that reaches one of those paths invalidates the cached read, or the IDENTITY.md editor would keep a pre-write copy and its next save would put the old values back.
+ */
+const IDENTITY_FILE = "IDENTITY.md";
 
 /**
  * Unified payload type for the two agent-config PATCH endpoints.
@@ -91,6 +104,30 @@ export function useSpawnAgent() {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: agentKeys.lists() });
       qc.invalidateQueries({ queryKey: overviewKeys.snapshot() });
+    },
+  });
+}
+
+/**
+ * Run one ephemeral worker and return what it produced (#6699).
+ *
+ * The worker leaves nothing behind — no registry entry, no session, no
+ * workspace — so there is no agent list to refresh afterwards. What it does
+ * leave is spend on the *parent's* ledger, which is why usage and budget are
+ * invalidated here: a Quick Run that silently cost money and left the budget
+ * widget showing the pre-run figure is the exact surprise this feature must
+ * not produce. `agentKeys.stats` is invalidated for the same reason and is not
+ * redundant with the two above — the parent's `Cost · 24h` tile on the Agents
+ * page reads from the stats query, and that page is where the run is started.
+ */
+export function useSpawnEphemeral() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (body: SpawnEphemeralRequest) => spawnEphemeral(body),
+    onSettled: (_data, _error, body) => {
+      qc.invalidateQueries({ queryKey: agentKeys.stats(body.parent) });
+      qc.invalidateQueries({ queryKey: usageKeys.all });
+      qc.invalidateQueries({ queryKey: budgetKeys.all });
     },
   });
 }
@@ -206,18 +243,167 @@ export function usePatchAgent() {
         schedule?: AgentSchedulePatch;
         auto_evolve?: boolean;
         manifest_toml?: string;
+        /** ETag from `GET .../manifest`; the server answers 409 on a mismatch (#8424). */
+        expected_version?: string;
       };
     }) => patchAgent(agentId, body),
     onSuccess: (_data, variables) => {
       qc.invalidateQueries({ queryKey: agentKeys.lists() });
       qc.invalidateQueries({ queryKey: agentKeys.detail(variables.agentId) });
+      // Every field this endpoint accepts lives in the manifest, so every
+      // successful call rotates the ETag — not only the `manifest_toml`
+      // replacement. Leaving e.g. `auto_evolve` or a rename out kept the
+      // cached manifest read "fresh" and the editor on a superseded token
+      // (#8424).
+      qc.invalidateQueries({ queryKey: agentKeys.manifest(variables.agentId) });
+      // A rename rewrites IDENTITY.md's `name:` (see `IDENTITY_FILE`); a manifest replacement can carry one.
+      if (variables.body.name !== undefined || variables.body.manifest_toml !== undefined) {
+        qc.invalidateQueries({ queryKey: agentFileKeys.detail(variables.agentId, IDENTITY_FILE) });
+      }
       if (variables.body.manifest_toml !== undefined) {
-        qc.invalidateQueries({ queryKey: agentKeys.manifest(variables.agentId) });
         qc.invalidateQueries({ queryKey: agentKeys.mcpServers(variables.agentId) });
         qc.invalidateQueries({ queryKey: agentKeys.skills(variables.agentId) });
         qc.invalidateQueries({ queryKey: agentKeys.tools(variables.agentId) });
         qc.invalidateQueries({ queryKey: agentKeys.channels(variables.agentId) });
       }
+    },
+  });
+}
+
+/**
+ * Restore an agent's manifest to a stored version-history snapshot.
+ *
+ * A restore replaces the whole manifest, so it can move any field the detail payload or an allowlist tab renders.
+ * `agentKeys.detail(agentId)` is invalidated first: the history key is nested under it, so the just-recorded `restore` snapshot shows up through the same invalidation.
+ */
+export function useRestoreAgentManifestVersion() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      agentId,
+      versionId,
+    }: {
+      agentId: string;
+      versionId: number;
+    }) => restoreAgentManifestVersion(agentId, versionId),
+    onSuccess: (_data, { agentId }) => {
+      qc.invalidateQueries({ queryKey: agentKeys.lists() });
+      qc.invalidateQueries({ queryKey: agentKeys.detail(agentId) });
+      qc.invalidateQueries({ queryKey: agentKeys.manifest(agentId) });
+      qc.invalidateQueries({ queryKey: agentKeys.mcpServers(agentId) });
+      qc.invalidateQueries({ queryKey: agentKeys.skills(agentId) });
+      qc.invalidateQueries({ queryKey: agentKeys.tools(agentId) });
+      qc.invalidateQueries({ queryKey: agentKeys.channels(agentId) });
+    },
+  });
+}
+
+/**
+ * PATCH /agents/{id}/identity — the agent's emoji and colour (#8339).
+ *
+ * Partial since #6608: a field left out of the body keeps its stored value, so
+ * setting an emoji cannot silently drop a colour. The corollary is that
+ * *clearing* one means sending it as an empty string — `undefined` is already
+ * spoken for by "not provided" and would leave the old value in place.
+ *
+ * `avatar_url` is not writable through here. It may only hold this agent's own
+ * avatar path, and the two hooks below are what put it there.
+ *
+ * Invalidates `detail(id)`, `lists()` and the dashboard snapshot: those are the
+ * three reads that carry the identity that just changed. The snapshot is the
+ * one that is easy to miss — `AgentsPage`'s rows render the emoji and the
+ * avatar out of it, not out of `agentKeys`.
+ */
+export function useUpdateAgentIdentity() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      agentId,
+      identity,
+    }: {
+      agentId: string;
+      identity: { emoji?: string; color?: string };
+    }) => updateAgentIdentity(agentId, identity),
+    onSuccess: (_data, variables) => {
+      qc.invalidateQueries({ queryKey: agentKeys.lists() });
+      qc.invalidateQueries({ queryKey: agentKeys.detail(variables.agentId) });
+      // The list rows do not read the identity out of `agentKeys` at all —
+      // `AgentsPage` renders them from the dashboard snapshot, whose key is a
+      // sibling of `agentKeys.all` rather than a child of it. Without this the
+      // row goes on showing the previous emoji until the snapshot's own 5 s
+      // poll comes round.
+      //
+      // Every other mutation in this file that changes what the list shows
+      // already does this — spawn, clone, suspend, resume, delete and
+      // reset-session all invalidate the snapshot. The three identity hooks
+      // were the ones that got missed, which is why an uploaded avatar used to
+      // take five seconds to appear in the row. Same line in the two avatar
+      // hooks below.
+      qc.invalidateQueries({ queryKey: overviewKeys.snapshot() });
+      // The same endpoint writes personality into IDENTITY.md's front matter (see `IDENTITY_FILE`).
+      qc.invalidateQueries({ queryKey: agentFileKeys.detail(variables.agentId, IDENTITY_FILE) });
+    },
+  });
+}
+
+/**
+ * POST /agents/{id}/avatar — store an image as this agent's avatar (#8339).
+ *
+ * The body is the raw bytes: no multipart, no filename anywhere. The server
+ * decides the format by sniffing them, so a file the browser mislabelled is
+ * still stored correctly and an SVG is still refused.
+ *
+ * Invalidates `avatar(id)` — the cached Blob is now the previous image — as
+ * well as the reads that carry `avatar_url`: `lists()`, `detail(id)` and the
+ * dashboard snapshot the list rows render from. The avatar key is invalidated
+ * in `onSuccess` rather than `onSettled` deliberately: the handler writes the
+ * bytes to a temp file and renames it into place, so an upload that fails leaves
+ * the previous avatar exactly as it was, and re-fetching the image after one
+ * only spends a request to arrive back at the bytes already in hand. That
+ * premise belongs to the handler rather than to this file — `routes::agents::avatar`
+ * has to keep clearing the superseded formats *after* a successful rename, not
+ * before it, or a failed upload starts deleting the picture it was meant to
+ * replace and this becomes `onSettled`.
+ */
+export function useUploadAgentAvatar() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ agentId, file }: { agentId: string; file: Blob }) =>
+      uploadAgentAvatar(agentId, file),
+    onSuccess: (_data, variables) => {
+      qc.invalidateQueries({ queryKey: agentAvatarKeys.avatar(variables.agentId) });
+      qc.invalidateQueries({ queryKey: agentKeys.lists() });
+      qc.invalidateQueries({ queryKey: agentKeys.detail(variables.agentId) });
+      qc.invalidateQueries({ queryKey: overviewKeys.snapshot() });
+    },
+  });
+}
+
+/**
+ * DELETE /agents/{id}/avatar — remove the image and clear `avatar_url` (#8339).
+ *
+ * The reference is cleared whether or not a file was found, which is how an
+ * agent whose `avatar_url` outlived its file — a database restored without the
+ * avatars directory — gets back to rendering its initials.
+ *
+ * The avatar key is **removed** rather than invalidated, and that is the one
+ * place this mutation diverges from the upload above it. `agentAvatarKeys.avatar`
+ * is gated on `enabled: hasAvatar`, which is "is `identity.avatar_url` set", so the
+ * `detail` refetch this same `onSuccess` triggers is what switches the query
+ * off. A disabled `useQuery` keeps returning its cached `data`, and an
+ * invalidation on a disabled query never becomes a refetch — so the deleted
+ * image goes on rendering until the entry is garbage-collected. `useDeleteAgent`
+ * removes its own key for the same reason.
+ */
+export function useDeleteAgentAvatar() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: deleteAgentAvatar,
+    onSuccess: (_data, agentId) => {
+      qc.removeQueries({ queryKey: agentAvatarKeys.avatar(agentId) });
+      qc.invalidateQueries({ queryKey: agentKeys.lists() });
+      qc.invalidateQueries({ queryKey: agentKeys.detail(agentId) });
+      qc.invalidateQueries({ queryKey: overviewKeys.snapshot() });
     },
   });
 }
@@ -240,6 +426,10 @@ export function usePatchAgentRuntimeConfig() {
     onSuccess: (_data, variables) => {
       qc.invalidateQueries({ queryKey: agentKeys.lists() });
       qc.invalidateQueries({ queryKey: agentKeys.detail(variables.agentId) });
+      // `/config` renames and writes personality, both of which rewrite IDENTITY.md (see `IDENTITY_FILE`).
+      if (!variables.isHand) {
+        qc.invalidateQueries({ queryKey: agentFileKeys.detail(variables.agentId, IDENTITY_FILE) });
+      }
       if (variables.isHand) {
         qc.invalidateQueries({ queryKey: handKeys.details() });
       }
@@ -543,13 +733,20 @@ export function useUpdateAgentTools() {
     mutationFn: ({
       agentId,
       payload,
+      expectedVersion,
     }: {
       agentId: string;
       payload: { capabilities_tools?: string[]; tool_allowlist?: string[]; tool_blocklist?: string[] };
-    }) => updateAgentTools(agentId, payload),
+      /** ETag of the open manifest editor; the server answers 409 on a mismatch (#8424). */
+      expectedVersion?: string;
+    }) => updateAgentTools(agentId, payload, expectedVersion),
     onSuccess: (_data, variables) => {
       qc.invalidateQueries({ queryKey: agentKeys.detail(variables.agentId) });
       qc.invalidateQueries({ queryKey: agentKeys.tools(variables.agentId) });
+      // The PUT moves the manifest's ETag. Without this the cached manifest
+      // read stays "fresh" for its full staleTime and the form would keep a
+      // token the server has already superseded (#8424).
+      qc.invalidateQueries({ queryKey: agentKeys.manifest(variables.agentId) });
     },
   });
 }
@@ -573,14 +770,19 @@ export function useSetAgentSkills() {
     mutationFn: ({
       agentId,
       skills,
+      expectedVersion,
     }: {
       agentId: string;
       skills: string[];
-    }) => setAgentSkills(agentId, skills),
+      /** ETag of the open manifest editor; the server answers 409 on a mismatch (#8424). */
+      expectedVersion?: string;
+    }) => setAgentSkills(agentId, skills, expectedVersion),
     onSuccess: (_data, variables) => {
       qc.invalidateQueries({ queryKey: agentKeys.skills(variables.agentId) });
       qc.invalidateQueries({ queryKey: agentKeys.detail(variables.agentId) });
       qc.invalidateQueries({ queryKey: agentKeys.lists() });
+      // See `useUpdateAgentTools`: the PUT rotates the manifest ETag (#8424).
+      qc.invalidateQueries({ queryKey: agentKeys.manifest(variables.agentId) });
     },
   });
 }
@@ -601,14 +803,19 @@ export function useSetAgentMcpServers() {
     mutationFn: ({
       agentId,
       mcpServers,
+      expectedVersion,
     }: {
       agentId: string;
       mcpServers: string[];
-    }) => setAgentMcpServers(agentId, mcpServers),
+      /** ETag of the open manifest editor; the server answers 409 on a mismatch (#8424). */
+      expectedVersion?: string;
+    }) => setAgentMcpServers(agentId, mcpServers, expectedVersion),
     onSuccess: (_data, variables) => {
       qc.invalidateQueries({ queryKey: agentKeys.mcpServers(variables.agentId) });
       qc.invalidateQueries({ queryKey: agentKeys.detail(variables.agentId) });
       qc.invalidateQueries({ queryKey: agentKeys.lists() });
+      // See `useUpdateAgentTools`: the PUT rotates the manifest ETag (#8424).
+      qc.invalidateQueries({ queryKey: agentKeys.manifest(variables.agentId) });
     },
   });
 }
@@ -636,13 +843,18 @@ export function useSetAgentChannels() {
     mutationFn: ({
       agentId,
       channels,
+      expectedVersion,
     }: {
       agentId: string;
       channels: string[];
-    }) => setAgentChannels(agentId, channels),
+      /** ETag of the open manifest editor; the server answers 409 on a mismatch (#8424). */
+      expectedVersion?: string;
+    }) => setAgentChannels(agentId, channels, expectedVersion),
     onSuccess: (_data, variables) => {
       qc.invalidateQueries({ queryKey: agentKeys.channels(variables.agentId) });
       qc.invalidateQueries({ queryKey: agentKeys.detail(variables.agentId) });
+      // See `useUpdateAgentTools`: the PUT rotates the manifest ETag (#8424).
+      qc.invalidateQueries({ queryKey: agentKeys.manifest(variables.agentId) });
     },
   });
 }

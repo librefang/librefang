@@ -282,7 +282,7 @@ export interface SkillDetail {
   license: string;
   tags: string[];
   runtime: string;
-  /** Tools the skill provides. */
+  /** Tools this skill *provides*. Its needs are in `required_tools`. */
   tools: SkillToolInfo[];
   /** Built-in tools the skill needs granted (manifest `[requirements]`); empty when it declares none. */
   required_tools: string[];
@@ -1309,7 +1309,25 @@ async function get<T>(path: string): Promise<T> {
   return (await response.json()) as T;
 }
 
-const AUTHENTICATED_IMAGE_PATH_RE = /^\/api\/(?:uploads|media\/artifacts)\/[A-Za-z0-9_-]+$/;
+// Paths whose bytes are an image behind the bearer token, so an `<img src>`
+// cannot reach them and the caller has to fetch a Blob instead.
+//
+// The agent avatar arm is anchored on the literal `/avatar` suffix rather than
+// left open-ended: `[A-Za-z0-9_-]+` already excludes `/` and `.`, so no id can
+// walk out of the segment, and requiring the suffix keeps the allowlist from
+// silently covering some future `/api/agents/{id}/anything` that is not an
+// image at all.
+//
+// The user avatar arm is a literal, and that is the whole point of it. A user
+// name does not fit `[A-Za-z0-9_-]+`: `encodeURIComponent("Juan Pérez")` is
+// `Juan%20P%C3%A9rez`, and `%` is not in the class, so a by-name arm would
+// simply fail to fetch that user's picture. Widening the class to carry `%XX`
+// would readmit `%2F`, which decodes to `/` — the traversal this allowlist
+// exists to stop. `/api/users/me/avatar` has no client-controlled segment at
+// all: `me` is a literal and the daemon resolves it from the credential, which
+// gives this route the same property `media.rs` claims for the agent one.
+const AUTHENTICATED_IMAGE_PATH_RE =
+  /^\/api\/(?:(?:uploads|media\/artifacts)\/[A-Za-z0-9_-]+|agents\/[A-Za-z0-9_-]+\/avatar|users\/me\/avatar)$/;
 
 export function isAuthenticatedImagePath(path: string): boolean {
   return AUTHENTICATED_IMAGE_PATH_RE.test(path);
@@ -1557,6 +1575,53 @@ export async function getAgentDetail(agentId: string): Promise<AgentDetail> {
   return get<AgentDetail>(`/api/agents/${encodeURIComponent(agentId)}`);
 }
 
+// ── Workspace identity files (`GET|PUT /api/agents/{id}/files/{filename}`) ──
+//
+// The daemon reads and writes these as opaque bytes: `read_identity_file`
+// returns the file verbatim and the prompt builder injects it under
+// `## Identity` (capped at 500 chars), so nothing here is parsed as a schema.
+// `filename` is checked against the daemon's `KNOWN_IDENTITY_FILES` allowlist,
+// not against anything client-side — a name outside it comes back 400.
+//
+// A missing file is a 404 on the read (the daemon cannot distinguish "absent"
+// from an I/O failure for this route), while the write creates it, so callers
+// treat a 404 as "not written yet" rather than as an error to report.
+
+/** Response of `GET /api/agents/{id}/files/{filename}` — a whitelisted identity file's bytes. */
+export interface AgentIdentityFile {
+  name: string;
+  content: string;
+  size_bytes: number;
+}
+
+/** Response of `PUT /api/agents/{id}/files/{filename}`. */
+export interface AgentIdentityFileWriteResult {
+  status: string;
+  name: string;
+  size_bytes: number;
+}
+
+export async function getAgentFile(
+  agentId: string,
+  filename: string,
+): Promise<AgentIdentityFile> {
+  return get<AgentIdentityFile>(
+    `/api/agents/${encodeURIComponent(agentId)}/files/${encodeURIComponent(filename)}`,
+  );
+}
+
+/** Writes `content` as the whole file — the daemon replaces it, it does not merge. */
+export async function setAgentFile(
+  agentId: string,
+  filename: string,
+  content: string,
+): Promise<AgentIdentityFileWriteResult> {
+  return put<AgentIdentityFileWriteResult>(
+    `/api/agents/${encodeURIComponent(agentId)}/files/${encodeURIComponent(filename)}`,
+    { content },
+  );
+}
+
 /** 24-hour KPI rollup for one agent — backs the AgentsPage detail-panel
  *  KPI tiles. See `GET /api/agents/{id}/stats`. */
 export interface AgentStats24h {
@@ -1601,6 +1666,35 @@ export async function listAgentEvents(
     `/api/agents/${encodeURIComponent(agentId)}/events?limit=${limit}`,
   );
   return data.events ?? [];
+}
+
+/** One snapshot in an agent's manifest version history. */
+export interface ManifestVersionEntry {
+  id: number;
+  agent_id: string;
+  agent_name: string;
+  timestamp: string;
+  manifest_toml: string;
+  // The column is free text on the server, so a producer this list does not know yet still type-checks and renders verbatim.
+  change_source: string;
+}
+
+export async function getAgentManifestHistory(
+  agentId: string,
+  limit = 30,
+): Promise<ManifestVersionEntry[]> {
+  const data = await get<{ versions?: ManifestVersionEntry[] }>(
+    `/api/agents/${encodeURIComponent(agentId)}/manifest-history?limit=${limit}`,
+  );
+  return data.versions ?? [];
+}
+
+/** POST /api/agents/{id}/manifest-history/{version_id}/restore. */
+export async function restoreAgentManifestVersion(
+  agentId: string,
+  versionId: number,
+): Promise<{ status: string; agent_id: string; restored_version_id: number }> {
+  return post(`/api/agents/${encodeURIComponent(agentId)}/manifest-history/${versionId}/restore`, {});
 }
 
 /**
@@ -1746,8 +1840,205 @@ export type AgentSchedulePatch =
  * as an `AgentManifest` and every other field on this request is ignored.
  * Powers the dashboard's full manifest editor (#7742), seeded from
  * `getAgentManifest` and serialized via `serializeManifestForm`. */
-export async function patchAgent(agentId: string, body: { name?: string; description?: string; system_prompt?: string; model?: string; provider?: string; mcp_servers?: string[]; schedule?: AgentSchedulePatch; manifest_toml?: string; auto_evolve?: boolean }): Promise<ApiActionResponse> {
+export async function patchAgent(agentId: string, body: { name?: string; description?: string; system_prompt?: string; model?: string; provider?: string; mcp_servers?: string[]; schedule?: AgentSchedulePatch; manifest_toml?: string; auto_evolve?: boolean; expected_version?: string }): Promise<ApiActionResponse> {
   return patch<ApiActionResponse>(`/api/agents/${encodeURIComponent(agentId)}`, body);
+}
+
+/** A manifest read with its optimistic-concurrency token (#8424).
+ *
+ * `version` is the `ETag` of the GET; `PATCH /api/agents/{id}` answers 409
+ * when the `expected_version` it is sent no longer matches the manifest, so a
+ * save built on a stale read cannot silently undo a concurrent write. */
+export interface AgentManifestSnapshot {
+  manifest_toml: string;
+  version: string | null;
+}
+
+// --- Agent visual identity: emoji, colour, avatar image (#8339) ------------
+
+/** Largest avatar the daemon stores, mirroring `MAX_AVATAR_BYTES` in
+ *  `crates/librefang-api/src/routes/agents/avatar.rs`.
+ *
+ *  Duplicated here to fail before spending the upload, not to decide: a stale
+ *  copy of this number can only be wrong in the direction of sending bytes the
+ *  server then rejects with a 413 that names the real cap. */
+export const MAX_AGENT_AVATAR_BYTES = 2 * 1024 * 1024;
+
+/** Image types the daemon accepts as an avatar, mirroring
+ *  `librefang_types::media::ALLOWED_IMAGE_TYPES`.
+ *
+ *  SVG is absent on purpose and its absence is load-bearing: an SVG is XML that
+ *  can carry script, and the daemon serves avatars back to a browser. Note the
+ *  server decides by sniffing the bytes and ignores both the `Content-Type` we
+ *  send and the name of the file, so this list is a courtesy to the person
+ *  picking the file — never the check that matters. */
+export const ALLOWED_AGENT_AVATAR_TYPES = [
+  "image/png",
+  "image/jpeg",
+  "image/gif",
+  "image/webp",
+] as const;
+
+/** The same two limits for the signed-in user's avatar (#8339).
+ *
+ *  Aliases rather than copies: the daemon serves both avatars with one cap
+ *  and one type list, and a second literal here could drift out of step with
+ *  the first. Named for the user surface so neither editor reads a constant
+ *  that belongs to the other. */
+export const MAX_USER_AVATAR_BYTES = MAX_AGENT_AVATAR_BYTES;
+export const ALLOWED_USER_AVATAR_TYPES = ALLOWED_AGENT_AVATAR_TYPES;
+
+
+/** The one path an agent's avatar can live at, mirroring
+ *  `librefang_types::media::agent_avatar_url`.
+ *
+ *  Derived from the id rather than read out of the stored `avatar_url` on
+ *  purpose. #8349 closed that field to exactly this value or nothing, but it is
+ *  validated on write and not on read, so a row written before that change — or
+ *  restored from an old backup — could still hold an external URL. Building the
+ *  path here means such a row renders the initials instead of sending this
+ *  origin's bearer token somewhere nobody chose. */
+export function agentAvatarPath(agentId: string): string {
+  return `/api/agents/${encodeURIComponent(agentId)}/avatar`;
+}
+
+export interface AgentAvatarUploadResult {
+  status: string;
+  /** Always `/api/agents/{id}/avatar` — the one value `avatar_url` may hold. */
+  avatar_url: string;
+  content_type: string;
+  bytes: number;
+}
+
+/** POST /api/agents/{id}/avatar — store an image as this agent's avatar.
+ *
+ *  The body is the raw bytes and nothing else: no multipart, no filename in a
+ *  header, no name in the path. That is the route's design, not an omission —
+ *  what lands on disk is `{agent_id}.{ext}` where the id is a UUID the daemon
+ *  minted and the extension comes from sniffing the bytes.
+ *
+ *  Rejects with 423 (Locked) for an agent the deployment provisions — every
+ *  identity write to one answers that, not 403 — because setting an avatar
+ *  writes `avatar_url` into the manifest identity and the next reconcile would
+ *  overwrite it (#6695). */
+export async function uploadAgentAvatar(agentId: string, file: Blob): Promise<AgentAvatarUploadResult> {
+  const response = await fetchWithTimeout(`/api/agents/${encodeURIComponent(agentId)}/avatar`, {
+    method: "POST",
+    // The route documents `application/octet-stream` and ignores whatever we
+    // send, so claim the honest thing rather than the browser's guess at the
+    // file's type — the bytes are what get read either way.
+    headers: buildHeaders({ "Content-Type": "application/octet-stream" }),
+    body: file,
+  });
+  if (!response.ok) {
+    throw await parseError(response);
+  }
+  return (await response.json()) as AgentAvatarUploadResult;
+}
+
+/** DELETE /api/agents/{id}/avatar — drop the image and clear `avatar_url`.
+ *
+ *  Succeeds whether or not a file was there: a stored `avatar_url` whose file
+ *  is gone renders as a broken image, and clearing the reference is how that
+ *  state is escaped. */
+export async function deleteAgentAvatar(agentId: string): Promise<ApiActionResponse> {
+  return del<ApiActionResponse>(`/api/agents/${encodeURIComponent(agentId)}/avatar`);
+}
+
+/** PATCH /api/agents/{id}/identity — emoji and colour.
+ *
+ *  Partial by contract since #6608: a field this body omits keeps its stored
+ *  value rather than being cleared, so sending `{ emoji }` alone cannot lose a
+ *  colour someone set. Clearing a field is therefore sending it empty, not
+ *  omitting it.
+ *
+ *  `avatar_url` is deliberately not in the accepted payload here. It may only
+ *  ever hold `/api/agents/{id}/avatar` or nothing, and the upload and delete
+ *  routes above are what write it — an editor for it would be a way to point
+ *  the dashboard's own origin at a URL the operator never asked for. */
+export async function updateAgentIdentity(
+  agentId: string,
+  identity: { emoji?: string; color?: string },
+): Promise<ApiActionResponse> {
+  return patch<ApiActionResponse>(`/api/agents/${encodeURIComponent(agentId)}/identity`, identity);
+}
+
+
+// --- User visual identity (#8339) -------------------------------------------
+
+/** The signed-in user's own avatar.
+ *
+ *  A literal path rather than `/api/users/{name}/avatar`, and that is the point
+ *  of it: a name is a client-controlled segment, and a path built from one
+ *  could only be admitted by `AUTHENTICATED_IMAGE_PATH_RE` loosening the
+ *  character class that stops a segment escaping — see the note on that regex.
+ *  `me` is resolved from the bearer credential on the daemon side, so nothing
+ *  in this path was chosen by a caller.
+ *
+ *  There is deliberately no `userAvatarPath(name)`. The dashboard draws the
+ *  signed-in user's picture and nobody else's; an admin surface for other
+ *  users' avatars would need one, and would need that regex question answered
+ *  first rather than answered by widening a security allowlist. */
+export function currentUserAvatarPath(): string {
+  return "/api/users/me/avatar";
+}
+
+/** What the daemon answers a successful upload with.
+ *
+ *  No `avatar_url`, deliberately, and the agent side's twin carries one — so the
+ *  absence is worth a line rather than looking like an omission. An agent stores
+ *  the path in its manifest and the daemon reads it back from there; a user has
+ *  no such field. Nothing here needs one either: the dashboard draws the
+ *  caller's own picture and takes it from the literal `me` path, which is not a
+ *  URL this response could improve on. */
+export interface UserAvatarUploadResult {
+  status: string;
+  content_type: string;
+  bytes: number;
+}
+
+/** POST /api/users/{name}/avatar — store an image as this user's avatar.
+ *
+ *  Raw bytes with no multipart and no filename, exactly like the agent route,
+ *  and for the same reason: the daemon sniffs the bytes rather than trusting
+ *  anything the browser said about them.
+ *
+ *  The name here is an addressing key, not a filename. The daemon keys the
+ *  stored file on `UserId::from_name`, a UUID it derives itself, so no part of
+ *  this path reaches the filesystem. */
+export async function uploadUserAvatar(name: string, file: Blob): Promise<UserAvatarUploadResult> {
+  const response = await fetchWithTimeout(`/api/users/${encodeURIComponent(name)}/avatar`, {
+    method: "POST",
+    headers: buildHeaders({ "Content-Type": "application/octet-stream" }),
+    body: file,
+  });
+  if (!response.ok) {
+    throw await parseError(response);
+  }
+  return (await response.json()) as UserAvatarUploadResult;
+}
+
+/** DELETE /api/users/{name}/avatar — drop the image. */
+export async function deleteUserAvatar(name: string): Promise<ApiActionResponse> {
+  return del<ApiActionResponse>(`/api/users/${encodeURIComponent(name)}/avatar`);
+}
+
+/** PATCH /api/users/{name}/identity — the user's emoji.
+ *
+ *  Partial, and tri-state on `emoji`, like the agent twin: an omitted key keeps
+ *  the stored glyph, an explicit `null` or `""` clears it, and a string is
+ *  validated and stored. The daemon tells absent from `null` with
+ *  `deserialize_present_option`, so omitting the key is how a caller says
+ *  "leave it" here too.
+ *
+ *  `avatar_url` is absent from the accepted payload for the same reason it is
+ *  absent on the agent side, and one more: a user has no manifest to write it
+ *  into. The image is a file and its existence is read off the disk. */
+export async function updateUserIdentity(
+  name: string,
+  identity: { emoji?: string },
+): Promise<ApiActionResponse> {
+  return patch<ApiActionResponse>(`/api/users/${encodeURIComponent(name)}/identity`, identity);
 }
 
 /** GET /api/agents/{id}/manifest — the agent's full manifest as raw TOML.
@@ -1759,8 +2050,19 @@ export async function patchAgent(agentId: string, body: { name?: string; descrip
  * writes back. Reflects the live in-memory manifest, not necessarily the
  * on-disk `agent.toml` (they can differ for a moment after a partial PATCH
  * that hasn't flushed to disk yet). */
-export async function getAgentManifest(agentId: string): Promise<string> {
-  return getText(`/api/agents/${encodeURIComponent(agentId)}/manifest`);
+export async function getAgentManifest(agentId: string): Promise<AgentManifestSnapshot> {
+  const response = await fetchWithTimeout(
+    `/api/agents/${encodeURIComponent(agentId)}/manifest`,
+    { headers: buildHeaders() },
+  );
+  if (!response.ok) {
+    throw await parseError(response);
+  }
+  return {
+    manifest_toml: await response.text(),
+    // The ETag is quoted per RFC 9110; the PATCH body carries the bare token.
+    version: response.headers.get("ETag")?.replace(/^"|"$/g, "") ?? null,
+  };
 }
 
 /** Response shape for `GET /api/agents/{id}/channels`. */
@@ -1780,10 +2082,11 @@ export interface AgentChannelsResponse {
 export async function setAgentChannels(
   agentId: string,
   channels: string[],
+  expectedVersion?: string,
 ): Promise<{ status: string; channels: string[] }> {
   return put<{ status: string; channels: string[] }>(
     `/api/agents/${encodeURIComponent(agentId)}/channels`,
-    { channels },
+    { channels, ...(expectedVersion ? { expected_version: expectedVersion } : {}) },
   );
 }
 
@@ -1805,8 +2108,16 @@ export async function getAgentTools(agentId: string): Promise<AgentToolsResponse
   return get<AgentToolsResponse>(`/api/agents/${encodeURIComponent(agentId)}/tools`);
 }
 
-export async function updateAgentTools(agentId: string, payload: { capabilities_tools?: string[]; tool_allowlist?: string[]; tool_blocklist?: string[] }): Promise<AgentToolsResponse> {
-  return put<AgentToolsResponse>(`/api/agents/${encodeURIComponent(agentId)}/tools`, payload);
+export async function updateAgentTools(
+  agentId: string,
+  payload: { capabilities_tools?: string[]; tool_allowlist?: string[]; tool_blocklist?: string[] },
+  /** Manifest ETag from the open editor; the server answers 409 on a mismatch (#8424). */
+  expectedVersion?: string,
+): Promise<AgentToolsResponse> {
+  return put<AgentToolsResponse>(`/api/agents/${encodeURIComponent(agentId)}/tools`, {
+    ...payload,
+    ...(expectedVersion ? { expected_version: expectedVersion } : {}),
+  });
 }
 
 /**
@@ -1921,12 +2232,20 @@ export async function getAgentChannels(
 export async function setAgentSkills(
   agentId: string,
   skills: string[],
+  expectedVersion?: string,
 ): Promise<{ status: string; skills: string[] }> {
   return put<{ status: string; skills: string[] }>(
     `/api/agents/${encodeURIComponent(agentId)}/skills`,
-    { skills },
+    { skills, ...(expectedVersion ? { expected_version: expectedVersion } : {}) },
   );
 }
+
+// Every caller of `listAgents` (dashboard nav, assignee pickers) wants "the
+// whole registry", not a page of it, and none of them paginate — so this is
+// a ceiling, not a page size. An install past this many registered agents
+// silently drops the tail rather than erroring; there is no signal today
+// that would tell an operator it happened.
+const AGENT_LIST_LIMIT = 500;
 
 /**
  * PUT /api/agents/{id}/mcp_servers — replace the agent's MCP server grant
@@ -1942,10 +2261,14 @@ export async function setAgentSkills(
 export async function setAgentMcpServers(
   agentId: string,
   mcpServers: string[],
+  expectedVersion?: string,
 ): Promise<{ status: string; mcp_servers: string[] }> {
   return put<{ status: string; mcp_servers: string[] }>(
     `/api/agents/${encodeURIComponent(agentId)}/mcp_servers`,
-    { mcp_servers: mcpServers },
+    {
+      mcp_servers: mcpServers,
+      ...(expectedVersion ? { expected_version: expectedVersion } : {}),
+    },
   );
 }
 
@@ -1953,7 +2276,7 @@ export async function listAgents(
   opts: { includeHands?: boolean } = {},
 ): Promise<AgentItem[]> {
   const params = new URLSearchParams({
-    limit: "500",
+    limit: String(AGENT_LIST_LIMIT),
     sort: "last_active",
     order: "desc",
   });
@@ -2437,36 +2760,9 @@ export async function listModelRouterProfiles(): Promise<ModelRouterProfiles> {
   return get<ModelRouterProfiles>("/api/model-router/profiles");
 }
 
-export interface AgentModelRouting {
-  mode: "fixed" | "flexible";
-  allowed_profiles: string[];
-  cost_budget?: CostTier | null;
-  default_profile?: string | null;
-  /// Per-agent router opt-out (#7781 review). `true` means the router never
-  /// touches this agent even in `flexible` mode — surfaced so the panel can
-  /// warn an operator their allowlist/budget edits have no effect.
-  fixed?: boolean;
-  /** Why the kernel will not route this agent's model whatever is stored here, or `null` when routing is live (#8446).
-   *  Response-only: the server ignores it on a PUT. */
-  routing_inert_reason?: ModelRoutingInertReason | null;
-  /** `agent.toml: pinned_model` — what Stable mode runs instead of any routed choice; `null` means the manifest model. Response-only. */
-  pinned_model?: string | null;
-}
-
 /** Why no router chooses an agent's model (#8446).
  *  `"stable_mode"`: the kernel runs in Stable mode, which freezes model choice to `pinned_model` (else the manifest model) and runs neither the profile router nor the tier router. */
 export type ModelRoutingInertReason = "stable_mode";
-
-export async function getAgentModelRouting(agentId: string): Promise<AgentModelRouting> {
-  return get<AgentModelRouting>(`/api/agents/${encodeURIComponent(agentId)}/model_routing`);
-}
-
-export async function updateAgentModelRouting(
-  agentId: string,
-  routing: AgentModelRouting,
-): Promise<AgentModelRouting> {
-  return put<AgentModelRouting>(`/api/agents/${encodeURIComponent(agentId)}/model_routing`, routing);
-}
 
 export async function listModels(params?: { provider?: string; tier?: string; available?: boolean }): Promise<{ models: ModelItem[]; total: number; available: number }> {
   const query = new URLSearchParams();
@@ -3577,8 +3873,40 @@ export async function getStatus(): Promise<StatusResponse> {
 
 export interface WhoamiResponse {
   name: string;
-  /** RBAC privilege level: `viewer` / `user` / `admin` / `owner`. */
+  /** The calling credential's own role — `owner`, `admin`, `user` or `viewer`.
+   *
+   *  The credential's, not the effective one: the daemon also reports the roles
+   *  a caller holds through groups, in `roles`, and the two are different
+   *  answers to different questions. This is the field the daemon's own write
+   *  check compares against (`user_role_allows_request`), which is why it is the
+   *  one a caller may use to decide whether to offer a write.
+   *
+   *  This interface is a partial view of `WhoamiView` — it declares what the
+   *  dashboard reads, not everything the daemon sends. */
   role: string;
+  /** The caller's emoji, absent when they have not set one (#8339).
+   *
+   *  Carried here rather than fetched from `/api/users/{name}` because every
+   *  page that draws the caller's identity would otherwise need a second
+   *  request, and that one is admin-only on the daemon side. */
+  emoji?: string;
+  /** Whether an avatar image for this caller is on disk (#8339).
+   *
+   *  Not a URL: the daemon answers *whether* there is something to fetch, and
+   *  `currentUserAvatarPath` is where the client fetches it. The name is what
+   *  the caller would build a path from if it were, which is the thing that
+   *  route exists to avoid.
+   *
+   *  Optional because the two halves can be out of step: the daemon always
+   *  sends it, but an SPA served from `~/.librefang/dashboard/` can be newer
+   *  than the binary behind it (see the deploy notes). A caller must therefore
+   *  read `false` as "there is nothing to fetch" and `undefined` as "not told",
+   *  never conflating them — the second one must still fetch. */
+  has_avatar?: boolean;
+  /** The caller's principal in `kind:uuid` form, or `null` for the synthetic `root` credential — the master API key, a trusted loopback caller, or a no-auth deployment — which names no `[[users]]` row.
+   *
+   *  Read to tell a person from that stand-in: drawing `root`'s initial on every message would be a confident identity for nobody. Optional for the same version-skew reason as `has_avatar`; `undefined` is "not told", never "no row". */
+  principal?: string | null;
 }
 
 /** The calling credential's own resolved identity — `GET /api/authz/whoami`.
@@ -3675,6 +4003,7 @@ export interface TaskQueueItem {
   result?: string;
   claimed_at?: string;
   priority?: number;
+  timeout_secs?: number;
   [key: string]: unknown;
 }
 
@@ -3683,6 +4012,8 @@ export interface CreateTaskPayload {
   description: string;
   assigned_to?: string;
   created_by?: string;
+  priority?: number;
+  timeout_secs?: number;
 }
 
 export interface CreateTaskResult {

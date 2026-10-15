@@ -17,7 +17,7 @@ use std::path::PathBuf;
 /// Resolve the LibreFang home directory: `LIBREFANG_HOME` if set, otherwise `~/.librefang`.
 ///
 /// Read live on every call rather than cached, because the integration suites set the variable per test binary and a cached value would leak one suite's fixtures into another's assertions.
-fn librefang_home() -> PathBuf {
+pub fn librefang_home() -> PathBuf {
     if let Ok(home) = std::env::var("LIBREFANG_HOME") {
         return PathBuf::from(home);
     }
@@ -53,12 +53,32 @@ pub fn agent_type_path_in(home_dir: &std::path::Path, name: &str) -> PathBuf {
 
 /// Live agent workspaces — the second, read-only source of the agent-type catalog.
 pub fn workspace_agents_dir() -> PathBuf {
-    librefang_home().join("workspaces").join("agents")
+    workspace_agents_dir_in(&librefang_home())
+}
+
+/// The live-agent-workspaces directory under an explicitly supplied home directory.
+///
+/// Same rationale as [`agent_types_dir_in`] / [`workspace_agent_manifest_path_in`]:
+/// the catalog *listing* (`GET /api/templates`) has to walk this directory against
+/// the same `home_dir` the spawn path and the detail routes resolve against, or an
+/// embedder whose `KernelConfig.home_dir` differs from `LIBREFANG_HOME` sees a
+/// listing that disagrees with what those other routes can actually read (#8112).
+pub fn workspace_agents_dir_in(home_dir: &std::path::Path) -> PathBuf {
+    home_dir.join("workspaces").join("agents")
 }
 
 /// The `agent.toml` of a live agent, which the catalog lists but this store never writes.
 pub fn workspace_agent_manifest_path(name: &str) -> PathBuf {
-    workspace_agents_dir().join(name).join("agent.toml")
+    workspace_agent_manifest_path_in(&librefang_home(), name)
+}
+
+/// The `agent.toml` of a live agent under an explicitly supplied home directory.
+///
+/// Added for the same reason [`agent_type_path_in`] exists (#6699): a caller holding a `KernelConfig::home_dir` must be able to ask this question without the answer detouring through `LIBREFANG_HOME`, or the shadow check below would consult a different tree than the write it is guarding.
+pub fn workspace_agent_manifest_path_in(home_dir: &std::path::Path, name: &str) -> PathBuf {
+    workspace_agents_dir_in(home_dir)
+        .join(name)
+        .join("agent.toml")
 }
 
 /// The registry checkout root (`$LIBREFANG_HOME/registry/`), the source side of a registry sync.
@@ -66,8 +86,42 @@ pub fn workspace_agent_manifest_path(name: &str) -> PathBuf {
 /// This store's own directory is the *destination* side, so the two are siblings under the same home and a caller that wants to compare an installed agent type against the copy the registry ships needs both.
 /// Named here rather than derived by the caller because the obvious derivation — taking the parent of [`agent_types_dir`] — is only correct while the store stays exactly one level below home, and it fails open: `Path::parent` returning `None` is indistinguishable from a registry that ships no such type, so a caller that mis-derives the root reports "not in the registry" for every name instead of erroring.
 pub fn registry_cache_dir() -> PathBuf {
-    librefang_home().join("registry")
+    registry_cache_dir_in(&librefang_home())
 }
+
+/// Same resolution as [`registry_cache_dir`] against an explicitly supplied home directory.
+///
+/// The catalog's registry reads join `registry/agent-types` under the same `home_dir` the
+/// store's own writes resolve against (#8112), so an embedder whose `KernelConfig.home_dir`
+/// differs from `LIBREFANG_HOME` sees one consistent source tree rather than two.
+pub fn registry_cache_dir_in(home_dir: &std::path::Path) -> PathBuf {
+    home_dir.join("registry")
+}
+
+/// The workspace directory component an agent is stored under.
+///
+/// This is the same filter `librefang_kernel::kernel::workspace_setup::safe_path_component`
+/// applies — ASCII alphanumerics plus `-` and `_` — kept here because a
+/// consumer in this crate has to answer "is this name the *same* agent the
+/// workspace directory names?" without depending on the kernel. That function
+/// now routes through this one, so the two cannot drift.
+pub fn workspace_component(agent_name: &str) -> String {
+    agent_name
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+        .collect()
+}
+
+/// `metadata` key that records a type's origin when the operator saves a live
+/// agent as a reusable type (`POST /api/agents/{id}/save-as-agent-type`).
+///
+/// The value is the source agent's name. `agent_purge` reads it to leave such a
+/// type alone: a snapshot deliberately shares its source's name (the
+/// `save-as-agent-type` path exempts it from [`CreateAgentTypeError::ShadowsLiveAgent`]),
+/// and purging the source must not delete the operator's reusable copy as if it
+/// were a trace of the agent. Absent on every type authored through
+/// `/api/templates` or `agent_type_create`, which purge still removes.
+pub const SAVED_FROM_AGENT_METADATA_KEY: &str = "saved_from_agent";
 
 /// Validate an agent-type name before it is joined onto the store directory.
 ///
@@ -142,8 +196,21 @@ pub fn create_agent_type(
     name: &str,
     spec: AgentTypeSpec,
 ) -> Result<CreatedAgentType, CreateAgentTypeError> {
+    create_agent_type_in(&librefang_home(), name, spec)
+}
+
+/// Same resolution as [`create_agent_type`] against an explicitly supplied home directory.
+///
+/// A caller with a `home_dir` in hand (the kernel, or a route handler with `AppState`) must use
+/// this rather than the process-environment version — see [`agent_type_path_in`] for why an
+/// embedder's `KernelConfig.home_dir` and `LIBREFANG_HOME` are not interchangeable (#8112).
+pub fn create_agent_type_in(
+    home_dir: &std::path::Path,
+    name: &str,
+    spec: AgentTypeSpec,
+) -> Result<CreatedAgentType, CreateAgentTypeError> {
     validate_agent_type_name(name).map_err(|_| CreateAgentTypeError::InvalidName)?;
-    if workspace_agent_manifest_path(name).exists() {
+    if workspace_agent_manifest_path_in(home_dir, name).exists() {
         return Err(CreateAgentTypeError::ShadowsLiveAgent);
     }
 
@@ -151,7 +218,7 @@ pub fn create_agent_type(
     let rendered = toml::to_string_pretty(&manifest).map_err(|e| {
         CreateAgentTypeError::Io(format!("failed to render agent type '{name}': {e}"))
     })?;
-    claim_and_write(name, &rendered)?;
+    claim_and_write(home_dir, name, &rendered)?;
 
     Ok(CreatedAgentType {
         name: name.to_string(),
@@ -175,31 +242,83 @@ pub fn create_agent_type_from_manifest(
     name: &str,
     manifest: &AgentManifest,
 ) -> Result<String, CreateAgentTypeError> {
+    create_agent_type_from_manifest_in(&librefang_home(), name, manifest, None)
+}
+
+/// Same resolution as [`create_agent_type_from_manifest`] against an explicitly supplied home directory.
+/// See [`create_agent_type_in`] for why this spelling exists (#8112).
+///
+/// `snapshot_of` is `Some(source_agent_name)` when the caller is snapshotting a live
+/// agent (`POST /api/agents/{id}/save-as-agent-type`): that source's name — more
+/// precisely, its sanitized workspace component — is the one name exempt from the
+/// [`CreateAgentTypeError::ShadowsLiveAgent`] check, because saving an agent under its
+/// own name is the feature's main path and that name necessarily already has a
+/// workspace on disk. Every OTHER live agent's name stays refused, for the reason
+/// [`CreateAgentTypeError::ShadowsLiveAgent`] documents. `None` is for a caller
+/// authoring from a caller-supplied manifest (no source agent): the check then
+/// applies unconditionally.
+pub fn create_agent_type_from_manifest_in(
+    home_dir: &std::path::Path,
+    name: &str,
+    manifest: &AgentManifest,
+    snapshot_of: Option<&str>,
+) -> Result<String, CreateAgentTypeError> {
     validate_agent_type_name(name).map_err(|_| CreateAgentTypeError::InvalidName)?;
-    if workspace_agent_manifest_path(name).exists() {
+    // Compare against the source's *workspace component*, not its raw manifest
+    // name: the probed path is built from the sanitized component (`Research
+    // Bot` lives at `workspaces/agents/ResearchBot`), so comparing the raw
+    // `Research Bot` let the source collide with itself and 409 a save under the
+    // very name the catalog lists it as.
+    let exempt = snapshot_of.is_some_and(|source| name == workspace_component(source));
+    if !exempt && workspace_agent_manifest_path_in(home_dir, name).exists() {
         return Err(CreateAgentTypeError::ShadowsLiveAgent);
     }
 
     let rendered = toml::to_string_pretty(manifest).map_err(|e| {
         CreateAgentTypeError::Io(format!("failed to render agent type '{name}': {e}"))
     })?;
-    claim_and_write(name, &rendered)?;
+    claim_and_write(home_dir, name, &rendered)?;
     Ok(rendered)
 }
 
 /// Claim `name`'s path atomically and write `rendered` into it — the shared landing of every
 /// create path, so the race-free claim and the leaves-nothing-behind cleanup on a failed write
 /// exist in exactly one place rather than risking drift between them.
-fn claim_and_write(name: &str, rendered: &str) -> Result<(), CreateAgentTypeError> {
-    let dir = agent_types_dir();
-    std::fs::create_dir_all(&dir).map_err(|e| {
+///
+/// Resolves against the caller's `home_dir` (#8112) so a create through any surface lands in
+/// the same store the reads and the tool resolve against.
+fn claim_and_write(
+    home_dir: &std::path::Path,
+    name: &str,
+    rendered: &str,
+) -> Result<(), CreateAgentTypeError> {
+    claim_and_write_at(
+        &agent_types_dir_in(home_dir),
+        &agent_type_path_in(home_dir, name),
+        name,
+        rendered,
+    )
+}
+
+/// [`claim_and_write`], resolved against an explicit directory and path.
+///
+/// `create_agent_type_from_manifest_in` writes under a `home_dir` the caller
+/// holds rather than through `LIBREFANG_HOME`, but the claim-then-write
+/// discipline (atomic `create_new`, cleanup on a failed rename) is identical;
+/// this is that one copy so a fix to either cannot miss the other.
+fn claim_and_write_at(
+    dir: &std::path::Path,
+    path: &std::path::Path,
+    name: &str,
+    rendered: &str,
+) -> Result<(), CreateAgentTypeError> {
+    std::fs::create_dir_all(dir).map_err(|e| {
         CreateAgentTypeError::Io(format!("failed to create {}: {e}", dir.display()))
     })?;
 
-    let path = agent_type_path(name);
     // `Path::exists()` followed by a write is check-then-act: two concurrent creates of the same name both observe "absent" and the second silently replaces the first, which is exactly the refusal this function promises.
     // Claiming the path with `File::create_new` — an atomic create-if-absent at the OS level — lets exactly one of them through.
-    match std::fs::File::create_new(&path) {
+    match std::fs::File::create_new(path) {
         Ok(_) => {}
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
             return Err(CreateAgentTypeError::NameTaken)
@@ -212,8 +331,8 @@ fn claim_and_write(name: &str, rendered: &str) -> Result<(), CreateAgentTypeErro
     }
 
     // The claim is filled by the same atomic rename every other write here uses, and removed again if that fails, so a failed create leaves no empty file behind for the catalog to trip over.
-    if let Err(e) = atomic_write(&path, rendered.as_bytes()) {
-        let _ = std::fs::remove_file(&path);
+    if let Err(e) = atomic_write(path, rendered.as_bytes()) {
+        let _ = std::fs::remove_file(path);
         return Err(CreateAgentTypeError::Io(format!(
             "failed to write agent type '{name}': {e}"
         )));
@@ -226,12 +345,22 @@ fn claim_and_write(name: &str, rendered: &str) -> Result<(), CreateAgentTypeErro
 ///
 /// This is the edit path's landing, and it deliberately does not construct anything: the caller has already read the stored manifest and applied [`AgentTypeSpec::apply_to`] over it, so every field outside the flat shape is the one that was on disk a moment ago.
 pub fn persist_agent_type(name: &str, manifest: &AgentManifest) -> Result<String, String> {
+    persist_agent_type_in(&librefang_home(), name, manifest)
+}
+
+/// Same resolution as [`persist_agent_type`] against an explicitly supplied home directory.
+/// See [`create_agent_type_in`] for why this spelling exists (#8112).
+pub fn persist_agent_type_in(
+    home_dir: &std::path::Path,
+    name: &str,
+    manifest: &AgentManifest,
+) -> Result<String, String> {
     let rendered = toml::to_string_pretty(manifest)
         .map_err(|e| format!("failed to render agent type '{name}': {e}"))?;
-    let dir = agent_types_dir();
+    let dir = agent_types_dir_in(home_dir);
     std::fs::create_dir_all(&dir)
         .map_err(|e| format!("failed to create {}: {e}", dir.display()))?;
-    atomic_write(&agent_type_path(name), rendered.as_bytes())
+    atomic_write(&agent_type_path_in(home_dir, name), rendered.as_bytes())
         .map_err(|e| format!("failed to write agent type '{name}': {e}"))?;
     Ok(rendered)
 }
@@ -322,5 +451,61 @@ mod tests {
         assert!(validate_agent_type_name("foo bar").is_err());
         assert!(validate_agent_type_name("foo.bar").is_err());
         assert!(validate_agent_type_name("foo%2fbar").is_err());
+    }
+
+    #[test]
+    fn workspace_component_matches_the_kernel_directory_rule() {
+        assert_eq!(workspace_component("Research Bot"), "ResearchBot");
+        assert_eq!(workspace_component("customer-support"), "customer-support");
+        assert_eq!(workspace_component("a.b/c"), "abc");
+        assert_eq!(workspace_component("👨‍👩‍👧"), "");
+    }
+
+    /// A live agent's workspace directory is named from its *sanitized* name, so
+    /// a save under that sanitized form is the source colliding with itself —
+    /// not a shadow of a different agent — and must be allowed.
+    #[test]
+    fn the_sources_sanitized_name_is_not_a_shadow() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir
+            .path()
+            .join("workspaces")
+            .join("agents")
+            .join("ResearchBot");
+        std::fs::create_dir_all(&ws).unwrap();
+        std::fs::write(ws.join("agent.toml"), "name = \"Research Bot\"\n").unwrap();
+
+        let manifest = AgentManifest {
+            name: "ResearchBot".to_string(),
+            ..AgentManifest::default()
+        };
+        let saved = create_agent_type_from_manifest_in(
+            dir.path(),
+            "ResearchBot",
+            &manifest,
+            Some("Research Bot"),
+        );
+        assert!(saved.is_ok(), "{saved:?}");
+    }
+
+    /// Any *other* live agent's workspace name stays refused, sanitized or not.
+    #[test]
+    fn a_different_live_agents_workspace_name_is_still_a_shadow() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path().join("workspaces").join("agents").join("victim");
+        std::fs::create_dir_all(&ws).unwrap();
+        std::fs::write(ws.join("agent.toml"), "name = \"Victim\"\n").unwrap();
+
+        let manifest = AgentManifest {
+            name: "victim".to_string(),
+            ..AgentManifest::default()
+        };
+        let refused = create_agent_type_from_manifest_in(
+            dir.path(),
+            "victim",
+            &manifest,
+            Some("Research Bot"),
+        );
+        assert_eq!(refused, Err(CreateAgentTypeError::ShadowsLiveAgent));
     }
 }

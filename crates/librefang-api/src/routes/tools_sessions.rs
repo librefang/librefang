@@ -605,7 +605,9 @@ pub async fn delete_session(
     // substrate directly leaked one tracker entry per ever-deleted session
     // for the daemon's lifetime — context-compression GC never runs on a
     // dead session.
-    match state.kernel.delete_session(session_id) {
+    // `ErrorTranslator` is `!Send`, so it must be gone before the await below.
+    drop(t);
+    match state.kernel.delete_session(session_id).await {
         Ok(removed) => {
             let removed_ids: Vec<String> = removed.iter().map(|sid| sid.0.to_string()).collect();
             (

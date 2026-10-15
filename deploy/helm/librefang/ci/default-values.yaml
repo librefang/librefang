@@ -1,0 +1,3 @@
+# Mutable-config baseline: mirrors deploy/kubernetes/base.
+auth:
+  existingSecret: librefang-auth

@@ -48,6 +48,18 @@ pub struct UsageTracker {
     /// A deque rather than a counter on the tumbling hourly window because the quota is documented as a *rolling* hour: with a tumbling window an agent that spends its whole cap in the last second of one window may spend it again in the first second of the next, which is not a cap of N bytes per hour by any reading an operator would recognise.
     /// It is also the only network figure kept, so [`UsageSnapshot::network_bytes`] reports the number the gate actually refuses on rather than a second one that drifts from it.
     pub network_byte_timestamps: VecDeque<(Instant, u64)>,
+    /// Identity of the current tumbling token window.
+    ///
+    /// A fresh value is drawn every time `total_tokens` is zeroed (window rollover, [`AgentScheduler::reset_usage`], re-registration), so a [`TokenReservation`] can tell whether the window it pre-charged is still the live one.
+    /// Without it, a reservation that outlived a rollover subtracted its old-window estimate from the new window's total and erased spend (including other in-flight pre-charges) recorded there.
+    window_epoch: u64,
+}
+
+/// Source of process-unique [`UsageTracker::window_epoch`] values.
+static NEXT_WINDOW_EPOCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+fn next_window_epoch() -> u64 {
+    NEXT_WINDOW_EPOCH.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
 /// One minute as a Duration constant.
@@ -92,11 +104,17 @@ impl Default for UsageTracker {
             tool_call_timestamps: VecDeque::new(),
             token_timestamps: VecDeque::new(),
             network_byte_timestamps: VecDeque::new(),
+            window_epoch: next_window_epoch(),
         }
     }
 }
 
 impl UsageTracker {
+    /// Whether a pre-charge tagged with `epoch` still lives in `total_tokens` (`None` means "assume it does").
+    fn charged_in_current_window(&self, epoch: Option<u64>) -> bool {
+        epoch.is_none_or(|e| e == self.window_epoch)
+    }
+
     /// Reset counters if the current window has expired (1 hour).
     fn reset_if_expired(&mut self) {
         if self.window_start.elapsed() >= ONE_HOUR {
@@ -106,6 +124,7 @@ impl UsageTracker {
             self.tool_calls = 0;
             self.llm_calls = 0;
             self.window_start = Instant::now();
+            self.window_epoch = next_window_epoch();
             self.tool_call_timestamps.clear();
             self.token_timestamps.clear();
             // `network_byte_timestamps` is deliberately NOT cleared here.
@@ -185,33 +204,42 @@ pub struct AgentScheduler {
 
 /// Roll back a pre-charged token reservation (undo the `total_tokens` increment) without recording an LLM call.
 /// Shared by [`AgentScheduler::release_reservation`] and [`TokenReservation`]'s drop / release paths so the math has a single source of truth.
+///
+/// `epoch` is the [`UsageTracker::window_epoch`] the estimate was charged into; when that window has since been zeroed the estimate is no longer in `total_tokens` and nothing is subtracted.
+/// `None` (the bare `release_reservation` API) assumes the current window.
 fn release_tokens_in(
     usage: &DashMap<AgentId, UsageTracker>,
     agent_id: AgentId,
     estimated_tokens: u64,
+    epoch: Option<u64>,
 ) {
     if estimated_tokens == 0 {
         return;
     }
     if let Some(mut tracker) = usage.get_mut(&agent_id) {
         tracker.reset_if_expired();
-        tracker.total_tokens = tracker.total_tokens.saturating_sub(estimated_tokens);
+        if tracker.charged_in_current_window(epoch) {
+            tracker.total_tokens = tracker.total_tokens.saturating_sub(estimated_tokens);
+        }
     }
 }
 
 /// Replace a pre-charged token reservation with actual usage and record the LLM call.
 /// Shared by [`AgentScheduler::settle_reservation`] and [`TokenReservation::settle`].
+///
+/// `epoch` has the same meaning as in [`release_tokens_in`]: a stale window's estimate is not subtracted, only the actual usage is added.
 fn settle_tokens_in(
     usage: &DashMap<AgentId, UsageTracker>,
     agent_id: AgentId,
     estimated_tokens: u64,
+    epoch: Option<u64>,
     usage_data: &TokenUsage,
 ) {
     let actual_tokens = usage_data.total();
     if let Some(mut tracker) = usage.get_mut(&agent_id) {
         tracker.reset_if_expired();
 
-        if estimated_tokens > 0 {
+        if estimated_tokens > 0 && tracker.charged_in_current_window(epoch) {
             // Correct the pre-charged estimate to the actual amount:
             //   total_tokens was incremented by `estimated`; adjust it
             //   to reflect `actual` instead.
@@ -220,7 +248,7 @@ fn settle_tokens_in(
                 .saturating_sub(estimated_tokens)
                 .saturating_add(actual_tokens);
         } else {
-            // No reservation was made (no quota) — behave like record_usage
+            // No reservation was made (no quota), or it was charged into a window that has since been zeroed — behave like record_usage
             tracker.total_tokens = tracker.total_tokens.saturating_add(actual_tokens);
         }
 
@@ -254,6 +282,8 @@ pub struct TokenReservation {
     usage: Arc<DashMap<AgentId, UsageTracker>>,
     agent_id: AgentId,
     estimated_tokens: u64,
+    /// [`UsageTracker::window_epoch`] the estimate was charged into.
+    window_epoch: u64,
     settled: bool,
 }
 
@@ -265,6 +295,7 @@ impl TokenReservation {
             &self.usage,
             self.agent_id,
             self.estimated_tokens,
+            Some(self.window_epoch),
             usage_data,
         );
         self.settled = true;
@@ -273,7 +304,12 @@ impl TokenReservation {
     /// Release the reservation without recording an LLM call (used when no LLM call was made — suspended agent, non-LLM agent failure, early error).
     /// Consumes the guard so its drop becomes a no-op.
     pub fn release(mut self) {
-        release_tokens_in(&self.usage, self.agent_id, self.estimated_tokens);
+        release_tokens_in(
+            &self.usage,
+            self.agent_id,
+            self.estimated_tokens,
+            Some(self.window_epoch),
+        );
         self.settled = true;
     }
 
@@ -287,7 +323,12 @@ impl TokenReservation {
 impl Drop for TokenReservation {
     fn drop(&mut self) {
         if !self.settled {
-            release_tokens_in(&self.usage, self.agent_id, self.estimated_tokens);
+            release_tokens_in(
+                &self.usage,
+                self.agent_id,
+                self.estimated_tokens,
+                Some(self.window_epoch),
+            );
         }
     }
 }
@@ -520,14 +561,15 @@ impl AgentScheduler {
     /// `total_tokens` down to the actual amount once the call finishes, so
     /// over the long run the counters remain accurate.
     ///
+    /// The burst gate clamps the hold to what the current minute still has room for rather than rejecting on the raw estimate, so a call whose ceiling exceeds the per-minute budget can still start while the window has room; once the window is full, reservations are refused until it slides.
+    ///
     /// After the LLM call completes, the caller **must** call
     /// `settle_reservation` with the actual [`TokenUsage`] so the
     /// reservation is corrected and the sliding-window counters are updated.
     /// **Do not call `record_usage` for a pre-charged call** — `settle_reservation`
     /// does both jobs in one atomic step.
     ///
-    /// Returns `Ok(estimated_tokens)` (the amount reserved) on success, or
-    /// `Err(QuotaExceeded)` if the reservation would breach the limit.
+    /// Returns `Ok(reserved)` — the estimate clamped to what the minute's burst window still has room for — on success, or `Err(QuotaExceeded)` if the reservation would breach the limit or the burst window is already full.
     /// Returns `Ok(0)` whenever no reservation was actually pre-charged —
     /// either because no quota is registered for the agent, or because the
     /// effective token limit is `0` (unlimited).  The caller must treat the
@@ -539,13 +581,24 @@ impl AgentScheduler {
         agent_id: AgentId,
         estimated_tokens: u64,
     ) -> LibreFangResult<u64> {
+        self.reserve_in_window(agent_id, estimated_tokens)
+            .map(|(reserved, _)| reserved)
+    }
+
+    /// Body of [`Self::check_quota_and_reserve`], also returning the [`UsageTracker::window_epoch`] the reservation was charged into.
+    /// The epoch is meaningless (0) when nothing was reserved.
+    fn reserve_in_window(
+        &self,
+        agent_id: AgentId,
+        estimated_tokens: u64,
+    ) -> LibreFangResult<(u64, u64)> {
         let quota = match self.quotas.get(&agent_id) {
             Some(q) => q.clone(),
-            None => return Ok(0), // No quota = no limit; nothing to reserve
+            None => return Ok((0, 0)), // No quota = no limit; nothing to reserve
         };
         let mut tracker = match self.usage.get_mut(&agent_id) {
             Some(t) => t,
-            None => return Ok(0),
+            None => return Ok((0, 0)),
         };
 
         tracker.reset_if_expired();
@@ -555,8 +608,25 @@ impl AgentScheduler {
             // Unlimited quota: nothing to reserve. Returning 0 ensures
             // callers won't later ask settle/release to subtract a
             // reservation that was never added to `total_tokens`.
-            return Ok(0);
+            return Ok((0, 0));
         }
+        // The estimate is the model's full output ceiling, and it can legitimately exceed one minute's burst budget: an agent whose only call is the one being started has zero usage, and rejecting it on the estimate alone made a tight hourly cap permanently unusable — 50000/hour gives a 10000/min burst, below the 32768 system default for an unset `max_tokens`.
+        // Hold what the minute still has room for instead: the hold is settled against real usage afterwards, so clamping it cannot let a call spend more than the hour allows, and the next reserve refuses once the window is full.
+        let ratio = quota.effective_burst_ratio(self.default_burst_ratio());
+        let burst_cap = (token_limit as f32 * ratio) as u64;
+        let tokens_last_min = tracker.tokens_in_last_minute();
+        let estimated_tokens = if burst_cap > 0 {
+            let room = burst_cap.saturating_sub(tokens_last_min);
+            if room == 0 && estimated_tokens > 0 {
+                return Err(LibreFangError::QuotaExceeded(format!(
+                    "Token burst limit would be exceeded: {} tokens already in the last minute (max {}/min)",
+                    tokens_last_min, burst_cap
+                )));
+            }
+            estimated_tokens.min(room)
+        } else {
+            estimated_tokens
+        };
         let projected = tracker.total_tokens.saturating_add(estimated_tokens);
         if projected > token_limit {
             return Err(LibreFangError::QuotaExceeded(format!(
@@ -564,19 +634,9 @@ impl AgentScheduler {
                 tracker.total_tokens, estimated_tokens, token_limit
             )));
         }
-        // Burst check against the projected spend
-        let ratio = quota.effective_burst_ratio(self.default_burst_ratio());
-        let burst_cap = (token_limit as f32 * ratio) as u64;
-        let tokens_last_min = tracker.tokens_in_last_minute();
-        if burst_cap > 0 && tokens_last_min.saturating_add(estimated_tokens) > burst_cap {
-            return Err(LibreFangError::QuotaExceeded(format!(
-                "Token burst limit would be exceeded: {} + {} reserved in last minute (max {}/min)",
-                tokens_last_min, estimated_tokens, burst_cap
-            )));
-        }
         // Atomically pre-charge inside the same DashMap entry write-lock
         tracker.total_tokens = projected;
-        Ok(estimated_tokens)
+        Ok((estimated_tokens, tracker.window_epoch))
     }
 
     /// Settle a prior [`check_quota_and_reserve`] reservation.
@@ -590,7 +650,7 @@ impl AgentScheduler {
     /// When `estimated_tokens == 0` (no quota was configured) the function
     /// falls back to the same logic as `record_usage`.
     pub fn settle_reservation(&self, agent_id: AgentId, estimated_tokens: u64, usage: &TokenUsage) {
-        settle_tokens_in(&self.usage, agent_id, estimated_tokens, usage);
+        settle_tokens_in(&self.usage, agent_id, estimated_tokens, None, usage);
     }
 
     /// Release a prior `check_quota_and_reserve` reservation without
@@ -607,7 +667,7 @@ impl AgentScheduler {
     /// Distinct from `settle_reservation`, which is for paths where an
     /// LLM call **was** attempted (it always increments `llm_calls`).
     pub fn release_reservation(&self, agent_id: AgentId, estimated_tokens: u64) {
-        release_tokens_in(&self.usage, agent_id, estimated_tokens);
+        release_tokens_in(&self.usage, agent_id, estimated_tokens, None);
     }
 
     /// Pre-charge an estimated token reservation and return an RAII [`TokenReservation`] guard.
@@ -621,11 +681,12 @@ impl AgentScheduler {
         estimated_tokens: u64,
     ) -> LibreFangResult<TokenReservation> {
         // check_quota_and_reserve returns the amount actually pre-charged (0 when the agent has no effective token quota), so the guard's drop subtracts exactly what was added — nothing, in the no-quota case.
-        let reserved = self.check_quota_and_reserve(agent_id, estimated_tokens)?;
+        let (reserved, window_epoch) = self.reserve_in_window(agent_id, estimated_tokens)?;
         Ok(TokenReservation {
             usage: Arc::clone(&self.usage),
             agent_id,
             estimated_tokens: reserved,
+            window_epoch,
             settled: false,
         })
     }
@@ -639,6 +700,7 @@ impl AgentScheduler {
             tracker.tool_calls = 0;
             tracker.llm_calls = 0;
             tracker.window_start = Instant::now();
+            tracker.window_epoch = next_window_epoch();
             tracker.tool_call_timestamps.clear();
             tracker.token_timestamps.clear();
             // Unlike the window rollover in `reset_if_expired`, an explicit reset is an operator/session-level "start over", so the rolling-hour deque goes with it.
@@ -1650,6 +1712,78 @@ mod tests {
         );
     }
 
+    /// Push the agent's tumbling window past its hour so the next access rolls it over.
+    /// Returns `false` on a host whose monotonic clock is younger than an hour, where the rollover cannot be simulated.
+    fn age_window_past_rollover(scheduler: &AgentScheduler, id: AgentId) -> bool {
+        let Some(stale) = Instant::now().checked_sub(ONE_HOUR + Duration::from_secs(1)) else {
+            return false;
+        };
+        scheduler.usage.get_mut(&id).unwrap().window_start = stale;
+        true
+    }
+
+    /// Regression: releasing a reservation charged into a window that has since rolled over must not erase spend recorded in the new window.
+    #[test]
+    fn reservation_spanning_window_rollover_does_not_erase_new_window_spend() {
+        let scheduler = AgentScheduler::new();
+        let id = AgentId::new();
+        scheduler.register(id, quota_100k());
+
+        let a = scheduler.reserve_tokens(id, 8_000).unwrap();
+        if !age_window_past_rollover(&scheduler, id) {
+            return;
+        }
+        let b = scheduler.reserve_tokens(id, 8_000).unwrap();
+        assert_eq!(scheduler.get_usage(id).unwrap().total_tokens, 8_000);
+
+        a.release();
+        assert_eq!(
+            scheduler.get_usage(id).unwrap().total_tokens,
+            8_000,
+            "a stale-window release must not subtract from the new window"
+        );
+        drop(b);
+        assert_eq!(scheduler.get_usage(id).unwrap().total_tokens, 0);
+    }
+
+    /// Regression: settling a reservation across a rollover adds the actual usage on top of the new window's charges instead of replacing one of them.
+    #[test]
+    fn reservation_settled_after_rollover_adds_actual_usage() {
+        let scheduler = AgentScheduler::new();
+        let id = AgentId::new();
+        scheduler.register(id, quota_100k());
+
+        let a = scheduler.reserve_tokens(id, 8_000).unwrap();
+        if !age_window_past_rollover(&scheduler, id) {
+            return;
+        }
+        let b = scheduler.reserve_tokens(id, 8_000).unwrap();
+        a.settle(&TokenUsage {
+            input_tokens: 1_000,
+            output_tokens: 2_000,
+            ..Default::default()
+        });
+        assert_eq!(scheduler.get_usage(id).unwrap().total_tokens, 8_000 + 3_000);
+        drop(b);
+        assert_eq!(scheduler.get_usage(id).unwrap().total_tokens, 3_000);
+    }
+
+    /// Regression: `reset_usage` zeroes the window, so a reservation taken before it must not eat a reservation taken after it.
+    #[test]
+    fn reservation_released_after_reset_usage_keeps_newer_charge() {
+        let scheduler = AgentScheduler::new();
+        let id = AgentId::new();
+        scheduler.register(id, quota_100k());
+
+        let a = scheduler.reserve_tokens(id, 8_000).unwrap();
+        scheduler.reset_usage(id);
+        let b = scheduler.reserve_tokens(id, 8_000).unwrap();
+        a.release();
+        assert_eq!(scheduler.get_usage(id).unwrap().total_tokens, 8_000);
+        b.release();
+        assert_eq!(scheduler.get_usage(id).unwrap().total_tokens, 0);
+    }
+
     /// `settle` corrects the pre-charge to actual usage and records the call, and the guard's subsequent drop must NOT double-release.
     #[test]
     fn reservation_settle_records_actual_and_drop_is_noop() {
@@ -1720,6 +1854,97 @@ mod tests {
             scheduler.get_usage(id).unwrap().total_tokens,
             150,
             "a no-quota guard drop must not touch real recorded usage"
+        );
+    }
+
+    /// The shape from #8502: `max_llm_tokens_per_hour = 50000` (burst 10000) with no `max_tokens` in the manifest, so the pre-call estimate is the 32768 system default.
+    /// Pre-fix the burst check compared `tokens_last_min + 32768 > 10000` and refused the very first message of the agent with zero usage on the clock; the hold is now clamped to what the minute still has room for instead.
+    #[test]
+    fn reserve_above_the_burst_cap_is_clamped_not_rejected() {
+        let scheduler = AgentScheduler::new();
+        let id = AgentId::new();
+        scheduler.register(
+            id,
+            ResourceQuota {
+                max_llm_tokens_per_hour: Some(50_000),
+                max_tool_calls_per_minute: 0,
+                ..Default::default()
+            },
+        );
+
+        let estimate = u64::from(librefang_types::agent::DEFAULT_MODEL_MAX_TOKENS);
+        let reserved = scheduler
+            .reserve_tokens(id, estimate)
+            .expect("a first message on a zero-usage quota must not be refused");
+        assert_eq!(
+            reserved.estimated_tokens(),
+            10_000,
+            "the hold is clamped to the 50000 × 0.2 burst cap, not rejected"
+        );
+        assert_eq!(scheduler.get_usage(id).unwrap().total_tokens, 10_000);
+    }
+
+    /// Clamping must leave room for the estimate the window can still hold: after 500 tokens actually settled this minute, a 32768 estimate reserves 9500, not a full 10000 that would trip the same burst check it came from.
+    #[test]
+    fn settled_usage_within_the_burst_window_leaves_room_for_the_next_hold() {
+        let scheduler = AgentScheduler::new();
+        let id = AgentId::new();
+        scheduler.register(
+            id,
+            ResourceQuota {
+                max_llm_tokens_per_hour: Some(50_000),
+                max_tool_calls_per_minute: 0,
+                ..Default::default()
+            },
+        );
+        scheduler.record_usage(
+            id,
+            &TokenUsage {
+                input_tokens: 300,
+                output_tokens: 200,
+                ..Default::default()
+            },
+        );
+
+        let reserved = scheduler
+            .reserve_tokens(id, 32_768)
+            .expect("the window still has room");
+        assert_eq!(
+            reserved.estimated_tokens(),
+            9_500,
+            "10000 cap − 500 spent leaves 9500 of room"
+        );
+    }
+
+    /// Once the last minute has spent the whole burst cap, the next reservation is refused rather than over-reserved — the clamp must not become an unconditional admission.
+    #[test]
+    fn reserve_is_refused_once_the_burst_window_is_full() {
+        let scheduler = AgentScheduler::new();
+        let id = AgentId::new();
+        scheduler.register(
+            id,
+            ResourceQuota {
+                max_llm_tokens_per_hour: Some(50_000),
+                max_tool_calls_per_minute: 0,
+                ..Default::default()
+            },
+        );
+        scheduler.record_usage(
+            id,
+            &TokenUsage {
+                input_tokens: 6_000,
+                output_tokens: 4_000,
+                ..Default::default()
+            },
+        );
+
+        let err = match scheduler.reserve_tokens(id, 1) {
+            Ok(_) => panic!("a full burst window must refuse the next call"),
+            Err(e) => e,
+        };
+        assert!(
+            err.to_string().contains("burst"),
+            "the refusal must name the burst limit; got: {err}"
         );
     }
 }

@@ -1728,6 +1728,9 @@ fn mark_run_failed(
 ///
 /// AND binds tighter than OR (standard precedence). All matching is
 /// case-insensitive (caller should pass lowercased input).
+///
+/// A term may be wrapped in `"…"` or `'…'` to match a literal that contains `&&`, `||` or a leading `!`; the quotes are stripped before matching.
+/// A quote only opens at the start of a term, so an apostrophe inside a word (`can't`) is an ordinary character.
 fn evaluate_condition(input: &str, condition: &str) -> bool {
     let condition = condition.trim();
 
@@ -1758,14 +1761,26 @@ fn evaluate_condition(input: &str, condition: &str) -> bool {
 
     // Negation
     if let Some(inner) = condition.strip_prefix('!') {
-        let inner = inner.trim();
-        let cond_lower = inner.to_lowercase();
+        let cond_lower = unquote_condition_term(inner.trim()).to_lowercase();
         return !input.contains(&cond_lower);
     }
 
     // Simple substring match
-    let cond_lower = condition.to_lowercase();
+    let cond_lower = unquote_condition_term(condition).to_lowercase();
     input.contains(&cond_lower)
+}
+
+/// Strip one pair of matching `"` or `'` quotes wrapping a condition term, so a quoted literal is matched without its quote characters.
+fn unquote_condition_term(s: &str) -> &str {
+    let s = s.trim();
+    let bytes = s.as_bytes();
+    if bytes.len() >= 2 {
+        let first = bytes[0];
+        if (first == b'"' || first == b'\'') && bytes[bytes.len() - 1] == first {
+            return &s[1..s.len() - 1];
+        }
+    }
+    s
 }
 
 /// Split `s` on `delimiter` only when the delimiter occurs outside of quoted
@@ -1785,11 +1800,19 @@ fn split_outside_quotes(s: &str, delimiter: &str) -> Option<Vec<String>> {
     while i < bytes.len() {
         let ch = bytes[i];
 
-        // Toggle quote state on unescaped quote characters
+        // Toggle quote state on quote characters.
+        // A quote only opens at the start of a term (string start, or after whitespace / `&` / `|` / a negating `!`), so an apostrophe inside a word such as `can't` stays literal instead of swallowing every later operator.
         if ch == b'"' || ch == b'\'' {
             match in_quote {
                 Some(q) if q == ch => in_quote = None,
-                None => in_quote = Some(ch),
+                None => {
+                    let at_term_start = i == 0
+                        || matches!(bytes[i - 1], b'&' | b'|' | b'!')
+                        || bytes[i - 1].is_ascii_whitespace();
+                    if at_term_start {
+                        in_quote = Some(ch);
+                    }
+                }
                 _ => {} // inside a different quote type, ignore
             }
             i += 1;
@@ -2177,6 +2200,8 @@ impl WorkflowEngine {
             }
         }
         debug!(loaded, skipped, total, "Loaded workflow runs from SQLite");
+        // Apply the retention cap to what was just loaded, so history persisted before eviction deleted rows (or beyond the cap for any other reason) is trimmed at boot instead of only after the next `create_run`.
+        self.evict_terminal_runs_over_cap();
         Ok(loaded)
     }
 
@@ -2740,46 +2765,64 @@ impl WorkflowEngine {
         self.cancel_notify
             .insert(run_id, Arc::new(tokio::sync::Notify::new()));
 
-        // Evict oldest terminal runs (Completed / Failed / Cancelled) when
-        // we exceed the cap. Cancelled must be included here, otherwise a
-        // burst of user-initiated cancels would pin those records in the
-        // DashMap forever and push out evictable Completed/Failed runs.
-        if self.runs.len() > Self::MAX_RETAINED_RUNS {
-            let mut evictable: Vec<(WorkflowRunId, DateTime<Utc>)> = self
-                .runs
-                .iter()
-                .filter(|r| {
-                    matches!(
-                        r.state,
-                        WorkflowRunState::Completed
-                            | WorkflowRunState::Failed
-                            | WorkflowRunState::Cancelled
-                    )
-                })
-                .map(|r| (*r.key(), r.started_at))
-                .collect();
-
-            // Sort oldest first
-            evictable.sort_by_key(|(_, t)| *t);
-
-            let to_remove = self.runs.len() - Self::MAX_RETAINED_RUNS;
-            for (id, _) in evictable.into_iter().take(to_remove) {
-                self.runs.remove(&id);
-                // Drop the per-run auxiliary maps alongside the run itself.
-                // These are keyed by run id and only ever removed on the
-                // terminal-cleanup path (`cancel_notify` at the retry-loop
-                // exit, `operator_resume_notify` when an operator gate
-                // resolves). A run evicted here may never have hit that path
-                // (e.g. a Pending-then-Cancelled run, or one evicted in the
-                // cleanup race window), so without this the Arc<Notify>
-                // entries would leak and grow without bound under churn.
-                self.cancel_notify.remove(&id);
-                self.operator_resume_notify.remove(&id);
-                debug!(run_id = %id, "Evicted old workflow run");
-            }
-        }
+        self.evict_terminal_runs_over_cap();
 
         Some(run_id)
+    }
+
+    /// Evict the oldest terminal runs (Completed / Failed / Cancelled) while the in-memory map exceeds [`Self::MAX_RETAINED_RUNS`], deleting each from the SQLite store as well.
+    ///
+    /// Cancelled must be included, otherwise a burst of user-initiated cancels would pin those records forever and push out evictable Completed / Failed runs.
+    /// Non-terminal runs are never evicted: stale-run recovery and paused gates need them.
+    /// Deleting from the store keeps the persisted history bounded; without it every evicted run stayed in `workflow_runs` and was deserialized again at every boot.
+    fn evict_terminal_runs_over_cap(&self) {
+        if self.runs.len() <= Self::MAX_RETAINED_RUNS {
+            return;
+        }
+        let mut evictable: Vec<(WorkflowRunId, DateTime<Utc>)> = self
+            .runs
+            .iter()
+            .filter(|r| {
+                matches!(
+                    r.state,
+                    WorkflowRunState::Completed
+                        | WorkflowRunState::Failed
+                        | WorkflowRunState::Cancelled
+                )
+            })
+            .map(|r| (*r.key(), r.started_at))
+            .collect();
+
+        // Sort oldest first
+        evictable.sort_by_key(|(_, t)| *t);
+
+        let to_remove = self.runs.len() - Self::MAX_RETAINED_RUNS;
+        for (id, _) in evictable.into_iter().take(to_remove) {
+            self.runs.remove(&id);
+            // Drop the per-run auxiliary maps alongside the run itself.
+            // These are keyed by run id and only ever removed on the terminal-cleanup path (`cancel_notify` at the retry-loop exit, `operator_resume_notify` when an operator gate resolves).
+            // A run evicted here may never have hit that path (e.g. a Pending-then-Cancelled run, or one evicted in the cleanup race window), so without this the Arc<Notify> entries would leak and grow without bound under churn.
+            self.cancel_notify.remove(&id);
+            self.operator_resume_notify.remove(&id);
+            self.delete_run_from_store(id);
+            debug!(run_id = %id, "Evicted old workflow run");
+        }
+    }
+
+    /// Delete one run row from the SQLite store, if one is configured.
+    ///
+    /// Never fails the caller: a failed delete only leaves a row the next eviction pass (or boot-time trim) will retry, so it is logged and counted like a failed upsert.
+    fn delete_run_from_store(&self, id: WorkflowRunId) {
+        if let Some(ref store) = self.store {
+            if let Err(e) = store.delete_run(&id.to_string()) {
+                metrics::counter!(
+                    "librefang_kernel_workflow_upsert_failed_total",
+                    "phase" => "delete_run",
+                )
+                .increment(1);
+                warn!(run_id = %id, error = %e, "SQLite delete of evicted workflow run failed");
+            }
+        }
     }
 
     /// Get the current state of a workflow run.
@@ -3503,9 +3546,8 @@ impl WorkflowEngine {
     /// signalled so any retry sleep currently waiting on the notifier wakes
     /// up immediately rather than sleeping for the full backoff duration.
     ///
-    /// The executor also observes cancellation at every step boundary: it
-    /// peeks the run state at the top of each iteration and exits early if
-    /// it finds `Cancelled`.
+    /// Both executors also observe cancellation: the sequential path peeks the run state at every step boundary, the DAG path at every layer boundary (and after a step error), and each exits early if it finds `Cancelled`.
+    /// Neither overwrites `Cancelled` with `Completed` or `Failed` on the way out.
     pub async fn cancel_run(&self, run_id: WorkflowRunId) -> Result<(), CancelRunError> {
         let already_paused = {
             let mut run = self
@@ -3580,6 +3622,69 @@ impl WorkflowEngine {
         Ok(())
     }
 
+    /// Mark a run that is still `Pending` or `Running` as `Failed` with `error`, for a caller that abandoned its executor mid-flight.
+    ///
+    /// The async-task tracker wraps `execute_run` in the caller's `[async_tasks] default_timeout_secs`; when that elapses the executor future is dropped mid-step and never reaches its own terminal handling, which would leave the run `Running` until the next boot's stale sweep.
+    /// `Completed`, `Failed`, `Cancelled` and `Paused` runs are left untouched, so a timeout racing a finished run cannot flip it.
+    /// Returns whether the transition happened.
+    pub async fn fail_running_run(&self, run_id: WorkflowRunId, error: &str) -> bool {
+        {
+            let Some(mut run) = self.runs.get_mut(&run_id) else {
+                return false;
+            };
+            if !matches!(
+                run.state,
+                WorkflowRunState::Pending | WorkflowRunState::Running
+            ) {
+                return false;
+            }
+            run.state = WorkflowRunState::Failed;
+            run.current_step_index = None;
+            run.error = Some(error.to_string());
+            run.completed_at = Some(Utc::now());
+            run.pause_request = None;
+        }
+        // Wake any retry sleep still parked on this run's notifier.
+        if let Some(n) = self.cancel_notify.get(&run_id) {
+            n.notify_waiters();
+        }
+        self.cleanup_terminal_pause_state(run_id).await;
+        if let Some(run) = self.runs.get(&run_id) {
+            self.upsert_run_to_store(&run);
+        }
+        if let Err(e) = self.persist_runs_async().await {
+            warn!(run_id = %run_id, error = %e, "Failed to persist abandoned run as failed");
+        }
+        warn!(run_id = %run_id, error = %error, "Workflow run abandoned by its caller and marked failed");
+        true
+    }
+
+    /// Check that `state` is `Paused` with a resume-token hash equal to `presented_hash` (constant-time), mapping every other state to the matching [`ResumeRunError`].
+    fn check_resumable(
+        run_id: WorkflowRunId,
+        state: &WorkflowRunState,
+        presented_hash: &str,
+    ) -> Result<(), ResumeRunError> {
+        let state = match state {
+            WorkflowRunState::Paused {
+                resume_token_hash: stored_hash,
+                ..
+            } => {
+                // Compare in constant time so we do not leak partial-match timing.
+                if !Self::hashes_equal(stored_hash, presented_hash) {
+                    return Err(ResumeRunError::TokenMismatch { run_id });
+                }
+                return Ok(());
+            }
+            WorkflowRunState::Pending => "pending",
+            WorkflowRunState::Running => "running",
+            WorkflowRunState::Completed => "completed",
+            WorkflowRunState::Failed => "failed",
+            WorkflowRunState::Cancelled => "cancelled",
+        };
+        Err(ResumeRunError::NotPaused { run_id, state })
+    }
+
     /// Resume a paused workflow run from where it stopped.
     ///
     /// Verifies that the run is in [`WorkflowRunState::Paused`] and that
@@ -3602,80 +3707,45 @@ impl WorkflowEngine {
         F: Fn(AgentId, String, Option<SessionMode>) -> Fut + Sync,
         Fut: std::future::Future<Output = Result<(String, u64, u64), String>> + Send,
     {
-        // Validate state + token, snapshot what we need, flip state back to
-        // Running, then drop the lock before re-entering execution. The
-        // execution path takes the same DashMap shard lock per step, so we
-        // must not hold it across the await.
-        let workflow = {
-            let workflow_id = {
-                let mut run = self
-                    .runs
-                    .get_mut(&run_id)
-                    .ok_or(ResumeRunError::NotFound(run_id))?;
-                // Validate token inside a scope so the immutable borrow of
-                // `run.state` ends before we mutate it below.
-                {
-                    match &run.state {
-                        WorkflowRunState::Paused {
-                            resume_token_hash: stored_hash,
-                            ..
-                        } => {
-                            // Hash the presented token and compare in constant
-                            // time so we do not leak partial-match timing.
-                            let presented_hash = Self::hash_resume_token(&resume_token);
-                            if !Self::hashes_equal(stored_hash, &presented_hash) {
-                                return Err(ResumeRunError::TokenMismatch { run_id });
-                            }
-                        }
-                        WorkflowRunState::Pending => {
-                            return Err(ResumeRunError::NotPaused {
-                                run_id,
-                                state: "pending",
-                            })
-                        }
-                        WorkflowRunState::Running => {
-                            return Err(ResumeRunError::NotPaused {
-                                run_id,
-                                state: "running",
-                            })
-                        }
-                        WorkflowRunState::Completed => {
-                            return Err(ResumeRunError::NotPaused {
-                                run_id,
-                                state: "completed",
-                            })
-                        }
-                        WorkflowRunState::Failed => {
-                            return Err(ResumeRunError::NotPaused {
-                                run_id,
-                                state: "failed",
-                            })
-                        }
-                        WorkflowRunState::Cancelled => {
-                            return Err(ResumeRunError::NotPaused {
-                                run_id,
-                                state: "cancelled",
-                            })
-                        }
-                    }
-                }
-                // Flip back to Running and clear pause_request so the loop
-                // does not re-pause itself immediately.
-                run.state = WorkflowRunState::Running;
-                run.pause_request = None;
-                run.workflow_id
-                // `run` (DashMap shard guard) is dropped here
-            };
-            self.workflows
-                .read()
-                .await
-                .get(&workflow_id)
-                .cloned()
-                .ok_or_else(|| ResumeRunError::ExecutionFailed {
-                    run_id,
-                    detail: format!("Workflow definition {workflow_id} not found"),
-                })?
+        // Validate state + token and look up the workflow definition BEFORE flipping the run back to Running.
+        // Every fallible check has to come first: flipping and then failing the definition lookup (deleted workflow) or the DAG guard (a PUT added `depends_on`) would strand the run in `Running` with no executor behind it and nothing able to resume it.
+        // The DashMap shard guard cannot be held across the `workflows` await, so the state is re-validated under `get_mut` right before the flip; a concurrent resume that won the race then surfaces as `NotPaused`.
+        let presented_hash = Self::hash_resume_token(&resume_token);
+        let workflow_id = {
+            let run = self
+                .runs
+                .get(&run_id)
+                .ok_or(ResumeRunError::NotFound(run_id))?;
+            Self::check_resumable(run_id, &run.state, &presented_hash)?;
+            run.workflow_id
+            // `run` (DashMap shard guard) is dropped here
         };
+        let workflow = self
+            .workflows
+            .read()
+            .await
+            .get(&workflow_id)
+            .cloned()
+            .ok_or_else(|| ResumeRunError::ExecutionFailed {
+                run_id,
+                detail: format!("Workflow definition {workflow_id} not found"),
+            })?;
+        // The DAG executor has no pause/resume support; we can only get here if the definition gained `depends_on` after the run paused on the sequential path.
+        // Refuse while the run is still Paused, so it stays resumable (after the definition is fixed) and cancellable.
+        if workflow.steps.iter().any(|s| !s.depends_on.is_empty()) {
+            return Err(ResumeRunError::DagUnsupported { run_id });
+        }
+        {
+            let mut run = self
+                .runs
+                .get_mut(&run_id)
+                .ok_or(ResumeRunError::NotFound(run_id))?;
+            Self::check_resumable(run_id, &run.state, &presented_hash)?;
+            // Flip back to Running and clear pause_request so the loop does not re-pause itself immediately.
+            run.state = WorkflowRunState::Running;
+            run.pause_request = None;
+            // `run` (DashMap shard guard) is dropped here
+        }
 
         // If this resume targets an operator-paused run, clean up the
         // watchdog notifier entry so it cannot race the resumed
@@ -3685,24 +3755,13 @@ impl WorkflowEngine {
         // through the operator path).
         self.cancel_operator_timeout_watchdog(run_id);
 
-        // Re-enter the sequential path. It looks at paused_step_index /
-        // paused_variables / paused_current_input on the run and resumes
-        // from there. The dispatch over has_dag_deps mirrors execute_run.
-        let has_dag_deps = workflow.steps.iter().any(|s| !s.depends_on.is_empty());
-        let result = if has_dag_deps {
-            // Symmetric guard with execute_run_dag's check; we only reach
-            // this path if a run was paused via the sequential path before
-            // the DAG branch was selected, which the DAG guard refuses to
-            // do today. Belt-and-suspenders so resume can never fan out
-            // into the unsupported DAG executor by accident.
-            Err(ResumeRunError::DagUnsupported { run_id })
-        } else {
-            // `input` here is unused on the resume path because the loop
-            // pulls `paused_current_input` off the run when present.
-            self.execute_run_sequential(run_id, &workflow, "", &agent_resolver, &send_message)
-                .await
-                .map_err(|e| ResumeRunError::ExecutionFailed { run_id, detail: e })
-        };
+        // Re-enter the sequential path. It looks at paused_step_index / paused_variables / paused_current_input on the run and resumes from there.
+        // The DAG case was refused above, before the state flip.
+        // `input` here is unused on the resume path because the loop pulls `paused_current_input` off the run when present.
+        let result = self
+            .execute_run_sequential(run_id, &workflow, "", &agent_resolver, &send_message)
+            .await
+            .map_err(|e| ResumeRunError::ExecutionFailed { run_id, detail: e });
         self.cleanup_terminal_pause_state(run_id).await;
         // If persistence panicked, surface it instead of returning a fake Ok.
         if let Err(persist_err) = self.persist_runs_async().await {
@@ -3742,7 +3801,6 @@ impl WorkflowEngine {
         spec: &HitlPauseSpec,
         current_input: &str,
         variables: &mut HashMap<String, String>,
-        all_outputs: &mut Vec<String>,
     ) -> HitlPauseOutcome {
         let input_trace = Self::truncate_operator_input_trace(current_input);
         let notify_count = spec.notify.len();
@@ -3786,7 +3844,6 @@ impl WorkflowEngine {
         if let Some(ref var) = step.output_var {
             variables.insert(var.clone(), output.clone());
         }
-        all_outputs.push(output);
 
         info!(
             step = step_index + 1,
@@ -3817,10 +3874,10 @@ impl WorkflowEngine {
                 });
             }
         }
+        // The plaintext `token` is never logged: it exists only to compute `hash` and is discarded here, so an operator pause resolves only through `resolve_operator_step` or the timeout watchdog (anyone able to read the logs could otherwise call `resume_run` and bypass the step's authorised-actions check).
         info!(
             run_id = %run_id,
             step = step_index + 1,
-            resume_token = %token,
             "Operator step pause token generated"
         );
 
@@ -4399,33 +4456,47 @@ impl WorkflowEngine {
         // Snapshot what we need, mutate the pause snapshot so the resumed
         // next step sees the resolved output as `{{input}}`, flip to
         // Running, drop the shard lock before the await-heavy re-entry.
-        let workflow = {
-            let workflow_id = {
-                let mut run = self
-                    .runs
-                    .get_mut(&run_id)
-                    .ok_or(ResumeRunError::NotFound(run_id))?;
-                if !run.state.is_paused() {
-                    return Err(ResumeRunError::NotPaused {
-                        run_id,
-                        state: "not paused",
-                    });
-                }
-                run.paused_current_input = Some(resolved_output.clone());
-                run.state = WorkflowRunState::Running;
-                run.pause_request = None;
-                run.workflow_id
-            };
-            self.workflows
-                .read()
-                .await
-                .get(&workflow_id)
-                .cloned()
-                .ok_or_else(|| ResumeRunError::ExecutionFailed {
-                    run_id,
-                    detail: format!("Workflow definition {workflow_id} not found"),
-                })?
+        let not_paused = || ResumeRunError::NotPaused {
+            run_id,
+            state: "not paused",
         };
+        let workflow_id = {
+            let run = self
+                .runs
+                .get(&run_id)
+                .ok_or(ResumeRunError::NotFound(run_id))?;
+            if !run.state.is_paused() {
+                return Err(not_paused());
+            }
+            run.workflow_id
+        };
+        // Look up the definition and apply the DAG guard while the run is still Paused: failing either after the flip would strand the run in `Running` with no executor behind it.
+        let workflow = self
+            .workflows
+            .read()
+            .await
+            .get(&workflow_id)
+            .cloned()
+            .ok_or_else(|| ResumeRunError::ExecutionFailed {
+                run_id,
+                detail: format!("Workflow definition {workflow_id} not found"),
+            })?;
+        if workflow.steps.iter().any(|s| !s.depends_on.is_empty()) {
+            return Err(ResumeRunError::DagUnsupported { run_id });
+        }
+        {
+            // Re-check under the shard guard: this is the critical section the race-idempotency note below relies on.
+            let mut run = self
+                .runs
+                .get_mut(&run_id)
+                .ok_or(ResumeRunError::NotFound(run_id))?;
+            if !run.state.is_paused() {
+                return Err(not_paused());
+            }
+            run.paused_current_input = Some(resolved_output.clone());
+            run.state = WorkflowRunState::Running;
+            run.pause_request = None;
+        }
 
         // If the operator step declared an `output_var`, rebind it to the
         // resolved output so `{{var}}` references downstream see the
@@ -4456,14 +4527,10 @@ impl WorkflowEngine {
         // even spinning up an outcome attempt in the common case.
         self.cancel_operator_timeout_watchdog(run_id);
 
-        let has_dag_deps = workflow.steps.iter().any(|s| !s.depends_on.is_empty());
-        let result = if has_dag_deps {
-            Err(ResumeRunError::DagUnsupported { run_id })
-        } else {
-            self.execute_run_sequential(run_id, &workflow, "", agent_resolver, send_message)
-                .await
-                .map_err(|e| ResumeRunError::ExecutionFailed { run_id, detail: e })
-        };
+        let result = self
+            .execute_run_sequential(run_id, &workflow, "", agent_resolver, send_message)
+            .await
+            .map_err(|e| ResumeRunError::ExecutionFailed { run_id, detail: e });
         self.cleanup_terminal_pause_state(run_id).await;
         if let Err(persist_err) = self.persist_runs_async().await {
             return Err(match result {
@@ -4488,6 +4555,10 @@ impl WorkflowEngine {
     /// The `agent_resolver` returns `(AgentId, agent_name, inherit_parent_context)`.
     /// When `inherit_parent_context` is true and the step doesn't override it,
     /// previous step outputs are prepended to the prompt as context.
+    ///
+    /// Only a run that is still `Pending` is started.
+    /// A run cancelled before its executor got here returns `Err("workflow run cancelled")` untouched, and any other state (a second call on a Running / Paused / terminal run) is refused without modifying the run.
+    /// A run whose workflow definition was removed before execution is marked `Failed` rather than left stranded.
     pub async fn execute_run<F, Fut>(
         &self,
         run_id: WorkflowRunId,
@@ -4498,23 +4569,52 @@ impl WorkflowEngine {
         F: Fn(AgentId, String, Option<SessionMode>) -> Fut + Sync,
         Fut: std::future::Future<Output = Result<(String, u64, u64), String>> + Send,
     {
-        // Get the run and workflow. Mutate the run's state synchronously
-        // via DashMap's get_mut, then drop the shard guard before the
-        // async workflow lookup.
+        // Read the run without touching its state, look up the definition, then flip Pending -> Running under a single shard guard.
+        // Flipping first would revive a run cancelled while still Pending (the step-boundary gate only sees `Running`) and strand the run in `Running` when the definition lookup fails.
         let (workflow_id, input) = {
-            let mut run = self.runs.get_mut(&run_id).ok_or("Workflow run not found")?;
-            // Mutate via DerefMut — `mut` on the binding required to invoke it.
-            run.state = WorkflowRunState::Running;
+            let run = self.runs.get(&run_id).ok_or("Workflow run not found")?;
             (run.workflow_id, run.input.clone())
-            // `run` (DashMap RefMut shard guard) is dropped here
+            // `run` (DashMap Ref shard guard) is dropped here, before the async lookup.
         };
-        let workflow = self
-            .workflows
-            .read()
-            .await
-            .get(&workflow_id)
-            .ok_or("Workflow definition not found")?
-            .clone();
+        let Some(workflow) = self.workflows.read().await.get(&workflow_id).cloned() else {
+            let msg = "Workflow definition not found";
+            // Only a run this call would have started is failed; any other state belongs to someone else.
+            let failed = match self.runs.get_mut(&run_id) {
+                Some(mut r) if matches!(r.state, WorkflowRunState::Pending) => {
+                    r.state = WorkflowRunState::Failed;
+                    r.current_step_index = None;
+                    r.error = Some(msg.to_string());
+                    r.completed_at = Some(Utc::now());
+                    true
+                }
+                _ => false,
+            };
+            if failed {
+                if let Some(run) = self.runs.get(&run_id) {
+                    self.upsert_run_to_store(&run);
+                }
+                if let Err(e) = self.persist_runs_async().await {
+                    warn!(run_id = %run_id, error = %e, "Failed to persist failed run state");
+                }
+            }
+            return Err(msg.to_string());
+        };
+        {
+            let mut run = self.runs.get_mut(&run_id).ok_or("Workflow run not found")?;
+            match &run.state {
+                WorkflowRunState::Pending => run.state = WorkflowRunState::Running,
+                WorkflowRunState::Cancelled => return Err("workflow run cancelled".into()),
+                other => {
+                    let state = match other {
+                        WorkflowRunState::Running => "running",
+                        WorkflowRunState::Paused { .. } => "paused",
+                        WorkflowRunState::Completed => "completed",
+                        _ => "failed",
+                    };
+                    return Err(format!("workflow run is not pending (state: {state})"));
+                }
+            }
+        }
 
         info!(
             run_id = %run_id,
@@ -4668,7 +4768,13 @@ impl WorkflowEngine {
                 (Self::template_input_text(input), vars, 0_usize)
             }
         };
-        let mut all_outputs: Vec<String> = Vec::new();
+        // Index into `run.step_results` where the current Collect batch starts.
+        // On a fresh start this is 0; on resume, steps recorded before the pause are not re-collected.
+        let mut collect_batch_start: usize = self
+            .runs
+            .get(&run_id)
+            .map(|r| r.step_results.len())
+            .unwrap_or(0);
 
         while i < workflow.steps.len() {
             // Update the run's current_step_index so pollers (dashboard)
@@ -4829,7 +4935,6 @@ impl WorkflowEngine {
                                 variables.insert(var.clone(), output.clone());
                             }
 
-                            all_outputs.push(output.clone());
                             current_input = output;
                             info!(step = i + 1, name = %step.name, duration_ms, "Step completed");
                         }
@@ -4951,7 +5056,6 @@ impl WorkflowEngine {
                                 if let Some(ref var) = fan_step.output_var {
                                     variables.insert(var.clone(), output.clone());
                                 }
-                                all_outputs.push(output.clone());
                                 current_input = output;
                             }
                             Ok(Err(e)) => {
@@ -4999,20 +5103,16 @@ impl WorkflowEngine {
                     // Build structured JSON from step results accumulated so far.
                     // NOTE: This intentionally outputs JSON (not plain text with `---` separators)
                     // so downstream steps can parse individual fan-out results programmatically.
-                    let step_results: Vec<StepResult> = self
+                    // The batch is every step result recorded since the previous Collect (or since the run started / resumed), tracked by `collect_batch_start`.
+                    // Deriving the window from a count of outputs instead drifted, because a Loop records one result per iteration and a Collect records none.
+                    let (relevant, recorded): (Vec<StepResult>, usize) = self
                         .runs
                         .get(&run_id)
-                        .map(|r| r.step_results.clone())
+                        .map(|r| {
+                            let start = collect_batch_start.min(r.step_results.len());
+                            (r.step_results[start..].to_vec(), r.step_results.len())
+                        })
                         .unwrap_or_default();
-
-                    // Collect results that correspond to the current all_outputs batch.
-                    // Take the last N step results where N = all_outputs.len().
-                    let n = all_outputs.len();
-                    let relevant = if step_results.len() >= n {
-                        &step_results[step_results.len() - n..]
-                    } else {
-                        &step_results[..]
-                    };
 
                     let results_json: Vec<serde_json::Value> = relevant
                         .iter()
@@ -5026,8 +5126,8 @@ impl WorkflowEngine {
 
                     let merged = serde_json::json!({ "results": results_json });
                     current_input = serde_json::to_string(&merged).unwrap_or_default();
-                    all_outputs.clear();
-                    all_outputs.push(current_input.clone());
+                    // Collect records no StepResult, so the next batch starts exactly here.
+                    collect_batch_start = recorded;
                     if let Some(ref var) = step.output_var {
                         variables.insert(var.clone(), current_input.clone());
                     }
@@ -5111,7 +5211,6 @@ impl WorkflowEngine {
                             if let Some(ref var) = step.output_var {
                                 variables.insert(var.clone(), output.clone());
                             }
-                            all_outputs.push(output.clone());
                             current_input = output;
                         }
                         Ok(None) => {}
@@ -5235,7 +5334,6 @@ impl WorkflowEngine {
                     if let Some(ref var) = step.output_var {
                         variables.insert(var.clone(), current_input.clone());
                     }
-                    all_outputs.push(current_input.clone());
                 }
 
                 // -- Operator nodes (#4980) ----------------------------------
@@ -5329,7 +5427,6 @@ impl WorkflowEngine {
                     if let Some(ref var) = step.output_var {
                         variables.insert(var.clone(), output.clone());
                     }
-                    all_outputs.push(output);
                     info!(
                         step = i + 1,
                         name = %step.name,
@@ -5381,7 +5478,6 @@ impl WorkflowEngine {
                             if let Some(ref var) = step.output_var {
                                 variables.insert(var.clone(), output.clone());
                             }
-                            all_outputs.push(output);
                             info!(
                                 step = i + 1,
                                 name = %step.name,
@@ -5468,7 +5564,6 @@ impl WorkflowEngine {
                         &spec,
                         &current_input,
                         &mut variables,
-                        &mut all_outputs,
                     );
                     let race = match outcome {
                         HitlPauseOutcome::Paused => return Ok(current_input),
@@ -5559,7 +5654,6 @@ impl WorkflowEngine {
                             if let Some(ref var) = step.output_var {
                                 variables.insert(var.clone(), rendered.clone());
                             }
-                            all_outputs.push(rendered.clone());
                             current_input = rendered;
                             info!(
                                 step = i + 1,
@@ -5721,7 +5815,6 @@ impl WorkflowEngine {
                                     if let Some(ref var) = step.output_var {
                                         variables.insert(var.clone(), output.clone());
                                     }
-                                    all_outputs.push(output);
                                     info!(
                                         step = i + 1,
                                         name = %step.name,
@@ -5818,24 +5911,43 @@ impl WorkflowEngine {
             i += 1;
         }
 
-        // Mark workflow as completed. Clear the pause snapshot fields and
-        // any orphan `pause_request` that may have been lodged after the
-        // last step boundary check — a pause requested between the loop's
-        // final iteration and this transition would otherwise survive on a
-        // Completed run as dead data.
+        // Mark workflow as completed (see `complete_run_unless_cancelled` for the pause-field clearing).
+        // A cancel that landed during the last step must not be overwritten with `Completed`.
         let final_output = current_input.clone();
-        if let Some(mut r) = self.runs.get_mut(&run_id) {
+        if !self.complete_run_unless_cancelled(&run_id, &final_output) {
+            return Err("workflow run cancelled".into());
+        }
+
+        info!(run_id = %run_id, "Workflow completed successfully");
+        Ok(final_output)
+    }
+
+    /// Whether the run has been cancelled (a missing run reads as not cancelled).
+    fn run_is_cancelled(&self, run_id: &WorkflowRunId) -> bool {
+        self.runs
+            .get(run_id)
+            .map(|r| matches!(r.state, WorkflowRunState::Cancelled))
+            .unwrap_or(false)
+    }
+
+    /// Transition a run to `Completed` with `output`, unless it was cancelled meanwhile.
+    ///
+    /// Also clears the pause snapshot fields and any orphan `pause_request` lodged after the last boundary check, which would otherwise survive on a Completed run as dead data.
+    /// Returns `false` only when the run is `Cancelled`; the check and the write happen under one shard guard so a concurrent `cancel_run` cannot slip in between.
+    fn complete_run_unless_cancelled(&self, run_id: &WorkflowRunId, output: &str) -> bool {
+        if let Some(mut r) = self.runs.get_mut(run_id) {
+            if matches!(r.state, WorkflowRunState::Cancelled) {
+                return false;
+            }
             r.state = WorkflowRunState::Completed;
-            r.output = Some(final_output.clone());
+            r.output = Some(output.to_string());
             r.completed_at = Some(Utc::now());
             r.pause_request = None;
             r.paused_step_index = None;
             r.paused_variables.clear();
             r.paused_current_input = None;
         }
-
-        info!(run_id = %run_id, "Workflow completed successfully");
-        Ok(final_output)
+        true
     }
 
     /// DAG-based workflow execution.
@@ -5924,9 +6036,10 @@ impl WorkflowEngine {
         Self::seed_input_vars_from_json(input, &mut variables);
         // Track which step names have failed so we can skip dependents
         let mut failed_steps: std::collections::HashSet<String> = std::collections::HashSet::new();
-        // `{{input}}` mirrors the sequential path: the object's string
-        // `input` key when present, else the raw blob (see template_input_text).
-        let mut last_output = Self::template_input_text(input);
+        // `{{input}}` mirrors the sequential path: the object's string `input` key when present, else the raw blob (see template_input_text).
+        // Every DAG prompt expands `{{input}}` from this text, and it is also the run output when no step produced one.
+        let input_text = Self::template_input_text(input);
+        let mut last_output = input_text.clone();
 
         info!(
             run_id = %run_id,
@@ -5935,6 +6048,16 @@ impl WorkflowEngine {
         );
 
         for (layer_idx, layer) in layers.iter().enumerate() {
+            // Cancellation gate, the DAG counterpart of the sequential executor's step-boundary check: a cancel that lands mid-layer stops every later layer from dispatching.
+            if self.run_is_cancelled(&run_id) {
+                info!(
+                    run_id = %run_id,
+                    layer = layer_idx + 1,
+                    "Workflow run cancelled at layer boundary"
+                );
+                return Err("workflow run cancelled".into());
+            }
+
             debug!(
                 layer = layer_idx + 1,
                 steps = layer.len(),
@@ -5970,11 +6093,7 @@ impl WorkflowEngine {
                         ErrorMode::Fail => {
                             let error_msg =
                                 format!("Step '{}' skipped: dependency failed", step.name);
-                            if let Some(mut r) = self.runs.get_mut(&run_id) {
-                                r.state = WorkflowRunState::Failed;
-                                r.error = Some(error_msg.clone());
-                                r.completed_at = Some(Utc::now());
-                            }
+                            mark_run_failed(&self.runs, &run_id, &error_msg);
                             return Err(error_msg);
                         }
                         _ => {
@@ -5999,7 +6118,7 @@ impl WorkflowEngine {
                 self.enforce_required_skills(&run_id, step, agent_id, &agent_name)
                     .await?;
 
-                let prompt = Self::expand_variables(&step.prompt_template, input, &variables);
+                let prompt = Self::expand_variables(&step.prompt_template, &input_text, &variables);
                 let prompt_sent = prompt.clone();
                 let start = std::time::Instant::now();
                 let result = Self::execute_step_with_error_mode(
@@ -6047,12 +6166,12 @@ impl WorkflowEngine {
                     }
                     Err(e) => {
                         failed_steps.insert(step.name.clone());
+                        // A cancel observed during a retry sleep surfaces here as `Err`; it must end the run rather than count as a non-fatal failure under `Retry` / `Skip`.
+                        if self.run_is_cancelled(&run_id) {
+                            return Err(e);
+                        }
                         if matches!(step.error_mode, ErrorMode::Fail) {
-                            if let Some(mut r) = self.runs.get_mut(&run_id) {
-                                r.state = WorkflowRunState::Failed;
-                                r.error = Some(e.clone());
-                                r.completed_at = Some(Utc::now());
-                            }
+                            mark_run_failed(&self.runs, &run_id, &e);
                             return Err(e);
                         }
                         warn!(step = %step.name, error = %e, "DAG step failed (non-fatal)");
@@ -6128,39 +6247,22 @@ impl WorkflowEngine {
                             >);
                     } else {
                         let prompt =
-                            Self::expand_variables(&step.prompt_template, input, &variables);
+                            Self::expand_variables(&step.prompt_template, &input_text, &variables);
                         step_prompts.push(prompt.clone());
-                        let timeout_dur = clamp_timeout_duration(step.timeout_secs);
-                        let step_timeout_secs = step.timeout_secs;
-                        let err_mode = step.error_mode.clone();
-                        let step_name = step.name.clone();
-                        let step_session_mode = step.session_mode;
-
+                        // Same helper as the single-step layer, so a step's timeout / Skip / Retry behaviour does not depend on how many siblings share its layer.
+                        let cancel_notify = &self.cancel_notify;
                         futures.push(Box::pin(async move {
                             let step_start = std::time::Instant::now();
-                            let result = tokio::time::timeout(
-                                timeout_dur,
-                                send_message(agent_id, prompt, step_session_mode),
+                            let r = Self::execute_step_with_error_mode(
+                                step,
+                                agent_id,
+                                prompt,
+                                send_message,
+                                run_id,
+                                cancel_notify,
                             )
                             .await;
-                            let step_duration = step_start.elapsed().as_millis() as u64;
-                            let r = match result {
-                                Ok(Ok(output)) => Ok(Some(output)),
-                                Ok(Err(e)) => match err_mode {
-                                    ErrorMode::Fail => {
-                                        Err(format!("Step '{}' failed: {}", step_name, e))
-                                    }
-                                    _ => Ok(None),
-                                },
-                                Err(_) => match err_mode {
-                                    ErrorMode::Fail => Err(format!(
-                                        "Step '{}' timed out after {}s; LLM steps generating long output often need more time — raise `timeout_secs` for this step in your workflow definition or switch to a faster model",
-                                        step_name, step_timeout_secs
-                                    )),
-                                    _ => Ok(None),
-                                },
-                            };
-                            (r, step_duration)
+                            (r, step_start.elapsed().as_millis() as u64)
                         })
                             as std::pin::Pin<
                                 Box<
@@ -6227,12 +6329,16 @@ impl WorkflowEngine {
                         }
                         Err(e) => {
                             failed_steps.insert(step_name.clone());
-                            if let Some(mut r) = self.runs.get_mut(&run_id) {
-                                r.state = WorkflowRunState::Failed;
-                                r.error = Some(e.clone());
-                                r.completed_at = Some(Utc::now());
+                            // Mirror the single-step gate: a cancel ends the run, a `Fail`-mode error fails it, and a `Retry` step that exhausted its retries is non-fatal.
+                            // A dependency-failed future only returns `Err` for a `Fail`-mode step, so it stays fatal.
+                            if self.run_is_cancelled(&run_id) {
+                                return Err(e);
                             }
-                            return Err(e);
+                            if matches!(step.error_mode, ErrorMode::Fail) {
+                                mark_run_failed(&self.runs, &run_id, &e);
+                                return Err(e);
+                            }
+                            warn!(step = %step_name, error = %e, "DAG step failed (non-fatal)");
                         }
                     }
                 }
@@ -6246,11 +6352,9 @@ impl WorkflowEngine {
             }
         }
 
-        // Mark workflow as completed
-        if let Some(mut r) = self.runs.get_mut(&run_id) {
-            r.state = WorkflowRunState::Completed;
-            r.output = Some(last_output.clone());
-            r.completed_at = Some(Utc::now());
+        // Mark workflow as completed, unless a cancel landed during the last layer: overwriting `Cancelled` would silently undo the user's cancel.
+        if !self.complete_run_unless_cancelled(&run_id, &last_output) {
+            return Err("workflow run cancelled".into());
         }
 
         info!(run_id = %run_id, "Workflow DAG execution completed successfully");
@@ -11911,6 +12015,29 @@ prompt_template = "do {{x}}"
     }
 
     #[test]
+    fn test_evaluate_condition_apostrophe_does_not_suppress_operators() {
+        // Before the fix the apostrophe opened a quote, so `||` was never split and the whole string was substring-matched.
+        assert!(evaluate_condition("fatal error occurred", "can't || error"));
+        assert!(evaluate_condition("i can't do that", "can't || error"));
+        assert!(evaluate_condition(
+            "i don't know the answer",
+            "don't && answer"
+        ));
+        assert!(!evaluate_condition("i don't know", "don't && answer"));
+    }
+
+    #[test]
+    fn test_evaluate_condition_quoted_literal_is_unquoted() {
+        // A quoted term keeps operators literal and is matched without its quotes.
+        assert!(evaluate_condition("use a && b here", "\"a && b\""));
+        assert!(evaluate_condition("x || y", "'x || y'"));
+        assert!(!evaluate_condition("a and b", "\"a && b\""));
+        assert!(evaluate_condition("nothing", "!\"a && b\""));
+        assert!(!evaluate_condition("use a && b here", "!\"a && b\""));
+        assert!(evaluate_condition("it's broken", "\"it's\" || missing"));
+    }
+
+    #[test]
     fn test_evaluate_condition_combined_and_or() {
         // OR has lower precedence: parsed as (a && b) || c
         assert!(evaluate_condition(
@@ -13881,6 +14008,82 @@ name = "topic"
         );
     }
 
+    /// In-memory tracing writer for the operator-pause log assertion.
+    #[derive(Clone)]
+    struct OperatorLogBuf(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+    impl std::io::Write for OperatorLogBuf {
+        fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(b);
+            Ok(b.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for OperatorLogBuf {
+        type Writer = OperatorLogBuf;
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn operator_step_pause_does_not_log_plaintext_resume_token() {
+        // The operator-pause resume token must never reach the logs: anyone holding it can call `resume_run`, which skips the step's authorised-actions check.
+        use tracing_subscriber::layer::SubscriberExt;
+        let buf = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+        let layer = tracing_subscriber::fmt::layer()
+            .with_writer(OperatorLogBuf(buf.clone()))
+            .with_ansi(false);
+        let subscriber = tracing_subscriber::registry()
+            .with(tracing_subscriber::EnvFilter::new("info"))
+            .with(layer);
+        // `set_default` is thread-local; the current-thread runtime keeps every poll of `execute_run` on this thread.
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        let engine = WorkflowEngine::new();
+        let wf_id = engine.register(workflow_with_operator_step()).await;
+        let run_id = engine
+            .create_run(wf_id, "seed-input".to_string())
+            .await
+            .expect("create_run");
+        engine
+            .execute_run(run_id, mock_resolver, |_id, _prompt, _mode| async {
+                Ok(("ignored".to_string(), 0u64, 0u64))
+            })
+            .await
+            .expect("operator pause returns Ok");
+
+        let run = engine.get_run(run_id).await.expect("run exists");
+        let WorkflowRunState::Paused {
+            resume_token_hash, ..
+        } = &run.state
+        else {
+            panic!("expected Paused, got {:?}", run.state);
+        };
+
+        let logs = String::from_utf8(buf.lock().unwrap().clone()).unwrap_or_default();
+        assert!(
+            logs.contains("Operator step pause token generated"),
+            "capture must have seen the pause log line; got: {logs}"
+        );
+        assert!(
+            !logs.contains("resume_token="),
+            "log must not carry a resume_token field; got: {logs}"
+        );
+        let uuid_re =
+            regex::Regex::new(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+                .unwrap();
+        for m in uuid_re.find_iter(&logs) {
+            let uuid = Uuid::parse_str(m.as_str()).unwrap();
+            assert_ne!(
+                &WorkflowEngine::hash_resume_token(&uuid),
+                resume_token_hash,
+                "a logged UUID is the plaintext resume token"
+            );
+        }
+    }
+
     // -----------------------------------------------------------------
     // #4977 step 2 — notify dispatch (#5135), timeout watchdog (#5134),
     // action → resume resolution (#5133).
@@ -14956,5 +15159,716 @@ name = "topic"
             err.contains("1s"),
             "DAG timeout error must include the step's timeout value; got: {err:?}"
         );
+    }
+
+    // Regression tests for the workflow-engine audit sweep: run-state transitions (cancel / timeout / resume), DAG error-mode parity, run retention and Collect batching.
+    mod audit_sweep {
+        use super::*;
+        use std::sync::atomic::{AtomicU32, Ordering};
+        use std::sync::Mutex;
+        use tokio::sync::Notify;
+
+        fn step(name: &str, prompt: &str, mode: StepMode, deps: &[&str]) -> WorkflowStep {
+            WorkflowStep {
+                name: name.to_string(),
+                agent: StepAgent::ByName {
+                    name: "a".to_string(),
+                },
+                prompt_template: prompt.to_string(),
+                mode,
+                timeout_secs: 10,
+                error_mode: ErrorMode::Fail,
+                output_var: None,
+                inherit_context: None,
+                depends_on: deps.iter().map(|d| d.to_string()).collect(),
+                session_mode: None,
+                required_skills: Vec::new(),
+            }
+        }
+
+        fn wf(steps: Vec<WorkflowStep>) -> Workflow {
+            Workflow {
+                id: WorkflowId::new(),
+                name: "audit-sweep".to_string(),
+                description: String::new(),
+                steps,
+                created_at: Utc::now(),
+                layout: None,
+                total_timeout_secs: None,
+                input_schema: None,
+                owner: None,
+            }
+        }
+
+        fn ok_sender(
+            _id: AgentId,
+            msg: String,
+            _sm: Option<SessionMode>,
+        ) -> std::future::Ready<Result<(String, u64, u64), String>> {
+            std::future::ready(Ok((format!("Done: {msg}"), 1, 1)))
+        }
+
+        // ---- execute_run entry (Pending-only) ----
+
+        #[tokio::test]
+        async fn execute_run_does_not_revive_a_run_cancelled_while_pending() {
+            let engine = WorkflowEngine::new();
+            let wf_id = engine.register(test_workflow()).await;
+            let run_id = engine.create_run(wf_id, "x".into()).await.unwrap();
+            engine.cancel_run(run_id).await.unwrap();
+
+            let calls = Arc::new(AtomicU32::new(0));
+            let c = calls.clone();
+            let result = engine
+                .execute_run(run_id, mock_resolver, move |_id, _m, _sm| {
+                    c.fetch_add(1, Ordering::SeqCst);
+                    async { Ok(("out".to_string(), 1u64, 1u64)) }
+                })
+                .await;
+            let err = result.expect_err("a cancelled run must not execute");
+            assert!(err.contains("cancel"), "got: {err}");
+            assert_eq!(calls.load(Ordering::SeqCst), 0, "no step may dispatch");
+            let run = engine.get_run(run_id).await.unwrap();
+            assert!(matches!(run.state, WorkflowRunState::Cancelled));
+        }
+
+        #[tokio::test]
+        async fn execute_run_refuses_a_run_that_already_completed() {
+            let engine = WorkflowEngine::new();
+            let wf_id = engine.register(test_workflow()).await;
+            let run_id = engine.create_run(wf_id, "x".into()).await.unwrap();
+            engine
+                .execute_run(run_id, mock_resolver, ok_sender)
+                .await
+                .expect("first run completes");
+
+            let calls = Arc::new(AtomicU32::new(0));
+            let c = calls.clone();
+            let err = engine
+                .execute_run(run_id, mock_resolver, move |_id, _m, _sm| {
+                    c.fetch_add(1, Ordering::SeqCst);
+                    async { Ok(("again".to_string(), 1u64, 1u64)) }
+                })
+                .await
+                .expect_err("a completed run must not be re-executed");
+            assert!(err.contains("not pending"), "got: {err}");
+            assert_eq!(calls.load(Ordering::SeqCst), 0);
+            let run = engine.get_run(run_id).await.unwrap();
+            assert!(matches!(run.state, WorkflowRunState::Completed));
+        }
+
+        #[tokio::test]
+        async fn execute_run_fails_the_run_when_its_definition_was_removed() {
+            let engine = WorkflowEngine::new();
+            let wf_id = engine.register(test_workflow()).await;
+            let run_id = engine.create_run(wf_id, "x".into()).await.unwrap();
+            assert!(engine.remove_workflow(wf_id).await);
+
+            let result = engine.execute_run(run_id, mock_resolver, ok_sender).await;
+            assert!(result.is_err());
+            let run = engine.get_run(run_id).await.unwrap();
+            assert!(
+                matches!(run.state, WorkflowRunState::Failed),
+                "run must not be stranded in Running: {:?}",
+                run.state
+            );
+            assert_eq!(run.error.as_deref(), Some("Workflow definition not found"));
+            assert!(run.completed_at.is_some());
+        }
+
+        // ---- abandoned executor (agent-side async timeout) ----
+
+        #[tokio::test]
+        async fn fail_running_run_terminates_a_run_whose_executor_was_dropped() {
+            let engine = WorkflowEngine::new();
+            let wf_id = engine.register(test_workflow()).await;
+            let run_id = engine.create_run(wf_id, "x".into()).await.unwrap();
+
+            let exec = engine.execute_run(run_id, mock_resolver, |_id, _m, _sm| {
+                futures::future::pending::<Result<(String, u64, u64), String>>()
+            });
+            let timed_out = tokio::time::timeout(std::time::Duration::from_millis(50), exec).await;
+            assert!(timed_out.is_err());
+            // Dropping the executor alone leaves the run in Running: this is the leak the async-task tracker must close.
+            assert!(matches!(
+                engine.get_run(run_id).await.unwrap().state,
+                WorkflowRunState::Running
+            ));
+
+            let msg = "workflow run timed out after 0s (agent-side default_timeout_secs)";
+            assert!(engine.fail_running_run(run_id, msg).await);
+            let run = engine.get_run(run_id).await.unwrap();
+            assert!(matches!(run.state, WorkflowRunState::Failed));
+            assert!(run.error.as_deref().unwrap_or("").contains("timed out"));
+            assert!(run.completed_at.is_some());
+            assert!(run.current_step_index.is_none());
+            assert!(matches!(
+                engine.cancel_run(run_id).await,
+                Err(CancelRunError::AlreadyTerminal {
+                    state: "failed",
+                    ..
+                })
+            ));
+        }
+
+        #[tokio::test]
+        async fn fail_running_run_leaves_a_terminal_run_alone() {
+            let engine = WorkflowEngine::new();
+            let wf_id = engine.register(test_workflow()).await;
+            let run_id = engine.create_run(wf_id, "x".into()).await.unwrap();
+            engine
+                .execute_run(run_id, mock_resolver, ok_sender)
+                .await
+                .unwrap();
+            assert!(!engine.fail_running_run(run_id, "timed out").await);
+            let run = engine.get_run(run_id).await.unwrap();
+            assert!(matches!(run.state, WorkflowRunState::Completed));
+            assert!(run.error.is_none());
+        }
+
+        // ---- cancellation is final on both executors ----
+
+        #[tokio::test]
+        async fn cancel_mid_dag_stops_later_layers_and_state_is_cancelled() {
+            let engine = Arc::new(WorkflowEngine::new());
+            let wf_id = engine
+                .register(wf(vec![
+                    step("a", "A", StepMode::Sequential, &[]),
+                    step("b", "B", StepMode::Sequential, &["a"]),
+                    step("c", "C", StepMode::Sequential, &["b"]),
+                ]))
+                .await;
+            let run_id = engine.create_run(wf_id, "x".into()).await.unwrap();
+
+            let started = Arc::new(Notify::new());
+            let gate = Arc::new(Notify::new());
+            let calls = Arc::new(AtomicU32::new(0));
+            let handle = {
+                let (engine, started, gate, calls) =
+                    (engine.clone(), started.clone(), gate.clone(), calls.clone());
+                tokio::spawn(async move {
+                    engine
+                        .execute_run(run_id, mock_resolver, move |_id, _m, _sm| {
+                            let n = calls.fetch_add(1, Ordering::SeqCst);
+                            let (started, gate) = (started.clone(), gate.clone());
+                            async move {
+                                if n == 0 {
+                                    started.notify_one();
+                                    gate.notified().await;
+                                }
+                                Ok(("a_out".to_string(), 1u64, 1u64))
+                            }
+                        })
+                        .await
+                })
+            };
+            started.notified().await;
+            engine.cancel_run(run_id).await.expect("cancel");
+            gate.notify_one();
+            let result = handle.await.unwrap();
+
+            let err = result.expect_err("a cancelled DAG run must not report success");
+            assert!(err.contains("cancel"), "got: {err}");
+            let run = engine.get_run(run_id).await.unwrap();
+            assert!(
+                matches!(run.state, WorkflowRunState::Cancelled),
+                "got: {:?}",
+                run.state
+            );
+            assert!(run.output.is_none());
+            assert_eq!(
+                calls.load(Ordering::SeqCst),
+                1,
+                "layers after the cancel must not dispatch"
+            );
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn cancel_during_dag_retry_is_not_overwritten() {
+            let engine = Arc::new(WorkflowEngine::new());
+            let mut flaky = step("flaky", "FLAKY", StepMode::Sequential, &[]);
+            flaky.error_mode = ErrorMode::Retry {
+                max_retries: 3,
+                backoff_ms: Some(5000),
+                jitter_pct: None,
+            };
+            let wf_id = engine
+                .register(wf(vec![
+                    flaky,
+                    step("after", "AFTER", StepMode::Sequential, &["flaky"]),
+                ]))
+                .await;
+            let run_id = engine.create_run(wf_id, "x".into()).await.unwrap();
+
+            let started = Arc::new(Notify::new());
+            let gate = Arc::new(Notify::new());
+            let after_calls = Arc::new(AtomicU32::new(0));
+            let first = Arc::new(AtomicU32::new(0));
+            let handle = {
+                let (engine, started, gate, after_calls, first) = (
+                    engine.clone(),
+                    started.clone(),
+                    gate.clone(),
+                    after_calls.clone(),
+                    first.clone(),
+                );
+                tokio::spawn(async move {
+                    engine
+                        .execute_run(run_id, mock_resolver, move |_id, m, _sm| {
+                            let (started, gate) = (started.clone(), gate.clone());
+                            let is_after = m.contains("AFTER");
+                            if is_after {
+                                after_calls.fetch_add(1, Ordering::SeqCst);
+                            }
+                            let n = first.fetch_add(1, Ordering::SeqCst);
+                            async move {
+                                if is_after {
+                                    return Ok(("after".to_string(), 1u64, 1u64));
+                                }
+                                if n == 0 {
+                                    started.notify_one();
+                                    gate.notified().await;
+                                }
+                                Err("500 upstream".to_string())
+                            }
+                        })
+                        .await
+                })
+            };
+            started.notified().await;
+            engine.cancel_run(run_id).await.expect("cancel");
+            gate.notify_one();
+            let result = handle.await.unwrap();
+
+            assert!(result.is_err(), "got: {result:?}");
+            let run = engine.get_run(run_id).await.unwrap();
+            assert!(
+                matches!(run.state, WorkflowRunState::Cancelled),
+                "a Retry step's failure must not overwrite Cancelled: {:?}",
+                run.state
+            );
+            assert_eq!(after_calls.load(Ordering::SeqCst), 0);
+        }
+
+        #[tokio::test]
+        async fn cancel_during_last_sequential_step_is_not_overwritten_with_completed() {
+            let engine = Arc::new(WorkflowEngine::new());
+            let wf_id = engine
+                .register(wf(vec![step("only", "S", StepMode::Sequential, &[])]))
+                .await;
+            let run_id = engine.create_run(wf_id, "x".into()).await.unwrap();
+            let started = Arc::new(Notify::new());
+            let gate = Arc::new(Notify::new());
+            let handle = {
+                let (engine, started, gate) = (engine.clone(), started.clone(), gate.clone());
+                tokio::spawn(async move {
+                    engine
+                        .execute_run(run_id, mock_resolver, move |_id, _m, _sm| {
+                            let (started, gate) = (started.clone(), gate.clone());
+                            async move {
+                                started.notify_one();
+                                gate.notified().await;
+                                Ok(("late".to_string(), 1u64, 1u64))
+                            }
+                        })
+                        .await
+                })
+            };
+            started.notified().await;
+            engine.cancel_run(run_id).await.expect("cancel");
+            gate.notify_one();
+            let result = handle.await.unwrap();
+            assert!(result.is_err(), "got: {result:?}");
+            let run = engine.get_run(run_id).await.unwrap();
+            assert!(
+                matches!(run.state, WorkflowRunState::Cancelled),
+                "got: {:?}",
+                run.state
+            );
+            assert!(run.output.is_none());
+        }
+
+        // ---- DAG parallel layers honour ErrorMode::Retry ----
+
+        fn retry_dag(max_retries: u32) -> Workflow {
+            let mut flaky = step("flaky", "FLAKY", StepMode::Sequential, &["root"]);
+            flaky.error_mode = ErrorMode::Retry {
+                max_retries,
+                backoff_ms: Some(1),
+                jitter_pct: None,
+            };
+            flaky.output_var = Some("f".to_string());
+            let mut after = step("after", "AFTER {{f}}", StepMode::Sequential, &["flaky"]);
+            after.error_mode = ErrorMode::Skip;
+            wf(vec![
+                step("root", "ROOT", StepMode::Sequential, &[]),
+                flaky,
+                step("steady", "STEADY", StepMode::Sequential, &["root"]),
+                after,
+            ])
+        }
+
+        #[tokio::test]
+        async fn dag_parallel_layer_honours_retry_error_mode() {
+            let engine = WorkflowEngine::new();
+            let wf_id = engine.register(retry_dag(2)).await;
+            let run_id = engine.create_run(wf_id, "x".into()).await.unwrap();
+            let flaky_calls = Arc::new(AtomicU32::new(0));
+            let fc = flaky_calls.clone();
+            engine
+                .execute_run(run_id, mock_resolver, move |_id, m, _sm| {
+                    let n = if m.contains("FLAKY") {
+                        Some(fc.fetch_add(1, Ordering::SeqCst))
+                    } else {
+                        None
+                    };
+                    async move {
+                        match n {
+                            Some(n) if n < 2 => Err("429 transient".to_string()),
+                            Some(_) => Ok(("ok".to_string(), 1u64, 1u64)),
+                            None => Ok((format!("Done: {m}"), 1u64, 1u64)),
+                        }
+                    }
+                })
+                .await
+                .expect("run completes");
+            let run = engine.get_run(run_id).await.unwrap();
+            assert!(matches!(run.state, WorkflowRunState::Completed));
+            assert_eq!(flaky_calls.load(Ordering::SeqCst), 3);
+            assert!(run
+                .step_results
+                .iter()
+                .any(|r| r.step_name == "flaky" && r.output == "ok"));
+            assert!(
+                run.step_results.iter().any(|r| r.step_name == "after"),
+                "the dependent must run once flaky succeeded on retry"
+            );
+        }
+
+        #[tokio::test]
+        async fn dag_parallel_layer_retry_exhaustion_is_non_fatal() {
+            let engine = WorkflowEngine::new();
+            let wf_id = engine.register(retry_dag(1)).await;
+            let run_id = engine.create_run(wf_id, "x".into()).await.unwrap();
+            let flaky_calls = Arc::new(AtomicU32::new(0));
+            let fc = flaky_calls.clone();
+            let result = engine
+                .execute_run(run_id, mock_resolver, move |_id, m, _sm| {
+                    let flaky = m.contains("FLAKY");
+                    if flaky {
+                        fc.fetch_add(1, Ordering::SeqCst);
+                    }
+                    async move {
+                        if flaky {
+                            Err("500 upstream".to_string())
+                        } else {
+                            Ok((format!("Done: {m}"), 1u64, 1u64))
+                        }
+                    }
+                })
+                .await;
+            assert!(result.is_ok(), "got: {result:?}");
+            let run = engine.get_run(run_id).await.unwrap();
+            assert!(matches!(run.state, WorkflowRunState::Completed));
+            assert_eq!(flaky_calls.load(Ordering::SeqCst), 2);
+            assert!(run.step_results.iter().any(|r| r.step_name == "steady"));
+            assert!(!run.step_results.iter().any(|r| r.step_name == "after"));
+        }
+
+        // ---- DAG {{input}} parity with the sequential path ----
+
+        #[tokio::test]
+        async fn execute_run_dag_input_placeholder_uses_input_key_like_sequential() {
+            let engine = WorkflowEngine::new();
+            let wf_id = engine
+                .register(wf(vec![
+                    step(
+                        "first",
+                        "Ctx={{input}} T={{topic}}",
+                        StepMode::Sequential,
+                        &[],
+                    ),
+                    step("second", "Ctx2={{input}}", StepMode::Sequential, &["first"]),
+                    step("third", "Ctx3={{input}}", StepMode::Sequential, &["first"]),
+                ]))
+                .await;
+            let input = serde_json::json!({"topic": "x", "input": "focus on EU"}).to_string();
+            let run_id = engine.create_run(wf_id, input).await.unwrap();
+            let captured = Arc::new(Mutex::new(Vec::<String>::new()));
+            let sink = captured.clone();
+            engine
+                .execute_run(run_id, mock_resolver, move |_id, m, _sm| {
+                    sink.lock().unwrap().push(m.clone());
+                    async { Ok(("ok".to_string(), 1u64, 1u64)) }
+                })
+                .await
+                .unwrap();
+            let prompts = captured.lock().unwrap().clone();
+            assert!(
+                prompts.iter().any(|p| p.contains("Ctx=focus on EU T=x")),
+                "{prompts:?}"
+            );
+            // `second` and `third` share a layer, so this covers the parallel branch.
+            assert!(
+                prompts.iter().any(|p| p.contains("Ctx2=focus on EU")),
+                "{prompts:?}"
+            );
+            assert!(
+                prompts.iter().any(|p| p.contains("Ctx3=focus on EU")),
+                "{prompts:?}"
+            );
+            assert!(
+                !prompts.iter().any(|p| p.contains("\"topic\"")),
+                "{prompts:?}"
+            );
+        }
+
+        // ---- resume paths validate before flipping to Running ----
+
+        async fn paused_run(engine: &WorkflowEngine) -> (WorkflowId, WorkflowRunId, Uuid) {
+            let wf_id = engine.register(test_workflow()).await;
+            let run_id = engine.create_run(wf_id, "data".into()).await.unwrap();
+            let token = engine.pause_run(run_id, "hold").await.unwrap();
+            engine
+                .execute_run(run_id, mock_resolver, ok_sender)
+                .await
+                .unwrap();
+            assert!(engine.get_run(run_id).await.unwrap().state.is_paused());
+            (wf_id, run_id, token)
+        }
+
+        #[tokio::test]
+        async fn resume_run_with_deleted_workflow_leaves_run_paused() {
+            let engine = WorkflowEngine::new();
+            let (wf_id, run_id, token) = paused_run(&engine).await;
+            assert!(engine.remove_workflow(wf_id).await);
+            let err = engine
+                .resume_run(run_id, token, mock_resolver, ok_sender)
+                .await
+                .expect_err("must fail");
+            assert!(matches!(err, ResumeRunError::ExecutionFailed { .. }));
+            let run = engine.get_run(run_id).await.unwrap();
+            assert!(run.state.is_paused(), "run stranded: {:?}", run.state);
+        }
+
+        #[tokio::test]
+        async fn resume_run_refused_as_dag_leaves_run_paused_and_resumable() {
+            let engine = WorkflowEngine::new();
+            let (wf_id, run_id, token) = paused_run(&engine).await;
+            let mut dag = test_workflow();
+            dag.steps[1].depends_on = vec!["analyze".to_string()];
+            assert!(engine.update_workflow(wf_id, dag).await);
+            let err = engine
+                .resume_run(run_id, token, mock_resolver, ok_sender)
+                .await
+                .expect_err("must refuse");
+            assert!(matches!(err, ResumeRunError::DagUnsupported { .. }));
+            assert!(engine.get_run(run_id).await.unwrap().state.is_paused());
+
+            // Once the definition is sequential again the same token still resumes the run.
+            assert!(engine.update_workflow(wf_id, test_workflow()).await);
+            engine
+                .resume_run(run_id, token, mock_resolver, ok_sender)
+                .await
+                .expect("resume after fixing the definition");
+            assert!(matches!(
+                engine.get_run(run_id).await.unwrap().state,
+                WorkflowRunState::Completed
+            ));
+        }
+
+        #[tokio::test]
+        async fn operator_outcome_with_deleted_workflow_leaves_run_paused() {
+            let engine = WorkflowEngine::new();
+            let wf_id = engine.register(workflow_with_operator_step()).await;
+            let run_id = engine.create_run(wf_id, "seed".into()).await.unwrap();
+            engine
+                .execute_run(run_id, mock_resolver, ok_sender)
+                .await
+                .unwrap();
+            assert!(engine.get_run(run_id).await.unwrap().state.is_paused());
+            assert!(engine.remove_workflow(wf_id).await);
+            let err = engine
+                .apply_operator_outcome(
+                    run_id,
+                    0,
+                    OperatorOutcome::Continue {
+                        output: "approved".into(),
+                    },
+                    &mock_resolver,
+                    &ok_sender,
+                )
+                .await
+                .expect_err("must fail");
+            assert!(matches!(err, ResumeRunError::ExecutionFailed { .. }));
+            let run = engine.get_run(run_id).await.unwrap();
+            assert!(run.state.is_paused(), "run stranded: {:?}", run.state);
+            assert_ne!(run.paused_current_input.as_deref(), Some("approved"));
+        }
+
+        // ---- run retention reaches the SQLite store ----
+
+        fn sqlite_store(db_path: &std::path::Path) -> librefang_memory::WorkflowStore {
+            let pool = r2d2::Pool::builder()
+                .max_size(2)
+                .build(r2d2_sqlite::SqliteConnectionManager::file(db_path))
+                .unwrap();
+            librefang_memory::migration::run_migrations(&pool.get().unwrap())
+                .expect("migrations must apply");
+            librefang_memory::WorkflowStore::new(pool)
+        }
+
+        fn stored_run(
+            workflow_id: WorkflowId,
+            state: WorkflowRunState,
+            age_secs: i64,
+        ) -> WorkflowRun {
+            WorkflowRun {
+                id: WorkflowRunId::new(),
+                workflow_id,
+                workflow_name: "audit-sweep".to_string(),
+                input: "x".to_string(),
+                state,
+                step_results: Vec::new(),
+                current_step_index: None,
+                total_steps: 1,
+                output: None,
+                error: None,
+                started_at: Utc::now() - chrono::Duration::seconds(age_secs),
+                completed_at: Some(Utc::now()),
+                pause_request: None,
+                paused_step_index: None,
+                paused_variables: BTreeMap::new(),
+                paused_current_input: None,
+                owner_agent_id: None,
+            }
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn evicted_runs_are_deleted_from_sqlite_store() {
+            let tmp = tempfile::tempdir().unwrap();
+            let db = tmp.path().join("workflows.db");
+            let engine = WorkflowEngine::new_with_store(sqlite_store(&db), tmp.path());
+            let wf_id = engine.register(test_workflow()).await;
+            for _ in 0..250usize {
+                let run_id = engine.create_run(wf_id, "x".into()).await.unwrap();
+                engine.cancel_run(run_id).await.unwrap();
+            }
+            let rows = sqlite_store(&db).count_runs().unwrap();
+            assert!(
+                rows <= WorkflowEngine::MAX_RETAINED_RUNS,
+                "evicted runs must leave the store too; {rows} rows"
+            );
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn boot_load_trims_terminal_runs_over_cap() {
+            let tmp = tempfile::tempdir().unwrap();
+            let db = tmp.path().join("workflows.db");
+            let store = sqlite_store(&db);
+            let wf_id = WorkflowId::new();
+            let mut rows: Vec<WorkflowRunRow> = (0..300)
+                .map(|i| {
+                    workflow_run_to_row(&stored_run(wf_id, WorkflowRunState::Completed, 1000 - i))
+                })
+                .collect();
+            // The oldest run of all is Paused: age alone must never evict a non-terminal run.
+            let paused = stored_run(
+                wf_id,
+                WorkflowRunState::Paused {
+                    resume_token_hash: WorkflowEngine::hash_resume_token(&Uuid::new_v4()),
+                    reason: "hold".into(),
+                    paused_at: Utc::now(),
+                },
+                10_000,
+            );
+            let paused_id = paused.id;
+            rows.push(workflow_run_to_row(&paused));
+            store.bulk_upsert_runs(&rows).unwrap();
+
+            let engine = WorkflowEngine::new_with_store(sqlite_store(&db), tmp.path());
+            tokio::task::block_in_place(|| engine.load_runs()).unwrap();
+            assert!(engine.list_runs(None).await.len() <= WorkflowEngine::MAX_RETAINED_RUNS);
+            assert!(store.count_runs().unwrap() <= WorkflowEngine::MAX_RETAINED_RUNS);
+            assert!(
+                engine.get_run(paused_id).await.is_some(),
+                "the Paused run must survive"
+            );
+        }
+
+        // ---- Collect batches by step-result index ----
+
+        fn collect_output(output: &str) -> Vec<String> {
+            let v: serde_json::Value = serde_json::from_str(output).expect("collect emits JSON");
+            v["results"]
+                .as_array()
+                .expect("results array")
+                .iter()
+                .map(|r| r["output"].as_str().unwrap_or("").to_string())
+                .collect()
+        }
+
+        #[tokio::test]
+        async fn second_collect_excludes_previous_batch() {
+            let engine = WorkflowEngine::new();
+            let wf_id = engine
+                .register(wf(vec![
+                    step("task-a", "Task A: {{input}}", StepMode::FanOut, &[]),
+                    step("task-b", "Task B: {{input}}", StepMode::FanOut, &[]),
+                    step("collect-1", "unused", StepMode::Collect, &[]),
+                    step("task-d", "Task D", StepMode::FanOut, &[]),
+                    step("task-e", "Task E", StepMode::FanOut, &[]),
+                    step("collect-2", "unused", StepMode::Collect, &[]),
+                ]))
+                .await;
+            let run_id = engine.create_run(wf_id, "data".into()).await.unwrap();
+            let output = engine
+                .execute_run(run_id, mock_resolver, ok_sender)
+                .await
+                .unwrap();
+            let results = collect_output(&output);
+            assert_eq!(results.len(), 2, "{results:?}");
+            assert!(
+                results
+                    .iter()
+                    .all(|o| o.contains("Task D") || o.contains("Task E")),
+                "{results:?}"
+            );
+        }
+
+        #[tokio::test]
+        async fn collect_after_loop_keeps_fanout_results() {
+            let engine = WorkflowEngine::new();
+            let wf_id = engine
+                .register(wf(vec![
+                    step("task-a", "Task A: {{input}}", StepMode::FanOut, &[]),
+                    step("task-b", "Task B: {{input}}", StepMode::FanOut, &[]),
+                    step(
+                        "refine",
+                        "Refine: {{input}}",
+                        StepMode::Loop {
+                            max_iterations: 3,
+                            until: "never-matches".into(),
+                        },
+                        &[],
+                    ),
+                    step("collect", "unused", StepMode::Collect, &[]),
+                ]))
+                .await;
+            let run_id = engine.create_run(wf_id, "data".into()).await.unwrap();
+            let output = engine
+                .execute_run(run_id, mock_resolver, ok_sender)
+                .await
+                .unwrap();
+            let results = collect_output(&output);
+            assert!(
+                results.iter().any(|o| o.starts_with("Done: Task A")),
+                "{results:?}"
+            );
+            assert!(
+                results.iter().any(|o| o.starts_with("Done: Task B")),
+                "{results:?}"
+            );
+        }
     }
 }

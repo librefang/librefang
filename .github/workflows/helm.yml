@@ -1,0 +1,53 @@
+name: Helm
+
+# Community chart under deploy/helm/librefang/. The Kustomize manifests in
+# deploy/kubernetes/ stay the reference; this only checks that the chart still
+# renders and that its output passes the same assertions as the Kustomize output.
+#
+# Deliberately small: no cluster, no image build, nothing that can hang. Kept in
+# its own file so it does not touch kubernetes.yml or its change detection.
+on:
+  pull_request:
+    paths:
+      - 'deploy/helm/**'
+      - '.github/workflows/helm.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'deploy/helm/**'
+      - '.github/workflows/helm.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  chart:
+    name: helm lint + template + check-k8s-manifests
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Install PyYAML
+        run: python3 -m pip install --user pyyaml
+
+      # Helm is preinstalled on ubuntu-latest. One pass per values file in
+      # deploy/helm/librefang/ci/, so a new scenario is a new file, not a
+      # workflow edit.
+      - name: Lint, render, and validate each values file
+        run: |
+          set -euo pipefail
+          helm version --short
+          for values in deploy/helm/librefang/ci/*.yaml; do
+            name="$(basename "$values" .yaml)"
+            echo "::group::$name"
+            helm lint deploy/helm/librefang -f "$values"
+            helm template librefang deploy/helm/librefang -f "$values" > "rendered-$name.yaml"
+            python3 scripts/check-k8s-manifests.py "rendered-$name.yaml"
+            echo "::endgroup::"
+          done

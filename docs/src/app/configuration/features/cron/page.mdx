@@ -160,6 +160,10 @@ Userinfo (`user:pass@host`) and ports are stripped before the check, so
 `http://attacker@127.0.0.1:8080/x` is rejected on its `127.0.0.1` host the
 same way `http://127.0.0.1/x` would be.
 
+The webhook client does not follow HTTP redirects.
+The validator only ever sees the configured URL, so a receiver answering `307 Location: http://169.254.169.254/...` would otherwise steer the daemon past it.
+A 3xx response is reported as a delivery failure (`webhook returned HTTP 307 ...`), the same as any other non-2xx status, on both `[delivery]` and `delivery_targets` webhooks.
+
 If you genuinely need to fan out to a host on the loopback range — for
 example a sidecar process on the same machine — route it through a channel
 adapter or use a `local_file` target instead of a webhook. The webhook path
@@ -264,7 +268,7 @@ questions:
 | Decides | "Should the agent run at all?" | "What extra context does the run get?" |
 | Output protocol | Last non-empty stdout line must be JSON. `{"wakeAgent": false}` skips the LLM call. Anything else wakes. | Stdout is appended to the prompt verbatim when non-empty. |
 | Timeout | 30 s. Timeout wakes the agent (failsafe). | 60 s. Timeout fires the agent without context (failsafe). |
-| Path allowlist | `<home_dir>/scripts/` (canonicalize + component prefix). Path violations wake the agent. | `<home_dir>/scripts/` (canonicalize + component prefix). Validation failure fires the agent without context. |
+| Path allowlist | `<home_dir>/scripts/` (canonicalize + component prefix), same rules as `pre_script.argv[0]`. A violating path is rejected when the job is created or updated; a job that reaches a fire with one anyway (persisted before the check, or hand-edited) does not run the script and wakes the agent. | `<home_dir>/scripts/` (canonicalize + component prefix). Validation failure fires the agent without context. |
 | Use case | Skip the LLM call when there's nothing new. Save tokens. | Feed deterministic data into the prompt. Reduce hallucination on numbers/diffs. |
 
 Both can coexist on the same `[action]`. A common pattern is "wake-gate the
@@ -349,6 +353,7 @@ Hard caps and validation rules enforced at job-create / job-update time:
 | Webhook host | not on the SSRF blocklist |
 | `local_file.path` | non-empty, workspace-relative, no `..` |
 | `pre_script.argv[0]` | resolves under `<home_dir>/scripts/` |
+| `pre_check_script` | resolves under `<home_dir>/scripts/` |
 | `pre_script.env` keys | none from the dynamic-linker / `PATH` / `IFS` denylist |
 | Pre-script timeout | 60 s wall-clock |
 | Wake-gate timeout | 30 s wall-clock |

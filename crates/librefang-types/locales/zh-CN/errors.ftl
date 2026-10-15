@@ -33,6 +33,7 @@ api-error-manifest-too-large = 清单文件过大（最大 1MB）
 api-error-manifest-invalid-format = 无效的清单格式
 api-error-manifest-signature-mismatch = 签名清单内容与 manifest_toml 不匹配
 api-error-manifest-signature-failed = 清单签名验证失败
+api-error-manifest-signed-template-conflict = signed_manifest 不能与 template 同时使用；请改为对内联 manifest_toml 签名
 
 # Auth errors
 api-error-auth-invalid-key = 无效的 API 密钥
@@ -91,3 +92,7 @@ api-error-rate-limited = 请求频率超限，请稍后重试。
 # typed MemoryRouteError-style helper. Without this key, every `t_args("api-error-generic", …)`
 # call returns the literal key as the response body and `$error` interpolation never runs.
 api-error-generic = 错误: { $error }
+api-error-agent-manifest-conflict = 清单已过期：在您加载后，其他人保存了此智能体。请重新加载并再次应用您的更改。
+
+api-error-validation-avatar-url-invalid = 头像 URL 必须是此守护进程为该 agent 提供的头像路由，或留空。请上传图片，而不是链接到它。
+api-error-validation-color-invalid = 颜色必须是以 '#' 开头的十六进制代码

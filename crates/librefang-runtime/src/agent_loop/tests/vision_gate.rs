@@ -73,6 +73,7 @@ impl LlmDriver for RecordingDriver {
     async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
         self.seen.lock().unwrap().push(request);
         Ok(CompletionResponse {
+            text_synthesized_from_thinking: false,
             content: vec![ContentBlock::Text {
                 text: "I can see it.".to_string(),
                 provider_metadata: None,
@@ -172,6 +173,7 @@ impl librefang_kernel_handle::TaskQueue for VisionKernel {
         _: &str,
         _: Option<&str>,
         _: Option<&str>,
+        _: &librefang_kernel_handle::TaskPostOptions,
     ) -> Result<String, librefang_kernel_handle::KernelOpError> {
         Err("not used".into())
     }

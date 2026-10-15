@@ -18,7 +18,9 @@ use crate::triggers::TriggerEngine;
 use librefang_memory::agent_tables::AGENT_SCOPED_TABLES;
 use librefang_memory::MemorySubstrate;
 use librefang_types::agent::{AgentEntry, AgentId};
-use librefang_types::agent_type_store::{agent_type_path_in, validate_agent_type_name};
+use librefang_types::agent_type_store::{
+    agent_type_path_in, validate_agent_type_name, SAVED_FROM_AGENT_METADATA_KEY,
+};
 use librefang_types::config::KernelConfig;
 use std::collections::HashSet;
 use std::ffi::OsStr;
@@ -62,6 +64,14 @@ pub struct PurgeReport {
     pub workspace_shared: bool,
     /// An agent-type template of the same name was deleted.
     pub agent_type_removed: bool,
+    /// A stored avatar image under `<home>/avatars/` was deleted (#8339).
+    ///
+    /// Keyed by `AgentId`, and the default id is derived deterministically
+    /// from the agent's name — so without this, a new agent later spawned
+    /// under the purged name would inherit the old agent's picture, which is
+    /// the same name-collision failure [`Self::cron_jobs_removed`] exists to
+    /// prevent and rather more visible.
+    pub avatar_removed: bool,
     /// Cron jobs owned by the purged agent id(s) were removed from
     /// `<home>/data/cron_jobs.json`.
     ///
@@ -145,6 +155,29 @@ pub struct PurgeOutcome {
     pub report: PurgeReport,
     /// Every step that failed, with the reason.
     pub failures: Vec<String>,
+}
+
+/// Whether `path` is an agent type the operator saved from `agent_name`.
+///
+/// `save-as-agent-type` records the source agent's name in the saved type's
+/// manifest `metadata` ([`SAVED_FROM_AGENT_METADATA_KEY`]). Such a type shares
+/// its source's name by design, so [`plan_purge`] must not treat it as a shadow
+/// of the agent and delete it.
+///
+/// A file that is absent, unreadable or not a manifest reports `false` and stays
+/// on the delete path, exactly as before this provenance existed.
+fn is_saved_agent_type_snapshot(path: &Path, agent_name: &str) -> bool {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return false;
+    };
+    let Ok(value) = toml::from_str::<toml::Value>(&text) else {
+        return false;
+    };
+    value
+        .get("metadata")
+        .and_then(|metadata| metadata.get(SAVED_FROM_AGENT_METADATA_KEY))
+        .and_then(toml::Value::as_str)
+        == Some(agent_name)
 }
 
 /// Read-only preview of what [`purge_agent`] would remove for `agent_name`.
@@ -373,13 +406,24 @@ pub fn plan_purge(substrate: &MemorySubstrate, cfg: &KernelConfig, agent_name: &
     // `validate_agent_type_name` governs filenames in the agent-type store, so
     // a name it rejects cannot name a file there. That is not a purge failure:
     // there is simply nothing to look for, and the rest of the purge runs.
+    //
+    // A type the operator saved *from* this agent is exempt: `save-as-agent-type`
+    // lets it share the agent's name on purpose (the type is the reusable copy,
+    // not a shadow), and it records that origin in its manifest metadata. Purging
+    // the agent must not delete the copy the operator made from it.
     let agent_type = validate_agent_type_name(agent_name)
         .ok()
         .map(|()| agent_type_path_in(home, agent_name))
-        .filter(|p| p.is_file());
+        .filter(|p| p.is_file() && !is_saved_agent_type_snapshot(p, agent_name));
     if agent_type.is_some() {
         preview.agent_type_removed = true;
     }
+
+    // Same id set the execution pass uses, so `--dry-run` and the run agree.
+    let avatars_dir = cfg.effective_avatars_dir();
+    preview.avatar_removed = purge_ids
+        .iter()
+        .any(|id| librefang_types::media::find_avatar(&avatars_dir, &id.to_string()).is_some());
 
     PurgePlan {
         preview,
@@ -547,7 +591,42 @@ pub fn purge_agent(
         }
     }
 
+    // Every id this purge attributed to the name, not just the roster one:
+    // an avatar set by an earlier incarnation of the same name is residue of
+    // exactly the kind this command exists to clear, and the deterministic
+    // `AgentId::from_name` means the next agent of that name would find it.
+    let avatars_dir = cfg.effective_avatars_dir();
+    for id in avatar_purge_ids(&plan) {
+        let (removed, errors) =
+            librefang_types::media::remove_avatars_reporting(&avatars_dir, &id.to_string());
+        if removed > 0 {
+            report.avatar_removed = true;
+        }
+        // Recorded like every other step above: "nothing was stored" and "the
+        // directory would not give the file up" both leave `avatar_removed`
+        // false, and only these lines tell the operator which one happened.
+        // `plan_purge` predicts from `find_avatar` alone, so a refusal here is
+        // exactly where a `--dry-run` and the run would otherwise disagree
+        // with nothing said.
+        for (path, error) in errors {
+            failures.push(format!("remove avatar {}: {error}", path.display()));
+        }
+    }
+
     PurgeOutcome { report, failures }
+}
+
+/// Every agent id whose avatar this purge should clear.
+///
+/// The roster id plus every orphan id the plan attributed to the name, deduplicated because a roster entry spawned under the name-derived UUID appears in both.
+fn avatar_purge_ids(plan: &PurgePlan) -> Vec<AgentId> {
+    let mut ids: Vec<AgentId> = plan.roster_agent_id.into_iter().collect();
+    for id in &plan.orphan_agent_ids {
+        if !ids.contains(id) {
+            ids.push(*id);
+        }
+    }
+    ids
 }
 
 /// Reject a name that would not stay put when joined onto a directory.
@@ -860,6 +939,86 @@ mod tests {
         assert!(outcome.report.agent_type_removed);
         assert!(!home.path().join("workspaces/agents/alpha").exists());
         assert!(!agent_type_path_in(home.path(), "alpha").exists());
+    }
+
+    /// A type the operator saved from this agent (`save-as-agent-type`) records
+    /// its origin in the manifest metadata and deliberately shares the agent's
+    /// name. Purge must leave it: it is the reusable copy, not a trace of the
+    /// agent, and the same-name deletion below exists for a shadowing type.
+    #[test]
+    fn it_keeps_an_agent_type_saved_from_the_agent() {
+        let home = home_with(&["alpha"]);
+        let saved = agent_type_path_in(home.path(), "alpha");
+        std::fs::write(
+            &saved,
+            format!("[metadata]\n{SAVED_FROM_AGENT_METADATA_KEY} = \"alpha\"\n"),
+        )
+        .unwrap();
+        let substrate = MemorySubstrate::open_in_memory(0.01).unwrap();
+
+        let outcome = purge_agent(&substrate, &cfg_for(&home), "alpha");
+
+        assert!(outcome.failures.is_empty(), "{:?}", outcome.failures);
+        assert!(outcome.report.workspace_removed);
+        assert!(
+            !outcome.report.agent_type_removed,
+            "a snapshot saved from the agent must survive its purge"
+        );
+        assert!(saved.exists());
+    }
+
+    /// The exemption is keyed to the source agent: a type saved from *another*
+    /// agent is still removed, so the guard cannot be widened by putting any
+    /// provenance in the file.
+    #[test]
+    fn a_type_saved_from_a_different_agent_is_still_removed() {
+        let home = home_with(&["alpha"]);
+        let saved = agent_type_path_in(home.path(), "alpha");
+        std::fs::write(
+            &saved,
+            format!("[metadata]\n{SAVED_FROM_AGENT_METADATA_KEY} = \"beta\"\n"),
+        )
+        .unwrap();
+        let substrate = MemorySubstrate::open_in_memory(0.01).unwrap();
+
+        let outcome = purge_agent(&substrate, &cfg_for(&home), "alpha");
+
+        assert!(outcome.failures.is_empty(), "{:?}", outcome.failures);
+        assert!(outcome.report.agent_type_removed);
+        assert!(!saved.exists());
+    }
+
+    /// A filesystem that refuses the unlink is reported, not swallowed.
+    ///
+    /// `plan_purge` predicts the avatar from `find_avatar` alone, so a refusal
+    /// here is exactly where a `--dry-run` and the run disagree and the operator
+    /// gets no line explaining why — the failure this pins. The avatar path is a
+    /// non-empty directory so `remove_file` refuses it portably (EISDIR)
+    /// whatever the test user's privileges, which a `chmod` would not.
+    ///
+    /// Sabotage: reverting to `remove_avatars` (which drops the error) leaves
+    /// `failures` empty and fails the assertion below.
+    #[test]
+    fn a_refused_avatar_removal_is_reported() {
+        let home = home_with(&["alpha"]);
+        let substrate = MemorySubstrate::open_in_memory(0.01).unwrap();
+        let id = AgentId::from_name("alpha");
+        seed_agent_rows(&substrate, "alpha", id);
+        delete_roster_row_only(&substrate, id);
+
+        let cfg = cfg_for(&home);
+        let avatars_dir = cfg.effective_avatars_dir();
+        std::fs::create_dir_all(&avatars_dir).unwrap();
+        let blocked = librefang_types::media::avatar_path(&avatars_dir, &id.to_string(), "png");
+        std::fs::create_dir_all(blocked.join("keep")).unwrap();
+
+        let outcome = purge_agent(&substrate, &cfg, "alpha");
+
+        assert!(
+            outcome.failures.iter().any(|f| f.contains("remove avatar")),
+            "a refused avatar removal must be reported, got {:?}",
+            outcome.failures
+        );
     }
 
     #[test]

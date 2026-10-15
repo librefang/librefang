@@ -10,7 +10,7 @@
 
 use librefang_types::message::{ContentBlock, Message, MessageContent};
 use librefang_types::tool::ToolDefinition;
-use tracing::{debug, warn};
+use tracing::{info, warn};
 
 /// Recovery stage that was applied.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -88,7 +88,8 @@ pub fn recover_from_overflow(
         let keep = 10.min(messages.len());
         let target_remove = messages.len() - keep;
         if target_remove > 0 {
-            debug!(
+            // `info!` rather than `debug!`: this is the most common recovery stage and it drops history, so it should show up at the level operators run with when they investigate a shrinking history, not only under full debug output (#8519).
+            info!(
                 estimated_tokens = estimated,
                 target_remove, "Stage 1: moderate trim, preserving pinned messages"
             );

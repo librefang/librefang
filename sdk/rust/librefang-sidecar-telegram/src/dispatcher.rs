@@ -39,6 +39,18 @@ pub(crate) fn is_message_not_modified(e: &Error) -> bool {
     matches!(e, Error::Api { code, description, .. } if *code == 400 && description.contains("message is not modified"))
 }
 
+/// Telegram refused `sendVoice` because the recipient restricts who may send them voice messages (Privacy and Security → Voice Messages → "My contacts" / "Nobody").
+/// A bot is never one of the user's contacts, so the refusal is permanent for that chat, while `sendDocument` sits behind a different gate and still delivers the same audio as a playable file (#8584).
+/// Matched on the error text rather than on the status code, so a throttle (429) or a server error (5xx) keeps its own retry semantics instead of being re-sent as a document.
+pub(crate) fn is_voice_messages_forbidden(e: &Error) -> bool {
+    matches!(e, Error::Api { description, .. } if description.contains("VOICE_MESSAGES_FORBIDDEN"))
+}
+
+/// A downgrade that nobody can see is its own trap: say which path actually served the send.
+fn log_voice_downgrade(chat_id: i64) {
+    eprintln!("[telegram] sendVoice refused with VOICE_MESSAGES_FORBIDDEN for chat {chat_id}; resending the same audio via sendDocument");
+}
+
 /// Prepare a caption for sending: format → sanitize → truncate to the caption limit. Returns `None` for None/empty input.
 fn prepare_caption(raw: Option<&str>) -> Option<String> {
     let raw = raw.map(str::trim).filter(|s| !s.is_empty())?;
@@ -201,9 +213,11 @@ pub async fn send_text_counting(
 ///
 /// Blocks first: Telegram runs no parser over a block's text, so quoted content cannot turn
 /// itself into markup and code samples keep their angle brackets. The sanitised Markdown
-/// string is kept only as a guard — if the converter ever returned nothing for text that was
-/// not empty, sending it would deliver an empty message, and a lower-fidelity message beats a
-/// blank one. `None` means the text does not fit the rich limit at all and the caller should
+/// string is the fallback when the converter returns nothing for text that was not empty:
+/// that guards against a converter bug, and it is also the reachable path for text whose whole
+/// content is a construct Telegram refuses to receive empty (a bare `## `, an empty fence, a
+/// lone `> `) — see `prepare_rich_blocks`. Telegram refuses the `markdown` body for those too,
+/// so they end on the HTML path; a lower-fidelity message still beats a blank one. `None` means the text does not fit the rich limit at all and the caller should
 /// chunk it through the legacy pipeline.
 pub(crate) fn rich_message_body(text: &str) -> Option<serde_json::Value> {
     if let Some(blocks) = crate::format::prepare_rich_blocks(text) {
@@ -403,9 +417,19 @@ pub async fn dispatch_content(
                 .and_then(Value::as_str)
                 .unwrap_or("file");
             if is_voice_filename(filename) {
-                client
+                match client
                     .send_voice_url(chat_id, url, None, None, thread_id)
-                    .await?;
+                    .await
+                {
+                    Ok(_) => {}
+                    Err(e) if is_voice_messages_forbidden(&e) => {
+                        log_voice_downgrade(chat_id);
+                        client
+                            .send_document_url(chat_id, url, None, None, thread_id)
+                            .await?;
+                    }
+                    Err(e) => return Err(e),
+                }
             } else {
                 client
                     .send_document_url(chat_id, url, None, None, thread_id)
@@ -454,22 +478,11 @@ pub async fn dispatch_content(
                 .and_then(Value::as_str)
                 .ok_or_else(|| Error::Other("Voice.url missing".into()))?;
             let raw_caption = payload.get("caption").and_then(Value::as_str);
-            let formatted = prepare_caption(raw_caption);
-            match client
-                .send_voice_url(
-                    chat_id,
-                    url,
-                    formatted.as_deref(),
-                    Some(PARSE_MODE_HTML),
-                    thread_id,
-                )
-                .await
-            {
-                Ok(_) => {}
-                Err(e) if is_parse_entities_error(&e) => {
-                    let plain = truncate_raw_caption(raw_caption);
-                    client
-                        .send_voice_url(chat_id, url, plain.as_deref(), None, thread_id)
+            match send_captioned_voice_url(client, chat_id, url, raw_caption, thread_id).await {
+                Ok(()) => {}
+                Err(e) if is_voice_messages_forbidden(&e) => {
+                    log_voice_downgrade(chat_id);
+                    send_captioned_document_url(client, chat_id, url, raw_caption, thread_id)
                         .await?;
                 }
                 Err(e) => return Err(e),
@@ -780,7 +793,70 @@ fn build_media_group(items: &[Value]) -> Result<Value> {
     Ok(Value::Array(out))
 }
 
+/// `Voice` content: `sendVoice` with an HTML caption, retried with the plain caption when Telegram cannot parse the entities.
+async fn send_captioned_voice_url(
+    client: &BotClient,
+    chat_id: i64,
+    url: &str,
+    raw_caption: Option<&str>,
+    thread_id: Option<i64>,
+) -> Result<()> {
+    let formatted = prepare_caption(raw_caption);
+    match client
+        .send_voice_url(
+            chat_id,
+            url,
+            formatted.as_deref(),
+            Some(PARSE_MODE_HTML),
+            thread_id,
+        )
+        .await
+    {
+        Ok(_) => Ok(()),
+        Err(e) if is_parse_entities_error(&e) => {
+            let plain = truncate_raw_caption(raw_caption);
+            client
+                .send_voice_url(chat_id, url, plain.as_deref(), None, thread_id)
+                .await
+                .map(drop)
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// The `sendDocument` counterpart of [`send_captioned_voice_url`], used when the recipient refuses voice messages so the caption travels with the audio rather than being dropped.
+async fn send_captioned_document_url(
+    client: &BotClient,
+    chat_id: i64,
+    url: &str,
+    raw_caption: Option<&str>,
+    thread_id: Option<i64>,
+) -> Result<()> {
+    let formatted = prepare_caption(raw_caption);
+    match client
+        .send_document_url(
+            chat_id,
+            url,
+            formatted.as_deref(),
+            Some(PARSE_MODE_HTML),
+            thread_id,
+        )
+        .await
+    {
+        Ok(_) => Ok(()),
+        Err(e) if is_parse_entities_error(&e) => {
+            let plain = truncate_raw_caption(raw_caption);
+            client
+                .send_document_url(chat_id, url, plain.as_deref(), None, thread_id)
+                .await
+                .map(drop)
+        }
+        Err(e) => Err(e),
+    }
+}
+
 /// Inline file bytes — detect Ogg/Opus magic and route to sendVoice, else sendDocument.
+/// A recipient who refuses voice messages gets the same bytes through sendDocument instead (#8584).
 async fn dispatch_filedata(
     client: &BotClient,
     chat_id: i64,
@@ -794,16 +870,31 @@ async fn dispatch_filedata(
             .as_deref()
             .map(|m| m == "audio/ogg" || m == "audio/opus")
             .unwrap_or(false);
-    let (method, field) = if is_voice {
-        ("sendVoice", "voice")
-    } else {
-        ("sendDocument", "document")
-    };
+    if is_voice {
+        // The upload consumes its bytes, and the document downgrade needs them again.
+        match client
+            .send_multipart(
+                "sendVoice",
+                chat_id,
+                "voice",
+                filename.clone(),
+                bytes.clone(),
+                mime_type.clone(),
+                vec![],
+                thread_id,
+            )
+            .await
+        {
+            Ok(_) => return Ok(()),
+            Err(e) if is_voice_messages_forbidden(&e) => log_voice_downgrade(chat_id),
+            Err(e) => return Err(e),
+        }
+    }
     client
         .send_multipart(
-            method,
+            "sendDocument",
             chat_id,
-            field,
+            "document",
             filename,
             bytes,
             mime_type,
@@ -884,9 +975,30 @@ mod tests {
             let mut seen = Vec::new();
             for (status, body) in responses {
                 let (mut stream, _) = listener.accept().expect("accept mock request");
+                // Read the whole request, not just the first segment: a multipart upload arrives as headers and body in separate writes, and answering before the body is drained makes the client see a reset instead of the response.
+                let mut raw = Vec::new();
                 let mut buf = [0_u8; 8192];
-                let read = stream.read(&mut buf).expect("read mock request");
-                let request = String::from_utf8_lossy(&buf[..read]).to_string();
+                loop {
+                    let read = stream.read(&mut buf).expect("read mock request");
+                    raw.extend_from_slice(&buf[..read]);
+                    let Some(head_end) = raw.windows(4).position(|w| w == b"\r\n\r\n") else {
+                        if read == 0 {
+                            break;
+                        }
+                        continue;
+                    };
+                    let body_len = raw.len() - (head_end + 4);
+                    let content_length = String::from_utf8_lossy(&raw[..head_end])
+                        .lines()
+                        .filter_map(|line| line.split_once(':'))
+                        .find(|(name, _)| name.trim().eq_ignore_ascii_case("content-length"))
+                        .and_then(|(_, value)| value.trim().parse::<usize>().ok())
+                        .unwrap_or(0);
+                    if read == 0 || body_len >= content_length {
+                        break;
+                    }
+                }
+                let request = String::from_utf8_lossy(&raw).to_string();
                 let line = request.lines().next().unwrap_or_default().to_string();
                 let payload = request
                     .split_once("\r\n\r\n")
@@ -1137,6 +1249,142 @@ mod tests {
         assert!(seen.iter().all(|(line, _)| line.contains("/sendMessage")));
         assert_eq!(delivered, 1, "one chunk reached the chat");
         assert!(error.is_some());
+    }
+
+    /// What Telegram answers `sendVoice` with when the recipient restricts voice messages to contacts (#8584).
+    const ERR_VOICE_FORBIDDEN: &str =
+        r#"{"ok":false,"error_code":400,"description":"Bad Request: VOICE_MESSAGES_FORBIDDEN"}"#;
+
+    #[test]
+    fn voice_messages_forbidden_is_recognised_only_by_its_description() {
+        let forbidden = Error::Api {
+            method: "sendVoice".into(),
+            code: 400,
+            description: ERR_VOICE_FORBIDDEN.into(),
+        };
+        assert!(is_voice_messages_forbidden(&forbidden));
+        for other in [
+            Error::Api {
+                method: "sendVoice".into(),
+                code: 400,
+                description: "Bad Request: chat not found".into(),
+            },
+            Error::Api {
+                method: "sendVoice".into(),
+                code: 429,
+                description: "Too Many Requests".into(),
+            },
+            Error::Other("VOICE_MESSAGES_FORBIDDEN".into()),
+        ] {
+            assert!(!is_voice_messages_forbidden(&other), "{other:?}");
+        }
+    }
+
+    /// The recipient refused voice notes: the audio and its caption must still arrive, as a document, instead of vanishing behind a WARN line.
+    #[test]
+    fn voice_content_refused_by_recipient_privacy_is_resent_as_a_document() {
+        let (root, server) = mock_bot_api(vec![(400, ERR_VOICE_FORBIDDEN), (200, OK_MESSAGE)]);
+        let client = BotClient::with_roots("t", &root, &root).expect("client");
+        let runtime = tokio::runtime::Runtime::new().expect("runtime");
+        runtime
+            .block_on(dispatch_content(
+                &client,
+                42,
+                &json!({"Voice": {"url": "https://example.com/tts.ogg", "caption": "your answer"}}),
+                Some(7),
+            ))
+            .expect("the downgrade delivers the audio");
+
+        let seen = server.join().expect("mock thread");
+        assert_eq!(seen.len(), 2, "{seen:?}");
+        assert!(seen[0].0.contains("/sendVoice"), "{}", seen[0].0);
+        assert!(seen[1].0.contains("/sendDocument"), "{}", seen[1].0);
+        let sent: Value = serde_json::from_str(&seen[1].1).expect("body is JSON");
+        assert_eq!(sent["document"], "https://example.com/tts.ogg");
+        assert_eq!(sent["caption"].as_str().map(str::trim), Some("your answer"));
+        assert_eq!(sent["parse_mode"], PARSE_MODE_HTML);
+        assert_eq!(sent["message_thread_id"], 7);
+    }
+
+    #[test]
+    fn voice_file_url_refused_by_recipient_privacy_is_resent_as_a_document() {
+        let (root, server) = mock_bot_api(vec![(400, ERR_VOICE_FORBIDDEN), (200, OK_MESSAGE)]);
+        let client = BotClient::with_roots("t", &root, &root).expect("client");
+        let runtime = tokio::runtime::Runtime::new().expect("runtime");
+        runtime
+            .block_on(dispatch_content(
+                &client,
+                42,
+                &json!({"File": {"url": "https://example.com/note.opus", "filename": "note.opus"}}),
+                None,
+            ))
+            .expect("the downgrade delivers the audio");
+
+        let seen = server.join().expect("mock thread");
+        assert_eq!(seen.len(), 2, "{seen:?}");
+        assert!(seen[0].0.contains("/sendVoice"), "{}", seen[0].0);
+        assert!(seen[1].0.contains("/sendDocument"), "{}", seen[1].0);
+        let sent: Value = serde_json::from_str(&seen[1].1).expect("body is JSON");
+        assert_eq!(sent["document"], "https://example.com/note.opus");
+    }
+
+    /// The path `channel_send(file_path = "….ogg")` takes: inline Ogg/Opus bytes.
+    #[test]
+    fn inline_ogg_opus_refused_by_recipient_privacy_is_uploaded_as_a_document() {
+        let mut body = b"OpusHead".to_vec();
+        body.resize(19, 0);
+        let voice = ogg_page(&[19], &body);
+        let data: Vec<Value> = voice.iter().map(|b| json!(b)).collect();
+
+        let (root, server) = mock_bot_api(vec![(400, ERR_VOICE_FORBIDDEN), (200, OK_MESSAGE)]);
+        let client = BotClient::with_roots("t", &root, &root).expect("client");
+        let runtime = tokio::runtime::Runtime::new().expect("runtime");
+        runtime
+            .block_on(dispatch_content(
+                &client,
+                42,
+                &json!({"FileData": {"data": data, "filename": "tts.ogg", "mime_type": "audio/ogg"}}),
+                None,
+            ))
+            .expect("the downgrade delivers the audio");
+
+        let seen = server.join().expect("mock thread");
+        assert_eq!(seen.len(), 2, "{seen:?}");
+        assert!(seen[0].0.contains("/sendVoice"), "{}", seen[0].0);
+        assert!(seen[0].1.contains(r#"name="voice""#), "{}", seen[0].1);
+        assert!(seen[1].0.contains("/sendDocument"), "{}", seen[1].0);
+        assert!(seen[1].1.contains(r#"name="document""#), "{}", seen[1].1);
+        assert!(seen[1].1.contains(r#"filename="tts.ogg""#), "{}", seen[1].1);
+        assert!(
+            seen[1].1.contains("OpusHead"),
+            "the same bytes must be re-sent"
+        );
+    }
+
+    /// Any other `sendVoice` refusal surfaces unchanged: the downgrade is scoped to the recipient's voice-message setting, not to every 400.
+    #[test]
+    fn other_voice_refusals_are_not_downgraded() {
+        let (root, server) = mock_bot_api(vec![(
+            400,
+            r#"{"ok":false,"error_code":400,"description":"Bad Request: chat not found"}"#,
+        )]);
+        let client = BotClient::with_roots("t", &root, &root).expect("client");
+        let runtime = tokio::runtime::Runtime::new().expect("runtime");
+        let error = runtime
+            .block_on(dispatch_content(
+                &client,
+                42,
+                &json!({"Voice": {"url": "https://example.com/tts.ogg"}}),
+                None,
+            ))
+            .expect_err("the refusal must surface");
+
+        assert!(
+            matches!(&error, Error::Api { method, code: 400, .. } if method == "sendVoice"),
+            "expected the sendVoice refusal itself, got {error:?}"
+        );
+        let seen = server.join().expect("mock thread");
+        assert_eq!(seen.len(), 1);
     }
 
     fn ogg_page(segment_table: &[u8], body: &[u8]) -> Vec<u8> {

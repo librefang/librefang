@@ -53,6 +53,7 @@ class LibreFang {
     this.sessions = new SessionsResource(this);
     this.skills = new SkillsResource(this);
     this.system = new SystemResource(this);
+    this.tasks = new TasksResource(this);
     this.tools = new ToolsResource(this);
     this.users = new UsersResource(this);
     this.vault = new VaultResource(this);
@@ -209,6 +210,18 @@ class AgentsResource {
     return this._c._request("PATCH", `/api/agents/${id}`, data, undefined);
   }
 
+  async serveAgentAvatar(id) {
+    return this._c._request("GET", `/api/agents/${id}/avatar`);
+  }
+
+  async uploadAgentAvatar(id, body, contentType) {
+    return this._c._request("POST", `/api/agents/${id}/avatar`, body, undefined, contentType || "application/octet-stream");
+  }
+
+  async deleteAgentAvatar(id) {
+    return this._c._request("DELETE", `/api/agents/${id}/avatar`);
+  }
+
   async getAgentChannels(id) {
     return this._c._request("GET", `/api/agents/${id}/channels`);
   }
@@ -281,6 +294,14 @@ class AgentsResource {
     return this._c._request("GET", `/api/agents/${id}/manifest`);
   }
 
+  async listAgentManifestHistory(id, query) {
+    return this._c._request("GET", `/api/agents/${id}/manifest-history`, undefined, query);
+  }
+
+  async restoreAgentManifestVersion(id, version_id) {
+    return this._c._request("POST", `/api/agents/${id}/manifest-history/${version_id}/restore`);
+  }
+
   async getAgentMcpServers(id) {
     return this._c._request("GET", `/api/agents/${id}/mcp_servers`);
   }
@@ -331,6 +352,10 @@ class AgentsResource {
 
   async listAgentRuntime(id) {
     return this._c._request("GET", `/api/agents/${id}/runtime`);
+  }
+
+  async saveAgentAsAgentType(id, data) {
+    return this._c._request("POST", `/api/agents/${id}/save-as-agent-type`, data, undefined);
   }
 
   async getAgentSession(id, query) {
@@ -1774,6 +1799,16 @@ class SystemResource {
   }
 }
 
+// ── Tasks Resource
+
+class TasksResource {
+  constructor(client) { this._c = client; }
+
+  async taskQueuePostRoot(data) {
+    return this._c._request("POST", "/api/tasks", data, undefined);
+  }
+}
+
 // ── Tools Resource
 
 class ToolsResource {
@@ -1801,6 +1836,10 @@ class UsersResource {
     return this._c._request("POST", "/api/users/import", data, undefined);
   }
 
+  async serveMyAvatar() {
+    return this._c._request("GET", "/api/users/me/avatar");
+  }
+
   async getUser(name) {
     return this._c._request("GET", `/api/users/${name}`);
   }
@@ -1811,6 +1850,22 @@ class UsersResource {
 
   async deleteUser(name) {
     return this._c._request("DELETE", `/api/users/${name}`);
+  }
+
+  async serveUserAvatar(name) {
+    return this._c._request("GET", `/api/users/${name}/avatar`);
+  }
+
+  async uploadUserAvatar(name, body, contentType) {
+    return this._c._request("POST", `/api/users/${name}/avatar`, body, undefined, contentType || "application/octet-stream");
+  }
+
+  async deleteUserAvatar(name) {
+    return this._c._request("DELETE", `/api/users/${name}/avatar`);
+  }
+
+  async updateUserIdentity(name, data) {
+    return this._c._request("PATCH", `/api/users/${name}/identity`, data, undefined);
   }
 
   async getUserPolicy(name) {

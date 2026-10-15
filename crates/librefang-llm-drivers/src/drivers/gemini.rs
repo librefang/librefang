@@ -624,6 +624,7 @@ fn convert_response(resp: GeminiResponse) -> Result<CompletionResponse, LlmError
         .unwrap_or_default();
 
     Ok(CompletionResponse {
+        text_synthesized_from_thinking: false,
         content,
         stop_reason,
         tool_calls,
@@ -963,6 +964,7 @@ pub(crate) async fn stream_gemini_sse(
         .await;
 
     Ok(CompletionResponse {
+        text_synthesized_from_thinking: false,
         content,
         stop_reason,
         tool_calls,
@@ -1498,6 +1500,7 @@ impl LlmDriver for GeminiDriver {
                 .await;
 
             return Ok(CompletionResponse {
+                text_synthesized_from_thinking: false,
                 content,
                 stop_reason,
                 tool_calls,

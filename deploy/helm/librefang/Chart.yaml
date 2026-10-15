@@ -1,0 +1,23 @@
+apiVersion: v2
+name: librefang
+description: >-
+  LibreFang agent daemon as a single-replica StatefulSet. Community chart that
+  mirrors the Kustomize reference in deploy/kubernetes/.
+type: application
+# Chart version: bump on every chart change. Independent of appVersion.
+version: 0.1.0
+# The LibreFang release the chart deploys by default; used as the image tag when
+# `image.tag` is empty. It is the ghcr.io tag, which has NO `v` prefix: release.yml
+# pushes `:$VERSION` with the `v` stripped, so `:v2026.9.19` does not exist.
+appVersion: "2026.9.19"
+# Pod Security `restricted` needs the PSA controller (GA 1.25);
+# StatefulSet persistentVolumeClaimRetentionPolicy is on by default from 1.27.
+kubeVersion: ">=1.27.0-0"
+home: https://github.com/librefang/librefang
+sources:
+  - https://github.com/librefang/librefang/tree/main/deploy/helm/librefang
+  - https://github.com/librefang/librefang/tree/main/deploy/kubernetes
+keywords:
+  - librefang
+  - agents
+  - statefulset

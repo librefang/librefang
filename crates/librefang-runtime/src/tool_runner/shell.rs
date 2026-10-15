@@ -18,7 +18,7 @@ use super::error::{ToolError, ToolResult};
 use std::path::Path;
 use tracing::warn;
 
-fn resolve_timeout(
+pub(super) fn resolve_timeout(
     input: &serde_json::Value,
     exec_policy: Option<&librefang_types::config::ExecPolicy>,
 ) -> u64 {
@@ -34,6 +34,65 @@ async fn kill_child_tree(pid: Option<u32>, reason: &str) {
     if let Err(e) = crate::subprocess_sandbox::kill_process_tree(pid, 0).await {
         warn!(pid, reason, error = %e, "failed to kill shell process tree");
     }
+}
+
+/// Marks a registered shell child `Finished` when it goes out of scope, so every exit path of `tool_shell_exec` records it: normal exit, interrupt, timeout, a collect error, and the future being dropped by the agent loop's outer tool timeout.
+/// Without it only the normal-exit path called `mark_finished`, and `Running` entries are never pruned, so each timed-out or interrupted command stayed `Running` forever.
+struct RegistryGuard<'a> {
+    reg: Option<&'a crate::process_registry::ProcessRegistry>,
+    pid: Option<u32>,
+    exit_code: i32,
+}
+
+impl Drop for RegistryGuard<'_> {
+    fn drop(&mut self) {
+        if let (Some(reg), Some(pid)) = (self.reg, self.pid) {
+            reg.mark_finished(pid, self.exit_code);
+        }
+    }
+}
+
+/// Read `r` to EOF, keeping at most `cap` bytes and counting the rest.
+/// Draining continues past the cap so the child never blocks on a full pipe, but the discarded bytes are not held in memory.
+async fn read_capped<R: tokio::io::AsyncRead + Unpin>(
+    mut r: R,
+    cap: usize,
+) -> std::io::Result<(Vec<u8>, u64)> {
+    use tokio::io::AsyncReadExt;
+    let mut kept = Vec::new();
+    let mut total: u64 = 0;
+    let mut chunk = [0u8; 8192];
+    loop {
+        let n = r.read(&mut chunk).await?;
+        if n == 0 {
+            break;
+        }
+        total += n as u64;
+        if kept.len() < cap {
+            let take = (cap - kept.len()).min(n);
+            kept.extend_from_slice(&chunk[..take]);
+        }
+    }
+    Ok((kept, total))
+}
+
+/// Render one captured stream: spill it like any large output, then say how many bytes were never captured.
+fn render_stream(kept: &[u8], total: u64, spill_threshold: u64) -> String {
+    let text = String::from_utf8_lossy(kept).into_owned();
+    let mut rendered = super::spill::spill_or_passthrough(
+        "shell_exec",
+        text,
+        spill_threshold,
+        crate::artifact_store::DEFAULT_MAX_ARTIFACT_BYTES,
+    );
+    let omitted = total.saturating_sub(kept.len() as u64);
+    if omitted > 0 {
+        rendered.push_str(&format!(
+            "\n[... {omitted} bytes omitted: output exceeded the {} byte capture limit]",
+            kept.len()
+        ));
+    }
+    rendered
 }
 
 /// `untrusted_env` is the attacker-controllable passthrough list (a hand's
@@ -154,7 +213,7 @@ pub(super) async fn tool_shell_exec(
     #[cfg(unix)]
     cmd.process_group(0);
 
-    let child = match cmd.spawn() {
+    let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => {
             return Err(ToolError::Upstream {
@@ -168,6 +227,11 @@ pub(super) async fn tool_shell_exec(
     if let (Some(reg), Some(pid)) = (process_registry, child_pid) {
         reg.register(pid, command.to_string(), session_id);
     }
+    let mut reg_guard = RegistryGuard {
+        reg: process_registry,
+        pid: child_pid,
+        exit_code: -1,
+    };
 
     let deadline = tokio::time::Instant::now()
         .checked_add(std::time::Duration::from_secs(timeout_secs))
@@ -176,7 +240,28 @@ pub(super) async fn tool_shell_exec(
     let interrupt_clone = interrupt.clone();
     let mut interrupt_tick = tokio::time::interval(std::time::Duration::from_millis(100));
     interrupt_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    let wait_fut = child.wait_with_output();
+    // `wait_with_output` would buffer both pipes to EOF with no bound, so a chatty command could grow the daemon's memory by gigabytes before the deadline.
+    // Output past the artifact size limit can never be spilled and already collapsed to a short preview, so that limit is the natural capture ceiling per stream.
+    let capture_cap =
+        usize::try_from(crate::artifact_store::DEFAULT_MAX_ARTIFACT_BYTES).unwrap_or(usize::MAX);
+    let stdout_pipe = child.stdout.take();
+    let stderr_pipe = child.stderr.take();
+    let wait_fut = async {
+        let read_stdout = async {
+            match stdout_pipe {
+                Some(p) => read_capped(p, capture_cap).await,
+                None => Ok((Vec::new(), 0)),
+            }
+        };
+        let read_stderr = async {
+            match stderr_pipe {
+                Some(p) => read_capped(p, capture_cap).await,
+                None => Ok((Vec::new(), 0)),
+            }
+        };
+        let (out, err, status) = tokio::join!(read_stdout, read_stderr, child.wait());
+        Ok::<_, std::io::Error>((out?, err?, status?))
+    };
     tokio::pin!(wait_fut);
 
     let output = loop {
@@ -202,27 +287,12 @@ pub(super) async fn tool_shell_exec(
     };
 
     match output {
-        Ok(output) => {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            let exit_code = output.status.code().unwrap_or(-1);
+        Ok(((stdout, stdout_total), (stderr, stderr_total), status)) => {
+            let exit_code = status.code().unwrap_or(-1);
+            reg_guard.exit_code = exit_code;
 
-            if let (Some(reg), Some(pid)) = (process_registry, child_pid) {
-                reg.mark_finished(pid, exit_code);
-            }
-
-            let stdout_str = super::spill::spill_or_passthrough(
-                "shell_exec",
-                stdout.to_string(),
-                max_output as u64,
-                crate::artifact_store::DEFAULT_MAX_ARTIFACT_BYTES,
-            );
-            let stderr_str = super::spill::spill_or_passthrough(
-                "shell_exec",
-                stderr.to_string(),
-                max_output as u64,
-                crate::artifact_store::DEFAULT_MAX_ARTIFACT_BYTES,
-            );
+            let stdout_str = render_stream(&stdout, stdout_total, max_output as u64);
+            let stderr_str = render_stream(&stderr, stderr_total, max_output as u64);
 
             // Surface refused env names to the agent — with only the daemon-log
             // WARN, a credentialed CLI's downstream failure is near-impossible
@@ -466,5 +536,85 @@ mod tests {
     #[test]
     fn timeout_no_policy_with_input_override() {
         assert_eq!(resolve_timeout(&json!({"timeout_seconds": 120}), None), 120,);
+    }
+    #[tokio::test]
+    async fn read_capped_keeps_prefix_and_counts_rest() {
+        let data = vec![b'a'; 10 * 1024 * 1024];
+        let (kept, total) = read_capped(&data[..], 1024 * 1024).await.unwrap();
+        assert_eq!(kept.len(), 1024 * 1024);
+        assert_eq!(total, 10 * 1024 * 1024);
+    }
+
+    #[test]
+    fn render_stream_reports_omitted_bytes() {
+        let rendered = render_stream(b"abc", 10, 1_000_000);
+        assert!(rendered.starts_with("abc"), "{rendered}");
+        assert!(
+            rendered.contains("[... 7 bytes omitted: output exceeded the 3 byte capture limit]"),
+            "{rendered}"
+        );
+        assert_eq!(render_stream(b"abc", 3, 1_000_000), "abc");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn shell_exec_timeout_marks_registry_finished() {
+        let reg = crate::process_registry::ProcessRegistry::new();
+        let r = tool_shell_exec(
+            &json!({"command": "sleep 30", "timeout_seconds": 1}),
+            &[],
+            None,
+            None,
+            None,
+            Some(&reg),
+            None,
+        )
+        .await;
+        assert!(r.is_err(), "{r:?}");
+        assert!(reg.list_running().is_empty());
+        assert_eq!(reg.len(), 1);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn shell_exec_dropped_future_marks_registry_finished() {
+        let reg = crate::process_registry::ProcessRegistry::new();
+        let r = tokio::time::timeout(
+            std::time::Duration::from_millis(500),
+            tool_shell_exec(
+                &json!({"command": "sleep 30", "timeout_seconds": 30}),
+                &[],
+                None,
+                None,
+                None,
+                Some(&reg),
+                None,
+            ),
+        )
+        .await;
+        assert!(r.is_err(), "the outer timeout must elapse first");
+        assert!(reg.list_running().is_empty());
+        assert_eq!(reg.len(), 1);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn shell_exec_normal_exit_records_exit_code() {
+        let reg = crate::process_registry::ProcessRegistry::new();
+        let out = tool_shell_exec(
+            &json!({"command": "sh -c 'echo hi; exit 3'"}),
+            &[],
+            None,
+            None,
+            None,
+            Some(&reg),
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(out.starts_with("Exit code: 3"), "{out}");
+        assert!(out.contains("STDOUT:\nhi\n"), "{out}");
+        assert!(reg.list_running().is_empty());
+        assert_eq!(reg.len(), 1);
     }
 }

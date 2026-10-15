@@ -178,3 +178,61 @@ impl kernel_handle::CronControl for LibreFangKernel {
         Ok(())
     }
 }
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::super::super::LibreFangKernel;
+    use librefang_runtime::kernel_handle::CronControl;
+    use librefang_types::config::KernelConfig;
+
+    /// An agent-authored job must not be able to point the daemon-spawned wake gate at an executable outside `<home>/scripts/`.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn cron_create_rejects_pre_check_script_outside_scripts_allowlist() {
+        let dir = tempfile::tempdir().unwrap();
+        let home_dir = dir.path().to_path_buf();
+        std::fs::create_dir_all(home_dir.join("data")).unwrap();
+        std::fs::create_dir_all(home_dir.join("scripts")).unwrap();
+        let config = KernelConfig {
+            home_dir: home_dir.clone(),
+            data_dir: home_dir.join("data"),
+            ..KernelConfig::default()
+        };
+        let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+        let agent_id = kernel
+            .agents
+            .registry
+            .list()
+            .iter()
+            .find(|a| a.name == "assistant")
+            .expect("assistant should exist")
+            .id
+            .to_string();
+
+        let job_json = serde_json::json!({
+            "name": "pre-check-escape",
+            "schedule": { "kind": "cron", "expr": "0 * * * *" },
+            "action": {
+                "kind": "agent_turn",
+                "message": "hi",
+                "pre_check_script": "/bin/sh",
+            },
+        });
+        let err = kernel
+            .cron_create(&agent_id, job_json, None)
+            .await
+            .expect_err("pre_check_script outside <home>/scripts must be rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("pre_check_script") && msg.contains("allowlist"),
+            "got: {msg}"
+        );
+        assert!(kernel
+            .cron_list(&agent_id)
+            .await
+            .unwrap()
+            .iter()
+            .all(|j| j["name"].as_str() != Some("pre-check-escape")));
+
+        kernel.shutdown();
+    }
+}

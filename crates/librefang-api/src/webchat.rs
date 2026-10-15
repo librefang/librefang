@@ -133,18 +133,18 @@ fn dashboard_sync_error_path(home_dir: &std::path::Path) -> std::path::PathBuf {
 /// is skipped entirely so the compile-time assets win regardless of whatever
 /// stale copy may still be sitting in `$LIBREFANG_HOME/dashboard/` from a
 /// previous sync.
-fn resolve_dashboard_file(
+async fn resolve_dashboard_file(
     home_dir: Option<&std::path::Path>,
     relative_path: &str,
 ) -> Option<Vec<u8>> {
-    resolve_dashboard_file_with_mode(home_dir, relative_path, embedded_only_mode())
+    resolve_dashboard_file_with_mode(home_dir, relative_path, embedded_only_mode()).await
 }
 
 /// Testable variant of [`resolve_dashboard_file`] that takes the
 /// embedded-only decision as a parameter instead of reading it from the
 /// environment. Keeps the public entry point ergonomic while letting unit
 /// tests exercise both branches deterministically.
-fn resolve_dashboard_file_with_mode(
+async fn resolve_dashboard_file_with_mode(
     home_dir: Option<&std::path::Path>,
     relative_path: &str,
     embedded_only: bool,
@@ -153,7 +153,8 @@ fn resolve_dashboard_file_with_mode(
     if !embedded_only {
         if let Some(home) = home_dir {
             let runtime_path = home.join("dashboard").join(relative_path);
-            if let Ok(data) = std::fs::read(&runtime_path) {
+            // `tokio::fs` runs the read on the blocking pool: a cold dashboard load fans out to dozens of asset requests, and a synchronous read on a slow `$LIBREFANG_HOME` (NFS, a macOS Docker volume) would stall a tokio worker per request.
+            if let Ok(data) = tokio::fs::read(&runtime_path).await {
                 return Some(data);
             }
         }
@@ -250,7 +251,7 @@ pub async fn locale_pl() -> impl IntoResponse {
 /// GET / — Serve the React dashboard shell.
 pub async fn webchat_page(State(state): State<Arc<crate::routes::AppState>>) -> impl IntoResponse {
     let home_dir = Some(state.kernel.home_dir().to_path_buf());
-    match resolve_dashboard_file(home_dir.as_deref(), "index.html") {
+    match resolve_dashboard_file(home_dir.as_deref(), "index.html").await {
         Some(data) => (
             [
                 (header::CONTENT_TYPE, "text/html; charset=utf-8"),
@@ -410,7 +411,7 @@ pub async fn react_asset(
 
     let asset_path = path.trim_start_matches('/');
     let home_dir = Some(state.kernel.home_dir().to_path_buf());
-    match resolve_dashboard_file(home_dir.as_deref(), asset_path) {
+    match resolve_dashboard_file(home_dir.as_deref(), asset_path).await {
         Some(data) => (
             [
                 (header::CONTENT_TYPE, content_type_for(asset_path)),
@@ -431,7 +432,8 @@ pub async fn react_asset(
                 .next()
                 .is_some_and(|s| s.contains('.'));
             if !has_ext && is_spa_route(asset_path) {
-                if let Some(index) = resolve_dashboard_file(home_dir.as_deref(), "index.html") {
+                if let Some(index) = resolve_dashboard_file(home_dir.as_deref(), "index.html").await
+                {
                     return ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], index)
                         .into_response();
                 }
@@ -730,20 +732,44 @@ mod tests {
         }
     }
 
-    #[test]
-    fn resolve_dashboard_prefers_runtime_dir_when_not_embedded_only() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn resolve_dashboard_prefers_runtime_dir_when_not_embedded_only() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let dashboard = tmp.path().join("dashboard");
         std::fs::create_dir_all(&dashboard).unwrap();
         let marker = b"runtime-dir-wins";
         std::fs::write(dashboard.join("test-marker.txt"), marker).unwrap();
 
-        let got = resolve_dashboard_file_with_mode(Some(tmp.path()), "test-marker.txt", false);
+        let got =
+            resolve_dashboard_file_with_mode(Some(tmp.path()), "test-marker.txt", false).await;
         assert_eq!(got.as_deref(), Some(marker.as_slice()));
     }
 
-    #[test]
-    fn resolve_dashboard_skips_runtime_dir_in_embedded_only_mode() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn resolve_dashboard_runtime_read_yields_to_the_runtime() {
+        // The runtime-dir read must go through the blocking pool rather than run inline on the worker: on a current-thread runtime a task spawned before the read only gets polled if the read yields.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dashboard = tmp.path().join("dashboard");
+        std::fs::create_dir_all(&dashboard).unwrap();
+        std::fs::write(dashboard.join("yield-marker.txt"), b"x").unwrap();
+
+        let ran = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let ran_task = ran.clone();
+        let handle = tokio::spawn(async move {
+            ran_task.store(true, std::sync::atomic::Ordering::SeqCst);
+        });
+        let got =
+            resolve_dashboard_file_with_mode(Some(tmp.path()), "yield-marker.txt", false).await;
+        assert_eq!(got.as_deref(), Some(b"x".as_slice()));
+        assert!(
+            ran.load(std::sync::atomic::Ordering::SeqCst),
+            "runtime-dir read must yield to other tasks while the file is read"
+        );
+        handle.await.unwrap();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn resolve_dashboard_skips_runtime_dir_in_embedded_only_mode() {
         // Put a file in the runtime dir that does NOT exist in the embedded
         // bundle — in embedded-only mode the resolver must ignore it and
         // return `None` instead of serving the stale runtime copy.
@@ -760,7 +786,8 @@ mod tests {
             Some(tmp.path()),
             "definitely-not-in-embedded-bundle.bin",
             true,
-        );
+        )
+        .await;
         assert!(
             got.is_none(),
             "embedded-only mode must not consult runtime dir"

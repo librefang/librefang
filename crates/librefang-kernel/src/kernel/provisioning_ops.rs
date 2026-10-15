@@ -84,7 +84,7 @@ impl LibreFangKernel {
                     };
                     let outcome = match self.agents.registry.find_by_name(&d.name) {
                         Some(entry) => self
-                            .update_manifest(entry.id, d.manifest.clone())
+                            .update_manifest(entry.id, d.manifest.clone(), "provisioning")
                             .map(|()| entry.id),
                         // Deliberately `spawn_agent`, not `spawn_agent_with_source`: recording the
                         // provisioning file as the agent's `source_toml_path` would point

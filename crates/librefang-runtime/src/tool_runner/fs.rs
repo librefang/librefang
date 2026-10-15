@@ -388,9 +388,11 @@ pub(super) async fn tool_file_read(
         });
     }
     use tokio::io::AsyncReadExt;
-    let alloc = (file_size.min(HARD_MAX_READ_BYTES)) as usize;
+    let alloc = (file_size.min(max_bytes)) as usize;
     let mut buf = Vec::with_capacity(alloc);
-    let mut reader = tokio::io::BufReader::new(file);
+    // The stat above is only a fast path: a file another process is appending to, or a FIFO that reports length 0, can deliver far more than it claimed.
+    // Bounding the read itself at one byte past the limit is what actually enforces `max_bytes`.
+    let mut reader = tokio::io::BufReader::new(file).take(max_bytes.saturating_add(1));
     reader
         .read_to_end(&mut buf)
         .await
@@ -398,6 +400,16 @@ pub(super) async fn tool_file_read(
             message: format!("Failed to read file '{}': {e}", resolved.display()),
             source: Some(Box::new(e)),
         })?;
+    if buf.len() as u64 > max_bytes {
+        return Err(ToolError::InvalidParameter {
+            name: "max_bytes",
+            reason: format!(
+                "File '{}' grew past the read limit of {} bytes while being read",
+                resolved.display(),
+                max_bytes
+            ),
+        });
+    }
     String::from_utf8(buf).map_err(|e| ToolError::InvalidParameter {
         name: "path",
         reason: format!(
@@ -469,22 +481,46 @@ pub(super) async fn tool_file_write(
             })?;
     }
     let tmp = resolved.with_extension(format!("{}.tmp", rand::random::<u64>()));
-    tokio::fs::write(&tmp, content)
+    // The rename replaces the target's inode, so the temp file must carry the existing file's mode or an edited `run.sh` silently loses its executable bit.
+    // Unix only: on Windows `Permissions` is just the readonly flag, and a readonly target already makes the rename fail.
+    #[cfg(unix)]
+    let existing_perms = tokio::fs::metadata(&resolved)
         .await
-        .map_err(|e| ToolError::Upstream {
+        .ok()
+        .filter(|m| m.is_file())
+        .map(|m| m.permissions());
+    // Every failure below removes the temp file, so a failed write (disk full) or rename (target is a directory) does not leave `<name>.<n>.tmp` debris behind on each retry.
+    if let Err(e) = tokio::fs::write(&tmp, content).await {
+        let _ = tokio::fs::remove_file(&tmp).await;
+        return Err(ToolError::Upstream {
             message: format!("Failed to write file '{}': {e}", resolved.display()),
             source: Some(Box::new(e)),
-        })?;
-    tokio::fs::rename(&tmp, &resolved)
-        .await
-        .map_err(|e| ToolError::Upstream {
+        });
+    }
+    #[cfg(unix)]
+    if let Some(perms) = existing_perms {
+        if let Err(e) = tokio::fs::set_permissions(&tmp, perms).await {
+            let _ = tokio::fs::remove_file(&tmp).await;
+            return Err(ToolError::Upstream {
+                message: format!(
+                    "Failed to preserve permissions of '{}': {e}",
+                    resolved.display()
+                ),
+                source: Some(Box::new(e)),
+            });
+        }
+    }
+    if let Err(e) = tokio::fs::rename(&tmp, &resolved).await {
+        let _ = tokio::fs::remove_file(&tmp).await;
+        return Err(ToolError::Upstream {
             message: format!(
                 "Failed to atomically rename '{}' -> '{}': {e}",
                 tmp.display(),
                 resolved.display()
             ),
             source: Some(Box::new(e)),
-        })?;
+        });
+    }
     Ok(format!(
         "Successfully wrote {} bytes to {}",
         content.len(),
@@ -545,12 +581,14 @@ pub(super) async fn tool_file_list(
         .take(limit.unwrap_or(DEFAULT_DIR_LIMIT))
         .collect();
     let mut out = limited.join("\n");
-    if limit.is_some() && skipped + limited.len() < total {
+    // The trailer is needed most when the caller passed no `limit`: the default cap truncates silently otherwise, and the model concludes the directory holds only what it was shown.
+    if skipped + limited.len() < total {
         out.push_str(&format!(
-            "\n--- showing {} of {} entries (offset: {}) ---",
+            "\n--- showing {} of {} entries (offset: {}); pass \"offset\": {} to list more ---",
             limited.len(),
             total,
-            skipped
+            skipped,
+            skipped + limited.len()
         ));
     }
     Ok(out)
@@ -752,5 +790,136 @@ mod toolerror_tests {
             r,
             Err(ToolError::Unavailable("workspace directory"))
         ));
+    }
+    // With no `limit` the default cap used to truncate silently, so the model saw 1000 names and concluded that was the whole directory.
+    #[tokio::test]
+    async fn file_list_default_limit_reports_truncation() {
+        let dir = tempfile::tempdir().unwrap();
+        for i in 0..1005 {
+            std::fs::write(dir.path().join(format!("f{i:04}.txt")), b"").unwrap();
+        }
+        let first = tool_file_list(&json!({"path": "."}), Some(dir.path()), &[])
+            .await
+            .unwrap();
+        assert_eq!(first.lines().filter(|l| l.ends_with(".txt")).count(), 1000);
+        assert!(first.contains("showing 1000 of 1005 entries"), "{first}");
+        assert!(first.contains("\"offset\": 1000"), "{first}");
+
+        let rest = tool_file_list(&json!({"path": ".", "offset": 1000}), Some(dir.path()), &[])
+            .await
+            .unwrap();
+        let names: Vec<&str> = rest.lines().collect();
+        assert_eq!(
+            names,
+            [
+                "f1000.txt",
+                "f1001.txt",
+                "f1002.txt",
+                "f1003.txt",
+                "f1004.txt"
+            ]
+        );
+    }
+
+    #[test]
+    fn file_list_schema_documents_paging() {
+        let defs = crate::tool_runner::builtin_tool_definitions();
+        let def = defs.iter().find(|d| d.name == "file_list").unwrap();
+        let props = &def.input_schema["properties"];
+        assert!(props.get("limit").is_some());
+        assert!(props.get("offset").is_some());
+    }
+
+    // A FIFO reports length 0, so the stat check always passes; only a bounded read enforces `max_bytes`.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn file_read_enforces_max_bytes_on_fifo_growth() {
+        let dir = tempfile::tempdir().unwrap();
+        let fifo = dir.path().join("pipe");
+        assert!(std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .unwrap()
+            .success());
+        let wpath = fifo.clone();
+        let writer = std::thread::spawn(move || {
+            use std::io::Write;
+            let mut f = std::fs::OpenOptions::new()
+                .write(true)
+                .open(&wpath)
+                .unwrap();
+            // A BrokenPipe once the reader stops is expected and ignored.
+            let _ = f.write_all(&[b'a'; 4096]);
+        });
+        let r = tool_file_read(
+            &json!({"path": "pipe", "max_bytes": 1024}),
+            Some(dir.path()),
+            &[],
+        )
+        .await;
+        writer.join().unwrap();
+        assert!(
+            matches!(
+                r,
+                Err(ToolError::InvalidParameter {
+                    name: "max_bytes",
+                    ..
+                })
+            ),
+            "got {r:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn file_read_within_limit_still_returns_content() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.txt"), "hello").unwrap();
+        let r = tool_file_read(
+            &json!({"path": "a.txt", "max_bytes": 5}),
+            Some(dir.path()),
+            &[],
+        )
+        .await
+        .unwrap();
+        assert_eq!(r, "hello");
+    }
+
+    // The rename replaces the inode, so without copying the mode an edited script lost its executable bit.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn file_write_preserves_existing_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("run.sh");
+        std::fs::write(&script, "old").unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        tool_file_write(
+            &json!({"path": "run.sh", "content": "echo hi"}),
+            Some(dir.path()),
+            &[],
+        )
+        .await
+        .unwrap();
+        let meta = std::fs::metadata(&script).unwrap();
+        assert_eq!(meta.permissions().mode() & 0o777, 0o755);
+        assert_eq!(std::fs::read_to_string(&script).unwrap(), "echo hi");
+    }
+
+    #[tokio::test]
+    async fn file_write_over_directory_leaves_no_tmp() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("sub")).unwrap();
+        let r = tool_file_write(
+            &json!({"path": "sub", "content": "x"}),
+            Some(dir.path()),
+            &[],
+        )
+        .await;
+        assert!(r.is_err(), "{r:?}");
+        let names: Vec<String> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, ["sub"]);
     }
 }
