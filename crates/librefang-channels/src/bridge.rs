@@ -5852,20 +5852,45 @@ fn has_file_saved_block(blocks: &[ContentBlock]) -> bool {
     })
 }
 
-/// Assemble the blocks for a successfully saved non-image attachment: the
-/// `marker` first, then whatever `enrichment` produced.
+/// Blocks for a downloaded non-image attachment: the `[File: …] saved to …`
+/// marker first, then whatever `enrich_saved_file` produced.
 ///
 /// The order is the point. The marker is the affordance an agent keys on to
 /// reach the raw file on disk, and the inlined body that follows can run to
 /// `MAX_ENRICHED_TEXT_CHARS` (200k) — trailing the marker, it pushes the
 /// affordance past the point a model reads, so the agent works from the
 /// truncated inline copy instead of the file (`#8626`).
-fn saved_file_blocks(marker: String, enrichment: Vec<ContentBlock>) -> Vec<ContentBlock> {
-    let mut blocks = Vec::with_capacity(enrichment.len() + 1);
-    blocks.push(ContentBlock::Text {
-        text: marker,
+///
+/// Enrichment does blocking `std::fs` reads and CPU-bound PDF text extraction
+/// (`pdf_extract`), which can stall the tokio worker for a large or complex
+/// document — so it stays on a blocking thread (refs blocking-fs-on-executor).
+async fn saved_attachment_blocks(
+    file_path: &std::path::Path,
+    media_type: &str,
+    filename: &str,
+) -> Vec<ContentBlock> {
+    let marker = ContentBlock::Text {
+        text: format!(
+            "{FILE_SAVED_BLOCK_PREFIX}{filename}] saved to {}",
+            file_path.to_string_lossy()
+        ),
         provider_metadata: None,
+    };
+
+    let file_path = file_path.to_path_buf();
+    let media_type = media_type.to_string();
+    let filename = filename.to_string();
+    let enrichment = tokio::task::spawn_blocking(move || {
+        crate::attachment_enrich::enrich_saved_file(&file_path, &media_type, &filename)
+    })
+    .await
+    .unwrap_or_else(|e| {
+        warn!("attachment enrichment task failed to join: {e}");
+        Vec::new()
     });
+
+    let mut blocks = Vec::with_capacity(enrichment.len() + 1);
+    blocks.push(marker);
     blocks.extend(enrichment);
     blocks
 }
@@ -6646,27 +6671,9 @@ async fn download_file_to_blocks(
         // text-like format, surface its actual content to the LLM in
         // addition to the saved-path block. The path block is preserved
         // so tools that legitimately want raw bytes (media_transcribe,
-        // custom file readers) still work.
-        // enrich_saved_file does blocking std::fs reads and CPU-bound PDF
-        // text extraction (pdf_extract), which can stall the tokio worker for
-        // a large/complex document — offload it (refs blocking-fs-on-executor).
-        let enrichment = {
-            let file_path = file_path.clone();
-            let media_type = media_type.clone();
-            let filename = filename.to_string();
-            tokio::task::spawn_blocking(move || {
-                crate::attachment_enrich::enrich_saved_file(&file_path, &media_type, &filename)
-            })
-            .await
-            .unwrap_or_else(|e| {
-                warn!("attachment enrichment task failed to join: {e}");
-                Vec::new()
-            })
-        };
-        saved_file_blocks(
-            format!("{FILE_SAVED_BLOCK_PREFIX}{filename}] saved to {path_str}"),
-            enrichment,
-        )
+        // custom file readers) still work — and it leads the blocks, so the
+        // agent never has to read past the inlined body to find it (#8626).
+        saved_attachment_blocks(&file_path, &media_type, filename).await
     };
     DownloadedFile {
         blocks,
@@ -12296,30 +12303,41 @@ mod tests {
             }
         }
 
-        /// #8626: the `[File: …] saved to …` marker is the affordance an agent
-        /// keys on to reach the raw bytes on disk, so it must lead the blocks.
-        /// It used to be pushed after the inlined enrichment, which can reach
-        /// `MAX_ENRICHED_TEXT_CHARS` and buries the marker past the point a
-        /// model reads — agents then worked from the truncated inline copy
-        /// instead of the file that was already saved.
-        #[test]
-        fn file_saved_marker_precedes_the_enriched_body() {
-            let blocks = saved_file_blocks(
-                format!("{FILE_SAVED_BLOCK_PREFIX}export.csv] saved to /tmp/9ff3f16a.csv"),
-                vec![ContentBlock::Text {
-                    text: "x".repeat(crate::attachment_enrich::MAX_ENRICHED_TEXT_CHARS),
-                    provider_metadata: None,
-                }],
-            );
+        /// #8626: the marker has to lead the blocks. Drive the real assembly —
+        /// the function `download_file_to_blocks` itself calls — against a real
+        /// text file, so the enrichment that buries the marker is the one under
+        /// test; a synthetic body would satisfy either order.
+        #[tokio::test]
+        async fn saved_attachment_blocks_put_the_marker_first() {
+            let dir = std::env::temp_dir().join("librefang_test_saved_attachment_blocks");
+            tokio::fs::create_dir_all(&dir).await.unwrap();
+            let path = dir.join("export.csv");
+            tokio::fs::write(&path, "cell,cell\n".repeat(4_000))
+                .await
+                .unwrap();
 
-            assert_eq!(blocks.len(), 2, "marker plus one enrichment block");
+            let blocks = saved_attachment_blocks(&path, "text/csv", "export.csv").await;
+
+            assert!(
+                blocks.len() > 1,
+                "want the marker plus the inlined body, got {} block(s)",
+                blocks.len()
+            );
             match &blocks[0] {
                 ContentBlock::Text { text, .. } => assert!(
-                    text.starts_with(FILE_SAVED_BLOCK_PREFIX),
+                    text.starts_with(FILE_SAVED_BLOCK_PREFIX)
+                        && text.contains("export.csv] saved to "),
                     "blocks[0] must be the saved-path marker, got: {text}"
                 ),
                 other => panic!("blocks[0] must be the saved-path marker, got {other:?}"),
             }
+            assert!(
+                blocks[1..].iter().any(|b| matches!(
+                    b,
+                    ContentBlock::Text { text, .. } if text.contains("cell,cell")
+                )),
+                "the inlined body must follow the marker"
+            );
             assert!(
                 has_file_saved_block(&blocks),
                 "the reordered marker must still satisfy the save-success check"
