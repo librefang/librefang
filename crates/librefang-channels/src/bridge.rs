@@ -12303,15 +12303,15 @@ mod tests {
             }
         }
 
-        /// #8626: the marker has to lead the blocks. Drive the real assembly —
-        /// the function `download_file_to_blocks` itself calls — against a real
-        /// text file, so the enrichment that buries the marker is the one under
-        /// test; a synthetic body would satisfy either order.
+        /// #8626: the marker has to lead the blocks, and it has to name the file.
+        /// Drive the real assembly — the function `download_file_to_blocks`
+        /// itself calls — against a real text file, so the enrichment that
+        /// buries the marker is the one under test; a synthetic body would
+        /// satisfy either order.
         #[tokio::test]
         async fn saved_attachment_blocks_put_the_marker_first() {
-            let dir = std::env::temp_dir().join("librefang_test_saved_attachment_blocks");
-            tokio::fs::create_dir_all(&dir).await.unwrap();
-            let path = dir.join("export.csv");
+            let dir = tempfile::TempDir::new().unwrap();
+            let path = dir.path().join("export.csv");
             tokio::fs::write(&path, "cell,cell\n".repeat(4_000))
                 .await
                 .unwrap();
@@ -12323,11 +12323,17 @@ mod tests {
                 "want the marker plus the inlined body, got {} block(s)",
                 blocks.len()
             );
+            // Pinned in full, path included: a marker that stops at "saved to "
+            // sends the agent nowhere, and `has_file_saved_block` only looks at
+            // the prefix, so it would accept that truncated marker happily.
+            let marker = format!(
+                "{FILE_SAVED_BLOCK_PREFIX}export.csv] saved to {}",
+                path.to_string_lossy()
+            );
             match &blocks[0] {
-                ContentBlock::Text { text, .. } => assert!(
-                    text.starts_with(FILE_SAVED_BLOCK_PREFIX)
-                        && text.contains("export.csv] saved to "),
-                    "blocks[0] must be the saved-path marker, got: {text}"
+                ContentBlock::Text { text, .. } => assert_eq!(
+                    text, &marker,
+                    "blocks[0] must be the whole saved-path marker, path included"
                 ),
                 other => panic!("blocks[0] must be the saved-path marker, got {other:?}"),
             }
