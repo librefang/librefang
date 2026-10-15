@@ -497,6 +497,47 @@ fn test_recover_bare_json_tool_call_with_escaped_quote_before_brace() {
     assert_eq!(calls[0].input["command"], "printf \"}\"");
 }
 
+/// A parsed bare-JSON call is consumed whole: a nested argument object that carries a known tool name must not be recovered as a second, phantom call.
+#[test]
+fn test_recover_bare_json_does_not_rescan_nested_args() {
+    let tools = vec![
+        ToolDefinition {
+            name: "tool_load".into(),
+            description: "Load".into(),
+            input_schema: serde_json::json!({}),
+        },
+        ToolDefinition {
+            name: "web_fetch".into(),
+            description: "Fetch".into(),
+            input_schema: serde_json::json!({}),
+        },
+    ];
+    let text = r#"{"name":"tool_load","arguments":{"name":"web_fetch"}}"#;
+    let calls = recover_text_tool_calls(text, &tools);
+    assert_eq!(
+        calls.len(),
+        1,
+        "nested argument object must not become a second call: {calls:?}"
+    );
+    assert_eq!(calls[0].name, "tool_load");
+    assert_eq!(calls[0].input["name"], "web_fetch");
+}
+
+/// A wrapper object that is not itself a call is still searched for the calls inside it.
+#[test]
+fn test_recover_bare_json_finds_call_inside_wrapper_object() {
+    let tools = vec![ToolDefinition {
+        name: "web_fetch".into(),
+        description: "Fetch".into(),
+        input_schema: serde_json::json!({}),
+    }];
+    let text = r#"{"tool_calls":[{"name":"web_fetch","arguments":{"url":"x"}}]}"#;
+    let calls = recover_text_tool_calls(text, &tools);
+    assert_eq!(calls.len(), 1, "{calls:?}");
+    assert_eq!(calls[0].name, "web_fetch");
+    assert_eq!(calls[0].input["url"], "x");
+}
+
 #[test]
 fn test_recover_bare_json_no_false_positive() {
     let tools = vec![ToolDefinition {
@@ -642,6 +683,7 @@ impl LlmDriver for TextToolCallDriver {
         if call == 0 {
             // Simulate Groq/Llama: tool call as text, not in tool_calls field
             Ok(CompletionResponse {
+                text_synthesized_from_thinking: false,
                 content: vec![ContentBlock::Text {
                     text: r#"Let me search for that. <function=web_search>{"query":"rust async"}</function>"#.to_string(),
                     provider_metadata: None,
@@ -659,6 +701,7 @@ impl LlmDriver for TextToolCallDriver {
         } else {
             // After tool result, return normal response
             Ok(CompletionResponse {
+                text_synthesized_from_thinking: false,
                 content: vec![ContentBlock::Text {
                     text: "Based on the search results, Rust async is great!".to_string(),
                     provider_metadata: None,

@@ -1604,6 +1604,34 @@ async fn test_shell_exec_full_mode_blocks_quoted_dangerous_command() {
     assert_eq!(approvals, 0);
 }
 
+/// #8536: `mode = "full"` with `denied_commands = ["git"]` refuses git before spawning a shell, and says so without the usual advice to switch to `full`.
+/// The probe is `git --version`, so a regression fails the assertion rather than touching any repository.
+#[tokio::test]
+async fn test_shell_exec_full_mode_refuses_denied_command() {
+    let policy = librefang_types::config::ExecPolicy {
+        mode: librefang_types::config::ExecSecurityMode::Full,
+        denied_commands: vec!["git".to_string()],
+        ..Default::default()
+    };
+
+    let (result, approvals) =
+        run_full_mode_approval_case(&policy, "echo start && git --version", None, Some(false))
+            .await;
+
+    assert!(result.is_error);
+    assert!(
+        result.content.contains("denied_commands"),
+        "a denied command must be refused by name: {}",
+        result.content
+    );
+    assert!(
+        !result.content.contains("set exec_policy.mode = 'full'"),
+        "advice to switch to full mode is wrong for a denied command: {}",
+        result.content
+    );
+    assert_eq!(approvals, 0);
+}
+
 /// #6594: with the flag off, `Full` no longer speaks for `[approval]` — a `shell_exec` named in the global `require_approval` list routes through the approval queue while still running unrestricted commands.
 #[tokio::test]
 async fn test_shell_exec_full_mode_honours_require_approval_when_flag_disabled() {

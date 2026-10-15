@@ -167,6 +167,38 @@ pub(super) fn resolve_context_window(
         })
 }
 
+/// Resolve this turn's sampling preferences (`max_tokens`, `temperature`,
+/// `top_p`, `frequency_penalty`, `presence_penalty`) from the agent manifest
+/// and the per-model override that matches `model.provider`/`model.model`,
+/// and write the result back onto `model` — agent manifest > per-model
+/// override > system default (#8112; see
+/// `librefang_types::inference_params` for why that order runs this way).
+///
+/// Every dispatch path that reaches an LLM driver must call this exactly
+/// once, after the final provider/model is settled (post-routing, post
+/// session-model-override) and before the manifest is handed to the driver.
+/// Before this helper existed, only `execute_llm_agent`
+/// (`kernel::agent_execution`) called the two functions this wraps — the
+/// ephemeral `/btw` path and the streaming dispatch path in
+/// `kernel::messaging`, and the ephemeral worker spawn in
+/// `kernel::ephemeral_spawn`, built their `CompletionRequest` straight from
+/// the manifest's own typed fields. A `top_p` set as a per-model override in
+/// the catalog reached the wire on the path that called this and reached
+/// nothing at all on the paths that did not — same agent, same override,
+/// two different sampling configurations depending on which dispatcher
+/// served the turn.
+pub(super) fn apply_resolved_inference_params(
+    catalog: &librefang_runtime::model_catalog::ModelCatalog,
+    model: &mut librefang_types::agent::ModelConfig,
+) {
+    // Catalog-aware on purpose: `resolve_turn_inference_params` supplies the
+    // `provider:model` override key *and* the model's effective output ceiling
+    // (#7774, #8502), so every dispatch path that shares this helper resolves
+    // `max_tokens` exactly the way the pre-call holds in `messaging.rs` do.
+    let resolved = catalog.resolve_turn_inference_params(model);
+    resolved.apply_to(model);
+}
+
 /// Apply a per-call reasoning override to a manifest clone.
 ///
 /// This is the top rung of the #7946 resolution order — per-call > per-agent >
@@ -708,28 +740,16 @@ pub(super) fn peer_scoped_key(
     }
 }
 
-/// Tag prefixes the kernel owns rather than the operator.
-///
-/// These three are written by hand-role activation (`kernel/hands_lifecycle.rs`) and are the only tags any code branches on.
-/// `hand:` and `hand_role:` route the agent's workspace under `hands/<hand>/<role>` instead of `agents/<name>` (`backfill_workspace_dir` in `kernel/workspace_setup.rs`), and `hand:` alone marks an agent autonomous for idle-wake purposes (`kernel/messaging.rs`), decides whether a tool call needs an approval gate (`kernel/handles/approval_gate.rs`), and scopes structured memory (`librefang-memory/src/structured.rs`).
-/// An operator who could add or drop one would be relocating a workspace and re-deciding an approval boundary through a field that reads like free-form metadata, so [`merge_agent_tags`] keeps them out of operator reach in both directions.
-const SYSTEM_TAG_PREFIXES: [&str; 3] = ["hand:", "hand_instance:", "hand_role:"];
-
-/// Whether a tag belongs to the kernel rather than the operator.
-fn is_system_tag(tag: &str) -> bool {
-    SYSTEM_TAG_PREFIXES
-        .iter()
-        .any(|prefix| tag.starts_with(prefix))
-}
-
 /// Merge an incoming tag list over the tags an agent is currently running with.
+///
+/// Kernel-owned tag prefixes — kept out of operator reach in both directions — are defined in `librefang_types::agent::SYSTEM_TAG_PREFIXES`; see that definition for why the set matters.
 ///
 /// System-owned tags are taken from `live` and operator-owned tags from `incoming`, so a caller that submits a whole manifest can freely rewrite the operator half without being able to forge, drop or preserve-by-accident the kernel half.
 /// A submitted system tag is dropped rather than rejected: the round-trip a dashboard performs is GET-manifest / edit-one-field / PUT-manifest, and echoing back the `hand:` tags it was just shown must not fail the write.
 ///
 /// Ordering is `live` system tags first, then `incoming` operator tags in submitted order, de-duplicated.
 /// That is deterministic for a given pair of inputs, which matters because `manifest.tags` is stringified into the router's agent summary (`librefang-kernel-router`) and a reordering there would invalidate provider prompt caches for no reason (#3298).
-pub(super) fn merge_agent_tags(live: &[String], incoming: &[String]) -> Vec<String> {
+pub(crate) fn merge_agent_tags(live: &[String], incoming: &[String]) -> Vec<String> {
     let mut merged: Vec<String> = live
         .iter()
         .filter(|tag| is_system_tag(tag))
@@ -1210,6 +1230,91 @@ mod context_window_tests {
         assert_eq!(
             source_of(&cat, &model("anthropic", "claude-sonnet-4-6", None), None),
             Some(ContextWindowSource::Catalog),
+        );
+    }
+}
+
+#[cfg(test)]
+mod apply_resolved_inference_params_tests {
+    use super::apply_resolved_inference_params;
+    use librefang_runtime::model_catalog::ModelCatalog;
+    use librefang_types::agent::ModelConfig;
+    use librefang_types::model_catalog::ModelOverrides;
+
+    fn catalog_with_top_p_override(top_p: f32) -> ModelCatalog {
+        let mut cat = ModelCatalog::from_entries(vec![], vec![]);
+        cat.set_overrides(
+            "openai:gpt-4o".to_string(),
+            ModelOverrides {
+                top_p: Some(top_p),
+                ..Default::default()
+            },
+        );
+        cat
+    }
+
+    /// Agent leaves `top_p` unset ("inherit") — the model-catalog override
+    /// must be the only source that can put a value on the wire.
+    fn inheriting_agent_model() -> ModelConfig {
+        ModelConfig {
+            provider: "openai".to_string(),
+            model: "gpt-4o".to_string(),
+            ..Default::default()
+        }
+    }
+
+    /// #8112: before this helper existed, `execute_llm_agent`
+    /// (`kernel::agent_execution`) called `resolve_inference_params` +
+    /// `apply_to` inline, but `messaging::send_message_ephemeral`, the
+    /// streaming dispatch and `ephemeral_spawn` built their manifest from a
+    /// bare `entry.manifest.clone()` and never called either — so a `top_p`
+    /// carried only by a per-model catalog override reached the wire on one
+    /// path and vanished on the other three.
+    ///
+    /// This pins the helper's own contract, and nothing more. Whether each
+    /// dispatcher actually *calls* it is not observable from here — two calls
+    /// to a deterministic function agreeing with each other cannot fail — so
+    /// the guard for that lives at the four injection sites, in
+    /// `kernel::tests::top_p_catalog_override_reaches_*`, which drive real
+    /// turns to a mocked backend and read the literal wire body.
+    #[test]
+    fn catalog_override_lands_on_the_typed_field_when_the_agent_leaves_top_p_unset() {
+        let catalog = catalog_with_top_p_override(0.5);
+        let mut model = inheriting_agent_model();
+        assert!(
+            model.top_p.is_none() && !model.extra_params.contains_key("top_p"),
+            "precondition: the agent sets no top_p of its own, so the catalog \
+             override is the only source that can put one on the wire"
+        );
+
+        apply_resolved_inference_params(&catalog, &mut model);
+
+        assert_eq!(model.top_p, Some(0.5));
+        // The typed field is the sole carrier: `extra_params` is for
+        // non-typed extras only and must not grow a second spelling of it.
+        assert!(
+            !model.extra_params.contains_key("top_p"),
+            "the resolved value must not be duplicated into extra_params: {:?}",
+            model.extra_params
+        );
+    }
+
+    /// An explicit agent-level preference still wins over the catalog
+    /// override — the resolution order this helper exists to enforce, not
+    /// just "the catalog wins because it's the only source in the test above".
+    #[test]
+    fn explicit_agent_preference_beats_the_catalog_override() {
+        let catalog = catalog_with_top_p_override(0.5);
+        let mut model = inheriting_agent_model();
+        model.top_p = Some(0.1);
+
+        apply_resolved_inference_params(&catalog, &mut model);
+
+        assert_eq!(model.top_p, Some(0.1));
+        assert!(
+            !model.extra_params.contains_key("top_p"),
+            "the agent's own value stays typed-only: {:?}",
+            model.extra_params
         );
     }
 }

@@ -28,22 +28,64 @@
 //! ## Failure semantics
 //! Hook failures are logged at `WARN` level and **never** propagate to the
 //! caller. Hook execution is fire-and-forget via `tokio::spawn`.
+//! At most `MAX_PENDING_HOOKS` hook invocations may be queued or running at once; events that arrive while that backlog is full are dropped with a `WARN` instead of piling up unbounded tasks.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use serde::Deserialize;
 use serde_json::Value;
 use tracing::{debug, error, warn};
 
-/// Limits the number of hook tasks that may execute concurrently.
+/// Limits the number of hook processes that may execute concurrently.
 ///
-/// `agent:step` fires on every tool-loop iteration and can produce a large
-/// number of concurrent spawns when several agents run simultaneously.  Eight
-/// concurrent executions is enough for normal workloads while preventing
-/// unbounded task accumulation.
+/// `agent:step` fires on every tool-loop iteration and can produce a large number of concurrent spawns when several agents run simultaneously.
+/// Eight concurrent executions is enough for normal workloads.
+/// This semaphore only caps running processes; tasks waiting for a permit are bounded separately by [`HOOK_ADMISSION`].
 static HOOK_CONCURRENCY: std::sync::LazyLock<tokio::sync::Semaphore> =
     std::sync::LazyLock::new(|| tokio::sync::Semaphore::new(8));
+
+/// Upper bound on hook invocations that are queued or running at the same time.
+///
+/// Leaves room for bursts (e.g. `agent:start` for many agents at once) well above the 8-process cap while keeping the backlog finite.
+const MAX_PENDING_HOOKS: usize = 64;
+
+/// Admission bound for spawned hook tasks and threads.
+///
+/// A permit is taken synchronously in [`ExternalHookSystem::fire`] before anything is spawned and released when the task or thread ends.
+/// Without it, every event spawned a task that then parked on [`HOOK_CONCURRENCY`], so a slow hook plus a high-frequency event grew the queue (and its copied payloads) without limit.
+static HOOK_ADMISSION: std::sync::LazyLock<Arc<tokio::sync::Semaphore>> =
+    std::sync::LazyLock::new(|| Arc::new(tokio::sync::Semaphore::new(MAX_PENDING_HOOKS)));
+
+/// Try to admit one hook invocation into the bounded backlog without waiting.
+///
+/// Returns `None` (and logs) when the backlog is full or the semaphore is closed, in which case the event is dropped for this hook.
+fn try_admit_hook(
+    sem: &Arc<tokio::sync::Semaphore>,
+    hook_name: &str,
+    ev: &str,
+) -> Option<tokio::sync::OwnedSemaphorePermit> {
+    match sem.clone().try_acquire_owned() {
+        Ok(permit) => Some(permit),
+        Err(tokio::sync::TryAcquireError::NoPermits) => {
+            warn!(
+                hook = %hook_name,
+                event = %ev,
+                "external hook backlog full ({MAX_PENDING_HOOKS}); dropping event"
+            );
+            None
+        }
+        Err(tokio::sync::TryAcquireError::Closed) => {
+            error!(
+                hook = %hook_name,
+                event = %ev,
+                "HOOK_ADMISSION semaphore closed; refusing to run hook"
+            );
+            None
+        }
+    }
+}
 
 /// Acquire a concurrency permit for a hook, or refuse to run on `SemaphoreClosed`.
 ///
@@ -269,6 +311,7 @@ impl ExternalHookSystem {
     /// Fire all hooks whose event patterns match `event`.
     ///
     /// Each matching hook is spawned as a separate `tokio` task (fire-and-forget).
+    /// When `MAX_PENDING_HOOKS` invocations are already queued or running, further matches are dropped with a `WARN`.
     /// The JSON `data` payload is serialised and passed via `HOOK_EVENT_DATA`.
     /// Errors are logged at `WARN` level and never propagated to the caller.
     ///
@@ -276,6 +319,17 @@ impl ExternalHookSystem {
     /// hook is run inline on the current thread rather than spawning, so the
     /// caller does not panic.
     pub fn fire(&self, event: ExternalHookEvent, data: Value) {
+        self.fire_with_admission(event, data, &HOOK_ADMISSION);
+    }
+
+    /// Body of [`Self::fire`] with an injectable admission semaphore; returns how many matching hooks were dropped because the backlog was full.
+    fn fire_with_admission(
+        &self,
+        event: ExternalHookEvent,
+        data: Value,
+        admission: &Arc<tokio::sync::Semaphore>,
+    ) -> usize {
+        let mut dropped = 0;
         let event_str = event.as_str().to_owned();
         let data_str = data.to_string();
 
@@ -290,6 +344,11 @@ impl ExternalHookSystem {
                 continue;
             }
 
+            let Some(admit) = try_admit_hook(admission, &loaded.manifest.name, &event_str) else {
+                dropped += 1;
+                continue;
+            };
+
             let command = loaded.manifest.command.clone();
             let command_args = loaded.manifest.args.clone();
             let hook_name = loaded.manifest.name.clone();
@@ -301,6 +360,7 @@ impl ExternalHookSystem {
             // thread so the caller is never blocked (fire-and-forget in both paths).
             if let Ok(handle) = tokio::runtime::Handle::try_current() {
                 handle.spawn(async move {
+                    let _admit = admit;
                     Self::run_hook(
                         &hook_name,
                         &ev,
@@ -316,6 +376,7 @@ impl ExternalHookSystem {
                 // Spawn a background thread so we never block the caller and
                 // never panic due to a missing runtime.
                 std::thread::spawn(move || {
+                    let _admit = admit;
                     if let Ok(rt) = tokio::runtime::Builder::new_current_thread()
                         .enable_all()
                         .build()
@@ -338,6 +399,7 @@ impl ExternalHookSystem {
                 });
             }
         }
+        dropped
     }
 
     async fn run_hook(
@@ -348,11 +410,9 @@ impl ExternalHookSystem {
         dir: &std::path::Path,
         payload: &str,
     ) {
-        // Acquire a concurrency permit before doing any work.  This caps the
-        // total number of simultaneously-running hook processes system-wide and
-        // prevents unbounded task accumulation on high-frequency events such as
-        // `agent:step`.  The permit is held for the duration of the process
-        // execution and released automatically when this function returns.
+        // Acquire a concurrency permit before doing any work.
+        // This caps the total number of simultaneously-running hook processes system-wide; the number of tasks waiting here is bounded by the HOOK_ADMISSION permit taken in `fire`.
+        // The permit is held for the duration of the process execution and released automatically when this function returns.
         //
         // The static `LazyLock` semaphore is never closed in practice, but if
         // it ever is, we refuse to run the hook rather than silently bypassing
@@ -758,6 +818,50 @@ command: /usr/bin/env
             "closed semaphore must refuse the hook so the system-wide \
              fork() rate cap stays a hard guarantee (issue #5118)"
         );
+    }
+
+    #[test]
+    fn try_admit_hook_refuses_when_backlog_full() {
+        let sem = Arc::new(tokio::sync::Semaphore::new(2));
+        let a = try_admit_hook(&sem, "h", "agent:step");
+        let b = try_admit_hook(&sem, "h", "agent:step");
+        assert!(a.is_some() && b.is_some());
+        assert!(try_admit_hook(&sem, "h", "agent:step").is_none());
+        drop(a);
+        assert!(try_admit_hook(&sem, "h", "agent:step").is_some());
+        sem.close();
+        assert!(try_admit_hook(&sem, "h", "agent:step").is_none());
+    }
+
+    #[tokio::test]
+    async fn fire_drops_events_past_the_admission_bound() {
+        let dir = tempfile::tempdir().unwrap();
+        let hook_dir = dir.path().join("step-hook");
+        std::fs::create_dir(&hook_dir).unwrap();
+        std::fs::write(
+            hook_dir.join("HOOK.yaml"),
+            "name: step-hook\nevents:\n  - \"agent:*\"\ncommand: /nonexistent/librefang-hook\n",
+        )
+        .unwrap();
+        let system = ExternalHookSystem::load(dir.path().to_path_buf());
+        assert_eq!(system.hooks.len(), 1);
+
+        // `fire` takes admission permits synchronously and this current-thread runtime cannot run the spawned tasks until we yield, so every permit is still held when the later fires arrive.
+        let admission = Arc::new(tokio::sync::Semaphore::new(2));
+        let dropped: usize = (0..5)
+            .map(|_| {
+                system.fire_with_admission(
+                    ExternalHookEvent::AgentStep,
+                    serde_json::json!({}),
+                    &admission,
+                )
+            })
+            .sum();
+        assert_eq!(
+            dropped, 3,
+            "fires beyond the backlog bound must be dropped, not queued"
+        );
+        assert_eq!(admission.available_permits(), 0);
     }
 
     #[test]

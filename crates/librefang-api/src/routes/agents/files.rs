@@ -549,11 +549,26 @@ fn read_identity_file(
     std::fs::read_to_string(path).map_err(IdentityFileMutationError::Io)
 }
 
+/// Serializes every identity-file write and delete made through these routes.
+///
+/// A write resolves its target with `canonicalize` and then renames a staged file onto it.
+/// On Windows, a concurrent writer's rename can replace the file while this one holds a handle to it for `canonicalize`, and the replaced file's final path is then reported under `\$Extend\$Deleted\`, outside the workspace, so the write was refused as a path traversal (403).
+/// Taken before `lock_identity_front_matter`, never after it, and the kernel never takes this one, so the two cannot deadlock.
+static IDENTITY_FILE_MUTATION_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn lock_identity_file_mutation() -> std::sync::MutexGuard<'static, ()> {
+    // The guarded section holds no state of its own, so a panic inside it leaves nothing to repair.
+    IDENTITY_FILE_MUTATION_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 fn write_identity_file(
     workspace: &std::path::Path,
     filename: &str,
     content: &str,
 ) -> Result<(), IdentityFileMutationError> {
+    let _mutation_guard = lock_identity_file_mutation();
     // The kernel edits IDENTITY.md's front matter by read-modify-rename (a rename, #8469; a personality PATCH, #8447).
     // Replacing the file while one of those is between its read and its rename would let its stale copy land on top of this write.
     let _front_matter_guard =
@@ -657,6 +672,7 @@ fn delete_identity_file(
     workspace: &std::path::Path,
     filename: &str,
 ) -> Result<(), IdentityFileMutationError> {
+    let _mutation_guard = lock_identity_file_mutation();
     // Same reason as `write_identity_file`: a front-matter edit that read the file before this delete would otherwise rename its copy back into place afterwards, undoing the delete while both requests answer success.
     let _front_matter_guard =
         (filename == "IDENTITY.md").then(librefang_kernel::kernel::lock_identity_front_matter);

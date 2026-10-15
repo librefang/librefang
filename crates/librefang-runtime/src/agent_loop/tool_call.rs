@@ -877,6 +877,7 @@ pub(super) async fn precheck_loop_guard(
                 data: serde_json::json!({
                     "reason": "circuit_break",
                     "error": msg.as_str(),
+                    "session_id": session.id.to_string(),
                     "is_fork": opts.is_fork,
                 }),
             };

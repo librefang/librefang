@@ -79,6 +79,29 @@ impl SecondFactor {
     pub fn requires_approval_totp(self) -> bool {
         matches!(self, SecondFactor::Totp | SecondFactor::Both)
     }
+
+    /// Whether TOTP is required on any surface at all.
+    ///
+    /// The two questions above are per-surface; this one is for a caller that
+    /// only needs to know whether a code is demanded *somewhere* — the boot-time
+    /// consistency check that warns when a `second_factor` promises a code and
+    /// no secret is enrolled, for instance.
+    /// `None` is the only variant that answers false, so `Login` is covered
+    /// here even though it demands nothing of the approval path.
+    pub fn requires_any_totp(self) -> bool {
+        !matches!(self, SecondFactor::None)
+    }
+
+    /// String label for display and storage — the value as written in
+    /// `config.toml`, matching the `snake_case` serde rename.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Totp => "totp",
+            Self::Login => "login",
+            Self::Both => "both",
+        }
+    }
 }
 
 /// Maximum TOTP grace period in seconds (1 hour).

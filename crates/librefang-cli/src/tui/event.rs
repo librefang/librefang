@@ -14,6 +14,7 @@ use std::sync::{mpsc, Arc, OnceLock};
 use std::time::Duration;
 
 use super::screens::{
+    agents::ManifestVersion,
     audit::AuditEntry,
     channels::{ChannelAdapterInfo, ChannelFieldInfo, ChannelInstance, ConfigureRequest},
     config_editor::{parse_config_sections, ConfigSection},
@@ -223,6 +224,19 @@ pub enum AppEvent {
     /// whatever it had (usually nothing) and the operator cannot tell a 5xx
     /// from an empty config from a request that never went out (#8141).
     MemoryConfigFailed(FetchFailure),
+    /// The agent's `[workspaces]` table, as `(name, path, mode)` rows.
+    ///
+    /// The middle field is the edit session the fetch was spawned for.
+    /// Without it the handler could only ask "is this the first reply since
+    /// the last `w`", which `w` → `Esc` → `w` resets — so a reply to the
+    /// first `w` that arrived after the second one had loaded was accepted
+    /// and the newer one discarded (#7835).
+    AgentWorkspacesLoaded(String, u64, Vec<(String, String, String)>),
+    /// The shared-folders write came back 2xx. The second field is the edit
+    /// session that staged it, so a save landing after `Esc` + `w` (same
+    /// agent, same sub-screen, new session) is dropped instead of closing
+    /// the new editor and stamping its status line (#7835 review).
+    AgentWorkspacesUpdated(String, u64),
     /// Memory KV pairs loaded.
     MemoryKvLoaded(Vec<KvPair>),
     /// Memory KV saved.
@@ -255,6 +269,23 @@ pub enum AppEvent {
     AgentTypePromoted {
         name: String,
         result: Result<String, String>,
+    },
+    /// Result of restoring an agent type from the registry.
+    RegistryRestoreResult {
+        name: String,
+        ok: bool,
+        message: String,
+    },
+    /// Template version history loaded — rows on success, a localized failure message otherwise.
+    TemplateHistoryLoaded {
+        name: String,
+        result: Result<Vec<TemplateVersionRow>, String>,
+    },
+    /// Result of restoring a template to one specific historical version.
+    TemplateVersionRestoreResult {
+        name: String,
+        ok: bool,
+        message: String,
     },
     /// Security features loaded.
     SecurityLoaded(Vec<SecurityFeature>),
@@ -456,6 +487,22 @@ pub enum AppEvent {
     },
     /// Agent model routing updated.
     AgentModelRoutingUpdated(String),
+    /// The agent's recorded manifest snapshots, newest first.
+    /// An empty vector is a real answer — an agent whose manifest was never persisted has none.
+    ///
+    /// `agent_id` is the agent the fetch was issued for.
+    /// This pane renders another agent's entire `agent.toml`, so a response that outlived its request has to be droppable rather than displayed under whichever header is open now.
+    AgentManifestHistoryLoaded {
+        agent_id: String,
+        versions: Vec<ManifestVersion>,
+    },
+    /// The agent's manifest snapshots could not be read — see [`FetchFailure`].
+    ///
+    /// Separate from the catch-all `FetchError` so that clearing the history pane's loading flag is scoped to a history failure, instead of any agent-tab fetch failure standing in for one.
+    AgentManifestHistoryFailed {
+        agent_id: String,
+        failure: FetchFailure,
+    },
     /// Comms topology loaded.
     CommsTopologyLoaded {
         nodes: Vec<super::screens::comms::CommsNode>,
@@ -792,6 +839,7 @@ pub fn spawn_daemon_stream(
 
         // Connection closed — agent loop is truly done.
         let _ = tx.send(AppEvent::StreamDone(Ok(AgentLoopResult {
+            hit_iteration_cap: false,
             response: String::new(),
             total_usage: librefang_types::message::TokenUsage {
                 input_tokens: total_input_tokens,
@@ -845,6 +893,7 @@ fn daemon_fallback(
         let input_tokens = body["input_tokens"].as_u64().unwrap_or(0);
         let output_tokens = body["output_tokens"].as_u64().unwrap_or(0);
         Ok(AgentLoopResult {
+            hit_iteration_cap: false,
             response: response.to_string(),
             total_usage: librefang_types::message::TokenUsage {
                 input_tokens,
@@ -874,8 +923,7 @@ fn daemon_fallback(
             actual_model: None,
         })
     } else {
-        Err(body["error"]
-            .as_str()
+        Err(daemon_error_reason(&body)
             .unwrap_or("Unknown error")
             .to_string())
     }
@@ -2068,7 +2116,332 @@ pub fn spawn_fetch_agent_mcp_servers(
     });
 }
 
-/// Update an agent's skills.
+/// Read the agent's `[workspaces]` table out of its manifest TOML.
+///
+/// Goes through `GET /api/agents/{id}/manifest` rather than the JSON agent
+/// detail, because the detail response does not carry the workspace
+/// declarations at all.
+///
+/// Only `path`-based declarations become rows: a `mount` entry is not a
+/// shared folder under `workspaces_dir` and the editor has no field for it,
+/// so it is hidden here and carried through verbatim by
+/// [`spawn_update_agent_workspaces`] instead of being silently rewritten as
+/// an empty `path`.
+/// `generation` is the caller's edit session, echoed back on the reply so a
+/// late response to an earlier `w` can be told apart from this one's.
+pub fn spawn_fetch_agent_workspaces(
+    backend: BackendRef,
+    agent_id: String,
+    generation: u64,
+    tx: mpsc::Sender<AppEvent>,
+) {
+    std::thread::spawn(move || match backend {
+        BackendRef::Daemon { base_url, api_key } => {
+            let client = make_daemon_client(api_key.as_deref());
+            // A failed GET, an unreadable body and a manifest that does not
+            // parse each reach the operator as an error instead of an empty
+            // editor that reads as "no shared folders".
+            let parsed: Result<toml::Value, String> = daemon_response(
+                client
+                    .get(format!("{base_url}/api/agents/{agent_id}/manifest"))
+                    .send(),
+                || crate::i18n::t("tui-event-workspaces-manifest-read-failed"),
+            )
+            .and_then(|r| {
+                r.text()
+                    .map_err(|_| crate::i18n::t("tui-event-workspaces-manifest-read-failed"))
+            })
+            .and_then(|text| {
+                toml::from_str::<toml::Value>(&text)
+                    .map_err(|_| crate::i18n::t("tui-event-workspaces-manifest-read-failed"))
+            });
+            match parsed {
+                Ok(value) => {
+                    let entries = workspaces_editor_rows(&value);
+                    let _ = tx.send(AppEvent::AgentWorkspacesLoaded(
+                        agent_id, generation, entries,
+                    ));
+                }
+                Err(message) => {
+                    let _ = tx.send(AppEvent::FetchError(message));
+                }
+            }
+        }
+        BackendRef::InProcess(_) => {
+            let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
+                "tui-event-workspaces-not-available-in-process",
+            )));
+        }
+    });
+}
+
+/// Canonicalize a manifest `mode` string to the spelling
+/// `GET /api/agents/{id}/manifest` actually serializes (`readwrite` /
+/// `readonly`), collapsing the deserialize-only `WorkspaceMode` aliases
+/// (`rw`, `r`, `read`, `read-write`, `read-only` —
+/// `librefang-types/src/agent.rs`) into it. Downstream code compares
+/// against these two canonical spellings only.
+fn canonical_workspace_mode(raw: &str) -> &'static str {
+    match raw {
+        "r" | "read" | "read-only" | "readonly" => "readonly",
+        _ => "readwrite",
+    }
+}
+
+/// Path-based workspace rows for the editor, as `(name, path, mode)`.
+///
+/// Declarations without a string `path` (mount-based, or malformed) are not
+/// rows the editor can render, so they are skipped here and preserved
+/// verbatim on save. A declaration carrying a `mount` key is skipped for the
+/// same reason even when it also carries a `path`: rendering it as an
+/// editable row and writing it back would drop the `mount` (#7835 review).
+/// A manifest without a `[workspaces]` table yields no rows.
+fn workspaces_editor_rows(manifest: &toml::Value) -> Vec<(String, String, String)> {
+    manifest
+        .get("workspaces")
+        .and_then(|w| w.as_table())
+        .map(|t| {
+            t.iter()
+                .filter_map(|(name, decl)| {
+                    if decl.get("mount").is_some() {
+                        return None;
+                    }
+                    let path = decl.get("path").and_then(toml::Value::as_str)?;
+                    let mode = decl
+                        .get("mode")
+                        .and_then(toml::Value::as_str)
+                        .map(canonical_workspace_mode)
+                        .unwrap_or("readwrite");
+                    Some((name.clone(), path.to_string(), mode.to_string()))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Write the edited shared folders back.
+///
+/// `PATCH /api/agents/{id}` with `manifest_toml` replaces the whole manifest,
+/// so the current one is fetched first and only its `[workspaces]` table is
+/// replaced. Sending a manifest built from the editor alone would silently
+/// drop every field the editor does not render.
+///
+/// The read-modify-write has no lost-update protection: `PATCH
+/// /api/agents/{id}` carries no version or ETag precondition, so a manifest
+/// written between the GET and the PATCH is overwritten with a stale base.
+/// Any surface adopting this pattern inherits that limitation — closing it
+/// needs a manifest generation counter on the endpoint.
+pub fn spawn_update_agent_workspaces(
+    backend: BackendRef,
+    agent_id: String,
+    workspaces: Vec<(String, String, String)>,
+    generation: u64,
+    tx: mpsc::Sender<AppEvent>,
+) {
+    std::thread::spawn(move || match backend {
+        BackendRef::Daemon { base_url, api_key } => {
+            let client = make_daemon_client(api_key.as_deref());
+            let outcome: Result<(), String> = (|| {
+                let resp = daemon_response(
+                    client
+                        .get(format!("{base_url}/api/agents/{agent_id}/manifest"))
+                        .send(),
+                    || crate::i18n::t("tui-event-workspaces-manifest-read-failed"),
+                )?;
+                let text = resp
+                    .text()
+                    .map_err(|_| crate::i18n::t("tui-event-workspaces-manifest-read-failed"))?;
+                let toml_content =
+                    rebuild_manifest_with_workspaces(&text, &workspaces).map_err(|e| match e {
+                        WorkspacesRebuildError::ManifestUnreadable => {
+                            crate::i18n::t("tui-event-workspaces-manifest-read-failed")
+                        }
+                        WorkspacesRebuildError::DuplicateName(name) => crate::i18n::t_args(
+                            "tui-event-workspaces-duplicate-name",
+                            &[("name", &name)],
+                        ),
+                        WorkspacesRebuildError::RejectedRow(name) => crate::i18n::t_args(
+                            "tui-agents-workspaces-row-invalid",
+                            &[("name", &name)],
+                        ),
+                    })?;
+                daemon_response(
+                    client
+                        .patch(format!("{base_url}/api/agents/{agent_id}"))
+                        .json(&serde_json::json!({"manifest_toml": toml_content}))
+                        .send(),
+                    || crate::i18n::t("tui-event-workspaces-update-failed"),
+                )?;
+                Ok(())
+            })();
+            match outcome {
+                Ok(()) => {
+                    let _ = tx.send(AppEvent::AgentWorkspacesUpdated(agent_id, generation));
+                }
+                Err(message) => {
+                    let _ = tx.send(AppEvent::FetchError(message));
+                }
+            }
+        }
+        BackendRef::InProcess(_) => {
+            let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
+                "tui-event-workspaces-not-available-in-process",
+            )));
+        }
+    });
+}
+
+/// Why a manifest could not be rebuilt with the editor's `[workspaces]` rows.
+#[derive(Debug)]
+enum WorkspacesRebuildError {
+    /// The fetched manifest is not valid TOML.
+    ManifestUnreadable,
+    /// Two rows (or a row and a preserved declaration) claim the same name;
+    /// saving would make one silently win, so the write is refused.
+    DuplicateName(String),
+    /// A row's name or path cannot become a declaration the kernel resolves,
+    /// so the write is refused rather than persisted and quietly skipped.
+    RejectedRow(String),
+}
+
+/// Whether an editor row cannot become a `[workspaces]` declaration.
+///
+/// The authority is `resolve_workspace_decl` on the kernel side
+/// (`crates/librefang-kernel/src/kernel/workspace_setup.rs`): a `path` that is
+/// absolute or carries `..` is answered with a `tracing::warn!` and a `None`,
+/// so the declaration is written to `agent.toml` and then skipped — the agent
+/// never gets the folder and the only trace is a daemon log line.
+/// A *name* is unusable for the same reason when the runtime cannot address it:
+/// `expand_workspace_alias` matches `@name/rest` on the segment before the
+/// first `/`, so a name carrying punctuation serializes to a manifest the
+/// kernel accepts and the agent can never reach. Mirrors the dashboard's
+/// `WORKSPACE_ALIAS_SAFE_NAME` and `isAbsoluteWorkspacePath` checks.
+pub(crate) fn workspace_row_is_invalid(name: &str, path: &str) -> bool {
+    if name.is_empty()
+        || !name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
+        return true;
+    }
+    if path.is_empty() {
+        return true;
+    }
+    // `Prefix` covers `C:foo`, which `is_absolute()` reports as false on a
+    // non-Windows host while `<root>.join(rel)` still yields a path outside
+    // the root — the same trap the kernel's own component walk guards.
+    std::path::Path::new(path).components().any(|c| {
+        matches!(
+            c,
+            std::path::Component::Prefix(_)
+                | std::path::Component::RootDir
+                | std::path::Component::ParentDir
+        )
+    })
+}
+
+/// Rebuild the manifest with its `[workspaces]` table replaced by the
+/// editor's rows, leaving every other table untouched.
+///
+/// Declarations the editor does not render — anything without a string
+/// `path` (mount-based, or malformed) — are carried over verbatim rather
+/// than dropped, so a save cannot turn a mount into an empty `path`.
+/// `mode` is written only when it is not the kernel default `readwrite`
+/// (accepting the same aliases `canonical_workspace_mode` does), so a
+/// manifest that relies on the default does not gain an explicit key.
+/// Duplicate folder names are refused instead of silently last-wins.
+fn rebuild_manifest_with_workspaces(
+    manifest_toml: &str,
+    workspaces: &[(String, String, String)],
+) -> Result<String, WorkspacesRebuildError> {
+    let mut value: toml::Value =
+        toml::from_str(manifest_toml).map_err(|_| WorkspacesRebuildError::ManifestUnreadable)?;
+    let table = value
+        .as_table_mut()
+        .ok_or(WorkspacesRebuildError::ManifestUnreadable)?;
+    // Copy the declarations the editor does not render before replacing the
+    // table, so they survive the save untouched. "Not rendered" is the exact
+    // complement of `workspaces_editor_rows`: no string `path`, or a `mount`
+    // key (even beside a `path`), which the row model has no field for.
+    let preserved: Vec<(String, toml::Value)> = table
+        .get("workspaces")
+        .and_then(toml::Value::as_table)
+        .map(|t| {
+            t.iter()
+                .filter(|(_, decl)| {
+                    decl.get("mount").is_some()
+                        || decl.get("path").and_then(toml::Value::as_str).is_none()
+                })
+                .map(|(name, decl)| (name.clone(), decl.clone()))
+                .collect()
+        })
+        .unwrap_or_default();
+    // A row the manifest already carries is exempt from the check only while
+    // it still matches that declaration exactly: same name, same path.
+    //
+    // The name half is the one that bit: `resolve_workspace_decl` never inspects a name, and
+    // `expand_workspace_alias` resolves `@name/rest` by exact string equality on the segment
+    // before the first `/` — so the kernel accepts a name this editor's rule refuses, and
+    // `[workspaces."team.docs"]` is legal today. The folder *is* delivered; it is only the
+    // `@team.docs/...` shorthand that misses. Applying the rule to a row the operator did not
+    // introduce refuses the *whole* save, so adding an unrelated folder to such an agent was
+    // impossible, and the two escapes were worse than the trap: delete the row, or rename it and
+    // break every `@team.docs/...` path the agent already uses.
+    //
+    // The path half is exempt for the same reason and is the likelier of the two to be found on
+    // disk: this check exists because rows with an absolute or `..` path were *written* by an
+    // earlier version of this editor, `resolve_workspace_decl` warned and skipped them, and the
+    // operator had no way to remove them without losing the rest of the form.
+    // Exempting them cannot make an inert row worse — it is written back byte-identical and the
+    // kernel skips it exactly as it does today.
+    //
+    // The pair, not the name, is what gets exempted: exempting by name alone let an operator
+    // change the path of an exempt row — `legacy` -> `/srv/data` retyped as `../outside`, or
+    // `team.docs` -> `shared/docs` as `/etc` — while both checks still saw the pre-existing name,
+    // the PATCH answered 200, and the kernel dropped the declaration with only a `WARN`. An
+    // edited path is a row this session typed and goes through the check; a path edited to a
+    // *valid* value still passes, because the check only refuses invalid shapes (#7835 review).
+    //
+    // What is typed here still has to be addressable; both halves are pinned by
+    // `rebuild_refuses_a_row_the_kernel_would_only_warn_about` above and
+    // `rebuild_keeps_a_pre_existing_row_the_alias_rule_would_refuse` below.
+    let already_declared: std::collections::HashMap<String, String> = table
+        .get("workspaces")
+        .and_then(toml::Value::as_table)
+        .map(|t| {
+            t.iter()
+                .filter(|(_, decl)| decl.get("mount").is_none())
+                .filter_map(|(name, decl)| {
+                    Some((name.clone(), decl.get("path")?.as_str()?.to_string()))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut ws = toml::map::Map::new();
+    for (name, path, mode) in workspaces {
+        let pre_existing = already_declared.get(name).map(String::as_str) == Some(path.as_str());
+        if !pre_existing && workspace_row_is_invalid(name, path) {
+            return Err(WorkspacesRebuildError::RejectedRow(name.clone()));
+        }
+        let mut entry = toml::map::Map::new();
+        entry.insert("path".to_string(), toml::Value::String(path.clone()));
+        let mode = canonical_workspace_mode(mode);
+        if mode != "readwrite" {
+            entry.insert("mode".to_string(), toml::Value::String(mode.to_string()));
+        }
+        if ws.insert(name.clone(), toml::Value::Table(entry)).is_some() {
+            return Err(WorkspacesRebuildError::DuplicateName(name.clone()));
+        }
+    }
+    for (name, decl) in preserved {
+        if ws.insert(name.clone(), decl).is_some() {
+            return Err(WorkspacesRebuildError::DuplicateName(name));
+        }
+    }
+    table.insert("workspaces".to_string(), toml::Value::Table(ws));
+    toml::to_string(&value).map_err(|_| WorkspacesRebuildError::ManifestUnreadable)
+}
+
 pub fn spawn_update_agent_skills(
     backend: BackendRef,
     agent_id: String,
@@ -2162,6 +2535,100 @@ pub fn spawn_fetch_agent_model_params(
                 "tui-event-model-params-daemon-only",
             )));
         }
+    });
+}
+
+/// Largest page `GET /api/agents/{id}/manifest-history` will serve.
+///
+/// Asked for in full because the endpoint has no offset parameter: whatever the first response omits cannot be paged to afterwards, and the store keeps far fewer snapshots per agent than this anyway.
+const MANIFEST_HISTORY_LIMIT: u32 = 200;
+
+/// Map a `GET /api/agents/{id}/manifest-history` 200 body to the pane's rows.
+///
+/// A body without a `versions` array is a broken answer, not an agent with no history: reporting an empty pane would hide the malformed response behind "nothing recorded".
+fn manifest_versions_from_body(body: &serde_json::Value) -> Result<Vec<ManifestVersion>, String> {
+    let Some(versions) = body["versions"].as_array() else {
+        return Err(crate::i18n::t("tui-event-manifest-history-fetch-failed"));
+    };
+    Ok(versions
+        .iter()
+        .map(|v| ManifestVersion {
+            timestamp: v["timestamp"].as_str().unwrap_or_default().to_string(),
+            change_source: v["change_source"].as_str().unwrap_or_default().to_string(),
+            manifest_toml: v["manifest_toml"].as_str().unwrap_or_default().to_string(),
+        })
+        .collect())
+}
+
+/// Read an agent's snapshots straight from the substrate, for the in-process backend.
+///
+/// Snapshots are written into the substrate by the same kernel the in-process TUI holds, so it can read them directly — including rows a daemon wrote in an earlier session against the same `~/.librefang`.
+/// Unlike the model-params fetch this is modelled on, there is no advisory limit check that only the endpoint performs; it is a pure read.
+fn manifest_versions_from_store(
+    store: &librefang_memory::ManifestVersionStore,
+    agent_id: &str,
+    limit: usize,
+) -> Result<Vec<ManifestVersion>, String> {
+    store
+        .list_for_agent(agent_id, limit)
+        .map(|rows| {
+            rows.into_iter()
+                .map(|r| ManifestVersion {
+                    timestamp: r.timestamp,
+                    change_source: r.change_source,
+                    manifest_toml: r.manifest_toml,
+                })
+                .collect()
+        })
+        .map_err(|e| e.to_string())
+}
+
+/// Fetch an agent's recorded manifest snapshots for the view-only history pane.
+pub fn spawn_fetch_agent_manifest_history(
+    backend: BackendRef,
+    agent_id: String,
+    tx: mpsc::Sender<AppEvent>,
+) {
+    let limit = MANIFEST_HISTORY_LIMIT;
+    std::thread::spawn(move || {
+        let fail = |tx: &mpsc::Sender<AppEvent>, failure: FetchFailure| {
+            let _ = tx.send(AppEvent::AgentManifestHistoryFailed {
+                agent_id: agent_id.clone(),
+                failure,
+            });
+        };
+        let versions = match backend {
+            BackendRef::Daemon { base_url, api_key } => {
+                let client = make_daemon_client(api_key.as_deref());
+                // A bad agent id is answered by the endpoint (400 for a non-UUID, 404 for one it does not know), so the reason it gives is reported instead of a generic failure.
+                fetch_json(
+                    client
+                        .get(format!(
+                            "{base_url}/api/agents/{agent_id}/manifest-history?limit={limit}"
+                        ))
+                        .send(),
+                    || crate::i18n::t("tui-event-manifest-history-fetch-failed"),
+                )
+                .and_then(|body| manifest_versions_from_body(&body))
+            }
+            BackendRef::InProcess(kernel) => {
+                use librefang_kernel::KernelApi;
+                let store =
+                    librefang_memory::ManifestVersionStore::new(kernel.memory_substrate().pool());
+                manifest_versions_from_store(&store, &agent_id, limit as usize)
+            }
+        };
+        let versions = match versions {
+            Ok(versions) => versions,
+            Err(message) => {
+                fail(&tx, FetchFailure::Error(message));
+                return;
+            }
+        };
+        let _ = tx.send(AppEvent::AgentManifestHistoryLoaded {
+            agent_id: agent_id.clone(),
+            versions,
+        });
     });
 }
 
@@ -3203,7 +3670,9 @@ pub fn spawn_save_memory_kv(
             let client = make_daemon_client(api_key.as_deref());
             let outcome = daemon_response(
                 client
-                    .put(format!("{base_url}/api/memory/agents/{agent_id}/kv/{key}"))
+                    .put(crate::commands::monitoring::memory_kv_url(
+                        &base_url, &agent_id, &key,
+                    ))
                     .json(&serde_json::json!({"value": value}))
                     .send(),
                 || crate::i18n::t("tui-event-kv-save-failed"),
@@ -3237,7 +3706,9 @@ pub fn spawn_delete_memory_kv(
             let client = make_daemon_client(api_key.as_deref());
             let outcome = daemon_response(
                 client
-                    .delete(format!("{base_url}/api/memory/agents/{agent_id}/kv/{key}"))
+                    .delete(crate::commands::monitoring::memory_kv_url(
+                        &base_url, &agent_id, &key,
+                    ))
                     .send(),
                 || crate::i18n::t("tui-event-kv-delete-failed"),
             );
@@ -3686,6 +4157,154 @@ pub fn spawn_promote_agent_type(backend: BackendRef, name: String, tx: mpsc::Sen
     });
 }
 
+/// One row of a template's version history, as served by `GET /api/templates/{name}/history`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TemplateVersionRow {
+    pub id: String,
+    pub timestamp: String,
+    pub change_source: String,
+}
+
+/// Parse the body of `GET /api/templates/{name}/history` into display rows.
+/// The endpoint answers `{"versions": [{id, template_name, timestamp, manifest_toml, change_source}, …]}` —
+/// a missing or non-array `versions` envelope is an error, not an empty list, because a failed
+/// request must not render the same "no history" state as an empty list.
+/// This guarantee stops at the envelope: within one row, a missing or non-string `id` /
+/// `timestamp` / `change_source` falls back to a placeholder (`"?"` / `"unknown"`) rather than
+/// erroring, so a daemon that renamed a row field renders placeholders instead of surfacing the
+/// shape mismatch.
+pub(crate) fn parse_template_history(
+    body: &serde_json::Value,
+) -> Result<Vec<TemplateVersionRow>, String> {
+    let items = body
+        .get("versions")
+        .ok_or_else(|| crate::i18n::t("tui-templates-history-shape"))?
+        .as_array()
+        .ok_or_else(|| crate::i18n::t("tui-templates-history-shape"))?;
+    items
+        .iter()
+        .map(|v| {
+            Ok(TemplateVersionRow {
+                // The id is an integer in the current API but the row type is display-only,
+                // so both a JSON number and a string are accepted without printing quotes.
+                id: match v.get("id") {
+                    Some(serde_json::Value::Number(n)) => n.to_string(),
+                    Some(serde_json::Value::String(s)) => s.clone(),
+                    Some(other) => other.to_string(),
+                    None => "?".to_string(),
+                },
+                timestamp: v
+                    .get("timestamp")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("unknown")
+                    .to_string(),
+                change_source: v
+                    .get("change_source")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("unknown")
+                    .to_string(),
+            })
+        })
+        .collect()
+}
+
+pub fn spawn_restore_from_registry(backend: BackendRef, name: String, tx: mpsc::Sender<AppEvent>) {
+    std::thread::spawn(move || {
+        let (ok, message) = if !is_safe_template_name(&name) {
+            (false, crate::i18n::t("tui-templates-restore-invalid-name"))
+        } else {
+            match backend {
+                BackendRef::Daemon { base_url, api_key } => {
+                    let client = make_daemon_client(api_key.as_deref());
+                    let outcome = client
+                        .post(format!("{base_url}/api/templates/{name}/restore"))
+                        .send();
+                    match daemon_response(outcome, || {
+                        crate::i18n::t("tui-templates-restore-failed")
+                    }) {
+                        Ok(_) => (true, crate::i18n::t("tui-templates-restore-success")),
+                        Err(message) => (false, message),
+                    }
+                }
+                BackendRef::InProcess(_) => {
+                    (false, crate::i18n::t("tui-templates-restore-daemon-only"))
+                }
+            }
+        };
+        let _ = tx.send(AppEvent::RegistryRestoreResult { name, ok, message });
+    });
+}
+
+/// Restore a template to one specific historical version, via
+/// `POST /api/templates/{name}/history/{version_id}/restore`.
+///
+/// Distinct from [`spawn_restore_from_registry`], which restores the registry's
+/// current definition through `/restore` rather than a chosen version.
+pub fn spawn_restore_template_version(
+    backend: BackendRef,
+    name: String,
+    version_id: String,
+    tx: mpsc::Sender<AppEvent>,
+) {
+    std::thread::spawn(move || {
+        let (ok, message) = if !is_safe_template_name(&name) || !is_safe_template_name(&version_id)
+        {
+            (false, crate::i18n::t("tui-templates-restore-invalid-name"))
+        } else {
+            match backend {
+                BackendRef::Daemon { base_url, api_key } => {
+                    let client = make_daemon_client(api_key.as_deref());
+                    let outcome = client
+                        .post(format!(
+                            "{base_url}/api/templates/{name}/history/{version_id}/restore"
+                        ))
+                        .send();
+                    match daemon_response(outcome, || {
+                        crate::i18n::t("tui-templates-version-restore-failed")
+                    }) {
+                        Ok(_) => (true, crate::i18n::t("tui-templates-restore-success")),
+                        Err(message) => (false, message),
+                    }
+                }
+                BackendRef::InProcess(_) => {
+                    (false, crate::i18n::t("tui-templates-restore-daemon-only"))
+                }
+            }
+        };
+        let _ = tx.send(AppEvent::TemplateVersionRestoreResult { name, ok, message });
+    });
+}
+
+pub fn spawn_fetch_template_history(backend: BackendRef, name: String, tx: mpsc::Sender<AppEvent>) {
+    std::thread::spawn(move || {
+        let result = if !is_safe_template_name(&name) {
+            Err(crate::i18n::t("tui-templates-restore-invalid-name"))
+        } else {
+            match backend {
+                BackendRef::Daemon { base_url, api_key } => {
+                    let client = make_daemon_client(api_key.as_deref());
+                    let outcome = client
+                        .get(format!("{base_url}/api/templates/{name}/history"))
+                        .send();
+                    match daemon_response(outcome, || {
+                        crate::i18n::t("tui-templates-history-failed")
+                    }) {
+                        Ok(resp) => match resp.json::<serde_json::Value>() {
+                            Ok(body) => parse_template_history(&body),
+                            Err(e) => Err(e.to_string()),
+                        },
+                        Err(message) => Err(message),
+                    }
+                }
+                BackendRef::InProcess(_) => {
+                    Err(crate::i18n::t("tui-templates-history-daemon-only"))
+                }
+            }
+        };
+        let _ = tx.send(AppEvent::TemplateHistoryLoaded { name, result });
+    });
+}
+
 pub fn spawn_fetch_template_providers(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
     std::thread::spawn(move || match backend {
         BackendRef::Daemon { base_url, api_key } => {
@@ -4070,18 +4689,26 @@ pub fn spawn_fetch_model_catalog(backend: BackendRef, tx: mpsc::Sender<AppEvent>
 /// clears every field the body omits, so submitting only the two capacity
 /// limits would silently drop the temperature, top-p and reasoning-effort
 /// settings stored under the same key.
+///
+/// A read that fails (transport error, non-2xx, or a body that is not a JSON object) is an `Err` carrying the line built by `summary`, never an empty document.
+/// Falling back to `{}` here is exactly the data loss the merge exists to prevent: the caller would then PUT a document holding only the limits, or DELETE the whole entry on reset.
 fn read_model_overrides(
     client: &reqwest::blocking::Client,
     base_url: &str,
     key: &str,
-) -> serde_json::Value {
-    client
-        .get(format!("{base_url}/api/models/overrides/{key}"))
-        .send()
-        .ok()
-        .and_then(|resp| resp.json::<serde_json::Value>().ok())
-        .filter(|doc| doc.is_object())
-        .unwrap_or_else(|| serde_json::json!({}))
+    summary: impl Fn() -> String,
+) -> Result<serde_json::Value, String> {
+    let doc = fetch_json(
+        client
+            .get(format!("{base_url}/api/models/overrides/{key}"))
+            .send(),
+        &summary,
+    )?;
+    if doc.is_object() {
+        Ok(doc)
+    } else {
+        Err(summary())
+    }
 }
 
 /// Persist one model's operator capacity limits (refs #7774).
@@ -4098,7 +4725,15 @@ pub fn spawn_save_model_limits(
     std::thread::spawn(move || match backend {
         BackendRef::Daemon { base_url, api_key } => {
             let client = make_daemon_client(api_key.as_deref());
-            let mut doc = read_model_overrides(&client, &base_url, &key);
+            let summary =
+                || crate::i18n::t_args("tui-event-model-limits-save-failed", &[("model", &key)]);
+            let mut doc = match read_model_overrides(&client, &base_url, &key, summary) {
+                Ok(doc) => doc,
+                Err(message) => {
+                    let _ = tx.send(AppEvent::FetchError(message));
+                    return;
+                }
+            };
             set_or_clear(&mut doc, "context_window", context_window);
             set_or_clear(&mut doc, "max_output_tokens", max_output_tokens);
             let outcome = daemon_response(
@@ -4106,7 +4741,7 @@ pub fn spawn_save_model_limits(
                     .put(format!("{base_url}/api/models/overrides/{key}"))
                     .json(&doc)
                     .send(),
-                || crate::i18n::t_args("tui-event-model-limits-save-failed", &[("model", &key)]),
+                summary,
             );
             match outcome {
                 Ok(_) => {
@@ -4135,7 +4770,15 @@ pub fn spawn_reset_model_limits(backend: BackendRef, key: String, tx: mpsc::Send
     std::thread::spawn(move || match backend {
         BackendRef::Daemon { base_url, api_key } => {
             let client = make_daemon_client(api_key.as_deref());
-            let mut doc = read_model_overrides(&client, &base_url, &key);
+            let summary =
+                || crate::i18n::t_args("tui-event-model-limits-reset-failed", &[("model", &key)]);
+            let mut doc = match read_model_overrides(&client, &base_url, &key, summary) {
+                Ok(doc) => doc,
+                Err(message) => {
+                    let _ = tx.send(AppEvent::FetchError(message));
+                    return;
+                }
+            };
             set_or_clear(&mut doc, "context_window", None);
             set_or_clear(&mut doc, "max_output_tokens", None);
             let empty = doc.as_object().map(|o| o.is_empty()).unwrap_or(true);
@@ -4149,9 +4792,7 @@ pub fn spawn_reset_model_limits(backend: BackendRef, key: String, tx: mpsc::Send
                     .json(&doc)
                     .send()
             };
-            let outcome = daemon_response(outcome, || {
-                crate::i18n::t_args("tui-event-model-limits-reset-failed", &[("model", &key)])
-            });
+            let outcome = daemon_response(outcome, summary);
             match outcome {
                 Ok(_) => {
                     let _ = tx.send(AppEvent::ModelLimitsReset(key));
@@ -6260,6 +6901,83 @@ mod tests {
     use super::*;
     use std::sync::atomic::AtomicBool;
 
+    // ── manifest history fetch: body and store mapping ────────────────────
+
+    /// A 200 without a `versions` array is a malformed answer and must surface as a failure, not as an agent with no history.
+    #[test]
+    fn a_history_body_without_versions_is_an_error() {
+        assert_eq!(
+            manifest_versions_from_body(&serde_json::json!({})),
+            Err(crate::i18n::t("tui-event-manifest-history-fetch-failed"))
+        );
+        assert!(manifest_versions_from_body(&serde_json::json!({ "versions": null })).is_err());
+    }
+
+    #[test]
+    fn an_empty_versions_array_is_an_empty_history() {
+        assert_eq!(
+            manifest_versions_from_body(&serde_json::json!({ "versions": [] })),
+            Ok(Vec::new())
+        );
+    }
+
+    #[test]
+    fn a_populated_history_body_keeps_order_and_fields() {
+        let body = serde_json::json!({
+            "versions": [
+                { "id": 2, "timestamp": "2026-09-07 10:00:00", "change_source": "restore", "manifest_toml": "name = \"b\"" },
+                { "id": 1, "timestamp": "2026-09-06 09:00:00", "change_source": "api", "manifest_toml": "name = \"a\"" },
+            ]
+        });
+        assert_eq!(
+            manifest_versions_from_body(&body),
+            Ok(vec![
+                ManifestVersion {
+                    timestamp: "2026-09-07 10:00:00".to_string(),
+                    change_source: "restore".to_string(),
+                    manifest_toml: "name = \"b\"".to_string(),
+                },
+                ManifestVersion {
+                    timestamp: "2026-09-06 09:00:00".to_string(),
+                    change_source: "api".to_string(),
+                    manifest_toml: "name = \"a\"".to_string(),
+                },
+            ])
+        );
+    }
+
+    /// The in-process backend reads the same substrate the kernel writes, newest first, scoped to the agent asked for.
+    #[test]
+    fn the_in_process_history_read_returns_the_agents_rows_newest_first() {
+        let substrate = librefang_memory::MemorySubstrate::open_in_memory(0.1).unwrap();
+        let store = librefang_memory::ManifestVersionStore::new(substrate.pool());
+        store
+            .record_version("agent_a", "a", "name = \"a\"\nversion = 1", "api")
+            .unwrap();
+        store
+            .record_version("agent_a", "a", "name = \"a\"\nversion = 2", "restore")
+            .unwrap();
+        store
+            .record_version("agent_b", "b", "name = \"b\"", "api")
+            .unwrap();
+
+        let versions = manifest_versions_from_store(&store, "agent_a", 200).unwrap();
+
+        assert_eq!(
+            versions
+                .iter()
+                .map(|v| (v.change_source.as_str(), v.manifest_toml.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("restore", "name = \"a\"\nversion = 2"),
+                ("api", "name = \"a\"\nversion = 1"),
+            ]
+        );
+        assert!(manifest_versions_from_store(&store, "agent_unknown", 200)
+            .unwrap()
+            .is_empty());
+    }
+
     // ── the memory-config PATCH reports its outcome in the body ───────────
 
     /// The clean case, and the only one that may clear the unsaved marker.
@@ -6565,6 +7283,399 @@ mod tests {
             FetchFailure::RequiresDaemon,
             FetchFailure::Error("connection refused".to_string())
         );
+    }
+
+    #[test]
+    fn workspace_rows_skip_mount_declarations() {
+        // `mode = "r"` here is the deserialize-only `WorkspaceMode` alias, not
+        // what the live API renders (`readonly`) — exercising it proves the
+        // editor's read path normalizes both spellings the same way.
+        let manifest: toml::Value = toml::from_str(
+            r#"
+[workspaces.library]
+path = "shared/library"
+mode = "r"
+
+[workspaces.vault]
+mount = "/data/vault"
+mode = "r"
+"#,
+        )
+        .unwrap();
+        let rows = workspaces_editor_rows(&manifest);
+        assert_eq!(
+            rows,
+            vec![(
+                "library".to_string(),
+                "shared/library".to_string(),
+                "readonly".to_string()
+            )]
+        );
+    }
+
+    #[test]
+    fn workspace_rows_default_mode_to_readwrite() {
+        let manifest: toml::Value = toml::from_str(
+            r#"
+[workspaces.library]
+path = "shared/library"
+"#,
+        )
+        .unwrap();
+        let rows = workspaces_editor_rows(&manifest);
+        assert_eq!(
+            rows,
+            vec![(
+                "library".to_string(),
+                "shared/library".to_string(),
+                "readwrite".to_string()
+            )]
+        );
+    }
+
+    #[test]
+    fn workspace_rows_normalize_the_canonical_api_spelling_too() {
+        // This is what `GET /api/agents/{id}/manifest` actually serializes —
+        // `WorkspaceMode`'s aliases are deserialize-only, so the live wire
+        // format never contains `r` / `rw`. NOT evidence of the alias fix by
+        // itself: the pre-fix code (`as_str().unwrap_or("rw")`) already
+        // passed a canonical `"readonly"` through unchanged, so this only
+        // guards against a future normalization step mishandling the
+        // canonical case. `workspace_rows_skip_mount_declarations` and
+        // `workspace_rows_default_mode_to_readwrite` are what demonstrate
+        // the fix — they fail against the pre-fix code.
+        let manifest: toml::Value = toml::from_str(
+            r#"
+[workspaces.library]
+path = "shared/library"
+mode = "readonly"
+"#,
+        )
+        .unwrap();
+        let rows = workspaces_editor_rows(&manifest);
+        assert_eq!(rows[0].2, "readonly");
+    }
+
+    #[test]
+    fn rebuild_preserves_mount_declarations_and_other_tables() {
+        let manifest = r#"
+name = "deanna"
+[skills]
+review = true
+[workspaces.library]
+path = "shared/library"
+[workspaces.vault]
+mount = "/data/vault"
+mode = "r"
+"#;
+        let rebuilt = rebuild_manifest_with_workspaces(
+            manifest,
+            &[(
+                "library".to_string(),
+                "shared/library".to_string(),
+                "rw".to_string(),
+            )],
+        )
+        .unwrap();
+        let value: toml::Value = toml::from_str(&rebuilt).unwrap();
+        // Every table the editor does not render survives the save.
+        assert_eq!(value["skills"]["review"].as_bool(), Some(true));
+        let vault = &value["workspaces"]["vault"];
+        assert_eq!(
+            vault.get("mount").and_then(toml::Value::as_str),
+            Some("/data/vault")
+        );
+        assert_eq!(vault.get("mode").and_then(toml::Value::as_str), Some("r"));
+        // The edited row is written through.
+        assert_eq!(
+            value["workspaces"]["library"]["path"].as_str(),
+            Some("shared/library")
+        );
+        // The default mode is not materialized as an explicit key.
+        assert_eq!(value["workspaces"]["library"].get("mode"), None);
+    }
+
+    /// A declaration carrying both `mount` and `path` is still mount-based:
+    /// the row model has no field for the mount, so rendering it as an
+    /// editable row and writing it back would silently drop the mount —
+    /// turning a declaration the kernel resolves as a mount into a plain
+    /// `path` one, or vice versa (#7835 review).
+    #[test]
+    fn a_mount_declaration_is_not_an_editable_row_even_beside_a_path() {
+        let manifest = r#"
+name = "deanna"
+[workspaces.vault]
+mount = "/data/vault"
+path = "shared/legacy"
+mode = "readonly"
+"#;
+
+        assert!(
+            workspaces_editor_rows(&toml::from_str(manifest).unwrap()).is_empty(),
+            "the editor cannot render a mount; it must not offer a row that would erase it"
+        );
+
+        let rebuilt = rebuild_manifest_with_workspaces(
+            manifest,
+            &[(
+                "library".to_string(),
+                "shared/library".to_string(),
+                "readwrite".to_string(),
+            )],
+        )
+        .unwrap();
+        let value: toml::Value = toml::from_str(&rebuilt).unwrap();
+        let vault = &value["workspaces"]["vault"];
+        assert_eq!(
+            vault.get("mount").and_then(toml::Value::as_str),
+            Some("/data/vault"),
+            "the mount key must survive the save"
+        );
+        assert_eq!(
+            vault.get("path").and_then(toml::Value::as_str),
+            Some("shared/legacy"),
+            "the declaration is preserved verbatim, not rewritten as a row"
+        );
+        assert_eq!(
+            value["workspaces"]["library"]["path"].as_str(),
+            Some("shared/library")
+        );
+    }
+
+    #[test]
+    fn rebuild_writes_explicit_mode_when_not_the_default() {
+        let manifest = "name = \"deanna\"\n";
+        let rebuilt = rebuild_manifest_with_workspaces(
+            manifest,
+            &[(
+                "library".to_string(),
+                "shared/library".to_string(),
+                // The alias, not the canonical spelling — the write path
+                // must normalize it the same way the read path does.
+                "r".to_string(),
+            )],
+        )
+        .unwrap();
+        let value: toml::Value = toml::from_str(&rebuilt).unwrap();
+        assert_eq!(
+            value["workspaces"]["library"]["mode"].as_str(),
+            Some("readonly")
+        );
+    }
+
+    #[test]
+    fn rebuild_refuses_duplicate_folder_names() {
+        let manifest = "name = \"deanna\"\n";
+        let err = rebuild_manifest_with_workspaces(
+            manifest,
+            &[
+                ("library".to_string(), "a".to_string(), "rw".to_string()),
+                ("library".to_string(), "b".to_string(), "rw".to_string()),
+            ],
+        )
+        .err()
+        .unwrap();
+        assert!(matches!(err, WorkspacesRebuildError::DuplicateName(n) if n == "library"));
+    }
+
+    #[test]
+    fn rebuild_refuses_a_row_that_collides_with_a_preserved_mount() {
+        let manifest = r#"
+[workspaces.vault]
+mount = "/data/vault"
+"#;
+        let err = rebuild_manifest_with_workspaces(
+            manifest,
+            &[("vault".to_string(), "shared".to_string(), "rw".to_string())],
+        )
+        .err()
+        .unwrap();
+        assert!(matches!(err, WorkspacesRebuildError::DuplicateName(n) if n == "vault"));
+    }
+
+    /// The shapes `resolve_workspace_decl` answers with a `tracing::warn!` and
+    /// a `None`: the row is written to `agent.toml` and then skipped, so the
+    /// PATCH returns 200, the TUI reports the folders saved, and the agent
+    /// silently never gets the folder. Refusing here is what turns that into a
+    /// message instead.
+    #[test]
+    fn rebuild_refuses_a_row_the_kernel_would_only_warn_about() {
+        let manifest = "name = \"deanna\"\n";
+        for (name, path) in [
+            ("library", "/srv/data"),
+            ("library", "../shared"),
+            ("library", "a/../b"),
+            ("lib/rary", "shared/library"),
+            ("lib rary", "shared/library"),
+        ] {
+            let err = rebuild_manifest_with_workspaces(
+                manifest,
+                &[(name.to_string(), path.to_string(), "rw".to_string())],
+            )
+            .err()
+            .unwrap_or_else(|| panic!("{name:?} + {path:?} must be refused"));
+            assert!(
+                matches!(err, WorkspacesRebuildError::RejectedRow(ref n) if n == name),
+                "{name:?} + {path:?} produced {err:?}"
+            );
+        }
+    }
+
+    /// A row the manifest already carries is not this editor's to police.
+    ///
+    /// Both shapes are here. `[workspaces."team.docs"]` is the name half: the kernel accepts it,
+    /// the agent gets the folder, and only the `@team.docs/…` shorthand misses — so refusing the
+    /// whole save over it blocked adding any unrelated folder, and the two escapes were worse
+    /// than the trap (delete the row, or rename it and break every `@team.docs/…` in use).
+    /// `path = "/srv/data"` is the path half: an earlier version of this editor wrote such rows,
+    /// the kernel warns and skips them, and the operator could not remove one without losing the
+    /// rest of the form.
+    ///
+    /// What the operator *types* is still checked in both halves — see
+    /// `rebuild_refuses_a_row_the_kernel_would_only_warn_about` above.
+    #[test]
+    fn rebuild_keeps_a_pre_existing_row_the_alias_rule_would_refuse() {
+        let manifest = r#"
+[workspaces."team.docs"]
+path = "shared/docs"
+
+[workspaces.legacy]
+path = "/srv/data"
+
+[workspaces.library]
+path = "shared/library"
+"#;
+        let out = rebuild_manifest_with_workspaces(
+            manifest,
+            &[
+                (
+                    "team.docs".to_string(),
+                    "shared/docs".to_string(),
+                    "rw".to_string(),
+                ),
+                (
+                    "legacy".to_string(),
+                    "/srv/data".to_string(),
+                    "rw".to_string(),
+                ),
+                (
+                    "library".to_string(),
+                    "shared/library".to_string(),
+                    "rw".to_string(),
+                ),
+                (
+                    "added".to_string(),
+                    "shared/added".to_string(),
+                    "rw".to_string(),
+                ),
+            ],
+        )
+        .expect("a pre-existing row must not refuse the save");
+
+        let parsed: toml::Value = toml::from_str(&out).unwrap();
+        let ws = parsed
+            .get("workspaces")
+            .and_then(toml::Value::as_table)
+            .unwrap();
+        assert!(
+            ws.contains_key("team.docs"),
+            "the pre-existing name was dropped: {out}"
+        );
+        assert_eq!(
+            ws.get("legacy")
+                .and_then(|d| d.get("path"))
+                .and_then(toml::Value::as_str),
+            Some("/srv/data"),
+            "the inert row was not written back byte-identical: {out}"
+        );
+        assert!(
+            ws.contains_key("added"),
+            "the operator's new row is missing: {out}"
+        );
+    }
+
+    /// Exempting by name alone exempted every path on that name too: a
+    /// pre-existing row with an inert `/srv/data` path could be retyped as
+    /// `../outside`, both checks still saw the pre-existing name, the PATCH
+    /// answered 200, and the kernel dropped the declaration with only a
+    /// `WARN` — the agent silently never got the folder. Only the pair that
+    /// still matches the manifest is exempt; an edited path is checked, and
+    /// editing it to a valid value still passes (#7835 review).
+    #[test]
+    fn rebuild_checks_a_pre_existing_row_whose_path_was_changed() {
+        let manifest = r#"
+[workspaces.legacy]
+path = "/srv/data"
+"#;
+        let err = rebuild_manifest_with_workspaces(
+            manifest,
+            &[(
+                "legacy".to_string(),
+                "../outside".to_string(),
+                "rw".to_string(),
+            )],
+        )
+        .expect_err("an edited path on a pre-existing name must be refused");
+        assert!(matches!(err, WorkspacesRebuildError::RejectedRow(ref n) if n == "legacy"));
+
+        // The untouched pair remains exempt, inert path included.
+        rebuild_manifest_with_workspaces(
+            manifest,
+            &[(
+                "legacy".to_string(),
+                "/srv/data".to_string(),
+                "rw".to_string(),
+            )],
+        )
+        .expect("the untouched pair must not refuse the save");
+
+        // And an edited path that is valid is still writable, name unchanged.
+        let out = rebuild_manifest_with_workspaces(
+            manifest,
+            &[(
+                "legacy".to_string(),
+                "shared/legacy".to_string(),
+                "rw".to_string(),
+            )],
+        )
+        .expect("a valid edited path must still pass");
+        let value: toml::Value = toml::from_str(&out).unwrap();
+        assert_eq!(
+            value["workspaces"]["legacy"]["path"].as_str(),
+            Some("shared/legacy")
+        );
+    }
+
+    /// The two rules the dashboard applies to the same field
+    /// (`WORKSPACE_ALIAS_SAFE_NAME` and `isAbsoluteWorkspacePath`), pinned on
+    /// the CLI side so the two surfaces cannot drift apart. The CLI is the
+    /// looser of the two today, and this is the check that closes it.
+    #[test]
+    fn workspace_row_validity_matches_the_dashboard() {
+        for (name, path) in [
+            ("library", "shared/library"),
+            ("my-folder_2", "a/b"),
+            ("A1", "x"),
+        ] {
+            assert!(
+                !workspace_row_is_invalid(name, path),
+                "{name:?}/{path:?} must be accepted"
+            );
+        }
+        for (name, path) in [
+            ("", "shared"),
+            ("library", ""),
+            ("lib rary", "shared"),
+            ("lib/rary", "shared"),
+            ("library", "/abs"),
+            ("library", "../up"),
+            ("library", "a/../b"),
+        ] {
+            assert!(
+                workspace_row_is_invalid(name, path),
+                "{name:?}/{path:?} must be refused"
+            );
+        }
     }
 
     /// `GET /api/channels` mixes configured instances and catalog adapters in
@@ -7291,6 +8402,28 @@ mod tests {
         }
     }
 
+    /// The reviewer's regression: the endpoint answers an object with a
+    /// `versions` array, but the old code deserialized the body straight into
+    /// `Vec<Value>` and let `unwrap_or_default()` swallow the mismatch — the
+    /// screen showed "no history" against a populated response.
+    #[test]
+    fn history_parse_reads_the_real_envelope_and_rows() {
+        let body = serde_json::json!({
+            "versions": [{
+                "id": 7,
+                "template_name": "payroll",
+                "timestamp": "2026-09-02T08:34:21Z",
+                "manifest_toml": "name = \"payroll\"\n",
+                "change_source": "update"
+            }]
+        });
+        let rows = parse_template_history(&body).expect("the served shape must parse");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, "7");
+        assert_eq!(rows[0].timestamp, "2026-09-02T08:34:21Z");
+        assert_eq!(rows[0].change_source, "update");
+    }
+
     // ── every list fetch reports its failure (#8154) ────────────────────────
 
     /// The daemon's standard `ApiErrorResponse` envelope, with a reason no helper could invent.
@@ -7526,5 +8659,116 @@ mod tests {
                 }
             }
         }
+    }
+
+    // ── Request-recording stub for write paths ─────────────────────────────
+
+    /// A stub daemon that answers `responses` in order and reports each request line (`"PUT /api/... HTTP/1.1"`) on the returned channel before answering it.
+    /// A request that would have followed the last answer is refused by the closed listener, so the caller still sees it as a transport error rather than hanging.
+    fn recording_server(
+        responses: Vec<(&'static str, &'static str)>,
+    ) -> (String, mpsc::Receiver<String>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let base = format!("http://{}", listener.local_addr().expect("addr"));
+        let (seen_tx, seen_rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            for (status, body) in responses {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    return;
+                };
+                let mut buf = [0u8; 8192];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                let head = String::from_utf8_lossy(&buf[..n]);
+                let _ = seen_tx.send(head.lines().next().unwrap_or_default().to_string());
+                let response = format!(
+                    "HTTP/1.1 {status}\r\ncontent-type: text/html\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(response.as_bytes());
+                let _ = stream.flush();
+            }
+        });
+        (base, seen_rx)
+    }
+
+    /// A failed read of the stored overrides must abort the write.
+    ///
+    /// `PUT /api/models/overrides/{id}` replaces the whole document, so merging the limits into `{}` after a 502 would wipe the stored temperature, top-p and reasoning effort.
+    #[test]
+    fn save_model_limits_does_not_put_after_failed_read() {
+        let (base, seen) = recording_server(vec![
+            ("502 Bad Gateway", "<html>bad gateway</html>"),
+            ("200 OK", "{}"),
+        ]);
+        let (tx, rx) = mpsc::channel();
+        spawn_save_model_limits(
+            daemon(base),
+            "openai:gpt-4o".to_string(),
+            Some(64000),
+            None,
+            tx,
+        );
+        match next_event(&rx) {
+            AppEvent::FetchError(message) => assert!(!message.is_empty()),
+            _ => panic!("a failed read must surface as FetchError, not as a saved limit"),
+        }
+        let requests: Vec<String> = seen.try_iter().collect();
+        assert_eq!(requests.len(), 1, "only the GET may be sent: {requests:?}");
+        assert!(requests[0].starts_with("GET "), "{requests:?}");
+    }
+
+    /// The reset path needs the same guard even more: a failed read left an empty document, which made it DELETE the whole entry.
+    #[test]
+    fn reset_model_limits_does_not_delete_after_failed_read() {
+        let (base, seen) = recording_server(vec![
+            ("502 Bad Gateway", "<html>bad gateway</html>"),
+            ("200 OK", "{}"),
+        ]);
+        let (tx, rx) = mpsc::channel();
+        spawn_reset_model_limits(daemon(base), "openai:gpt-4o".to_string(), tx);
+        match next_event(&rx) {
+            AppEvent::FetchError(message) => assert!(!message.is_empty()),
+            _ => panic!("a failed read must surface as FetchError, not as a reset"),
+        }
+        let requests: Vec<String> = seen.try_iter().collect();
+        assert_eq!(requests.len(), 1, "only the GET may be sent: {requests:?}");
+        assert!(requests[0].starts_with("GET "), "{requests:?}");
+    }
+
+    /// Memory KV keys are free-form, and agents store keys such as `notes/2026`; the TUI must address them as one encoded path segment.
+    #[test]
+    fn memory_kv_save_and_delete_percent_encode_the_key() {
+        let (base, seen) = recording_server(vec![("200 OK", "{}"), ("200 OK", "{}")]);
+        let (tx, rx) = mpsc::channel();
+        spawn_save_memory_kv(
+            daemon(base.clone()),
+            "a1".to_string(),
+            "notes/2026?x".to_string(),
+            "v".to_string(),
+            tx.clone(),
+        );
+        match next_event(&rx) {
+            AppEvent::MemoryKvSaved { key } => assert_eq!(key, "notes/2026?x"),
+            _ => panic!("expected MemoryKvSaved"),
+        }
+        spawn_delete_memory_kv(
+            daemon(base),
+            "a1".to_string(),
+            "notes/2026?x".to_string(),
+            tx,
+        );
+        match next_event(&rx) {
+            AppEvent::MemoryKvDeleted(key) => assert_eq!(key, "notes/2026?x"),
+            _ => panic!("expected MemoryKvDeleted"),
+        }
+        let requests: Vec<String> = seen.try_iter().collect();
+        assert_eq!(
+            requests,
+            vec![
+                "PUT /api/memory/agents/a1/kv/notes%2F2026%3Fx HTTP/1.1".to_string(),
+                "DELETE /api/memory/agents/a1/kv/notes%2F2026%3Fx HTTP/1.1".to_string(),
+            ]
+        );
     }
 }

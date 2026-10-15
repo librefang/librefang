@@ -51,7 +51,7 @@ use librefang_types::agent::AgentId;
 use librefang_types::config::ContextEngineSidecarConfig;
 use librefang_types::error::LibreFangResult;
 use librefang_types::memory::MemoryFragment;
-use librefang_types::message::Message;
+use librefang_types::message::{Message, Role};
 use librefang_types::tool::ToolDefinition;
 use serde_json::{json, Value};
 use std::sync::Arc;
@@ -187,13 +187,23 @@ impl ContextEngine for SidecarContextEngine {
                     // (Anthropic 400s on an orphan tool_result). This makes the
                     // doc's "the built-in engine still owns final ordering"
                     // claim actually true regardless of sidecar quality.
-                    *messages = crate::session_repair::validate_and_repair(&new_messages);
-                    let recovery = value
-                        .get("recovery")
-                        .cloned()
-                        .and_then(|r| serde_json::from_value::<RecoveryStage>(r).ok())
-                        .unwrap_or(RecoveryStage::None);
-                    return Ok(AssembleResult { recovery });
+                    // The leading-user invariant is re-established too (Gemini rejects a leading assistant turn), and a window left with no user turn at all — an empty reply, or one that repair drained to nothing — falls back to the inner engine, because every provider rejects an empty request body.
+                    let repaired = crate::session_repair::ensure_starts_with_user(
+                        crate::session_repair::validate_and_repair(&new_messages),
+                    );
+                    if repaired.iter().any(|m| m.role == Role::User) {
+                        *messages = repaired;
+                        let recovery = value
+                            .get("recovery")
+                            .cloned()
+                            .and_then(|r| serde_json::from_value::<RecoveryStage>(r).ok())
+                            .unwrap_or(RecoveryStage::None);
+                        return Ok(AssembleResult { recovery });
+                    }
+                    warn!(
+                        returned = new_messages.len(),
+                        "context engine sidecar: assemble window has no user turn after repair; falling back"
+                    );
                 }
                 Some(Err(e)) => warn!(error = %e,
                     "context engine sidecar: bad assemble reply; falling back"),
@@ -218,11 +228,19 @@ impl ContextEngine for SidecarContextEngine {
         driver: Arc<dyn LlmDriver>,
         model: &str,
         context_window_tokens: usize,
+        reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy,
     ) -> LibreFangResult<CompactionResult> {
         // LLM-bearing: the driver cannot cross the process boundary, so
         // compaction stays in Rust.
         self.inner
-            .compact(agent_id, messages, driver, model, context_window_tokens)
+            .compact(
+                agent_id,
+                messages,
+                driver,
+                model,
+                context_window_tokens,
+                reasoning_echo_policy,
+            )
             .await
     }
 
@@ -294,6 +312,7 @@ mod tests {
             _driver: Arc<dyn LlmDriver>,
             _model: &str,
             _context_window_tokens: usize,
+            _reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy,
         ) -> LibreFangResult<CompactionResult> {
             Ok(CompactionResult {
                 summary: String::new(),
@@ -315,7 +334,7 @@ mod tests {
         }
     }
 
-    /// A reference sidecar that rewrites `assemble` to an empty window and
+    /// A reference sidecar that rewrites `assemble` to a one-message window and
     /// echoes `ingest` with no memories. Written in Python because a long-lived
     /// shell `printf` to a pipe is block-buffered (the reply would never flush
     /// until the shell exits); `sys.stdout.flush()` makes the reply prompt.
@@ -338,7 +357,7 @@ while True:
     rid = req.get("id")
     method = req.get("method")
     if method == "assemble":
-        ok = {"messages": [], "recovery": "None"}
+        ok = {"messages": [{"role": "user", "content": "rewritten"}], "recovery": "None"}
     elif method == "ingest":
         ok = {"recalled_memories": []}
     else:
@@ -385,9 +404,9 @@ while True:
             .await
             .unwrap();
 
-        // The fake returns an empty window; the bridge must apply it verbatim
-        // (proving the sidecar reply was used, not the inner stub identity).
-        assert!(messages.is_empty());
+        // The fake returns a distinct one-message window; the bridge must apply it (proving the sidecar reply was used, not the inner stub identity).
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].content.text_content(), "rewritten");
         assert_eq!(result.recovery, RecoveryStage::None);
     }
 
@@ -532,5 +551,69 @@ while True:
             !has_orphan,
             "validate_and_repair must drop the orphan tool_result"
         );
+        // Repair drained the window to nothing, so assemble fell back to the inner engine and the original window is intact.
+        assert_eq!(m.len(), 1);
+        assert_eq!(m[0].content.text_content(), "first");
+    }
+
+    /// A sidecar that answers every `assemble` with `window` (a JSON array literal).
+    fn fixed_window_sidecar(window: &str) -> String {
+        format!(
+            "import sys, json\nwhile True:\n    line = sys.stdin.readline()\n    if not line:\n        break\n    line = line.strip()\n    if not line:\n        continue\n    rid = json.loads(line).get(\"id\")\n    win = json.loads({window:?})\n    sys.stdout.write(json.dumps({{\"id\": rid, \"ok\": {{\"messages\": win, \"recovery\": \"None\"}}}}) + \"\\n\")\n    sys.stdout.flush()\n"
+        )
+    }
+
+    /// A sidecar window with no user turn after repair must not replace the request: an empty body is rejected by every provider and a leading assistant turn by strict ones, so assemble falls back to the inner engine.
+    #[tokio::test]
+    async fn assemble_falls_back_when_sidecar_window_has_no_user_turn() {
+        let Some(py) = python3() else {
+            eprintln!("skipping: no python3 on this runner");
+            return;
+        };
+
+        // (a) Empty window.
+        let dir = tempfile::tempdir().unwrap();
+        let engine = spawn_with(py, dir.path(), &fixed_window_sidecar("[]"), 5);
+        let mut m = vec![Message::user("first"), Message::user("second")];
+        engine
+            .assemble(AgentId(uuid::Uuid::nil()), &mut m, "sys", &[], 1000)
+            .await
+            .unwrap();
+        assert_eq!(m.len(), 2, "empty sidecar window must fall back");
+
+        // (b) Assistant-only window.
+        let dir = tempfile::tempdir().unwrap();
+        let engine = spawn_with(
+            py,
+            dir.path(),
+            &fixed_window_sidecar(r#"[{"role": "assistant", "content": "hi"}]"#),
+            5,
+        );
+        let mut m = vec![Message::user("first"), Message::user("second")];
+        engine
+            .assemble(AgentId(uuid::Uuid::nil()), &mut m, "sys", &[], 1000)
+            .await
+            .unwrap();
+        assert_eq!(m.len(), 2, "user-less sidecar window must fall back");
+        assert_eq!(m[0].role, Role::User);
+
+        // (c) Leading assistant turn followed by a user turn: the sidecar window is used, minus the leading assistant turn.
+        let dir = tempfile::tempdir().unwrap();
+        let engine = spawn_with(
+            py,
+            dir.path(),
+            &fixed_window_sidecar(
+                r#"[{"role": "assistant", "content": "a"}, {"role": "user", "content": "u"}]"#,
+            ),
+            5,
+        );
+        let mut m = vec![Message::user("first"), Message::user("second")];
+        engine
+            .assemble(AgentId(uuid::Uuid::nil()), &mut m, "sys", &[], 1000)
+            .await
+            .unwrap();
+        assert_eq!(m.len(), 1);
+        assert_eq!(m[0].role, Role::User);
+        assert_eq!(m[0].content.text_content(), "u");
     }
 }

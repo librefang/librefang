@@ -350,8 +350,13 @@ impl LibreFangKernel {
             );
         }
 
-        // Check TOTP configuration consistency
-        if config.approval.second_factor == librefang_types::approval::SecondFactor::Totp {
+        // Check TOTP configuration consistency.
+        // `requires_any_totp`, not a comparison against one variant: `login`
+        // demands a code on the dashboard login (verified in `server.rs` under
+        // `requires_login_totp()`) and `both` demands one there and on tool
+        // approvals, and both used to boot silently while the surface they
+        // configure served requests with no code at all.
+        if config.approval.second_factor.requires_any_totp() {
             let vault_path = config.home_dir.join("vault.enc");
             let mut vault = librefang_extensions::vault::CredentialVault::new(vault_path);
             let totp_ready = vault.unlock().is_ok()
@@ -360,10 +365,34 @@ impl LibreFangKernel {
                     .map(|v| v.as_str() == "true")
                     .unwrap_or(false);
             if !totp_ready {
+                // Spell out what each surface this variant covers actually does
+                // without a secret, because the two differ and the line must be
+                // exact about both: the dashboard login skips the check
+                // (`server.rs`), while tool approvals fail closed — the handler
+                // answers 400 "TOTP not configured" to a supplied code and
+                // `resolve` rejects a code-less approval with "TOTP code
+                // required for approval", so an approval that demands one
+                // cannot succeed until enrollment.
+                let mut effects = Vec::new();
+                if config.approval.second_factor.requires_login_totp() {
+                    effects.push(
+                        "Dashboard login skips the TOTP check, so the login half of the second \
+                         factor is not enforced there.",
+                    );
+                }
+                if config.approval.second_factor.requires_approval_totp() {
+                    effects.push(
+                        "Tool approvals fail closed: a supplied code answers 400 \"TOTP not \
+                         configured\" and a code-less approval is rejected with \"TOTP code \
+                         required for approval\", so those tools cannot be approved until \
+                         enrollment.",
+                    );
+                }
                 warn!(
-                    "Config: second_factor = \"totp\" but TOTP is not enrolled/confirmed in vault. \
-                     Approvals will require TOTP but no secret is configured. \
-                     Run POST /api/approvals/totp/setup to enroll."
+                    "Config: second_factor = \"{}\" but TOTP is not enrolled/confirmed in vault. \
+                     {} Run POST /api/approvals/totp/setup to enroll.",
+                    config.approval.second_factor.as_str(),
+                    effects.join(" ")
                 );
             }
         }
@@ -1164,9 +1193,8 @@ impl LibreFangKernel {
         // Initialize git repo for config version control (first boot)
         init_git_if_missing(&config.home_dir);
 
-        // Auto-sync registry content on first boot or after upgrade when
-        // Sync registry: downloads if cache is stale, pre-installs providers/agents/integrations.
-        // Skips download if cache is fresh; skips copy if files already exist.
+        // Sync registry content on boot: downloads when the cache is stale, then pre-installs providers/, channels/, the MCP catalog, agent types and workflow templates.
+        // Those are two separate steps — a fresh cache skips the download only, and the fan-out runs on every boot regardless, rewriting a file while its bytes are still the ones the sync wrote and keeping one the operator has edited (#8407).
         // `[registry] auto_sync = false` freezes `~/.librefang/registry/`: the sync fast-forwards that checkout with `git reset --hard origin/main`, which destroys every local modification under it — including the ones `PUT /api/hands/{id}/manifest` writes for a registry-shipped hand.
         // Explicit operator actions (`librefang init`, `POST /api/catalog/update`) still fetch; `POST /api/hands/reload` only reloads whatever is already on disk and never fetched from upstream, so it is unaffected either way.
         if config.registry.auto_sync {
@@ -1200,6 +1228,17 @@ impl LibreFangKernel {
                 .join("suppressed_providers.json"),
         );
         model_catalog.load_overrides(&config.home_dir.join("data").join("model_overrides.json"));
+        // Operator-owned discovery preference (#8407), applied over the catalog the registry sync maintains — the setting used to live in the provider TOML the sync rewrites, which is how a reboot turned discovery off.
+        let discover_prefs_path = config.home_dir.join("data").join("provider_discovery.json");
+        model_catalog.load_discover_prefs(&discover_prefs_path);
+        // Adopt the flag out of `providers/*.toml` for installs that set it before this store existed, once; a provider already recorded here is left alone.
+        let adopted = model_catalog.adopt_legacy_discover_flags(&discover_prefs_path);
+        if adopted > 0 {
+            info!(
+                "adopted {adopted} provider discovery preference(s) out of providers/*.toml into {}",
+                discover_prefs_path.display()
+            );
+        }
         model_catalog.detect_auth();
         // Apply region selections first (lower priority than explicit provider_urls)
         if !config.provider_regions.is_empty() {
@@ -1781,16 +1820,7 @@ impl LibreFangKernel {
 
         // Validate notification config — warn (not error) on unrecognized values
         {
-            let known_events = [
-                "approval_requested",
-                "task_completed",
-                "task_failed",
-                // Provider-safety refusals, split out of task_failed by #3450 so they can be routed separately — a rule listing this is valid and must not be warned about.
-                "content_filtered",
-                "tool_failure",
-                "health_check_failed",
-                "model_migrated",
-            ];
+            let known_events = KNOWN_NOTIFICATION_EVENTS;
             for (i, rule) in config.notification.agent_rules.iter().enumerate() {
                 for event in &rule.events {
                     if !known_events.contains(&event.as_str()) {

@@ -249,11 +249,13 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
             },
             ToolDefinition {
                 name: tool_name::FILE_LIST.to_string(),
-                description: "List files in a directory. Paths are relative to the agent workspace.".to_string(),
+                description: "List files in a directory. Paths are relative to the agent workspace. Long listings are paged: when entries are left over, the output ends with a trailer giving the `offset` to pass for the next page.".to_string(),
                 input_schema: serde_json::json!({
                     "type": "object",
                     "properties": {
-                        "path": { "type": "string", "description": "The directory path to list" }
+                        "path": { "type": "string", "description": "The directory path to list" },
+                        "limit": { "type": "integer", "description": "Maximum entries to return (default: 1000)" },
+                        "offset": { "type": "integer", "description": "Number of sorted entries to skip, for paging (default: 0)" }
                     },
                     "required": ["path"]
                 }),
@@ -1069,7 +1071,7 @@ use instead of web_fetch + file_write (which round-trips the entire body through
                         "file_path": { "type": "string", "description": "Local file path to send as attachment (reads from disk; use instead of file_url for local files)" },
                         "filename": { "type": "string", "description": "Filename for file attachments (defaults to the basename of file_path, or 'file')" },
                         "thread_id": { "type": "string", "description": "Thread/topic ID to reply in (e.g., Telegram message_thread_id, Slack thread_ts)" },
-                        "account_id": { "type": "string", "description": "Optional account_id of the specific configured bot to send through (e.g., 'admin-bot'). When omitted, uses the first configured adapter for this channel." },
+                        "account_id": { "type": "string", "description": "Optional account_id of the specific configured bot to send through (e.g., 'admin-bot'). During an inbound conversation, sends to that same channel default to the bot account the conversation runs on; out of band, name the account when the channel has several configured instances." },
                         "poll_question": { "type": "string", "description": "Question for a poll (starts a poll, mutually exclusive with image_url/file_url/file_path)" },
                         "poll_options": { "type": "array", "items": { "type": "string" }, "description": "Answer options for the poll (2-10 items, required with poll_question)" },
                         "poll_is_quiz": { "type": "boolean", "description": "Set to true for a quiz mode (one correct answer)" },

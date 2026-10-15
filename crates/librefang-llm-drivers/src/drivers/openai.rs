@@ -2043,32 +2043,10 @@ impl LlmDriver for OpenAIDriver {
 
             // If we have reasoning but no text content and no tool calls,
             // synthesize a brief text block so the agent loop doesn't treat
-            // this as an empty response.
-            let has_text = content
-                .iter()
-                .any(|b| matches!(b, ContentBlock::Text { .. }));
-            let has_thinking = content
-                .iter()
-                .any(|b| matches!(b, ContentBlock::Thinking { .. }));
-            if has_thinking && !has_text && choice.message.tool_calls.is_none() {
-                // Extract the last sentence or line from the thinking as a response
-                let thinking_text = content
-                    .iter()
-                    .find_map(|b| match b {
-                        ContentBlock::Thinking { thinking, .. } => Some(thinking.as_str()),
-                        _ => None,
-                    })
-                    .unwrap_or("");
-                let summary = extract_thinking_summary(thinking_text);
-                debug!(
-                    summary_len = summary.len(),
-                    "Synthesizing text from thinking-only response"
-                );
-                content.push(ContentBlock::Text {
-                    text: summary,
-                    provider_metadata: None,
-                });
-            }
+            // this as an empty response. #8556: report the synthesis so the
+            // loop delivers it as terminal instead of re-promoting it.
+            let text_synthesized_from_thinking =
+                synthesize_thinking_only_text(&mut content, choice.message.tool_calls.is_some());
 
             if let Some(calls) = choice.message.tool_calls {
                 for call in calls {
@@ -2138,6 +2116,7 @@ impl LlmDriver for OpenAIDriver {
             );
 
             return Ok(CompletionResponse {
+                text_synthesized_from_thinking,
                 content,
                 stop_reason,
                 tool_calls,
@@ -2853,31 +2832,10 @@ impl LlmDriver for OpenAIDriver {
 
             // If we have reasoning but no text content and no tool calls,
             // synthesize a brief text block so the agent loop doesn't treat
-            // this as an empty response.
-            let has_text = content
-                .iter()
-                .any(|b| matches!(b, ContentBlock::Text { .. }));
-            let has_thinking = content
-                .iter()
-                .any(|b| matches!(b, ContentBlock::Thinking { .. }));
-            if has_thinking && !has_text && !has_complete_tool_call {
-                let thinking_text = content
-                    .iter()
-                    .find_map(|b| match b {
-                        ContentBlock::Thinking { thinking, .. } => Some(thinking.as_str()),
-                        _ => None,
-                    })
-                    .unwrap_or("");
-                let summary = extract_thinking_summary(thinking_text);
-                debug!(
-                    summary_len = summary.len(),
-                    "Synthesizing text from thinking-only stream response"
-                );
-                content.push(ContentBlock::Text {
-                    text: summary,
-                    provider_metadata: None,
-                });
-            }
+            // this as an empty response. #8556: report the synthesis so the
+            // loop delivers it as terminal instead of re-promoting it.
+            let text_synthesized_from_thinking =
+                synthesize_thinking_only_text(&mut content, has_complete_tool_call);
 
             for call in &tool_accum {
                 // Skip malformed tool calls (empty ID or name can happen if
@@ -2956,6 +2914,7 @@ impl LlmDriver for OpenAIDriver {
                 .await;
 
             return Ok(CompletionResponse {
+                text_synthesized_from_thinking,
                 content,
                 stop_reason,
                 tool_calls,
@@ -3023,6 +2982,44 @@ fn extract_think_tags(text: &str) -> (String, Option<String>) {
     } else {
         (cleaned, Some(thinking_parts.join("\n\n")))
     }
+}
+
+/// Push a synthesized summary text block when a response carries thinking but
+/// no native text and no tool calls, returning `true` when it did.
+///
+/// The return value becomes `CompletionResponse::text_synthesized_from_thinking`
+/// (#8556): the agent loop treats a synthesized answer as terminal rather than
+/// re-promoting it into a tool call. `has_tool_calls` is passed separately
+/// because both call sites build the tool-call blocks *after* this step (the
+/// streaming path tracks them in `tool_accum`).
+fn synthesize_thinking_only_text(content: &mut Vec<ContentBlock>, has_tool_calls: bool) -> bool {
+    let has_text = content
+        .iter()
+        .any(|b| matches!(b, ContentBlock::Text { .. }));
+    let has_thinking = content
+        .iter()
+        .any(|b| matches!(b, ContentBlock::Thinking { .. }));
+    if !(has_thinking && !has_text && !has_tool_calls) {
+        return false;
+    }
+
+    let thinking_text = content
+        .iter()
+        .find_map(|b| match b {
+            ContentBlock::Thinking { thinking, .. } => Some(thinking.as_str()),
+            _ => None,
+        })
+        .unwrap_or("");
+    let summary = extract_thinking_summary(thinking_text);
+    debug!(
+        summary_len = summary.len(),
+        "Synthesizing text from thinking-only response"
+    );
+    content.push(ContentBlock::Text {
+        text: summary,
+        provider_metadata: None,
+    });
+    true
 }
 
 /// Extract a usable summary from thinking-only output.
@@ -3159,6 +3156,7 @@ fn parse_groq_failed_tool_call(body: &str) -> Option<CompletionResponse> {
         if !failed.trim().is_empty() {
             warn!("Recovering plain text from Groq failed_generation (no tool calls)");
             return Some(CompletionResponse {
+                text_synthesized_from_thinking: false,
                 content: vec![ContentBlock::Text {
                     text: failed.to_string(),
                     provider_metadata: None,
@@ -3178,6 +3176,7 @@ fn parse_groq_failed_tool_call(body: &str) -> Option<CompletionResponse> {
     }
 
     Some(CompletionResponse {
+        text_synthesized_from_thinking: false,
         content: vec![],
         tool_calls,
         stop_reason: StopReason::ToolUse,
@@ -4746,6 +4745,48 @@ mod tests {
         assert!(
             content.is_some(),
             "deepseek-reasoner assistant messages must always have non-null content for multi-turn"
+        );
+    }
+
+    /// #8556: the thinking-only synthesis helper reports that it synthesized
+    /// text — the value the driver surfaces as
+    /// `CompletionResponse::text_synthesized_from_thinking` — and does not
+    /// when native text or tool calls are present.
+    #[test]
+    fn test_synthesize_thinking_only_text_reports_synthesis() {
+        let thinking = ContentBlock::Thinking {
+            thinking: "I should answer plainly.".to_string(),
+            provider_metadata: None,
+        };
+
+        let mut content = vec![thinking.clone()];
+        assert!(
+            synthesize_thinking_only_text(&mut content, false),
+            "thinking-only content must report synthesis"
+        );
+        assert!(
+            content
+                .iter()
+                .any(|b| matches!(b, ContentBlock::Text { .. })),
+            "synthesis must push a Text block"
+        );
+
+        let mut with_text = vec![
+            thinking.clone(),
+            ContentBlock::Text {
+                text: "native answer".to_string(),
+                provider_metadata: None,
+            },
+        ];
+        assert!(
+            !synthesize_thinking_only_text(&mut with_text, false),
+            "native text present → no synthesis"
+        );
+
+        let mut with_tools = vec![thinking];
+        assert!(
+            !synthesize_thinking_only_text(&mut with_tools, true),
+            "tool calls present → no synthesis"
         );
     }
 

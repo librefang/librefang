@@ -21,7 +21,7 @@
 //! 1. `CF-Connecting-IP` — Cloudflare strips client-supplied versions
 //!    and re-sets it from the connecting client. Single value.
 //! 2. `X-Real-IP` — single-value header set by most reverse proxies.
-//! 3. `Forwarded` (RFC 7239) — `for=` parameter, leftmost.
+//! 3. `Forwarded` (RFC 7239) — `for=` parameter, walked right-to-left across every element and header instance, dropping hops that match `trusted_proxies` (same as `X-Forwarded-For`).
 //! 4. `X-Forwarded-For` — comma-separated chain. Walked
 //!    **right-to-left**, dropping hops that match `trusted_proxies`;
 //!    the first non-matching value is the real client. Walking right-
@@ -178,8 +178,8 @@ pub fn resolve_real_client_ip(
     if let Some(ip) = single_ip_header(headers, "x-real-ip") {
         return ip;
     }
-    // Preference 3: Forwarded (RFC 7239) — leftmost `for=` parameter.
-    if let Some(ip) = parse_forwarded_for_param(headers) {
+    // Preference 3: Forwarded (RFC 7239) — walk `for=` values right-to-left, dropping trusted hops (same as XFF).
+    if let Some(ip) = parse_forwarded_for_param(headers, trusted_proxies) {
         return ip;
     }
     // Preference 4: X-Forwarded-For — walk right-to-left, dropping
@@ -295,12 +295,41 @@ fn parse_xff_rightmost_untrusted(
         .find(|ip| !trusted_proxies.contains(*ip))
 }
 
-fn parse_forwarded_for_param(headers: &HeaderMap) -> Option<IpAddr> {
+fn parse_forwarded_for_param(
+    headers: &HeaderMap,
+    trusted_proxies: &TrustedProxies,
+) -> Option<IpAddr> {
     // RFC 7239 example: `Forwarded: for=192.0.2.60;proto=http;by=203.0.113.43`
     // Multiple values comma-separated, parameters semicolon-separated.
-    let header = headers.get("forwarded")?.to_str().ok()?;
-    let first = header.split(',').next()?;
-    for param in first.split(';') {
+    // Proxies append `, for=<peer>` on the right (or add a new header instance), so the leftmost element is whatever the original client sent.
+    // Collect every element across every header instance, in order, and walk right-to-left like the XFF path.
+    let mut chain: Vec<Option<IpAddr>> = Vec::new();
+    for v in headers.get_all("forwarded").iter() {
+        let Ok(s) = v.to_str() else { continue };
+        for element in s.split(',') {
+            if element.trim().is_empty() {
+                continue;
+            }
+            chain.push(parse_forwarded_element(element));
+        }
+    }
+    for entry in chain.into_iter().rev() {
+        match entry {
+            Some(ip) if trusted_proxies.contains(ip) => continue,
+            Some(ip) => return Some(ip),
+            // NOTE: an obfuscated identifier (`for=_hidden`), `unknown`, a missing or unparseable `for=` in the selected element short-circuits the entire `Forwarded` walk; we don't peek past it.
+            // By design: the RFC allows the proxy to redact the client identity and we honor that intent. Callers fall through to the `X-Forwarded-For` header next.
+            None => return None,
+        }
+    }
+    None
+}
+
+/// Parse the `for=` parameter of one `Forwarded` list element.
+///
+/// Returns `None` for an obfuscated identifier (`_token`), `unknown`, a missing `for=` parameter, or a value that is not a parseable IP.
+fn parse_forwarded_element(element: &str) -> Option<IpAddr> {
+    for param in element.split(';') {
         let param = param.trim();
         // RFC 7230 §3.2.4 — parameter names are case-insensitive
         // (so `for=`, `For=`, `FOR=`, `fOr=` all match).
@@ -313,12 +342,6 @@ fn parse_forwarded_for_param(headers: &HeaderMap) -> Option<IpAddr> {
         // Value may be quoted, may include a port, may be `[v6]:port`,
         // and may be the obfuscated `_token` form (which we ignore).
         let unquoted = value.trim_matches('"');
-        // NOTE: an obfuscated identifier (`for=_hidden`) or `unknown`
-        // here short-circuits the entire `Forwarded` walk — we don't
-        // try the next list element. By design: the RFC allows the
-        // proxy to redact the client identity and we honor that
-        // intent rather than peeking past it. Callers that want a
-        // real IP fall through to the `X-Forwarded-For` header next.
         if unquoted.starts_with('_') || unquoted.eq_ignore_ascii_case("unknown") {
             return None;
         }
@@ -335,8 +358,8 @@ fn parse_forwarded_for_param(headers: &HeaderMap) -> Option<IpAddr> {
         } else {
             unquoted.parse::<IpAddr>().ok()
         };
-        if let Some(ip) = parsed {
-            return Some(ip);
+        if parsed.is_some() {
+            return parsed;
         }
     }
     None
@@ -603,6 +626,45 @@ mod tests {
                 "case-insensitive `for=` failed on header {header:?}"
             );
         }
+    }
+
+    #[test]
+    fn forwarded_rfc7239_client_supplied_leftmost_is_ignored() {
+        // Client forged `for=6.6.6.6`; the trusted proxy appended the real peer, then an inner trusted hop appended its own.
+        let t = tp(&["10.0.0.0/8"]);
+        let h = hdr(&[("forwarded", "for=6.6.6.6, for=203.0.113.7, for=10.0.0.5")]);
+        assert_eq!(
+            resolve_real_client_ip(ip("10.0.0.1"), &h, &t, true),
+            ip("203.0.113.7")
+        );
+    }
+
+    #[test]
+    fn forwarded_rfc7239_multiple_header_instances_walked_right_to_left() {
+        // A proxy that adds a new header line instead of appending puts the real peer in the second instance.
+        let t = tp(&["10.0.0.0/8"]);
+        let h = hdr(&[
+            ("forwarded", "for=6.6.6.6"),
+            ("forwarded", "for=203.0.113.7"),
+        ]);
+        assert_eq!(
+            resolve_real_client_ip(ip("10.0.0.1"), &h, &t, true),
+            ip("203.0.113.7")
+        );
+    }
+
+    #[test]
+    fn forwarded_rfc7239_obfuscated_selected_element_falls_through() {
+        // The rightmost untrusted element is redacted: honour it and fall through to XFF instead of peeking at the client-supplied leftmost value.
+        let t = tp(&["10.0.0.0/8"]);
+        let h = hdr(&[
+            ("forwarded", "for=6.6.6.6, for=_hidden, for=10.0.0.5"),
+            ("x-forwarded-for", "1.2.3.4"),
+        ]);
+        assert_eq!(
+            resolve_real_client_ip(ip("10.0.0.1"), &h, &t, true),
+            ip("1.2.3.4")
+        );
     }
 
     #[test]

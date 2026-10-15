@@ -471,6 +471,55 @@ async fn get_experiment_metrics_empty_for_unknown_id() {
     assert_eq!(body, serde_json::json!([]));
 }
 
+/// A malformed version / experiment id in the path is a client error: it must reach the caller as 400 with the parse message, not a scrubbed 500.
+#[tokio::test(flavor = "multi_thread")]
+async fn prompt_routes_reject_non_uuid_path_ids_with_400() {
+    let h = boot().await;
+    let agent_id = seeded_agent_id(&h);
+    let cases = [
+        (Method::GET, "/api/prompts/versions/not-a-uuid", None),
+        (Method::DELETE, "/api/prompts/versions/not-a-uuid", None),
+        (
+            Method::POST,
+            "/api/prompts/versions/not-a-uuid/activate",
+            Some(serde_json::json!({ "agent_id": agent_id })),
+        ),
+        (Method::GET, "/api/prompts/experiments/not-a-uuid", None),
+        (
+            Method::GET,
+            "/api/prompts/experiments/not-a-uuid/metrics",
+            None,
+        ),
+        (
+            Method::POST,
+            "/api/prompts/experiments/not-a-uuid/start",
+            None,
+        ),
+        (
+            Method::POST,
+            "/api/prompts/experiments/not-a-uuid/pause",
+            None,
+        ),
+        (
+            Method::POST,
+            "/api/prompts/experiments/not-a-uuid/complete",
+            None,
+        ),
+    ];
+    for (method, path, body) in cases {
+        let (status, resp) = json_request(&h, method.clone(), path, body).await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "{method} {path}: body={resp:?}"
+        );
+        assert!(
+            resp.to_string().contains("Invalid"),
+            "{method} {path}: expected the parse message, got {resp:?}"
+        );
+    }
+}
+
 // ----- create-handler input-validation guards -----
 //
 // Audit: `docs/issues/prompt-version-system-prompt-no-cap.md`. The create

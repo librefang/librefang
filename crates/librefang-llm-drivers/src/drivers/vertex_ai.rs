@@ -156,17 +156,45 @@ impl TokenManager {
     }
 
     /// Get token from `gcloud auth print-access-token`.
+    ///
+    /// The caller holds the token manager's write lock for the whole call, so the subprocess is bounded by [`GCLOUD_TOKEN_TIMEOUT`] and gets no stdin: a gcloud stuck on an interactive reauth prompt or a hung network call would otherwise block every Vertex AI request indefinitely.
     async fn token_from_gcloud() -> Result<CachedToken, LlmError> {
-        let output = tokio::process::Command::new("gcloud")
-            .args(["auth", "print-access-token"])
-            .output()
-            .await
-            .map_err(|e| {
-                LlmError::MissingApiKey(format!(
+        let mut command = tokio::process::Command::new("gcloud");
+        command.args(["auth", "print-access-token"]);
+        Self::token_from_command(command, GCLOUD_TOKEN_TIMEOUT).await
+    }
+
+    /// Run a `print-access-token`-style command and parse its stdout as the access token.
+    async fn token_from_command(
+        mut command: tokio::process::Command,
+        timeout: std::time::Duration,
+    ) -> Result<CachedToken, LlmError> {
+        command
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        let output = match crate::cli_process::output_with_timeout(&mut command, timeout).await {
+            Ok(output) => output,
+            Err(crate::cli_process::OutputError::Spawn(e)) => {
+                return Err(LlmError::MissingApiKey(format!(
                     "Failed to run `gcloud auth print-access-token`: {e}. \
                      Set VERTEX_AI_SERVICE_ACCOUNT_JSON or install gcloud CLI."
-                ))
-            })?;
+                )));
+            }
+            Err(crate::cli_process::OutputError::Io(e)) => {
+                return Err(LlmError::MissingApiKey(format!(
+                    "`gcloud auth print-access-token` failed: {e}"
+                )));
+            }
+            Err(crate::cli_process::OutputError::TimedOut) => {
+                return Err(LlmError::MissingApiKey(format!(
+                    "`gcloud auth print-access-token` did not finish within {}s; \
+                     run it manually to check for a reauthentication prompt, \
+                     or set VERTEX_AI_SERVICE_ACCOUNT_JSON.",
+                    timeout.as_secs()
+                )));
+            }
+        };
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -207,6 +235,30 @@ fn encode_service_account_jwt(
 }
 
 // ─── Vertex AI driver ───────────────────────────────────────────────
+
+/// Upper bound on `gcloud auth print-access-token`.
+const GCLOUD_TOKEN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Split a 429/503 response's `Retry-After` into the floor for the next in-driver backoff and the `retry_after_ms` surfaced in the error.
+///
+/// The floor is zero when the server sent no usable header, so the next sleep falls back to the standard capped, jittered backoff.
+/// The surfaced value falls back to an exponential default computed with saturating arithmetic, so an operator-configured `max_retries` of 64 or more cannot overflow the shift.
+fn retry_after_signal(
+    headers: &reqwest::header::HeaderMap,
+    attempt: u64,
+) -> (std::time::Duration, u64) {
+    let floor = crate::retry_after::parse_retry_after(headers, 0);
+    let fallback_ms = 1000u64.saturating_mul(
+        1u64.checked_shl(u32::try_from(attempt).unwrap_or(u32::MAX))
+            .unwrap_or(u64::MAX),
+    );
+    let retry_after_ms = if floor.is_zero() {
+        fallback_ms
+    } else {
+        u64::try_from(floor.as_millis()).unwrap_or(u64::MAX)
+    };
+    (floor, retry_after_ms)
+}
 
 /// Vertex AI LLM driver.
 pub struct VertexAiDriver {
@@ -298,8 +350,14 @@ impl VertexAiDriver {
                 method = method,
             );
         }
+        // The `global` location has no regional host: it is served from the bare `aiplatform.googleapis.com` host, and `global-aiplatform.googleapis.com` does not resolve.
+        let host = if self.region == "global" {
+            "aiplatform.googleapis.com".to_string()
+        } else {
+            format!("{}-aiplatform.googleapis.com", self.region)
+        };
         format!(
-            "https://{region}-aiplatform.googleapis.com/v1/projects/{project}/locations/{region}/publishers/google/models/{model}:{method}",
+            "https://{host}/v1/projects/{project}/locations/{region}/publishers/google/models/{model}:{method}",
             region = self.region,
             project = self.project_id,
             model = model_name,
@@ -465,9 +523,16 @@ impl LlmDriver for VertexAiDriver {
         // attempts, including transport-error retries below).
         let max_retries = self.max_retries as u64;
         let mut last_error = None;
+        // Retry-After from the previous 429/503, honoured as the floor of the next backoff.
+        let mut retry_after_floor = std::time::Duration::ZERO;
         for attempt in 0..=max_retries {
             if attempt > 0 {
-                tokio::time::sleep(std::time::Duration::from_millis(500 * (1 << attempt))).await;
+                tokio::time::sleep(crate::backoff::standard_retry_delay(
+                    u32::try_from(attempt).unwrap_or(u32::MAX),
+                    retry_after_floor,
+                ))
+                .await;
+                retry_after_floor = std::time::Duration::ZERO;
             }
 
             let token = self.token_manager.write().await.get_token().await?;
@@ -512,8 +577,9 @@ impl LlmDriver for VertexAiDriver {
             }
 
             // Read Retry-After before the body consumes the response.
-            let retry_after_ms =
-                crate::retry_after::parse_retry_after_ms(resp.headers(), 1000 * (1 << attempt));
+            let (retry_after_floor_next, retry_after_ms) =
+                retry_after_signal(resp.headers(), attempt);
+            retry_after_floor = retry_after_floor_next;
             let resp_body = resp.text().await.unwrap_or_default();
 
             if status.as_u16() == 429 {
@@ -564,9 +630,16 @@ impl LlmDriver for VertexAiDriver {
         // attempts, including transport-error retries below).
         let max_retries = self.max_retries as u64;
         let mut last_error = None;
+        // Retry-After from the previous 429/503, honoured as the floor of the next backoff.
+        let mut retry_after_floor = std::time::Duration::ZERO;
         for attempt in 0..=max_retries {
             if attempt > 0 {
-                tokio::time::sleep(std::time::Duration::from_millis(500 * (1 << attempt))).await;
+                tokio::time::sleep(crate::backoff::standard_retry_delay(
+                    u32::try_from(attempt).unwrap_or(u32::MAX),
+                    retry_after_floor,
+                ))
+                .await;
+                retry_after_floor = std::time::Duration::ZERO;
             }
 
             let token = self.token_manager.write().await.get_token().await?;
@@ -607,8 +680,9 @@ impl LlmDriver for VertexAiDriver {
             }
 
             // Read Retry-After before the body consumes the response.
-            let retry_after_ms =
-                crate::retry_after::parse_retry_after_ms(resp.headers(), 1000 * (1 << attempt));
+            let (retry_after_floor_next, retry_after_ms) =
+                retry_after_signal(resp.headers(), attempt);
+            retry_after_floor = retry_after_floor_next;
             let resp_body = resp.text().await.unwrap_or_default();
 
             if status.as_u16() == 429 {
@@ -759,6 +833,78 @@ mod tests {
         let stream_url = driver.endpoint_url("gemini-2.5-flash", true);
         assert!(stream_url.contains("streamGenerateContent?alt=sse"));
         assert!(stream_url.contains("gemini-2.5-flash"));
+    }
+
+    #[test]
+    fn test_endpoint_url_global_location_uses_bare_host() {
+        let driver = VertexAiDriver {
+            project_id: "my-project".to_string(),
+            region: "global".to_string(),
+            token_manager: Arc::new(RwLock::new(TokenManager::new(CredentialSource::GcloudCli))),
+            client: librefang_http::new_client(),
+            emit_caller_trace_headers: true,
+            base_url_override: None,
+            max_retries: 3,
+        };
+
+        assert_eq!(
+            driver.endpoint_url("gemini-2.5-pro", false),
+            "https://aiplatform.googleapis.com/v1/projects/my-project/locations/global/publishers/google/models/gemini-2.5-pro:generateContent"
+        );
+    }
+
+    #[test]
+    fn retry_after_signal_honours_header_and_never_overflows() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        let (floor, surfaced) = retry_after_signal(&headers, 2);
+        assert_eq!(
+            floor,
+            std::time::Duration::ZERO,
+            "no header means no backoff floor"
+        );
+        assert_eq!(surfaced, 4000);
+
+        // Operator-configured retry caps of 64+ must not overflow the fallback shift.
+        let (_, surfaced) = retry_after_signal(&headers, 64);
+        assert_eq!(surfaced, u64::MAX);
+        let (_, surfaced) = retry_after_signal(&headers, u64::MAX);
+        assert_eq!(surfaced, u64::MAX);
+
+        headers.insert(reqwest::header::RETRY_AFTER, "30".parse().unwrap());
+        let (floor, surfaced) = retry_after_signal(&headers, 1);
+        assert_eq!(floor, std::time::Duration::from_secs(30));
+        assert_eq!(surfaced, 30_000);
+        // The next in-driver backoff honours the server's Retry-After instead of a fixed 1 s / 2 s / 4 s schedule, and stays capped.
+        assert!(crate::backoff::standard_retry_delay(1, floor) >= floor);
+        assert!(
+            crate::backoff::standard_retry_delay(u32::MAX, std::time::Duration::ZERO)
+                <= std::time::Duration::from_secs(90)
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn token_command_is_bounded_by_timeout() {
+        let mut command = tokio::process::Command::new("sh");
+        command.args(["-c", "sleep 30"]);
+        let started = std::time::Instant::now();
+        let result =
+            TokenManager::token_from_command(command, std::time::Duration::from_millis(200)).await;
+        assert!(
+            matches!(result, Err(LlmError::MissingApiKey(ref msg)) if msg.contains("did not finish"))
+        );
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn token_command_stdout_becomes_the_token() {
+        let mut command = tokio::process::Command::new("sh");
+        command.args(["-c", "echo ya29.test-token"]);
+        let token = TokenManager::token_from_command(command, std::time::Duration::from_secs(5))
+            .await
+            .expect("token");
+        assert_eq!(token.access_token, "ya29.test-token");
     }
 
     #[test]

@@ -1,7 +1,7 @@
 import { fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { useState } from "react";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { StepLadderInput } from "./StepLadderInput";
 import {
   MAX_OUTPUT_TOKENS_LADDER,
@@ -97,6 +97,34 @@ describe("StepLadderInput", () => {
   it("keeps the whole ladder when no cap was sourced", () => {
     render(<Harness />);
     expect(screen.getByRole("button", { name: "128K" })).toBeInTheDocument();
+  });
+
+  // A press that chooses nothing must not look like an edit to a call site that
+  // persists on `onChange`: pressing "custom" on a field already showing the
+  // preset, and pressing the rung that is already selected, both used to emit a
+  // no-op `onChange`, which armed the callers' Save buttons with nothing chosen.
+  it("does not emit a change for a press that selects what is already shown", async () => {
+    const onChange = vi.fn();
+    render(
+      <StepLadderInput
+        label="Response length"
+        value="8192"
+        onChange={onChange}
+        ladder={MAX_OUTPUT_TOKENS_LADDER}
+        inheritLabel="inherit"
+        customLabel="custom"
+      />,
+    );
+
+    await userEvent.click(screen.getByRole("button", { name: "custom" }));
+    expect(onChange).not.toHaveBeenCalled();
+
+    await userEvent.click(screen.getByRole("button", { name: "8K" }));
+    expect(onChange).not.toHaveBeenCalled();
+
+    // A press that does change the value still emits.
+    await userEvent.click(screen.getByRole("button", { name: "16K" }));
+    expect(onChange).toHaveBeenCalledWith("16384");
   });
 
   it("shows an advisory without disabling anything", async () => {

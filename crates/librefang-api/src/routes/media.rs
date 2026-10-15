@@ -64,7 +64,15 @@ fn media_error_response(err: MediaError) -> ApiErrorResponse {
     }
 }
 
-fn image_content_type(data: &[u8]) -> Option<(&'static str, &'static str)> {
+/// The image format `data` actually is, as `(mime, extension)`, or `None`.
+///
+/// Content, never a header or an extension: a `Content-Type` and a filename are
+/// both things a caller chooses, and the magic bytes are what a browser will
+/// try to render. Shared with the agent avatar route (#8339) rather than
+/// copied — the four formats here are exactly
+/// `librefang_types::media::ALLOWED_IMAGE_TYPES`, and SVG's absence from both
+/// is deliberate: it is a document that can carry script.
+pub(crate) fn image_content_type(data: &[u8]) -> Option<(&'static str, &'static str)> {
     if data.starts_with(b"\x89PNG\r\n\x1a\n") {
         Some(("image/png", "png"))
     } else if data.starts_with(b"\xff\xd8\xff") {

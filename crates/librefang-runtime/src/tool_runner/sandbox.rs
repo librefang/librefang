@@ -96,6 +96,19 @@ impl Drop for SandboxGuard {
     }
 }
 
+/// Whether a `docker exec` result is the Docker CLI reporting that the target container no longer exists or is not running, as opposed to output of the command itself.
+/// In that case the command never started, so it is safe to run it again on a fresh container.
+/// The CLI prints these as `Error response from daemon: …` on stderr and exits non-zero.
+/// A command that never started cannot have written to stdout, so any stdout rules the report out: that keeps a command which merely prints a similar line (and has already run) from being run a second time.
+fn docker_exec_reports_container_gone(exit_code: i32, stdout: &str, stderr: &str) -> bool {
+    if exit_code == 0 || !stdout.is_empty() {
+        return false;
+    }
+    let stderr = stderr.trim_start();
+    stderr.starts_with("Error response from daemon:")
+        && (stderr.contains("No such container") || stderr.contains("is not running"))
+}
+
 pub(super) async fn tool_docker_exec(
     input: &serde_json::Value,
     docker_config: Option<&librefang_types::config::DockerSandboxConfig>,
@@ -154,15 +167,19 @@ pub(super) async fn tool_docker_exec(
     let mut exec_result =
         crate::docker_sandbox::exec_in_sandbox(guard.container(), command, timeout).await;
 
-    // A pooled container can have been removed out from under us — a Docker daemon restart,
-    // an operator's `docker rm`, an out-of-disk eviction. That is not a tool failure, but
-    // without this retry the dead container would be handed straight back to the pool and
-    // every later call for the same key would fail the same way.
-    if exec_result.is_err() && from_pool {
+    // A pooled container can have been removed out from under us — a Docker daemon restart, an operator's `docker rm`, an out-of-disk eviction.
+    // That is not a tool failure, but without this retry the dead container would be handed straight back to the pool and every later call for the same key would fail the same way.
+    // Retry only when `docker exec` itself reports the container missing or stopped: the command never started there, so running it on a fresh container runs it exactly once.
+    // Any other failure (above all a timeout) means the command did or may still run in the old container, and a retry would execute a non-idempotent command twice.
+    let pooled_container_gone = from_pool
+        && exec_result
+            .as_ref()
+            .is_ok_and(|r| docker_exec_reports_container_gone(r.exit_code, &r.stdout, &r.stderr));
+    if pooled_container_gone {
         if let Some(dead) = guard.take() {
             warn!(
                 container = %dead.container_id,
-                "Pooled Docker sandbox failed; discarding it and retrying on a fresh container"
+                "Pooled Docker sandbox is gone; discarding it and retrying on a fresh container"
             );
             if let Err(e) = crate::docker_sandbox::destroy_sandbox(&dead).await {
                 warn!("Failed to destroy stale pooled Docker sandbox: {e}");
@@ -176,7 +193,11 @@ pub(super) async fn tool_docker_exec(
             crate::docker_sandbox::exec_in_sandbox(guard.container(), command, timeout).await;
     }
 
-    if exec_result.is_err() {
+    // A container `docker exec` reports as gone must not go back to the pool either, or the next call for the same key fails the same way.
+    let container_gone = exec_result
+        .as_ref()
+        .is_ok_and(|r| docker_exec_reports_container_gone(r.exit_code, &r.stdout, &r.stderr));
+    if exec_result.is_err() || container_gone {
         // A failed exec leaves the container unfit for reuse. On a timeout `exec_in_sandbox`
         // only SIGKILLs the host-side `docker exec` client — the in-container workload keeps
         // running, and destroying the container is the only thing that bounds it. Anything
@@ -252,6 +273,43 @@ mod tests {
         .await;
         let msg = r.unwrap_err().to_string();
         assert!(msg.contains("Command blocked"), "got: {msg}");
+    }
+
+    /// Only the Docker CLI's own "container gone" report may trigger the fresh-container retry.
+    /// A timeout surfaces as `Err` and never reaches this check, and ordinary command failures (including a command that prints a similar phrase) must not be re-run either.
+    #[test]
+    fn container_gone_detection_is_limited_to_docker_daemon_errors() {
+        assert!(docker_exec_reports_container_gone(
+            1,
+            "",
+            "Error response from daemon: No such container: librefang-sandbox-abc\n"
+        ));
+        assert!(docker_exec_reports_container_gone(
+            1,
+            "",
+            "Error response from daemon: container 3f2a is not running\n"
+        ));
+        assert!(!docker_exec_reports_container_gone(
+            0,
+            "",
+            "Error response from daemon: No such container: x"
+        ));
+        assert!(!docker_exec_reports_container_gone(
+            1,
+            "",
+            "curl: (7) Failed to connect\n"
+        ));
+        assert!(!docker_exec_reports_container_gone(
+            2,
+            "",
+            "grep: No such container: pattern\n"
+        ));
+        // Output on stdout proves the command ran, so a look-alike stderr line must not trigger a second run.
+        assert!(!docker_exec_reports_container_gone(
+            1,
+            "charged\n",
+            "Error response from daemon: No such container: x\n"
+        ));
     }
 
     /// The guard hands a scope-keyed container back to the pool instead of destroying it —

@@ -305,6 +305,40 @@ pub(crate) async fn master_hash_matches(hash: &str, token: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Find the per-user API key entry (`[[users]]` or a paired device) that `token` verifies against, without ever blocking the async runtime.
+///
+/// Same contract as [`master_hash_matches`]: the table mixes `$sha256$` device hashes, which verify inline because one SHA-256 is cheaper than a thread hop, with `[[users]]` Argon2id hashes, which cost ~50–100 ms of CPU each.
+/// The Argon2id entries are verified together inside one `spawn_blocking`, so a garbage bearer from an unauthenticated caller cannot stall a tokio worker for the length of the whole table's KDF work.
+/// When no Argon2id entry exists the blocking hop is skipped entirely.
+///
+/// A `spawn_blocking` join failure is a miss rather than a match: an auth check that cannot complete must fail closed.
+pub(crate) async fn find_user_api_key(
+    users: &[middleware::ApiUserAuth],
+    token: &str,
+) -> Option<middleware::ApiUserAuth> {
+    let (cheap, expensive): (Vec<_>, Vec<_>) = users
+        .iter()
+        .partition(|user| crate::password_hash::is_cheap_to_verify(&user.api_key_hash));
+    if let Some(user) = cheap
+        .into_iter()
+        .find(|user| crate::password_hash::verify_password(token, &user.api_key_hash))
+    {
+        return Some(user.clone());
+    }
+    if expensive.is_empty() {
+        return None;
+    }
+    let expensive: Vec<middleware::ApiUserAuth> = expensive.into_iter().cloned().collect();
+    let token = token.to_string();
+    tokio::task::spawn_blocking(move || {
+        expensive
+            .into_iter()
+            .find(|user| crate::password_hash::verify_password(&token, &user.api_key_hash))
+    })
+    .await
+    .unwrap_or(None)
+}
+
 pub(crate) fn has_dashboard_credentials(snap: &ApiAuthSnapshot) -> bool {
     let DashboardRawConfig {
         user,
@@ -617,15 +651,38 @@ fn request_is_https(
 /// working; any public deployment should be proxied behind TLS *and* have
 /// the proxy address allow-listed via `trusted_proxies` (at which point
 /// `X-Forwarded-Proto` flips the flag on automatically).
+///
+/// `Path=/`, not `Path=/dashboard`: the login page replaces its location with
+/// the SPA shell at `/` once the credentials check out, and `/` is a gated
+/// entry (`is_shell_path` in `middleware.rs`), so a cookie scoped to
+/// `/dashboard` is never sent there — the browser drops it from the request,
+/// the gate finds no session, and the operator is handed the same login page
+/// again. That is a login loop, not a redirect.
+///
+/// This completes #8279: that change widened the shell gate *and* the cookie
+/// lookup to `/`, so a session established at the root would be recognised
+/// there, and left this cookie scoped below `/` — where the widened lookup can
+/// never find it. Half of that intent was unreachable as written.
+///
+/// The scope is not what holds the CSRF posture, and the earlier comment here
+/// said otherwise. `SameSite=Lax` is what keeps the cookie off cross-site
+/// POSTs, and the auth middleware only reads it for shell paths
+/// (`/`, `/dashboard`, `/dashboard/*`) — it sets `cookie_session_token` only
+/// under the `is_shell_path` test — all of which serve GET-only handlers.
+/// Every `/api/*` route still requires the Bearer token, so a cookie that now
+/// travels with API requests cannot authenticate one. The one `/api/*` handler
+/// that reads `librefang_session` directly is [`dashboard_logout`], and it uses
+/// the value only to invalidate the server-side session and clear the cookie:
+/// it grants no privilege, so it is not an authentication path (#8416 review).
 fn session_cookie_attrs(
     peer: std::net::IpAddr,
     headers: &axum::http::HeaderMap,
     trusted_proxies: &crate::client_ip::TrustedProxies,
 ) -> &'static str {
     if request_is_https(peer, headers, trusted_proxies) {
-        "Path=/dashboard; HttpOnly; SameSite=Lax; Secure"
+        "Path=/; HttpOnly; SameSite=Lax; Secure"
     } else {
-        "Path=/dashboard; HttpOnly; SameSite=Lax"
+        "Path=/; HttpOnly; SameSite=Lax"
     }
 }
 
@@ -641,8 +698,69 @@ fn session_cookie_attrs(
 /// Modern browsers (Chromium, Firefox, Safari 16.4+) accept `Secure`
 /// on `Max-Age=0` responses regardless of transport.
 /// (audit: logout-no-secure-cookie).
+///
+/// The `Path` has to equal the one the live cookie was issued with, for the
+/// same reason `Secure` does: a cookie is identified by name, domain *and*
+/// path (RFC 6265 §5.3), so a clear that differs on any of the three writes a
+/// second cookie and leaves the first one in the browser. It tracks
+/// [`session_cookie_attrs`] — `/`, the URL the login redirects to — rather
+/// than the narrower `/dashboard` it carried while that scope was still what
+/// the login worked against.
 fn session_cookie_clear_attrs() -> &'static str {
-    "Path=/dashboard; HttpOnly; SameSite=Lax; Secure"
+    "Path=/; HttpOnly; SameSite=Lax; Secure"
+}
+
+/// Clearing `Set-Cookie` values for the legacy pre-#8416 `librefang_session`
+/// cookie, which was scoped to `/dashboard`.
+///
+/// A cookie is identified by name, domain *and* path (RFC 6265 §5.3), so the
+/// `Path=/` clear cannot evict the old scope. On `/dashboard*` the browser sends
+/// the stale `/dashboard` cookie first, and both parsers (`middleware.rs` and
+/// [`dashboard_logout`]) take the first match, so a 30-day stale session
+/// shadows the valid one — the PWA `start_url` is `/dashboard/#/overview`, so
+/// this reappears on every cold start until the old cookie expires (#8416
+/// review). Emit these alongside the login and logout clears for the new scope.
+///
+/// Two variants because the legacy cookie was issued with `Secure` on HTTPS and
+/// without it on plain HTTP, and a response can only overwrite a cookie whose
+/// `Secure` state it matches: the browser ignores a `Secure` `Set-Cookie` on an
+/// insecure connection, and refuses to overwrite a `Secure` cookie from one.
+/// The `Secure` variant covers sessions established through TLS; the `Secure`-
+/// less variant covers a LAN HTTP bind. Both are sent, so either is evicted
+/// regardless of where the clear is delivered.
+fn legacy_session_cookie_clears() -> [&'static str; 2] {
+    [
+        "librefang_session=; Path=/dashboard; HttpOnly; SameSite=Lax; Max-Age=0",
+        "librefang_session=; Path=/dashboard; HttpOnly; SameSite=Lax; Secure; Max-Age=0",
+    ]
+}
+
+/// The three `Set-Cookie` headers shared by login, session mint and logout:
+/// `primary` (the new session or the `Path=/` clear) plus the two legacy
+/// `/dashboard` clears.
+///
+/// [`axum::response::AppendHeaders`] is load-bearing. A bare
+/// `[(HeaderName, String); N]` response-parts impl calls `HeaderMap::insert`,
+/// which *replaces* every value already associated with the name: stacking the
+/// three pairs in a plain tuple array left only the last legacy clear on the
+/// wire, so no login response ever carried the live `librefang_session` cookie
+/// and logout never emitted its `Path=/` clear. `AppendHeaders` uses
+/// `HeaderMap::append` and keeps all three (#8416 CI).
+fn session_cookie_headers(
+    primary: String,
+) -> axum::response::AppendHeaders<[(axum::http::HeaderName, String); 3]> {
+    let [legacy_clear_plain, legacy_clear_secure] = legacy_session_cookie_clears();
+    axum::response::AppendHeaders([
+        (axum::http::header::SET_COOKIE, primary),
+        (
+            axum::http::header::SET_COOKIE,
+            legacy_clear_plain.to_string(),
+        ),
+        (
+            axum::http::header::SET_COOKIE,
+            legacy_clear_secure.to_string(),
+        ),
+    ])
 }
 
 /// Dashboard credential login — validates username/password using Argon2id
@@ -916,14 +1034,14 @@ pub(crate) async fn dashboard_login(
                 save_sessions(state.kernel.home_dir(), &sessions);
             }
 
-            // Issue a session cookie so subsequent browser navigation to
-            // `/dashboard/*` authenticates without JS sending a header.
-            // Scope to `Path=/dashboard` so the cookie never auto-attaches
-            // to `/api/*` requests — API calls keep using the Bearer token
-            // from localStorage, which neutralises cookie-borne CSRF.
-            // `Secure` is added when the request is HTTPS (direct or via a
-            // TLS-terminating proxy), so the cookie cannot leak across
-            // plaintext fallbacks of the same host.
+            // Issue a session cookie so subsequent browser navigation to the
+            // shell authenticates without JS sending a header. The cookie is
+            // scoped to `/` because the login page navigates to `/` itself and
+            // `/` is a gated shell entry; see `session_cookie_attrs` for why
+            // the narrower `/dashboard` scope broke that, and for what carries
+            // the CSRF posture in its place. `Secure` is added when the request
+            // is HTTPS (direct or via a TLS-terminating proxy), so the cookie
+            // cannot leak across plaintext fallbacks of the same host.
             let cookie = format!(
                 "librefang_session={}; {}; Max-Age={}",
                 token.token,
@@ -932,7 +1050,7 @@ pub(crate) async fn dashboard_login(
             );
             (
                 axum::http::StatusCode::OK,
-                [(axum::http::header::SET_COOKIE, cookie)],
+                session_cookie_headers(cookie),
                 axum::response::Json(serde_json::json!({
                     "ok": true,
                     "token": token.token,
@@ -984,7 +1102,7 @@ pub(crate) async fn mint_dashboard_session(
     );
     (
         axum::http::StatusCode::OK,
-        [(axum::http::header::SET_COOKIE, cookie)],
+        session_cookie_headers(cookie),
         axum::response::Json(serde_json::json!({
             "ok": true,
             "token": token.token,
@@ -1114,9 +1232,11 @@ pub(crate) async fn dashboard_logout(
         "librefang_session=; {}; Max-Age=0",
         session_cookie_clear_attrs(),
     );
+    // Also evict the legacy `/dashboard`-scoped cookie, which the `Path=/`
+    // clear above cannot reach (see `legacy_session_cookie_clears`).
     (
         axum::http::StatusCode::OK,
-        [(axum::http::header::SET_COOKIE, expired_cookie)],
+        session_cookie_headers(expired_cookie),
         axum::response::Json(serde_json::json!({"ok": true})),
     )
         .into_response()
@@ -1571,7 +1691,10 @@ fn save_sessions(
             // the bearer tokens during the gap.  open(mode 0600 +
             // truncate) + write_all + flush + sync_all + rename keeps
             // the file at owner-only mode for its entire lifetime.
-            let tmp_path = path.with_extension(format!("json.tmp.{}", std::process::id()));
+            // The temp name is unique per call (pid plus a process-wide sequence), so two writers can never open, truncate and rename the same temp file even if one of them skips the `active_sessions` write guard.
+            static SAVE_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let seq = SAVE_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let tmp_path = path.with_extension(format!("json.tmp.{}.{seq}", std::process::id()));
             let result = (|| -> std::io::Result<()> {
                 use std::io::Write as _;
                 let mut opts = std::fs::OpenOptions::new();
@@ -1595,6 +1718,42 @@ fn save_sessions(
         }
         Err(e) => tracing::warn!("Failed to serialize sessions: {e}"),
     }
+}
+
+/// Drop expired session tokens from `sessions` and persist the trimmed map, returning how many were removed.
+///
+/// The save runs while the write guard is still held, like the login and logout writers: that guard is what serialises every `save_sessions` caller, so a snapshot saved after the guard was released could land after a newer login's save and overwrite `sessions.json` without the just-issued session.
+async fn prune_and_persist_expired_sessions(
+    home_dir: &std::path::Path,
+    sessions: &tokio::sync::RwLock<
+        std::collections::HashMap<String, crate::password_hash::SessionToken>,
+    >,
+) -> usize {
+    let mut sessions = sessions.write().await;
+    let before = sessions.len();
+    sessions.retain(|_, token| {
+        !crate::password_hash::is_token_expired(
+            token,
+            crate::password_hash::DEFAULT_SESSION_TTL_SECS,
+        )
+    });
+    let removed = before - sessions.len();
+    if removed > 0 {
+        save_sessions(home_dir, &sessions);
+    }
+    removed
+}
+
+/// Evict route-cache entries older than `ttl` and return how many were removed.
+///
+/// The count is taken around the `retain` alone and saturates, because route handlers insert into these maps concurrently and a later `len()` can exceed the one sampled before the sweep.
+fn evict_expired_cache_entries(
+    cache: &dashmap::DashMap<String, (Instant, serde_json::Value)>,
+    ttl: std::time::Duration,
+) -> usize {
+    let before = cache.len();
+    cache.retain(|_, (fetched_at, _)| fetched_at.elapsed() < ttl);
+    before.saturating_sub(cache.len())
 }
 
 /// Atomically write the Argon2id upgrade-hint file at owner-only (0600) mode.
@@ -2234,6 +2393,25 @@ pub async fn build_router(
                 max_attempts: auth_rl_max_attempts,
                 trusted_proxies: trusted_proxies.clone(),
                 trust_forwarded_for,
+                // Read live, per request: this decides whether approving the
+                // request behind the path's id has a TOTP/recovery code to
+                // brute-force. It follows the policy (`POST /api/config/reload`
+                // swaps the whole policy through `ApprovalManager::update_policy`),
+                // the tool (`totp_tools` narrows which tools verify a code) and
+                // the caller's grace window (a successful verification skips
+                // the next ones) — a bool captured at boot would keep metering
+                // approvals that verify nothing, which is the lockout this
+                // gates, or drop the #4020 brake on a path that had started
+                // verifying codes. `api_admin` is the identity `approve_request`
+                // resolves the API path under (routes/approvals.rs).
+                approvals_require_totp: {
+                    let kernel = Arc::clone(&state.kernel);
+                    Arc::new(move |approval_id: &str| {
+                        uuid::Uuid::parse_str(approval_id).is_ok_and(|id| {
+                            kernel.approvals().would_verify_totp(id, "api_admin")
+                        })
+                    })
+                },
             },
             rate_limiter::auth_rate_limit_layer,
         ))
@@ -2684,12 +2862,8 @@ pub async fn run_daemon(
 
                 // Evict expired clawhub/skillhub cache entries (120s TTL)
                 let cache_ttl = std::time::Duration::from_secs(120);
-                let before_claw = st.clawhub_cache.len();
-                st.clawhub_cache
-                    .retain(|_, (fetched_at, _)| fetched_at.elapsed() < cache_ttl);
-                let before_skill = st.skillhub_cache.len();
-                st.skillhub_cache
-                    .retain(|_, (fetched_at, _)| fetched_at.elapsed() < cache_ttl);
+                let claw_removed = evict_expired_cache_entries(&st.clawhub_cache, cache_ttl);
+                let skill_removed = evict_expired_cache_entries(&st.skillhub_cache, cache_ttl);
 
                 // Evict expired session tokens and persist the
                 // trimmed state to disk. Audit:
@@ -2700,33 +2874,16 @@ pub async fn run_daemon(
                 // expired token came back to life on the next daemon
                 // boot via `load_sessions`. Persisting after the
                 // prune closes that survives-restart loop.
-                let (expired_sessions, sessions_snapshot) = {
-                    let mut sessions = st.active_sessions.write().await;
-                    let before = sessions.len();
-                    sessions.retain(|_, token| {
-                        !crate::password_hash::is_token_expired(
-                            token,
-                            crate::password_hash::DEFAULT_SESSION_TTL_SECS,
-                        )
-                    });
-                    let removed = before - sessions.len();
-                    // Snapshot for disk write so we can drop the
-                    // write guard before the (potentially blocking)
-                    // file syscall. Only snapshot when there's
-                    // actually something to persist — the token map
-                    // is shallow but cloning on every tick when
-                    // nothing expired would be wasted work.
-                    let snap = (removed > 0).then(|| sessions.clone());
-                    (removed, snap)
-                };
-                if let Some(snap) = sessions_snapshot {
-                    save_sessions(st.kernel.home_dir(), &snap);
-                }
+                let expired_sessions =
+                    prune_and_persist_expired_sessions(st.kernel.home_dir(), &st.active_sessions)
+                        .await;
 
                 // Prune stale auth-rate-limit entries (windows older than 30 minutes).
                 let before_auth_rl = st.auth_login_limiter.map.len();
                 st.auth_login_limiter.prune_stale();
-                let auth_rl_removed = before_auth_rl - st.auth_login_limiter.map.len();
+                // `saturating_sub`: a login attempt from a new IP can insert between the two `len()` reads, and a plain subtraction would underflow (a panic that kills this GC task in debug builds).
+                let auth_rl_removed =
+                    before_auth_rl.saturating_sub(st.auth_login_limiter.map.len());
 
                 // Evict stale GCRA rate-limiter entries. The DashMap grows
                 // unbounded as new client IPs arrive — every unique IP adds a
@@ -2747,8 +2904,6 @@ pub async fn run_daemon(
                     &st.pending_a2a_agents,
                 );
 
-                let claw_removed = before_claw - st.clawhub_cache.len();
-                let skill_removed = before_skill - st.skillhub_cache.len();
                 let total = claw_removed
                     + skill_removed
                     + expired_sessions
@@ -3275,6 +3430,68 @@ mod master_credential_tests {
         assert!(!master_hash_matches("", "anything").await);
     }
 
+    fn api_user(name: &str, api_key_hash: String) -> middleware::ApiUserAuth {
+        middleware::ApiUserAuth {
+            name: name.to_string(),
+            role: middleware::UserRole::User,
+            api_key_hash,
+            user_id: librefang_types::agent::UserId::from_name(name),
+        }
+    }
+
+    fn mixed_user_key_table() -> Vec<middleware::ApiUserAuth> {
+        let mut users: Vec<_> = (0..3)
+            .map(|i| {
+                api_user(
+                    &format!("user{i}"),
+                    crate::password_hash::hash_password(&format!("k{i}")).expect("hash"),
+                )
+            })
+            .collect();
+        users.push(api_user(
+            "device:phone",
+            crate::password_hash::hash_device_token("dev"),
+        ));
+        users
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn find_user_api_key_matches_argon2_and_device_entries() {
+        let users = mixed_user_key_table();
+        assert_eq!(
+            find_user_api_key(&users, "k2").await.map(|u| u.name),
+            Some("user2".to_string())
+        );
+        assert_eq!(
+            find_user_api_key(&users, "dev").await.map(|u| u.name),
+            Some("device:phone".to_string())
+        );
+        assert!(find_user_api_key(&users, "garbage").await.is_none());
+        assert!(find_user_api_key(&users, "").await.is_none());
+        assert!(find_user_api_key(&[], "k0").await.is_none());
+    }
+
+    /// The Argon2id scan must not run inline on the async worker: on a current-thread runtime a ticker task only advances while the lookup is in flight if the KDF work was moved to the blocking pool.
+    #[tokio::test(flavor = "current_thread")]
+    async fn find_user_api_key_does_not_stall_the_runtime() {
+        let users = mixed_user_key_table();
+        let ticks = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let ticker_ticks = ticks.clone();
+        let ticker = tokio::spawn(async move {
+            loop {
+                ticker_ticks.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                tokio::task::yield_now().await;
+            }
+        });
+        assert!(find_user_api_key(&users, "garbage").await.is_none());
+        let observed = ticks.load(std::sync::atomic::Ordering::Relaxed);
+        ticker.abort();
+        assert!(
+            observed > 0,
+            "the runtime must keep polling other tasks during the Argon2id scan"
+        );
+    }
+
     /// An `$argon2id$` master hash stays *accepted* — a hand-written or
     /// pre-#6613 value must keep working even though `$sha256$` is what the
     /// upgrade path and `librefang hash-api-key` now produce.
@@ -3509,6 +3726,135 @@ mod observability_tests {
             !raw_after.contains("live-token"),
             "live cleartext bearer must NEVER leak to disk (#5494): {raw_after}"
         );
+    }
+
+    fn session_token_at(created_at: u64) -> crate::password_hash::SessionToken {
+        crate::password_hash::SessionToken {
+            token: String::new(),
+            created_at,
+            user_name: None,
+            user_role: None,
+        }
+    }
+
+    fn now_secs() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+    }
+
+    /// The GC sweep races login writers that insert a session and save under the `active_sessions` write guard.
+    /// Before the sweep saved under the same guard, its stale snapshot could be renamed over `sessions.json` after a newer login's save, so a live session vanished from disk.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn gc_sweep_and_concurrent_logins_leave_disk_equal_to_memory() {
+        let expired_at =
+            now_secs().saturating_sub(crate::password_hash::DEFAULT_SESSION_TTL_SECS * 2);
+        for round in 0..10 {
+            let tmp = tempfile::tempdir().unwrap();
+            let home = tmp.path().to_path_buf();
+            std::fs::create_dir_all(home.join("data")).unwrap();
+            let sessions = Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new()));
+
+            let mut tasks = Vec::new();
+            for i in 0..20 {
+                let login_sessions = sessions.clone();
+                let login_home = home.clone();
+                tasks.push(tokio::spawn(async move {
+                    let mut guard = login_sessions.write().await;
+                    guard.insert(
+                        crate::password_hash::hash_device_token(&format!("live-{round}-{i}")),
+                        session_token_at(now_secs()),
+                    );
+                    save_sessions(&login_home, &guard);
+                }));
+                let gc_sessions = sessions.clone();
+                let gc_home = home.clone();
+                tasks.push(tokio::spawn(async move {
+                    gc_sessions.write().await.insert(
+                        crate::password_hash::hash_device_token(&format!("expired-{round}-{i}")),
+                        session_token_at(expired_at),
+                    );
+                    prune_and_persist_expired_sessions(&gc_home, &gc_sessions).await;
+                }));
+            }
+            for t in tasks {
+                t.await.unwrap();
+            }
+            // Leave memory free of expired entries so the on-disk and in-memory views are comparable after `load_sessions` filters expiry.
+            prune_and_persist_expired_sessions(&home, &sessions).await;
+
+            let mut on_disk: Vec<String> = load_sessions(&home).into_keys().collect();
+            let mut in_memory: Vec<String> = sessions.read().await.keys().cloned().collect();
+            on_disk.sort();
+            in_memory.sort();
+            assert_eq!(
+                in_memory.len(),
+                20,
+                "round {round}: every login is live in memory"
+            );
+            assert_eq!(on_disk, in_memory, "round {round}: disk must match memory");
+        }
+    }
+
+    /// Concurrent unguarded `save_sessions` calls must never share a temp file, so the final `sessions.json` is always valid and no temp file is left behind.
+    #[test]
+    fn concurrent_save_sessions_use_distinct_temp_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().to_path_buf();
+        std::fs::create_dir_all(home.join("data")).unwrap();
+        let handles: Vec<_> = (0..8)
+            .map(|t| {
+                let home = home.clone();
+                std::thread::spawn(move || {
+                    for i in 0..50 {
+                        let mut map = std::collections::HashMap::new();
+                        for k in 0..=(i % 7) {
+                            map.insert(
+                                crate::password_hash::hash_device_token(&format!(
+                                    "tok-{t}-{i}-{k}"
+                                )),
+                                session_token_at(now_secs()),
+                            );
+                        }
+                        save_sessions(&home, &map);
+                    }
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().unwrap();
+        }
+        let path = sessions_path(&home);
+        let raw = std::fs::read_to_string(&path).unwrap();
+        serde_json::from_str::<serde_json::Value>(&raw)
+            .unwrap_or_else(|e| panic!("sessions.json must be valid JSON: {e}: {raw}"));
+        let leftovers: Vec<_> = std::fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.contains(".tmp."))
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "temp files left behind: {leftovers:?}"
+        );
+    }
+
+    #[test]
+    fn evict_expired_cache_entries_counts_only_removed_entries() {
+        let cache: dashmap::DashMap<String, (Instant, serde_json::Value)> = dashmap::DashMap::new();
+        let ttl = std::time::Duration::from_secs(120);
+        let stale = Instant::now()
+            .checked_sub(std::time::Duration::from_secs(300))
+            .expect("monotonic clock has at least 300s of history");
+        cache.insert("stale".into(), (stale, serde_json::Value::Null));
+        cache.insert("fresh".into(), (Instant::now(), serde_json::Value::Null));
+        assert_eq!(evict_expired_cache_entries(&cache, ttl), 1);
+        assert_eq!(cache.len(), 1);
+        assert!(cache.contains_key("fresh"));
+        // Nothing expired: zero removed, never an underflowed count.
+        assert_eq!(evict_expired_cache_entries(&cache, ttl), 0);
     }
 
     // #3725: a sessions.json file already on disk at world-readable
@@ -4020,7 +4366,10 @@ fn is_daemon_responding(addr: &str) -> bool {
 
 #[cfg(test)]
 mod session_cookie_attrs_tests {
-    use super::{request_is_https, session_cookie_attrs, session_cookie_clear_attrs};
+    use super::{
+        legacy_session_cookie_clears, request_is_https, session_cookie_attrs,
+        session_cookie_clear_attrs,
+    };
     use crate::client_ip::TrustedProxies;
     use axum::http::HeaderMap;
     use std::net::IpAddr;
@@ -4046,7 +4395,113 @@ mod session_cookie_attrs_tests {
         );
         assert!(attrs.contains("HttpOnly"));
         assert!(attrs.contains("SameSite=Lax"));
-        assert!(attrs.contains("Path=/dashboard"));
+        // Exact token, not a substring: `Path=/` is a prefix of
+        // `Path=/dashboard`, so `contains` would pass on the very scope that
+        // broke the login. Split on `;` and compare whole attributes.
+        assert!(attr_tokens(attrs).contains(&"Path=/"));
+        assert!(
+            !attr_tokens(attrs).contains(&"Path=/dashboard"),
+            "the clear must name the same path the live cookie was issued with, \
+             or it writes a second cookie and leaves the first in the browser: {attrs}"
+        );
+    }
+
+    /// The cookie attribute list as whole `;`-separated tokens.
+    fn attr_tokens(attrs: &str) -> Vec<&str> {
+        attrs.split(';').map(str::trim).collect()
+    }
+
+    /// A pre-upgrade `/dashboard`-scoped cookie is not reachable by the `Path=/`
+    /// clear, so login and logout also emit a clearing `Set-Cookie` for that
+    /// exact scope. Both the `Secure` and non-`Secure` variants are emitted
+    /// because the old build issued one or the other depending on transport,
+    /// and a clear only overwrites a cookie whose `Secure` state it matches.
+    #[test]
+    fn legacy_clear_evicts_the_dashboard_scoped_cookie() {
+        let clears = legacy_session_cookie_clears();
+        assert_eq!(clears.len(), 2, "one clear per legacy `Secure` variant");
+
+        let secure_variants = clears
+            .iter()
+            .filter(|attrs| attr_tokens(attrs).contains(&"Secure"))
+            .count();
+        assert_eq!(
+            secure_variants, 1,
+            "exactly one clear carries `Secure`, matching the old HTTPS-issued \
+             cookie; the other matches the plain-HTTP one: {clears:?}"
+        );
+
+        for attrs in legacy_session_cookie_clears() {
+            let tokens = attr_tokens(attrs);
+            assert!(
+                tokens.contains(&"Path=/dashboard"),
+                "the legacy clear must name the old scope or it cannot evict it: {attrs}"
+            );
+            assert!(
+                !tokens.contains(&"Path=/"),
+                "`Path=/` would write a second cookie instead of evicting the legacy one: {attrs}"
+            );
+            assert!(
+                tokens.contains(&"Max-Age=0"),
+                "a clear must expire immediately: {attrs}"
+            );
+        }
+    }
+
+    /// The login cookie has to be sent to the URL the login page navigates to.
+    ///
+    /// `login_page.html` ends a successful sign-in with `location.replace` on
+    /// the SPA shell at `/`, and `/` is a gated shell entry, so the session
+    /// cookie it was just issued has to arrive with that request. A cookie
+    /// scoped to `/dashboard` does not (RFC 6265 §5.1.4): the browser drops it
+    /// from a request for `/`, the middleware finds no session, and the
+    /// operator gets the login page back — the loop this pins shut.
+    ///
+    /// Both transports, because the `Path` is built in both branches and a fix
+    /// applied to one of them is a fix that works on the operator's LAN and
+    /// disappears behind a TLS proxy. The posture that replaces the old
+    /// narrow-scope CSRF argument is pinned here too, so widening the scope
+    /// cannot quietly take `HttpOnly` or `SameSite` with it.
+    #[test]
+    fn session_cookie_covers_the_shell_url_the_login_redirects_to() {
+        let trusted = tp(&["172.19.0.0/16"]);
+        let mut https_headers = HeaderMap::new();
+        https_headers.insert("x-forwarded-proto", "https".parse().unwrap());
+
+        let plain = session_cookie_attrs(ip("203.0.113.7"), &HeaderMap::new(), &tp(&[]));
+        let secure = session_cookie_attrs(ip("172.19.0.5"), &https_headers, &trusted);
+
+        assert!(
+            attr_tokens(secure).contains(&"Secure"),
+            "the HTTPS branch must keep `Secure`: {secure}"
+        );
+        assert!(
+            !attr_tokens(plain).contains(&"Secure"),
+            "the plain-HTTP branch must NOT carry `Secure`: the browser drops a `Secure` \
+             cookie over http://, so emitting one here puts the login loop back on the \
+             operator's own LAN bind: {plain}"
+        );
+        for attrs in [plain, secure] {
+            let tokens = attr_tokens(attrs);
+            assert!(
+                tokens.contains(&"Path=/"),
+                "the cookie must be scoped to `/`, the URL the login page redirects to: {attrs}"
+            );
+            assert!(
+                !tokens.contains(&"Path=/dashboard"),
+                "`/dashboard` does not path-match `/`, so that scope is never sent to \
+                 the shell after the login redirect: {attrs}"
+            );
+            assert!(
+                tokens.contains(&"HttpOnly"),
+                "the session token must stay unreadable to page scripts: {attrs}"
+            );
+            assert!(
+                tokens.contains(&"SameSite=Lax"),
+                "SameSite is what keeps the cookie off cross-site POSTs now that the \
+                 scope no longer is: {attrs}"
+            );
+        }
     }
 
     // ─────────────────────────────────────────────────────────────

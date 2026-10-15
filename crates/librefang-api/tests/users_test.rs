@@ -128,6 +128,17 @@ async fn users_create_then_get_then_delete_round_trips() {
 
     let (status, _) = json_request(&h, Method::GET, "/api/users/Alice", None).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
+
+    // The deletion is explicit on disk — `users = []`, not a dropped key — so
+    // the reload overlay (#8459/#8460) cannot keep the live copy and resurrect
+    // Alice on the handler's own reload (a missing key means "keep the live
+    // value", which is the contract for partial documents).
+    let raw = std::fs::read_to_string(h._test.tmp_path().join("config.toml"))
+        .expect("config.toml is on disk");
+    assert!(
+        raw.contains("users = []"),
+        "the empty section must be stated explicitly: {raw}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -394,6 +405,7 @@ async fn users_update_and_import_preserve_rbac_m3_policy_fields() {
             delete_allowed: false,
         }),
         channel_tool_rules: HashMap::new(),
+        emoji: None,
     };
     let h = boot_with_seed_users(vec![seed.clone()]).await;
 
@@ -634,6 +646,7 @@ async fn users_policy_get_round_trip() {
             delete_allowed: true,
         }),
         channel_tool_rules: HashMap::new(),
+        emoji: None,
     };
     let h = boot_with_seed_users(vec![seed]).await;
 
@@ -690,6 +703,7 @@ async fn users_policy_put_replaces_only_specified_fields() {
         tool_categories: None,
         memory_access: Some(seed_memory.clone()),
         channel_tool_rules: HashMap::new(),
+        emoji: None,
     };
     let h = boot_with_seed_users(vec![seed]).await;
 
@@ -1261,6 +1275,7 @@ async fn users_rotate_key_preserves_other_fields() {
             delete_allowed: false,
         }),
         channel_tool_rules: HashMap::new(),
+        emoji: None,
     };
     let h = boot_with_seed_users(vec![seed.clone()]).await;
 
@@ -1527,4 +1542,114 @@ async fn users_import_empty_rows_is_bad_request() {
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body:?}");
+}
+
+// ---------------------------------------------------------------------------
+// `api_key_hash` is tri-state on update: absent keeps, null clears
+// ---------------------------------------------------------------------------
+
+fn stored_hash(h: &Harness, name: &str) -> Option<String> {
+    h._state
+        .kernel
+        .config_ref()
+        .users
+        .iter()
+        .find(|u| u.name == name)
+        .and_then(|u| u.api_key_hash.clone())
+}
+
+/// The dashboard's edit modal and identity wizard send `{name, role, channel_bindings}` with no `api_key_hash`.
+/// Such an edit must keep the user's key; before the fix it silently revoked it.
+#[tokio::test(flavor = "multi_thread")]
+async fn users_update_without_api_key_hash_preserves_key() {
+    let h = boot_with_seed_users(vec![seed_user_with_key("Alice", "alice-plaintext")]).await;
+
+    let (status, body) = json_request(
+        &h,
+        Method::PUT,
+        "/api/users/Alice",
+        Some(serde_json::json!({
+            "name": "Alice",
+            "role": "viewer",
+            "channel_bindings": {"telegram": "111"},
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "update failed: {body:?}");
+    assert_eq!(body["has_api_key"], true, "edit revoked the key: {body:?}");
+    let hash = stored_hash(&h, "Alice").expect("hash must survive an edit without api_key_hash");
+    assert!(librefang_api::password_hash::verify_password(
+        "alice-plaintext",
+        &hash
+    ));
+    assert!(
+        h._state
+            .user_api_keys
+            .read()
+            .await
+            .iter()
+            .any(|u| u.name == "Alice"
+                && librefang_api::password_hash::verify_password(
+                    "alice-plaintext",
+                    &u.api_key_hash
+                )),
+        "live auth snapshot lost Alice's key after an edit"
+    );
+
+    // An explicit null is still the way to clear the key.
+    let (status, body) = json_request(
+        &h,
+        Method::PUT,
+        "/api/users/Alice",
+        Some(serde_json::json!({
+            "name": "Alice",
+            "role": "viewer",
+            "api_key_hash": null,
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "clear failed: {body:?}");
+    assert_eq!(
+        body["has_api_key"], false,
+        "explicit null must clear: {body:?}"
+    );
+    assert!(stored_hash(&h, "Alice").is_none());
+}
+
+/// Re-importing a CSV whose row names an existing user must not wipe that user's key, since the CSV parser never emits `api_key_hash`.
+#[tokio::test(flavor = "multi_thread")]
+async fn users_import_existing_row_without_hash_preserves_key() {
+    let h = boot_with_seed_users(vec![seed_user_with_key("Alice", "alice-plaintext")]).await;
+
+    let (status, body) = json_request(
+        &h,
+        Method::POST,
+        "/api/users/import",
+        Some(serde_json::json!({
+            "rows": [{"name": "Alice", "role": "user"}],
+            "dry_run": false,
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "import failed: {body:?}");
+    assert_eq!(body["updated"], 1, "{body:?}");
+    let hash = stored_hash(&h, "Alice").expect("import row without api_key_hash wiped the key");
+    assert!(librefang_api::password_hash::verify_password(
+        "alice-plaintext",
+        &hash
+    ));
+
+    // A row that does carry an explicit null still clears it.
+    let (status, body) = json_request(
+        &h,
+        Method::POST,
+        "/api/users/import",
+        Some(serde_json::json!({
+            "rows": [{"name": "Alice", "role": "user", "api_key_hash": null}],
+            "dry_run": false,
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "import failed: {body:?}");
+    assert!(stored_hash(&h, "Alice").is_none());
 }

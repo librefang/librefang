@@ -319,6 +319,9 @@ pub struct AppState {
     pub webhook_router: Arc<tokio::sync::RwLock<Arc<axum::Router>>>,
     /// Mutex for serializing config file writes — prevents concurrent config_set
     /// calls from reading the same file and overwriting each other's changes.
+    /// The user-avatar upload and delete handlers take it too: their file is
+    /// keyed on a uuid derived from the user's name, so they must not interleave
+    /// with a `[[users]]` write that deletes or renames the owner.
     pub config_write_lock: tokio::sync::Mutex<()>,
     // NOTE: taking this lock is NOT the same as being allowed to write.
     // Managed mode (#6695) is enforced by `guard_config_write` below, which every config-persisting handler must call before it starts building a new file.

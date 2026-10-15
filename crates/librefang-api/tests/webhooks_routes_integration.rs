@@ -265,3 +265,74 @@ async fn update_event_webhook_rejects_ssrf_url() {
         "rejected update must not mutate the stored URL"
     );
 }
+
+// ---------------------------------------------------------------------------
+// UPDATE — PUT /api/webhooks/{id} status mapping
+// ---------------------------------------------------------------------------
+
+/// `WebhookStore::update` reports validation failures and a missing id through the same `Err(String)`.
+/// Only the missing id is a 404; a rejected URL or an empty name is a 400, the same as on create, so a client does not read "invalid input" as "the webhook was deleted".
+#[tokio::test(flavor = "multi_thread")]
+async fn update_webhook_validation_errors_are_400_and_missing_id_is_404() {
+    let h = boot().await;
+
+    let (status, created) = send_json(
+        &h,
+        Method::POST,
+        "/api/webhooks",
+        serde_json::json!({
+            "name": "hook",
+            "url": "https://example.com/hook",
+            "events": ["agent_spawned"],
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "create failed: {created}");
+    let id = created["id"].as_str().expect("id").to_string();
+    let uri = format!("/api/webhooks/{id}");
+
+    let (status, json) = send_json(
+        &h,
+        Method::PUT,
+        &uri,
+        serde_json::json!({ "url": "http://10.0.0.5/hook" }),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "SSRF-rejected URL must be a 400, not a 404; body={json}"
+    );
+
+    let (status, json) =
+        send_json(&h, Method::PUT, &uri, serde_json::json!({ "name": "   " })).await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "empty name must be a 400; body={json}"
+    );
+
+    // The webhook is still there and still updatable.
+    let (status, json) = send_json(
+        &h,
+        Method::PUT,
+        &uri,
+        serde_json::json!({ "enabled": false }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "valid update failed; body={json}");
+    assert_eq!(json["url"], "https://example.com/hook");
+
+    let (status, json) = send_json(
+        &h,
+        Method::PUT,
+        &format!("/api/webhooks/{}", uuid::Uuid::new_v4()),
+        serde_json::json!({ "enabled": false }),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "unknown id must stay a 404; body={json}"
+    );
+}

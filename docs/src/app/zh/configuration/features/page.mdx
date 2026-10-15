@@ -297,6 +297,7 @@ no_output_timeout_secs = 30
 | `safe_bins_skip_approval` | bool | `false` | 可选开启：在 `allowlist` 模式下，若 `shell_exec` 的每个基础命令都在 `safe_bins` 中，则同时跳过人工审批提示。链式命令中只要有一个基础命令不在其中，仍走审批流程。 |
 | `full_mode_skips_approval` | bool | `true` | `mode = "full"` 是否同时对 `shell_exec` 豁免全局 `approval.require_approval` 列表。设为 `false` 即可实现"命令不受限但仍需审批"。 |
 | `allowed_commands` | list of strings | `[]` | 当 `mode = "allowlist"` 时额外允许的命令。 |
+| `denied_commands` | list of strings | `[]` | 在任何 `mode` 下都拒绝执行的命令，优先级高于 `safe_bins` 与 `allowed_commands`；`mode = "full"` 加 `denied_commands = ["git"]` 即可运行除 git 以外的一切。名称匹配规则与不检查的范围见[配置](/zh/configuration#exec_policy)。 |
 | `timeout_secs` | u64 | `30` | 每条命令的最大挂钟执行时间（秒）。 |
 | `max_output_bytes` | usize | `102400` | stdout+stderr 合并输出的最大大小（字节）。默认 100 KB。 |
 | `no_output_timeout_secs` | u64 | `30` | 进程在此秒数内无输出则被终止。`0` = 禁用。 |

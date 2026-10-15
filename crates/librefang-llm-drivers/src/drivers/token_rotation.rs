@@ -439,6 +439,7 @@ mod tests {
 
     fn ok_response(text: &str) -> CompletionResponse {
         CompletionResponse {
+            text_synthesized_from_thinking: false,
             content: vec![ContentBlock::Text {
                 text: text.to_string(),
                 provider_metadata: None,

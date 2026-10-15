@@ -106,6 +106,7 @@ pub(super) fn build_silent_agent_loop_result(
     new_messages_start: usize,
 ) -> AgentLoopResult {
     AgentLoopResult {
+        hit_iteration_cap: false,
         response: String::new(),
         total_usage,
         iterations,
@@ -134,6 +135,14 @@ pub(super) enum EndTurnRetry {
 }
 
 pub(super) fn classify_end_turn_retry(ctx: EndTurnRetryContext<'_>) -> Option<EndTurnRetry> {
+    // #8556: text synthesized from a thinking-only response is a terminal
+    // best-effort answer — never nudge it into a retry (empty-response,
+    // hallucinated-action, or action-intent). Re-issuing the turn here is
+    // what kept it alive after the driver had already answered.
+    if ctx.response.text_synthesized_from_thinking {
+        return None;
+    }
+
     if ctx.text.trim().is_empty() && ctx.response.tool_calls.is_empty() {
         let is_silent_failure =
             ctx.response.usage.input_tokens == 0 && ctx.response.usage.output_tokens == 0;
@@ -160,6 +169,29 @@ pub(super) fn classify_end_turn_retry(ctx: EndTurnRetryContext<'_>) -> Option<En
     }
 
     None
+}
+
+/// What a turn that exhausted its iteration budget delivers (#8556).
+///
+/// Returns `(response, notice)`.
+/// `notice` says the turn was cut off, and `response` is the prose the turn produced before the cap with that notice appended, or the notice alone when the turn only ran tools.
+/// The canned end-turn guard (`[Task completed — …]`) is deliberately not reused: a capped turn did not complete, and every consumer of the response (the user, cron delivery, channel bridges) must be able to tell.
+pub(super) fn finalize_iteration_cap_text(
+    accumulated_text: &str,
+    max_iterations: u32,
+) -> (String, String) {
+    let partial = accumulated_text.trim_end();
+    if partial.trim().is_empty() {
+        let notice = format!(
+            "[Stopped after reaching the iteration limit ({max_iterations}) before finishing — the agent ran tools but did not produce an answer.]"
+        );
+        (notice.clone(), notice)
+    } else {
+        let notice = format!(
+            "[Stopped after reaching the iteration limit ({max_iterations}) before finishing — the response above may be incomplete.]"
+        );
+        (format!("{partial}\n\n{notice}"), notice)
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -395,6 +427,7 @@ pub(super) async fn finalize_successful_end_turn(
         data: serde_json::json!({
             "iterations": end_turn.iteration + 1,
             "response_length": end_turn.final_response.len(),
+            "session_id": ctx.session.id.to_string(),
             "is_fork": ctx.opts.is_fork,
         }),
     };
@@ -402,6 +435,7 @@ pub(super) async fn finalize_successful_end_turn(
 
     let tool_call_count = end_turn.decision_traces.len();
     Ok(AgentLoopResult {
+        hit_iteration_cap: false,
         response: end_turn.final_response,
         total_usage: end_turn.total_usage,
         iterations: end_turn.iteration + 1,
@@ -495,6 +529,9 @@ pub(super) async fn maybe_fold_stale_tool_results(
         }
     }
     if fold_result.groups_folded > 0 {
+        // #4971: a folded `file_read` body is gone from the prompt, so a dedup stub pointing at it would leave the model unable to see the file again.
+        // Keyed on `groups_folded` rather than `rewrites`: the working copy is folded even when no durable rewrite applies.
+        crate::context_compressor::reset_post_compression_side_state(session.id);
         let label = if streaming {
             "streaming"
         } else {

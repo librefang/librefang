@@ -340,7 +340,7 @@ fn main() {
     dotenv::load_dotenv();
 
     let language = load_language_from_config().unwrap_or_else(i18n::detect_system_language);
-    i18n::init(&language);
+    i18n::init_process(&language);
 
     let cli = Cli::parse();
 

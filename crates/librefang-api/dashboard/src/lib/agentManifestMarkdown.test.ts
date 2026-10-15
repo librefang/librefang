@@ -166,6 +166,76 @@ describe("generateManifestMarkdown", () => {
     expect(md).toContain("json");
   });
 
+  /// The engine leads the routing section, because it is the question the
+  /// section exists to answer, and the tier table does not answer it: the
+  /// kernel consults the profile router first and the tiers only when nothing
+  /// matches, so an agent can carry tiers and still be routed by profile.
+  it("names the routing engine, and still prints tiers the tiers engine is not driving", () => {
+    const form = emptyManifestForm();
+    form.model.mode = "flexible";
+    form.model.router_fixed = false;
+    form.routing.enabled = true;
+    form.routing.simple_model = "tier-cheap";
+
+    const md = generateManifestMarkdown(form);
+
+    expect(md).toContain("## Model Routing");
+    expect(md).toContain("Profile router");
+    // Not hidden just because the profile router decides first: these are the
+    // kernel's fallback when no profile matches, and a reader who cannot see
+    // them cannot tell why an unmatched task picked a cheaper model.
+    expect(md).toContain("tier-cheap");
+  });
+
+  it("calls an agent with no routing fixed and prints no tiers", () => {
+    const md = generateManifestMarkdown(emptyManifestForm());
+
+    expect(md).toContain("## Model Routing");
+    expect(md).toContain("Fixed model");
+    expect(md).not.toContain("Simple threshold");
+  });
+
+  it("caveats the fixed engine with the daemon's own default routing", () => {
+    // "Fixed model" alone is true of the manifest and false of the agent: the
+    // kernel runs the daemon's `[default_routing]` for every agent with no
+    // `[routing]` table of its own, which is exactly the state this engine
+    // writes.
+    const md = generateManifestMarkdown(emptyManifestForm());
+
+    expect(md).toContain("Fixed model");
+    expect(md).toContain("kernel-wide `[default_routing]`");
+  });
+
+  it("says when the agent is pinned out of profiles, and at whose cost", () => {
+    // The pin is not a routing flag: it refuses every profile to the agents
+    // this one spawns, so a reader who cannot see it cannot explain a refused
+    // `agent_spawn` that names one.
+    const form = emptyManifestForm();
+    form.model.router_fixed = true;
+
+    const md = generateManifestMarkdown(form);
+
+    expect(md).toContain("**Pinned**");
+    expect(md).toContain("fixed = true");
+  });
+
+  it("says nothing about a pin when there is none", () => {
+    expect(generateManifestMarkdown(emptyManifestForm())).not.toContain("**Pinned**");
+  });
+
+  it("prints the daemon's model for a blank tier, marked as the daemon's", () => {
+    // The table arms the router whether or not it names models, so a reader
+    // shown nothing where the model belongs would be reading a table that
+    // routes onto a model nobody chose.
+    const form = emptyManifestForm();
+    form.routing.enabled = true;
+
+    const md = generateManifestMarkdown(form);
+
+    expect(md).toContain("Effort (complexity)");
+    expect(md).toContain("claude-haiku-4-5-20251001 _(daemon default)_");
+  });
+
   it("includes lifecycle overrides when set to non-default values", () => {
     const form = emptyManifestForm();
     form.name = "ops";
@@ -174,7 +244,7 @@ describe("generateManifestMarkdown", () => {
     form.priority = "Critical";
     form.session_mode = "new";
     form.web_search_augmentation = "always";
-    form.exec_policy_shorthand = "deny";
+    form.exec_policy.mode = "deny";
     form.pinned_model = "gpt-4o-2024-05-13";
     form.workspace = "/var/agents/ops";
     form.allowed_plugins = ["telegram"];

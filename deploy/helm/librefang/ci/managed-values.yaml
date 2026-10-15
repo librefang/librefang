@@ -1,0 +1,25 @@
+# Managed config + provisioned agents + NetworkPolicy: mirrors
+# deploy/kubernetes/overlays/managed-config.
+# No image.tag: the chart default (appVersion) must itself support managed config.
+auth:
+  existingSecret: librefang-auth
+managedConfig:
+  enabled: true
+  agents:
+    researcher.toml: |
+      name = "researcher"
+      description = "Deployment-provisioned research agent"
+      module = "builtin:chat"
+
+      [model]
+      provider = "default"
+      model = "default"
+      max_tokens = 8192
+      temperature = 0.3
+      system_prompt = "You research questions carefully and cite what you find."
+networkPolicy:
+  enabled: true
+  ingressFrom:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: ingress-nginx

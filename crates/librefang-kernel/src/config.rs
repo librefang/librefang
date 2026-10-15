@@ -407,6 +407,31 @@ pub fn load_config(path: Option<&Path>) -> Result<KernelConfig, String> {
 /// - Unknown fields under `strict_config = false` (or unset) still warn
 ///   and proceed, matching `load_config`'s tolerant behaviour.
 pub fn try_load_config(path: &Path) -> Result<KernelConfig, String> {
+    try_load_config_over(path, None)
+}
+
+/// Load `path` with `base` supplying every field the resolved document does not state.
+///
+/// `base` is `None` at boot, where the compiled defaults are the right thing for an absent key —
+/// there is no live configuration to disagree with. The reload path passes the running config,
+/// because there the document is an *edit*: `POST /api/users/{name}/identity` and its siblings
+/// rewrite only the sections they own, and on a kernel whose config file did not exist yet the
+/// document they leave behind states nothing else. Reading that as a complete statement of intent is
+/// what hands the daemon the compiled defaults for its home, its data directory and its API key.
+///
+/// **The trade-off, stated rather than implied**: with a base, deleting a *top-level* key from
+/// `config.toml` and reloading no longer resets that field to its default — it keeps the running
+/// value until the next restart, because an absent top-level key now means "unchanged" rather than
+/// "unset". A key *inside* a section the document states is the opposite case and remains
+/// deletable: the stated section replaces the live one wholesale, so dropping a
+/// `[provider_api_keys]` entry is how an operator revokes it.
+/// That absent-means-unchanged reading is the same meaning the reload already gives every field it
+/// classifies as restart-required, and it is the only reading under which a document that states
+/// one section is not a declaration about the other hundred.
+pub fn try_load_config_over(
+    path: &Path,
+    base: Option<&KernelConfig>,
+) -> Result<KernelConfig, String> {
     if !path.exists() {
         return Err(format!("Config file not found: {}", path.display()));
     }
@@ -497,9 +522,93 @@ pub fn try_load_config(path: &Path) -> Result<KernelConfig, String> {
         );
     }
 
+    // A document that omits a field must not be read as declaring that field's compiled default.
+    //
+    // `KernelConfig` is `#[serde(default)]` at the container level, so deserializing a *partial*
+    // document over nothing resets every field it does not mention — the loose runtime that
+    // `load_config`'s own comment names as the thing a strict operator must not be handed.
+    // Strictness stops at parseability: a file that parses and is partial lands in the same place a
+    // file that failed to parse used to. `base` is the other half.
+    // The interchange is JSON rather than TOML, and deliberately: this value never reaches disk, and
+    // a live config is not always TOML-representable — an MCP transport entry serializes a unit that
+    // TOML has no syntax for — so routing it through `toml::Value` would make the reload fail for
+    // exactly the configurations that have an MCP server.
+    if let Some(base) = base {
+        let mut merged = serde_json::to_value(base)
+            .map_err(|e| format!("Failed to reuse the live config as a base: {e}"))?;
+        let document = serde_json::to_value(&root_value)
+            .map_err(|e| format!("Failed to read the document as a value: {e}"))?;
+        overlay_document(&mut merged, &document);
+        return serde_json::from_value(merged)
+            .map_err(|e| format!("Failed to deserialize config: {e}"));
+    }
+
     root_value
         .try_into::<KernelConfig>()
         .map_err(|e| format!("Failed to deserialize config: {e}"))
+}
+
+/// `(canonical, alias)` pairs for the `#[serde(alias = …)]` attributes on `KernelConfig`'s own
+/// fields (`crates/librefang-types/src/config/types.rs`).
+///
+/// The overlay deals in raw JSON keyed by whatever the operator wrote, while the base comes from
+/// serializing the live config and therefore always carries the canonical spelling. A document that
+/// states only the alias would leave the base's canonical key in the merged object, and `serde`
+/// rejects an object holding both spellings of one field as a `duplicate field` — so every reload of
+/// such a config failed. Dropping the counterpart before inserting the stated key gives alias and
+/// canonical the same meaning serde gives them at boot.
+///
+/// Only the root needs a map: a stated top-level key replaces its whole subtree (see
+/// [`overlay_document`]), so an alias nested inside a stated section — `terminal.trust_proxy_headers`,
+/// `sidecar_channels[].default_agent` — never shares an object with the base's canonical spelling.
+///
+/// Keep in sync with `crate::config_reload::KERNEL_CONFIG_FIELD_ALIASES`, which keeps the coverage
+/// guard aware of the same names; `top_level_alias_map_covers_the_known_config_aliases` fails when
+/// the two lists drift.
+const TOP_LEVEL_FIELD_ALIASES: &[(&str, &str)] = &[
+    ("api_listen", "listen_addr"),
+    ("approval", "approval_policy"),
+];
+
+/// The other spelling of `key`, when `key` is one of [`TOP_LEVEL_FIELD_ALIASES`].
+fn top_level_alias_counterpart(key: &str) -> Option<&'static str> {
+    TOP_LEVEL_FIELD_ALIASES
+        .iter()
+        .find_map(|(canonical, alias)| {
+            if key == *canonical {
+                Some(*alias)
+            } else if key == *alias {
+                Some(*canonical)
+            } else {
+                None
+            }
+        })
+}
+
+/// Overlay `document` onto `base` one top-level key at a time, the document winning.
+///
+/// A top-level key the document states replaces the base's whole value for it — subtree included —
+/// and a key it does not state keeps the base's value. That is the contract that makes a partial
+/// document (what `persist_identity_sections` leaves behind on a kernel whose config file did not
+/// exist yet) load without resetting the fields it never mentions (#8459).
+///
+/// The replacement is wholesale rather than recursive on purpose. A stated table is a statement
+/// about the whole table: recursing read an omitted entry as "keep", so revoking one
+/// `[provider_api_keys]` entry, removing the last `[[users]]` block or dropping a `cors_origin`
+/// entry could never be expressed through a reload — the document stated the section and every
+/// entry it omitted came back from the base.
+fn overlay_document(base: &mut serde_json::Value, document: &serde_json::Value) {
+    match (base, document) {
+        (serde_json::Value::Object(base_map), serde_json::Value::Object(document_map)) => {
+            for (key, value) in document_map {
+                if let Some(counterpart) = top_level_alias_counterpart(key) {
+                    base_map.remove(counterpart);
+                }
+                base_map.insert(key.clone(), value.clone());
+            }
+        }
+        (slot, value) => *slot = value.clone(),
+    }
 }
 
 /// Resolve config includes by deep-merging included files into the root value.
@@ -2107,5 +2216,105 @@ mod tests {
     fn a_drive_letter_stays_an_ordinary_relative_name_on_unix() {
         assert!(include_is_not_plainly_relative(Path::new("/etc/passwd")));
         assert!(!include_is_not_plainly_relative(Path::new("C:passwd")));
+    }
+
+    /// A stated top-level key replaces the base's whole subtree, so an entry it omits is removed.
+    ///
+    /// This is the revocation path: an operator removing `openai` from `[provider_api_keys]` states
+    /// the table without that entry, and the reload must express the removal. The recursive overlay
+    /// this replaced read the omitted entry as "keep" and merged it back, so revoking a credential
+    /// silently no-op'd.
+    #[test]
+    fn overlay_replaces_a_stated_subtree_wholesale() {
+        let base = serde_json::json!({
+            "provider_api_keys": { "openai": "OPENAI_API_KEY", "anthropic": "ANTHROPIC_API_KEY" },
+            "log_level": "info"
+        });
+        let document =
+            serde_json::json!({ "provider_api_keys": { "anthropic": "ANTHROPIC_API_KEY" } });
+
+        let mut merged = base.clone();
+        overlay_document(&mut merged, &document);
+
+        let keys = merged["provider_api_keys"].as_object().unwrap();
+        assert_eq!(keys.len(), 1, "{merged}");
+        assert!(
+            keys.get("openai").is_none(),
+            "an entry the stated table omits must be gone, not merged back: {merged}"
+        );
+        assert_eq!(
+            merged["log_level"], "info",
+            "an unstated top-level key keeps the base value"
+        );
+    }
+
+    /// Alias and canonical spelling of one field must not both survive the overlay.
+    ///
+    /// `serde_json::to_value(base)` emits the canonical name while the document keeps whatever the
+    /// operator wrote, and serde rejects an object holding both as `duplicate field` — the reload
+    /// failed for every config that spells a documented alias.
+    #[test]
+    fn overlay_treats_alias_and_canonical_as_one_field() {
+        // Document states the alias; the base's canonical key must be dropped.
+        let base = serde_json::json!({ "api_listen": "127.0.0.1:4545", "log_level": "info" });
+        let document = serde_json::json!({ "listen_addr": "0.0.0.0:9999" });
+
+        let mut merged = base.clone();
+        overlay_document(&mut merged, &document);
+        assert_eq!(merged["listen_addr"], "0.0.0.0:9999");
+        assert!(
+            merged.get("api_listen").is_none(),
+            "the base's canonical key must be dropped when the document states the alias: {merged}"
+        );
+        assert_eq!(merged["log_level"], "info", "unstated keys stay");
+
+        // The reverse direction: the document states the canonical key, the base's alias must go.
+        let base = serde_json::json!({ "listen_addr": "127.0.0.1:4545" });
+        let document = serde_json::json!({ "api_listen": "0.0.0.0:9999" });
+
+        let mut merged = base.clone();
+        overlay_document(&mut merged, &document);
+        assert!(
+            merged.get("listen_addr").is_none(),
+            "the base's alias must be dropped when the document states the canonical key: {merged}"
+        );
+        assert_eq!(merged["api_listen"], "0.0.0.0:9999");
+    }
+
+    /// Every alias the reload-coverage guard knows about needs a canonical partner here, or a
+    /// reload that spells it fails with `duplicate field`.
+    ///
+    /// `KERNEL_CONFIG_FIELD_ALIASES` is the kernel's existing list of `KernelConfig` top-level
+    /// aliases; comparing against it is what keeps a newly-added alias from silently landing in one
+    /// list and not the other.
+    #[test]
+    fn top_level_alias_map_covers_the_known_config_aliases() {
+        use std::collections::BTreeSet;
+
+        let mapped: BTreeSet<&str> = TOP_LEVEL_FIELD_ALIASES.iter().map(|(_, a)| *a).collect();
+        let known: BTreeSet<&str> = crate::config_reload::KERNEL_CONFIG_FIELD_ALIASES
+            .iter()
+            .copied()
+            .collect();
+        assert_eq!(
+            mapped, known,
+            "every KernelConfig alias needs a (canonical, alias) pair in TOP_LEVEL_FIELD_ALIASES"
+        );
+
+        let fields: BTreeSet<&str> = KernelConfig::known_top_level_fields()
+            .iter()
+            .copied()
+            .collect();
+        for (canonical, alias) in TOP_LEVEL_FIELD_ALIASES {
+            assert_ne!(canonical, alias);
+            assert!(
+                fields.contains(canonical),
+                "{canonical} must be a real KernelConfig field"
+            );
+            assert!(
+                fields.contains(alias),
+                "{alias} must be an accepted alias of it"
+            );
+        }
     }
 }

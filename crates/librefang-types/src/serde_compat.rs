@@ -580,6 +580,26 @@ timeout_secs = 60
         let policy = parsed.exec_policy.unwrap();
         assert_eq!(policy.mode, crate::config::ExecSecurityMode::Full);
         assert_eq!(policy.timeout_secs, 60);
+        assert!(policy.denied_commands.is_empty());
+    }
+
+    /// #8536: `denied_commands` is read from the table form, and the shorthand string form leaves it empty.
+    #[test]
+    fn exec_policy_denied_commands_parses() {
+        let parsed: TestExecPolicy = toml::from_str(
+            r#"
+[exec_policy]
+mode = "full"
+denied_commands = ["git"]
+"#,
+        )
+        .unwrap();
+        let policy = parsed.exec_policy.unwrap();
+        assert_eq!(policy.mode, crate::config::ExecSecurityMode::Full);
+        assert_eq!(policy.denied_commands, vec!["git".to_string()]);
+
+        let shorthand: TestExecPolicy = toml::from_str(r#"exec_policy = "full""#).unwrap();
+        assert!(shorthand.exec_policy.unwrap().denied_commands.is_empty());
     }
 
     /// #6594: an `exec_policy` written before `full_mode_skips_approval` existed must keep the historical "Full waives the global require_approval list" behaviour after an upgrade.

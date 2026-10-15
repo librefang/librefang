@@ -120,7 +120,7 @@ pub(crate) fn cmd_security_verify() {
         ui::success(&i18n::t("audit-verified"));
     } else {
         ui::error(&i18n::t("audit-failed"));
-        if let Some(msg) = body["error"].as_str() {
+        if let Some(msg) = api_error_message(&body) {
             ui::hint(msg);
         }
         std::process::exit(1);
@@ -497,15 +497,22 @@ pub(crate) fn cmd_memory_list(agent: &str, json: bool) {
     }
 }
 
+/// URL of one agent KV entry, with `key` percent-encoded as a single path segment.
+///
+/// The route is `/api/memory/agents/{id}/kv/{key}`, a single-segment capture: a raw `/` misses the route, a raw `?` or `#` truncates the key so the write lands under a different one, and a raw `%XX` is decoded by the server into another key.
+/// Agents routinely store keys such as `user/prefs` through the memory tool.
+pub(crate) fn memory_kv_url(base: &str, agent: &str, key: &str) -> String {
+    format!(
+        "{base}/api/memory/agents/{agent}/kv/{}",
+        percent_encode_path_segment(key)
+    )
+}
+
 pub(crate) fn cmd_memory_get(agent: &str, key: &str, json: bool) {
     let base = require_daemon("memory get");
     let agent = resolve_agent_id(&base, agent);
     let client = daemon_client();
-    let body = daemon_json(
-        client
-            .get(format!("{base}/api/memory/agents/{agent}/kv/{key}"))
-            .send(),
-    );
+    let body = daemon_json(client.get(memory_kv_url(&base, &agent, key)).send());
     if json {
         println!(
             "{}",
@@ -527,17 +534,18 @@ pub(crate) fn cmd_memory_set(agent: &str, key: &str, value: &str) {
     let base = require_daemon("memory set");
     let agent = resolve_agent_id(&base, agent);
     let client = daemon_client();
-    let body = daemon_json(
+    let (status, body) = daemon_json_checked(
         client
-            .put(format!("{base}/api/memory/agents/{agent}/kv/{key}"))
+            .put(memory_kv_url(&base, &agent, key))
             .json(&serde_json::json!({"value": value}))
             .send(),
     );
-    if body.get("error").is_some() {
+    if !status.is_success() || body.get("error").is_some() {
         ui::error(&i18n::t_args(
             "memory-set-failed",
-            &[("error", body["error"].as_str().unwrap_or("?"))],
+            &[("error", &mutation_failure_reason(status, &body))],
         ));
+        std::process::exit(1);
     } else {
         ui::success(&i18n::t_args(
             "memory-set",
@@ -550,16 +558,14 @@ pub(crate) fn cmd_memory_delete(agent: &str, key: &str) {
     let base = require_daemon("memory delete");
     let agent = resolve_agent_id(&base, agent);
     let client = daemon_client();
-    let body = daemon_json(
-        client
-            .delete(format!("{base}/api/memory/agents/{agent}/kv/{key}"))
-            .send(),
-    );
-    if body.get("error").is_some() {
+    let (status, body) =
+        daemon_json_checked(client.delete(memory_kv_url(&base, &agent, key)).send());
+    if !status.is_success() || body.get("error").is_some() {
         ui::error(&i18n::t_args(
             "memory-delete-failed",
-            &[("error", body["error"].as_str().unwrap_or("?"))],
+            &[("error", &mutation_failure_reason(status, &body))],
         ));
+        std::process::exit(1);
     } else {
         ui::success(&i18n::t_args(
             "memory-deleted",
@@ -633,16 +639,17 @@ pub(crate) fn cmd_devices_pair() {
 pub(crate) fn cmd_devices_remove(id: &str) {
     let base = require_daemon("devices remove");
     let client = daemon_client();
-    let body = daemon_json(
+    let (status, body) = daemon_json_checked(
         client
             .delete(format!("{base}/api/pairing/devices/{id}"))
             .send(),
     );
-    if body.get("error").is_some() {
+    if !status.is_success() || body.get("error").is_some() {
         ui::error(&i18n::t_args(
             "device-remove-failed",
-            &[("error", body["error"].as_str().unwrap_or("?"))],
+            &[("error", &mutation_failure_reason(status, &body))],
         ));
+        std::process::exit(1);
     } else {
         ui::success(&i18n::t_args("device-removed", &[("id", id)]));
     }
@@ -723,7 +730,7 @@ pub(crate) fn cmd_webhooks_create(agent: &str, url: &str) {
     } else {
         ui::error(&i18n::t_args(
             "webhook-create-failed",
-            &[("error", body["error"].as_str().unwrap_or("?"))],
+            &[("error", api_error_message(&body).unwrap_or("?"))],
         ));
         std::process::exit(1);
     }
@@ -736,7 +743,7 @@ pub(crate) fn cmd_webhooks_delete(id: &str) {
     if body.get("error").is_some() {
         ui::error(&i18n::t_args(
             "webhook-delete-failed",
-            &[("error", body["error"].as_str().unwrap_or("?"))],
+            &[("error", api_error_message(&body).unwrap_or("?"))],
         ));
         std::process::exit(1);
     }
@@ -754,8 +761,38 @@ pub(crate) fn cmd_webhooks_test(id: &str) {
     } else {
         ui::error(&i18n::t_args(
             "webhook-test-failed",
-            &[("error", body["error"].as_str().unwrap_or("?"))],
+            &[("error", api_error_message(&body).unwrap_or("?"))],
         ));
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn memory_kv_url_percent_encodes_key() {
+        let u = memory_kv_url("http://127.0.0.1:4545", "a1", "todo?today");
+        assert_eq!(
+            u,
+            "http://127.0.0.1:4545/api/memory/agents/a1/kv/todo%3Ftoday"
+        );
+
+        let u = memory_kv_url("http://h", "a1", "notes/2026#x%20");
+        assert!(u.ends_with("/kv/notes%2F2026%23x%2520"), "got {u}");
+        let parsed = reqwest::Url::parse(&u).expect("valid url");
+        assert!(parsed.query().is_none() && parsed.fragment().is_none());
+        assert_eq!(
+            parsed.path_segments().map(|s| s.count()),
+            Some(6),
+            "the key must stay a single path segment"
+        );
+
+        // Plain keys are unchanged, so every URL that already worked keeps working.
+        assert_eq!(
+            memory_kv_url("http://h", "a1", "user_prefs-1"),
+            "http://h/api/memory/agents/a1/kv/user_prefs-1"
+        );
     }
 }

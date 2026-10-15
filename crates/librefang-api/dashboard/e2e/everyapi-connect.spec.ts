@@ -8,7 +8,7 @@
 // And the registry body is a cross-language contract with the CLI: the daemon keys its catalog refresh off the provider id, and `models` is deliberately empty so `catalog_needs_initial_refresh` in `crates/librefang-api/src/everyapi_catalog.rs` becomes true and the daemon backfills the catalog itself.
 //
 // No daemon is involved.
-// Playwright serves the dashboard from vite (see playwright.config.ts, port 4173) and every backend call is fulfilled by `page.route`, so this suite never contends with a real LibreFang on 4545.
+// Playwright serves the dashboard from vite (see playwright.config.ts, whose port is per checkout) and every backend call is fulfilled by `page.route`, so this suite never contends with a real LibreFang on 4545.
 // The flip side is that it verifies what the dashboard *sends*, not that the daemon accepts it.
 //
 // `.first()` throughout: the drawer host mounts at both the desktop and mobile breakpoints, so every control inside it resolves to two nodes with only one visible.

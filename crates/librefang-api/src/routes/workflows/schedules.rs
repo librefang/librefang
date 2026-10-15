@@ -483,6 +483,16 @@ pub async fn update_schedule(
                 m.unwrap_or(librefang_types::agent::SessionMode::Persistent)
             };
             if effective(job.session_mode) != effective(requested_mode) {
+                // A workflow schedule cannot carry `session_mode` at all (#8533), so "recreate with the desired session_mode" would only lead to a second 400.
+                if matches!(
+                    job.action,
+                    librefang_types::scheduler::CronAction::Workflow { .. }
+                ) {
+                    return ApiErrorResponse::bad_request(
+                        "session_mode is ignored on a workflow schedule and is not accepted there; set session_mode on the workflow's steps instead (WorkflowStep.session_mode)",
+                    )
+                    .into_json_tuple();
+                }
                 return ApiErrorResponse::bad_request(
                     "session_mode cannot be changed on an existing schedule — delete it and \
                      recreate with the desired session_mode via POST /api/schedules",

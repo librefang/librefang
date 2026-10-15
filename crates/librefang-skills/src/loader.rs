@@ -129,6 +129,51 @@ enum DrainOutcome {
     },
 }
 
+/// Concurrently read stdout and stderr until both reach EOF or either hits `SKILL_MAX_OUTPUT_BYTES`.
+///
+/// On overflow the child is killed here, inside the drain, so a concurrent stdin writer blocked on a child that stopped reading also unblocks (the write fails with a broken pipe once the child is gone).
+async fn drain_pipes(
+    child: &mut tokio::process::Child,
+    stdout_pipe: &mut tokio::process::ChildStdout,
+    stderr_pipe: &mut tokio::process::ChildStderr,
+) -> std::io::Result<(Vec<u8>, Vec<u8>, bool)> {
+    let cap = SKILL_MAX_OUTPUT_BYTES;
+    let mut stdout_buf: Vec<u8> = Vec::new();
+    let mut stderr_buf: Vec<u8> = Vec::new();
+    let mut truncated = false;
+    let mut out_done = false;
+    let mut err_done = false;
+    while !out_done || !err_done {
+        let mut out_chunk = [0u8; SKILL_READ_CHUNK_BYTES];
+        let mut err_chunk = [0u8; SKILL_READ_CHUNK_BYTES];
+        tokio::select! {
+            n = stdout_pipe.read(&mut out_chunk), if !out_done => match n? {
+                0 => out_done = true,
+                n => {
+                    let take = cap.saturating_sub(stdout_buf.len()).min(n);
+                    stdout_buf.extend_from_slice(&out_chunk[..take]);
+                    if stdout_buf.len() >= cap { truncated = true; break; }
+                }
+            },
+            n = stderr_pipe.read(&mut err_chunk), if !err_done => match n? {
+                0 => err_done = true,
+                n => {
+                    let take = cap.saturating_sub(stderr_buf.len()).min(n);
+                    stderr_buf.extend_from_slice(&err_chunk[..take]);
+                    if stderr_buf.len() >= cap { truncated = true; break; }
+                }
+            },
+        }
+    }
+    if truncated {
+        // We've stopped reading; kill the child so it doesn't keep
+        // producing output we'll never drain. start_kill() queues SIGKILL
+        // on Linux/macOS / TerminateProcess on Windows; it does not block.
+        let _ = child.start_kill();
+    }
+    Ok((stdout_buf, stderr_buf, truncated))
+}
+
 /// Drive a spawned child to completion with both wall-clock timeout (#3454)
 /// and per-stream stdout/stderr byte caps (#3455). Mirrors the
 /// `host_shell_exec` pattern from #4099: `select!`-based concurrent drain so a
@@ -136,10 +181,15 @@ enum DrainOutcome {
 /// `start_kill()` is fired the instant either pipe overflows so the other
 /// pipe sees EOF immediately. `kill_on_drop(true)` on the spawning `Command`
 /// guarantees the child is reaped even if this future is dropped (#3624).
+///
+/// `stdin_payload` is written to the child's stdin concurrently with the stdout/stderr drain and inside the same wall-clock timeout.
+/// Writing it up front would deadlock once the payload exceeds the OS pipe buffer and the child fills stdout before reading stdin, and would let a child that never reads stdin escape the timeout entirely.
 async fn drain_child_with_caps(
     mut child: tokio::process::Child,
+    stdin_payload: Vec<u8>,
     timeout_dur: std::time::Duration,
 ) -> Result<DrainOutcome, SkillError> {
+    let stdin_pipe = child.stdin.take();
     let mut stdout_pipe = child
         .stdout
         .take()
@@ -150,40 +200,18 @@ async fn drain_child_with_caps(
         .ok_or_else(|| SkillError::ExecutionFailed("child has no stderr pipe".into()))?;
 
     let exec = async {
-        let cap = SKILL_MAX_OUTPUT_BYTES;
-        let mut stdout_buf: Vec<u8> = Vec::new();
-        let mut stderr_buf: Vec<u8> = Vec::new();
-        let mut truncated = false;
-        let mut out_done = false;
-        let mut err_done = false;
-        while !out_done || !err_done {
-            let mut out_chunk = [0u8; SKILL_READ_CHUNK_BYTES];
-            let mut err_chunk = [0u8; SKILL_READ_CHUNK_BYTES];
-            tokio::select! {
-                n = stdout_pipe.read(&mut out_chunk), if !out_done => match n? {
-                    0 => out_done = true,
-                    n => {
-                        let take = cap.saturating_sub(stdout_buf.len()).min(n);
-                        stdout_buf.extend_from_slice(&out_chunk[..take]);
-                        if stdout_buf.len() >= cap { truncated = true; break; }
-                    }
-                },
-                n = stderr_pipe.read(&mut err_chunk), if !err_done => match n? {
-                    0 => err_done = true,
-                    n => {
-                        let take = cap.saturating_sub(stderr_buf.len()).min(n);
-                        stderr_buf.extend_from_slice(&err_chunk[..take]);
-                        if stderr_buf.len() >= cap { truncated = true; break; }
-                    }
-                },
+        // Ignore write errors: a broken pipe just means the child exited or closed stdin without reading it.
+        // The pipe is dropped (closed) as soon as the write finishes so the child sees EOF.
+        let writer = async move {
+            if let Some(mut stdin) = stdin_pipe {
+                let _ = stdin.write_all(&stdin_payload).await;
             }
-        }
-        if truncated {
-            // We've stopped reading; kill the child so it doesn't keep
-            // producing output we'll never drain. start_kill() queues SIGKILL
-            // on Linux/macOS / TerminateProcess on Windows; it does not block.
-            let _ = child.start_kill();
-        }
+        };
+        let ((), drained) = tokio::join!(
+            writer,
+            drain_pipes(&mut child, &mut stdout_pipe, &mut stderr_pipe)
+        );
+        let (stdout_buf, stderr_buf, truncated) = drained?;
         // Drop the owned pipe handles before wait(). On Windows, child.wait()
         // waits on the process handle alone, but on Linux/macOS keeping the
         // reader end open after we've stopped polling can leave kernel buffers
@@ -659,20 +687,20 @@ async fn execute_python(
     // Python needs PYTHONIOENCODING for UTF-8 output
     cmd.env("PYTHONIOENCODING", "utf-8");
 
-    let mut child = cmd
+    let child = cmd
         .spawn()
         .map_err(|e| SkillError::ExecutionFailed(format!("Failed to spawn Python: {e}")))?;
 
-    // Write input to stdin (ignore broken pipe — process may not need stdin)
-    if let Some(mut stdin) = child.stdin.take() {
-        let payload_bytes = serde_json::to_vec(&payload)
-            .map_err(|e| SkillError::ExecutionFailed(format!("JSON serialize: {e}")))?;
-        let _ = stdin.write_all(&payload_bytes).await;
-        drop(stdin);
-    }
+    // The payload is written by drain_child_with_caps, concurrently with the output drain and under the timeout.
+    let payload_bytes = serde_json::to_vec(&payload)
+        .map_err(|e| SkillError::ExecutionFailed(format!("JSON serialize: {e}")))?;
 
-    let (status, stdout_bytes, stderr_bytes) = match drain_child_with_caps(child, timeout_dur)
-        .await?
+    let (status, stdout_bytes, stderr_bytes) = match drain_child_with_caps(
+        child,
+        payload_bytes,
+        timeout_dur,
+    )
+    .await?
     {
         DrainOutcome::TimedOut { timeout_secs } => {
             error!(
@@ -813,20 +841,20 @@ async fn execute_node(
     }
     cmd.env("NODE_NO_WARNINGS", "1");
 
-    let mut child = cmd
+    let child = cmd
         .spawn()
         .map_err(|e| SkillError::ExecutionFailed(format!("Failed to spawn Node.js: {e}")))?;
 
-    // Write input to stdin (ignore broken pipe — process may not need stdin)
-    if let Some(mut stdin) = child.stdin.take() {
-        let payload_bytes = serde_json::to_vec(&payload)
-            .map_err(|e| SkillError::ExecutionFailed(format!("JSON serialize: {e}")))?;
-        let _ = stdin.write_all(&payload_bytes).await;
-        drop(stdin);
-    }
+    // The payload is written by drain_child_with_caps, concurrently with the output drain and under the timeout.
+    let payload_bytes = serde_json::to_vec(&payload)
+        .map_err(|e| SkillError::ExecutionFailed(format!("JSON serialize: {e}")))?;
 
-    let (status, stdout_bytes, stderr_bytes) = match drain_child_with_caps(child, timeout_dur)
-        .await?
+    let (status, stdout_bytes, stderr_bytes) = match drain_child_with_caps(
+        child,
+        payload_bytes,
+        timeout_dur,
+    )
+    .await?
     {
         DrainOutcome::TimedOut { timeout_secs } => {
             error!(
@@ -966,20 +994,20 @@ async fn execute_shell(
         }
     }
 
-    let mut child = cmd
+    let child = cmd
         .spawn()
         .map_err(|e| SkillError::ExecutionFailed(format!("Failed to spawn shell: {e}")))?;
 
-    if let Some(mut stdin) = child.stdin.take() {
-        let payload_bytes = serde_json::to_vec(&payload)
-            .map_err(|e| SkillError::ExecutionFailed(format!("JSON serialize: {e}")))?;
-        // Ignore broken pipe — the script may exit before reading stdin
-        let _ = stdin.write_all(&payload_bytes).await;
-        drop(stdin);
-    }
+    // The payload is written by drain_child_with_caps, concurrently with the output drain and under the timeout.
+    let payload_bytes = serde_json::to_vec(&payload)
+        .map_err(|e| SkillError::ExecutionFailed(format!("JSON serialize: {e}")))?;
 
-    let (status, stdout_bytes, stderr_bytes) = match drain_child_with_caps(child, timeout_dur)
-        .await?
+    let (status, stdout_bytes, stderr_bytes) = match drain_child_with_caps(
+        child,
+        payload_bytes,
+        timeout_dur,
+    )
+    .await?
     {
         DrainOutcome::TimedOut { timeout_secs } => {
             error!(
@@ -1073,50 +1101,53 @@ fn apply_env_passthrough(cmd: &mut tokio::process::Command, allowlist: &[String]
     }
 }
 
+/// Return the first of `candidates` that can be spawned with `--version`.
+///
+/// This is a blocking spawn-and-wait, so callers go through `cached_interpreter` and run it once per process instead of on every skill tool call.
+fn probe_interpreter(candidates: &[&str]) -> Option<String> {
+    candidates
+        .iter()
+        .find(|name| {
+            std::process::Command::new(name)
+                .arg("--version")
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .is_ok()
+        })
+        .map(|name| name.to_string())
+}
+
+/// Return the cached interpreter from `cell`, probing `candidates` on first use.
+///
+/// Only a successful lookup is cached: a miss is re-probed on the next call, so an interpreter installed after the daemon started is picked up without a restart.
+fn cached_interpreter(
+    cell: &'static std::sync::OnceLock<String>,
+    candidates: &[&str],
+) -> Option<String> {
+    if let Some(found) = cell.get() {
+        return Some(found.clone());
+    }
+    let found = probe_interpreter(candidates)?;
+    Some(cell.get_or_init(|| found).clone())
+}
+
 /// Find a shell interpreter (bash preferred, sh as fallback).
 fn find_shell() -> Option<String> {
-    for name in &["bash", "sh"] {
-        if std::process::Command::new(name)
-            .arg("--version")
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .is_ok()
-        {
-            return Some(name.to_string());
-        }
-    }
-    None
+    static SHELL: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    cached_interpreter(&SHELL, &["bash", "sh"])
 }
 
 /// Find Python 3 binary.
 fn find_python() -> Option<String> {
-    for name in &["python3", "python"] {
-        if std::process::Command::new(name)
-            .arg("--version")
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .is_ok()
-        {
-            return Some(name.to_string());
-        }
-    }
-    None
+    static PYTHON: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    cached_interpreter(&PYTHON, &["python3", "python"])
 }
 
 /// Find Node.js binary.
 fn find_node() -> Option<String> {
-    if std::process::Command::new("node")
-        .arg("--version")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .is_ok()
-    {
-        return Some("node".to_string());
-    }
-    None
+    static NODE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    cached_interpreter(&NODE, &["node"])
 }
 
 #[cfg(test)]
@@ -2186,5 +2217,146 @@ echo '{"greeting": "hello from shell"}'
             elapsed < std::time::Duration::from_secs(8),
             "manifest timeout was not honored: {elapsed:?}"
         );
+    }
+
+    #[cfg(unix)]
+    fn shell_manifest(name: &str, entry: &str, timeout_secs: Option<u64>) -> SkillManifest {
+        use crate::{SkillMeta, SkillRequirements, SkillRuntimeConfig, SkillToolDef, SkillTools};
+        SkillManifest {
+            skill: SkillMeta {
+                name: name.to_string(),
+                version: librefang_types::VERSION.to_string(),
+                description: name.to_string(),
+                author: String::new(),
+                license: String::new(),
+                tags: vec![],
+            },
+            runtime: SkillRuntimeConfig {
+                runtime_type: SkillRuntime::Shell,
+                entry: entry.to_string(),
+            },
+            tools: SkillTools {
+                provided: vec![SkillToolDef {
+                    name: "tool".to_string(),
+                    description: name.to_string(),
+                    input_schema: serde_json::json!({"type": "object"}),
+                }],
+            },
+            requirements: SkillRequirements {
+                tools: vec![],
+                capabilities: vec![],
+                timeout_secs,
+            },
+            prompt_context: None,
+            source: None,
+            config: std::collections::HashMap::new(),
+            config_vars: Vec::new(),
+            env_passthrough: Vec::new(),
+        }
+    }
+
+    /// A child that fills stdout past the pipe buffer before reading a payload larger than the pipe buffer must not deadlock the parent (stdin is written concurrently with the drain).
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn test_large_stdin_with_output_before_read_does_not_deadlock() {
+        use tempfile::TempDir;
+
+        if find_shell().is_none() {
+            return;
+        }
+        let dir = TempDir::new().unwrap();
+        // ~200 KB of stdout before touching stdin, then consume all of stdin.
+        let script = "#!/bin/sh\nhead -c 200000 /dev/zero | tr '\\0' 'x'\necho\ncat > /dev/null\necho done\n";
+        std::fs::write(dir.path().join("chatty.sh"), script).unwrap();
+        let manifest = shell_manifest("chatty", "chatty.sh", Some(30));
+        let big = "y".repeat(300_000);
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(20),
+            execute_skill_tool(
+                &manifest,
+                dir.path(),
+                "tool",
+                &serde_json::json!({ "doc": big }),
+                None,
+            ),
+        )
+        .await
+        .expect("skill execution deadlocked writing stdin")
+        .unwrap();
+        assert!(!result.is_error, "unexpected error: {}", result.output);
+        let text = result.output["result"].as_str().unwrap_or_default();
+        assert!(text.trim_end().ends_with("done"), "missing trailer");
+    }
+
+    /// A child that never reads stdin while a large payload is pending must still be killed by the manifest timeout.
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn test_timeout_applies_while_stdin_write_is_blocked() {
+        use tempfile::TempDir;
+
+        if find_shell().is_none() {
+            return;
+        }
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("ignore.sh"), "#!/bin/sh\nsleep 30\n").unwrap();
+        let manifest = shell_manifest("ignore-stdin", "ignore.sh", Some(1));
+        let big = "y".repeat(1_000_000);
+
+        let started = std::time::Instant::now();
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(20),
+            execute_skill_tool(
+                &manifest,
+                dir.path(),
+                "tool",
+                &serde_json::json!({ "doc": big }),
+                None,
+            ),
+        )
+        .await
+        .expect("timeout bypassed while stdin write was blocked")
+        .unwrap();
+        assert!(result.is_error);
+        let err_msg = result.output["error"].as_str().unwrap_or_default();
+        assert!(err_msg.contains("timed out"), "got: {err_msg}");
+        assert!(started.elapsed() < std::time::Duration::from_secs(8));
+    }
+
+    #[test]
+    fn test_probe_interpreter_skips_missing_binaries() {
+        assert_eq!(
+            probe_interpreter(&["librefang-definitely-not-a-binary-xyz"]),
+            None
+        );
+        #[cfg(unix)]
+        assert_eq!(
+            probe_interpreter(&["librefang-definitely-not-a-binary-xyz", "sh"]),
+            Some("sh".to_string())
+        );
+    }
+
+    #[test]
+    fn test_find_shell_is_cached_and_stable() {
+        assert_eq!(find_shell(), find_shell());
+    }
+
+    #[test]
+    fn test_cached_interpreter_does_not_cache_a_miss() {
+        static CELL: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+        assert_eq!(
+            cached_interpreter(&CELL, &["librefang-definitely-not-a-binary-xyz"]),
+            None
+        );
+        assert!(CELL.get().is_none(), "a failed probe must not be cached");
+        #[cfg(unix)]
+        {
+            assert_eq!(cached_interpreter(&CELL, &["sh"]), Some("sh".to_string()));
+            // Once found, the cached answer is returned without probing the new candidates.
+            assert_eq!(
+                cached_interpreter(&CELL, &["librefang-definitely-not-a-binary-xyz"]),
+                Some("sh".to_string())
+            );
+        }
     }
 }

@@ -676,7 +676,7 @@ fn local_provider_probe_targets_includes_opted_in_custom_providers() {
         "a custom provider stays out of the probe loop until it opts in"
     );
 
-    assert!(catalog.set_provider_discover_models("acme-vllm", true));
+    assert!(catalog.set_provider_discover_preference("acme-vllm", true));
     let targets = catalog.local_provider_probe_targets();
     assert!(
         targets
@@ -702,7 +702,7 @@ fn local_provider_probe_targets_includes_opted_in_custom_providers() {
     );
     catalog.unsuppress_provider("acme-vllm");
 
-    assert!(catalog.set_provider_discover_models("acme-vllm", false));
+    assert!(catalog.set_provider_discover_preference("acme-vllm", false));
     assert!(
         !catalog
             .local_provider_probe_targets()
@@ -712,7 +712,7 @@ fn local_provider_probe_targets_includes_opted_in_custom_providers() {
     );
 
     assert!(
-        !catalog.set_provider_discover_models("__no_such_provider__", true),
+        !catalog.set_provider_discover_preference("__no_such_provider__", true),
         "an unknown id reports failure so the API can answer 404"
     );
 }
@@ -1409,6 +1409,134 @@ fn test_merge_accepts_a_partially_reported_capacity() {
     assert_eq!(entry.context_window, 200_000);
     assert_eq!(entry.max_output_tokens, 0);
     assert!(entry.limits_known);
+}
+
+/// A gateway that declares what its models cost must have that reach the catalog entry; a discovered model used to be recorded as free (`0.0` with `pricing_known`) no matter what the gateway said.
+#[test]
+fn test_merge_records_a_price_the_gateway_declared() {
+    let mut catalog = test_catalog();
+    catalog.merge_discovered_models(
+        "litellm",
+        &[DiscoveredModelInfo {
+            input_cost_per_m: Some(3.0),
+            output_cost_per_m: Some(15.0),
+            ..DiscoveredModelInfo::bare("priced")
+        }],
+    );
+    let entry = catalog.find_model("priced").unwrap();
+    assert!(entry.pricing_known);
+    assert_eq!(entry.input_cost_per_m, 3.0);
+    assert_eq!(entry.output_cost_per_m, 15.0);
+}
+
+/// The gateway is the authority on its own price, so a later declaration replaces an earlier one rather than only ever filling a blank.
+#[test]
+fn test_merge_lets_a_declared_price_replace_an_earlier_one() {
+    let mut catalog = test_catalog();
+    catalog.merge_discovered_models(
+        "litellm",
+        &[DiscoveredModelInfo {
+            input_cost_per_m: Some(3.0),
+            output_cost_per_m: Some(15.0),
+            ..DiscoveredModelInfo::bare("repriced")
+        }],
+    );
+    catalog.merge_discovered_models(
+        "litellm",
+        &[DiscoveredModelInfo {
+            input_cost_per_m: Some(1.0),
+            output_cost_per_m: Some(2.0),
+            ..DiscoveredModelInfo::bare("repriced")
+        }],
+    );
+    let entry = catalog.find_model("repriced").unwrap();
+    assert_eq!(entry.input_cost_per_m, 1.0);
+    assert_eq!(entry.output_cost_per_m, 2.0);
+}
+
+/// A probe that stops declaring a price — the operator turned LiteLLM's `/model/info` extension off — must not erase what an earlier probe learned, the same never-downgrade rule the capacity fields follow.
+#[test]
+fn test_merge_never_erases_a_price_an_earlier_probe_learned() {
+    let mut catalog = test_catalog();
+    catalog.merge_discovered_models(
+        "litellm",
+        &[DiscoveredModelInfo {
+            input_cost_per_m: Some(3.0),
+            output_cost_per_m: Some(15.0),
+            ..DiscoveredModelInfo::bare("still-priced")
+        }],
+    );
+    catalog.merge_discovered_models("litellm", &names_to_info(&["still-priced"]));
+    let entry = catalog.find_model("still-priced").unwrap();
+    assert_eq!(entry.input_cost_per_m, 3.0);
+    assert_eq!(entry.output_cost_per_m, 15.0);
+}
+
+/// Half a price is not a price: recording the declared half against an invented `0.0` counterpart would assert free output for a model nobody priced.
+#[test]
+fn test_merge_ignores_half_a_declared_price() {
+    let mut catalog = test_catalog();
+    catalog.merge_discovered_models(
+        "litellm",
+        &[DiscoveredModelInfo {
+            input_cost_per_m: Some(3.0),
+            ..DiscoveredModelInfo::bare("half-priced")
+        }],
+    );
+    let entry = catalog.find_model("half-priced").unwrap();
+    assert!(!entry.pricing_known);
+    assert_eq!(entry.input_cost_per_m, 0.0);
+    assert_eq!(entry.output_cost_per_m, 0.0);
+}
+
+/// A bare discovery from a built-in local provider is free, not an unknown price (#8369).
+///
+/// Every local-provider probe reaches this method through
+/// `DiscoveredModelInfo::bare` or Ollama metadata, neither of which carries a
+/// price field at all. Recording that silence as `pricing_known: false` made
+/// metering charge the $1/$3 conservative default rate on the operator's own
+/// hardware — pulling an untracked Ollama tag could burn a spend cap during
+/// free local inference — and the dashboard showed "pricing unavailable"
+/// instead of free.
+#[test]
+fn test_merge_keeps_a_bare_local_provider_model_free() {
+    let mut catalog = test_catalog();
+    catalog.merge_discovered_models(
+        "ollama",
+        &[DiscoveredModelInfo::bare("locally-pulled:latest")],
+    );
+
+    let entry = catalog
+        .find_model("locally-pulled:latest")
+        .expect("discovered model must be added");
+    assert!(
+        entry.pricing_known,
+        "a local provider serves its own weights; its silence about price means free, not unknown"
+    );
+    assert_eq!(entry.input_cost_per_m, 0.0);
+    assert_eq!(entry.output_cost_per_m, 0.0);
+    assert_eq!(
+        catalog.pricing("locally-pulled:latest"),
+        Some((0.0, 0.0)),
+        "metering must read the local model as free rather than fall back to the default rate"
+    );
+}
+
+/// The other half of the rule: an operator-defined gateway can proxy a paid
+/// provider, so its silence about price stays unknown and metering falls back
+/// to the conservative default rate instead of recording the model as free.
+#[test]
+fn test_merge_keeps_a_bare_operator_gateway_model_price_unknown() {
+    let mut catalog = test_catalog();
+    catalog.merge_discovered_models("litellm", &[DiscoveredModelInfo::bare("gateway-model")]);
+
+    let entry = catalog.find_model("gateway-model").unwrap();
+    assert!(
+        !entry.pricing_known,
+        "only a declared pair may turn an operator gateway's model into a priced or free one"
+    );
+    assert_eq!(entry.input_cost_per_m, 0.0);
+    assert_eq!(entry.output_cost_per_m, 0.0);
 }
 
 /// Capacity upgrades follow the same never-downgrade rule as the capability flags: a later probe may fill in an unknown limit, and a probe that stops reporting one must not erase what an earlier probe learned.
@@ -2640,6 +2768,75 @@ fn an_unknown_model_with_no_override_resolves_to_nothing() {
     assert_eq!(lim.max_output_tokens, None);
 }
 
+/// The catalog rung of the `max_tokens` chain, driven through the same method `agent_execution.rs` calls: when neither the agent nor the per-model preference names a budget, the *effective* ceiling decides it, so an operator's `max_output_tokens` correction of a registry figure is what the turn asks for — not the figure it corrects.
+/// Reading the raw entry instead would ignore the override that exists to correct it, and assembling the rung by hand would keep passing even if the execution path stopped asking the catalog at all.
+#[test]
+fn an_operator_override_beats_the_catalog_ceiling_for_an_unset_budget() {
+    use librefang_types::agent::ModelConfig;
+
+    let mut catalog = test_catalog();
+    catalog.add_custom_model(ModelCatalogEntry {
+        id: "capped".to_string(),
+        provider: "litellm".to_string(),
+        context_window: 200_000,
+        max_output_tokens: 16_384,
+        limits_known: true,
+        ..Default::default()
+    });
+    catalog.set_overrides(
+        "litellm:capped".to_string(),
+        ModelOverrides {
+            max_output_tokens: Some(8_192),
+            ..Default::default()
+        },
+    );
+
+    let limits = catalog.effective_limits_for_manifest("litellm", "capped");
+    assert_eq!(
+        limits.max_output_tokens,
+        Some(8_192),
+        "the override is the effective ceiling"
+    );
+
+    let agent = ModelConfig {
+        provider: "litellm".to_string(),
+        model: "capped".to_string(),
+        ..Default::default()
+    };
+    let resolved = catalog.resolve_turn_inference_params(&agent);
+    assert_eq!(
+        resolved.max_tokens, 8_192,
+        "an unset budget takes the correction, not the registry's 16_384"
+    );
+}
+
+/// A model with no override anywhere still answers an unset budget from its own catalog ceiling — 4096 is only the fallback for a model nothing knows.
+#[test]
+fn a_catalog_ceiling_answers_an_unset_budget_through_the_execution_method() {
+    use librefang_types::agent::ModelConfig;
+
+    let mut catalog = test_catalog();
+    catalog.add_custom_model(ModelCatalogEntry {
+        id: "capped".to_string(),
+        provider: "litellm".to_string(),
+        context_window: 200_000,
+        max_output_tokens: 65_536,
+        limits_known: true,
+        ..Default::default()
+    });
+
+    let agent = ModelConfig {
+        provider: "litellm".to_string(),
+        model: "capped".to_string(),
+        ..Default::default()
+    };
+    let resolved = catalog.resolve_turn_inference_params(&agent);
+    assert_eq!(
+        resolved.max_tokens, 65_536,
+        "the turn must ask the endpoint for its registered ceiling"
+    );
+}
+
 /// Refs #7774 / #6423. When the catalog reconciles a bare manifest model to a
 /// prefixed entry id, the key the operator typed — the manifest's own
 /// `provider:model` — is honoured, and the entry's key still works as the
@@ -3366,5 +3563,623 @@ fn a_registry_entry_that_omits_the_flag_is_still_a_declaration() {
     assert_eq!(
         catalog.vision_support_for("acme-text"),
         VisionSupport::Unsupported
+    );
+}
+
+// ---------------------------------------------------------------------------
+// #8407 — the discovery preference lives in `data/`, not in the file the
+// registry sync rewrites.
+// ---------------------------------------------------------------------------
+
+/// What the registry ships for every provider: a `[provider]` table and no `discover_models` key.
+const REGISTRY_SHAPED_PROVIDER: &str =
+    "[provider]\nid = \"deepseek\"\nbase_url = \"https://api.deepseek.com/v1\"\n";
+
+/// The reporter's symptom as an assertion: set the preference, let the boot-time registry sync rewrite the provider file, reboot, and discovery is still on.
+///
+/// The sync is represented by its effect — the bytes it writes — rather than by calling it, so the test stays hermetic while pinning the same contract: the preference is not in that file, so nothing the sync does to it can clear the preference.
+#[test]
+fn a_discovery_preference_survives_a_registry_sync_that_rewrites_the_provider_file() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let providers = dir.path().join("providers");
+    let prefs = dir.path().join("data").join("provider_discovery.json");
+    std::fs::create_dir_all(&providers).unwrap();
+    std::fs::create_dir_all(prefs.parent().unwrap()).unwrap();
+    std::fs::write(providers.join("deepseek.toml"), REGISTRY_SHAPED_PROVIDER).unwrap();
+
+    // Boot 1: the operator turns discovery on.
+    let mut catalog = ModelCatalog::new_from_dir(&providers);
+    assert!(catalog.set_provider_discover_preference("deepseek", true));
+    catalog
+        .save_discover_prefs(&prefs)
+        .expect("the preference must reach disk");
+    assert!(catalog.get_provider("deepseek").unwrap().discover_models);
+
+    // The boot-time registry sync rewrites the file from the registry's copy,
+    // which carries no key for the setting to survive in.
+    std::fs::write(providers.join("deepseek.toml"), REGISTRY_SHAPED_PROVIDER).unwrap();
+
+    // Boot 2: same file as boot 1 — the preference has to come back from `data/`.
+    let mut rebooted = ModelCatalog::new_from_dir(&providers);
+    assert!(
+        !rebooted.get_provider("deepseek").unwrap().discover_models,
+        "the provider file alone no longer carries the setting, which is why it is stored elsewhere"
+    );
+    rebooted.load_discover_prefs(&prefs);
+    assert!(
+        rebooted.get_provider("deepseek").unwrap().discover_models,
+        "the preference must survive the sync rewriting the provider file"
+    );
+}
+
+/// End to end, with the real fan-out running in between: the registry sync installs `providers/` from the fixture, the operator turns discovery on, the next boot's fan-out runs again over the same home, and the setting is still there.
+///
+/// This is the reporter's restart driven through the code that performs it.
+/// The preference survives because it is not in the file the fan-out owns — the digest manifest, which keeps an operator-edited file from being rewritten at all, is covered by the `registry_sync` tests.
+#[test]
+fn a_discovery_preference_survives_a_real_registry_fanout() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let home = dir.path().to_path_buf();
+    let prefs = home.join("data").join("provider_discovery.json");
+
+    // First boot: the fan-out installs `providers/*.toml` from the registry
+    // fixture, exactly like `sync_registry` does.
+    crate::registry_sync::seed_registry_fixture_for_tests(&home);
+    let mut catalog = ModelCatalog::new(&home);
+    assert!(
+        !catalog.get_provider("deepseek").unwrap().discover_models,
+        "the registry ships no `discover_models` key at all"
+    );
+
+    // The operator turns it on.
+    assert!(catalog.set_provider_discover_preference("deepseek", true));
+    catalog
+        .save_discover_prefs(&prefs)
+        .expect("the preference must reach disk");
+
+    // Restart: same fan-out, same cache, then the catalog is rebuilt the way boot does.
+    crate::registry_sync::seed_registry_fixture_for_tests(&home);
+    let mut rebooted = ModelCatalog::new(&home);
+    rebooted.load_discover_prefs(&prefs);
+
+    assert!(
+        rebooted.get_provider("deepseek").unwrap().discover_models,
+        "the preference has to survive a restart with the registry fan-out in between"
+    );
+}
+
+/// The preference store outranks the provider file for discovery, in both directions (#8407).
+///
+/// The registry sync keeps an operator-edited file and says so in a WARN, which reads as "your edit is in force" — and for everything else in that file it is.
+/// Discovery is the exception: it is operator state that lives in the store, and the store is applied after the catalog is loaded from those files, so a hand edit to the flag loses for any provider the store has an entry for.
+/// Pinned here so it is a decision rather than an accident; the WARN says the same thing to whoever reads it.
+#[test]
+fn the_preference_store_outranks_the_provider_file_for_discovery() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let providers = dir.path().join("providers");
+    let prefs = dir.path().join("data").join("provider_discovery.json");
+    std::fs::create_dir_all(&providers).unwrap();
+    std::fs::create_dir_all(prefs.parent().unwrap()).unwrap();
+
+    std::fs::write(
+        providers.join("off-in-file.toml"),
+        "[provider]\nid = \"off-in-file\"\nbase_url = \"http://127.0.0.1:4200/v1\"\ndiscover_models = false\n",
+    )
+    .unwrap();
+    std::fs::write(
+        providers.join("on-in-file.toml"),
+        "[provider]\nid = \"on-in-file\"\nbase_url = \"http://127.0.0.1:4300/v1\"\ndiscover_models = true\n",
+    )
+    .unwrap();
+    std::fs::write(&prefs, r#"{"off-in-file": true, "on-in-file": false}"#).unwrap();
+
+    let mut catalog = ModelCatalog::new_from_dir(&providers);
+    catalog.load_discover_prefs(&prefs);
+
+    assert!(
+        catalog.get_provider("off-in-file").unwrap().discover_models,
+        "the store's `true` outranks the file's `false`: the store is applied after the files are loaded"
+    );
+    assert!(
+        !catalog.get_provider("on-in-file").unwrap().discover_models,
+        "and the store's `false` outranks the file's `true` — the direction a WARN that only says \"kept local\" would have hidden"
+    );
+}
+
+/// A provider created *after* the preference store is applied still receives its preference (#8407).
+///
+/// This is the population the removed TOML writer used to serve: an endpoint registered through `[provider_urls]` or `PUT /api/providers/{name}/url` does not exist on disk, so boot creates it *after* it has applied the store, and `set_provider_url` builds the record with `discover_models: false`.
+/// Applying the store only to the providers loaded from disk stores the setting and applies it to nobody — the same silent revert, for exactly the providers the discovery toggle was added to serve.
+///
+/// The control is in the middle: a provider that is on disk when the store is applied must keep receiving it, so a fix cannot trade one population for the other.
+#[test]
+fn a_provider_created_after_the_preference_load_still_receives_it() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let providers = dir.path().join("providers");
+    let prefs = dir.path().join("data").join("provider_discovery.json");
+    std::fs::create_dir_all(&providers).unwrap();
+    std::fs::write(
+        providers.join("deepseek.toml"),
+        "[provider]\nid = \"deepseek\"\nbase_url = \"https://api.deepseek.com/v1\"\n",
+    )
+    .unwrap();
+
+    // Boot 1: the operator turns discovery on for a provider that is on disk, and
+    // registers a bare endpoint through `[provider_urls]` and turns it on too.
+    let mut first = ModelCatalog::new_from_dir(&providers);
+    assert!(first.set_provider_url("acme-gateway", "http://127.0.0.1:4100/v1"));
+    assert!(first.set_provider_discover_preference("deepseek", true));
+    assert!(first.set_provider_discover_preference("acme-gateway", true));
+    first
+        .save_discover_prefs(&prefs)
+        .expect("the preference must reach disk");
+
+    // Boot 2, in boot's order: the store is applied while only the on-disk
+    // providers exist, and the `[provider_urls]` overlay creates the other one
+    // afterwards.
+    let mut rebooted = ModelCatalog::new_from_dir(&providers);
+    rebooted.load_discover_prefs(&prefs);
+    assert!(
+        rebooted.get_provider("acme-gateway").is_none(),
+        "a bare endpoint lives in config.toml, not in providers/, so it cannot be there yet"
+    );
+    rebooted.apply_url_overrides(&BTreeMap::from([(
+        "acme-gateway".to_string(),
+        "http://127.0.0.1:4100/v1".to_string(),
+    )]));
+
+    // Control: the provider that existed when the store was applied.
+    assert!(
+        rebooted.get_provider("deepseek").unwrap().discover_models,
+        "control: a provider present at load time must keep receiving its preference"
+    );
+    // The hole: the provider creation created after the store was applied.
+    assert!(
+        rebooted
+            .get_provider("acme-gateway")
+            .unwrap()
+            .discover_models,
+        "a provider created after the store was applied must still receive the preference"
+    );
+}
+
+/// The other half of the migration question: a provider whose file says `false` explicitly is honoured, and is **not** adopted into the store.
+///
+/// An absent key and an explicit `false` are indistinguishable once parsed, so adopting every `false` would record an "off" for every provider nobody has expressed an opinion about — and since the store has the last word, that would override a `true` the registry may ship for one of them later.
+/// The asymmetry is the failure's own: losing a `true` turns discovery off, while losing a `false` lands back on the value an absent key already means.
+#[test]
+fn an_explicit_false_in_the_provider_file_is_honoured_but_not_adopted() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let providers = dir.path().join("providers");
+    let prefs = dir.path().join("data").join("provider_discovery.json");
+    std::fs::create_dir_all(&providers).unwrap();
+    std::fs::write(
+        providers.join("litellm.toml"),
+        "[provider]\nid = \"litellm\"\nbase_url = \"https://gateway.internal/v1\"\ndiscover_models = false\n",
+    )
+    .unwrap();
+
+    let mut catalog = ModelCatalog::new_from_dir(&providers);
+    assert!(
+        !catalog.get_provider("litellm").unwrap().discover_models,
+        "the file's explicit false is honoured"
+    );
+    assert_eq!(
+        catalog.adopt_legacy_discover_flags(&prefs),
+        0,
+        "an explicit false is not a legacy opt-in"
+    );
+    assert!(
+        !prefs.exists(),
+        "nothing is recorded, because adopting would write an \"off\" for every provider that merely omits the key"
+    );
+
+    // And the file's own value still reaches the catalog on the next boot.
+    let rebooted = ModelCatalog::new_from_dir(&providers);
+    assert!(!rebooted.get_provider("litellm").unwrap().discover_models);
+}
+
+/// An install that enabled discovery before the preference store existed carries the flag only in its provider file (#8407).
+///
+/// The first boot adopts it into the store, and every later boot leaves what it finds there alone — otherwise a stale `true` in a file would overrule an operator who has since turned the setting off.
+#[test]
+fn a_legacy_discover_flag_is_adopted_once_and_never_re_adopted() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let providers = dir.path().join("providers");
+    let prefs = dir.path().join("data").join("provider_discovery.json");
+    std::fs::create_dir_all(&providers).unwrap();
+    std::fs::create_dir_all(prefs.parent().unwrap()).unwrap();
+    std::fs::write(
+        providers.join("deepseek.toml"),
+        "[provider]\nid = \"deepseek\"\nbase_url = \"https://api.deepseek.com/v1\"\ndiscover_models = true\n",
+    )
+    .unwrap();
+
+    // Boot 1: nothing recorded yet, so the file's flag is adopted.
+    let mut first = ModelCatalog::new_from_dir(&providers);
+    assert_eq!(first.adopt_legacy_discover_flags(&prefs), 1);
+    assert!(first.get_provider("deepseek").unwrap().discover_models);
+
+    // The operator turns it off through the preference store.
+    let mut second = ModelCatalog::new_from_dir(&providers);
+    second.load_discover_prefs(&prefs);
+    assert!(second.set_provider_discover_preference("deepseek", false));
+    second
+        .save_discover_prefs(&prefs)
+        .expect("the preference must reach disk");
+
+    // Boot 2: the file still says `true`, and the store has the last word.
+    let mut third = ModelCatalog::new_from_dir(&providers);
+    third.load_discover_prefs(&prefs);
+    assert_eq!(
+        third.adopt_legacy_discover_flags(&prefs),
+        0,
+        "an explicit preference is never re-adopted from the file"
+    );
+    assert!(
+        !third.get_provider("deepseek").unwrap().discover_models,
+        "turning it off has to stick even while the file still says true"
+    );
+}
+
+/// The boot adoption reads the flag off the provider files, but the boot's
+/// registry sync runs first and its pre-digest adoption overwrites the file —
+/// the declaration was gone before that read could see it (#8411).
+///
+/// The sync captures it from the bytes it is about to replace, and the capture
+/// has to obey the adoption's own rules: record a declared `true` once, and
+/// never re-adopt over a preference the operator has since recorded.
+#[test]
+fn a_flag_captured_before_an_overwrite_is_recorded_once_and_left_alone_after() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let prefs = dir.path().join("data").join("provider_discovery.json");
+    let declaring = "[provider]\nid = \"deepseek\"\nbase_url = \"https://api.deepseek.com/v1\"\ndiscover_models = true\n";
+
+    assert!(
+        ModelCatalog::capture_legacy_discover_flag(&prefs, declaring),
+        "a declared true has to be captured — the file will not exist for the boot adoption"
+    );
+    let stored: std::collections::BTreeMap<String, bool> =
+        serde_json::from_str(&std::fs::read_to_string(&prefs).unwrap()).unwrap();
+    assert_eq!(stored.get("deepseek"), Some(&true));
+
+    // Same idempotence as the boot adoption: once recorded, the file's stale
+    // `true` never overrides what the store says.
+    assert!(!ModelCatalog::capture_legacy_discover_flag(
+        &prefs, declaring
+    ));
+    std::fs::write(&prefs, r#"{"deepseek": false}"#).unwrap();
+    assert!(
+        !ModelCatalog::capture_legacy_discover_flag(&prefs, declaring),
+        "a recorded false must keep the last word over the file"
+    );
+    let stored: std::collections::BTreeMap<String, bool> =
+        serde_json::from_str(&std::fs::read_to_string(&prefs).unwrap()).unwrap();
+    assert_eq!(stored.get("deepseek"), Some(&false));
+}
+
+/// The capture only fires for a genuine legacy opt-in: an absent key and an
+/// explicit `false` are both "no preference", and recording either would write
+/// an "off" for providers nobody has expressed an opinion about — the failure
+/// the adoption itself refuses to make.
+#[test]
+fn capture_ignores_files_without_a_true_declaration() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let prefs = dir.path().join("data").join("provider_discovery.json");
+
+    for (case, body) in [
+        (
+            "absent key",
+            "[provider]\nid = \"deepseek\"\nbase_url = \"https://api.deepseek.com/v1\"\n",
+        ),
+        (
+            "explicit false",
+            "[provider]\nid = \"deepseek\"\nbase_url = \"https://api.deepseek.com/v1\"\ndiscover_models = false\n",
+        ),
+        // Not a provider file at all: nothing to key the preference by.
+        ("no [provider] table", "id = \"deepseek\"\n"),
+    ] {
+        assert!(
+            !ModelCatalog::capture_legacy_discover_flag(&prefs, body),
+            "{case} must not be captured"
+        );
+    }
+    assert!(
+        !prefs.exists(),
+        "nothing to record means no store file, exactly like the boot adoption"
+    );
+}
+
+/// Buffered `tracing` writer for the divergence-warning tests below.
+///
+/// Local to this pair of tests rather than promoted to a shared helper:
+/// `kernel/tests.rs`, `config.rs` and `cron.rs` each carry their own copy, and
+/// factoring them together is a change to files this PR has no other reason to
+/// touch.
+#[derive(Clone)]
+struct CapturedLogs(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for CapturedLogs {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CapturedLogs {
+    type Writer = CapturedLogs;
+    fn make_writer(&'a self) -> Self::Writer {
+        self.clone()
+    }
+}
+
+impl CapturedLogs {
+    fn new() -> Self {
+        Self(std::sync::Arc::new(std::sync::Mutex::new(Vec::new())))
+    }
+
+    /// Install this buffer as the calling thread's subscriber for the duration of the returned guard.
+    fn install(&self) -> tracing::subscriber::DefaultGuard {
+        use tracing_subscriber::layer::SubscriberExt;
+        let layer = tracing_subscriber::fmt::layer()
+            .with_writer(self.clone())
+            .with_ansi(false)
+            .with_target(false);
+        tracing::subscriber::set_default(tracing_subscriber::registry().with(layer))
+    }
+
+    fn text(&self) -> String {
+        String::from_utf8(self.0.lock().unwrap().clone()).expect("utf8")
+    }
+}
+
+/// The silent half the review caught (#8411): once the store has an entry, a hand
+/// edit of `discover_models` in the provider file stops mattering — including the
+/// edit that looks like it turns discovery *off*.
+///
+/// The store still wins, because that is the design; what changes is that the
+/// boot says so. The WARN names the provider, both values, and the supported way
+/// to change the setting, so the file no longer reads as if it were in force.
+#[test]
+fn a_provider_file_that_disagrees_with_the_stored_preference_warns() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let providers = dir.path().join("providers");
+    let prefs = dir.path().join("data").join("provider_discovery.json");
+    std::fs::create_dir_all(&providers).unwrap();
+    std::fs::create_dir_all(prefs.parent().unwrap()).unwrap();
+    std::fs::write(
+        providers.join("gateway.toml"),
+        "[provider]\nid = \"gateway\"\nbase_url = \"https://gateway.internal/v1\"\ndiscover_models = false\n",
+    )
+    .unwrap();
+    std::fs::write(&prefs, r#"{"gateway": true}"#).unwrap();
+
+    let logs = CapturedLogs::new();
+    let _guard = logs.install();
+    let mut catalog = ModelCatalog::new_from_dir(&providers);
+    catalog.load_discover_prefs(&prefs);
+
+    assert!(
+        catalog.get_provider("gateway").unwrap().discover_models,
+        "the store wins, which is exactly why the disagreement has to be logged"
+    );
+    let text = logs.text();
+    assert!(
+        text.contains("declares discover_models = false") && text.contains("records true"),
+        "the WARN must show both values so the inert edit is visible; got: {text}"
+    );
+    assert!(
+        text.contains("stored preference wins"),
+        "the WARN must say which side wins; got: {text}"
+    );
+    assert!(
+        text.contains("/api/providers/gateway/discovery"),
+        "the WARN must say how to change it; got: {text}"
+    );
+}
+
+/// The other direction, and the one the review's scenario walks through: a
+/// `true` still declared in a hand-maintained file is adopted into the store, so
+/// from that boot on the file is inert — an operator turning it off there watches
+/// discovery stay on.
+///
+/// The adoption is a one-time legacy migration, but it is a transfer of control
+/// and now says so: WARN names the provider, the file as the source, the store as
+/// the new decider, and how to turn discovery off.
+#[test]
+fn adopting_a_legacy_discover_flag_warns_that_the_store_now_decides() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let providers = dir.path().join("providers");
+    let prefs = dir.path().join("data").join("provider_discovery.json");
+    std::fs::create_dir_all(&providers).unwrap();
+    std::fs::write(
+        providers.join("deepseek.toml"),
+        "[provider]\nid = \"deepseek\"\nbase_url = \"https://api.deepseek.com/v1\"\ndiscover_models = true\n",
+    )
+    .unwrap();
+
+    let logs = CapturedLogs::new();
+    let _guard = logs.install();
+    let mut catalog = ModelCatalog::new_from_dir(&providers);
+    assert_eq!(catalog.adopt_legacy_discover_flags(&prefs), 1);
+
+    let text = logs.text();
+    assert!(
+        text.contains("adopting the legacy discover_models = true"),
+        "the adoption must say what it read and from where; got: {text}"
+    );
+    assert!(
+        text.contains("stored preference decides"),
+        "the adoption must say who decides afterwards; got: {text}"
+    );
+    assert!(
+        text.contains("/api/providers/deepseek/discovery"),
+        "and how to turn discovery off once the store owns it; got: {text}"
+    );
+}
+
+fn custom_entry(id: &str, provider: &str, aliases: &[&str]) -> ModelCatalogEntry {
+    ModelCatalogEntry {
+        id: id.to_string(),
+        display_name: id.to_string(),
+        provider: provider.to_string(),
+        tier: ModelTier::Custom,
+        context_window: 64_000,
+        max_output_tokens: 4_096,
+        input_cost_per_m: 0.0,
+        output_cost_per_m: 0.0,
+        supports_tools: true,
+        supports_vision: false,
+        supports_streaming: true,
+        supports_thinking: false,
+        aliases: aliases.iter().map(|a| a.to_string()).collect(),
+        ..Default::default()
+    }
+}
+
+fn provider_model_count(catalog: &ModelCatalog, provider: &str) -> usize {
+    catalog
+        .list_providers()
+        .iter()
+        .find(|p| p.id == provider)
+        .map(|p| p.model_count)
+        .expect("provider present in test catalog")
+}
+
+/// A malformed custom_models.json must not be silently dropped and then clobbered: it is moved aside, so the next save cannot overwrite the operator's only copy.
+#[test]
+fn load_custom_models_moves_unparseable_file_aside() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("custom_models.json");
+    let original = r#"[{"id": "a", "display_name": "A",}]"#;
+    std::fs::write(&path, original).unwrap();
+
+    let mut catalog = test_catalog();
+    catalog.load_custom_models(&path);
+    assert!(!path.exists(), "unparseable file must be moved aside");
+    let aside: Vec<_> = std::fs::read_dir(tmp.path())
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter(|p| {
+            p.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("custom_models.json.corrupt-")
+        })
+        .collect();
+    assert_eq!(aside.len(), 1, "expected one aside copy, found {aside:?}");
+    assert_eq!(std::fs::read_to_string(&aside[0]).unwrap(), original);
+
+    // The next add persists only in-memory models; the aside copy must survive untouched.
+    assert!(catalog.add_custom_model(custom_entry("new-one", "qwen", &[])));
+    catalog.save_custom_models(&path).unwrap();
+    assert_eq!(std::fs::read_to_string(&aside[0]).unwrap(), original);
+}
+
+#[test]
+fn load_custom_models_missing_file_is_noop() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("custom_models.json");
+    let mut catalog = test_catalog();
+    let before = catalog.list_models().len();
+    catalog.load_custom_models(&path);
+    assert_eq!(catalog.list_models().len(), before);
+    assert_eq!(std::fs::read_dir(tmp.path()).unwrap().count(), 0);
+}
+
+#[test]
+fn save_then_load_custom_models_round_trips() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("custom_models.json");
+    let mut catalog = test_catalog();
+    assert!(catalog.add_custom_model(custom_entry("rt-model", "qwen", &[])));
+    catalog.save_custom_models(&path).unwrap();
+    assert_eq!(
+        std::fs::read_dir(tmp.path()).unwrap().count(),
+        1,
+        "only the final file may remain; no temp file left behind"
+    );
+
+    let mut fresh = test_catalog();
+    fresh.load_custom_models(&path);
+    assert!(fresh
+        .list_models()
+        .iter()
+        .any(|m| m.id == "rt-model" && m.provider == "qwen" && m.tier == ModelTier::Custom));
+}
+
+/// The add-handler rollback must remove only the entry it added, not a same-id custom model under another provider.
+#[test]
+fn remove_custom_model_scoped_to_provider_keeps_sibling() {
+    let mut catalog = test_catalog();
+    assert!(catalog.add_custom_model(custom_entry("llama3", "qwen", &[])));
+    assert!(catalog.add_custom_model(custom_entry("llama3", "minimax", &[])));
+
+    let removed = catalog.remove_custom_model("LLAMA3", Some("MiniMax"));
+    assert_eq!(removed.len(), 1);
+    assert_eq!(removed[0].provider, "minimax");
+    assert!(catalog
+        .list_models()
+        .iter()
+        .any(|m| m.id == "llama3" && m.provider == "qwen"));
+    assert!(!catalog
+        .list_models()
+        .iter()
+        .any(|m| m.id == "llama3" && m.provider == "minimax"));
+}
+
+#[test]
+fn remove_custom_model_updates_model_count_and_prunes_aliases() {
+    let mut catalog = test_catalog();
+    assert!(catalog.add_custom_model(custom_entry("gone-soon", "qwen", &["gone-alias"])));
+    let with_custom = provider_model_count(&catalog, "qwen");
+    assert_eq!(
+        catalog.resolve_alias("gone-alias").map(String::from),
+        Some("gone-soon".to_string())
+    );
+
+    let removed = catalog.remove_custom_model("gone-soon", None);
+    assert_eq!(removed.len(), 1);
+    assert_eq!(provider_model_count(&catalog, "qwen"), with_custom - 1);
+    assert_eq!(catalog.resolve_alias("gone-alias"), None);
+}
+
+#[test]
+fn remove_custom_model_keeps_alias_while_target_id_survives() {
+    let mut catalog = test_catalog();
+    assert!(catalog.add_custom_model(custom_entry("dup", "qwen", &["dup-alias"])));
+    assert!(catalog.add_custom_model(custom_entry("dup", "minimax", &[])));
+
+    catalog.remove_custom_model("dup", Some("qwen"));
+    assert_eq!(
+        catalog.resolve_alias("dup-alias").map(String::from),
+        Some("dup".to_string())
+    );
+}
+
+#[test]
+fn remove_custom_model_never_touches_builtin() {
+    let mut catalog = test_catalog();
+    assert!(catalog.find_model("grok-4-fast-reasoning").is_some());
+    assert!(catalog
+        .remove_custom_model("grok-4-fast-reasoning", None)
+        .is_empty());
+    assert!(catalog.find_model("grok-4-fast-reasoning").is_some());
+}
+
+/// An alias created through the alias API is persisted separately and must survive the model's removal, so deleting and re-adding a custom model to edit it does not lose the operator's alias.
+#[test]
+fn remove_custom_model_keeps_user_created_alias() {
+    let mut catalog = test_catalog();
+    assert!(catalog.add_custom_model(custom_entry("edited", "qwen", &[])));
+    assert!(catalog.add_alias("my-edited", "edited"));
+
+    catalog.remove_custom_model("edited", None);
+    assert_eq!(
+        catalog.resolve_alias("my-edited").map(String::from),
+        Some("edited".to_string())
     );
 }

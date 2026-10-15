@@ -435,48 +435,19 @@ mod transport {
             .await
             .map_err(|e| ExecError::Other(format!("exec: {e}")))?;
 
-        let mut stdout = Vec::new();
-        let mut stderr = Vec::new();
-        let mut exit_code: Option<i32> = None;
-        let mut signal_note: Option<String> = None;
-
+        let mut drain = ChannelDrain::default();
         while let Some(msg) = chan.wait().await {
-            use russh::ChannelMsg;
-            match msg {
-                ChannelMsg::Data { data } => stdout.extend_from_slice(&data),
-                ChannelMsg::ExtendedData { ext: 1, data } => {
-                    stderr.extend_from_slice(&data);
-                }
-                ChannelMsg::ExitStatus { exit_status } => {
-                    exit_code = Some(exit_status as i32);
-                }
-                ChannelMsg::ExitSignal {
-                    signal_name,
-                    core_dumped: _,
-                    error_message: _,
-                    lang_tag: _,
-                } => {
-                    // POSIX convention: shells report killed-by-signal as
-                    // 128 + signum. Use `-2` for unknown signal names so
-                    // the value is recognisably "not a real exit code".
-                    //
-                    // russh's `Sig` is an enum without `Display` —
-                    // we render via `Debug` and accept either the
-                    // `SIGTERM` form (some hosts) or the bare `TERM`
-                    // form (russh's `Sig::TERM` variant) interchangeably.
-                    let label = signal_name_label(&format!("{signal_name:?}"));
-                    let signum = posix_signum(&label);
-                    let code = match signum {
-                        Some(n) => 128 + n,
-                        None => -2,
-                    };
-                    exit_code = Some(code);
-                    signal_note = Some(format!("\n[killed by signal: SIG{label}]\n"));
-                }
-                ChannelMsg::Eof | ChannelMsg::Close => break,
-                _ => {}
+            if drain.apply(msg) {
+                break;
             }
         }
+        let ChannelDrain {
+            stdout,
+            mut stderr,
+            exit_code,
+            signal_note,
+            ..
+        } = drain;
 
         // Prepend the signal annotation so it survives truncation:
         // `truncate_to_cap` keeps the prefix and drops the suffix, so
@@ -508,6 +479,62 @@ mod transport {
             exit_code: exit_code.unwrap_or(-1),
             backend_id: Some(format!("ssh:{}@{}:{}", cfg.user, cfg.host, cfg.port)),
         })
+    }
+
+    /// Accumulated state of one exec channel while its messages are read.
+    #[derive(Default)]
+    struct ChannelDrain {
+        stdout: Vec<u8>,
+        stderr: Vec<u8>,
+        exit_code: Option<i32>,
+        signal_note: Option<String>,
+        saw_eof: bool,
+    }
+
+    impl ChannelDrain {
+        /// Fold one channel message into the state; returns `true` when reading should stop.
+        ///
+        /// RFC 4254 does not order CHANNEL_EOF against the `exit-status` / `exit-signal` requests, only both before CLOSE, and servers such as Dropbear send EOF first.
+        /// So EOF alone does not end the read: it stops at CLOSE, or once both EOF and an exit status have been seen, so a server that waits for the client before sending CLOSE cannot stall until the timeout.
+        fn apply(&mut self, msg: russh::ChannelMsg) -> bool {
+            use russh::ChannelMsg;
+            match msg {
+                ChannelMsg::Data { data } => self.stdout.extend_from_slice(&data),
+                ChannelMsg::ExtendedData { ext: 1, data } => {
+                    self.stderr.extend_from_slice(&data);
+                }
+                ChannelMsg::ExitStatus { exit_status } => {
+                    self.exit_code = Some(exit_status as i32);
+                    return self.saw_eof;
+                }
+                ChannelMsg::ExitSignal {
+                    signal_name,
+                    core_dumped: _,
+                    error_message: _,
+                    lang_tag: _,
+                } => {
+                    // POSIX convention: shells report killed-by-signal as 128 + signum.
+                    // Use `-2` for unknown signal names so the value is recognisably "not a real exit code".
+                    //
+                    // russh's `Sig` is an enum without `Display`; we render via `Debug` and accept either the `SIGTERM` form (some hosts) or the bare `TERM` form (russh's `Sig::TERM` variant) interchangeably.
+                    let label = signal_name_label(&format!("{signal_name:?}"));
+                    let code = match posix_signum(&label) {
+                        Some(n) => 128 + n,
+                        None => -2,
+                    };
+                    self.exit_code = Some(code);
+                    self.signal_note = Some(format!("\n[killed by signal: SIG{label}]\n"));
+                    return self.saw_eof;
+                }
+                ChannelMsg::Eof => {
+                    self.saw_eof = true;
+                    return self.exit_code.is_some();
+                }
+                ChannelMsg::Close => return true,
+                _ => {}
+            }
+            false
+        }
     }
 
     /// `russh` surfaces `signal_name` as the [`russh::Sig`] enum
@@ -554,6 +581,71 @@ mod transport {
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        fn drain(msgs: Vec<russh::ChannelMsg>) -> (ChannelDrain, usize) {
+            let mut state = ChannelDrain::default();
+            let mut consumed = 0;
+            for msg in msgs {
+                consumed += 1;
+                if state.apply(msg) {
+                    break;
+                }
+            }
+            (state, consumed)
+        }
+
+        #[test]
+        fn exit_status_after_eof_is_captured() {
+            let (state, _) = drain(vec![
+                russh::ChannelMsg::Data {
+                    data: b"hi\n".to_vec().into(),
+                },
+                russh::ChannelMsg::Eof,
+                russh::ChannelMsg::ExitStatus { exit_status: 0 },
+                russh::ChannelMsg::Close,
+            ]);
+            assert_eq!(state.stdout, b"hi\n");
+            assert_eq!(state.exit_code, Some(0));
+        }
+
+        #[test]
+        fn exit_signal_after_eof_is_captured() {
+            let (state, _) = drain(vec![
+                russh::ChannelMsg::Eof,
+                russh::ChannelMsg::ExitSignal {
+                    signal_name: russh::Sig::TERM,
+                    core_dumped: false,
+                    error_message: String::new(),
+                    lang_tag: String::new(),
+                },
+                russh::ChannelMsg::Close,
+            ]);
+            assert_eq!(state.exit_code, Some(143));
+            assert!(state
+                .signal_note
+                .as_deref()
+                .is_some_and(|n| n.starts_with("\n[killed by signal: SIGTERM]")));
+        }
+
+        #[test]
+        fn exit_status_before_eof_is_captured_and_stops_at_eof() {
+            let (state, consumed) = drain(vec![
+                russh::ChannelMsg::ExitStatus { exit_status: 3 },
+                russh::ChannelMsg::Eof,
+                russh::ChannelMsg::Close,
+            ]);
+            assert_eq!(state.exit_code, Some(3));
+            assert_eq!(
+                consumed, 2,
+                "EOF after the exit status ends the read without waiting for CLOSE"
+            );
+        }
+
+        #[test]
+        fn close_without_exit_status_leaves_code_unset() {
+            let (state, _) = drain(vec![russh::ChannelMsg::Eof, russh::ChannelMsg::Close]);
+            assert_eq!(state.exit_code, None);
+        }
 
         #[test]
         fn hex_encode_round_trip() {

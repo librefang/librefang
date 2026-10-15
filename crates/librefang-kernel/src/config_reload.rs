@@ -1331,6 +1331,32 @@ pub fn validate_config_for_reload(config: &KernelConfig) -> Result<(), Vec<Strin
         errors.push(format!("tool_exec: {e}"));
     }
 
+    // A user's emoji has two authors — `PATCH /api/users/{name}/identity`,
+    // which bounds it, and an operator editing `config.toml` by hand, which
+    // cannot. A hand-edited value is reported here, not refused (#8339).
+    //
+    // It has to be a warning, because refusing made a pre-existing oversize
+    // glyph a permanent lockout: `load_config` deliberately boots on one
+    // rather than refusing to start, but then every *unrelated* write — a
+    // `/api/users/*` or `/api/groups/*` edit, a budget change, a config-editor
+    // patch — re-serialises the file, trips this check on the row the operator
+    // was not touching, and answers 400 until the file is fixed by hand. The
+    // write path that owns the field still bounds it before persisting, so an
+    // API write cannot introduce one; this is the only check a hand-edit
+    // passes through, and it now names the row in the log instead of blocking
+    // the write.
+    for user in &config.users {
+        if let Err(e) = librefang_types::config::validate_emoji(user.emoji.as_deref()) {
+            tracing::warn!(
+                user = %user.name,
+                error = %e,
+                "user emoji is out of bounds; leaving it in place rather than \
+                 refusing this write. Fix the emoji through the API or by \
+                 editing config.toml."
+            );
+        }
+    }
+
     // Network config: if network is enabled, shared_secret must be set
     if config.network_enabled && config.network.shared_secret.is_empty() {
         errors.push("network_enabled is true but network.shared_secret is empty".to_string());
@@ -1374,6 +1400,18 @@ pub fn should_apply_hot(mode: ReloadMode, plan: &ReloadPlan) -> bool {
 /// `prompt_caching`, default `language` / `mode`, `sanitize`). Gating the
 /// swap on `hot_actions` alone made those edits silently no-op while the
 /// reload response reported success.
+///
+/// A plan whose only change is **restart-required** does NOT store. Swapping it
+/// in would leave every live reader of a restart-required field looking at a
+/// value boot never wired — `protected_write_paths` reads `data_dir` live to
+/// guard the audit anchor, so a `data_dir`-only edit would move the guard to the
+/// new path while the anchor keeps being written at the old one until the
+/// restart; `GET /api/config` would report the new `api_listen` / `data_dir`
+/// while the daemon still serves the old ones; and the next reload would diff
+/// against the stored config and no longer report `restart_required` for a
+/// change that has not taken effect. A field with no live reader is classified
+/// `R` honestly and left for the restart, rather than making `R` mean "stored
+/// but not applied" for every field at once.
 ///
 /// `Off` / `Restart` modes still return `false` — the operator expects no
 /// runtime change until a full restart.
@@ -2475,6 +2513,41 @@ mod tests {
         assert!(err.iter().any(|e| e.contains("max_cron_jobs")));
     }
 
+    /// A hand-edited emoji is reported, not refused, so it cannot wedge the
+    /// next unrelated write (#8339 review follow-up).
+    ///
+    /// The write path that owns the field —
+    /// `PATCH /api/users/{name}/identity` — bounds it before persisting, so an
+    /// API write cannot introduce one. The hand-edit door is deliberately
+    /// tolerant for the same reason `load_config` boots on the same value: a
+    /// hard failure here made a pre-existing oversize glyph block every
+    /// `/api/users/*`, `/api/groups/*`, budget and config-editor write until
+    /// the file was fixed by hand.
+    #[test]
+    fn test_validate_accepts_a_hand_edited_emoji_as_a_warning() {
+        let mut config = default_cfg();
+        config.users.push(librefang_types::config::UserConfig {
+            name: "alice".to_string(),
+            emoji: Some("a".repeat(librefang_types::config::MAX_EMOJI_CHARS + 1)),
+            ..Default::default()
+        });
+
+        assert!(
+            validate_config_for_reload(&config).is_ok(),
+            "a pre-existing hand-edit must not fail every later write"
+        );
+
+        // The check is skipped, not the validator: an unrelated fault still
+        // refuses, and the emoji does not ride along as an error.
+        config.api_listen = String::new();
+        let err = validate_config_for_reload(&config).unwrap_err();
+        assert!(err.iter().any(|e| e.contains("api_listen")));
+        assert!(
+            !err.iter().any(|e| e.contains("emoji")),
+            "the emoji must be a warning, not an error: {err:?}"
+        );
+    }
+
     #[test]
     fn test_validate_network_enabled_no_secret() {
         let mut config = default_cfg();
@@ -2558,6 +2631,44 @@ mod tests {
         assert!(!should_apply_hot(ReloadMode::Hybrid, &plan));
         // `should_store_config` is true — the new config is swapped in so the
         // read-live field takes effect on the next message/request.
+        assert!(should_store_config(ReloadMode::Hot, &plan));
+        assert!(should_store_config(ReloadMode::Hybrid, &plan));
+    }
+
+    #[test]
+    fn test_should_store_config_restart_only_does_not_swap() {
+        // Plan with NO hot actions and NO noop changes: the only change is restart-required.
+        let plan = ReloadPlan {
+            restart_required: true,
+            restart_reasons: vec!["api_listen".to_string()],
+            hot_actions: vec![],
+            noop_changes: vec![],
+            config_stored: false,
+        };
+        // A restart-only plan must NOT be swapped into the live config: every
+        // live reader of a restart-required field would otherwise see a value
+        // boot never wired, and the reload response would stop reporting
+        // `restart_required` on the next diff. The API still reports the plan as
+        // partial (restart required). See `should_store_config`'s docs.
+        assert!(!should_store_config(ReloadMode::Hot, &plan));
+        assert!(!should_store_config(ReloadMode::Hybrid, &plan));
+        // Off / Restart must still withhold the runtime change.
+        assert!(!should_store_config(ReloadMode::Off, &plan));
+        assert!(!should_store_config(ReloadMode::Restart, &plan));
+    }
+
+    /// A plan that carries a hot or noop change *alongside* a restart-required
+    /// one still stores, so the hot/noop half takes effect; the restart half is
+    /// applied by the following restart.
+    #[test]
+    fn test_should_store_config_mixed_plan_still_swaps() {
+        let plan = ReloadPlan {
+            restart_required: true,
+            restart_reasons: vec!["api_listen".to_string()],
+            hot_actions: vec![],
+            noop_changes: vec!["max_history_messages".to_string()],
+            config_stored: false,
+        };
         assert!(should_store_config(ReloadMode::Hot, &plan));
         assert!(should_store_config(ReloadMode::Hybrid, &plan));
     }

@@ -1,6 +1,13 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { render, screen } from "@testing-library/react";
 import { CollapsibleSection } from "./CollapsibleSection";
+
+vi.mock("react-i18next", () => ({
+  useTranslation: () => ({
+    t: (_key: string, opts?: { defaultValue?: string }) =>
+      opts?.defaultValue ?? _key,
+  }),
+}));
 
 describe("CollapsibleSection", () => {
   it("starts folded so a long form does not open as a wall", () => {
@@ -54,6 +61,31 @@ describe("CollapsibleSection", () => {
     expect(details).toHaveAttribute("open");
   });
 
+  it("does not clip a child popover once open", () => {
+    // `overflow-hidden` trims the body to the rounded corners while folded, but
+    // it also clipped the absolutely-positioned model picker popover a child
+    // renders. The clip is released once `open` is set on the element. The
+    // `open:` variant matches the element itself; `group-open:` would compile
+    // to a descendant selector and never match, so pin the working token.
+    render(
+      <CollapsibleSection title="Routing" defaultOpen>
+        <p>body</p>
+      </CollapsibleSection>,
+    );
+    const details = screen.getByText("Routing").closest("details")!;
+    expect(details.className).toContain("open:overflow-visible");
+    expect(details.className).not.toContain("group-open:overflow-visible");
+  });
+
+  it("keeps the clip while folded", () => {
+    render(
+      <CollapsibleSection title="Routing">
+        <p>body</p>
+      </CollapsibleSection>,
+    );
+    expect(screen.getByText("Routing").closest("details")!.className).toContain("overflow-hidden");
+  });
+
   it("is a real details/summary, so the keyboard and toggle behaviour come free", () => {
     const { container } = render(
       <CollapsibleSection title="Routing">
@@ -73,5 +105,31 @@ describe("CollapsibleSection", () => {
     // The value is still in the DOM: folding must not unmount a control, or
     // the field would silently reset every time the section was collapsed.
     expect(screen.getByLabelText("threshold")).toHaveValue("100");
+  });
+
+  it("shows the count next to the title, and nothing at zero or when absent", () => {
+    const { rerender } = render(
+      <CollapsibleSection title="Routing" count={3}>
+        <p>body</p>
+      </CollapsibleSection>,
+    );
+    const summary = screen.getByText("Routing").closest("summary")!;
+    expect(summary).toHaveTextContent("3");
+
+    // Zero and undefined are the same answer — no fields to advertise — and a
+    // "0" would read as a section that failed to load.
+    rerender(
+      <CollapsibleSection title="Routing" count={0}>
+        <p>body</p>
+      </CollapsibleSection>,
+    );
+    expect(summary).not.toHaveTextContent(/\d/);
+
+    rerender(
+      <CollapsibleSection title="Routing">
+        <p>body</p>
+      </CollapsibleSection>,
+    );
+    expect(summary).not.toHaveTextContent(/\d/);
   });
 });

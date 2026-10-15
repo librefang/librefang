@@ -421,6 +421,8 @@ impl LibreFangKernel {
                 String::new(),
                 agent_provider.clone(),
             )];
+            // Per-slot output ceilings, parallel to `chain`. The primary's request budget is already resolved for the primary model, so it stays `None`; each fallback slot clamps to its own catalog ceiling (see `with_slot_max_tokens_caps`).
+            let mut slot_caps: Vec<Option<u32>> = vec![None];
             for fb in &effective_fallbacks {
                 // A sentinel model inherits the authoritative default provider/model pair; an explicit fallback model may infer its provider. This uses the same hot-reloadable default snapshot as the primary slot.
                 let (fb_provider, fb_model) = resolve_fallback_target(
@@ -521,7 +523,19 @@ impl LibreFangKernel {
                     self.llm.driver_cache.get_or_create(&config)
                 };
                 match fallback_driver {
-                    Ok(d) => chain.push((d, fb_model, fb_provider.clone())),
+                    Ok(d) => {
+                        // The fallback model's own output ceiling, so a failover that rewrites only `req.model` cannot carry the primary's larger budget above it (#8502 review).
+                        // `None` when the catalog knows no ceiling for the slot.
+                        let max_tokens_cap = self
+                            .llm
+                            .model_catalog
+                            .load()
+                            .effective_limits_for_manifest(&fb_provider, &fb_model)
+                            .max_output_tokens
+                            .and_then(|tokens| u32::try_from(tokens).ok());
+                        chain.push((d, fb_model, fb_provider.clone()));
+                        slot_caps.push(max_tokens_cap);
+                    }
                     Err(e) => {
                         warn!("Fallback driver '{}' failed to init: {e}", fb_provider);
                     }
@@ -536,7 +550,8 @@ impl LibreFangKernel {
                 let fb =
                     librefang_runtime::drivers::fallback::FallbackDriver::with_models_and_providers(
                         chain,
-                    );
+                    )
+                    .with_slot_max_tokens_caps(slot_caps);
                 let fb = match self.metering.engine.exhaustion_store() {
                     Some(store) => fb.with_exhaustion_store(store),
                     None => fb,
@@ -779,11 +794,10 @@ mod tests {
         std::fs::create_dir_all(home.join("workspaces").join("agents")).unwrap();
         std::fs::create_dir_all(home.join("workspaces").join("hands")).unwrap();
 
-        // Pre-touch the sync marker so `registry_sync::sync_registry` treats
-        // the registry cache as fresh and skips the download + fan-out step.
-        // Without this, `sync_flat_files` removes any TOML in `providers/` that
-        // does not exist in the (empty) registry cache, nuking our fixture before
-        // the catalog is loaded. See the same pattern in kernel/tests.rs.
+        // Pre-touch the sync marker so `registry_sync::sync_registry` treats the registry cache as fresh and does not fetch: this test must not touch the network.
+        // It does NOT skip the fan-out — `sync_registry` calls `fanout_registry_content` after that gate rather than behind it, so the fan-out runs on every call, marker or not (`registry_sync.rs`).
+        // What actually keeps the fixture safe is that the fan-out only visits a `registry/providers/` that exists (absent here), and that a local file with no `.registry-managed` record is never pruned (#5823) or overwritten (#8407).
+        // See the same pattern in kernel/tests.rs.
         let registry_dir = home.join("registry");
         std::fs::create_dir_all(&registry_dir).unwrap();
         std::fs::write(registry_dir.join(".sync_marker"), "").unwrap();
@@ -928,6 +942,7 @@ key_required = true
             ) -> Result<CompletionResponse, LlmError> {
                 *self.0.lock().unwrap() = Some(req.model.clone());
                 Ok(CompletionResponse {
+                    text_synthesized_from_thinking: false,
                     content: vec![ContentBlock::Text {
                         text: "ok".to_string(),
                         provider_metadata: None,

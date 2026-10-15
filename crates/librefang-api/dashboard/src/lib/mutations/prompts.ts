@@ -127,6 +127,11 @@ export function useBindPromptVersionToAgent() {
       invalidatePromptRepo(qc, variables.agentId);
       qc.invalidateQueries({ queryKey: agentKeys.detail(variables.agentId) });
       qc.invalidateQueries({ queryKey: agentKeys.lists() });
+      // Both the hot-swap and the rollback write `system_prompt` through
+      // `PATCH /agents/{id}`, so the manifest ETag moved even though this hook
+      // never goes through `usePatchAgent` (#8424). A manifest editor opened
+      // afterwards must re-read instead of trusting a cached token.
+      qc.invalidateQueries({ queryKey: agentKeys.manifest(variables.agentId) });
     },
   });
 }

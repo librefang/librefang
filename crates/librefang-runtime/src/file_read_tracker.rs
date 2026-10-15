@@ -12,10 +12,8 @@
 //!   `[File updated since last read at turn N]\n\n`
 //! - New path → return content unchanged and record.
 //!
-//! State is keyed by [`SessionId`] and cleared when the context compressor
-//! summarises history (the prior bodies are gone, so the stub would point at
-//! nothing). Insertion / eviction also keep a small recency-driven cap to
-//! bound memory for long-lived sessions.
+//! State is keyed by [`SessionId`] and cleared whenever the prior bodies are gone, since the stub would then point at nothing: when the context compressor summarises history, when the kernel resets, reboots or clears a session's history (the sid is often reused afterwards), and when it deletes a session.
+//! Insertion / eviction also keep a small recency-driven cap to bound memory for long-lived sessions.
 //!
 //! # Determinism
 //!

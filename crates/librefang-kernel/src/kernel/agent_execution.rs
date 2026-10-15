@@ -325,6 +325,7 @@ impl LibreFangKernel {
         );
 
         Ok(AgentLoopResult {
+            hit_iteration_cap: false,
             response,
             total_usage: librefang_types::message::TokenUsage {
                 input_tokens: 0,
@@ -402,6 +403,7 @@ impl LibreFangKernel {
         info!(agent = %entry.name, "Python agent execution complete");
 
         Ok(AgentLoopResult {
+            hit_iteration_cap: false,
             response: result.response,
             total_usage: librefang_types::message::TokenUsage {
                 input_tokens: 0,
@@ -1306,11 +1308,12 @@ impl LibreFangKernel {
         // will actually be called, not the pre-routing one (e.g. routing may
         // switch sonnet → haiku).
         //
-        // Priority: agent manifest > per-model override > system defaults, for
-        // the sampling preferences. This block used to run the chain the other
-        // way round, which meant tuning the temperature of a shared model
-        // silently overwrote it for every agent using that model — two
-        // instances of one agent type could not hold different temperatures.
+        // Priority: agent manifest > per-model override > registry ceiling
+        // (for `max_tokens`) > system defaults, for the sampling preferences.
+        // This block used to run the chain the other way round, which meant
+        // tuning the temperature of a shared model silently overwrote it for
+        // every agent using that model — two instances of one agent type could
+        // not hold different temperatures.
         // The inversion was load-bearing only because `ModelConfig` had no
         // "inherit" state: every agent carried a concrete 4096 / 0.7, so
         // letting the manifest win would have made per-model overrides
@@ -1320,15 +1323,19 @@ impl LibreFangKernel {
         // `reasoning_effort` is deliberately excluded from that reordering —
         // see `librefang_types::inference_params` for why the model level has
         // to keep winning there (#7770).
-        {
-            let override_key = format!("{}:{}", manifest.model.provider, manifest.model.model);
-            let catalog = self.llm.model_catalog.load();
-            let resolved = librefang_types::inference_params::resolve_inference_params(
-                &manifest.model,
-                catalog.get_overrides(&override_key),
-            );
-            resolved.apply_to(&mut manifest.model);
-        }
+        //
+        // `ModelCatalog::resolve_turn_inference_params` owns the two lookups that need the catalog: the `provider:model` override key and the model's *effective* ceiling (the operator's `model_overrides.json` correction if one exists, otherwise the matched entry's own `max_output_tokens`, #7774).
+        // The pre-call holds in `messaging.rs` call the same method, so the estimate and the request cannot drift.
+        //
+        // Shared with the other two dispatch paths (`messaging::send_message_ephemeral`,
+        // `messaging::send_message_streaming_with_sender_context_routing_thinking_and_session`)
+        // and the ephemeral worker spawn (#8112) — see
+        // `manifest_helpers::apply_resolved_inference_params` for why calling
+        // this from only one of the four used to matter.
+        super::manifest_helpers::apply_resolved_inference_params(
+            &self.llm.model_catalog.load(),
+            &mut manifest.model,
+        );
 
         // #5980: pre-dispatch per-provider budget gate. The provider name is
         // now finalized (model routing + key-availability fallback above), so
@@ -1424,6 +1431,12 @@ impl LibreFangKernel {
 
         // Inject sender context into manifest metadata so the tool runner can
         // use it for per-sender trust and channel-specific authorization rules.
+        // First drop any reserved sender keys the manifest itself declared: only
+        // a turn's verified `SenderContext` may speak for a sender, otherwise an
+        // `agent.toml` could name `webui` plus a target's derivable `UserId`
+        // UUID and assume that user's policy on a sender-less turn (#8409
+        // review).
+        librefang_types::agent::strip_reserved_sender_metadata(&mut manifest.metadata);
         if let Some(ctx) = sender_context {
             if !ctx.user_id.is_empty() {
                 manifest.metadata.insert(
@@ -1529,6 +1542,7 @@ impl LibreFangKernel {
                 agent_id,
                 &mut session,
                 &manifest.model.system_prompt,
+                &tools,
                 &config,
                 agent_scoped,
             )
@@ -1745,6 +1759,8 @@ impl LibreFangKernel {
             kernel.spawn_compaction_after_turn(
                 agent_id,
                 &session,
+                &manifest.model.system_prompt,
+                &tools,
                 manifest.compaction.as_ref(),
                 agent_scoped,
             );

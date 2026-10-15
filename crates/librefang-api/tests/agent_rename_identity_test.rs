@@ -223,6 +223,59 @@ async fn rejected_rename_leaves_identity_untouched() {
     assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
 }
 
+fn registry_description(server: &TestServer, agent_id: &str) -> String {
+    let id: AgentId = agent_id.parse().expect("agent id");
+    server
+        .state
+        .kernel
+        .agent_registry()
+        .get(id)
+        .expect("agent in registry")
+        .manifest
+        .description
+}
+
+/// A client that sends the whole agent object back carries the unchanged name, so a same-name rename must be a no-op rather than a conflict that drops the rest of the PATCH.
+#[tokio::test(flavor = "multi_thread")]
+async fn patch_with_unchanged_name_applies_other_fields() {
+    let server = start_full_router().await;
+    let id = spawn(&server, "same-name").await;
+    let path = identity_path(&server, &id);
+
+    let status = patch(
+        &server,
+        &format!("/api/agents/{id}/config"),
+        serde_json::json!({"name": "same-name", "description": "config text"}),
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(registry_name(&server, &id), "same-name");
+    assert_eq!(registry_description(&server, &id), "config text");
+
+    // The personality pre-check must not treat the agent's own name as taken either.
+    let status = patch(
+        &server,
+        &format!("/api/agents/{id}/config"),
+        serde_json::json!({"name": "same-name", "archetype": "researcher", "description": "with personality"}),
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(registry_description(&server, &id), "with personality");
+    assert!(std::fs::read_to_string(&path)
+        .unwrap()
+        .contains("\narchetype: researcher\n"));
+
+    let status = patch(
+        &server,
+        &format!("/api/agents/{id}"),
+        serde_json::json!({"name": "same-name", "description": "lifecycle text"}),
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(registry_name(&server, &id), "same-name");
+    assert_eq!(registry_description(&server, &id), "lifecycle text");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn clone_points_copied_identity_at_the_clone_name() {
     let server = start_full_router().await;

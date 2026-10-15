@@ -158,7 +158,8 @@ pub enum StepAgent {
 { "mode": "collect" }
 ```
 
-`collect` 步骤收集前一个扇出组的所有输出。它不执行 Agent——这是一个**纯数据**步骤，使用分隔符 `"\n\n---\n\n"` 连接所有累积的输出，并将结果设置为后续步骤的 `{{input}}`。
+`collect` 步骤收集自上一个 `collect`（或自运行开始、恢复）以来记录的每个步骤的结果。它不执行 Agent——这是一个**纯数据**步骤，把这些结果序列化为 JSON `{"results":[{"agent":"...","output":"..."}, ...]}`，并将其设置为后续步骤的 `{{input}}`。
+批次内的 `loop` 步骤每次迭代贡献一条结果，与运行记录的步骤结果一致。
 
 典型的 fan-out/collect 模式：
 
@@ -176,6 +177,10 @@ step 4: sequential --> receives joined output as {{input}}
 ```
 
 仅当前一步骤的输出**包含** `condition` 子字符串时（通过 `to_lowercase().contains()` 进行不区分大小写的比较），该步骤才会执行。如果条件不满足，该步骤将被完全跳过，`{{input}}` 不会被修改。
+
+条件可以用 `&&`（全部匹配）、`||`（任一匹配，优先级低于 `&&`）和前导 `!`（不得匹配）组合多个项。
+用 `"…"` 或 `'…'` 包裹某一项，可以匹配本身含有 `&&`、`||` 或前导 `!` 的字面量；匹配前会去掉引号，因此 `"a && b"` 匹配包含 `a && b` 的输出。
+引号只在项的开头才会开启，所以单词内部的撇号（`can't || error`）按字面处理，不会阻止运算符拆分。
 
 当条件满足时，该步骤按顺序执行模式运行。
 
@@ -411,7 +416,7 @@ fn expand_variables(template: &str, input: &str, vars: &HashMap<String, String>)
 }
 ```
 
-三个扇出步骤并行运行。`collect` 步骤使用 `---` 分隔符连接它们的输出。`synthesize` 步骤接收合并后的输出。
+三个扇出步骤并行运行。`collect` 步骤把它们的输出合并为一个 `{"results":[...]}` JSON 对象。`synthesize` 步骤接收合并后的输出。
 
 ### 示例 4：迭代优化（Loop）
 
@@ -848,7 +853,8 @@ librefang trigger delete <trigger_id>
 
 ### 运行记录淘汰上限
 
-工作流引擎最多保留 **200** 条运行记录（`WorkflowEngine::MAX_RETAINED_RUNS`）。创建新运行后超出此限制时，最旧的**已完成**或**已失败**的运行记录将被淘汰（按 `started_at` 排序）。处于 `Pending` 或 `Running` 状态的运行永远不会被淘汰。
+工作流引擎最多保留 **200** 条运行记录（`WorkflowEngine::MAX_RETAINED_RUNS`）。创建新运行后，或守护进程启动时从数据库加载运行记录后，若超出此限制，最旧的**已完成**、**已失败**或**已取消**的运行记录将被淘汰（按 `started_at` 排序）。处于 `Pending`、`Running` 或 `Paused` 状态的运行永远不会被淘汰。
+被淘汰的运行也会从 SQLite 存储中删除，因此持久化的历史保持有界，而不会在每次启动时被完整重新加载。
 
 ### 步骤超时
 
@@ -889,7 +895,7 @@ librefang trigger delete <trigger_id>
                       v           v
               +---------------+
               |   Step 4      |  mode: collect
-              |   (no agent)  |  joins all outputs with "---"
+              |   (no agent)  |  merges outputs into JSON
               +-------+-------+
                       | combined output -> {{input}}
                       v

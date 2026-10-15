@@ -158,7 +158,8 @@ If any fan-out step fails or times out, the entire workflow fails immediately.
 { "mode": "collect" }
 ```
 
-The `collect` step gathers all outputs from the preceding fan-out group. It does not execute an agent -- it is a **data-only** step that joins all accumulated outputs with the separator `"\n\n---\n\n"` and sets the result as `{{input}}` for subsequent steps.
+The `collect` step gathers the results of every step recorded since the previous `collect` (or since the run started or resumed). It does not execute an agent -- it is a **data-only** step that serializes those results as JSON, `{"results":[{"agent":"...","output":"..."}, ...]}`, and sets that as `{{input}}` for subsequent steps.
+A `loop` step inside the batch contributes one entry per iteration, matching the run's recorded step results.
 
 A typical fan-out/collect pattern:
 
@@ -178,6 +179,10 @@ step 4: sequential --> receives joined output as {{input}}
 The step only executes if the previous step's output **contains** the `condition` substring (case-insensitive comparison via `to_lowercase().contains()`). If the condition is not met, the step is skipped entirely and `{{input}}` is not modified.
 
 When the condition is met, the step executes like a sequential step.
+
+A condition can combine terms with `&&` (all must match), `||` (any must match, lower precedence than `&&`) and a leading `!` (must not match).
+Wrap a term in `"…"` or `'…'` to match a literal that itself contains `&&`, `||` or a leading `!`; the quotes are stripped before matching, so `"a && b"` matches output containing `a && b`.
+A quote only opens at the start of a term, so an apostrophe inside a word (`can't || error`) is literal and does not stop the operators from splitting.
 
 ### Loop
 
@@ -411,7 +416,7 @@ Three agents brainstorm in parallel, then a fourth agent synthesizes their ideas
 }
 ```
 
-The three fan-out steps run in parallel. The `collect` step joins their outputs with `---` separators. The `synthesize` step receives the combined output.
+The three fan-out steps run in parallel. The `collect` step gathers their outputs into a `{"results":[...]}` JSON object. The `synthesize` step receives the combined output.
 
 ### Example 4: Iterative Refinement (Loop)
 
@@ -848,7 +853,8 @@ Deletes a trigger by its UUID.
 
 ### Run Eviction Cap
 
-The workflow engine retains a maximum of **200** workflow runs (`WorkflowEngine::MAX_RETAINED_RUNS`). When this limit is exceeded after creating a new run, the oldest **completed** or **failed** runs are evicted (sorted by `started_at`). Runs in `Pending` or `Running` state are never evicted.
+The workflow engine retains a maximum of **200** workflow runs (`WorkflowEngine::MAX_RETAINED_RUNS`). When this limit is exceeded after creating a new run, or when runs are loaded from the database at daemon start, the oldest **completed**, **failed** or **cancelled** runs are evicted (sorted by `started_at`). Runs in `Pending`, `Running` or `Paused` state are never evicted.
+An evicted run is deleted from the SQLite store as well, so the persisted history stays bounded instead of being reloaded in full at every boot.
 
 ### Step Timeouts
 
@@ -889,7 +895,7 @@ The `AgentScheduler` (in `librefang-kernel/src/scheduler.rs`) tracks per-agent t
                       v           v
               +---------------+
               |   Step 4      |  mode: collect
-              |   (no agent)  |  joins all outputs with "---"
+              |   (no agent)  |  merges outputs into JSON
               +-------+-------+
                       | combined output -> {{input}}
                       v

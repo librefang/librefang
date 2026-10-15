@@ -3773,6 +3773,13 @@
             "type": "string"
           }
         },
+        "denied_commands": {
+          "description": "Commands that are refused in every mode, e.g. `[\"git\"]` to let an agent run anything except git (#8536).\n\nApplies to `shell_exec` and `process_start` under both `allowlist` and `full`, and wins over `safe_bins` and `allowed_commands`. Entries are bare executable names; matching ignores ASCII case, a leading directory (`/usr/bin/git`), quoting (`\"git\"`, `g\\it`) and a Windows `.exe` / `.cmd` / `.bat` / `.com` suffix. A command is refused when a denied name sits in command position in any segment of a chain, pipeline, subshell or command substitution, when it follows a prefix runner such as `env`, `sudo`, `nohup`, `timeout` or `xargs`, or when it appears anywhere in the arguments of a shell wrapper (`bash -c \"…\"`, `cmd /c …`).\n\nThis guards against an agent reaching for the command, not against an agent determined to evade it: a script file, an interpreter (`python -c`), `find -exec`, an alias, or a command name assembled in a variable is not inspected. When that matters, use `mode = \"allowlist\"`, or remove the binary from the daemon's `PATH`.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
         "full_mode_skips_approval": {
           "description": "Whether `mode = \"full\"` also waives the global `approval.require_approval` list for `shell_exec`.\n\nDefault `true` preserves the historical coupling, and the default is deliberately NOT flipped (#6594). Two facts make a flipped default a breaking change for ordinary installs: `ApprovalPolicy::default()` puts `shell_exec` in `require_approval`, and `Kernel::spawn` promotes any standalone agent whose `capabilities.tools` contains `shell_exec` or `*` and which declares no `exec_policy` to `mode = \"full\"`. So on a default install this waiver is the only reason ordinary agents run shell commands unattended, and flipping it would make every install prompt on every command.\n\nSet `false` to hold both positions at once — unrestricted commands that still prompt. `Full` then waives only allowlist *validation*, and `require_approval` is honoured exactly as it is for any other mode. This overrides a coupling that was deliberate rather than accidental: `Full` skipping the approval queue was documented behaviour, and `false` narrows `Full` to what its name describes — a command-validation mode — leaving who-must-confirm to `[approval]`.\n\nIndependent of this flag in both positions: a per-user RBAC `NeedsApproval` still forces the approval queue, and the dangerous-command denylist still screens every command under `full`.",
           "default": true,
@@ -5889,7 +5896,7 @@
           "format": "double"
         },
         "duplicate_threshold": {
-          "description": "Similarity threshold for duplicate detection (0.0 - 1.0). When stored embeddings are available, uses vector cosine similarity (mem0-quality); otherwise falls back to Jaccard word overlap. Default: 0.85.\n\nPre-fix this defaulted to 0.5, which is far too permissive for both metrics: cosine 0.5 matches \"topically related\" pairs (including opposite-meaning sentences that share keywords), and Jaccard 0.5 matches anything with 50% word overlap. 0.85 is the threshold mem0 recommends for \"near-duplicate\" detection and matches the industry-standard cosine cut-off for embedding-based dedup.",
+          "description": "Similarity threshold for duplicate detection (0.0 - 1.0), calibrated as Jaccard word overlap. When both memories carry comparable stored embeddings, the per-agent consolidation compares their cosine similarity against `max(duplicate_threshold, 0.95)` instead, because cosine 0.85 between sentence embeddings already means \"same topic\" rather than \"same statement\" (#8524). Default: 0.85.\n\nPre-fix this defaulted to 0.5, which is far too permissive: Jaccard 0.5 matches anything with 50% word overlap.",
           "default": 0.8500000238418579,
           "type": "number",
           "format": "float"
@@ -6231,7 +6238,7 @@
           "minimum": 0.0
         },
         "auth_rate_limit_per_ip": {
-          "description": "Max login attempts per IP per 15-minute window on auth endpoints (`/api/auth/dashboard-login`, `/api/auth/login*`). Default: 10. Set to 0 to disable the per-IP auth rate limiter.",
+          "description": "Max login attempts per IP per 15-minute window on auth endpoints (`/api/auth/dashboard-login`, `/api/auth/login*`, `/api/auth/introspect`, `/api/auth/refresh`, the OAuth callback and the passkey ceremonies), plus two of the endpoints that verify a TOTP or recovery code: `/api/approvals/totp/confirm` always counts, and `/api/approvals/{id}/approve` counts only while approving that request would verify a code.\n\nAn approval verifies a code only when `approval.second_factor` is `totp` or `both`, the tool being approved is inside `approval.totp_tools` (all tools when the list is empty), the caller is outside the TOTP grace window a previous successful verification opened, and the id names a pending request — an unknown or already-resolved id verifies nothing. With the default `none`, or a tool outside a narrowed `totp_tools`, an approval verifies nothing, and metering it would spend this login budget on approvals that already succeeded and lock a working operator out.\n\n`/api/approvals/totp/setup` (the `current_code` a re-enrollment sends) and `/api/approvals/totp/revoke` verify codes as well and are deliberately not counted here: each is an Owner-only write performed once, and each already fails closed on its own TOTP lockout — five failed codes, then a five-minute refusal — so this budget would only lengthen that brake.\n\nDefault: 10. Set to 0 to disable the per-IP auth rate limiter.",
           "default": 10,
           "type": "integer",
           "format": "uint32",
@@ -7431,7 +7438,7 @@
       ]
     },
     "TaskBoardConfig": {
-      "description": "Task-board (shared-task-queue) safety knobs.\n\nWhen a worker agent calls `task_claim` the task transitions to `in_progress` and `claimed_at` is stamped. If the worker's LLM stalls (empty response, crash, timeout) it will never call `task_complete` and the task would otherwise stay `in_progress` forever — no retry, no external signal, no way for the delegator to know something broke (issues #2923, #2926).\n\nThe sweeper runs in the kernel and flips stuck tasks back to `pending` so they can be reclaimed, clearing `assigned_to` in the process.\n\nConfigure in config.toml: ```toml [task_board] claim_ttl_secs = 600         # 10 minutes — auto-reset after this sweep_interval_secs = 30     # how often the sweeper runs assignee_wake = true         # wake the assignee even with no trigger declared ```\n\nSetting `claim_ttl_secs = 0` disables the sweeper entirely — useful for long-running human-in-the-loop tasks where a 10 minute reset would be wrong.\n\nEvery field is re-read live by its consumer — the sweeper re-reads its three knobs on each tick, and `assignee_wake` is read at the synthesis site on each `TaskPosted` — so the whole struct is hot-reloadable (`config_reload::build_reload_plan`).",
+      "description": "Task-board (shared-task-queue) safety knobs.\n\nWhen a worker agent calls `task_claim` the task transitions to `in_progress` and `claimed_at` is stamped. If the worker's LLM stalls (empty response, crash, timeout) it will never call `task_complete` and the task would otherwise stay `in_progress` forever — no retry, no external signal, no way for the delegator to know something broke (issues #2923, #2926).\n\nThe sweeper runs in the kernel and flips stuck tasks back to `pending` so they can be reclaimed, clearing `assigned_to` in the process.\n\nConfigure in config.toml: ```toml [task_board] claim_ttl_secs = 600         # 10 minutes — auto-reset after this sweep_interval_secs = 30     # how often the sweeper runs assignee_wake = true         # wake the assignee even with no trigger declared ```\n\nSetting `claim_ttl_secs = 0` disables the *global* clock, not a clock a task explicitly carries: a task that declared its own `timeout_secs` still expires, because that is a more specific statement than the global default. Useful for long-running human-in-the-loop tasks where a 10 minute reset would be wrong — as long as those tasks do not carry a per-task timeout.\n\nEvery field is re-read live by its consumer — the sweeper re-reads its three knobs on each tick, and `assignee_wake` is read at the synthesis site on each `TaskPosted` — so the whole struct is hot-reloadable (`config_reload::build_reload_plan`).",
       "type": "object",
       "properties": {
         "assignee_wake": {
@@ -7440,7 +7447,7 @@
           "type": "boolean"
         },
         "claim_ttl_secs": {
-          "description": "How long an `in_progress` task may stay claimed before the sweeper resets it to `pending`. Default: 600 s (10 minutes). 0 disables.",
+          "description": "How long an `in_progress` task may stay claimed before the sweeper resets it to `pending`. Default: 600 s (10 minutes). 0 disables the global clock only — a task that declared its own `timeout_secs` still expires.",
           "default": 600,
           "type": "integer",
           "format": "uint64",
@@ -8249,6 +8256,13 @@
           "additionalProperties": {
             "$ref": "#/definitions/ChannelToolPolicy"
           }
+        },
+        "emoji": {
+          "description": "A short glyph the operator picked to stand for this user in the dashboard (#8339).\n\nFree-form text rather than an enum or a validated emoji table: the set of glyphs a person may want is not something this daemon should have an opinion about, and the value only ever reaches a DOM text node. The write path bounds its length and refuses control characters — the two properties that matter for a value that is stored in `config.toml` and rendered — and nothing else.\n\n`None` (or an absent key) means \"no glyph chosen\", which the dashboard renders as the user's initial. The avatar *image* deliberately does not live here: it is a file on disk, and whether one exists is answered by probing the directory rather than by a second copy of the answer that can fall out of step with it.",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "memory_access": {
           "description": "Memory namespace ACL — controls reads/writes to memory scopes (`proactive`, `kv:*`, etc.) and PII redaction. `None` means \"use the role default ACL\".",

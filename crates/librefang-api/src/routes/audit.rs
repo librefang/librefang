@@ -88,7 +88,9 @@ const MAX_AUDIT_QUERY_LIMIT: u32 = 5000;
 /// Operators that want audit access in a no-auth deployment must configure at least one user with an admin api_key.
 ///
 /// Returns `Some(response)` when the request should be aborted with 403.
-fn require_admin(
+///
+/// Also gates `GET /api/logs/stream` (`routes/logs.rs`), which streams the same ledger rows.
+pub(crate) fn require_admin(
     state: &AppState,
     api_user: Option<&AuthenticatedApiUser>,
     trusted_no_auth: bool,

@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import * as http from "../http/client";
 import { authzKeys, userKeys } from "../queries/keys";
 import { createQueryClientWrapper } from "../test/query-client";
-import { useCreateUser, useRotateUserKey, useUpdateUser } from "./users";
+import { useCreateUser, useDeleteUser, useRotateUserKey, useUpdateUser } from "./users";
 
 vi.mock("../http/client", () => ({
   createUser: vi.fn(),
@@ -62,6 +62,19 @@ describe("user identity mutation caches", () => {
     expect(removeSpy).toHaveBeenCalledWith({ queryKey: authzKeys.effective("alice") });
     expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: userKeys.detail("alicia") });
     expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: authzKeys.effective("alicia") });
+    // The users page reads `whoami.name` to decide whether the edited row is the caller's own; a rename of that row must not leave it naming the old one.
+    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: authzKeys.whoami() });
+  });
+
+  it("refreshes whoami after a delete", async () => {
+    vi.mocked(http.deleteUser).mockReset().mockResolvedValue({ status: "ok" });
+    const { queryClient, wrapper } = createQueryClientWrapper();
+    const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");
+    const { result } = renderHook(() => useDeleteUser(), { wrapper });
+
+    await result.current.mutateAsync("alice");
+
+    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: authzKeys.whoami() });
   });
 
   it("invalidates the existing identity after a non-rename update", async () => {

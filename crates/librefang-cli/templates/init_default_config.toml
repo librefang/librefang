@@ -60,7 +60,7 @@ auto_retrieve = true            # Auto-recall relevant memories
 max_retrieve = 10               # Max memories per retrieval
 # extraction_threshold = 0.7   # Min confidence to save memory
 # session_ttl_hours = 24
-# duplicate_threshold = 0.5
+# duplicate_threshold = 0.85
 # max_memories_per_agent = 1000
 
 # ── Web Tools ────────────────────────────────────────────────

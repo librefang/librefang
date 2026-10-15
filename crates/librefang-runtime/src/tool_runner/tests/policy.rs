@@ -3,7 +3,7 @@ use super::*;
 // ---- RBAC M3 — per-user tool policy gate (#3054) ----
 
 #[tokio::test]
-async fn tool_runner_rbac_user_deny_returns_hard_error() {
+async fn tool_runner_rbac_user_deny_returns_soft_denied() {
     let approval_requests = Arc::new(AtomicUsize::new(0));
     let kernel: Arc<dyn KernelHandle> = Arc::new(ApprovalKernel {
         requires_approval_override: None,
@@ -49,6 +49,11 @@ async fn tool_runner_rbac_user_deny_returns_hard_error() {
     .await;
 
     assert!(result.is_error, "user-policy deny must produce an error");
+    // A policy refusal is soft, so it does not count toward the consecutive-hard-failure abort.
+    assert_eq!(
+        result.status,
+        librefang_types::tool::ToolExecutionStatus::Denied
+    );
     assert!(
         result.content.contains("Execution denied"),
         "content should announce the deny: {}",
@@ -2930,6 +2935,7 @@ impl TaskQueue for SpawnCheckKernel {
         _description: &str,
         _assigned_to: Option<&str>,
         _created_by: Option<&str>,
+        _opts: &librefang_kernel_handle::TaskPostOptions,
     ) -> Result<String, librefang_kernel_handle::KernelOpError> {
         Err("not used".into())
     }

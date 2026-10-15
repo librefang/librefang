@@ -7,7 +7,7 @@
 //!    supports text — image/audio/embedded resource content needs the
 //!    `prompt_capabilities` flags we don't advertise yet).
 //! 3. Call [`AcpKernel::send_prompt`] to start a streaming agent turn.
-//! 4. Race the event channel against the per-session cancel token,
+//! 4. Race the event channel against this turn's cancel token,
 //!    translating each [`StreamEvent`] into one or more
 //!    `session/update` notifications.
 //! 5. Wait for the event channel to close or for cancellation.
@@ -50,6 +50,8 @@ pub(crate) async fn handle<K: AcpKernel>(
             }),
         ));
     };
+    // A fresh per-turn token: a `session/cancel` aimed at an earlier turn (or sent while idle) must not cancel this one.
+    let cancel = state.begin_turn();
 
     let (message, converted) = concat_text_blocks(&req.prompt);
     // Surface converted multimodal blocks so the user knows the
@@ -77,6 +79,10 @@ pub(crate) async fn handle<K: AcpKernel>(
         // editor doesn't spin on an empty user message.
         return responder.respond(PromptResponse::new(StopReason::EndTurn));
     }
+    if cancel.is_cancelled() {
+        // Cancelled before the kernel turn started: don't persist the message or bill the LLM.
+        return responder.respond(PromptResponse::new(StopReason::Cancelled));
+    }
 
     let mut events = match kernel
         .send_prompt(agent_id, message, state.librefang_session_id)
@@ -88,7 +94,6 @@ pub(crate) async fn handle<K: AcpKernel>(
 
     let mut translator = EventTranslator::new();
     let session_id = req.session_id.clone();
-    let cancel = state.cancel.clone();
     let mut last_stop_reason: Option<LfStopReason> = None;
 
     'pump: loop {

@@ -148,11 +148,23 @@ function renderPage() {
   const qc = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   });
-  return render(
+  const utils = render(
     <QueryClientProvider client={qc}>
       <TasksPage />
     </QueryClientProvider>,
   );
+  return {
+    ...utils,
+    // Re-render the same tree after changing a mock's return value, so a
+    // test can simulate a query resolving mid-interaction without
+    // remounting (and so losing) component state.
+    rerenderSameTree: () =>
+      utils.rerender(
+        <QueryClientProvider client={qc}>
+          <TasksPage />
+        </QueryClientProvider>,
+      ),
+  };
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────────
@@ -190,6 +202,42 @@ describe("TasksPage", () => {
       renderPage();
       // Multiple tasks are assigned to agent-alpha and agent-beta
       expect(screen.getAllByText("agent-alpha").length).toBeGreaterThan(0);
+    });
+
+    it("shows priority and timeout badges, and labels a zero timeout as never-reclaimed", () => {
+      useTaskQueueMock.mockReturnValue(
+        makeQuery({
+          tasks: [
+            ...SAMPLE_TASKS,
+            {
+              id: "task-priority-1",
+              status: "pending",
+              title: "Prioritized",
+              description: "Has a priority and a timeout",
+              priority: 3,
+              timeout_secs: 30,
+              created_at: new Date().toISOString(),
+            },
+            {
+              id: "task-timeout-never-1",
+              status: "pending",
+              title: "Never reclaimed",
+              description: "timeout_secs is explicitly 0",
+              timeout_secs: 0,
+              created_at: new Date().toISOString(),
+            },
+          ],
+          total: SAMPLE_TASKS.length + 2,
+        }),
+      );
+      renderPage();
+      expect(screen.getByText("tasks.priority_badge")).toBeInTheDocument();
+      expect(screen.getByText("tasks.timeout_badge")).toBeInTheDocument();
+      expect(screen.getByText("tasks.timeout_badge_never")).toBeInTheDocument();
+      // The default priority (0, unset) and absent timeout_secs on the
+      // sample tasks must not render either badge.
+      expect(screen.queryAllByText("tasks.priority_badge")).toHaveLength(1);
+      expect(screen.queryAllByText("tasks.timeout_badge")).toHaveLength(1);
     });
 
     it("shows result preview for completed and failed tasks", () => {
@@ -325,6 +373,145 @@ describe("TasksPage", () => {
             title: "My new task",
             description: "Task description here",
           }),
+        );
+      });
+    });
+
+    it("includes priority and timeout_secs in the payload when set", async () => {
+      const mutate = vi.fn();
+      useCreateTaskMock.mockReturnValue(makeMutation({ mutate }));
+
+      renderPage();
+      fireEvent.click(screen.getByRole("button", { name: /tasks.new_task/i }));
+
+      fireEvent.change(screen.getByPlaceholderText("tasks.field_title_placeholder"), {
+        target: { value: "Prioritized task" },
+      });
+      fireEvent.change(screen.getByPlaceholderText("tasks.field_description_placeholder"), {
+        target: { value: "Needs a deadline" },
+      });
+      fireEvent.change(screen.getByPlaceholderText("tasks.field_priority_placeholder"), {
+        target: { value: "3" },
+      });
+      fireEvent.change(screen.getByPlaceholderText("tasks.field_timeout_placeholder"), {
+        target: { value: "30" },
+      });
+
+      fireEvent.click(screen.getByRole("button", { name: "tasks.submit" }));
+
+      await waitFor(() => {
+        expect(mutate).toHaveBeenCalledWith(
+          expect.objectContaining({ priority: 3, timeout_secs: 30 }),
+        );
+      });
+    });
+
+    it("restricts priority and timeout_secs to whole numbers", () => {
+      // Both fields are integers server-side (`i64` / `u32`) and a fractional
+      // value is a 400 from `/api/tasks`. The browser can block that before
+      // submit only if the field declares an integer step — and `min={0}` on
+      // the timeout mirroring the server's `as_u64()` rejection of negatives.
+      renderPage();
+      fireEvent.click(screen.getByRole("button", { name: /tasks.new_task/i }));
+
+      const priority = screen.getByPlaceholderText("tasks.field_priority_placeholder");
+      const timeout = screen.getByPlaceholderText("tasks.field_timeout_placeholder");
+
+      expect(priority).toHaveAttribute("type", "number");
+      expect(priority).toHaveAttribute("step", "1");
+      expect(timeout).toHaveAttribute("type", "number");
+      expect(timeout).toHaveAttribute("step", "1");
+      expect(timeout).toHaveAttribute("min", "0");
+    });
+
+    it("omits priority and timeout_secs from the payload when left blank", async () => {
+      const mutate = vi.fn();
+      useCreateTaskMock.mockReturnValue(makeMutation({ mutate }));
+
+      renderPage();
+      fireEvent.click(screen.getByRole("button", { name: /tasks.new_task/i }));
+
+      fireEvent.change(screen.getByPlaceholderText("tasks.field_title_placeholder"), {
+        target: { value: "Plain task" },
+      });
+      fireEvent.change(screen.getByPlaceholderText("tasks.field_description_placeholder"), {
+        target: { value: "No overrides" },
+      });
+
+      fireEvent.click(screen.getByRole("button", { name: "tasks.submit" }));
+
+      await waitFor(() => {
+        expect(mutate).toHaveBeenCalled();
+      });
+      const payload = mutate.mock.calls[0][0];
+      expect(payload).not.toHaveProperty("priority");
+      expect(payload).not.toHaveProperty("timeout_secs");
+    });
+
+    // Was: "keeps a typed assignee once the agent registry loads instead of
+    // losing it to a widget swap". The widget swap it guarded against is gone —
+    // the field is now always a <select>, so there is no second control for a
+    // value to be stranded under, and while the registry is still loading the
+    // picker is disabled rather than accepting a value it is about to orphan.
+    //
+    // The guarantee still matters and is asserted here against the surviving
+    // widget: a chosen assignee survives the registry changing underneath it.
+    // Keying by agent id rather than by name is what makes that true across a
+    // rename, which is the case a name-valued control could not have survived
+    // at all — it would have been left pointing at a string that no longer
+    // exists.
+    it("keeps the selected agent id when the registry changes under it, including across a rename", async () => {
+      const mutate = vi.fn();
+      useCreateTaskMock.mockReturnValue(makeMutation({ mutate }));
+
+      // Pick the assignee picker out of the two selects on the page by the
+      // option only it carries, so the query survives a change of selection.
+      const assigneeSelect = () =>
+        screen
+          .getAllByRole("combobox")
+          .find((el) =>
+            Array.from(el.querySelectorAll("option")).some(
+              (o) => o.textContent === "tasks.assignee_none",
+            ),
+          ) as HTMLSelectElement;
+
+      // Registry still loading: nothing to offer, so the field is disabled
+      // rather than accepting a value it cannot yet validate.
+      useAgentsMock.mockReturnValue(makeQuery(undefined, { isLoading: true, isSuccess: false }));
+      const { rerenderSameTree } = renderPage();
+      fireEvent.click(screen.getByRole("button", { name: /tasks.new_task/i }));
+
+      fireEvent.change(screen.getByPlaceholderText("tasks.field_title_placeholder"), {
+        target: { value: "For agent alpha" },
+      });
+      fireEvent.change(screen.getByPlaceholderText("tasks.field_description_placeholder"), {
+        target: { value: "Chosen once the registry arrived" },
+      });
+      expect(assigneeSelect()).toBeDisabled();
+
+      // Registry arrives; choose alpha by id.
+      useAgentsMock.mockReturnValue(makeQuery(SAMPLE_AGENTS));
+      rerenderSameTree();
+      fireEvent.change(assigneeSelect(), { target: { value: ALPHA_ID } });
+      expect(assigneeSelect()).toHaveValue(ALPHA_ID);
+
+      // Registry updates again and alpha has been renamed. The selection is an
+      // id, so it is still the same agent and still selected.
+      useAgentsMock.mockReturnValue(
+        makeQuery([
+          { id: ALPHA_ID, name: "agent-alpha-renamed" },
+          ...SAMPLE_AGENTS.slice(1),
+        ]),
+      );
+      rerenderSameTree();
+
+      expect(assigneeSelect()).toHaveValue(ALPHA_ID);
+
+      fireEvent.click(screen.getByRole("button", { name: "tasks.submit" }));
+
+      await waitFor(() => {
+        expect(mutate).toHaveBeenCalledWith(
+          expect.objectContaining({ assigned_to: ALPHA_ID }),
         );
       });
     });

@@ -254,7 +254,7 @@ pub(crate) fn spawn_prepared_agent(config: Option<PathBuf>, prepared: PreparedAg
                 "{}",
                 i18n::t_args(
                     "agent-spawn-agent-failed",
-                    &[("error", body["error"].as_str().unwrap_or(&err_fallback))]
+                    &[("error", api_error_message(&body).unwrap_or(&err_fallback))]
                 )
             );
             std::process::exit(1);
@@ -414,7 +414,7 @@ pub(crate) fn cmd_agent_kill(config: Option<PathBuf>, agent_id_str: &str) {
                 "{}",
                 i18n::t_args(
                     "agent-kill-failed",
-                    &[("error", body["error"].as_str().unwrap_or(&err_fallback))]
+                    &[("error", api_error_message(&body).unwrap_or(&err_fallback))]
                 )
             );
             std::process::exit(1);
@@ -494,7 +494,7 @@ pub(crate) fn cmd_agent_delete(config: Option<PathBuf>, name: &str, yes: bool) {
                     "agent-delete-failed-with-reason",
                     &[(
                         "error",
-                        body["error"].as_str().unwrap_or(&i18n::t("error-unknown"))
+                        api_error_message(&body).unwrap_or(&i18n::t("error-unknown"))
                     )]
                 )
             );
@@ -576,7 +576,7 @@ pub(crate) fn cmd_agent_reset_uuid(config: Option<PathBuf>, name: &str, yes: boo
                 "{}",
                 i18n::t_args(
                     "agent-reset-uuid-failed-with-reason",
-                    &[("error", body["error"].as_str().unwrap_or(&err_fallback))]
+                    &[("error", api_error_message(&body).unwrap_or(&err_fallback))]
                 )
             );
             std::process::exit(1);
@@ -651,7 +651,8 @@ pub(crate) fn cmd_agent_routing_show(agent_id_str: &str, json: bool) {
             .send(),
     );
 
-    if let Some(err) = body.get("error").and_then(|e| e.as_str()) {
+    if body.get("error").is_some() {
+        let err = api_error_message(&body).unwrap_or("?");
         eprintln!(
             "{}",
             i18n::t_args("agent-routing-failed", &[("error", err)])
@@ -806,7 +807,7 @@ pub(crate) fn cmd_agent_routing_set(
             "{}",
             i18n::t_args(
                 "agent-routing-failed",
-                &[("error", body["error"].as_str().unwrap_or(&err_fallback))]
+                &[("error", api_error_message(&body).unwrap_or(&err_fallback))]
             )
         );
         std::process::exit(1);
@@ -886,7 +887,7 @@ pub(crate) fn cmd_agent_set(agent_id_str: &str, field: &str, value: &str) {
                         "{}",
                         i18n::t_args(
                             "agent-set-model-failed-with-reason",
-                            &[("error", body["error"].as_str().unwrap_or(&err_fallback))]
+                            &[("error", api_error_message(&body).unwrap_or(&err_fallback))]
                         )
                     );
                     std::process::exit(1);
@@ -996,7 +997,7 @@ fn cmd_agent_set_inference_param(agent_id_str: &str, field: &str, value: &str) {
             "{}",
             i18n::t_args(
                 "agent-set-model-failed-with-reason",
-                &[("error", body["error"].as_str().unwrap_or(&err_fallback))]
+                &[("error", api_error_message(&body).unwrap_or(&err_fallback))]
             )
         );
         std::process::exit(1);
@@ -1116,7 +1117,7 @@ pub(crate) fn spawn_template_agent(
             let err_fallback = i18n::t("error-unknown");
             ui::error(&i18n::t_args(
                 "agent-spawn-failed",
-                &[("error", body["error"].as_str().unwrap_or(&err_fallback))],
+                &[("error", api_error_message(&body).unwrap_or(&err_fallback))],
             ));
             std::process::exit(1);
         }

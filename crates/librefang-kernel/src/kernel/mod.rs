@@ -547,8 +547,8 @@ impl CachedToolList {
 /// Thread-safe cache for prompt-building metadata. Avoids redundant filesystem
 /// scans and skill registry iteration on every incoming message.
 ///
-/// Keyed by workspace path (for workspace metadata) and a sorted skill
-/// allowlist string (for skill metadata). Entries expire after [`PROMPT_CACHE_TTL`].
+/// Keyed by workspace path (for workspace metadata) and an encoded sorted skill allowlist (for skill metadata, see [`PromptMetadataCache::skill_cache_key`]).
+/// Entries expire after [`PROMPT_CACHE_TTL`].
 ///
 /// Invalidated explicitly on skill reload, config reload, or workspace change.
 struct PromptMetadataCache {
@@ -576,13 +576,49 @@ impl PromptMetadataCache {
     }
 
     /// Build a cache key for the skill allowlist.
+    ///
+    /// An empty allowlist means "all enabled skills" and gets its own sentinel so it never shares a slot with `["*"]`, which on the skill path is a literal name that matches nothing (see `classify_required_skills`).
+    /// Names are length-prefixed so `["a,b"]` and `["a", "b"]` cannot alias either.
     fn skill_cache_key(allowlist: &[String]) -> String {
+        use std::fmt::Write as _;
+
         if allowlist.is_empty() {
-            return String::from("*");
+            return String::from("\x1fall\x1f");
         }
         let mut sorted = allowlist.to_vec();
         sorted.sort();
-        sorted.join(",")
+        let mut key = format!("{}:", sorted.len());
+        for name in &sorted {
+            write!(key, "{}:", name.len()).expect("writing to a String cannot fail");
+            key.push_str(name);
+        }
+        key
+    }
+}
+
+#[cfg(test)]
+mod skill_cache_key_tests {
+    use super::PromptMetadataCache;
+
+    fn names(v: &[&str]) -> Vec<String> {
+        v.iter().map(|x| x.to_string()).collect()
+    }
+
+    /// `[]` means every enabled skill while `["*"]` is a literal name that matches nothing, so the two must never share a skill-metadata cache slot; comma-bearing names must not alias a split list either.
+    #[test]
+    fn skill_cache_key_distinguishes_empty_wildcard_and_comma_names() {
+        let key = PromptMetadataCache::skill_cache_key;
+        let empty = key(&[]);
+        let star = key(&names(&["*"]));
+        let comma = key(&names(&["a,b"]));
+        let split = key(&names(&["a", "b"]));
+        let all = [&empty, &star, &comma, &split];
+        for i in 0..all.len() {
+            for j in (i + 1)..all.len() {
+                assert_ne!(all[i], all[j], "keys {i} and {j} alias");
+            }
+        }
+        assert_eq!(key(&names(&["b", "a"])), split, "order must not matter");
     }
 }
 
@@ -1182,6 +1218,10 @@ fn warn_invalid_group_trigger_patterns(manifest: &AgentManifest, agent_name: &st
 
 mod manifest_helpers;
 use manifest_helpers::*;
+// `AgentRegistry::update_tags` applies the same system-tag merge as
+// `update_manifest`, so the one implementation stays reachable from
+// `crate::registry` without widening the helper module itself (#7835 review).
+pub(crate) use manifest_helpers::merge_agent_tags;
 
 // ── Background skill review helpers ────────────────────────────────
 //
@@ -1226,6 +1266,22 @@ fn agent_rule_matches(pattern: &str, agent_id: &str, agent_name: Option<&str>) -
     glob_matches(pattern, agent_id) || agent_name.is_some_and(|name| glob_matches(pattern, name))
 }
 
+/// Every `event_type` the kernel passes to `push_notification`, i.e. every value an `[[notification.agent_rules]]` entry can usefully list in `events`.
+///
+/// Boot validation warns about a rule naming anything outside this list, so an event the kernel emits must appear here or an operator who routes it gets a spurious unknown-event warning.
+pub(crate) const KNOWN_NOTIFICATION_EVENTS: &[&str] = &[
+    "approval_requested",
+    "task_completed",
+    "task_failed",
+    // Provider-safety refusals, split out of task_failed by #3450 so they can be routed separately — a rule listing this is valid and must not be warned about.
+    "content_filtered",
+    "tool_failure",
+    "health_check_failed",
+    "model_migrated",
+    // A turn that exhausted its iteration budget and delivered a partial answer (#8556).
+    "max_iterations",
+];
+
 /// Resolve which targets one notification is delivered to.
 ///
 /// Precedence, most specific first:
@@ -1269,7 +1325,9 @@ fn resolve_notification_targets(
         | "task_failed"
         | "tool_failure"
         | "health_check_failed"
-        | "model_migrated" => notification.alert_channels.clone(),
+        | "model_migrated"
+        // #8556: a capped turn used to fail and reach operators as `task_failed`; now that it delivers a partial answer it must still alert them by default.
+        | "max_iterations" => notification.alert_channels.clone(),
         _ => Vec::new(),
     }
 }

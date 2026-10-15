@@ -236,6 +236,32 @@ There is no structured field to read.
 An agent that wants to branch on the remaining balance must parse a float out of that prose, which is exactly the kind of step models get wrong at the margins — a `$1,234.00` thousands separator or a future wording change breaks it silently.
 Prefer a coarse threshold ("if it looks below ten dollars, stop and notify") over arithmetic that assumes an exact parse, and have the agent surface the raw line to a human when it cannot read a number out of it confidently.
 
+### Catalog entries for authenticated HTTP servers
+
+A catalog entry for a native `sse` or `http` server can map one of its `required_env` credentials to a request header, so installing it from the dashboard catalog or `librefang mcp add` asks for the user's own key and sends it as, for example, a bearer token:
+
+```toml
+[transport]
+type = "http"
+url = "https://mcp.example.com/mcp"
+
+[[required_env]]
+name = "EXAMPLE_API_KEY"
+label = "API Key"
+help = "Create a key in your account settings"
+
+[[headers]]
+name = "Authorization"
+value = "Bearer ${EXAMPLE_API_KEY}"
+```
+
+The installed `[[mcp_servers]]` entry stores the header as the reference `Authorization: Bearer ${EXAMPLE_API_KEY}`, never the key itself; the key is kept in the vault and substituted from the daemon environment each time the connection is opened.
+A key entered in the dashboard catalog is usable immediately; one stored with `librefang mcp add` or `librefang vault set` while the daemon is running reaches the daemon environment at its next start, as for any vault credential.
+A `${NAME}` placeholder may only name a variable the server declares in its `env` list — the catalog loader skips an entry whose placeholder is not one of its `required_env` names, and the same rule applies to a hand-written `headers` entry.
+A missing or blank credential fails the connection with an error naming the header and variable before any request is sent.
+Headers without `${…}` are sent verbatim, as before.
+Installing a server does not grant it to an agent whose `mcp_servers` list neither names it nor is `["*"]`: add its name to that agent's list.
+
 ### MCP Tool Naming
 
 MCP tool naming format:

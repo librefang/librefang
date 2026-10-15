@@ -33,7 +33,7 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use tracing::{debug, warn};
 
@@ -1125,6 +1125,24 @@ fn apply_seccomp_allowlist(_allow_network: bool) -> bool {
     false
 }
 
+/// Removes every complete (`\n`-terminated) line from the front of `pending` and returns them decoded lossily, newline included.
+/// With `at_eof`, a trailing unterminated line is returned too, matching what `read_line` used to yield for it.
+fn take_hook_output_lines(pending: &mut Vec<u8>, at_eof: bool) -> Vec<String> {
+    let end = if at_eof {
+        pending.len()
+    } else {
+        match pending.iter().rposition(|b| *b == b'\n') {
+            Some(pos) => pos + 1,
+            None => return Vec::new(),
+        }
+    };
+    let complete: Vec<u8> = pending.drain(..end).collect();
+    complete
+        .split_inclusive(|b| *b == b'\n')
+        .map(|line| String::from_utf8_lossy(line).into_owned())
+        .collect()
+}
+
 /// Run a hook script and parse the last JSON line of stdout.
 ///
 /// This is the main entry point — picks the right launcher based on
@@ -1406,51 +1424,75 @@ pub async fn run_hook_json(
         let mut stdout_done = false;
         let mut stderr_done = false;
         let mut overflowed = false;
-        let mut out_line = String::new();
-        let mut err_line = String::new();
+        // Raw chunk reads, not `read_line`: `read_line` is not cancel safe, so whenever the other `select!` branch won, the half-read line held inside the dropped future was lost and the stdout JSON came back truncated.
+        // It also failed with InvalidData on a non-UTF-8 line, which stopped draining that pipe and stalled the child until the hook timeout.
+        // `read` into a caller-owned buffer loses nothing on cancellation, lines are split here and decoded lossily, and the byte cap now counts every byte read, so a stream without newlines cannot grow unbounded either.
+        let mut out_chunk = vec![0u8; 8192];
+        let mut err_chunk = vec![0u8; 8192];
+        let mut out_pending: Vec<u8> = Vec::new();
+        let mut err_pending: Vec<u8> = Vec::new();
         while !(stdout_done && stderr_done) {
-            tokio::select! {
-                res = stdout_reader.read_line(&mut out_line), if !stdout_done => match res {
-                    Ok(0) => stdout_done = true,
-                    Ok(n) => {
-                        stdout_total = stdout_total.saturating_add(n);
-                        if stdout_total > HOOK_STREAM_BYTE_CAP {
-                            overflowed = true;
-                            break;
-                        }
-                        stdout_lines.push(out_line.trim_end().to_string());
-                        out_line.clear();
+            let (is_stdout, res) = tokio::select! {
+                res = stdout_reader.read(&mut out_chunk), if !stdout_done => (true, res),
+                res = stderr_reader.read(&mut err_chunk), if !stderr_done => (false, res),
+            };
+            let (chunk, pending, total, done) = if is_stdout {
+                (
+                    &out_chunk,
+                    &mut out_pending,
+                    &mut stdout_total,
+                    &mut stdout_done,
+                )
+            } else {
+                (
+                    &err_chunk,
+                    &mut err_pending,
+                    &mut stderr_total,
+                    &mut stderr_done,
+                )
+            };
+            let lines = match res {
+                Ok(0) => {
+                    *done = true;
+                    // An unterminated final line still counts as a line.
+                    take_hook_output_lines(pending, true)
+                }
+                Ok(n) => {
+                    *total = total.saturating_add(n);
+                    if *total > HOOK_STREAM_BYTE_CAP {
+                        overflowed = true;
+                        break;
                     }
-                    Err(e) => {
-                        warn!("hook stdout read error: {e}");
-                        stdout_done = true;
-                    }
-                },
-                res = stderr_reader.read_line(&mut err_line), if !stderr_done => match res {
-                    Ok(0) => stderr_done = true,
-                    Ok(n) => {
-                        stderr_total = stderr_total.saturating_add(n);
-                        if stderr_total > HOOK_STREAM_BYTE_CAP {
-                            overflowed = true;
-                            break;
-                        }
-                        // Stream each non-empty line to tracing as it arrives so
-                        // operators can monitor long-running hooks live (#3256).
-                        // The full line stays in `stderr_text` either way — the
-                        // post-exit `debug!` summary below is independent.
-                        if let Some(trimmed) = trim_for_log(&err_line) {
-                            tracing::info!(
-                                target: PLUGIN_STDERR_TARGET,
-                                hook = %hook_name,
-                                script = %script_path,
-                                "{trimmed}"
-                            );
-                        }
-                        stderr_text.push_str(&err_line);
-                        err_line.clear();
-                    }
-                    Err(_) => stderr_done = true,
-                },
+                    pending.extend_from_slice(&chunk[..n]);
+                    take_hook_output_lines(pending, false)
+                }
+                Err(e) => {
+                    warn!(
+                        "hook {} read error: {e}",
+                        if is_stdout { "stdout" } else { "stderr" }
+                    );
+                    *done = true;
+                    Vec::new()
+                }
+            };
+            for line in lines {
+                if is_stdout {
+                    stdout_lines.push(line.trim_end().to_string());
+                    continue;
+                }
+                // Stream each non-empty line to tracing as it arrives so
+                // operators can monitor long-running hooks live (#3256).
+                // The full line stays in `stderr_text` either way — the
+                // post-exit `debug!` summary below is independent.
+                if let Some(trimmed) = trim_for_log(&line) {
+                    tracing::info!(
+                        target: PLUGIN_STDERR_TARGET,
+                        hook = %hook_name,
+                        script = %script_path,
+                        "{trimmed}"
+                    );
+                }
+                stderr_text.push_str(&line);
             }
         }
 

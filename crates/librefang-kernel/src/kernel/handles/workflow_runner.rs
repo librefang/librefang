@@ -589,7 +589,16 @@ impl kernel_handle::WorkflowRunner for LibreFangKernel {
             let exec_result: Result<Result<String, String>, ()> = match timeout {
                 Some(d) => match tokio::time::timeout(d, exec_fut).await {
                     Ok(inner) => Ok(inner),
-                    Err(_elapsed) => Err(()),
+                    Err(_elapsed) => {
+                        // Dropping `execute_run` mid-step leaves the engine record in `Running` with nothing driving it, so drive it to the same terminal `Failed` the agent is told about.
+                        // This runs whether or not a task is tracked and whether or not the timeout is notified: the run-state fix is independent of agent delivery.
+                        kernel_arc
+                            .workflows
+                            .engine
+                            .fail_running_run(run_id, &render_workflow_timeout_text(d.as_secs()))
+                            .await;
+                        Err(())
+                    }
                 },
                 None => Ok(exec_fut.await),
             };

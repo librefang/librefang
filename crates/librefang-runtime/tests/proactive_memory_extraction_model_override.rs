@@ -114,6 +114,7 @@ impl TaskQueue for OverrideKernel {
         _: &str,
         _: Option<&str>,
         _: Option<&str>,
+        _opts: &librefang_kernel_handle::TaskPostOptions,
     ) -> Result<String, librefang_kernel_handle::KernelOpError> {
         Err("stub".into())
     }
@@ -285,6 +286,7 @@ impl librefang_runtime::llm_driver::LlmDriver for SharedRecordingDriver {
             .unwrap()
             .push(request.model.clone());
         Ok(librefang_runtime::llm_driver::CompletionResponse {
+            text_synthesized_from_thinking: false,
             content: vec![ContentBlock::Text {
                 text: self.response_json.clone(),
                 provider_metadata: None,

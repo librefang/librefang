@@ -1044,11 +1044,14 @@ impl TriggerEngine {
                 trigger.fire_count += 1;
                 state_mutated = true;
                 // Stamp the window that was actually consulted, and the trigger-wide entry alongside it so `last_fired_at` on disk keeps meaning "when this trigger last fired" for operators and for restart recovery.
-                self.last_fired.insert((trigger.id, subject.clone()), now);
+                // A zero cooldown never consults a per-subject window, so stamping one would only add an entry the prune has to clean up.
+                if subject.is_none() || !cooldown.is_zero() {
+                    self.last_fired.insert((trigger.id, subject.clone()), now);
+                }
                 if subject.is_some() {
                     self.last_fired.insert((trigger.id, None), now);
                 }
-                // Pruning is deferred to after the loop on purpose: `entry` is a live `RefMut` on this trigger's shard, and the prune has to read `self.triggers` to learn the longest window in use.
+                // Pruning is deferred to after the loop on purpose: `entry` is a live `RefMut` on this trigger's shard, and the prune has to read `self.triggers` to learn each trigger's window.
                 // Same-thread write-then-read on one shard is the self-deadlock this function already documents for `DashMap::len()` above.
                 inserted_cooldown = true;
 
@@ -1140,7 +1143,9 @@ impl TriggerEngine {
     /// Drop cooldown entries that can no longer suppress anything.
     ///
     /// Per-subject windows are unbounded in principle — one entry per task id a trigger ever saw — so without this a long-lived daemon on a busy board would accumulate them for the life of the process.
-    /// An entry older than the longest window any trigger could be using is dead weight: the check that consults it can only ever conclude "elapsed", so removing it is invisible.
+    /// A per-subject entry older than its own trigger's window is dead weight: the check that consults it can only ever conclude "elapsed", so removing it is invisible.
+    /// The horizon is per trigger rather than the installation-wide maximum, so one long-cooldown trigger cannot keep every other trigger's stale windows alive (and the map above the threshold, re-scanned on every fire).
+    /// Per-subject entries of a trigger that no longer exists, or whose window is zero, are dropped as well.
     ///
     /// Runs only once the map is larger than a fire could plausibly need, so the common path pays a length check rather than a scan.
     fn prune_expired_cooldowns(&self, now: DateTime<Utc>) {
@@ -1149,22 +1154,29 @@ impl TriggerEngine {
             return;
         }
         let default_cooldown = self.default_cooldown_secs.load(Ordering::Relaxed);
-        let longest = self
+        // Snapshot every horizon before the retain: looking a trigger up inside the retain closure would take a `triggers` shard lock while holding a `last_fired` shard write lock, the reverse of the order the evaluator loop uses, and risk an ABBA deadlock.
+        // `cooldown_secs` is a `u64` that arrives from the API unvalidated (`routes/workflows/triggers.rs` reads it with `as_u64` and neither clamps nor bounds it), so this arithmetic has to survive values no sane operator would type.
+        // `Duration::seconds` panics past roughly 9.2e15, and a bare `as i64` on something larger wraps negative — a negative horizon makes the retain below drop every window including the live ones, silently disabling same-subject suppression.
+        // Saturating keeps "absurdly large" meaning "effectively never expires", which is what the operator asked for.
+        let horizons: std::collections::HashMap<TriggerId, chrono::Duration> = self
             .triggers
             .iter()
-            .map(|t| t.cooldown_secs.unwrap_or(default_cooldown))
-            .max()
-            .unwrap_or(default_cooldown);
-        // `cooldown_secs` is a `u64` that arrives from the API unvalidated (`routes/workflows/triggers.rs` reads it with `as_u64` and neither clamps nor bounds it), so this arithmetic has to survive values no sane operator would type.
-        // `Duration::seconds` panics past roughly 9.2e15, and a bare `as i64` on something larger wraps negative — a negative horizon makes the retain below drop every window including the live ones, silently disabling same-subject suppression installation-wide.
-        // Saturating keeps "absurdly large" meaning "effectively never expires", which is what the operator asked for.
-        let horizon = i64::try_from(longest)
-            .ok()
-            .and_then(chrono::Duration::try_seconds)
-            .unwrap_or(chrono::Duration::MAX);
+            .map(|t| {
+                let secs = t.cooldown_secs.unwrap_or(default_cooldown);
+                let horizon = i64::try_from(secs)
+                    .ok()
+                    .and_then(chrono::Duration::try_seconds)
+                    .unwrap_or(chrono::Duration::MAX);
+                (t.id, horizon)
+            })
+            .collect();
         // Keep the trigger-wide entries regardless: they are bounded by the trigger count and back `last_fired_at` on disk.
-        self.last_fired
-            .retain(|(_, subject), last| subject.is_none() || now - *last < horizon);
+        self.last_fired.retain(|(id, subject), last| {
+            subject.is_none()
+                || horizons
+                    .get(id)
+                    .is_some_and(|horizon| !horizon.is_zero() && now - *last < *horizon)
+        });
     }
 
     /// Drop every cooldown window belonging to a trigger — the trigger-wide entry and each per-subject one (#6756).
@@ -4612,7 +4624,98 @@ mod tests {
         }
     }
 
-    /// The prune horizon has to be the longest window in use, not any window: a short-cooldown trigger must not evict a long-cooldown trigger's live entries.
+    /// The prune horizon is each trigger's own window: a long-cooldown trigger must not keep another trigger's stale per-subject windows alive.
+    /// Before this, one trigger at 86400s made every busy 5s trigger's windows survive a day and kept the map above the prune threshold, re-scanned on every fire.
+    #[test]
+    fn a_long_cooldown_trigger_does_not_keep_other_triggers_stale_windows_alive() {
+        let engine = TriggerEngine::new();
+        let owner = AgentId::new();
+        let brief = engine
+            .register_with_target(
+                owner,
+                TriggerPattern::TaskCompleted {
+                    creator_match: None,
+                },
+                "brief: {{event}}".to_string(),
+                0,
+                None,
+                Some(5),
+                None,
+                None,
+            )
+            .unwrap();
+        let patient = engine
+            .register_with_target(
+                owner,
+                TriggerPattern::TaskClaimed {
+                    creator_match: None,
+                },
+                "patient: {{event}}".to_string(),
+                0,
+                None,
+                Some(86_400),
+                None,
+                None,
+            )
+            .unwrap();
+
+        let middling = Utc::now() - chrono::Duration::seconds(600);
+        engine
+            .last_fired
+            .insert((patient, Some("kept".to_string())), middling);
+        for i in 0..4_200 {
+            engine
+                .last_fired
+                .insert((brief, Some(format!("old-{i}"))), middling);
+        }
+
+        engine.evaluate_with_resolver(&completion_of("fresh", owner), |_| None);
+
+        assert!(
+            !engine
+                .last_fired
+                .iter()
+                .any(|e| e.key().0 == brief && e.key().1.as_deref().is_some_and(|s| s.starts_with("old-"))),
+            "windows stale for their own trigger must be pruned even when another trigger's cooldown is longer"
+        );
+        assert!(engine
+            .last_fired
+            .contains_key(&(patient, Some("kept".to_string()))));
+        assert!(engine
+            .last_fired
+            .contains_key(&(brief, Some("fresh".to_string()))));
+        assert!(engine.last_fired.contains_key(&(brief, None)));
+    }
+
+    /// A zero cooldown never consults a per-subject window, so firing must not stamp one; the trigger-wide entry is still stamped for `last_fired_at`.
+    #[test]
+    fn a_zero_cooldown_trigger_does_not_stamp_per_subject_windows() {
+        let engine = TriggerEngine::new();
+        let owner = AgentId::new();
+        let tid = engine
+            .register_with_target(
+                owner,
+                TriggerPattern::TaskCompleted {
+                    creator_match: None,
+                },
+                "zero: {{event}}".to_string(),
+                0,
+                None,
+                Some(0),
+                None,
+                None,
+            )
+            .unwrap();
+
+        let (matches, _) = engine.evaluate_with_resolver(&completion_of("t1", owner), |_| None);
+        assert_eq!(matches.len(), 1);
+        assert!(!engine
+            .last_fired
+            .contains_key(&(tid, Some("t1".to_string()))));
+        assert!(engine.last_fired.contains_key(&(tid, None)));
+    }
+
+    /// The prune horizon has to be each trigger's own window, not any window: a short-cooldown trigger must not evict a long-cooldown trigger's live entries.
     /// Without this, one trigger at 5s would cut another's hour-long window down to five seconds.
     #[test]
     fn the_prune_horizon_respects_the_longest_window_in_use() {

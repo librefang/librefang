@@ -21,6 +21,7 @@
 //! +-------------------+
 //! ```
 
+use crate::consolidation::{identifier_tokens, TenantKey};
 use crate::knowledge::KnowledgeStore;
 use crate::semantic::SemanticStore;
 use crate::structured::StructuredStore;
@@ -845,12 +846,10 @@ impl ProactiveMemoryStore {
             f
         });
         let mut existing = if let Some(ref qe) = query_embedding {
-            self.semantic.recall_with_embedding(
-                &item.content,
-                fetch_limit,
-                filter.clone(),
-                Some(qe),
-            )?
+            // An empty query keeps this a pure nearest-neighbour lookup.
+            // A non-empty one would fuse in the bm25 ranking that search and recall use (#8521), and then rows sharing a common word with the new fact but scoring low on cosine could fill the small candidate window ahead of the near-duplicate `decide_action` exists to find.
+            self.semantic
+                .recall_with_embedding("", fetch_limit, filter.clone(), Some(qe))?
         } else {
             // M13: union the result sets across the top distinctive
             // keywords instead of LIKE-substring matching on just the
@@ -1243,10 +1242,13 @@ impl ProactiveMemoryStore {
 
             // Add relation (skip if already exists)
             let relation_type = parse_relation_type(&triple.relation);
-            match self
-                .knowledge
-                .has_relation(&source_id, &relation_type, &target_id, peer_id)
-            {
+            match self.knowledge.has_relation(
+                &source_id,
+                &relation_type,
+                &target_id,
+                agent_id,
+                peer_id,
+            ) {
                 Ok(true) => {
                     tracing::debug!(
                         "Skipping duplicate relation: {} -> {} -> {}",
@@ -1287,7 +1289,10 @@ impl ProactiveMemoryStore {
     ///
     /// Extracts candidate entity names from the query, then does targeted
     /// graph lookups instead of loading all relations.
-    fn graph_context(&self, query: &str) -> Option<String> {
+    ///
+    /// `agent_id` is the raw id string `store_relations` writes into `relations.agent_id`; every lookup is scoped to it so one agent's recall never surfaces another agent's triples.
+    /// The unscoped `query_graph` read every agent's and every user's graph into the prompt.
+    fn graph_context(&self, query: &str, agent_id: &str) -> Option<String> {
         // Extract capitalized words and significant terms as entity candidates
         let candidates = extract_entity_candidates(query);
         if candidates.is_empty() {
@@ -1299,12 +1304,16 @@ impl ProactiveMemoryStore {
 
         for candidate in &candidates {
             // Query as source
-            if let Ok(matches) = self.knowledge.query_graph(GraphPattern {
-                source: Some(candidate.clone()),
-                relation: None,
-                target: None,
-                max_depth: 1,
-            }) {
+            if let Ok(matches) = self.knowledge.query_graph_scoped(
+                GraphPattern {
+                    source: Some(candidate.clone()),
+                    relation: None,
+                    target: None,
+                    max_depth: 1,
+                },
+                Some(agent_id),
+                None,
+            ) {
                 for m in matches {
                     let key = format!("{}-{:?}-{}", m.source.id, m.relation.relation, m.target.id);
                     if seen.insert(key) {
@@ -1313,12 +1322,16 @@ impl ProactiveMemoryStore {
                 }
             }
             // Query as target
-            if let Ok(matches) = self.knowledge.query_graph(GraphPattern {
-                source: None,
-                relation: None,
-                target: Some(candidate.clone()),
-                max_depth: 1,
-            }) {
+            if let Ok(matches) = self.knowledge.query_graph_scoped(
+                GraphPattern {
+                    source: None,
+                    relation: None,
+                    target: Some(candidate.clone()),
+                    max_depth: 1,
+                },
+                Some(agent_id),
+                None,
+            ) {
                 for m in matches {
                     let key = format!("{}-{:?}-{}", m.source.id, m.relation.relation, m.target.id);
                     if seen.insert(key) {
@@ -1351,12 +1364,17 @@ impl ProactiveMemoryStore {
     /// Also includes relevant knowledge graph relations if any entity
     /// names appear in the memory content. Honors the configured
     /// `format_context_max_chars` (H4 review-followup #8).
-    pub fn format_context_with_query(&self, memories: &[MemoryItem], query: &str) -> String {
+    pub fn format_context_with_query(
+        &self,
+        memories: &[MemoryItem],
+        query: &str,
+        agent_id: &str,
+    ) -> String {
         let max_chars = self.read_config().format_context_max_chars;
         let mut context = librefang_types::memory::format_memories_with_budget(memories, max_chars);
 
         // Append knowledge graph context if relevant
-        if let Some(graph_ctx) = self.graph_context(query) {
+        if let Some(graph_ctx) = self.graph_context(query, agent_id) {
             context.push('\n');
             context.push_str(&graph_ctx);
         }
@@ -1555,11 +1573,10 @@ impl ProactiveMemoryStore {
 
         // Preserve the existing agent-scoped graph enrichment, but never add
         // an Agent-level synthetic item to a User/Session-filtered result set.
-        if parsed_agent_id.is_some()
-            && level.is_none_or(|value| value == MemoryLevel::Agent)
-            && items.len() < limit
-        {
-            if let Some(graph_context) = self.graph_context(query) {
+        if let Some(raw_agent_id) = agent_id.filter(|_| {
+            level.is_none_or(|value| value == MemoryLevel::Agent) && items.len() < limit
+        }) {
+            if let Some(graph_context) = self.graph_context(query, raw_agent_id) {
                 items.push(
                     MemoryItem::new(graph_context, MemoryLevel::Agent)
                         .with_category("knowledge_graph"),
@@ -1658,9 +1675,9 @@ impl ProactiveMemoryStore {
     /// Consolidate memories: merge near-duplicates and remove stale entries.
     ///
     /// This is the mem0-style maintenance operation that keeps memory clean:
-    /// 1. Find duplicate groups using semantic similarity
-    /// 2. Merge each group into the most recently accessed memory
-    /// 3. Soft-delete the older duplicates
+    /// 1. Find duplicate groups (see [`Self::find_duplicates`])
+    /// 2. Keep the most trusted member of each group — highest confidence, then newest
+    /// 3. Soft-delete the others whose content the keeper covers
     ///
     /// Returns the number of memories merged (soft-deleted).
     pub async fn consolidate(&self, user_id: &str) -> LibreFangResult<u64> {
@@ -1677,22 +1694,37 @@ impl ProactiveMemoryStore {
                 continue;
             }
 
-            // Keep the most recently created memory as the "winner".
-            // Note: MemoryItem doesn't expose accessed_at; created_at is the best
-            // available signal here. The newest duplicate typically has the most
-            // up-to-date content from the latest extraction.
-            let Some(winner) = group.iter().max_by_key(|m| m.created_at).cloned() else {
+            // The keeper is the member the store trusts most, and only then the newest (#8524).
+            // Newest-wins let a fresh low-confidence extraction displace an established fact.
+            // created_at breaks ties rather than accessed_at, which every recall bumps and so measures how often a row was retrieved, not how current its content is.
+            let Some(winner) = group
+                .iter()
+                .max_by(|a, b| {
+                    a.confidence
+                        .unwrap_or(0.0)
+                        .total_cmp(&b.confidence.unwrap_or(0.0))
+                        .then(a.created_at.cmp(&b.created_at))
+                })
+                .cloned()
+            else {
                 continue;
             };
+            let winner_lower = winner.content.to_lowercase();
 
-            // Soft-delete all others
+            // Soft-delete the others. Nothing is folded into the keeper, so a loser is only deleted when the keeper already says everything it says.
+            // A loser that strictly contains the keeper's text (the substring fast path in `find_duplicates`) carries more than the keeper and is kept (#8524).
             for item in &group {
-                if item.id != winner.id {
-                    if let Ok(uuid) = uuid::Uuid::parse_str(&item.id) {
-                        let mid = MemoryId(uuid);
-                        if self.semantic.forget(mid).is_ok() {
-                            merged_count += 1;
-                        }
+                if item.id == winner.id {
+                    continue;
+                }
+                let item_lower = item.content.to_lowercase();
+                if item_lower.len() > winner_lower.len() && item_lower.contains(&winner_lower) {
+                    continue;
+                }
+                if let Ok(uuid) = uuid::Uuid::parse_str(&item.id) {
+                    let mid = MemoryId(uuid);
+                    if self.semantic.forget(mid).is_ok() {
+                        merged_count += 1;
                     }
                 }
             }
@@ -1744,12 +1776,12 @@ impl ProactiveMemoryStore {
     /// Find duplicate/near-duplicate memories for a user/agent.
     ///
     /// Uses a tiered similarity strategy (mem0-style):
-    /// 1. **Vector cosine similarity** (when stored embeddings are available) —
-    ///    the most accurate method, matching mem0's dedup quality.
+    /// 1. **Vector cosine similarity** (when stored embeddings are available), against `max(duplicate_threshold, DUPLICATE_COSINE_FLOOR)`.
     /// 2. **Substring containment** — catches exact and super/sub-string matches.
-    /// 3. **Jaccard word overlap** — fallback when no embeddings are stored.
+    /// 3. **Jaccard word overlap** — fallback when no embeddings are stored, against the configured `duplicate_threshold`.
     ///
-    /// Uses configurable `duplicate_threshold` from config.
+    /// A pair is only ever a candidate inside one [`TenantKey`] partition (peer, chat, session and storage scope) and only when both rows carry the same identifier tokens (#8524).
+    /// A group is complete-linkage: a member must be a duplicate of every other member, not just of the seed, because "A ~ B and A ~ C" does not make B and C duplicates.
     pub async fn find_duplicates(
         &self,
         user_id: &str,
@@ -1796,7 +1828,50 @@ impl ProactiveMemoryStore {
             );
         }
 
+        // Partition keys and identifier sets, computed once per row (#8524).
+        // `peer_id` is a column `MemoryItem` does not carry, so it is read back here; a failed read aborts the pass rather than treating every row as unscoped and merging across users.
+        // Every read path enforces the peer, chat and session axes, so merging across them soft-deletes one tenant's fact beyond the reach of any reader — the same rule `ConsolidationEngine` applies (#5227, #7605).
+        let peer_ids = self.semantic.get_peer_ids_batch(&id_refs)?;
+        let lowered: Vec<String> = all_items.iter().map(|m| m.content.to_lowercase()).collect();
+        let partitions: Vec<TenantKey> = all_items
+            .iter()
+            .map(|m| {
+                TenantKey::from_metadata(
+                    peer_ids.get(&m.id).map(String::as_str),
+                    m.scope.as_deref().unwrap_or_else(|| m.level.scope_str()),
+                    &m.metadata,
+                )
+            })
+            .collect();
+        let identifiers: Vec<std::collections::BTreeSet<String>> =
+            lowered.iter().map(|c| identifier_tokens(c)).collect();
+
         let threshold = self.read_config().duplicate_threshold;
+        let is_duplicate = |a: usize, b: usize| -> bool {
+            if partitions[a] != partitions[b] || identifiers[a] != identifiers[b] {
+                return false;
+            }
+            // Substring containment (fast path). `consolidate` never deletes the containing row in favour of the contained one.
+            if lowered[a].contains(&lowered[b]) || lowered[b].contains(&lowered[a]) {
+                return true;
+            }
+            // Tiered similarity: prefer vector cosine when both have embeddings, fall back to Jaccard word overlap otherwise.
+            // Each metric is held to a cut-off on its own scale (#8524): `duplicate_threshold` is calibrated as word overlap, where 0.85 means near-verbatim, while cosine 0.85 on a sentence embedding means "same topic".
+            let cosine = match (
+                embeddings.get(&all_items[a].id),
+                embeddings.get(&all_items[b].id),
+            ) {
+                // Not comparable (dimension mismatch, zero vector) falls back to text similarity rather than 0.0, which would silently suppress legitimate dedup candidates (#3536).
+                (Some(ea), Some(eb)) => librefang_types::memory::cosine_similarity(ea, eb),
+                _ => None,
+            };
+            match cosine {
+                Some(similarity) => similarity > threshold.max(DUPLICATE_COSINE_FLOOR),
+                None => {
+                    librefang_types::memory::text_similarity(&lowered[a], &lowered[b]) > threshold
+                }
+            }
+        };
 
         let mut used = vec![false; all_items.len()];
         let mut groups: Vec<Vec<MemoryItem>> = Vec::new();
@@ -1806,53 +1881,20 @@ impl ProactiveMemoryStore {
                 continue;
             }
             used[i] = true; // Mark seed so it cannot be absorbed into a later group
-            let mut group = vec![all_items[i].clone()];
-            let a_lower = all_items[i].content.to_lowercase();
-            let emb_a = embeddings.get(&all_items[i].id);
+            let mut members = vec![i];
 
-            for j in (i + 1)..all_items.len() {
-                if used[j] {
+            for (j, used_j) in used.iter_mut().enumerate().skip(i + 1) {
+                if *used_j {
                     continue;
                 }
-                let b_lower = all_items[j].content.to_lowercase();
-
-                // Check substring containment (fast path)
-                let is_substring =
-                    a_lower.contains(&b_lower) || b_lower.contains(&a_lower) || a_lower == b_lower;
-
-                if is_substring {
-                    group.push(all_items[j].clone());
-                    used[j] = true;
-                    continue;
-                }
-
-                // Tiered similarity: prefer vector cosine when both have embeddings,
-                // fall back to Jaccard word overlap otherwise.
-                let emb_b = embeddings.get(&all_items[j].id);
-                let similarity = match (emb_a, emb_b) {
-                    (Some(a), Some(b)) => {
-                        // Vector cosine similarity (mem0-quality dedup).
-                        // Fall back to text similarity when vectors are not
-                        // comparable; treating that case as 0.0 would silently
-                        // suppress legitimate dedup candidates (#3536).
-                        librefang_types::memory::cosine_similarity(a, b).unwrap_or_else(|| {
-                            librefang_types::memory::text_similarity(&a_lower, &b_lower)
-                        })
-                    }
-                    _ => {
-                        // Jaccard word overlap fallback
-                        librefang_types::memory::text_similarity(&a_lower, &b_lower)
-                    }
-                };
-
-                if similarity > threshold {
-                    group.push(all_items[j].clone());
-                    used[j] = true;
+                if members.iter().all(|&k| is_duplicate(k, j)) {
+                    members.push(j);
+                    *used_j = true;
                 }
             }
 
-            if group.len() > 1 {
-                groups.push(group);
+            if members.len() > 1 {
+                groups.push(members.into_iter().map(|k| all_items[k].clone()).collect());
             }
         }
 
@@ -1961,9 +2003,7 @@ impl ProactiveMemoryStore {
     /// Consolidation wrapper. Requires the `delete` capability on the
     /// `proactive` namespace, not merely `write` (#7808).
     ///
-    /// Consolidation merges each near-duplicate group into its newest member and soft-deletes the
-    /// rest, so its effect on the store is deletion regardless of how the operation is named — and
-    /// the gate has to match the effect, not the name.
+    /// Consolidation keeps the most trusted member of each near-duplicate group and soft-deletes the rest, so its effect on the store is deletion regardless of how the operation is named — and the gate has to match the effect, not the name.
     /// This is the same capability [`Self::reset_with_guard`] demands for the same reason.
     pub async fn consolidate_with_guard(
         &self,
@@ -2237,7 +2277,7 @@ impl ProactiveMemory for ProactiveMemoryStore {
         // Enrich with knowledge graph: if entities in query match graph nodes,
         // synthesize a context memory from graph relations.
         if items.len() < limit {
-            if let Some(graph_ctx) = self.graph_context(query) {
+            if let Some(graph_ctx) = self.graph_context(query, user_id) {
                 items.push(
                     MemoryItem::new(graph_ctx, MemoryLevel::Agent).with_category("knowledge_graph"),
                 );
@@ -2629,6 +2669,14 @@ fn parse_relation_type(s: &str) -> RelationType {
 /// hits this floor a background `consolidate` task is spawned and the
 /// entry is removed.
 const AUTO_CONSOLIDATE_EVERY: u32 = 10;
+
+/// Lowest cosine similarity at which `find_duplicates` treats two stored embeddings as the same memory (#8524).
+///
+/// `duplicate_threshold` (default 0.85) is calibrated for Jaccard word overlap, where 0.85 already means near-verbatim.
+/// Cosine 0.85 between sentence embeddings means "about the same topic": measured on a production store, four out of five rows consolidation deleted shared under a fifth of their words with anything that survived.
+/// The cosine path therefore uses `max(duplicate_threshold, DUPLICATE_COSINE_FLOOR)`, so an operator can still tighten it but the shared knob can no longer loosen it into topic clustering.
+/// 0.95 is where embedding cosine stops separating paraphrases from distinct statements about one subject.
+const DUPLICATE_COSINE_FLOOR: f32 = 0.95;
 
 /// Idle window (in hours) before a `consolidation_counters` entry is
 /// considered stale and reclaimed by the maintenance sweep (M11). Any
@@ -4805,6 +4853,89 @@ mod tests {
         assert_eq!(matches.len(), 1);
     }
 
+    /// Relations are owned per agent, so a second agent's identical triple must be stored for that agent rather than dropped as a duplicate of the first agent's row.
+    #[tokio::test]
+    async fn test_store_relations_dedup_is_per_agent() {
+        let substrate = Arc::new(MemorySubstrate::open_in_memory(0.1).unwrap());
+        let store = ProactiveMemoryStore::with_default_config(substrate.clone());
+        let triples = vec![librefang_types::memory::RelationTriple {
+            subject: "Bob".to_string(),
+            subject_type: "person".to_string(),
+            relation: "works_at".to_string(),
+            object: "Acme".to_string(),
+            object_type: "organization".to_string(),
+        }];
+        let agent_a = AgentId::new().to_string();
+        let agent_b = AgentId::new().to_string();
+        store.store_relations(&triples, &agent_a, None);
+        store.store_relations(&triples, &agent_b, None);
+        store.store_relations(&triples, &agent_b, None);
+
+        for agent in [&agent_a, &agent_b] {
+            let matches = substrate
+                .knowledge()
+                .query_graph_scoped(
+                    GraphPattern {
+                        source: Some("Bob".to_string()),
+                        relation: None,
+                        target: None,
+                        max_depth: 1,
+                    },
+                    Some(agent),
+                    None,
+                )
+                .unwrap();
+            assert_eq!(matches.len(), 1, "agent {agent} must own exactly one copy");
+        }
+    }
+
+    /// Knowledge-graph enrichment of search must only read the searching agent's triples, never another agent's.
+    #[tokio::test]
+    async fn test_search_graph_enrichment_is_agent_scoped() {
+        let substrate = Arc::new(MemorySubstrate::open_in_memory(0.1).unwrap());
+        let store = ProactiveMemoryStore::with_default_config(substrate.clone());
+        let agent_a = AgentId::new().to_string();
+        let agent_b = AgentId::new().to_string();
+        store.store_relations(
+            &[librefang_types::memory::RelationTriple {
+                subject: "Alice".to_string(),
+                subject_type: "person".to_string(),
+                relation: "works_at".to_string(),
+                object: "Acme".to_string(),
+                object_type: "organization".to_string(),
+            }],
+            &agent_a,
+            None,
+        );
+
+        let graph_items = |items: Vec<MemoryItem>| -> Vec<String> {
+            items
+                .into_iter()
+                .filter(|i| i.category.as_deref() == Some("knowledge_graph"))
+                .map(|i| i.content)
+                .collect()
+        };
+
+        let b_items = graph_items(
+            store
+                .search("Where does Alice work?", &agent_b, 5)
+                .await
+                .unwrap(),
+        );
+        assert!(
+            b_items.is_empty(),
+            "agent B must not see agent A's graph: {b_items:?}"
+        );
+        let a_items = graph_items(
+            store
+                .search("Where does Alice work?", &agent_a, 5)
+                .await
+                .unwrap(),
+        );
+        assert_eq!(a_items.len(), 1);
+        assert!(a_items[0].contains("Acme"));
+    }
+
     #[tokio::test]
     async fn test_consolidate_merges_duplicates() {
         let substrate = MemorySubstrate::open_in_memory(0.1).unwrap();
@@ -4849,6 +4980,77 @@ mod tests {
 
         let count_after = store.count(&agent_id, None).unwrap();
         assert_eq!(count_after, 1);
+    }
+
+    /// `consolidate` must not merge near-duplicates that belong to different tenants (peer, chat scope or session scope): the losing row would be soft-deleted beyond the reach of its own tenant's reads.
+    #[tokio::test]
+    async fn test_consolidate_does_not_merge_across_tenants() {
+        let substrate = MemorySubstrate::open_in_memory(0.1).unwrap();
+        let store = ProactiveMemoryStore::with_default_config(Arc::new(substrate));
+        let agent = AgentId::new();
+        let agent_str = agent.to_string();
+        let stamped = |key: &str, value: &str| {
+            let mut m = HashMap::new();
+            m.insert(key.to_string(), serde_json::json!(value));
+            m
+        };
+        let put =
+            |content: &str, metadata: HashMap<String, serde_json::Value>, peer: Option<&str>| {
+                store
+                    .semantic
+                    .remember_with_embedding_and_peer(
+                        agent,
+                        content,
+                        MemorySource::Conversation,
+                        scopes::USER,
+                        metadata,
+                        None,
+                        None,
+                        None,
+                        librefang_types::memory::MemoryModality::Text,
+                        peer,
+                    )
+                    .unwrap();
+            };
+
+        // Same text, different sessions.
+        put(
+            "User likes tea",
+            stamped(SESSION_SCOPE_METADATA_KEY, "s1"),
+            None,
+        );
+        put(
+            "User likes tea and coffee",
+            stamped(SESSION_SCOPE_METADATA_KEY, "s2"),
+            None,
+        );
+        // Same text, different chats.
+        put(
+            "Lives in Berlin",
+            stamped(CHAT_SCOPE_METADATA_KEY, "dm"),
+            None,
+        );
+        put(
+            "Lives in Berlin",
+            stamped(CHAT_SCOPE_METADATA_KEY, "group"),
+            None,
+        );
+        // Same text, different peers.
+        put("Owns a bicycle", HashMap::new(), Some("peer-a"));
+        put("Owns a bicycle", HashMap::new(), Some("peer-b"));
+
+        assert!(store
+            .find_duplicates(&agent_str, None)
+            .await
+            .unwrap()
+            .is_empty());
+        assert_eq!(store.consolidate(&agent_str).await.unwrap(), 0);
+        assert_eq!(store.count(&agent_str, None).unwrap(), 6);
+
+        // Within one tenant the duplicate is still merged.
+        put("Owns a bicycle", HashMap::new(), Some("peer-a"));
+        assert_eq!(store.consolidate(&agent_str).await.unwrap(), 1);
+        assert_eq!(store.count(&agent_str, None).unwrap(), 6);
     }
 
     #[test]
@@ -5600,5 +5802,236 @@ mod tests {
             matches!(err, Err(LibreFangError::AuthDenied(_))),
             "find_duplicates_with_guard must deny a caller with no proactive read; got {err:?}"
         );
+    }
+
+    // -----------------------------------------------------------------
+    // #8524 — auto-consolidation must not delete non-duplicates.
+    // -----------------------------------------------------------------
+
+    fn dedup_store() -> (ProactiveMemoryStore, String, AgentId) {
+        let substrate = MemorySubstrate::open_in_memory(0.1).unwrap();
+        let store = ProactiveMemoryStore::with_default_config(Arc::new(substrate));
+        let agent = AgentId::new();
+        (store, agent.to_string(), agent)
+    }
+
+    fn remember_for_dedup(
+        store: &ProactiveMemoryStore,
+        agent: AgentId,
+        content: &str,
+        scope: &str,
+        embedding: Option<&[f32]>,
+        peer_id: Option<&str>,
+    ) -> String {
+        store
+            .semantic
+            .remember_with_embedding_and_peer(
+                agent,
+                content,
+                MemorySource::Conversation,
+                scope,
+                HashMap::new(),
+                embedding,
+                None,
+                None,
+                Default::default(),
+                peer_id,
+            )
+            .unwrap()
+            .0
+            .to_string()
+    }
+
+    fn live_ids(store: &ProactiveMemoryStore, agent: &str) -> Vec<String> {
+        let mut ids: Vec<String> = store
+            .retrieve_memory_items(
+                ProactiveMemoryStore::parse_agent_id(agent).unwrap(),
+                None,
+                None,
+            )
+            .unwrap()
+            .into_iter()
+            .map(|m| m.id)
+            .collect();
+        ids.sort();
+        ids
+    }
+
+    /// The reported failure: two different questions about one topic score cosine ~0.90 and share almost no words.
+    /// The shared `duplicate_threshold` of 0.85 made the cosine path a topic filter and the older row was deleted.
+    #[tokio::test]
+    async fn consolidate_does_not_merge_topical_neighbours_on_cosine() {
+        let (store, agent_str, agent) = dedup_store();
+        let a = remember_for_dedup(
+            &store,
+            agent,
+            "where is the onboarding checklist for new contractors",
+            scopes::SESSION,
+            Some(&[1.0, 0.0, 0.0]),
+            None,
+        );
+        let b = remember_for_dedup(
+            &store,
+            agent,
+            "who signs off contractor laptops before day one",
+            scopes::SESSION,
+            Some(&[1.0, 0.48, 0.0]),
+            None,
+        );
+        let cosine =
+            librefang_types::memory::cosine_similarity(&[1.0, 0.0, 0.0], &[1.0, 0.48, 0.0])
+                .unwrap();
+        assert!(cosine > 0.85 && cosine < DUPLICATE_COSINE_FLOOR);
+
+        assert!(store
+            .find_duplicates(&agent_str, None)
+            .await
+            .unwrap()
+            .is_empty());
+        assert_eq!(store.consolidate(&agent_str).await.unwrap(), 0);
+        let mut expected = vec![a, b];
+        expected.sort();
+        assert_eq!(live_ids(&store, &agent_str), expected);
+    }
+
+    /// Positive control: a genuine paraphrase pair above the cosine floor still consolidates.
+    #[tokio::test]
+    async fn consolidate_still_merges_near_identical_vectors() {
+        let (store, agent_str, agent) = dedup_store();
+        remember_for_dedup(
+            &store,
+            agent,
+            "user prefers dark mode in the editor",
+            scopes::SESSION,
+            Some(&[1.0, 0.0, 0.0]),
+            None,
+        );
+        remember_for_dedup(
+            &store,
+            agent,
+            "the user likes a dark editor theme",
+            scopes::SESSION,
+            Some(&[1.0, 0.05, 0.0]),
+            None,
+        );
+        assert_eq!(store.consolidate(&agent_str).await.unwrap(), 1);
+        assert_eq!(live_ids(&store, &agent_str).len(), 1);
+    }
+
+    /// The URL loss from the report: the newer row repeats the older one's prose without its link, and the substring fast path used to merge them with no threshold at all.
+    #[tokio::test]
+    async fn consolidate_never_deletes_the_only_copy_of_a_url() {
+        let (store, agent_str, agent) = dedup_store();
+        let with_link = remember_for_dedup(
+            &store,
+            agent,
+            "the design brief is at https://docs.example/brief-42",
+            scopes::SESSION,
+            None,
+            None,
+        );
+        remember_for_dedup(
+            &store,
+            agent,
+            "the design brief is at",
+            scopes::SESSION,
+            None,
+            None,
+        );
+        assert!(store
+            .find_duplicates(&agent_str, None)
+            .await
+            .unwrap()
+            .is_empty());
+        store.consolidate(&agent_str).await.unwrap();
+        assert!(live_ids(&store, &agent_str).contains(&with_link));
+    }
+
+    /// #3531 / #8196 were fixed only in `ConsolidationEngine`; the per-agent pass that runs every ten turns must partition the same way, and on the storage scope as well.
+    #[tokio::test]
+    async fn find_duplicates_never_groups_across_peers_or_scopes() {
+        let (store, agent_str, agent) = dedup_store();
+        let fact = "the deadline is friday";
+        remember_for_dedup(&store, agent, fact, scopes::USER, None, Some("peer-a"));
+        remember_for_dedup(&store, agent, fact, scopes::USER, None, Some("peer-b"));
+        remember_for_dedup(&store, agent, fact, scopes::SESSION, None, Some("peer-a"));
+        assert!(
+            store
+                .find_duplicates(&agent_str, None)
+                .await
+                .unwrap()
+                .is_empty(),
+            "identical text in different peers / scopes is not a duplicate"
+        );
+
+        // Positive control: the same peer and scope does group.
+        remember_for_dedup(&store, agent, fact, scopes::USER, None, Some("peer-a"));
+        let groups = store.find_duplicates(&agent_str, None).await.unwrap();
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].len(), 2);
+    }
+
+    /// Groups are complete-linkage: B and C each resemble the seed A but not each other, so they must not land in one group where whichever survives deletes the other.
+    #[tokio::test]
+    async fn find_duplicates_requires_every_member_to_match() {
+        let (store, agent_str, agent) = dedup_store();
+        let b = remember_for_dedup(
+            &store,
+            agent,
+            "alpha bravo charlie",
+            scopes::SESSION,
+            Some(&[1.0, 0.3, 0.0]),
+            None,
+        );
+        let c = remember_for_dedup(
+            &store,
+            agent,
+            "delta echo foxtrot",
+            scopes::SESSION,
+            Some(&[1.0, -0.3, 0.0]),
+            None,
+        );
+        // Newest, so it is the seed of the first group.
+        remember_for_dedup(
+            &store,
+            agent,
+            "golf hotel india",
+            scopes::SESSION,
+            Some(&[1.0, 0.0, 0.0]),
+            None,
+        );
+
+        let groups = store.find_duplicates(&agent_str, None).await.unwrap();
+        for group in &groups {
+            let ids: Vec<&str> = group.iter().map(|m| m.id.as_str()).collect();
+            assert!(
+                !(ids.contains(&b.as_str()) && ids.contains(&c.as_str())),
+                "B and C are not duplicates of each other; got group {ids:?}"
+            );
+        }
+    }
+
+    /// The keeper is the higher-confidence row, not merely the newer one.
+    #[tokio::test]
+    async fn consolidate_keeps_the_higher_confidence_duplicate() {
+        let (store, agent_str, agent) = dedup_store();
+        let fact = "user prefers dark mode in the editor";
+        let established = remember_for_dedup(&store, agent, fact, scopes::USER, None, None);
+        let fresh = remember_for_dedup(&store, agent, fact, scopes::USER, None, None);
+        {
+            let conn = store.semantic.pool().get().unwrap();
+            conn.execute(
+                "UPDATE memories SET confidence = 0.9 WHERE id = ?1",
+                rusqlite::params![established],
+            )
+            .unwrap();
+            conn.execute(
+                "UPDATE memories SET confidence = 0.4 WHERE id = ?1",
+                rusqlite::params![fresh],
+            )
+            .unwrap();
+        }
+        assert_eq!(store.consolidate(&agent_str).await.unwrap(), 1);
+        assert_eq!(live_ids(&store, &agent_str), vec![established]);
     }
 }

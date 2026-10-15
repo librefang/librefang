@@ -5,8 +5,9 @@
 //! all and quoted content cannot become markup. The limit is 32768 characters rather
 //! than 4096.
 //!
-//! `rich_sanitize` → `rich_message.markdown` remains only as a guard for the case where
-//! conversion yields nothing for non-empty text, which would mean a converter bug.
+//! `rich_sanitize` → `rich_message.markdown` is the fallback for the case where conversion
+//! yields nothing for non-empty text: a converter bug, or text whose whole content is a
+//! construct Telegram refuses to receive empty — see `prepare_rich_blocks`.
 //!
 //! The stages below are the fallback for Bot API servers older than 10.1, and mirror
 //! the Python adapter's three-stage pipeline:
@@ -43,9 +44,21 @@ pub fn prepare_rich_markdown(text: &str) -> Option<String> {
 /// markup and code samples keep their angle brackets.
 ///
 /// Returns `None` when the caller should not use blocks — either the text does not fit the
-/// rich limit, or conversion produced nothing for text that was not empty. The second case
-/// should not happen; it is a guard, because losing the whole message to a converter bug is
-/// far worse than falling back to a lower-fidelity path.
+/// rich limit, or conversion produced nothing for text that was not empty.
+///
+/// The second case is reachable on purpose, not only as a guard against a converter bug.
+/// Text whose entire content is a construct Telegram refuses to receive empty — a bare `## `,
+/// an empty fence, a lone `> ` — converts to no blocks at all, because emitting the empty
+/// block would have the API refuse the whole message.
+///
+/// Such a message then tries the `markdown` body, and Telegram refuses that too: measured,
+/// `{"markdown": "## "}` comes back `RICH_MESSAGE_EMPTY`, as do the empty fence and the lone
+/// `> `. So it ends up on the HTML path — which is the honest answer for a message whose whole
+/// content is an empty heading, and is what happened before this change as well, only after a
+/// refused `blocks` payload instead of a refused `markdown` one.
+///
+/// The guard still covers the converter-bug case it was written for: losing the whole message
+/// is far worse than falling back to a lower-fidelity path.
 pub fn prepare_rich_blocks(text: &str) -> Option<Vec<Block>> {
     let blocks = markdown_to_blocks(text);
     if blocks.is_empty() && !text.trim().is_empty() {

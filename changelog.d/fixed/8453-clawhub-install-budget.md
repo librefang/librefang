@@ -1,0 +1,3 @@
+ClawHub installs run under their own 300 s budget, separate from the 8 s deadline the ClawHub read routes use to answer before the route smoke test gives up.
+An install is staged beside `skills/`, stamped with its provenance, and moved into place with one conditional `rename` only once complete, so a budget expiry or a hung-up caller answers without side effects: no partial skill directory, no staging residue, and no install left without provenance.
+A promotion that loses a race against an install that landed first answers as already installed rather than a scrubbed 500 (#8453) (@DaBlitzStein)

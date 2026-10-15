@@ -292,7 +292,7 @@ max_memories_per_agent = 1000
 | `extraction_model` | string or null | `null` | LLM model for extraction. Supports `provider/model` (e.g. `"anthropic/claude-haiku-4"`), `provider:model`, or bare model name (uses default provider). If `null`, uses rule-based extraction. There is no separate `extraction_provider` field. |
 | `extract_categories` | list of strings | `["user_preference", "important_fact", "task_context", "relationship"]` | Categories to extract from conversations. |
 | `session_ttl_hours` | u32 | `24` | Session memory TTL in hours. Memories older than this are cleaned up before each agent execution. |
-| `duplicate_threshold` | f32 | `0.5` | Similarity threshold for duplicate detection (0.0–1.0). Uses vector cosine similarity when embeddings are available, otherwise falls back to Jaccard word overlap. |
+| `duplicate_threshold` | f32 | `0.85` | Similarity threshold for duplicate detection (0.0–1.0), calibrated as Jaccard word overlap. When both memories carry embeddings, vector cosine similarity is compared against `max(duplicate_threshold, 0.95)` instead, because cosine on sentence embeddings runs much higher than word overlap for the same pair. Rows that differ in peer, chat, session or storage scope, or in an identifier (URL, email, UUID, number of 4+ digits), are never merged. |
 | `confidence_decay_rate` | f64 | `0.01` | Confidence decay rate per day. Follows exponential decay: `conf × e^(−rate × days)`. Default of `0.01` takes ~70 days to halve. |
 | `max_memories_per_agent` | usize | `1000` | Maximum memories per agent. When exceeded, raw dialogue rows are evicted before extracted facts, lowest-confidence first within each class. `0` = no cap. |
 
