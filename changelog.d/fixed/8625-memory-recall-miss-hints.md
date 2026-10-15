@@ -1,0 +1,4 @@
+`memory_recall` now answers a miss with the keys that do exist in the caller's own scope, instead of only `No value found for key '<key>'.`
+The store is the only party that knows the key space and the miss returned none of it, so an agent convinced its key should exist varied the name — `…-docx-v32` through `-v41` — until the iteration cap ended the turn with a generic error; the loop guard could not see it because enumerating invented keys produces fresh params by construction.
+The nearby names come from a range scan on the key column (`key >= prefix AND key < prefix + U+10FFFF`) rather than `LIKE`, which would lose the index on a BINARY-collated primary key, and they are probed in the same agent + peer namespace `memory_recall` reads, so a hint can neither cross agents nor cross peers.
+The miss text mirrors `memory_semantic_search`, which already named its store and its escape hatches (#8628) (@nevgenov)
