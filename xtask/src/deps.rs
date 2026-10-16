@@ -115,6 +115,32 @@ enum PnpmAuditOutcome {
     Skipped,
 }
 
+fn pnpm_audit_passed(exit_code: Option<i32>, stdout: &str) -> bool {
+    if exit_code == Some(0) {
+        return true;
+    }
+    if exit_code != Some(1) {
+        return false;
+    }
+
+    let Ok(report) = serde_json::from_str::<serde_json::Value>(stdout) else {
+        return false;
+    };
+    // pnpm can exit 1 for ignored findings while its filtered advisory map is empty.
+    // Require a complete report so command errors cannot be mistaken for ignored findings.
+    report.get("error").is_none()
+        && report["advisories"]
+            .as_object()
+            .is_some_and(|advisories| advisories.is_empty())
+        && ["info", "low", "moderate", "high", "critical"]
+            .iter()
+            .all(|severity| {
+                report["metadata"]["vulnerabilities"][severity]
+                    .as_u64()
+                    .is_some()
+            })
+}
+
 fn run_pnpm_audit(dir: &Path, label: &str) -> PnpmAuditOutcome {
     if !dir.join("package.json").exists() {
         return PnpmAuditOutcome::Clean;
@@ -123,7 +149,7 @@ fn run_pnpm_audit(dir: &Path, label: &str) -> PnpmAuditOutcome {
     println!("--- pnpm audit: {} ---", label);
     // --prod: devDependencies (vite, esbuild) never ship to users; their advisories are not runtime exposures.
     let result = Command::new("pnpm")
-        .args(["audit", "--prod"])
+        .args(["audit", "--prod", "--json"])
         .current_dir(dir)
         .output();
 
@@ -144,7 +170,10 @@ fn run_pnpm_audit(dir: &Path, label: &str) -> PnpmAuditOutcome {
     print!("{combined}");
     println!();
 
-    if output.status.success() {
+    if pnpm_audit_passed(
+        output.status.code(),
+        &String::from_utf8_lossy(&output.stdout),
+    ) {
         PnpmAuditOutcome::Clean
     } else if is_audit_endpoint_retired(&combined) {
         println!(
@@ -222,6 +251,35 @@ pub fn run(args: DepsArgs) -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ignored_only_audit_with_nonzero_exit_passes() {
+        let report = r#"{"advisories":{},"metadata":{"vulnerabilities":{"info":0,"low":0,"moderate":0,"high":1,"critical":0}}}"#;
+        assert!(pnpm_audit_passed(Some(1), report));
+    }
+
+    #[test]
+    fn actionable_advisories_still_fail() {
+        let report = r#"{"advisories":{"123":{"severity":"high"}},"metadata":{"vulnerabilities":{"info":0,"low":0,"moderate":0,"high":2,"critical":0}}}"#;
+        assert!(!pnpm_audit_passed(Some(1), report));
+    }
+
+    #[test]
+    fn failed_or_incomplete_audits_still_fail() {
+        for report in [
+            "not JSON",
+            "{}",
+            r#"{"advisories":{}}"#,
+            r#"{"advisories":{},"metadata":{"vulnerabilities":{"info":0,"low":0,"moderate":0,"high":1,"critical":0}},"error":{"code":"ECONNRESET"}}"#,
+        ] {
+            assert!(!pnpm_audit_passed(Some(1), report), "{report}");
+        }
+        assert!(!pnpm_audit_passed(None, "{}"));
+        assert!(!pnpm_audit_passed(
+            Some(2),
+            r#"{"advisories":{},"metadata":{"vulnerabilities":{"info":0,"low":0,"moderate":0,"high":1,"critical":0}}}"#
+        ));
+    }
 
     // Verbatim body npm returns for both retired audit endpoints (HTTP 410),
     // as surfaced by pnpm v10 in CI.
