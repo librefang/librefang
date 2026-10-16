@@ -61,6 +61,28 @@ fn reject_peer_prefix_in_key(key: &str) -> Result<(), kernel_handle::KernelOpErr
     Ok(())
 }
 
+/// Reject an LLM-supplied key that starts with the reserved per-session
+/// summary prefix (#8645).
+///
+/// `session_<id>` entries are the platform's own summaries — written by
+/// compaction and by `reset_session`. They are conversation-scoped state, and
+/// the prompt path already gates them by owning session (#6493); leaving the
+/// key/value tools open to that prefix re-opens the same leak through another
+/// door. An unattributed turn (cron, trigger, `agent_send`, REST, dashboard —
+/// `peer_id = None`) reads the unscoped namespace, so `memory_recall` would
+/// surface another conversation's summary into its prompt, and `memory_store`
+/// could plant one that a later compaction read path trusts.
+fn reject_session_prefix_in_key(key: &str) -> Result<(), kernel_handle::KernelOpError> {
+    use kernel_handle::KernelOpError;
+    if key.starts_with(librefang_memory::SESSION_SUMMARY_KEY_PREFIX) {
+        return Err(KernelOpError::InvalidInput(format!(
+            "memory key '{key}' must not start with reserved '{}' prefix",
+            librefang_memory::SESSION_SUMMARY_KEY_PREFIX
+        )));
+    }
+    Ok(())
+}
+
 /// Reject an empty memory key at the kernel-handle boundary (#5138).
 ///
 /// `memory_store(key="", ...)` would otherwise land a row at
@@ -131,6 +153,7 @@ impl kernel_handle::MemoryAccess for LibreFangKernel {
         use kernel_handle::KernelOpError;
         reject_empty_key(key)?;
         reject_peer_prefix_in_key(key)?;
+        reject_session_prefix_in_key(key)?;
         reject_bad_peer_id(peer_id)?;
         let agent_id = resolve_agent_id(agent_id)?;
         let scoped = peer_scoped_key(key, peer_id)?;
@@ -203,6 +226,7 @@ impl kernel_handle::MemoryAccess for LibreFangKernel {
         use kernel_handle::KernelOpError;
         reject_empty_key(key)?;
         reject_peer_prefix_in_key(key)?;
+        reject_session_prefix_in_key(key)?;
         reject_bad_peer_id(peer_id)?;
         let agent_id = resolve_agent_id(agent_id)?;
         let scoped = peer_scoped_key(key, peer_id)?;
@@ -290,7 +314,10 @@ impl kernel_handle::MemoryAccess for LibreFangKernel {
             }
             None => Ok(all_keys
                 .into_iter()
-                .filter(|k| !k.starts_with("peer:"))
+                .filter(|k| {
+                    !k.starts_with("peer:")
+                        && !k.starts_with(librefang_memory::SESSION_SUMMARY_KEY_PREFIX)
+                })
                 .collect()),
         }
     }
@@ -524,5 +551,28 @@ impl LibreFangKernel {
             self.memory_acl_for_sender(sender_id, channel)
                 .unwrap_or_else(unrestricted_acl),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// #8645: the per-session summary namespace is platform-owned, so the
+    /// key/value tools must not read or write it — an unattributed turn would
+    /// otherwise surface another conversation's summary (the leak #6493 closed
+    /// on the prompt path) or plant one.
+    #[test]
+    fn the_reserved_session_prefix_is_refused() {
+        assert!(reject_session_prefix_in_key("session_abc").is_err());
+        assert!(reject_session_prefix_in_key(&format!(
+            "{}{}",
+            librefang_memory::SESSION_SUMMARY_KEY_PREFIX,
+            "0192-uuid"
+        ))
+        .is_err());
+        // Ordinary keys stay allowed, including ones that merely contain it.
+        assert!(reject_session_prefix_in_key("user_name").is_ok());
+        assert!(reject_session_prefix_in_key("my_session_note").is_ok());
     }
 }

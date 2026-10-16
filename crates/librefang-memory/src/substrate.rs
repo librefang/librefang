@@ -203,6 +203,34 @@ pub fn session_summary_key(session_id: &SessionId) -> String {
     format!("session_{}", session_id.0)
 }
 
+/// Prefix under which every per-session summary lives.
+pub const SESSION_SUMMARY_KEY_PREFIX: &str = "session_";
+
+/// Cap on the mirrored copy of a summary.
+///
+/// The key/value store rejects values above `MAX_KV_VALUE_BYTES`
+/// (`structured.rs`), and the canonical row has no such cap, so an oversized
+/// summary would keep the canonical copy and silently lose only the mirror —
+/// the session would then lose its summary to the next compaction of another
+/// conversation, which is exactly what the mirror exists to prevent. The reset
+/// path already trims to the same order of magnitude (`MAX_SUMMARY_OUTPUT_BYTES`
+/// in `session_ops.rs`).
+const MAX_SUMMARY_MIRROR_BYTES: usize = 16 * 1024;
+
+/// Trim `text` to `max` bytes at a UTF-8 boundary, marking the cut.
+fn truncate_summary_mirror(text: &str, max: usize) -> (String, bool) {
+    if text.len() <= max {
+        return (text.to_string(), false);
+    }
+    let mut cutoff = max;
+    while cutoff > 0 && !text.is_char_boundary(cutoff) {
+        cutoff -= 1;
+    }
+    let mut trimmed = text[..cutoff].to_string();
+    trimmed.push_str("\n\n…[truncated]");
+    (trimmed, true)
+}
+
 impl MemorySubstrate {
     /// Open or create a memory substrate at the given database path.
     pub fn open(db_path: &Path, decay_rate: f32) -> LibreFangResult<Self> {
@@ -902,23 +930,42 @@ impl MemorySubstrate {
             .store_llm_summary(agent_id, summary, kept_messages, owning_session_id)?;
         // Mirror the summary under the session's own key so the conversation it
         // describes keeps reading it after another session compacts (#8645).
-        // Best-effort: the canonical write above already succeeded, and losing
-        // the mirror only costs the old behaviour, never the summary itself.
-        if let Some(session_id) = owning_session_id {
-            if !summary.trim().is_empty() {
-                if let Err(error) = self.structured_set(
-                    agent_id,
-                    &session_summary_key(&session_id),
-                    serde_json::Value::String(summary.to_string()),
-                ) {
-                    tracing::warn!(
-                        agent_id = %agent_id,
-                        session_id = %session_id.0,
-                        %error,
-                        "Failed to persist the per-session copy of the compaction summary"
-                    );
-                }
+        // Best-effort throughout: the canonical write above already succeeded,
+        // and losing a mirror only costs the old behaviour, never the summary.
+        let Some(session_id) = owning_session_id else {
+            return Ok(());
+        };
+        let key = session_summary_key(&session_id);
+        if summary.trim().is_empty() {
+            // The canonical row is written unconditionally, empty summary
+            // included; leaving the previous mirror behind would resurrect it
+            // as soon as another session takes the agent-scoped slot.
+            if let Err(error) = self.structured_delete(agent_id, &key) {
+                tracing::warn!(
+                    agent_id = %agent_id,
+                    session_id = %session_id.0,
+                    %error,
+                    "Failed to clear the per-session copy of the compaction summary"
+                );
             }
+            return Ok(());
+        }
+        let (mirror, truncated) = truncate_summary_mirror(summary, MAX_SUMMARY_MIRROR_BYTES);
+        if truncated {
+            tracing::warn!(
+                agent_id = %agent_id,
+                session_id = %session_id.0,
+                limit_bytes = MAX_SUMMARY_MIRROR_BYTES,
+                "Compaction summary exceeds the key/value mirror limit; the per-session copy is trimmed"
+            );
+        }
+        if let Err(error) = self.structured_set(agent_id, &key, serde_json::Value::String(mirror)) {
+            tracing::warn!(
+                agent_id = %agent_id,
+                session_id = %session_id.0,
+                %error,
+                "Failed to persist the per-session copy of the compaction summary"
+            );
         }
         Ok(())
     }
@@ -2300,6 +2347,85 @@ mod tests {
             .canonical_context(agent, Some(session_a), None)
             .unwrap();
         assert_eq!(summary, None);
+    }
+
+    /// Review finding 2: an empty summary must clear the per-session copy too.
+    ///
+    /// The canonical row is written even when the summary is empty, while the
+    /// mirror is only written for non-empty ones — so without an explicit
+    /// delete the previous copy survives and reappears as soon as another
+    /// session takes the agent-scoped slot.
+    #[test]
+    fn an_empty_summary_clears_the_per_session_copy() {
+        let substrate = MemorySubstrate::open_in_memory(0.1).unwrap();
+        let agent = AgentId::new();
+        let session_a = SessionId::new();
+        let session_b = SessionId::new();
+        let kept = |text: &str| {
+            vec![librefang_types::message::Message {
+                role: librefang_types::message::Role::User,
+                content: librefang_types::message::MessageContent::Text(text.to_string()),
+                pinned: false,
+                timestamp: None,
+            }]
+        };
+
+        substrate
+            .store_llm_summary(agent, "summary of A v1", kept("a"), Some(session_a))
+            .unwrap();
+        // A compacts again and produces nothing — the canonical row goes empty.
+        substrate
+            .store_llm_summary(agent, "", kept("a"), Some(session_a))
+            .unwrap();
+        // Another conversation takes the single agent-scoped slot.
+        substrate
+            .store_llm_summary(agent, "summary of B", kept("b"), Some(session_b))
+            .unwrap();
+
+        let (summary, _recent) = substrate
+            .canonical_context(agent, Some(session_a), None)
+            .unwrap();
+        assert!(
+            summary.as_deref().unwrap_or("").trim().is_empty(),
+            "a cleared summary must not resurface from the per-session copy, got {summary:?}"
+        );
+    }
+
+    /// Review finding 3: an oversized summary is trimmed for the mirror rather
+    /// than silently rejected by the key/value store's size limit, which would
+    /// leave that session with no per-session copy at all.
+    #[test]
+    fn an_oversized_summary_is_trimmed_for_the_mirror() {
+        let substrate = MemorySubstrate::open_in_memory(0.1).unwrap();
+        let agent = AgentId::new();
+        let session_a = SessionId::new();
+        let session_b = SessionId::new();
+        let kept = |text: &str| {
+            vec![librefang_types::message::Message {
+                role: librefang_types::message::Role::User,
+                content: librefang_types::message::MessageContent::Text(text.to_string()),
+                pinned: false,
+                timestamp: None,
+            }]
+        };
+
+        let huge = "ф".repeat(200_000); // 400 KB, well over MAX_KV_VALUE_BYTES
+        substrate
+            .store_llm_summary(agent, &huge, kept("a"), Some(session_a))
+            .unwrap();
+        substrate
+            .store_llm_summary(agent, "summary of B", kept("b"), Some(session_b))
+            .unwrap();
+
+        let (summary, _recent) = substrate
+            .canonical_context(agent, Some(session_a), None)
+            .unwrap();
+        let summary = summary.expect("the per-session copy must survive being oversized");
+        assert!(summary.ends_with("[truncated]"), "expected a marked trim");
+        assert!(
+            summary.len() < 40_000,
+            "the mirror must stay near its byte cap"
+        );
     }
 
     /// #8219: the aggregate must agree with what listing every row would have counted.
