@@ -1,4 +1,0 @@
-Tool dispatch now emits a `librefang::tool_identity` debug record carrying the executing tool, the principal the turn acts for (`acting_principal`, in its canonical `kind:uuid` form), and the `sender_id` that travelled with the call, so `(tool, owner, sender_id)` for a turn is visible without a restart by raising that target on the hot log filter.
-  The owner is the resolved principal — the bearer-authenticated user when there is one, otherwise the agent manifest's `owner`, otherwise `default_owner` — so an unattended turn on a group-owned agent records `group:<uuid>` rather than no owner at all.
-  The record is needed because the audit log does not carry this attribution: a successful turn writes `AuditAction::AgentMessage` with `user_id: None`, and `AuditAction::ToolInvoke` is never written on the agent-loop path at all.
-  It stays at `debug` because it fires once per tool call. (#8583, #7744) (@DaBlitzStein)
