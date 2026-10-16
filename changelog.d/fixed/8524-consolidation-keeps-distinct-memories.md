@@ -1,2 +1,0 @@
-Memory auto-consolidation no longer deletes memories that only share a topic.
-One `duplicate_threshold` was applied both to word overlap and to embedding cosine, where 0.85 cosine means "same subject" rather than "same statement"; with embeddings a merge now needs cosine above `max(duplicate_threshold, 0.95)`, never crosses peer, chat, session or storage scope, and is refused when the two memories carry different URLs, emails or numbers (#8587, #8524) (@houko)
