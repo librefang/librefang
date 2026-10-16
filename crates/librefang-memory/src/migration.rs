@@ -5,7 +5,7 @@
 use rusqlite::Connection;
 
 /// Current schema version.
-const SCHEMA_VERSION: u32 = 63;
+const SCHEMA_VERSION: u32 = 64;
 
 /// Run all migrations to bring the database up to date.
 pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
@@ -328,6 +328,13 @@ pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
     // This wanted to be 62 but #7974 took that number first, so it renumbers
     // to 63 rather than skipping past it — same rule as the note above.
     run_step!(63, migrate_v63);
+    // v64 (#8591): per-session reasoning-mode override. Mirrors v39's
+    // `model_override` exactly — a nullable TEXT token, NULL meaning
+    // "inherit the agent/global level", which is what every pre-v64 row
+    // means, so no backfill is needed. The value is the open-vocabulary
+    // effort token (e.g. "xhigh", "medium", "minimal"); it is validated at
+    // the API boundary and stored as given.
+    run_step!(64, migrate_v64);
     // Audit-trail consistency (#3538): user_version must match the count
     // of distinct rows in `migrations`. Drift means an earlier migration
     // applied DDL without recording its audit row — operator tooling
@@ -1619,6 +1626,41 @@ fn migrate_v63(conn: &Connection) -> Result<(), rusqlite::Error> {
     conn.execute(
         "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
          VALUES (63, datetime('now'), 'Add ephemeral_runs.truncated so a cap-delivered worker run is distinguishable from a full one (#8556)')",
+        [],
+    )?;
+    Ok(())
+}
+
+/// Version 64: add a nullable `reasoning_effort` TEXT column to `sessions`
+/// (#8591).
+///
+/// The per-session rung of the reasoning resolution order
+/// (frame > session > agent > global > compiled default), shaped exactly like
+/// v39's `model_override`: a nullable token read back into
+/// [`Session::reasoning_effort`](crate::session::Session::reasoning_effort) and
+/// applied per turn by the kernel dispatchers. It is **not** written by
+/// `save_session`, for the same reason `model_override` is not — a routine
+/// history save must not clear a pin; only
+/// `set_session_reasoning_effort` writes it.
+///
+/// `NULL` means "inherit", which is exactly what every pre-v64 row means, so
+/// the column needs no backfill. The text is the provider's own effort token
+/// (`none` / `low` / `medium` / `high` / `xhigh` / `max` / `minimal`, or
+/// whatever the model's catalog entry declares), validated at the API
+/// boundary rather than here so an existing row can never fail to load.
+fn migrate_v64(conn: &Connection) -> Result<(), rusqlite::Error> {
+    // `sessions` is created by `migrate_v1`, so it exists on every database
+    // that reaches this step; `try_column_exists` is the SQLite `ADD COLUMN
+    // IF NOT EXISTS` stand-in.
+    if !try_column_exists(conn, "sessions", "reasoning_effort")? {
+        conn.execute(
+            "ALTER TABLE sessions ADD COLUMN reasoning_effort TEXT DEFAULT NULL",
+            [],
+        )?;
+    }
+    conn.execute(
+        "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
+         VALUES (64, datetime('now'), 'Add sessions.reasoning_effort for per-session reasoning-effort pin (#8591)')",
         [],
     )?;
     Ok(())
@@ -4576,6 +4618,83 @@ mod tests {
             )
             .unwrap();
         assert!(cleared.is_none(), "clearing model_override to NULL failed");
+    }
+
+    /// Regression for #8591: v64 adds `reasoning_effort TEXT` to `sessions`
+    /// (nullable, so pre-v64 rows inherit), round-trips an open-vocabulary
+    /// token, and is idempotent on rerun.
+    #[test]
+    fn migrate_v64_adds_reasoning_effort_column_nullable_and_round_trips() {
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+
+        assert!(
+            column_exists(&conn, "sessions", "reasoning_effort"),
+            "sessions.reasoning_effort column missing after migrate_v64"
+        );
+
+        // Minimal row: reasoning_effort must default to NULL.
+        let sid = uuid::Uuid::new_v4().to_string();
+        let aid = uuid::Uuid::new_v4().to_string();
+        conn.execute(
+            "INSERT INTO sessions (id, agent_id, messages, created_at, updated_at) \
+             VALUES (?1, ?2, ?3, datetime('now'), datetime('now'))",
+            rusqlite::params![sid, aid, b"[]" as &[u8]],
+        )
+        .unwrap();
+        let stored: Option<String> = conn
+            .query_row(
+                "SELECT reasoning_effort FROM sessions WHERE id = ?1",
+                [&sid],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(
+            stored.is_none(),
+            "reasoning_effort must default to NULL for pre-migration rows: got {stored:?}"
+        );
+
+        // Open-vocabulary token round trip — `xhigh` is exactly the kind of
+        // rung the four-value enum could not store.
+        conn.execute(
+            "UPDATE sessions SET reasoning_effort = ?1 WHERE id = ?2",
+            rusqlite::params!["xhigh", sid],
+        )
+        .unwrap();
+        let stored: Option<String> = conn
+            .query_row(
+                "SELECT reasoning_effort FROM sessions WHERE id = ?1",
+                [&sid],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            stored.as_deref(),
+            Some("xhigh"),
+            "reasoning_effort round-trip failed"
+        );
+
+        // Clear back to NULL.
+        conn.execute(
+            "UPDATE sessions SET reasoning_effort = NULL WHERE id = ?1",
+            [&sid],
+        )
+        .unwrap();
+        let cleared: Option<String> = conn
+            .query_row(
+                "SELECT reasoning_effort FROM sessions WHERE id = ?1",
+                [&sid],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(
+            cleared.is_none(),
+            "clearing reasoning_effort to NULL failed"
+        );
+
+        // Rerun the step directly: `try_column_exists` must make it a no-op
+        // rather than a duplicate-column error.
+        migrate_v64(&conn).expect("migrate_v64 must be idempotent");
     }
 
     /// Audit: sessions-missing-index. After v41 both

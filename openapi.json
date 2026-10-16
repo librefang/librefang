@@ -13188,6 +13188,55 @@
         }
       }
     },
+    "/api/sessions/{id}/reasoning": {
+      "patch": {
+        "tags": [
+          "sessions"
+        ],
+        "summary": "PATCH /api/sessions/:id/reasoning — Set or clear a per-session\nreasoning-effort override (#8591).",
+        "description": "Body: `{\"reasoning_effort\": \"xhigh\"}` to pin, `{\"reasoning_effort\": null}`\nto clear and restore the agent/global default. `reasoning_mode` is accepted\nas a deprecated alias key (#8591 naming); `reasoning_effort` wins if both\nare present.\n\nThe token is validated with [`librefang_types::config::ReasoningMode::new`]\n— structural validation only (non-empty, bounded, no whitespace), because\nthe vocabulary is per-model catalog data and an open token like `minimal`\nor a gateway-declared one must be settable. Whether the *effective* model\naccepts it is enforced where the model is known: the catalog's declared\npolicy coerces an out-of-set token to the nearest supported rung with a\nwarning. The resolution order per turn is\nframe > session > agent > global > compiled default.",
+        "operationId": "patch_session_reasoning",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Session ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Reasoning override updated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid session ID or reasoning effort"
+          },
+          "404": {
+            "description": "Session not found"
+          }
+        }
+      }
+    },
     "/api/shutdown": {
       "post": {
         "tags": [
@@ -17921,12 +17970,12 @@
           "message": {
             "type": "string"
           },
-          "reasoning_mode": {
+          "reasoning_effort": {
             "type": [
               "string",
               "null"
             ],
-            "description": "Per-task reasoning mode: `\"none\"` | `\"low\"` | `\"high\"` | `\"max\"` (#7946).\n\nTop rung of the resolution order — per-call > per-agent (`agent.toml`\n`[thinking] reasoning_mode`) > global (`config.toml` `[thinking]\nreasoning_mode`) > compiled default (the `budget_tokens` bucket).\n\nAdded alongside [`Self::thinking`] rather than widening it, because the\nboolean is in the wire contract of every existing client and a JSON\n`true` cannot grow a third value without breaking them. The two are not\nredundant either: `thinking: false` merely omits the reasoning opt-in,\nwhile `reasoning_mode: \"none\"` sends the provider's explicit non-think\ntoggle — the difference between \"we did not ask it to think\" and \"we\nasked it not to\", which is the whole point on a model that reasons by\ndefault.",
+            "description": "Per-task reasoning effort: `\"none\"` | `\"low\"` | `\"medium\"` | `\"high\"`\n| `\"xhigh\"` | `\"max\"` | `\"minimal\"` — or any token the target model's\ncatalog entry declares (#7946, open vocabulary #8591).\n\nTop rung of the resolution order — per-call > per-session\n(`PATCH /api/sessions/{id}/reasoning`) > per-agent (`agent.toml`\n`[thinking] reasoning_effort`) > global (`config.toml` `[thinking]\nreasoning_effort`) > compiled default (the `budget_tokens` bucket).\n\nAdded alongside [`Self::thinking`] rather than widening it, because the\nboolean is in the wire contract of every existing client and a JSON\n`true` cannot grow a third value without breaking them. The two are not\nredundant either: `thinking: false` merely omits the reasoning opt-in,\nwhile `reasoning_effort: \"none\"` sends the provider's explicit non-think\ntoggle — the difference between \"we did not ask it to think\" and \"we\nasked it not to\", which is the whole point on a model that reasons by\ndefault.\n\n`reasoning_mode` is accepted as a deprecated alias on the wire\n(#8591); responses and documentation use `reasoning_effort`.",
             "example": "high"
           },
           "sender_id": {
@@ -17962,7 +18011,7 @@
               "boolean",
               "null"
             ],
-            "description": "Per-call deep-thinking override.\n\n- `Some(true)`: force thinking on (even if the manifest has it off)\n- `Some(false)`: force thinking off (even if the manifest has it on)\n- `None`: use the manifest/global default\n\nKept as a boolean for backward compatibility. Prefer\n[`Self::reasoning_mode`], which is strictly more expressive and wins\nwhen both are present (#7946)."
+            "description": "Per-call deep-thinking override.\n\n- `Some(true)`: force thinking on (even if the manifest has it off)\n- `Some(false)`: force thinking off (even if the manifest has it on)\n- `None`: use the manifest/global default\n\nKept as a boolean for backward compatibility. Prefer\n[`Self::reasoning_effort`], which is strictly more expressive and wins\nwhen both are present (#7946)."
           },
           "was_mentioned": {
             "type": "boolean",

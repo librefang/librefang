@@ -1696,38 +1696,37 @@ admin_role = "admin"
 
     // ── Reasoning mode (#7946) ─────────────────────────────────────────
 
-    /// The global `[thinking]` table must accept `reasoning_mode` from TOML.
+    /// The global `[thinking]` table must accept `reasoning_effort` from TOML.
     /// A missing `#[serde(default)]` would make the whole table fail to parse;
     /// a missing struct field would make the key an unknown-field error or a
     /// silent drop, depending on the deserializer.
     #[test]
-    fn test_thinking_config_parses_reasoning_mode_from_toml() {
-        for (literal, expected) in [
-            ("none", ReasoningMode::None),
-            ("low", ReasoningMode::Low),
-            ("high", ReasoningMode::High),
-            ("max", ReasoningMode::Max),
-        ] {
+    fn test_thinking_config_parses_reasoning_effort_from_toml() {
+        for literal in ["none", "low", "medium", "high", "xhigh", "max", "minimal"] {
             let toml_str = format!(
                 r#"
                 log_level = "info"
                 [thinking]
                 budget_tokens = 2048
-                reasoning_mode = "{literal}"
+                reasoning_effort = "{literal}"
                 "#
             );
             let config: KernelConfig = toml::from_str(&toml_str).unwrap();
             let tc = config.thinking.expect("thinking table parsed");
-            assert_eq!(tc.reasoning_mode, Some(expected), "literal {literal:?}");
+            assert_eq!(
+                tc.reasoning_effort.as_ref().map(|m| m.as_str()),
+                Some(literal),
+                "literal {literal:?}"
+            );
             assert_eq!(tc.budget_tokens, 2048, "literal {literal:?}");
         }
     }
 
-    /// A `[thinking]` table that omits `reasoning_mode` still parses, and the
+    /// A `[thinking]` table that omits `reasoning_effort` still parses, and the
     /// field defaults to "no explicit mode" — i.e. the pre-#7946 budget-bucket
     /// behaviour, not a mode of its own.
     #[test]
-    fn test_thinking_config_reasoning_mode_defaults_to_none() {
+    fn test_thinking_config_reasoning_effort_defaults_to_none() {
         let toml_str = r#"
             log_level = "info"
             [thinking]
@@ -1735,38 +1734,262 @@ admin_role = "admin"
         "#;
         let config: KernelConfig = toml::from_str(toml_str).unwrap();
         let tc = config.thinking.expect("thinking table parsed");
-        assert_eq!(tc.reasoning_mode, None);
-        assert_eq!(ThinkingConfig::default().reasoning_mode, None);
+        assert_eq!(tc.reasoning_effort, None);
+        assert_eq!(ThinkingConfig::default().reasoning_effort, None);
     }
 
-    /// An unrecognised mode is an error, not a silent fallback to the default.
+    /// `reasoning_mode` — the key this field shipped under in #7946 — is
+    /// accepted as a deprecated alias (#8591 naming), so every existing
+    /// `agent.toml` / `config.toml` keeps loading unchanged. Serialization
+    /// writes the canonical `reasoning_effort` spelling, which is what the
+    /// docs and every response use.
     #[test]
-    fn test_thinking_config_rejects_an_unknown_reasoning_mode() {
+    fn test_thinking_config_accepts_deprecated_reasoning_mode_alias() {
         let toml_str = r#"
             log_level = "info"
             [thinking]
-            reasoning_mode = "medium"
+            budget_tokens = 2048
+            reasoning_mode = "xhigh"
         "#;
+        let config: KernelConfig = toml::from_str(toml_str).unwrap();
+        let tc = config.thinking.as_ref().expect("thinking table parsed");
+        assert_eq!(
+            tc.reasoning_effort.as_ref().map(|m| m.as_str()),
+            Some("xhigh"),
+            "the deprecated alias must load identically",
+        );
+        assert_eq!(tc.budget_tokens, 2048);
+
+        // Round trip: the canonical key is what gets written out.
+        let serialized = toml::to_string(&config).unwrap();
         assert!(
-            toml::from_str::<KernelConfig>(toml_str).is_err(),
-            "`medium` is reachable only as the budget-bucket fallback and is not a settable mode",
+            serialized.contains("reasoning_effort"),
+            "canonical key must be written: {serialized}"
+        );
+        assert!(
+            !serialized.contains("reasoning_mode"),
+            "the deprecated alias must never be serialized: {serialized}"
         );
     }
 
-    /// The serde spelling is the documented spelling.
+    /// The vocabulary is open (#8591): a well-formed token the four-rung enum
+    /// could not express — `medium`, `xhigh`, `minimal`, or whatever a gateway
+    /// declares — parses and is kept verbatim. The pre-#7946 test asserted
+    /// `medium` was rejected; the level the operator picks now reaches the wire
+    /// as-is, and the per-model vocabulary lives in the catalog instead of a
+    /// hard-coded parser.
     #[test]
-    fn test_reasoning_mode_serde_spelling_matches_as_str() {
+    fn test_thinking_config_accepts_open_vocabulary_reasoning_efforts() {
+        for literal in ["medium", "xhigh", "minimal", "qwen-deep"] {
+            let toml_str = format!(
+                r#"
+                log_level = "info"
+                [thinking]
+                reasoning_effort = "{literal}"
+                "#
+            );
+            let config: KernelConfig = toml::from_str(&toml_str).unwrap();
+            let tc = config.thinking.expect("thinking table parsed");
+            assert_eq!(
+                tc.reasoning_effort.as_ref().map(|m| m.as_str()),
+                Some(literal),
+            );
+        }
+    }
+
+    /// Structural validation still rejects input that cannot be a token —
+    /// whitespace, emptiness, control characters. This is the price of an open
+    /// vocabulary: `banana` is a *typo* the provider rejects, not a parse
+    /// error, because no closed set can know every provider's rungs.
+    #[test]
+    fn test_thinking_config_rejects_malformed_reasoning_efforts() {
+        for literal in ["ban ana", "", "high low"] {
+            let toml_str = format!(
+                r#"
+                log_level = "info"
+                [thinking]
+                reasoning_effort = "{literal}"
+                "#
+            );
+            assert!(
+                toml::from_str::<KernelConfig>(&toml_str).is_err(),
+                "literal {literal:?} must not parse as a reasoning mode",
+            );
+        }
+    }
+
+    /// The serde spelling is the documented spelling, for the legacy rungs and
+    /// for open-vocabulary tokens alike (#8591).
+    #[test]
+    fn test_reasoning_effort_serde_spelling_matches_as_str() {
         for mode in [
-            ReasoningMode::None,
-            ReasoningMode::Low,
-            ReasoningMode::High,
-            ReasoningMode::Max,
+            ReasoningMode::none(),
+            ReasoningMode::low(),
+            ReasoningMode::high(),
+            ReasoningMode::max(),
+            ReasoningMode::new("medium").unwrap(),
+            ReasoningMode::new("xhigh").unwrap(),
+            ReasoningMode::new("minimal").unwrap(),
         ] {
             let json = serde_json::to_string(&mode).unwrap();
             assert_eq!(json, format!("\"{}\"", mode.as_str()));
             let back: ReasoningMode = serde_json::from_str(&json).unwrap();
             assert_eq!(back, mode);
         }
+    }
+
+    /// `ReasoningMode::new` is the structural gate: it trims, bounds, and
+    /// restricts to token characters — but it does **not** enforce a closed
+    /// vocabulary, because the vocabulary is per-model catalog data.
+    #[test]
+    fn test_reasoning_effort_structural_validation() {
+        assert_eq!(ReasoningMode::new("  xhigh  ").unwrap().as_str(), "xhigh");
+        assert_eq!(ReasoningMode::new("max").unwrap().as_str(), "max");
+        for bad in ["", "   ", "ban ana", "high low"] {
+            assert!(
+                ReasoningMode::new(bad).is_err(),
+                "{bad:?} must not be a valid reasoning token",
+            );
+        }
+        assert!(
+            ReasoningMode::new("a".repeat(33)).is_err(),
+            "an over-long token must be rejected",
+        );
+        // A typo is structurally valid; the provider is what rejects it.
+        assert_eq!(ReasoningMode::new("banana").unwrap().as_str(), "banana");
+    }
+
+    /// `ReasoningEffortPolicy::coerce` (#8591) implements the comparative-study
+    /// rule: a value outside the model's supported set maps to the **nearest**
+    /// supported rung (ties resolve downward, `xhigh` → `high`), never a silent
+    /// drop and never a 400. `none` on a model that cannot be switched off maps
+    /// to the lowest graded rung; an undeclared policy passes everything
+    /// through.
+    #[test]
+    fn test_reasoning_policy_coerces_to_the_nearest_supported_effort() {
+        use crate::config::ReasoningEffortPolicy;
+
+        let declared = |efforts: &[&str]| ReasoningEffortPolicy {
+            supported_efforts: efforts.iter().map(|s| (*s).to_string()).collect(),
+            ..Default::default()
+        };
+
+        // xhigh → high when the top rung is absent (Vercel/LiteLLM pattern).
+        let wide = declared(&["minimal", "low", "medium", "high"]);
+        let c = wide.coerce(&ReasoningMode::new("xhigh").unwrap());
+        assert_eq!(c.effective.as_str(), "high");
+        assert_eq!(c.coerced_from.as_deref(), Some("xhigh"));
+
+        // Ties resolve downward: xhigh sits one step from high and one from
+        // max, and high is the lower of the two.
+        let middle = declared(&["low", "high", "max"]);
+        let c = middle.coerce(&ReasoningMode::new("xhigh").unwrap());
+        assert_eq!(c.effective.as_str(), "high");
+
+        // minimal → low when the floor is not supported.
+        let c = middle.coerce(&ReasoningMode::new("minimal").unwrap());
+        assert_eq!(c.effective.as_str(), "low");
+
+        // A token inside the set travels verbatim.
+        let c = wide.coerce(&ReasoningMode::new("minimal").unwrap());
+        assert_eq!(c.effective.as_str(), "minimal");
+        assert_eq!(c.coerced_from, None);
+
+        // A token outside the canonical vocabulary (a gateway rung the model
+        // does not carry) falls back to the declared default, else the floor.
+        let with_default = ReasoningEffortPolicy {
+            default_effort: Some("medium".to_string()),
+            ..declared(&["low", "medium", "high"])
+        };
+        let c = with_default.coerce(&ReasoningMode::new("qwen-deep").unwrap());
+        assert_eq!(c.effective.as_str(), "medium");
+        assert_eq!(c.coerced_from.as_deref(), Some("qwen-deep"));
+        let c = wide.coerce(&ReasoningMode::new("qwen-deep").unwrap());
+        assert_eq!(c.effective.as_str(), "minimal", "no default → the floor");
+
+        // `none` is only available when the model allows it.
+        assert!(wide.none_allowed());
+        let c = wide.coerce(&ReasoningMode::none());
+        assert_eq!(c.effective.as_str(), "none");
+        assert_eq!(c.coerced_from, None);
+
+        let no_off = ReasoningEffortPolicy {
+            off_allowed: false,
+            ..declared(&["low", "medium", "high"])
+        };
+        assert!(!no_off.none_allowed());
+        let c = no_off.coerce(&ReasoningMode::none());
+        assert_eq!(c.effective.as_str(), "low", "none → the floor");
+        assert_eq!(c.coerced_from.as_deref(), Some("none"));
+
+        let always_on = ReasoningEffortPolicy {
+            mandatory: true,
+            ..declared(&["low", "high"])
+        };
+        let c = always_on.coerce(&ReasoningMode::none());
+        assert_eq!(c.effective.as_str(), "low");
+        assert!(!always_on.none_allowed());
+
+        // Undeclared policy: nothing is coerced (legacy wire).
+        let undeclared = ReasoningEffortPolicy::default();
+        assert!(!undeclared.is_declared());
+        let c = undeclared.coerce(&ReasoningMode::new("xhigh").unwrap());
+        assert_eq!(c.effective.as_str(), "xhigh");
+        assert_eq!(c.coerced_from, None);
+        assert!(
+            undeclared.offered().is_empty(),
+            "an undeclared model must not be offered a guessed rung",
+        );
+    }
+
+    /// The offer surface: graded tokens plus `none` where the model allows it.
+    #[test]
+    fn test_reasoning_policy_offered_set() {
+        use crate::config::ReasoningEffortPolicy;
+        let policy = ReasoningEffortPolicy {
+            supported_efforts: vec!["low".to_string(), "high".to_string()],
+            ..Default::default()
+        };
+        assert_eq!(policy.offered(), vec!["none", "low", "high"]);
+        assert_eq!(policy.min_graded(), Some("low"));
+
+        let no_off = ReasoningEffortPolicy {
+            off_allowed: false,
+            ..policy
+        };
+        assert_eq!(no_off.offered(), vec!["low", "high"]);
+    }
+
+    /// `provider-default` is the **absence** of a value, not a level (#8591):
+    /// it is deliberately absent from the canonical vocabulary, so nobody can
+    /// pin it as if it were a rung.
+    #[test]
+    fn test_provider_default_is_not_a_canonical_level() {
+        assert!(!CANONICAL_REASONING_EFFORTS.contains(&"default"));
+        assert_eq!(
+            CANONICAL_REASONING_EFFORTS,
+            ["none", "minimal", "low", "medium", "high", "xhigh", "max"],
+        );
+        assert_eq!(canonical_reasoning_rank("none"), Some(0));
+        assert_eq!(canonical_reasoning_rank("max"), Some(6));
+        assert_eq!(canonical_reasoning_rank("default"), None);
+    }
+
+    /// `is_none` is the only token with driver-side off semantics, and
+    /// `is_canonical` distinguishes the pre-#8591 rungs.
+    #[test]
+    fn test_reasoning_effort_helpers() {
+        assert!(ReasoningMode::none().is_none());
+        assert!(!ReasoningMode::low().is_none());
+        assert!(ReasoningMode::high().is_canonical());
+        assert!(ReasoningMode::new("xhigh").unwrap().is_canonical());
+        assert!(ReasoningMode::new("minimal").unwrap().is_canonical());
+        assert!(!ReasoningMode::new("banana").unwrap().is_canonical());
+        assert_eq!(ReasoningMode::high().to_string(), "high");
+        assert_eq!(
+            CANONICAL_REASONING_EFFORTS,
+            ["none", "minimal", "low", "medium", "high", "xhigh", "max"],
+        );
     }
 
     /// `ThinkingOverride::resolve` is the per-call rung: the explicit mode wins
@@ -1786,14 +2009,14 @@ admin_role = "admin"
             ThinkingOverride::Disable
         );
         assert_eq!(
-            ThinkingOverride::resolve(None, Some(ReasoningMode::Max)),
-            ThinkingOverride::Mode(ReasoningMode::Max)
+            ThinkingOverride::resolve(None, Some(ReasoningMode::max())),
+            ThinkingOverride::Mode(ReasoningMode::max())
         );
         for boolean in [None, Some(true), Some(false)] {
             assert_eq!(
-                ThinkingOverride::resolve(boolean, Some(ReasoningMode::Low)),
-                ThinkingOverride::Mode(ReasoningMode::Low),
-                "reasoning_mode must win over thinking={boolean:?}",
+                ThinkingOverride::resolve(boolean, Some(ReasoningMode::low())),
+                ThinkingOverride::Mode(ReasoningMode::low()),
+                "reasoning_effort must win over thinking={boolean:?}",
             );
         }
         // The `From<Option<bool>>` shim every pre-#7946 call site goes through.
