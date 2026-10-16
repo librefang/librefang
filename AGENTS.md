@@ -162,7 +162,7 @@ the single-page summary.
 
 ## Gotchas
 
-- Do not modify `librefang-cli` without explicit instruction. It is under active development.
+- `librefang-cli` is under active development and may be modified as needed — keep changes focused.
 - `PeerRegistry`: `Option<PeerRegistry>` on the kernel, `Option<Arc<PeerRegistry>>` on `AppState`.
 - New `KernelConfig` field MUST appear in its `Default` impl. Build fails otherwise.
 - `AgentLoopResult` field is `.response`. Not `.response_text`.
