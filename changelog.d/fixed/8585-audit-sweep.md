@@ -1,3 +1,0 @@
-Fix defects found in a workspace audit across the kernel, runtime, API, CLI and LLM drivers.
-Notable ones: a workflow that hits its timeout now ends `Failed` instead of staying `Running` forever, disconnecting an MCP server no longer drops the tools of another server whose name starts with the same prefix, `task_complete` only succeeds for the agent holding the claim, the `librefang mcp` backend authenticates when `api_key` is set, the Claude Code and CLI drivers reap their child processes on cancellation, and Anthropic streams framed with CRLF are parsed.
-On Windows, concurrent writes to the same agent identity file no longer fail with a spurious 403. (#8585) (@houko)

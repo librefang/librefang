@@ -1,3 +1,0 @@
-MCP catalog entries for native SSE / Streamable-HTTP servers can now map a `required_env` credential to a request header with `[[headers]] name = "Authorization", value = "Bearer ${KEY}"`, so an authenticated remote MCP server can be installed from the catalog with the user's own key instead of hand-writing `headers` in `config.toml`.
-The installed server stores only the `${KEY}` reference; the runtime substitutes it from the server's declared `env` at every connect, fails before sending anything when the credential is missing or blank, and leaves fixed headers untouched.
-Credentials entered at install are now usable without a daemon restart, and editing a server from the dashboard no longer silently drops its configured headers. (#8587, #8578) (@houko)

@@ -3,6 +3,7 @@
 
 require "json"
 require "net/http"
+require "time"
 require "uri"
 require "yaml"
 
@@ -112,12 +113,19 @@ module DevtoPublish
   class Client
     DEFAULT_BASE_URL = "https://dev.to/api/"
     DEFAULT_PAGE_SIZE = 1000
+    MAX_RATE_LIMIT_RETRIES = 3
+    MAX_RETRY_DELAY = 60
 
-    def initialize(api_key:, base_url: DEFAULT_BASE_URL, page_size: DEFAULT_PAGE_SIZE, transport: nil)
+    def initialize(api_key:, base_url: DEFAULT_BASE_URL, page_size: DEFAULT_PAGE_SIZE, transport: nil,
+      sleeper: ->(seconds) { sleep(seconds) }, clock: -> { Time.now }, output: $stderr)
       @api_key = api_key
       @base_url = URI(base_url)
       @page_size = page_size
       @transport = transport || method(:http_request)
+      @sleeper = sleeper
+      @clock = clock
+      @output = output
+      @write_sent = false
     end
 
     def all_articles
@@ -177,7 +185,26 @@ module DevtoPublish
     private
 
     def request_json(method, path, payload = nil)
-      status, body = @transport.call(method, URI.join(@base_url.to_s, path), payload)
+      # Forem limits ordinary API writes to one per second, by both IP and key.
+      # https://github.com/forem/forem/blob/main/config/initializers/rack_attack.rb
+      if method != :get
+        @sleeper.call(1) if @write_sent
+        @write_sent = true
+      end
+
+      retries = 0
+      status, body = loop do
+        code, response_body, headers = @transport.call(method, URI.join(@base_url.to_s, path), payload)
+        break [code, response_body] unless code == 429 && retries < MAX_RATE_LIMIT_RETRIES
+
+        delay = retry_delay(headers, retries)
+        # Stop if the server asks for a longer wait; never retry early.
+        break [code, response_body] if delay > MAX_RETRY_DELAY
+
+        retries += 1
+        @output.puts("Dev.to rate limited; retrying in #{delay}s (#{retries}/#{MAX_RATE_LIMIT_RETRIES})")
+        @sleeper.call(delay)
+      end
       unless status.between?(200, 299)
         detail = body.to_s.gsub(/\s+/, " ")[0, 500]
         raise Error, "Dev.to API returned HTTP #{status}: #{detail}"
@@ -185,6 +212,18 @@ module DevtoPublish
       JSON.parse(body)
     rescue JSON::ParserError => e
       raise Error, "Dev.to API returned invalid JSON: #{e.message}"
+    end
+
+    def retry_delay(headers, retries)
+      value = headers&.fetch("retry-after", nil).to_s
+      delay = if value.match?(/\A\d+\z/)
+                value.to_i
+              else
+                (Time.httpdate(value) - @clock.call).ceil
+              end
+      [delay, 1].max
+    rescue ArgumentError
+      2**retries
     end
 
     def http_request(method, uri, payload)
@@ -202,7 +241,7 @@ module DevtoPublish
         read_timeout: 20,
         write_timeout: 20
       ) { |http| http.request(request) }
-      [response.code.to_i, response.body.to_s]
+      [response.code.to_i, response.body.to_s, {"retry-after" => response["Retry-After"]}]
     rescue SystemCallError, SocketError, Timeout::Error => e
       raise Error, "Dev.to request failed: #{e.message}"
     end
