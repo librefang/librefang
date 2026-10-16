@@ -34,7 +34,7 @@ members = [
 ]
 
 [workspace.package]
-version = "2026.9.19"
+version = "2026.10.16"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/librefang/librefang"
@@ -257,7 +257,7 @@ regex-lite = "0.1"
 socket2 = "0.6.4"
 
 # Zip archive extraction
-zip = { version = "8", default-features = false, features = ["deflate"] }
+zip = { version = "9.0.3", default-features = false, features = ["deflate"] }
 
 # Internationalization (i18n)
 fluent = "0.17"

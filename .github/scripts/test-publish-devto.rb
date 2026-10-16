@@ -4,6 +4,7 @@
 require "minitest/autorun"
 require "stringio"
 require "tempfile"
+require "socket"
 require_relative "publish-devto"
 
 class DevtoPublishTest < Minitest::Test
@@ -156,6 +157,141 @@ class DevtoPublishTest < Minitest::Test
     assert_raises(DevtoPublish::Error) { invalid_url.publish(article, id: 7) }
   ensure
     file&.close!
+  end
+
+  def test_client_spaces_writes_and_retries_only_the_rate_limited_article
+    file = article_file("Article", "https://example.test/article")
+    article = DevtoPublish.parse_article(file.path)
+    calls = []
+    delays = []
+    transport = lambda do |method, uri, payload|
+      calls << [method, uri.path, payload]
+      if calls.length == 2
+        [429, "Retry later", {"retry-after" => "2"}]
+      else
+        id = uri.path.split("/").last.to_i
+        [200, JSON.generate({id: id, url: "https://dev.to/#{id}"})]
+      end
+    end
+    client = DevtoPublish::Client.new(
+      api_key: "secret", transport: transport, sleeper: ->(delay) { delays << delay }, output: StringIO.new
+    )
+
+    client.publish(article, id: 7)
+    client.publish(article, id: 8)
+
+    assert_equal [[:put, "/api/articles/7"], [:put, "/api/articles/8"], [:put, "/api/articles/8"]],
+      calls.map { |method, path, _| [method, path] }
+    assert_equal calls[1][2], calls[2][2]
+    assert_equal [1, 2], delays
+  ensure
+    file&.close!
+  end
+
+  def test_client_recovers_from_rate_limit_without_retry_after_using_backoff
+    responses = [[429, "Retry later"], [429, "Retry later"], [200, "[]"]]
+    delays = []
+    client = DevtoPublish::Client.new(
+      api_key: "secret", transport: ->(*) { responses.shift },
+      sleeper: ->(delay) { delays << delay }, output: StringIO.new
+    )
+
+    assert_empty client.all_articles
+    assert_equal [1, 2], delays
+  end
+
+  def test_rate_limited_create_retries_the_same_payload
+    file = article_file("New article", "https://example.test/new")
+    article = DevtoPublish.parse_article(file.path)
+    calls = []
+    delays = []
+    transport = lambda do |method, uri, payload|
+      calls << [method, uri.path, payload]
+      calls.length == 1 ? [429, "Retry later"] : [201, '{"id":9,"url":"https://dev.to/new"}']
+    end
+    client = DevtoPublish::Client.new(
+      api_key: "secret", transport: transport, sleeper: ->(delay) { delays << delay }, output: StringIO.new
+    )
+
+    assert_equal 9, client.publish(article).fetch("id")
+    assert_equal [:post, "/api/articles"], calls[0][0, 2]
+    assert_equal calls[0], calls[1]
+    assert_equal [1], delays
+  ensure
+    file&.close!
+  end
+
+  def test_client_limits_rate_limit_retries_and_does_not_retry_other_http_errors
+    [401, 403, 422, 429, 500].each do |status|
+      attempts = 0
+      delays = []
+      client = DevtoPublish::Client.new(
+        api_key: "secret", transport: ->(*) { attempts += 1; [status, "Failed"] },
+        sleeper: ->(delay) { delays << delay }, output: StringIO.new
+      )
+
+      error = assert_raises(DevtoPublish::Error) { client.all_articles }
+      assert_includes error.message, "HTTP #{status}"
+      assert_equal(status == 429 ? 4 : 1, attempts)
+      assert_equal(status == 429 ? [1, 2, 4] : [], delays)
+    end
+  end
+
+  def test_client_handles_http_date_and_invalid_retry_after
+    now = Time.utc(2026, 10, 16, 5, 0, 0)
+    {"Fri, 16 Oct 2026 05:00:03 GMT" => 3, "Fri, 16 Oct 2026 04:59:59 GMT" => 1,
+      "invalid" => 1, "-1" => 1, "0" => 1}.each do |header, delay|
+      responses = [[429, "Retry later", {"retry-after" => header}], [200, "[]"]]
+      delays = []
+      client = DevtoPublish::Client.new(
+        api_key: "secret", transport: ->(*) { responses.shift },
+        sleeper: ->(seconds) { delays << seconds }, clock: -> { now }, output: StringIO.new
+      )
+
+      assert_empty client.all_articles
+      assert_equal [delay], delays
+    end
+  end
+
+  def test_client_does_not_shorten_excessive_server_retry_delay
+    attempts = 0
+    delays = []
+    client = DevtoPublish::Client.new(
+      api_key: "secret", transport: ->(*) { attempts += 1; [429, "Retry later", {"retry-after" => "3600"}] },
+      sleeper: ->(delay) { delays << delay }, output: StringIO.new
+    )
+
+    error = assert_raises(DevtoPublish::Error) { client.all_articles }
+    assert_includes error.message, "HTTP 429"
+    assert_equal 1, attempts
+    assert_empty delays
+  end
+
+  def test_real_http_transport_preserves_retry_after
+    server = TCPServer.new("127.0.0.1", 0)
+    worker = Thread.new do
+      [429, 200].each do |status|
+        socket = server.accept
+        while (line = socket.gets) && line != "\r\n"
+          # Consume the request headers before returning a complete response.
+        end
+        body = status == 429 ? "Retry later" : "[]"
+        socket.write("HTTP/1.1 #{status} Test\r\nRetry-After: 2\r\nContent-Length: #{body.bytesize}\r\nConnection: close\r\n\r\n#{body}")
+        socket.close
+      end
+    end
+    delays = []
+    client = DevtoPublish::Client.new(
+      api_key: "secret", base_url: "http://127.0.0.1:#{server.addr[1]}/api/",
+      sleeper: ->(delay) { delays << delay }, output: StringIO.new
+    )
+
+    assert_empty client.all_articles
+    assert_equal [2], delays
+    worker.value
+  ensure
+    worker&.kill
+    server&.close
   end
 
   def test_ambiguous_title_fails_closed
