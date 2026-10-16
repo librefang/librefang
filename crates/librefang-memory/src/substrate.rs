@@ -809,47 +809,57 @@ impl MemorySubstrate {
         session_id: Option<SessionId>,
         window_size: Option<usize>,
     ) -> LibreFangResult<(Option<String>, Vec<librefang_types::message::Message>)> {
-        let (fallback, recent) =
+        let (canonical, recent) =
             self.sessions
                 .canonical_context(agent_id, session_id, window_size)?;
-        let summary = self.summary_for_session(agent_id, session_id, fallback)?;
+        let summary = self.summary_for_session(agent_id, session_id, canonical);
         Ok((summary, recent))
     }
 
-    /// Prefer the summary written for `session_id` itself (#8645), falling back
-    /// to the agent-scoped one the caller already resolved.
+    /// Resolve the summary for one session (#8645).
     ///
-    /// `fallback` comes from `canonical_sessions`, which holds one summary per
-    /// agent, so it is only correct for the session that produced it — and is
-    /// already gated that way by #6493. Every other session must use its own
-    /// copy, otherwise another conversation's compaction silently removes this
-    /// conversation's summary.
+    /// `canonical` is what the canonical row returned for this session — already
+    /// gated by ownership (#6493), so when it is `Some` it *is* this session's
+    /// summary and wins: that keeps a single-conversation agent on exactly the
+    /// path it took before this change. Only when the canonical row has nothing
+    /// for this session (another conversation compacted last) does the
+    /// per-session copy apply — the thing another session's compaction cannot
+    /// take away.
     fn summary_for_session(
         &self,
         agent_id: AgentId,
         session_id: Option<SessionId>,
-        fallback: Option<String>,
-    ) -> LibreFangResult<Option<String>> {
+        canonical: Option<String>,
+    ) -> Option<String> {
         let Some(want) = session_id else {
             // Agent-wide read (no session named): unchanged behaviour.
-            return Ok(fallback);
+            return canonical;
         };
-        Ok(self.per_session_summary(agent_id, want)?.or(fallback))
+        canonical.or_else(|| self.per_session_summary(agent_id, want))
     }
 
     /// Read the summary stored under the session's own key, if any.
-    fn per_session_summary(
-        &self,
-        agent_id: AgentId,
-        session_id: SessionId,
-    ) -> LibreFangResult<Option<String>> {
-        let Some(value) = self.structured_get(agent_id, &session_summary_key(&session_id))? else {
-            return Ok(None);
-        };
-        Ok(value
-            .as_str()
-            .filter(|text| !text.trim().is_empty())
-            .map(str::to_string))
+    ///
+    /// Best-effort by design: this is an additive fallback, so a KV-store
+    /// failure must not turn a prompt-assembly path that used to succeed (from
+    /// the canonical row) into an error.
+    fn per_session_summary(&self, agent_id: AgentId, session_id: SessionId) -> Option<String> {
+        match self.structured_get(agent_id, &session_summary_key(&session_id)) {
+            Ok(Some(value)) => value
+                .as_str()
+                .filter(|text| !text.trim().is_empty())
+                .map(str::to_string),
+            Ok(None) => None,
+            Err(error) => {
+                tracing::warn!(
+                    agent_id = %agent_id,
+                    session_id = %session_id.0,
+                    %error,
+                    "Failed to read the per-session copy of the compaction summary"
+                );
+                None
+            }
+        }
     }
 
     /// Return the agent's compacted summary **only if it is owned by
@@ -866,17 +876,15 @@ impl MemorySubstrate {
         agent_id: AgentId,
         session_id: SessionId,
     ) -> LibreFangResult<Option<String>> {
-        // The session's own summary first (#8645): the agent-scoped row below
-        // holds whichever conversation compacted last, so on a multi-user agent
-        // it is either somebody else's summary (withheld by the gate) or none.
-        if let Some(summary) = self.per_session_summary(agent_id, session_id)? {
-            return Ok(Some(summary));
-        }
         let canonical = self.sessions.load_canonical(agent_id)?;
-        Ok(match canonical.compacted_summary_session_id {
+        let owned = match canonical.compacted_summary_session_id {
             Some(owner) if owner == session_id => canonical.compacted_summary,
             _ => None,
-        })
+        };
+        // Owned by this session wins, matching the pre-#8645 behaviour; the
+        // per-session copy covers the case the canonical row cannot: another
+        // conversation compacted last and took the single agent-scoped slot.
+        Ok(owned.or_else(|| self.per_session_summary(agent_id, session_id)))
     }
 
     /// Store an LLM-generated summary, replacing older messages with the kept subset.
@@ -2258,6 +2266,40 @@ mod tests {
             .canonical_context(agent, Some(session_a), None)
             .unwrap();
         assert_eq!(summary.as_deref(), Some("summary of A"));
+    }
+
+    /// The #6493 guarantee has to survive: a session that owns no summary reads
+    /// nothing, never the agent-scoped summary belonging to another conversation.
+    #[test]
+    fn a_session_never_reads_another_sessions_summary() {
+        let substrate = MemorySubstrate::open_in_memory(0.1).unwrap();
+        let agent = AgentId::new();
+        let session_a = SessionId::new();
+        let session_b = SessionId::new();
+
+        let kept = |text: &str| {
+            vec![librefang_types::message::Message {
+                role: librefang_types::message::Role::User,
+                content: librefang_types::message::MessageContent::Text(text.to_string()),
+                pinned: false,
+                timestamp: None,
+            }]
+        };
+
+        substrate
+            .store_llm_summary(agent, "summary of B", kept("b"), Some(session_b))
+            .unwrap();
+
+        assert_eq!(
+            substrate
+                .compacted_summary_for_session(agent, session_a)
+                .unwrap(),
+            None
+        );
+        let (summary, _recent) = substrate
+            .canonical_context(agent, Some(session_a), None)
+            .unwrap();
+        assert_eq!(summary, None);
     }
 
     /// #8219: the aggregate must agree with what listing every row would have counted.
