@@ -73,3 +73,19 @@ export function whoamiPersonName(
   if (me.principal !== null || !!me.emoji || me.has_avatar === true) return me.name;
   return undefined;
 }
+
+/**
+ * Whether this credential's `GET /api/agents` listing is the whole registry.
+ *
+ * The daemon owner-scopes that listing for every role below Admin
+ * (`routes/agents/lifecycle.rs`): a plain User caller is served only the
+ * agents it authored, so an id missing from its list proves nothing about
+ * the registry. The same Admin boundary as `canEditAgentIdentity` in the
+ * agent editor, but a different question — which is why it is its own
+ * predicate. `undefined` (whoami still in flight, or failed) is not Admin:
+ * callers that would prune state on the list's word must keep their hands
+ * off until the role is known (#8596).
+ */
+export function canListAllAgents(role: string | undefined): boolean {
+  return role === "admin" || role === "owner";
+}

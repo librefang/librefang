@@ -2243,9 +2243,41 @@ export async function setAgentSkills(
 // Every caller of `listAgents` (dashboard nav, assignee pickers) wants "the
 // whole registry", not a page of it, and none of them paginate — so this is
 // a ceiling, not a page size. An install past this many registered agents
-// silently drops the tail rather than erroring; there is no signal today
-// that would tell an operator it happened.
+// used to drop the tail with nothing left to say it happened; the result's
+// `truncated` flag is that signal now (#8596), and callers that treat a
+// missing id as "gone" must honour it.
 const AGENT_LIST_LIMIT = 500;
+
+export type AgentListResult = { items: AgentItem[]; truncated: boolean };
+
+/**
+ * The registry as one page, plus whether the page holds the whole registry.
+ *
+ * `total` is the server's count *after* its own filtering — owner scoping
+ * for non-admin callers, the hand-agent and text filters — so `truncated`
+ * means "more agents exist than this page returned" under whichever view
+ * the caller is entitled to, never a comparison against an invisible set.
+ * `useAgents` splits the two apart again; anything that prunes state from
+ * the ids must look at `truncated` first (#8596).
+ */
+export async function listAgents(
+  opts: { includeHands?: boolean } = {},
+): Promise<AgentListResult> {
+  const params = new URLSearchParams({
+    limit: String(AGENT_LIST_LIMIT),
+    sort: "last_active",
+    order: "desc",
+  });
+  if (opts.includeHands) {
+    params.set("include_hands", "true");
+  }
+  const data = await get<PaginatedResponse<AgentItem>>(
+    `/api/agents?${params.toString()}`,
+  );
+  const items = data.items ?? [];
+  const total = data.total ?? 0;
+  return { items, truncated: total > items.length };
+}
 
 /**
  * PUT /api/agents/{id}/mcp_servers — replace the agent's MCP server grant
@@ -2270,23 +2302,6 @@ export async function setAgentMcpServers(
       ...(expectedVersion ? { expected_version: expectedVersion } : {}),
     },
   );
-}
-
-export async function listAgents(
-  opts: { includeHands?: boolean } = {},
-): Promise<AgentItem[]> {
-  const params = new URLSearchParams({
-    limit: String(AGENT_LIST_LIMIT),
-    sort: "last_active",
-    order: "desc",
-  });
-  if (opts.includeHands) {
-    params.set("include_hands", "true");
-  }
-  const data = await get<PaginatedResponse<AgentItem>>(
-    `/api/agents?${params.toString()}`,
-  );
-  return data.items ?? [];
 }
 
 /**
