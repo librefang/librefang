@@ -123,7 +123,7 @@ describe("generateManifestMarkdown", () => {
     form.fallback_models = [
       { _uid: "test-fb-1", provider: "anthropic", model: "claude-3-5-sonnet", api_key_env: "", base_url: "", extras: {} },
     ];
-    form.thinking = { enabled: true, budget_tokens: "5000", stream_thinking: true };
+    form.thinking = { enabled: true, budget_tokens: "5000", stream_thinking: true, reasoning_effort: "" };
     form.autonomous = {
       enabled: true,
       max_iterations: "100",

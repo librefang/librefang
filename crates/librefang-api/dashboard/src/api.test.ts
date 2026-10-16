@@ -15,7 +15,9 @@ import {
   resetAgentSession,
   restoreBackup,
   searchMemories,
+  sendAgentMessage,
   setApiKey,
+  setSessionReasoningOverride,
   updateAgentTools,
   verifyStoredAuth,
 } from "./api";
@@ -454,6 +456,53 @@ describe("dashboard auth helpers", () => {
     ]);
   });
 
+  // The canonical wire spelling is `reasoning_effort` (the ecosystem's name);
+  // `reasoning_mode` survives server-side only as a deprecated alias, so the
+  // dashboard must never emit it.
+  it("setSessionReasoningOverride patches the session with reasoning_effort", async () => {
+    setApiKey("secret-token");
+    const okResponse = () =>
+      new Response(JSON.stringify({ status: "ok" }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    fetchMock.mockResolvedValueOnce(okResponse()).mockResolvedValueOnce(okResponse());
+
+    await setSessionReasoningOverride("sess-1", "xhigh");
+    await setSessionReasoningOverride("sess-1", null);
+
+    expect(fetchMock.mock.calls[0][0]).toBe("/api/sessions/sess-1/reasoning");
+    const pinned = JSON.parse(fetchMock.mock.calls[0][1].body);
+    expect(pinned).toEqual({ reasoning_effort: "xhigh" });
+    expect(pinned).not.toHaveProperty("reasoning_mode");
+    // `null` has to survive stringify as an explicit null: it is the only way
+    // to say "remove the pin" — an omitted key means "leave it alone".
+    expect(JSON.parse(fetchMock.mock.calls[1][1].body)).toEqual({ reasoning_effort: null });
+  });
+
+  it("sendAgentMessage carries reasoning_effort only when one is armed", async () => {
+    setApiKey("secret-token");
+    const okResponse = () =>
+      new Response(JSON.stringify({ response: "ok" }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    fetchMock.mockResolvedValueOnce(okResponse()).mockResolvedValueOnce(okResponse());
+
+    await sendAgentMessage("agent-1", "hi", { reasoning_effort: "minimal" });
+    await sendAgentMessage("agent-1", "hi");
+
+    const withEffort = JSON.parse(fetchMock.mock.calls[0][1].body);
+    expect(withEffort.reasoning_effort).toBe("minimal");
+    expect(withEffort).not.toHaveProperty("reasoning_mode");
+    // Unset is absent, not null: the session pin / manifest default applies.
+    const without = JSON.parse(fetchMock.mock.calls[1][1].body);
+    expect(without).not.toHaveProperty("reasoning_effort");
+  });
+
+  // `null` has to survive JSON.stringify as `null`, not vanish. It is the only
+  // way for a client to say "hand this field back to inherit" — an omitted key
+  // means "leave it alone", which is a different request.
   it("reads the manifest ETag as an unquoted expected_version token (#8424)", async () => {
     fetchMock.mockResolvedValueOnce(
       new Response('name = "a"\n', {

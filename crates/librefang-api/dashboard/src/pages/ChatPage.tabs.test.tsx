@@ -95,6 +95,9 @@ vi.mock("../lib/queries/approvals", () => ({
 
 vi.mock("../lib/queries/sessions", () => ({
   useSessionStream: () => ({ events: [], isAttached: false, lastError: null }),
+  // The composer reads the session's pinned reasoning level from the session
+  // detail; these suites do not exercise it, so it answers as "nothing pinned".
+  useSessionDetails: () => ({ data: undefined, isPending: false }),
 }));
 
 vi.mock("../lib/queries/hands", () => ({
