@@ -34,10 +34,13 @@ feature-depth = 1
 db-path = "$CARGO_HOME/advisory-dbs"
 db-urls = ["https://github.com/RustSec/advisory-db"]
 yanked = "deny"
-# cargo-deny 0.20.2 advisory ignores are global by advisory ID; its schema
-# accepts only `id` and `reason`, not crate/version constraints. Re-review the
-# full dependency graph whenever an ignored advisory appears on a new path.
+# cargo-deny 0.20.2 RustSec ignores are global by advisory ID and cannot be
+# constrained by crate/version. Re-review the full dependency graph whenever
+# an ignored advisory appears on a new path. Yank ignores use exact crate versions.
 ignore = [
+    # All zip 4.x releases are yanked; even tauri-plugin-updater 2.14.0 still requires ^4 on Windows.
+    # Remove this exact-version yank exception when the updater supports zip 9; RustSec advisories remain enforced.
+    { crate = "zip@4.6.1", reason = "Windows-only tauri-plugin-updater dependency; no non-yanked zip 4.x release exists. https://crates.io/crates/tauri-plugin-updater/2.14.0/dependencies" },
     # ── gtk-rs GTK3 bindings, unmaintained ─────────────────────────────────
     # Transitive via tauri-runtime-wry on Linux only. Cannot upgrade until
     # tauri migrates to GTK4 — track upstream: https://github.com/tauri-apps/tauri/issues/9220
@@ -132,7 +135,7 @@ allow = []
 deny = []
 skip = [
     # `zip` 4.x is pulled in by tauri-plugin-updater (transitive) while our
-    # own code uses 8.x. Allow the duplicate until tauri upstream catches up.
+    # own code uses 9.x. Allow the duplicate until tauri upstream catches up.
     { name = "zip", version = "=4.6.1" },
 ]
 skip-tree = []
