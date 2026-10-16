@@ -97,6 +97,27 @@ fn list_identity_files(workspace: &std::path::Path) -> Vec<serde_json::Value> {
 mod identity_file_list_tests {
     use super::*;
 
+    /// Serializes the two tests below that hold the kernel's front-matter lock.
+    ///
+    /// Each of them holds `IDENTITY_FRONT_MATTER_LOCK` in the test thread while a
+    /// spawned helper takes `IDENTITY_FILE_MUTATION_LOCK` (the `IDENTITY.md` write
+    /// and delete take it *before* the front-matter lock, in production order).
+    /// Run in parallel, the two can chain into a cycle: one test's helper holds the
+    /// mutation lock and waits for the front-matter lock while the other test's
+    /// thread holds the front-matter lock and waits for a SOUL.md helper that needs
+    /// the mutation lock. Both then stall until their 10s timeouts. Serializing the
+    /// two tests keeps the process-global locks in one order without changing the
+    /// behaviour either of them covers.
+    static FRONT_MATTER_LOCK_TESTS_SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Hold for the whole test, before any lock a helper could take.
+    fn lock_front_matter_tests() -> std::sync::MutexGuard<'static, ()> {
+        // The guarded section holds no state of its own, so a panic inside it leaves nothing to repair.
+        FRONT_MATTER_LOCK_TESTS_SERIAL
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     #[test]
     fn list_identity_files_prefers_current_layout_and_reports_sizes() {
         let temp = tempfile::tempdir().unwrap();
@@ -250,6 +271,8 @@ mod identity_file_list_tests {
         use std::sync::mpsc;
         use std::time::Duration;
 
+        // The sibling delete test must not interleave its mutation-lock holder with this test's front-matter wait.
+        let _serial = lock_front_matter_tests();
         let temp = tempfile::tempdir().unwrap();
         let workspace = temp.path().to_path_buf();
         std::fs::create_dir(workspace.join(".identity")).unwrap();
@@ -300,6 +323,8 @@ mod identity_file_list_tests {
         use std::sync::mpsc;
         use std::time::Duration;
 
+        // Same reason as the write test above.
+        let _serial = lock_front_matter_tests();
         let temp = tempfile::tempdir().unwrap();
         let workspace = temp.path().to_path_buf();
         std::fs::create_dir(workspace.join(".identity")).unwrap();
