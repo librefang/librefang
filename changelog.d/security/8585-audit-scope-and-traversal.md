@@ -1,2 +1,0 @@
-Close a set of isolation gaps found in a workspace audit: knowledge-graph enrichment and memory consolidation read and merged other agents' data, desktop agent import and `librefang skill create` built paths from unvalidated names, the OpenClaw importer followed symlinks out of the workspace, integration installs wrote caller-supplied keys into the vault, and several API side doors skipped the owner scope.
-Each now stays within its caller's scope or refuses the input. (#8585) (@houko)
