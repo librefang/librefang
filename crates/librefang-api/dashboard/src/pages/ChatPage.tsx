@@ -3672,8 +3672,15 @@ export function ChatPage() {
   );
 
   useEffect(() => {
-    if (selectedAgentId && activeSessionId) openChatTab(selectedAgentId, activeSessionId);
-  }, [selectedAgentId, activeSessionId, openChatTab]);
+    if (!selectedAgentId || !activeSessionId) return;
+    // `agentTabs` is in the dependencies on purpose, not only navigation: a
+    // prune against a list that is stale (10 s `staleTime`), or another
+    // window's `rehydrate()` through the storage listener, can drop the tab
+    // of the session on screen, and nothing else would add it back. When the
+    // id is already open and newest, `openChatTab` returns the same state, so
+    // the extra runs cost nothing and cannot loop.
+    openChatTab(selectedAgentId, activeSessionId);
+  }, [selectedAgentId, activeSessionId, agentTabs, openChatTab]);
 
   useEffect(() => {
     // A session deleted from the dropdown, another browser tab, or the CLI
@@ -3684,11 +3691,15 @@ export function ChatPage() {
     // so it prunes the stale tabs instead of being skipped (#8326 review).
     const loaded = sessionsQuery.data;
     if (!selectedAgentId || !loaded) return;
-    pruneChatTabs(
-      selectedAgentId,
-      new Set(loaded.map((session) => session.session_id).filter((id): id is string => !!id)),
+    const valid = new Set(
+      loaded.map((session) => session.session_id).filter((id): id is string => !!id),
     );
-  }, [selectedAgentId, sessionsQuery.data, pruneChatTabs]);
+    // The session on screen is always valid, however stale the list: a tab
+    // removed here would be appended back at the end by the open effect
+    // above, moving the active tab under the cursor.
+    if (activeSessionId) valid.add(activeSessionId);
+    pruneChatTabs(selectedAgentId, valid);
+  }, [selectedAgentId, sessionsQuery.data, activeSessionId, pruneChatTabs]);
 
   useEffect(() => {
     // Tabs are keyed by agent, so a deleted agent would otherwise leave its

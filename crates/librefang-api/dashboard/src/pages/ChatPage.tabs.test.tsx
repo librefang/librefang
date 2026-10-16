@@ -52,6 +52,10 @@ const SESSIONS: SessionListItem[] = [
   { session_id: "s3", agent_id: "agent-a", label: "Three", created_at: "2026-09-12T17:10:00Z" },
 ];
 
+// Mutable so individual tests can serve a stale session list (one the server
+// no longer returns in full), which is the input behind the prune tests.
+const sessionList = vi.hoisted(() => ({ data: [] as SessionListItem[] }));
+
 vi.mock("../lib/queries/agents", () => ({
   agentQueries: {
     session: () => ({
@@ -70,7 +74,7 @@ vi.mock("../lib/queries/agents", () => ({
     }),
   },
   useAgents: () => ({ data: AGENTS, refetch: vi.fn(), isFetching: false }),
-  useAgentSessions: () => ({ data: SESSIONS, refetch: vi.fn() }),
+  useAgentSessions: () => ({ data: sessionList.data, refetch: vi.fn() }),
   // `ChatPage` resolves the agent avatar through this hook since main grew the
   // avatar picker (#8371). This test neither asserts nor renders avatars, so a
   // stub that reports "no avatar" keeps the component mountable.
@@ -185,6 +189,7 @@ describe("chat session tab strip order", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     vi.stubGlobal("WebSocket", MockWebSocket);
+    sessionList.data = SESSIONS;
     // The real store: this test is about the order the component renders from
     // `openChatTabs`, which is exactly the array the page subscribes to.
     useUIStore.setState({
@@ -209,5 +214,59 @@ describe("chat session tab strip order", () => {
     });
 
     expect(tabLabels(tablist)).toEqual(["One", "Two", "Three"]);
+  });
+
+  it("keeps the active session in the set handed to pruneChatTabs", async () => {
+    // The cached list is stale: it was fetched before the session in the URL
+    // existed (created in another window, or reached from the Sessions page).
+    // Pruning with it alone would drop the tab of the session on screen; the
+    // open effect would have to append it back at the end, moving the active
+    // tab under the cursor.
+    sessionList.data = SESSIONS.filter((session) => session.session_id !== "s2");
+    useUIStore.setState({
+      openChatTabs: { "agent-a": ["s1", "s2", "s3", "deleted"] },
+      chatTabRecency: {},
+    });
+    const realPrune = useUIStore.getState().pruneChatTabs;
+    const pruneSpy = vi.fn(realPrune);
+    useUIStore.setState({ pruneChatTabs: pruneSpy });
+
+    renderPage();
+    await screen.findByText("hello there");
+    await vi.waitFor(() => expect(pruneSpy).toHaveBeenCalled());
+
+    // The active session is in the valid set even though the list omits it…
+    const validSets = pruneSpy.mock.calls.map(([, valid]) => valid as Set<string>);
+    expect(validSets[validSets.length - 1].has("s2")).toBe(true);
+    // …while a session the list genuinely no longer has is still pruned, and
+    // the strip keeps its order. The active tab falls back to its id as the
+    // label because the stale list cannot name it.
+    const tablist = screen.getByRole("tablist", { name: "Open conversations" });
+    await vi.waitFor(() => expect(tabLabels(tablist)).toEqual(["One", "s2", "Three"]));
+
+    useUIStore.setState({ pruneChatTabs: realPrune });
+  });
+
+  it("re-adds the active tab after a cross-window rehydrate removes it", async () => {
+    renderPage();
+    await screen.findByText("hello there");
+    const tablist = screen.getByRole("tablist", { name: "Open conversations" });
+    expect(tabLabels(tablist)).toEqual(["One", "Two", "Three"]);
+
+    // The other window closed (or evicted) this session's tab and wrote the
+    // record; the `storage` listener rehydrates it here, replacing the tab
+    // list under the session on screen. Nothing else would re-add it until
+    // the next navigation.
+    localStorage.setItem(
+      "librefang-ui-storage",
+      JSON.stringify({ version: 1, state: { openChatTabs: { "agent-a": ["s1", "s3"] } } }),
+    );
+    await act(async () => {
+      await useUIStore.persist.rehydrate();
+    });
+
+    // Appended, not inserted at its old position: the strip preserves the
+    // order tabs were last opened in.
+    await vi.waitFor(() => expect(tabLabels(tablist)).toEqual(["One", "Three", "Two"]));
   });
 });
