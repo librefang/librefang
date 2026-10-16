@@ -5,7 +5,7 @@
 use rusqlite::Connection;
 
 /// Current schema version.
-const SCHEMA_VERSION: u32 = 63;
+const SCHEMA_VERSION: u32 = 64;
 
 /// Run all migrations to bring the database up to date.
 pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
@@ -328,6 +328,20 @@ pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
     // This wanted to be 62 but #7974 took that number first, so it renumbers
     // to 63 rather than skipping past it — same rule as the note above.
     run_step!(63, migrate_v63);
+
+    // v64: skill version history (#8021). Full `skill.toml` +
+    // `prompt_context.md` snapshots so operators can see what changed over
+    // time and restore a prior state.
+    //
+    // This number collides with the open reasoning-effort PR (#8616), which
+    // also claims v64 for `sessions.reasoning_effort`. Whichever merges first
+    // keeps 64 and the other renumbers to 65 on rebase — the ladder below must
+    // stay contiguous either way, because `run_step!` gates on
+    // `current_version < N` read once at boot: a database that reaches N via a
+    // binary with a hole below it never runs the skipped step and the #3538
+    // backfill writes its audit row anyway, so the skew is silent and
+    // permanent.
+    run_step!(64, migrate_v64);
     // Audit-trail consistency (#3538): user_version must match the count
     // of distinct rows in `migrations`. Drift means an earlier migration
     // applied DDL without recording its audit row — operator tooling
@@ -1619,6 +1633,44 @@ fn migrate_v63(conn: &Connection) -> Result<(), rusqlite::Error> {
     conn.execute(
         "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
          VALUES (63, datetime('now'), 'Add ephemeral_runs.truncated so a cap-delivered worker run is distinguishable from a full one (#8556)')",
+        [],
+    )?;
+    Ok(())
+}
+
+/// v64 (#8021): skill version history.
+///
+/// Records full `skill.toml` + `prompt_context.md` snapshots per skill so the
+/// dashboard can show how an installed skill changed over time and restore a
+/// prior state. Keyed by `skill_name` alone: v1 tracks skills under the global
+/// `~/.librefang/skills/` root; workspace and hand-scoped skills are out of
+/// scope until a scope column exists.
+///
+/// Pure `CREATE TABLE IF NOT EXISTS` + fresh index, so re-running is a no-op.
+/// The index is `(skill_name, timestamp DESC)` because every read is scoped to
+/// one skill and ordered newest-first; the trim and dedup-run
+/// `ORDER BY timestamp DESC, id DESC LIMIT 1` against the same prefix.
+///
+/// This number collides with the open reasoning-effort PR (#8616), which also
+/// claims v64 (`sessions.reasoning_effort`); the one that merges second
+/// renumbers to 65 on rebase.
+fn migrate_v64(conn: &Connection) -> Result<(), rusqlite::Error> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS skill_versions (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            skill_name      TEXT NOT NULL,
+            timestamp       TEXT NOT NULL DEFAULT (datetime('now')),
+            manifest_toml   TEXT NOT NULL,
+            prompt_context  TEXT NOT NULL DEFAULT '',
+            author          TEXT NOT NULL DEFAULT '',
+            change_source   TEXT NOT NULL DEFAULT 'unknown'
+        );
+        CREATE INDEX IF NOT EXISTS idx_skill_versions_name
+            ON skill_versions(skill_name, timestamp DESC);",
+    )?;
+    conn.execute(
+        "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
+         VALUES (64, datetime('now'), 'Skill version history table (#8021)')",
         [],
     )?;
     Ok(())
@@ -5119,6 +5171,92 @@ mod tests {
         assert!(
             d62.contains("timeout_secs"),
             "version 62 must describe the timeout migration, got: {d62}"
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // v64: skill version history (#8021)
+    // ---------------------------------------------------------------------
+
+    /// The table has to arrive with the columns the store reads, on a database
+    /// that already holds skills (a migration that only works on a fresh file
+    /// has never run where it matters). A row written before the snapshot
+    /// exists is impossible by construction, so this only pins the shape.
+    #[test]
+    fn migrate_v64_creates_skill_versions_with_the_shape_the_store_reads() {
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+
+        assert!(
+            try_table_exists(&conn, "skill_versions").unwrap(),
+            "v64 must create skill_versions"
+        );
+        for column in [
+            "id",
+            "skill_name",
+            "timestamp",
+            "manifest_toml",
+            "prompt_context",
+            "author",
+            "change_source",
+        ] {
+            assert!(
+                column_exists(&conn, "skill_versions", column),
+                "skill_versions.{column} missing after migrate_v64"
+            );
+        }
+
+        // The default covers rows written by a writer that does not classify
+        // itself, and it has to be the same `unknown` the schema comment names.
+        conn.execute(
+            "INSERT INTO skill_versions (skill_name, manifest_toml) VALUES ('alpha', 'x')",
+            [],
+        )
+        .unwrap();
+        let (prompt, author, source): (String, String, String) = conn
+            .query_row(
+                "SELECT prompt_context, author, change_source FROM skill_versions \
+                 WHERE skill_name = 'alpha'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(prompt, "");
+        assert_eq!(author, "");
+        assert_eq!(source, "unknown");
+    }
+
+    #[test]
+    fn migrate_v64_is_idempotent_and_records_its_audit_row_once() {
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+
+        // The runner can legitimately replay a step after an interrupted
+        // upgrade; `CREATE TABLE/INDEX IF NOT EXISTS` is what makes the rerun
+        // a no-op. A database that has climbed past 64 through another caller,
+        // or a hand-run replay, issues it directly.
+        migrate_v64(&conn).expect("v64 must survive a rerun");
+        assert!(try_table_exists(&conn, "skill_versions").unwrap());
+
+        let audit_rows: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM migrations WHERE version = 64",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(audit_rows, 1, "v64 must record exactly one migrations row");
+
+        let description: String = conn
+            .query_row(
+                "SELECT description FROM migrations WHERE version = 64",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(
+            description.contains("Skill version history"),
+            "version 64 must describe the skill-history step, got: {description}"
         );
     }
 }

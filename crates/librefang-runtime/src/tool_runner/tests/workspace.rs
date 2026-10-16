@@ -623,6 +623,7 @@ impl ApprovalGate for NamedWsKernel {}
 impl A2ARegistry for NamedWsKernel {}
 impl ChannelSender for NamedWsKernel {}
 impl PromptStore for NamedWsKernel {}
+impl SkillHistory for NamedWsKernel {}
 impl WorkflowRunner for NamedWsKernel {}
 impl GoalControl for NamedWsKernel {}
 impl librefang_kernel_handle::CatalogQuery for NamedWsKernel {}

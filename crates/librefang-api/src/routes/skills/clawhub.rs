@@ -639,6 +639,7 @@ pub async fn clawhub_skill_code(
 )]
 pub async fn clawhub_install(
     State(state): State<Arc<AppState>>,
+    api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
     Json(req): Json<crate::types::ClawHubInstallRequest>,
 ) -> impl IntoResponse {
     let home = state.kernel.home_dir();
@@ -691,6 +692,17 @@ pub async fn clawhub_install(
             // Reload so the kernel sees the patched provenance immediately —
             // mirrors what reload_skills() does for the FangHub install path.
             state.kernel.reload_skills();
+            // Record the first version of the skill the marketplace delivered
+            // (#8021), under its own `install` source. Hand-scoped installs are
+            // skipped: v1 history covers the global `skills/` root only.
+            if req.hand.is_none() {
+                record_installed_skill_version(
+                    &state,
+                    &skills_dir,
+                    &result.skill_name,
+                    &dashboard_author(api_user.as_ref()),
+                );
+            }
 
             let warnings: Vec<serde_json::Value> = result
                 .warnings
@@ -980,6 +992,7 @@ pub async fn clawhub_cn_skill_code(
 /// POST /api/clawhub-cn/install — Install a skill from the ClawHub China mirror.
 pub async fn clawhub_cn_install(
     State(state): State<Arc<AppState>>,
+    api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
     Json(req): Json<crate::types::ClawHubInstallRequest>,
 ) -> impl IntoResponse {
     let home = state.kernel.home_dir();
@@ -1030,6 +1043,16 @@ pub async fn clawhub_cn_install(
         Ok(result) => {
             // Provenance to ClawHubCn was stamped while the skill was staged, so the registry can
             // surface update/version info and the directory in `skills/` is complete.
+            state.kernel.reload_skills();
+            // Same history record as the standard hub (#8021).
+            if req.hand.is_none() {
+                record_installed_skill_version(
+                    &state,
+                    &skills_dir,
+                    &result.skill_name,
+                    &dashboard_author(api_user.as_ref()),
+                );
+            }
             let warnings: Vec<serde_json::Value> = result
                 .warnings
                 .iter()

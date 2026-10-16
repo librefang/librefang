@@ -229,6 +229,7 @@ impl ChannelSender for CapturingFileKernel {
 }
 
 impl PromptStore for CapturingFileKernel {}
+impl SkillHistory for CapturingFileKernel {}
 impl WorkflowRunner for CapturingFileKernel {}
 impl GoalControl for CapturingFileKernel {}
 impl ToolPolicy for CapturingFileKernel {}

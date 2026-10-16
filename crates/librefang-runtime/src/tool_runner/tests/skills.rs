@@ -661,7 +661,7 @@ async fn test_evolve_tools_rejected_when_registry_frozen() {
         "prompt_context": "# x",
         "tags": [],
     });
-    let err = tool_skill_evolve_create(&input, Some(&registry), None)
+    let err = tool_skill_evolve_create(&input, Some(&registry), None, None)
         .await
         .expect_err("must reject under freeze")
         .to_string();
@@ -670,10 +670,15 @@ async fn test_evolve_tools_rejected_when_registry_frozen() {
         "error must mention Stable/frozen, got: {err}"
     );
 
-    let err = tool_skill_evolve_delete(&serde_json::json!({ "name": "gated" }), Some(&registry))
-        .await
-        .expect_err("delete must reject under freeze")
-        .to_string();
+    let err = tool_skill_evolve_delete(
+        &serde_json::json!({ "name": "gated" }),
+        Some(&registry),
+        None,
+        None,
+    )
+    .await
+    .expect_err("delete must reject under freeze")
+    .to_string();
     assert!(err.contains("frozen") || err.contains("Stable"));
 
     let err = tool_skill_evolve_write_file(
@@ -683,6 +688,8 @@ async fn test_evolve_tools_rejected_when_registry_frozen() {
             "content": "hi",
         }),
         Some(&registry),
+        None,
+        None,
     )
     .await
     .expect_err("write_file must reject under freeze")

@@ -616,6 +616,89 @@ pub fn approve_candidate(
     Ok(result)
 }
 
+/// Promote a pending candidate and snapshot the result into the skill version
+/// history (#8021).
+///
+/// The version-history half of [`approve_candidate`]: the raw promotion is
+/// filesystem-only (it reaches `librefang_skills::evolution`, which has no
+/// store handle), so the kernel-side callers that *do* hold the substrate —
+/// `LibreFangKernel::approve_pending_skill` and the workshop's auto-promote
+/// loop — go through this wrapper. The CLI keeps calling the raw function: it
+/// runs without a daemon and has no pool to write to, which is the same v1
+/// limitation the store documents. Tests that exercise promotion without a
+/// substrate call the raw function too.
+///
+/// Records after promotion, like every post-write snapshot: a failure costs one
+/// history row, never the promotion. The `change_source` names the kind of
+/// promotion (`create` / `update`), read before the call because
+/// `approve_candidate` deletes the pending TOML on success.
+pub fn approve_candidate_versioned(
+    store: &librefang_memory::SkillVersionStore,
+    skills_root: &Path,
+    active_skills_dir: &Path,
+    id: &str,
+) -> Result<EvolutionResult, WorkshopError> {
+    let candidate = load_candidate(skills_root, id)?;
+    let source = match candidate.kind {
+        CandidateKind::Create => librefang_types::skill_history::SkillWrite::Create.as_str(),
+        CandidateKind::Update => librefang_types::skill_history::SkillWrite::Update.as_str(),
+    };
+    let result = approve_candidate(skills_root, active_skills_dir, id)?;
+    // Attribute the row to the agent whose draft was approved — the same
+    // `agent:<id>` shape the runtime tools record under.
+    let author = format!("agent:{}", candidate.agent_id);
+    match evolution::load_installed_skill_from_disk(active_skills_dir, &result.skill_name) {
+        Ok(skill) => {
+            record_skill_version_snapshot(store, &skill.path, &result.skill_name, &author, source)
+        }
+        Err(e) => tracing::warn!(
+            skill = %result.skill_name,
+            error = %e,
+            "skill history: promoted skill could not be resolved on disk; snapshot skipped"
+        ),
+    }
+    Ok(result)
+}
+
+/// Best-effort snapshot of one installed skill directory into the history
+/// store (#8021). Shared by the workshop promote wrapper and the kernel
+/// reviewer path.
+///
+/// A missing `prompt_context.md` records as an empty string; an unreadable
+/// `skill.toml` skips the row entirely, because a snapshot without its
+/// manifest cannot be restored.
+pub(crate) fn record_skill_version_snapshot(
+    store: &librefang_memory::SkillVersionStore,
+    skill_dir: &Path,
+    skill_name: &str,
+    author: &str,
+    source: &str,
+) {
+    let manifest_toml = match fs::read_to_string(skill_dir.join("skill.toml")) {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::warn!(
+                skill = skill_name,
+                dir = %skill_dir.display(),
+                error = %e,
+                "skill history: skill.toml unreadable after a successful mutation; snapshot skipped"
+            );
+            return;
+        }
+    };
+    let prompt_context =
+        fs::read_to_string(skill_dir.join("prompt_context.md")).unwrap_or_default();
+    if let Err(e) =
+        store.record_version(skill_name, &manifest_toml, &prompt_context, author, source)
+    {
+        tracing::warn!(
+            skill = skill_name,
+            error = %e,
+            "Failed to record skill version snapshot"
+        );
+    }
+}
+
 /// Best-effort cleanup of orphan `.toml.tmp` files left over from a
 /// crash between write and rename. Cheap to call at daemon boot.
 pub fn prune_orphan_temp_files(skills_root: &Path) -> io::Result<u32> {

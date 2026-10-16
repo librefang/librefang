@@ -386,7 +386,14 @@ async fn capture_one(
                     .join(agent_id.to_string());
                 match storage::find_duplicate_pending(&agent_pending_root, &candidate) {
                     Ok(Some(orphan)) => {
-                        match storage::approve_candidate(&skills_root, &skills_root, &orphan.id) {
+                        match storage::approve_candidate_versioned(
+                            &librefang_memory::SkillVersionStore::new(
+                                kernel.memory.substrate.pool(),
+                            ),
+                            &skills_root,
+                            &skills_root,
+                            &orphan.id,
+                        ) {
                             Ok(_) => {
                                 debug!(
                                     %agent_id,
@@ -420,7 +427,12 @@ async fn capture_one(
                     }
                 }
             }
-            match storage::approve_candidate(&skills_root, &skills_root, &candidate.id) {
+            match storage::approve_candidate_versioned(
+                &librefang_memory::SkillVersionStore::new(kernel.memory.substrate.pool()),
+                &skills_root,
+                &skills_root,
+                &candidate.id,
+            ) {
                 Ok(_) => {
                     debug!(%agent_id, id = %candidate.id, "skill_workshop: auto-promoted candidate");
                     // Caller (`run_capture`) batches the registry
