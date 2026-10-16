@@ -1,2 +1,0 @@
-Token-triggered compaction now fires before the overflow guard trims history on tool-heavy and small-window agents.
-The triggers estimated tokens without the tool schemas (and, after the turn, without the system prompt) and measured against the 200K config default instead of the agent's own context window, so the guard's "older messages trimmed" path ran first; both triggers and the inner gate now price the same request against the agent's real window (#8587, #8519) (@houko)
