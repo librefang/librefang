@@ -42,7 +42,7 @@ import { Button } from "../components/ui/Button";
 import { Badge, dotColors } from "../components/ui/Badge";
 import { Avatar } from "../components/ui/Avatar";
 import { PromptsExperimentsPanel } from "../components/PromptsExperimentsPanel";
-import { AgentTabBar } from "../components/AgentTabs";
+import { AgentTabBar, agentTabDomId } from "../components/AgentTabs";
 import type { AgentTabDef } from "../components/AgentTabs";
 import { AgentBrief } from "../components/AgentBrief";
 import type { AgentBriefMessage } from "../components/AgentBrief";
@@ -2037,11 +2037,17 @@ export function AgentsPage() {
             onSelect={setMainTab}
             ariaLabel={t("agents.tabs.main", { defaultValue: "Agent view" })}
             className="mt-4 -mb-3"
+            panelId="agent-main-panel"
           />
         </div>
 
         {/* Tab content */}
-        <div className="flex-1 overflow-y-auto px-3 sm:px-5 py-3 sm:py-4">
+        <div
+          id="agent-main-panel"
+          role="tabpanel"
+          aria-labelledby={agentTabDomId("agent-main-panel", mainTab)}
+          className="flex-1 overflow-y-auto px-3 sm:px-5 py-3 sm:py-4"
+        >
           {mainTab === "info"
             ? renderInfoTab(agent, isCrashed)
             : renderConfigTab(agent)}
@@ -2114,8 +2120,13 @@ export function AgentsPage() {
           onSelect={setInfoTab}
           ariaLabel={t("agents.tabs.info", { defaultValue: "Agent information" })}
           variant="pill"
+          panelId="agent-info-panel"
         />
-        <div>
+        <div
+          id="agent-info-panel"
+          role="tabpanel"
+          aria-labelledby={agentTabDomId("agent-info-panel", infoTab)}
+        >
           {infoTab === "logs" && renderLogsTab(agent)}
           {infoTab === "memory" && renderMemoryTab(agent)}
           {infoTab === "prompts" && <PromptsExperimentsPanel agentId={agent.id} />}
@@ -2210,8 +2221,14 @@ export function AgentsPage() {
           // Pill, like the info sub-tabs: these are one level below the main
           // tabs and the same shape says so without a second legend.
           variant="pill"
+          panelId="agent-config-panel"
         />
-        <div className="flex flex-col gap-4">
+        <div
+          id="agent-config-panel"
+          role="tabpanel"
+          aria-labelledby={agentTabDomId("agent-config-panel", configGroup)}
+          className="flex flex-col gap-4"
+        >
           {configGroup === "general" && canEditAppearance && (
             <AgentAppearanceSection
               // Without the key the section stays mounted across a list click

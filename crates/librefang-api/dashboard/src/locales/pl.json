@@ -3923,11 +3923,11 @@
       "help": "Skróty klawiszowe",
       "help_title": "Skróty kart",
       "help_switch": "Przełącz kartę",
-      "help_switch_key": "Kliknięcie",
+      "help_switch_key": "Kliknięcie / ← →",
       "help_rename": "Zmień nazwę karty",
       "help_rename_key": "Dwukrotne kliknięcie",
       "help_close": "Zamknij kartę",
-      "help_close_key": "Kliknięcie środkowym przyciskiem myszy / ✕",
+      "help_close_key": "Kliknięcie środkowym przyciskiem myszy / ✕ / Del",
       "help_new": "Nowa karta",
       "help_new_key": "＋"
     },
