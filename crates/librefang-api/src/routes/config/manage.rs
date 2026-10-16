@@ -596,7 +596,7 @@ fn redacted_config_json(
                 // `Debug`, so the dashboard receives one of the values its
                 // dropdown offers — see
                 // `enum_valued_fields_use_the_serde_encoding_not_debug`.
-                "reasoning_mode": t.reasoning_mode,
+                "reasoning_effort": t.reasoning_effort,
             }),
             None => serde_json::json!(null),
         },

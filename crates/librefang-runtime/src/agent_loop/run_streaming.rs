@@ -826,6 +826,12 @@ async fn run_agent_loop_streaming_inner(
             .as_ref()
             .map(|k| k.reasoning_echo_policy_for(&api_model))
             .unwrap_or_default();
+        // Catalog-driven reasoning policy (#8591) — same as the
+        // non-streaming path above.
+        let reasoning_policy = kernel
+            .as_ref()
+            .map(|k| k.reasoning_policy_for(&api_model))
+            .unwrap_or_default();
 
         // Mirror the non-streaming vision gate (#6010, refs #7957): only a model the catalog
         // *declares* text-only gets its image blocks redacted before the request is built.
@@ -893,6 +899,7 @@ async fn run_agent_loop_streaming_inner(
             // path enforces the cross-account guard too.
             sender_account_id: sender_account_id.clone(),
             reasoning_echo_policy,
+            reasoning_policy,
         };
         // The stripped-tools request has been built; restore tools for any
         // subsequent iteration (the degrade is a single forced prose turn).

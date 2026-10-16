@@ -4491,6 +4491,18 @@ impl SessionsResource {
         )
         .await
     }
+
+    pub async fn patch_session_reasoning(&self, id: &str, data: Value) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::PATCH,
+            &["api", "sessions", id, "reasoning"],
+            Some(data),
+            &[],
+        )
+        .await
+    }
 }
 
 // ── Skills ──

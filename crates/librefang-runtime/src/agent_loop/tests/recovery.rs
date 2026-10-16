@@ -735,7 +735,7 @@ async fn test_text_tool_call_recovery_e2e() {
         context_window_tokens: 0,
         label: None,
         model_override: None,
-
+        reasoning_effort: None,
         messages_generation: 0,
         last_repaired_generation: None,
         peer_id: None,
@@ -821,7 +821,7 @@ async fn test_normal_flow_unaffected_by_recovery() {
         context_window_tokens: 0,
         label: None,
         model_override: None,
-
+        reasoning_effort: None,
         messages_generation: 0,
         last_repaired_generation: None,
         peer_id: None,
@@ -889,7 +889,7 @@ async fn test_text_tool_call_recovery_streaming_e2e() {
         context_window_tokens: 0,
         label: None,
         model_override: None,
-
+        reasoning_effort: None,
         messages_generation: 0,
         last_repaired_generation: None,
         peer_id: None,

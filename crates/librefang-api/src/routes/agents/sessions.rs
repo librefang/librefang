@@ -403,12 +403,37 @@ pub async fn get_agent_session(
                         .into_response();
                 }
             }
-            // Expose the LLM-generated compaction summary even when the
-            // session row itself is not yet materialised (e.g. agent just
-            // spawned but store_llm_summary was called directly, as in
-            // tests), but only when this active session is the one that
-            // actually owns the summary (#6225) — never a freshly created
-            // session that inherited the agent-scoped row.
+            // Materialize the canonical row before answering (#8591). This
+            // route is the agent-scoped way a client resolves the session id
+            // it is about to act on — the TUI's daemon-backed `/think` reads
+            // `session_id` here and then PATCHes
+            // `/api/sessions/{id}/reasoning`, and that route addresses the row
+            // by id alone, with no agent context to create it from. Returning
+            // a payload for an id no row backs made the follow-up 404 on a
+            // never-used agent, with nothing in the GET payload to explain
+            // why. Creating the empty row here makes the response and the
+            // substrate agree; `ensure_session` never touches an existing row,
+            // and the first inbound turn adopts the same row (the resolver
+            // loads an existing session rather than replacing it), so nothing
+            // downstream observes the earlier creation.
+            if let Err(e) = state
+                .kernel
+                .memory_substrate()
+                .ensure_session(agent_id, entry.session_id)
+            {
+                tracing::warn!("Session materialization failed for agent {id}: {e}");
+                return ApiErrorResponse::internal(err_session_load_failed)
+                    .with_code("session_load_failed")
+                    .into_response();
+            }
+            // Expose the LLM-generated compaction summary even with no
+            // persisted messages yet (e.g. agent just spawned but
+            // store_llm_summary was called directly, as in tests) — the
+            // summary lives in the agent-scoped `canonical_sessions` row, not
+            // in the session's message blob — but only when this active
+            // session is the one that actually owns the summary (#6225) —
+            // never a freshly created session that inherited the
+            // agent-scoped row.
             let compacted_summary: Option<String> = state
                 .kernel
                 .memory_substrate()
@@ -1827,5 +1852,163 @@ mod tests {
         assert_eq!(body, "Internal server error");
         assert!(!body.contains("/srv/private"));
         assert!(!body.contains("database"));
+    }
+
+    /// `GET /api/agents/{id}/session` must materialize the canonical session
+    /// row before answering (#8591).
+    ///
+    /// The TUI's daemon-backed `/think` reads the session id from this route's
+    /// payload and then calls `PATCH /api/sessions/{id}/reasoning`, which
+    /// addresses the row by id alone — with no agent context to create it
+    /// from. On a never-used agent nothing had created the row, so the GET
+    /// answered a session id that did not exist and the follow-up 404-ed with
+    /// nothing in the payload to explain why. This pins both halves: the GET
+    /// now leaves a persisted row behind, and the PATCH still refuses a
+    /// genuinely unknown id.
+    ///
+    /// Boots a real kernel and the composed router — the same in-crate pattern
+    /// as `server.rs`'s layer-order tests. `librefang_testing::TestAppState`
+    /// cannot be used here: `crates/librefang-api` carries itself as a
+    /// dev-dependency (for the `test-util` feature), so inside this lib-test
+    /// build `TestAppState.state` is an `AppState` from a second crate
+    /// instance that no route in this build accepts.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn get_agent_session_materializes_the_row_for_a_never_used_agent() {
+        use axum::body::Body;
+        use axum::http::{Method, Request, StatusCode};
+        use librefang_kernel::KernelApi as _;
+        use librefang_types::config::{DefaultModelConfig, KernelConfig};
+        use tower::ServiceExt as _;
+
+        /// A loopback-origin request: the auth middleware trusts requests
+        /// carrying `ConnectInfo` for 127.0.0.1 and rejects a missing origin
+        /// alone as untrusted, so the extension is part of every request here.
+        fn req(method: Method, uri: String, body: Body) -> Request<Body> {
+            let mut request = Request::builder()
+                .method(method)
+                .uri(uri)
+                .header("content-type", "application/json")
+                .body(body)
+                .unwrap();
+            request.extensions_mut().insert(axum::extract::ConnectInfo(
+                "127.0.0.1:40000".parse::<std::net::SocketAddr>().unwrap(),
+            ));
+            request
+        }
+
+        let tmp = tempfile::tempdir().expect("temp dir");
+        // Seed the pinned registry fixture so the kernel boots offline.
+        librefang_kernel::registry_sync::seed_registry_fixture_for_tests(tmp.path());
+
+        let config = KernelConfig {
+            home_dir: tmp.path().to_path_buf(),
+            data_dir: tmp.path().join("data"),
+            api_key: String::new(),
+            default_model: DefaultModelConfig {
+                provider: "ollama".to_string(),
+                model: "test-model".to_string(),
+                api_key_env: "OLLAMA_API_KEY".to_string(),
+                base_url: None,
+                message_timeout_secs: 300,
+                extra_params: std::collections::BTreeMap::new(),
+                cli_profile_dirs: Vec::new(),
+            },
+            ..KernelConfig::default()
+        };
+        let kernel = std::sync::Arc::new(
+            librefang_kernel::LibreFangKernel::boot_with_config(config).expect("kernel boots"),
+        );
+        kernel.clone().set_self_handle();
+
+        // A fresh agent that has never had a turn: no session row anywhere.
+        let agent = kernel
+            .spawn_agent_typed(librefang_types::agent::AgentManifest {
+                name: "session-materialization".to_string(),
+                ..Default::default()
+            })
+            .expect("spawn agent");
+        let session_id = kernel
+            .agent_registry()
+            .get(agent)
+            .expect("registry entry")
+            .session_id;
+
+        let (app, state) =
+            crate::server::build_router(kernel, "127.0.0.1:0".parse().unwrap()).await;
+        let substrate = state.kernel.memory_substrate();
+        assert!(
+            substrate.get_session(session_id).unwrap().is_none(),
+            "pre-condition: the canonical session has no row"
+        );
+
+        let resp = app
+            .clone()
+            .oneshot(req(
+                Method::GET,
+                format!("/api/agents/{agent}/session"),
+                Body::empty(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK, "GET agent session");
+        let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            body["session_id"].as_str(),
+            Some(session_id.0.to_string().as_str()),
+            "GET must report the canonical session id: {body:?}"
+        );
+        assert_eq!(body["message_count"].as_u64(), Some(0));
+        assert!(
+            substrate.get_session(session_id).unwrap().is_some(),
+            "the GET must leave a persisted row behind, or the PATCH below \
+             has nothing to update"
+        );
+
+        // The follow-up the TUI performs: address the row the GET reported.
+        let resp = app
+            .clone()
+            .oneshot(req(
+                Method::PATCH,
+                format!("/api/sessions/{}/reasoning", session_id.0),
+                Body::from(serde_json::json!({"reasoning_effort": "high"}).to_string()),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "PATCH reasoning on the id the GET reported"
+        );
+        assert_eq!(
+            substrate
+                .get_session(session_id)
+                .unwrap()
+                .unwrap()
+                .reasoning_effort
+                .as_deref(),
+            Some("high"),
+        );
+
+        // …while a genuinely unknown id keeps its 404: materialization on GET
+        // must not turn the PATCH into an upsert.
+        let unknown = uuid::Uuid::new_v4();
+        let resp = app
+            .oneshot(req(
+                Method::PATCH,
+                format!("/api/sessions/{unknown}/reasoning"),
+                Body::from(serde_json::json!({"reasoning_effort": "high"}).to_string()),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::NOT_FOUND,
+            "an id no route ever reported must still 404"
+        );
+
+        state.kernel.shutdown();
     }
 }

@@ -27,7 +27,7 @@
 //!   PUT   /api/agents/{id}/skills  (an on-disk-but-unloaded skill saves under
 //!                                   its `[skill].name`, not its directory name
 //!                                   — #7772)
-//!   POST  /api/agents/{id}/message  (`reasoning_mode` deserializes into the real
+//!   POST  /api/agents/{id}/message  (`reasoning_effort` deserializes into the real
 //!                                   enum on both the buffered and streaming
 //!                                   routes, an invalid mode is rejected rather
 //!                                   than silently ignored, and the legacy
@@ -1346,69 +1346,134 @@ async fn test_incognito_defaults_to_false_when_omitted() {
 // Per-task reasoning mode — refs #7946
 // ---------------------------------------------------------------------------
 
-/// `reasoning_mode` on the POST /api/agents/{id}/message body must deserialize
-/// into the real enum, not be silently ignored.
+/// `reasoning_effort` on the POST /api/agents/{id}/message body must deserialize
+/// into the real type, not be silently ignored.
 ///
 /// The positive half of this test proves little on its own: `MessageRequest`
 /// does not deny unknown fields, so a *typo'd* key is accepted with the same
-/// status. The conclusive assertion is the negative one below it — an invalid
-/// mode string can only be rejected if serde is actually parsing the field into
-/// `ReasoningMode`, which is exactly the "field added to the struct but never
-/// deserialized" failure this suite exists to catch.
+/// status. The conclusive assertion is the malformed-input half below it — a
+/// token that cannot be a provider rung can only be rejected if serde is
+/// actually parsing the field into `ReasoningMode`, which is exactly the
+/// "field added to the struct but never deserialized" failure this suite exists
+/// to catch. Since #8591 the type validates structurally, not against a closed
+/// vocabulary, so the accepted set is wider than the four legacy spells.
 #[tokio::test(flavor = "multi_thread")]
-async fn test_reasoning_mode_field_accepted_by_message_endpoint() {
+async fn test_reasoning_effort_field_accepted_by_message_endpoint() {
     let h = boot(TEST_TOKEN).await;
     let id = spawn_named(&h.state, "reasoning-mode-agent");
 
-    for mode in ["none", "low", "high", "max"] {
+    for mode in ["none", "low", "medium", "high", "xhigh", "max", "minimal"] {
         let (status, body) = send(
             h.app.clone(),
             post_json(
                 &format!("/api/agents/{id}/message"),
-                serde_json::json!({"message": "hello", "reasoning_mode": mode}),
+                serde_json::json!({"message": "hello", "reasoning_effort": mode}),
             ),
         )
         .await;
         assert_ne!(
             status,
             StatusCode::UNPROCESSABLE_ENTITY,
-            "reasoning_mode={mode:?} must deserialize cleanly — body={body:?}",
+            "reasoning_effort={mode:?} must deserialize cleanly — body={body:?}",
         );
         // Provider is unconfigured → 412 or 500, NOT 422.
         assert!(
             status == StatusCode::PRECONDITION_FAILED || status.is_server_error(),
-            "reasoning_mode={mode:?}: expected provider-auth 412 or server error, got {status} — body={body:?}",
+            "reasoning_effort={mode:?}: expected provider-auth 412 or server error, got {status} — body={body:?}",
         );
     }
 }
 
-/// An unrecognised mode must be rejected rather than quietly falling back to the
-/// agent default — a silent fallback is how a typo'd `reasoning_mode` in a
-/// caller's config ends up billing reasoning tokens nobody asked for.
+/// The vocabulary is open (#8591), so the parse-rejection boundary moved to
+/// *structural* validity: a token that cannot be a provider rung (whitespace,
+/// emptiness) is a 422, while an unknown-but-well-formed token (`banana`) is
+/// accepted and left for the provider to reject — no closed set can know every
+/// gateway's rungs. The four legacy spells are still parsed into the real type;
+/// what this pins is that malformed input is refused loudly rather than
+/// silently dropped to the agent default.
 #[tokio::test(flavor = "multi_thread")]
-async fn test_invalid_reasoning_mode_is_rejected() {
+async fn test_malformed_reasoning_effort_is_rejected() {
     let h = boot(TEST_TOKEN).await;
     let id = spawn_named(&h.state, "reasoning-mode-invalid-agent");
+
+    for malformed in ["high low", ""] {
+        let (status, body) = send(
+            h.app.clone(),
+            post_json(
+                &format!("/api/agents/{id}/message"),
+                serde_json::json!({"message": "hello", "reasoning_effort": malformed}),
+            ),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "reasoning_effort={malformed:?} must be a deserialize error — body={body:?}",
+        );
+    }
+
+    // An unknown-but-well-formed token deserializes; the turn fails later on
+    // the unconfigured provider (412/500), not at parse time.
+    let (status, body) = send(
+        h.app.clone(),
+        post_json(
+            &format!("/api/agents/{id}/message"),
+            serde_json::json!({"message": "hello", "reasoning_effort": "banana"}),
+        ),
+    )
+    .await;
+    assert_ne!(
+        status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "an open-vocabulary token must parse — body={body:?}",
+    );
+}
+
+/// The deprecated `reasoning_mode` key is still accepted on the message body
+/// (#8591 naming), so a client mid-migration keeps working.
+///
+/// Sending **both** keys in one body is a serde duplicate-field error (the
+/// alias and the canonical name resolve to the same field) — a 422, not a
+/// silent pick. The surfaces that parse JSON by hand (the WS frame and the
+/// session PATCH route) do accept both with `reasoning_effort` winning.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_deprecated_reasoning_mode_key_is_still_accepted() {
+    let h = boot(TEST_TOKEN).await;
+    let id = spawn_named(&h.state, "reasoning-mode-alias-agent");
 
     let (status, body) = send(
         h.app.clone(),
         post_json(
             &format!("/api/agents/{id}/message"),
-            serde_json::json!({"message": "hello", "reasoning_mode": "banana"}),
+            serde_json::json!({"message": "hello", "reasoning_mode": "high"}),
+        ),
+    )
+    .await;
+    assert_ne!(
+        status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "the deprecated alias must deserialize — response={body:?}",
+    );
+
+    let (status, body) = send(
+        h.app.clone(),
+        post_json(
+            &format!("/api/agents/{id}/message"),
+            serde_json::json!({"message": "hello", "reasoning_mode": "low", "reasoning_effort": "max"}),
         ),
     )
     .await;
     assert_eq!(
         status,
         StatusCode::UNPROCESSABLE_ENTITY,
-        "an invalid reasoning_mode must be a deserialize error — body={body:?}",
+        "both keys at once is a duplicate field, not a silent precedence — response={body:?}",
     );
 }
 
-/// Omitting `reasoning_mode` must keep working: every existing client sends a
+/// Omitting `reasoning_effort` must keep working: every existing client sends a
 /// body without it, and `thinking: bool` remains its own supported override.
 #[tokio::test(flavor = "multi_thread")]
-async fn test_reasoning_mode_omitted_and_legacy_thinking_boolean_still_work() {
+async fn test_reasoning_effort_omitted_and_legacy_thinking_boolean_still_work() {
     let h = boot(TEST_TOKEN).await;
     let id = spawn_named(&h.state, "reasoning-mode-compat-agent");
 
@@ -1416,8 +1481,8 @@ async fn test_reasoning_mode_omitted_and_legacy_thinking_boolean_still_work() {
         serde_json::json!({"message": "hello"}),
         serde_json::json!({"message": "hello", "thinking": true}),
         serde_json::json!({"message": "hello", "thinking": false}),
-        // Both keys at once: documented precedence is reasoning_mode wins.
-        serde_json::json!({"message": "hello", "thinking": false, "reasoning_mode": "max"}),
+        // Both keys at once: documented precedence is reasoning_effort wins.
+        serde_json::json!({"message": "hello", "thinking": false, "reasoning_effort": "max"}),
     ] {
         let (status, body) = send(
             h.app.clone(),
@@ -1438,7 +1503,7 @@ async fn test_reasoning_mode_omitted_and_legacy_thinking_boolean_still_work() {
 /// kernel — so a per-task mode that only worked on the non-streaming route
 /// would be invisible to any UI that streams.
 #[tokio::test(flavor = "multi_thread")]
-async fn test_reasoning_mode_accepted_by_streaming_message_endpoint() {
+async fn test_reasoning_effort_accepted_by_streaming_message_endpoint() {
     let h = boot(TEST_TOKEN).await;
     let id = spawn_named(&h.state, "reasoning-mode-stream-agent");
 
@@ -1446,46 +1511,46 @@ async fn test_reasoning_mode_accepted_by_streaming_message_endpoint() {
         h.app.clone(),
         post_json(
             &format!("/api/agents/{id}/message/stream"),
-            serde_json::json!({"message": "hello", "reasoning_mode": "low"}),
+            serde_json::json!({"message": "hello", "reasoning_effort": "low"}),
         ),
     )
     .await;
     assert_ne!(
         status,
         StatusCode::UNPROCESSABLE_ENTITY,
-        "reasoning_mode must deserialize on the streaming route too — body={body:?}",
+        "reasoning_effort must deserialize on the streaming route too — body={body:?}",
     );
 
     let (status, body) = send(
         h.app.clone(),
         post_json(
             &format!("/api/agents/{id}/message/stream"),
-            serde_json::json!({"message": "hello", "reasoning_mode": "banana"}),
+            serde_json::json!({"message": "hello", "reasoning_effort": "high low"}),
         ),
     )
     .await;
     assert_eq!(
         status,
         StatusCode::UNPROCESSABLE_ENTITY,
-        "an invalid reasoning_mode must be rejected on the streaming route — body={body:?}",
+        "a malformed reasoning_effort must be rejected on the streaming route — body={body:?}",
     );
 }
 
 /// The per-call override the handler builds from the request body — the
-/// injection site, not the implementation site. A `reasoning_mode` field that
+/// injection site, not the implementation site. A `reasoning_effort` field that
 /// exists on `MessageRequest` but is never folded into a `ThinkingOverride`
 /// compiles and deserializes while doing nothing, which is the #7946 shape of
 /// CLAUDE.md's "`Option::None` defaults compile silently but disable the
 /// feature" warning.
 #[test]
-fn test_per_call_reasoning_mode_wins_over_the_legacy_boolean() {
+fn test_per_call_reasoning_effort_wins_over_the_legacy_boolean() {
     use librefang_types::config::{ReasoningMode, ThinkingOverride};
 
     // Exactly the expression both message handlers use.
     let resolve = |json: serde_json::Value| {
         let req: librefang_api::types::MessageRequest =
             serde_json::from_value(json).expect("deserialize MessageRequest");
-        ThinkingOverride::resolve(req.thinking, req.reasoning_mode)
+        ThinkingOverride::resolve(req.thinking, req.reasoning_effort)
     };
 
     assert_eq!(
@@ -1501,17 +1566,17 @@ fn test_per_call_reasoning_mode_wins_over_the_legacy_boolean() {
         ThinkingOverride::Disable,
     );
     assert_eq!(
-        resolve(serde_json::json!({"message": "x", "reasoning_mode": "max"})),
-        ThinkingOverride::Mode(ReasoningMode::Max),
+        resolve(serde_json::json!({"message": "x", "reasoning_effort": "max"})),
+        ThinkingOverride::Mode(ReasoningMode::max()),
     );
     // Both present: the more specific key wins.
     assert_eq!(
-        resolve(serde_json::json!({"message": "x", "thinking": true, "reasoning_mode": "none"})),
-        ThinkingOverride::Mode(ReasoningMode::None),
+        resolve(serde_json::json!({"message": "x", "thinking": true, "reasoning_effort": "none"})),
+        ThinkingOverride::Mode(ReasoningMode::none()),
     );
     assert_eq!(
-        resolve(serde_json::json!({"message": "x", "thinking": false, "reasoning_mode": "high"})),
-        ThinkingOverride::Mode(ReasoningMode::High),
+        resolve(serde_json::json!({"message": "x", "thinking": false, "reasoning_effort": "high"})),
+        ThinkingOverride::Mode(ReasoningMode::high()),
     );
 }
 
@@ -1662,6 +1727,7 @@ async fn test_agent_session_returns_null_summary_for_non_canonical_session() {
         context_window_tokens: 0,
         label: None,
         model_override: None,
+        reasoning_effort: None,
         messages_generation: 0,
         last_repaired_generation: None,
         peer_id: None,

@@ -622,12 +622,6 @@ where
 pub struct KernelBridgeAdapter {
     kernel: Arc<dyn KernelApi>,
     started_at: Instant,
-    /// `/think` preference per `(agent, conversation)` (#7140).
-    ///
-    /// Keyed by the conversation the command was typed in, never by the agent alone: one agent routinely serves many chats, so an agent-keyed preference would push one user's reasoning mode — and its token cost — onto everybody else's turns.
-    ///
-    /// Deliberately in-memory. A `/think` toggle is a per-chat convenience, not durable configuration; after a daemon restart every conversation falls back to the agent's `[thinking]` manifest / global default, which is the same state a chat starts in.
-    thinking_prefs: dashmap::DashMap<(AgentId, ConversationScope), bool>,
 }
 
 impl KernelBridgeAdapter {
@@ -638,16 +632,7 @@ impl KernelBridgeAdapter {
         Self {
             kernel,
             started_at: Instant::now(),
-            thinking_prefs: dashmap::DashMap::new(),
         }
-    }
-
-    /// The per-turn thinking override to apply to a message from `sender`.
-    ///
-    /// `None` — no `/think` was issued in this conversation, so the agent manifest / global `[thinking]` default stands untouched. This is the read half of `set_thinking`; both sides derive the key the same way, so a preference set in one chat is invisible to every other chat and to every other agent.
-    fn thinking_override_for(&self, agent_id: AgentId, sender: &SenderContext) -> Option<bool> {
-        let scope = ConversationScope::from_sender(sender);
-        self.thinking_prefs.get(&(agent_id, scope)).map(|v| *v)
     }
 
     /// `true` only when the catalog positively reports that this agent's configured model has no extended-thinking mode.
@@ -875,7 +860,10 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
             .map(|e| e.manifest.show_progress)
             .unwrap_or(true);
         let language = self.kernel.config_snapshot().language.clone();
-        let thinking = self.thinking_override_for(agent_id, sender);
+        // `None` leaves the turn's thinking state to the kernel resolution
+        // chain (frame > session > agent > global): the `/think` command
+        // writes the session pin, so the adapter keeps no per-conversation
+        // toggle of its own (#8591).
         let (event_rx, kernel_handle) = self
             .kernel
             .clone()
@@ -884,7 +872,7 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
                 message,
                 None,
                 sender.clone(),
-                thinking,
+                None,
                 None,
             )
             .await
@@ -917,7 +905,10 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
             .map(|e| e.manifest.show_progress)
             .unwrap_or(true);
         let language = self.kernel.config_snapshot().language.clone();
-        let thinking = self.thinking_override_for(agent_id, sender);
+        // `None` leaves the turn's thinking state to the kernel resolution
+        // chain (frame > session > agent > global): the `/think` command
+        // writes the session pin, so the adapter keeps no per-conversation
+        // toggle of its own (#8591).
         let (event_rx, kernel_handle) = self
             .kernel
             .clone()
@@ -926,7 +917,7 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
                 message,
                 None,
                 sender.clone(),
-                thinking,
+                None,
                 None,
             )
             .await
@@ -952,7 +943,8 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
                 agent_id,
                 message,
                 sender.clone(),
-                self.thinking_override_for(agent_id, sender),
+                // Inherit: the kernel applies the session pin `/think` wrote.
+                None,
             )
             .await
             .map_err(|e| format!("{e}"))?;
@@ -989,7 +981,8 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
                 &text,
                 blocks,
                 sender.clone(),
-                self.thinking_override_for(agent_id, sender),
+                // Inherit: the kernel applies the session pin `/think` wrote.
+                None,
             )
             .await
             .map_err(|e| format!("{e}"))?;
@@ -2073,21 +2066,55 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
         Ok(msg)
     }
 
-    async fn set_thinking(
+    async fn set_reasoning_effort(
         &self,
         agent_id: AgentId,
-        on: bool,
+        effort: Option<&str>,
         scope: &ConversationScope,
     ) -> Result<String, String> {
-        self.thinking_prefs.insert((agent_id, scope.clone()), on);
-        let state = if on { "enabled" } else { "disabled" };
-        let mut msg =
-            format!("Extended thinking {state} for this chat. Other chats are unaffected.");
+        // The pinned session is the one this conversation's inbound turns
+        // resolve to — `channel_session_id` — which is exactly the session
+        // `/new` / `/reboot` / `/compact` address for the same scope (#7701).
+        // `scope.account_id` is deliberately not part of the key: the inbound
+        // resolver ignores it too, so two bots serving one chat already share
+        // this session, and a per-account pin would claim a split that the
+        // turns themselves do not have.
+        let session_id = LibreFangKernel::channel_session_id(
+            agent_id,
+            &scope.channel,
+            scope.chat_id.as_deref(),
+            // Channel commands are external ingress by construction, the same
+            // flag the reset arms in `librefang-channels::bridge` pass.
+            false,
+        );
+        let substrate = self.kernel.memory_substrate();
+        // Materialize the row when the conversation has not had its first turn
+        // yet: the inbound resolver creates it lazily with
+        // `reasoning_effort = None`, so a pin written onto a missing row would
+        // be silently lost — the ack-without-action class #7140 is about.
+        substrate
+            .ensure_session(agent_id, session_id)
+            .map_err(|e| format!("{e}"))?;
+        substrate
+            .set_session_reasoning_effort(session_id, effort)
+            .map_err(|e| format!("{e}"))?;
+
+        let mut msg = match effort {
+            None => "Reasoning effort cleared for this chat — the agent default applies. Other chats are unaffected.".to_string(),
+            Some("none") => {
+                "Reasoning disabled for this chat (session pin: none). Other chats are unaffected."
+                    .to_string()
+            }
+            Some(level) => format!(
+                "Reasoning effort set to {level} for this chat. Other chats are unaffected."
+            ),
+        };
         // Only warn when the catalog positively knows this model cannot think.
         // An unset / "default" / unrecognised model resolves to no entry, and
         // guessing there would produce exactly the false statement this
-        // command is being fixed for.
-        if on && self.model_rejects_thinking(agent_id) {
+        // command is being fixed for. `none` needs no warning: "do not reason"
+        // is exactly what a non-thinking model would do anyway.
+        if effort.is_some_and(|e| e != "none") && self.model_rejects_thinking(agent_id) {
             msg.push_str("\nNote: this agent's model has no extended-thinking mode, so turns will run as usual until you switch models.");
         }
         Ok(msg)
@@ -3576,9 +3603,17 @@ mod tests {
         }
     }
 
-    /// Injection-site guard for #7140. `/think` promises the user a per-chat setting, and `KernelBridgeAdapter` is where that promise is kept: the store is written by `set_thinking` and read by every send path. Keying it by `agent_id` alone compiles, passes every command-path test, and silently pushes one chat's reasoning mode (and token bill) onto every other chat the agent serves — the same shape as the #7605 memory leak.
+    /// Injection-site guard for #8591. `/think` promises the user a per-chat
+    /// setting, and `KernelBridgeAdapter` is where that promise is kept: the
+    /// pin is written onto the session `(channel, chat_id)` resolves to — the
+    /// exact session every inbound turn loads — so the kernel's resolution
+    /// chain applies it on later turns. Writing somewhere the inbound resolver
+    /// never derives (an agent-keyed map, a row-less session) compiles, passes
+    /// every command-path test, and silently pushes one chat's reasoning mode
+    /// (and token bill) onto every other chat the agent serves — the same
+    /// shape as #7605, or acks without acting, which is #7140.
     #[tokio::test(flavor = "multi_thread")]
-    async fn think_preference_is_isolated_per_conversation() {
+    async fn think_pin_is_isolated_per_conversation() {
         use librefang_testing::MockKernelBuilder;
 
         let (kernel, _tmp) = MockKernelBuilder::new().build();
@@ -3587,60 +3622,112 @@ mod tests {
             .find_by_name("assistant")
             .expect("default assistant agent should exist after boot")
             .id;
-        let other_agent = AgentId::new();
         let adapter = KernelBridgeAdapter::new(kernel.clone());
+        let substrate = kernel.memory_substrate();
 
         let chat_a = ConversationScope::new("telegram", Some("bot-a"), Some("chat-a"));
         let chat_b = ConversationScope::new("telegram", Some("bot-a"), Some("chat-b"));
+        let sid_a = LibreFangKernel::channel_session_id(agent, "telegram", Some("chat-a"), false);
+        let sid_b = LibreFangKernel::channel_session_id(agent, "telegram", Some("chat-b"), false);
 
-        // Nobody has configured anything: every conversation keeps the
-        // agent/global `[thinking]` default, which `None` means.
-        assert_eq!(
-            adapter.thinking_override_for(agent, &sender_in(Some("bot-a"), "chat-a")),
-            None,
-            "an unconfigured conversation must not force thinking either way"
-        );
+        // Nothing configured, nothing materialized.
+        assert!(substrate.get_session(sid_a).unwrap().is_none());
+        assert!(substrate.get_session(sid_b).unwrap().is_none());
 
         adapter
-            .set_thinking(agent, true, &chat_a)
+            .set_reasoning_effort(agent, Some("medium"), &chat_a)
             .await
-            .expect("set_thinking");
+            .expect("pin medium");
 
-        // Round trip: what was set in chat A is what chat A reads back.
+        // The pin is on the session the inbound turns resolve to, and the row
+        // was materialized even though the chat never had a first turn —
+        // without that, the lazy creation path would store `None` and the pin
+        // would vanish.
         assert_eq!(
-            adapter.thinking_override_for(agent, &sender_in(Some("bot-a"), "chat-a")),
-            Some(true),
+            substrate
+                .get_session(sid_a)
+                .unwrap()
+                .expect("pin must materialize the session row")
+                .reasoning_effort
+                .as_deref(),
+            Some("medium"),
         );
-        // …and chat B, same agent, same bot, is untouched.
-        assert_eq!(
-            adapter.thinking_override_for(agent, &sender_in(Some("bot-a"), "chat-b")),
-            None,
-            "/think in one chat must not reach another chat on the same agent",
-        );
-        // …as is the same chat id reached through a second bot account.
-        assert_eq!(
-            adapter.thinking_override_for(agent, &sender_in(Some("bot-b"), "chat-a")),
-            None,
-            "/think must not cross bot accounts",
-        );
-        // …as is a different agent entirely.
-        assert_eq!(
-            adapter.thinking_override_for(other_agent, &sender_in(Some("bot-a"), "chat-a")),
-            None,
-        );
+        // Chat B, same agent, same bot, is untouched — no row, no pin.
+        assert!(substrate.get_session(sid_b).unwrap().is_none());
 
-        // The opposite toggle in chat B leaves chat A's `on` standing.
+        // Clearing removes the pin without dropping the row.
         adapter
-            .set_thinking(agent, false, &chat_b)
+            .set_reasoning_effort(agent, None, &chat_a)
             .await
-            .expect("set_thinking");
+            .expect("clear");
         assert_eq!(
-            adapter.thinking_override_for(agent, &sender_in(Some("bot-a"), "chat-a")),
-            Some(true),
+            substrate
+                .get_session(sid_a)
+                .unwrap()
+                .expect("row survives a clear")
+                .reasoning_effort,
+            None,
+        );
+
+        // `off` stores the explicit non-think token, not a cleared pin.
+        adapter
+            .set_reasoning_effort(agent, Some("none"), &chat_a)
+            .await
+            .expect("pin none");
+        assert_eq!(
+            substrate
+                .get_session(sid_a)
+                .unwrap()
+                .unwrap()
+                .reasoning_effort
+                .as_deref(),
+            Some("none"),
+        );
+
+        // A second chat pins independently.
+        adapter
+            .set_reasoning_effort(agent, Some("high"), &chat_b)
+            .await
+            .expect("pin high");
+        assert_eq!(
+            substrate
+                .get_session(sid_a)
+                .unwrap()
+                .unwrap()
+                .reasoning_effort
+                .as_deref(),
+            Some("none"),
         );
         assert_eq!(
-            adapter.thinking_override_for(agent, &sender_in(Some("bot-a"), "chat-b")),
-            Some(false),
+            substrate
+                .get_session(sid_b)
+                .unwrap()
+                .unwrap()
+                .reasoning_effort
+                .as_deref(),
+            Some("high"),
+        );
+
+        // The same chat id through a second bot account maps to the same
+        // session — and so shares the pin — because the inbound resolver
+        // ignores the account dimension too. The command's account-carrying
+        // scope exists for agent-routing preferences, not for the session
+        // key; a per-account pin here would claim a split the turns do not
+        // have (#8591).
+        let chat_a_other_bot = ConversationScope::new("telegram", Some("bot-b"), Some("chat-a"));
+        adapter
+            .set_reasoning_effort(agent, Some("low"), &chat_a_other_bot)
+            .await
+            .expect("pin low");
+        assert_eq!(
+            substrate
+                .get_session(sid_a)
+                .unwrap()
+                .unwrap()
+                .reasoning_effort
+                .as_deref(),
+            Some("low"),
+            "one chat reached through two bots is one session, so it carries one pin",
         );
     }
 

@@ -49,6 +49,10 @@ pub fn router() -> axum::Router<Arc<AppState>> {
             axum::routing::patch(patch_session_model),
         )
         .route(
+            "/sessions/{id}/reasoning",
+            axum::routing::patch(patch_session_reasoning),
+        )
+        .route(
             "/agents/{id}/sessions/by-label/{label}",
             axum::routing::get(find_session_by_label),
         )
@@ -561,6 +565,7 @@ pub async fn get_session(
                     "context_window_tokens": session.context_window_tokens,
                     "label": label,
                     "model_override": session.model_override,
+                    "reasoning_effort": session.reasoning_effort,
                     "created_at": created_at,
                     "active": active,
                     "duration_ms": duration_ms,
@@ -785,6 +790,117 @@ pub async fn patch_session_model(
                 "status": "updated",
                 "session_id": id,
                 "model_override": model_override,
+            })),
+        ),
+        Err(e) => session_storage_error(e).into_json_tuple(),
+    }
+}
+
+/// PATCH /api/sessions/:id/reasoning — Set or clear a per-session
+/// reasoning-effort override (#8591).
+///
+/// Body: `{"reasoning_effort": "xhigh"}` to pin, `{"reasoning_effort": null}`
+/// to clear and restore the agent/global default. `reasoning_mode` is accepted
+/// as a deprecated alias key (#8591 naming); `reasoning_effort` wins if both
+/// are present.
+///
+/// The token is validated with [`librefang_types::config::ReasoningMode::new`]
+/// — structural validation only (non-empty, bounded, no whitespace), because
+/// the vocabulary is per-model catalog data and an open token like `minimal`
+/// or a gateway-declared one must be settable. Whether the *effective* model
+/// accepts it is enforced where the model is known: the catalog's declared
+/// policy coerces an out-of-set token to the nearest supported rung with a
+/// warning. The resolution order per turn is
+/// frame > session > agent > global > compiled default.
+#[utoipa::path(
+    patch,
+    path = "/api/sessions/{id}/reasoning",
+    tag = "sessions",
+    params(("id" = String, Path, description = "Session ID")),
+    request_body = crate::types::JsonObject,
+    responses(
+        (status = 200, description = "Reasoning override updated", body = crate::types::JsonObject),
+        (status = 400, description = "Invalid session ID or reasoning effort"),
+        (status = 404, description = "Session not found"),
+    )
+)]
+pub async fn patch_session_reasoning(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    lang: Option<axum::Extension<RequestLanguage>>,
+    Json(req): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
+    let session_id = match id.parse::<uuid::Uuid>() {
+        Ok(u) => librefang_types::agent::SessionId(u),
+        Err(_) => {
+            return ApiErrorResponse::bad_request(t.t("api-error-session-invalid-id"))
+                .into_json_tuple();
+        }
+    };
+
+    // Canonical key first, deprecated alias second: a caller sending both
+    // meant the canonical one, and a caller mid-migration sends only the old.
+    // Present with a string value → set override; present with null → clear;
+    // neither key present → 400 (explicit opt-in required, same contract as
+    // /model).
+    let raw = req
+        .get("reasoning_effort")
+        .or_else(|| req.get("reasoning_mode"));
+    let reasoning_effort: Option<&str> = match raw {
+        None => {
+            return ApiErrorResponse::bad_request(t.t_args(
+                "api-error-generic",
+                &[("error", "missing field: reasoning_effort")],
+            ))
+            .into_json_tuple();
+        }
+        Some(serde_json::Value::Null) => None,
+        Some(serde_json::Value::String(s)) => Some(s.as_str()),
+        Some(other) => {
+            return ApiErrorResponse::bad_request(t.t_args(
+                "api-error-generic",
+                &[(
+                    "error",
+                    &format!("reasoning_effort must be a string or null, got {other}"),
+                )],
+            ))
+            .into_json_tuple();
+        }
+    };
+
+    // Validate the token before touching the DB. Structural only: the
+    // vocabulary is declared per model in the catalog, so rejecting an
+    // unknown-but-well-formed token here would reject exactly the rungs
+    // (#8591) this endpoint exists to set.
+    if let Some(token) = reasoning_effort {
+        if let Err(e) = librefang_types::config::ReasoningMode::new(token) {
+            return ApiErrorResponse::bad_request(t.t_args("api-error-generic", &[("error", &e)]))
+                .into_json_tuple();
+        }
+    }
+
+    // Verify session exists before writing (same contract as /model).
+    match state.kernel.memory_substrate().get_session(session_id) {
+        Ok(None) => {
+            return ApiErrorResponse::not_found(t.t("api-error-session-not-found"))
+                .into_json_tuple();
+        }
+        Err(e) => return session_storage_error(e).into_json_tuple(),
+        Ok(Some(_)) => {}
+    }
+
+    match state
+        .kernel
+        .memory_substrate()
+        .set_session_reasoning_effort(session_id, reasoning_effort)
+    {
+        Ok(()) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "status": "updated",
+                "session_id": id,
+                "reasoning_effort": reasoning_effort,
             })),
         ),
         Err(e) => session_storage_error(e).into_json_tuple(),
