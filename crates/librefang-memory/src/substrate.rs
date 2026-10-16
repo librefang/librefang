@@ -200,7 +200,7 @@ pub fn restrict_db_file_permissions(db_path: &Path) {
 /// its summaries (#4869) — makes the summary readable for the conversation it
 /// actually describes.
 pub fn session_summary_key(session_id: &SessionId) -> String {
-    format!("session_{}", session_id.0)
+    format!("{}{}", SESSION_SUMMARY_KEY_PREFIX, session_id.0)
 }
 
 /// Prefix under which every per-session summary lives.
@@ -2409,7 +2409,9 @@ mod tests {
             }]
         };
 
-        let huge = "ф".repeat(200_000); // 400 KB, well over MAX_KV_VALUE_BYTES
+        // 3-byte characters: 16384 is not a character boundary, so the trim has to
+        // walk back — a 2-byte repeat would sit exactly on the boundary.
+        let huge = "☃".repeat(200_000); // 600 KB, well over MAX_KV_VALUE_BYTES
         substrate
             .store_llm_summary(agent, &huge, kept("a"), Some(session_a))
             .unwrap();
@@ -2423,8 +2425,9 @@ mod tests {
         let summary = summary.expect("the per-session copy must survive being oversized");
         assert!(summary.ends_with("[truncated]"), "expected a marked trim");
         assert!(
-            summary.len() < 40_000,
-            "the mirror must stay near its byte cap"
+            summary.len() <= MAX_SUMMARY_MIRROR_BYTES + 64,
+            "the mirror must stay within its byte cap, got {}",
+            summary.len()
         );
     }
 

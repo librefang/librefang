@@ -72,9 +72,17 @@ fn reject_peer_prefix_in_key(key: &str) -> Result<(), kernel_handle::KernelOpErr
 /// `peer_id = None`) reads the unscoped namespace, so `memory_recall` would
 /// surface another conversation's summary into its prompt, and `memory_store`
 /// could plant one that a later compaction read path trusts.
-fn reject_session_prefix_in_key(key: &str) -> Result<(), kernel_handle::KernelOpError> {
+///
+/// Only the unscoped namespace is reserved: a key on an attributed turn is
+/// stored under `peer:{peer_id}:{key}`, which cannot collide with the
+/// platform's `session_{uuid}` entries, and refusing it there would break
+/// legitimate keys such as `session_notes` that agents already use.
+fn reject_session_prefix_in_key(
+    key: &str,
+    peer_id: Option<&str>,
+) -> Result<(), kernel_handle::KernelOpError> {
     use kernel_handle::KernelOpError;
-    if key.starts_with(librefang_memory::SESSION_SUMMARY_KEY_PREFIX) {
+    if peer_id.is_none() && key.starts_with(librefang_memory::SESSION_SUMMARY_KEY_PREFIX) {
         return Err(KernelOpError::InvalidInput(format!(
             "memory key '{key}' must not start with reserved '{}' prefix",
             librefang_memory::SESSION_SUMMARY_KEY_PREFIX
@@ -153,7 +161,7 @@ impl kernel_handle::MemoryAccess for LibreFangKernel {
         use kernel_handle::KernelOpError;
         reject_empty_key(key)?;
         reject_peer_prefix_in_key(key)?;
-        reject_session_prefix_in_key(key)?;
+        reject_session_prefix_in_key(key, peer_id)?;
         reject_bad_peer_id(peer_id)?;
         let agent_id = resolve_agent_id(agent_id)?;
         let scoped = peer_scoped_key(key, peer_id)?;
@@ -226,7 +234,7 @@ impl kernel_handle::MemoryAccess for LibreFangKernel {
         use kernel_handle::KernelOpError;
         reject_empty_key(key)?;
         reject_peer_prefix_in_key(key)?;
-        reject_session_prefix_in_key(key)?;
+        reject_session_prefix_in_key(key, peer_id)?;
         reject_bad_peer_id(peer_id)?;
         let agent_id = resolve_agent_id(agent_id)?;
         let scoped = peer_scoped_key(key, peer_id)?;
@@ -564,15 +572,22 @@ mod tests {
     /// on the prompt path) or plant one.
     #[test]
     fn the_reserved_session_prefix_is_refused() {
-        assert!(reject_session_prefix_in_key("session_abc").is_err());
-        assert!(reject_session_prefix_in_key(&format!(
-            "{}{}",
-            librefang_memory::SESSION_SUMMARY_KEY_PREFIX,
-            "0192-uuid"
-        ))
+        assert!(reject_session_prefix_in_key("session_abc", None).is_err());
+        assert!(reject_session_prefix_in_key(
+            &format!(
+                "{}{}",
+                librefang_memory::SESSION_SUMMARY_KEY_PREFIX,
+                "0192-uuid"
+            ),
+            None
+        )
         .is_err());
         // Ordinary keys stay allowed, including ones that merely contain it.
-        assert!(reject_session_prefix_in_key("user_name").is_ok());
-        assert!(reject_session_prefix_in_key("my_session_note").is_ok());
+        assert!(reject_session_prefix_in_key("user_name", None).is_ok());
+        assert!(reject_session_prefix_in_key("my_session_note", None).is_ok());
+        // An attributed turn writes under `peer:...:` and cannot collide with
+        // the platform's unscoped summaries, so its keys are none of our
+        // business — refusing them here broke legitimate agent keys.
+        assert!(reject_session_prefix_in_key("session_notes", Some("@alice")).is_ok());
     }
 }

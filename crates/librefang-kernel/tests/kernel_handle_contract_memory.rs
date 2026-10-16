@@ -581,3 +581,42 @@ fn test_concurrent_goal_update_loses_no_writes_5138() {
         "writer 2's update was clobbered by writer 1: {goal2:?}"
     );
 }
+
+#[test]
+fn test_memory_store_rejects_session_summary_prefix_key() {
+    let (kernel, _tmp) = boot();
+    let kh: &dyn KernelHandle = &kernel;
+    use librefang_memory::SESSION_SUMMARY_KEY_PREFIX;
+
+    let err = kh
+        .memory_store(
+            &format!("{SESSION_SUMMARY_KEY_PREFIX}0192-uuid"),
+            serde_json::json!("planted"),
+            None,
+            None,
+        )
+        .expect_err("the per-session summary namespace must be closed to the tools (#8645)");
+    assert!(
+        matches!(err, KernelOpError::InvalidInput(_)),
+        "expected InvalidInput, got {err:?}"
+    );
+}
+
+#[test]
+fn test_memory_recall_rejects_session_summary_prefix_key() {
+    let (kernel, _tmp) = boot();
+    let kh: &dyn KernelHandle = &kernel;
+    use librefang_memory::SESSION_SUMMARY_KEY_PREFIX;
+
+    let err = kh
+        .memory_recall(
+            &format!("{SESSION_SUMMARY_KEY_PREFIX}0192-uuid"),
+            None,
+            None,
+        )
+        .expect_err("the per-session summary namespace must be closed on recall (#8645)");
+    assert!(
+        matches!(err, KernelOpError::InvalidInput(_)),
+        "expected InvalidInput, got {err:?}"
+    );
+}
