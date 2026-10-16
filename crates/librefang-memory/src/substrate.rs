@@ -189,6 +189,20 @@ pub fn restrict_db_file_permissions(db_path: &Path) {
     }
 }
 
+/// KV key under which the summary of a single session is stored (#8645).
+///
+/// The compaction summary itself lives once per agent (`canonical_sessions`,
+/// keyed by `agent_id`), and #6493/#6497 gated its *read* by owning session so
+/// one conversation's summary could not leak into another's prompt. The storage
+/// stayed agent-scoped, so only the session that compacted last could read a
+/// summary and every other session's compaction overwrote it. Keeping a copy
+/// under the session's own key — the channel `reset_session` already used for
+/// its summaries (#4869) — makes the summary readable for the conversation it
+/// actually describes.
+pub fn session_summary_key(session_id: &SessionId) -> String {
+    format!("session_{}", session_id.0)
+}
+
 impl MemorySubstrate {
     /// Open or create a memory substrate at the given database path.
     pub fn open(db_path: &Path, decay_rate: f32) -> LibreFangResult<Self> {
@@ -785,14 +799,57 @@ impl MemorySubstrate {
     ///
     /// Returns the compacted summary (if any) and recent messages from the
     /// agent's persistent canonical session.
+    ///
+    /// The summary returned for a named session is that session's own one
+    /// (#8645); the agent-scoped row is only a fallback for summaries written
+    /// before per-session summaries existed.
     pub fn canonical_context(
         &self,
         agent_id: AgentId,
         session_id: Option<SessionId>,
         window_size: Option<usize>,
     ) -> LibreFangResult<(Option<String>, Vec<librefang_types::message::Message>)> {
-        self.sessions
-            .canonical_context(agent_id, session_id, window_size)
+        let (fallback, recent) =
+            self.sessions
+                .canonical_context(agent_id, session_id, window_size)?;
+        let summary = self.summary_for_session(agent_id, session_id, fallback)?;
+        Ok((summary, recent))
+    }
+
+    /// Prefer the summary written for `session_id` itself (#8645), falling back
+    /// to the agent-scoped one the caller already resolved.
+    ///
+    /// `fallback` comes from `canonical_sessions`, which holds one summary per
+    /// agent, so it is only correct for the session that produced it — and is
+    /// already gated that way by #6493. Every other session must use its own
+    /// copy, otherwise another conversation's compaction silently removes this
+    /// conversation's summary.
+    fn summary_for_session(
+        &self,
+        agent_id: AgentId,
+        session_id: Option<SessionId>,
+        fallback: Option<String>,
+    ) -> LibreFangResult<Option<String>> {
+        let Some(want) = session_id else {
+            // Agent-wide read (no session named): unchanged behaviour.
+            return Ok(fallback);
+        };
+        Ok(self.per_session_summary(agent_id, want)?.or(fallback))
+    }
+
+    /// Read the summary stored under the session's own key, if any.
+    fn per_session_summary(
+        &self,
+        agent_id: AgentId,
+        session_id: SessionId,
+    ) -> LibreFangResult<Option<String>> {
+        let Some(value) = self.structured_get(agent_id, &session_summary_key(&session_id))? else {
+            return Ok(None);
+        };
+        Ok(value
+            .as_str()
+            .filter(|text| !text.trim().is_empty())
+            .map(str::to_string))
     }
 
     /// Return the agent's compacted summary **only if it is owned by
@@ -809,6 +866,12 @@ impl MemorySubstrate {
         agent_id: AgentId,
         session_id: SessionId,
     ) -> LibreFangResult<Option<String>> {
+        // The session's own summary first (#8645): the agent-scoped row below
+        // holds whichever conversation compacted last, so on a multi-user agent
+        // it is either somebody else's summary (withheld by the gate) or none.
+        if let Some(summary) = self.per_session_summary(agent_id, session_id)? {
+            return Ok(Some(summary));
+        }
         let canonical = self.sessions.load_canonical(agent_id)?;
         Ok(match canonical.compacted_summary_session_id {
             Some(owner) if owner == session_id => canonical.compacted_summary,
@@ -828,7 +891,28 @@ impl MemorySubstrate {
         owning_session_id: Option<SessionId>,
     ) -> LibreFangResult<()> {
         self.sessions
-            .store_llm_summary(agent_id, summary, kept_messages, owning_session_id)
+            .store_llm_summary(agent_id, summary, kept_messages, owning_session_id)?;
+        // Mirror the summary under the session's own key so the conversation it
+        // describes keeps reading it after another session compacts (#8645).
+        // Best-effort: the canonical write above already succeeded, and losing
+        // the mirror only costs the old behaviour, never the summary itself.
+        if let Some(session_id) = owning_session_id {
+            if !summary.trim().is_empty() {
+                if let Err(error) = self.structured_set(
+                    agent_id,
+                    &session_summary_key(&session_id),
+                    serde_json::Value::String(summary.to_string()),
+                ) {
+                    tracing::warn!(
+                        agent_id = %agent_id,
+                        session_id = %session_id.0,
+                        %error,
+                        "Failed to persist the per-session copy of the compaction summary"
+                    );
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Write a human-readable JSONL mirror of a session to disk.
@@ -2112,6 +2196,69 @@ impl Memory for MemorySubstrate {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #8645: a second conversation's compaction must not remove the first one's
+    /// summary.
+    ///
+    /// `canonical_sessions` holds one summary per *agent*, gated by owning
+    /// session (#6493), so with two conversations on one agent at most one of
+    /// them could ever read a summary and the other's compaction destroyed it.
+    /// The reproduction this test mirrors: session A compacts, session B
+    /// compacts, and A is left with `None`.
+    #[test]
+    fn compaction_summary_is_scoped_to_its_own_session() {
+        let substrate = MemorySubstrate::open_in_memory(0.1).unwrap();
+        let agent = AgentId::new();
+        let session_a = SessionId::new();
+        let session_b = SessionId::new();
+
+        let kept = |text: &str| {
+            vec![librefang_types::message::Message {
+                role: librefang_types::message::Role::User,
+                content: librefang_types::message::MessageContent::Text(text.to_string()),
+                pinned: false,
+                timestamp: None,
+            }]
+        };
+
+        substrate
+            .store_llm_summary(agent, "summary of A", kept("a"), Some(session_a))
+            .unwrap();
+        assert_eq!(
+            substrate
+                .compacted_summary_for_session(agent, session_a)
+                .unwrap()
+                .as_deref(),
+            Some("summary of A")
+        );
+
+        // A second conversation compacts: the agent-scoped row now belongs to B.
+        substrate
+            .store_llm_summary(agent, "summary of B", kept("b"), Some(session_b))
+            .unwrap();
+
+        // Both conversations keep their own summary — the fix.
+        assert_eq!(
+            substrate
+                .compacted_summary_for_session(agent, session_a)
+                .unwrap()
+                .as_deref(),
+            Some("summary of A")
+        );
+        assert_eq!(
+            substrate
+                .compacted_summary_for_session(agent, session_b)
+                .unwrap()
+                .as_deref(),
+            Some("summary of B")
+        );
+
+        // The prompt path must agree with the banner path.
+        let (summary, _recent) = substrate
+            .canonical_context(agent, Some(session_a), None)
+            .unwrap();
+        assert_eq!(summary.as_deref(), Some("summary of A"));
+    }
 
     /// #8219: the aggregate must agree with what listing every row would have counted.
     ///
