@@ -1,19 +1,10 @@
-//! Integration tests for two fixes shipped together for the "Agent Types
-//! page is uneditable" bug (an install with 42 agents and 0 templates had
-//! every agent listed as an unusable agent type):
+//! Integration tests for the "Agent Types page is uneditable" bug (an install
+//! with 42 agents and 0 templates had every agent listed as an unusable agent
+//! type):
 //!
-//!  1. `POST /api/agents {"template": name}` now resolves a real
-//!     `~/.librefang/agent-types/<name>.toml` template FIRST. Before this
-//!     fix `resolve_manifest` (`routes/agents/lifecycle.rs`) only ever
-//!     checked `workspaces/agents/<name>/agent.toml` — spawning a
-//!     persistent agent "from template" 404'd for every real template and
-//!     only worked when `name` happened to match an existing agent's own
-//!     workspace, the opposite of what the endpoint promises. The
-//!     workspace fallback is kept second, for backward compatibility.
-//!  2. `POST /api/agents/{id}/save-as-agent-type` extracts a live agent's
-//!     manifest into a reusable `agent-types/<name>.toml` file — the bridge
-//!     from "I have agents, not templates" to a populated, editable Agent
-//!     Types page.
+//!  1. `POST /api/agents {"template": name}` resolves templates through the kernel-owned `agent_template_candidates` order: the writable `agent-types/<name>.toml` store first, then the live agent's `workspaces/agents/<name>/agent.toml`, then the read-only registry checkout.
+//!     This file pins the route's end of that contract, including the refusal of `signed_manifest` combined with `template`.
+//!  2. `POST /api/agents/{id}/save-as-agent-type` extracts a live agent's manifest into a reusable `agent-types/<name>.toml` file — the bridge from "I have agents, not templates" to a populated, editable Agent Types page.
 //!
 //! `LIBREFANG_HOME` and `KernelConfig::home_dir` are pinned to the SAME
 //! tempdir per test: `agent_templates.rs`'s reads/writes
@@ -168,7 +159,7 @@ model = "default"
 }
 
 // ---------------------------------------------------------------------------
-// Point 2: POST /api/agents {"template": name} resolves real templates
+// POST /api/agents {"template": name} resolves real templates
 // ---------------------------------------------------------------------------
 
 #[tokio::test(flavor = "multi_thread")]
@@ -184,8 +175,7 @@ async fn spawn_from_real_template_succeeds() {
     )
     .unwrap();
 
-    // Before the fix: this 404'd — `resolve_manifest` never looked in
-    // `templates/` at all, only in `workspaces/agents/`.
+    // The writable `agent-types/` store is the first candidate in the kernel-owned order, so this resolves even with no workspace agent of that name.
     let (status, body) = send(
         h.app.clone(),
         post_json(
@@ -203,7 +193,7 @@ async fn spawn_from_workspace_agent_name_still_works() {
     let _guard = home_lock().lock().await;
     let h = boot().await;
 
-    // Backward-compat fallback (kept deliberately, point 4 of the fix): a
+    // Backward-compat fallback (kept deliberately): a
     // "template" name that matches an existing agent's own workspace
     // directory still resolves. It is the second candidate in the kernel's
     // `agent_template_candidates` order — `agent-types/` → `workspaces/agents/`
@@ -240,7 +230,7 @@ async fn spawn_from_workspace_agent_name_still_works() {
 /// A live agent named `Research Bot` lives at
 /// `workspaces/agents/ResearchBot/agent.toml` — the directory is the sanitized
 /// component of its name (pinned by `workspace_component("Research Bot") ==
-/// "ResearchBot"` in the kernel). `resolve_manifest` no longer pins the
+/// "ResearchBot"` in the kernel). `resolve_manifest` does not pin the
 /// template's declared `name` to the requested one, so the request matches on
 /// the directory component and `Research Bot 2` (the request's own name
 /// override) is what spawns.
@@ -358,7 +348,7 @@ model = "default"
 }
 
 // ---------------------------------------------------------------------------
-// Point 3: POST /api/agents/{id}/save-as-agent-type + round trip
+// POST /api/agents/{id}/save-as-agent-type + round trip
 // ---------------------------------------------------------------------------
 
 #[tokio::test(flavor = "multi_thread")]
@@ -437,8 +427,7 @@ async fn save_agent_as_agent_type_round_trip() {
         "the snapshot must record its source agent for agent_purge: {content}"
     );
 
-    // It shows up on the Agent Types list, editable/deletable like any
-    // other template (point 1: only real templates are listed).
+    // It shows up on the Agent Types list, editable/deletable like any other template.
     let (list_status, list_body) = send(h.app.clone(), get("/api/templates")).await;
     assert_eq!(list_status, StatusCode::OK, "{list_body}");
     let items = list_body["templates"].as_array().expect("templates array");
@@ -768,9 +757,9 @@ async fn save_agent_as_agent_type_allows_the_source_agents_own_name() {
 ///
 /// `create_agent_type` already refuses this with `ShadowsLiveAgent`, and its
 /// stated reason is that an agent type sharing a live agent's name wins every
-/// subsequent catalog read and leaves the agent unreachable. Point 1 of this
-/// change makes that worse rather than better: `resolve_manifest` now prefers
-/// the agent-type store, so the shadowing type wins outright.
+/// subsequent catalog read and leaves the agent unreachable. Since template
+/// resolution consults the agent-type store first, a shadowing type wins
+/// outright for `POST /api/agents {"template": name}` as well.
 ///
 /// The ordering matters. The sibling test above creates the agent type first
 /// and then re-saves over it, which is refused by the `NameTaken` claim and
@@ -867,9 +856,8 @@ async fn save_agent_as_agent_type_forbids_user_role() {
 }
 
 /// `signed_manifest` is verified against the exact bytes it was signed over.
-/// A `template` supplies the manifest server-side, so accepting the pair
-/// would leave nothing to verify the signature against — the request must be
-/// rejected rather than the signature silently ignored.
+/// Main accepted the pair when those signed bytes equalled the resolved template's content — a verified flow, not a skipped one.
+/// This door rejects the pair anyway, so a signature-pinned spawn can only pin content the client supplied, never whatever the template store holds at verification time.
 #[tokio::test(flavor = "multi_thread")]
 async fn spawn_rejects_signed_manifest_combined_with_template() {
     let _guard = home_lock().lock().await;
