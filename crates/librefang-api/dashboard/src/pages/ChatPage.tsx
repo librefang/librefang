@@ -69,6 +69,14 @@ import {
 const isAuthUnavailable = (status?: string) =>
   !!status && status !== "configured" && status !== "validated_key" && status !== "configured_cli" && status !== "not_required" && status !== "auto_detected";
 
+// Tab↔panel wiring for the session strip (#8597). The message area is a
+// single panel whose contents follow the active session — switching tabs
+// swaps the conversation inside it rather than mounting one panel per tab —
+// so every tab controls the same panel and the panel is labelled by whichever
+// tab is selected. Ids are derived from the session id to stay unique.
+const CHAT_SESSION_PANEL_ID = "chat-session-panel";
+const chatSessionTabId = (sessionId: string) => `chat-session-tab-${sessionId}`;
+
 /**
  * Format a chat message's timestamp for the message footer.
  *
@@ -3670,10 +3678,27 @@ export function ChatPage() {
     () => (selectedAgentId ? (openChatTabs[selectedAgentId] ?? []) : []),
     [openChatTabs, selectedAgentId],
   );
+  // The strip only exists once a second conversation is open; a single tab is
+  // a label pretending to be a control (see the render below). The panel
+  // semantics follow the same condition so the message area is only announced
+  // as a tabpanel while there are tabs to explain it.
+  const showSessionTabs = agentTabs.length > 1;
+  // Exactly one tab owns the tab stop. Normally that is the selected one; if
+  // the active session has no tab yet (a prune window), anchor the roving
+  // tabindex on the first tab so the strip is never keyboard-unreachable.
+  const rovingSessionId =
+    activeSessionId && agentTabs.includes(activeSessionId) ? activeSessionId : agentTabs[0];
 
   useEffect(() => {
-    if (selectedAgentId && activeSessionId) openChatTab(selectedAgentId, activeSessionId);
-  }, [selectedAgentId, activeSessionId, openChatTab]);
+    if (!selectedAgentId || !activeSessionId) return;
+    // `agentTabs` is in the dependencies on purpose, not only navigation: a
+    // prune against a list that is stale (10 s `staleTime`), or another
+    // window's `rehydrate()` through the storage listener, can drop the tab
+    // of the session on screen, and nothing else would add it back. When the
+    // id is already open and newest, `openChatTab` returns the same state, so
+    // the extra runs cost nothing and cannot loop.
+    openChatTab(selectedAgentId, activeSessionId);
+  }, [selectedAgentId, activeSessionId, agentTabs, openChatTab]);
 
   useEffect(() => {
     // A session deleted from the dropdown, another browser tab, or the CLI
@@ -3684,11 +3709,15 @@ export function ChatPage() {
     // so it prunes the stale tabs instead of being skipped (#8326 review).
     const loaded = sessionsQuery.data;
     if (!selectedAgentId || !loaded) return;
-    pruneChatTabs(
-      selectedAgentId,
-      new Set(loaded.map((session) => session.session_id).filter((id): id is string => !!id)),
+    const valid = new Set(
+      loaded.map((session) => session.session_id).filter((id): id is string => !!id),
     );
-  }, [selectedAgentId, sessionsQuery.data, pruneChatTabs]);
+    // The session on screen is always valid, however stale the list: a tab
+    // removed here would be appended back at the end by the open effect
+    // above, moving the active tab under the cursor.
+    if (activeSessionId) valid.add(activeSessionId);
+    pruneChatTabs(selectedAgentId, valid);
+  }, [selectedAgentId, sessionsQuery.data, activeSessionId, pruneChatTabs]);
 
   useEffect(() => {
     // Tabs are keyed by agent, so a deleted agent would otherwise leave its
@@ -3753,6 +3782,65 @@ export function ChatPage() {
       });
     }
   }, [deleteSessionMutation, selectedAgentId, urlSessionId, navigate]);
+
+  // Keyboard model of the strip (#8597), following the APG tabs pattern with
+  // automatic activation: moving focus with the arrow keys selects that tab in
+  // one step, and both the tab stop and `aria-selected` follow the selection.
+  // Delete/Backspace close the focused tab — the close button itself is out of
+  // the tab order (tabindex -1) so it cannot interleave with the roving
+  // tabindex, and this handler is the keyboard path that replaces it.
+  const handleTabKeyDown = useCallback(
+    (event: React.KeyboardEvent<HTMLDivElement>, sessionId: string) => {
+      const index = agentTabs.indexOf(sessionId);
+      if (index === -1) return;
+
+      if (event.key === "Delete" || event.key === "Backspace") {
+        event.preventDefault();
+        const nextSessionId = sessionAfterClose(agentTabs, sessionId);
+        handleCloseTab(sessionId);
+        // The neighbour keeps its identity across the re-render (tabs are
+        // keyed by session id), so focusing it now survives the tab's removal.
+        if (nextSessionId) {
+          document.getElementById(chatSessionTabId(nextSessionId))?.focus();
+        }
+        return;
+      }
+
+      let targetIndex: number;
+      switch (event.key) {
+        case "ArrowRight":
+          targetIndex = (index + 1) % agentTabs.length;
+          break;
+        case "ArrowLeft":
+          targetIndex = (index - 1 + agentTabs.length) % agentTabs.length;
+          break;
+        case "Home":
+          targetIndex = 0;
+          break;
+        case "End":
+          targetIndex = agentTabs.length - 1;
+          break;
+        case "Enter":
+        case " ":
+          // A div with role="tab" has no native activation; select the tab
+          // under focus when it somehow is not the selected one.
+          targetIndex = index;
+          break;
+        default:
+          return;
+      }
+      event.preventDefault();
+      const targetSessionId = agentTabs[targetIndex];
+      if (!targetSessionId) return;
+      if (targetSessionId !== activeSessionId) {
+        void handleSwitchSession(targetSessionId);
+      }
+      // Focus the target directly rather than relying on the re-render to move
+      // it: focus must not depend on navigate() resolving first.
+      document.getElementById(chatSessionTabId(targetSessionId))?.focus();
+    },
+    [agentTabs, activeSessionId, handleCloseTab, handleSwitchSession],
+  );
 
   // If the current selection is no longer visible (e.g. hand agents toggled
   // off while a hand-spawned agent was selected), clear it so the auto-select
@@ -4090,54 +4178,67 @@ export function ChatPage() {
             pretending to be a control, and the header already names the
             conversation you are in.
           */}
-          {agentTabs.length > 1 && (
-            <div
-              role="tablist"
-              aria-label={t("chat.session_tabs", { defaultValue: "Open conversations" })}
-              className="flex items-center gap-1 overflow-x-auto border-b border-border-subtle/50 px-2 py-1 scrollbar-thin"
-            >
-              {agentTabs.map((sessionId) => {
-                const isActive = sessionId === activeSessionId;
-                return (
-                  <div
-                    key={sessionId}
-                    className={`group flex shrink-0 items-center gap-1 rounded-t-lg border-b-2 px-2 py-1 text-[11px] transition-colors ${
-                      isActive
-                        ? "border-brand bg-brand/5 text-brand font-bold"
-                        : "border-transparent text-text-dim hover:text-text-main hover:bg-surface-hover"
-                    }`}
-                  >
-                    <button
-                      type="button"
+          {showSessionTabs && (
+            <div className="flex items-center border-b border-border-subtle/50 pr-1">
+              <div
+                role="tablist"
+                aria-label={t("chat.session_tabs", { defaultValue: "Open conversations" })}
+                className="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto px-2 py-1 scrollbar-thin"
+              >
+                {agentTabs.map((sessionId) => {
+                  const isActive = sessionId === activeSessionId;
+                  const isRoving = sessionId === rovingSessionId;
+                  return (
+                    <div
+                      key={sessionId}
+                      id={chatSessionTabId(sessionId)}
                       role="tab"
                       aria-selected={isActive}
+                      aria-controls={CHAT_SESSION_PANEL_ID}
+                      tabIndex={isRoving ? 0 : -1}
                       onClick={() => { if (!isActive) void handleSwitchSession(sessionId); }}
-                      className="max-w-[16ch] truncate"
+                      onKeyDown={(event) => handleTabKeyDown(event, sessionId)}
+                      className={`group flex shrink-0 cursor-pointer items-center gap-1 rounded-t-lg border-b-2 px-2 py-1 text-[11px] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand focus-visible:ring-inset ${
+                        isActive
+                          ? "border-brand bg-brand/5 text-brand font-bold"
+                          : "border-transparent text-text-dim hover:text-text-main hover:bg-surface-hover"
+                      }`}
                     >
-                      {pickSessionDropdownLabel(sessionId, sessionsQuery.data) ?? sessionId.slice(0, 8)}
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => handleCloseTab(sessionId)}
-                      aria-label={t("chat.session_tab_close", { defaultValue: "Close this tab" })}
-                      title={t("chat.session_tab_close_hint", {
-                        defaultValue: "Closes the tab. The conversation is kept.",
-                      })}
-                      // Hidden on hover-capable devices to keep the strip
-                      // quiet, always visible on touch screens where there is
-                      // no hover to reveal it.
-                      className="rounded p-0.5 opacity-0 transition-opacity hover:text-error focus-visible:opacity-100 group-hover:opacity-100 pointer-coarse:opacity-100"
-                    >
-                      <X className="h-2.5 w-2.5" />
-                    </button>
-                  </div>
-                );
-              })}
+                      <span className="max-w-[16ch] truncate">
+                        {pickSessionDropdownLabel(sessionId, sessionsQuery.data) ?? sessionId.slice(0, 8)}
+                      </span>
+                      <button
+                        type="button"
+                        // Out of the tab order on purpose (#8597): the tab is
+                        // the tab stop and the close button must not interleave
+                        // with the roving tabindex. Delete/Backspace on the tab
+                        // is the keyboard path.
+                        tabIndex={-1}
+                        onClick={(event) => { event.stopPropagation(); handleCloseTab(sessionId); }}
+                        aria-label={t("chat.session_tab_close", { defaultValue: "Close this tab" })}
+                        title={t("chat.session_tab_close_hint", {
+                          defaultValue: "Closes the tab. The conversation is kept.",
+                        })}
+                        // Hidden on hover-capable devices to keep the strip
+                        // quiet, always visible on touch screens where there is
+                        // no hover to reveal it. h-6/w-6 keep the hit target at
+                        // the 24 px WCAG 2.5.8 minimum while the icon stays 10 px.
+                        className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded opacity-0 transition-opacity hover:text-error group-hover:opacity-100 pointer-coarse:opacity-100"
+                      >
+                        <X className="h-2.5 w-2.5" />
+                      </button>
+                    </div>
+                  );
+                })}
+              </div>
+              {/* New tab lives beside the tablist, not inside it: a tablist's
+                  children are tabs, and a plain button there reads as one
+                  (#8597). */}
               <button
                 type="button"
                 onClick={() => { void handleNewSession(); }}
                 aria-label={t("chat.new_session", { defaultValue: "New session" })}
-                className="shrink-0 rounded-lg p-1 text-text-dim hover:text-brand hover:bg-surface-hover"
+                className="ml-1 shrink-0 rounded-lg p-1 text-text-dim hover:text-brand hover:bg-surface-hover"
               >
                 <Plus className="h-3 w-3" />
               </button>
@@ -4158,6 +4259,14 @@ export function ChatPage() {
             anything portalled to the body keep their own size.
           */}
           <div
+            // The message area is the panel the session tabs control. It is
+            // only a tabpanel while the strip is rendered — a lone
+            // conversation has no tabs to explain it (#8597).
+            id={showSessionTabs ? CHAT_SESSION_PANEL_ID : undefined}
+            role={showSessionTabs ? "tabpanel" : undefined}
+            aria-labelledby={
+              showSessionTabs && rovingSessionId ? chatSessionTabId(rovingSessionId) : undefined
+            }
             className="flex-1 min-h-0 overflow-y-auto p-2 sm:p-4 scrollbar-thin"
             style={{ zoom: chatScale }}
             data-testid="chat-message-area"
