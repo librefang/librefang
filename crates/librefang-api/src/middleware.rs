@@ -402,11 +402,13 @@ fn is_owner_only_write(method: &axum::http::Method, path: &str) -> bool {
     // An MCP catalog entry carries a raw stdio `command` + `args` that the extensions-install alias spawns, and a freshly written plugin directory has no `.disabled` marker, so it is enabled by default and an overwrite can drop the manifest's `[integrity]` table.
     // Both therefore cross the same "config write" to "process spawn" line as the MCP server and plugin install gates, so they are Owner-only too.
     // The other content types (`provider`, `agent`, `hand`, `skill`) stay at Admin: `hand` is covered by the Owner-only `install-deps` gate above at the point where it would execute anything.
+    // The `{content_type}` segment is compared decoded: axum percent-decodes the capture before the handler sees it, so `/api/registry/content/%6Dcp` would otherwise slip past this raw-path check as Admin and still write the MCP catalog (`create_registry_content` re-checks the decoded value as well).
     if (*method == axum::http::Method::POST || *method == axum::http::Method::PUT)
-        && matches!(
-            path,
-            "/api/registry/content/mcp" | "/api/registry/content/plugin"
-        )
+        && path
+            .strip_prefix("/api/registry/content/")
+            .is_some_and(|segment| {
+                matches!(crate::percent_decode(segment).as_str(), "mcp" | "plugin")
+            })
     {
         return true;
     }
@@ -3223,6 +3225,10 @@ mod tests {
             (axum::http::Method::PUT, "/api/registry/content/mcp"),
             (axum::http::Method::POST, "/api/registry/content/plugin"),
             (axum::http::Method::PUT, "/api/registry/content/plugin"),
+            // axum percent-decodes the `{content_type}` capture, so an encoded spelling reaches the same handler arm and must hit the same gate.
+            (axum::http::Method::POST, "/api/registry/content/%6Dcp"),
+            (axum::http::Method::PUT, "/api/registry/content/plug%69n"),
+            (axum::http::Method::POST, "/api/registry/content/%6d%63%70"),
             (axum::http::Method::POST, "/api/restore"),
         ];
         for (method, path) in owner_only {
@@ -3242,6 +3248,7 @@ mod tests {
             (axum::http::Method::POST, "/api/registry/content/provider"),
             (axum::http::Method::PUT, "/api/registry/content/agent"),
             (axum::http::Method::POST, "/api/registry/content/skill"),
+            (axum::http::Method::POST, "/api/registry/content/%73kill"),
             (axum::http::Method::POST, "/api/extensions/uninstall"),
         ] {
             assert!(

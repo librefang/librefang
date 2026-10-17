@@ -162,6 +162,17 @@ async fn admin_cannot_reach_spawn_or_config_overwrite_aliases() {
             "/api/registry/content/plugin",
             serde_json::json!({"name": "admin-plugin", "version": "0.1.0"}),
         ),
+        // Percent-encoded spellings of the content type: axum decodes the capture to "mcp" / "plugin", so the gate must too.
+        (
+            Method::POST,
+            "/api/registry/content/%6Dcp",
+            stdio_catalog_entry("admin-mcp"),
+        ),
+        (
+            Method::PUT,
+            "/api/registry/content/plug%69n",
+            serde_json::json!({"name": "admin-plugin", "version": "0.1.0"}),
+        ),
         (
             Method::POST,
             "/api/extensions/install",

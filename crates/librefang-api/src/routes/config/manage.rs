@@ -18,6 +18,106 @@ pub async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse
     Json(redacted_config_json(&config, &budget))
 }
 
+fn redact_url_map_credentials(
+    urls: &std::collections::BTreeMap<String, String>,
+) -> std::collections::BTreeMap<String, String> {
+    urls.iter()
+        .map(|(k, v)| (k.clone(), redact_url_credentials(v)))
+        .collect()
+}
+
+/// The live value a redacted URL posted back to `/api/config/set` stands for, or `None` when `submitted` is a real edit.
+///
+/// `submitted` is taken as a round-trip of `GET /api/config` only when it differs from `live` and equals `redact(live)` exactly, which no real URL edit produces because the redacted form carries a literal `***` where the secret was.
+fn unredacted_url(submitted: &str, live: &str, redact: fn(&str) -> String) -> Option<String> {
+    (submitted != live && redact(live) == submitted).then(|| live.to_string())
+}
+
+/// Undo the URL redaction of `GET /api/config` on a value the dashboard posts back to `/api/config/set`.
+///
+/// The dashboard edits `provider_urls`, `provider_proxy_urls` and `a2a.external_agents` as whole collections, so changing one entry re-posts every other entry exactly as the redacted read returned it.
+/// Without this, saving one proxy URL would overwrite every other proxy's credentials with `***`.
+/// Only values that are byte-for-byte the redacted form of the live value are substituted; anything else is the caller's edit and is written as posted.
+fn restore_redacted_config_value(
+    path: &str,
+    mut value: serde_json::Value,
+    config: &librefang_types::config::KernelConfig,
+) -> serde_json::Value {
+    let restore_str =
+        |v: &mut serde_json::Value, live: Option<&str>, redact: fn(&str) -> String| {
+            if let (Some(submitted), Some(live)) = (v.as_str(), live) {
+                if let Some(original) = unredacted_url(submitted, live, redact) {
+                    *v = serde_json::Value::String(original);
+                }
+            }
+        };
+    let (head, rest) = match path.split_once('.') {
+        Some((head, rest)) => (head, Some(rest)),
+        None => (path, None),
+    };
+    match (head, rest) {
+        ("provider_urls" | "provider_proxy_urls", _) => {
+            let live = if head == "provider_urls" {
+                &config.provider_urls
+            } else {
+                &config.provider_proxy_urls
+            };
+            match rest {
+                None => {
+                    if let Some(map) = value.as_object_mut() {
+                        for (key, entry) in map.iter_mut() {
+                            restore_str(
+                                entry,
+                                live.get(key).map(String::as_str),
+                                redact_url_credentials,
+                            );
+                        }
+                    }
+                }
+                Some(key) => restore_str(
+                    &mut value,
+                    live.get(key).map(String::as_str),
+                    redact_url_credentials,
+                ),
+            }
+        }
+        ("memory", Some("vector_store_url")) => {
+            restore_str(
+                &mut value,
+                config.memory.vector_store_url.as_deref(),
+                redact_url_secrets,
+            );
+        }
+        ("a2a", Some("external_agents")) => {
+            let live_agents = config
+                .a2a
+                .as_ref()
+                .map(|a| a.external_agents.as_slice())
+                .unwrap_or_default();
+            if let Some(items) = value.as_array_mut() {
+                for item in items {
+                    let Some(obj) = item.as_object_mut() else {
+                        continue;
+                    };
+                    let Some(name) = obj.get("name").and_then(|n| n.as_str()).map(str::to_string)
+                    else {
+                        continue;
+                    };
+                    let live = live_agents
+                        .iter()
+                        .find(|ea| ea.name == name)
+                        .map(|ea| ea.url.as_str());
+                    if let Some(url) = obj.get_mut("url") {
+                        restore_str(url, live, redact_url_secrets);
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+    value
+}
+
 /// Build the redacted body returned by `GET /api/config`.
 ///
 /// Split out of the handler so the read/write parity guard can render a payload without booting a kernel.
@@ -139,7 +239,8 @@ fn redacted_config_json(
         .collect::<serde_json::Map<String, serde_json::Value>>()
         .into();
 
-    // -- sidecar_channels: show names/commands, redact env values --
+    // -- sidecar_channels: show names/commands, reduce args to a count, list env keys only --
+    // Sidecar args have the same shape as MCP stdio args (`--token <value>`), so they get the same treatment; `sidecar_channels` is not writable through `/api/config/set`, so nothing reads them back.
     let sidecar_channels: Vec<serde_json::Value> = config
         .sidecar_channels
         .iter()
@@ -147,7 +248,7 @@ fn redacted_config_json(
             serde_json::json!({
                 "name": sc.name,
                 "command": sc.command,
-                "args": sc.args,
+                "args_count": sc.args.len(),
                 "channel_type": sc.channel_type,
                 "env_keys": sc.env.keys().collect::<Vec<_>>(),
             })
@@ -252,7 +353,7 @@ fn redacted_config_json(
         "decay": serde_json::to_value(&config.memory.decay).unwrap_or_default(),
         "chunking": serde_json::to_value(&config.memory.chunking).unwrap_or_default(),
         "vector_backend": config.memory.vector_backend,
-        "vector_store_url": config.memory.vector_store_url,
+        "vector_store_url": config.memory.vector_store_url.as_deref().map(redact_url_secrets),
         "soft_delete_retention_days": config.memory.soft_delete_retention_days,
         "pool_size": config.memory.pool_size,
         "max_episodic_chars": config.memory.max_episodic_chars,
@@ -320,7 +421,7 @@ fn redacted_config_json(
                 "description": a2a.description,
                 "listen_path": a2a.listen_path,
                 "external_agents": a2a.external_agents.iter().map(|ea| {
-                    serde_json::json!({ "name": ea.name, "url": ea.url })
+                    serde_json::json!({ "name": ea.name, "url": redact_url_secrets(&ea.url) })
                 }).collect::<Vec<_>>(),
             }),
             None => serde_json::json!(null),
@@ -616,8 +717,16 @@ fn redacted_config_json(
         "providers": serde_json::to_value(&budget.providers).unwrap_or_default(),
     });
 
-    set!("provider_urls", config.provider_urls);
-    set!("provider_proxy_urls", config.provider_proxy_urls);
+    // Proxy URLs conventionally carry `user:pass@`, and a self-hosted base URL can too; the query is kept because `api-version=` on Azure is configuration.
+    // `config_set` maps a redacted value posted back unchanged onto the live one (`restore_redacted_config_value`), since the dashboard writes these maps whole.
+    set!(
+        "provider_urls",
+        redact_url_map_credentials(&config.provider_urls)
+    );
+    set!(
+        "provider_proxy_urls",
+        redact_url_map_credentials(&config.provider_proxy_urls)
+    );
     set!("provider_api_keys", provider_api_keys);
     set!("provider_regions", config.provider_regions);
 
@@ -1544,6 +1653,9 @@ pub async fn config_set(
         );
     }
 
+    // `GET /api/config` redacts credential-bearing URLs, and the dashboard posts the collections holding them back whole; map an unchanged redacted entry onto the live value instead of persisting the `***` placeholder.
+    let value = restore_redacted_config_value(&path, value, &state.kernel.config_ref());
+
     // No basename / traversal check on `config_path`: it is the kernel's boot-resolved path, not anything the request supplied.
     // Under `LIBREFANG_CONFIG_PATH` the operator's chosen filename is the point, so rejecting a name that is not literally `config.toml` would refuse to write the very file this daemon loaded (#6695).
     let config_path = state.kernel.config_path().to_path_buf();
@@ -1984,6 +2096,139 @@ mod config_read_write_parity_tests {
         assert_eq!(
             payload["default_model"]["base_url"],
             "https://***@llm.example.test/v1"
+        );
+    }
+
+    /// The same payload carried sidecar stdio args, provider base / proxy URLs, the vector store URL and A2A agent URLs verbatim, which is the leak the MCP redaction above closes for MCP entries.
+    #[test]
+    fn sidecar_args_and_secondary_urls_hide_credentials() {
+        let mut config = KernelConfig {
+            sidecar_channels: serde_json::from_value(serde_json::json!([
+                {"name": "slack", "command": "slack-sidecar", "args": ["--token", "xoxb-sidecar-secret"]}
+            ]))
+            .expect("sidecar entries deserialize"),
+            a2a: Some(
+                serde_json::from_value(serde_json::json!({
+                    "external_agents": [{"name": "peer", "url": "https://a2a-user:a2a-pass@peer.example.test/a2a?key=a2a-query-secret"}]
+                }))
+                .expect("a2a config deserializes"),
+            ),
+            ..KernelConfig::default()
+        };
+        config.provider_proxy_urls.insert(
+            "openai".to_string(),
+            "http://proxy-user:proxy-pass@proxy.example.test:3128".to_string(),
+        );
+        config.provider_urls.insert(
+            "azure".to_string(),
+            "https://base-user:base-pass@azure.example.test/v1?api-version=2024-10-01".to_string(),
+        );
+        config.memory.vector_store_url = Some(
+            "https://vs-user:vs-pass@qdrant.example.test:6333?api_key=vs-query-secret".to_string(),
+        );
+
+        let payload = super::redacted_config_json(&config, &BudgetConfig::default());
+        let rendered = payload.to_string();
+        for secret in [
+            "xoxb-sidecar-secret",
+            "proxy-pass",
+            "base-pass",
+            "vs-pass",
+            "vs-query-secret",
+            "a2a-pass",
+            "a2a-query-secret",
+        ] {
+            assert!(!rendered.contains(secret), "`{secret}` leaked: {rendered}");
+        }
+        assert_eq!(payload["sidecar_channels"][0]["args_count"], 2);
+        assert!(payload["sidecar_channels"][0].get("args").is_none());
+        assert_eq!(
+            payload["provider_proxy_urls"]["openai"],
+            "http://***@proxy.example.test:3128"
+        );
+        // The query of a provider base URL is configuration (`api-version=`), so only the userinfo goes.
+        assert_eq!(
+            payload["provider_urls"]["azure"],
+            "https://***@azure.example.test/v1?api-version=2024-10-01"
+        );
+        assert_eq!(
+            payload["memory"]["vector_store_url"],
+            "https://***@qdrant.example.test:6333?***"
+        );
+        assert_eq!(
+            payload["a2a"]["external_agents"][0]["url"],
+            "https://***@peer.example.test/a2a?***"
+        );
+    }
+
+    /// The dashboard writes `provider_proxy_urls` and friends back whole, so a redacted entry posted back unchanged must resolve to the live value, while a real edit is written as posted.
+    #[test]
+    fn redacted_urls_posted_back_restore_the_live_value() {
+        let mut config = KernelConfig {
+            a2a: Some(
+                serde_json::from_value(serde_json::json!({
+                    "external_agents": [{"name": "peer", "url": "https://u:p@peer.example.test/a2a?key=k"}]
+                }))
+                .expect("a2a config deserializes"),
+            ),
+            ..KernelConfig::default()
+        };
+        config.provider_proxy_urls.insert(
+            "openai".to_string(),
+            "http://u:secret@proxy.example.test:3128".to_string(),
+        );
+        config.provider_proxy_urls.insert(
+            "anthropic".to_string(),
+            "http://plain.example.test:3128".to_string(),
+        );
+        config.memory.vector_store_url = Some("https://u:p@vs.example.test?api_key=k".to_string());
+
+        let payload = super::redacted_config_json(&config, &BudgetConfig::default());
+
+        // Whole-map write: one entry edited, the other re-posted as read.
+        let mut posted = payload["provider_proxy_urls"].clone();
+        posted["anthropic"] = serde_json::json!("http://edited.example.test:8080");
+        let restored = super::restore_redacted_config_value("provider_proxy_urls", posted, &config);
+        assert_eq!(
+            restored["openai"],
+            "http://u:secret@proxy.example.test:3128"
+        );
+        assert_eq!(restored["anthropic"], "http://edited.example.test:8080");
+
+        // Per-key write of the unchanged redacted value.
+        let restored = super::restore_redacted_config_value(
+            "provider_proxy_urls.openai",
+            payload["provider_proxy_urls"]["openai"].clone(),
+            &config,
+        );
+        assert_eq!(restored, "http://u:secret@proxy.example.test:3128");
+
+        // A real edit that happens to keep userinfo is not mistaken for a round-trip.
+        let edited = serde_json::json!("http://u:new@proxy.example.test:3128");
+        assert_eq!(
+            super::restore_redacted_config_value(
+                "provider_proxy_urls.openai",
+                edited.clone(),
+                &config
+            ),
+            edited
+        );
+
+        let restored = super::restore_redacted_config_value(
+            "memory.vector_store_url",
+            payload["memory"]["vector_store_url"].clone(),
+            &config,
+        );
+        assert_eq!(restored, "https://u:p@vs.example.test?api_key=k");
+
+        let restored = super::restore_redacted_config_value(
+            "a2a.external_agents",
+            payload["a2a"]["external_agents"].clone(),
+            &config,
+        );
+        assert_eq!(
+            restored[0]["url"],
+            "https://u:p@peer.example.test/a2a?key=k"
         );
     }
 
