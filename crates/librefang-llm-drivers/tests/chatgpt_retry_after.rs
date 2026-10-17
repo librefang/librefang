@@ -27,6 +27,7 @@ async fn complete_with_retry_after(value: &str) -> Result<(), LlmError> {
 }
 
 /// A delta-seconds value above `u64::MAX / 1000` saturates instead of overflowing.
+/// The driver reports the hint as given; the agent loop caps the in-turn sleep it causes (`in_turn_retry_delay_ms`), and the uncapped value feeds only the message journal's defer window.
 #[tokio::test]
 #[serial_test::serial]
 async fn huge_retry_after_saturates_instead_of_overflowing() {

@@ -103,6 +103,18 @@ fn record_retry_failure(
 /// resets.
 const DEFAULT_DEFER_MS: u64 = 5 * 60 * 1000;
 
+/// Longest single in-turn sleep a provider's Retry-After hint can impose (5 minutes, the same ceiling the drivers' own `standard_retry_delay` floor uses).
+///
+/// The sleep holds the agent turn and its session locks, and drivers report the server's hint as given — a saturated `u64::MAX` for an absurd delta-seconds value — so an uncapped hint would park the turn indefinitely.
+/// The uncapped value still reaches the exhausted-retry defer marker, where the message journal re-dispatches on a ticker instead of holding anything.
+const MAX_IN_TURN_RETRY_DELAY_MS: u64 = 5 * 60 * 1000;
+
+/// Sleep before retry `attempt + 1`: the provider's hint or the exponential backoff, whichever is longer, capped at [`MAX_IN_TURN_RETRY_DELAY_MS`].
+fn in_turn_retry_delay_ms(attempt: u32, retry_after_ms: u64) -> u64 {
+    let backoff = BASE_RETRY_DELAY_MS.saturating_mul(2u64.saturating_pow(attempt));
+    retry_after_ms.max(backoff).min(MAX_IN_TURN_RETRY_DELAY_MS)
+}
+
 async fn handle_retryable_llm_error(
     attempt: u32,
     retry_after_ms: u64,
@@ -126,8 +138,13 @@ async fn handle_retryable_llm_error(
         )));
     }
 
-    let delay = std::cmp::max(retry_after_ms, BASE_RETRY_DELAY_MS * 2u64.pow(attempt));
-    warn!(attempt, delay_ms = delay, "{retry_log_message}");
+    let delay = in_turn_retry_delay_ms(attempt, retry_after_ms);
+    warn!(
+        attempt,
+        delay_ms = delay,
+        retry_after_ms,
+        "{retry_log_message}"
+    );
     tokio::time::sleep(Duration::from_millis(delay)).await;
     Ok(last_error_label.to_string())
 }
@@ -667,6 +684,26 @@ mod tests {
     use crate::llm_driver::CompletionResponse;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+
+    /// A provider's Retry-After hint lengthens the in-turn sleep but cannot hold the turn past the cap, including the saturated `u64::MAX` a driver reports for an absurd delta-seconds value.
+    #[test]
+    fn in_turn_retry_delay_honours_the_hint_up_to_the_cap() {
+        assert_eq!(in_turn_retry_delay_ms(0, 0), BASE_RETRY_DELAY_MS);
+        assert_eq!(in_turn_retry_delay_ms(2, 0), BASE_RETRY_DELAY_MS * 4);
+        assert_eq!(in_turn_retry_delay_ms(0, 30_000), 30_000);
+        assert_eq!(
+            in_turn_retry_delay_ms(0, 3_600_000),
+            MAX_IN_TURN_RETRY_DELAY_MS
+        );
+        assert_eq!(
+            in_turn_retry_delay_ms(1, u64::MAX),
+            MAX_IN_TURN_RETRY_DELAY_MS
+        );
+        assert_eq!(
+            in_turn_retry_delay_ms(u32::MAX, 0),
+            MAX_IN_TURN_RETRY_DELAY_MS
+        );
+    }
 
     /// A streaming driver that forwards one observable delta and then errors with a *retryable* variant — the shape that makes an un-guarded retry re-stream and duplicate output.
     struct PartialThenOverloaded;
