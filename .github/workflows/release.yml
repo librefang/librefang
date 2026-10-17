@@ -58,6 +58,11 @@ on:
         required: false
         type: string
         default: ""
+      preserve_tag:
+        description: "Rebuild an existing tag with the current workflow without moving its source commit (channel=current only)."
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -68,8 +73,10 @@ permissions:
 # GitHub Actions default behaviour (jobs only block each other through
 # explicit `needs`, which we only use where the old files already did).
 concurrency:
-  group: release-${{ github.ref }}
-  cancel-in-progress: true
+  group: release-${{ (github.event_name == 'workflow_dispatch' && inputs.channel == 'current') && format('refs/tags/{0}', inputs.tag) || github.ref }}
+  # A repair of an existing tag waits for its active build to finish.
+  # Two runs must not overwrite the same release assets concurrently.
+  cancel-in-progress: ${{ !inputs.preserve_tag }}
 
 env:
   CARGO_TERM_COLOR: always
@@ -89,9 +96,11 @@ env:
   # - tag push (normal release): use the pushed tag's frozen commit
   # - workflow_dispatch channel=current: use main HEAD so a hotfix
   #   landed after the tag re-publishes the same version
+  # - preserve_tag: use the existing tag with the repaired workflow,
+  #   keeping already-published SDK packages and rebuilt binaries on the same source
   # Other dispatch channels (stable/beta/rc/lts) only run bump_version,
   # which always wants main.
-  RELEASE_REF: ${{ (github.event_name == 'workflow_dispatch' && inputs.channel == 'current') && 'refs/heads/main' || github.ref }}
+  RELEASE_REF: ${{ (github.event_name == 'workflow_dispatch' && inputs.channel == 'current') && (inputs.preserve_tag && format('refs/tags/{0}', inputs.tag) || 'refs/heads/main') || github.ref }}
   # Effective release tag name. For channel=current dispatches the
   # workflow runs from `main` (so GitHub reads release.yml fresh),
   # which makes `github.ref_name` "main" — useless for naming the
@@ -137,7 +146,7 @@ jobs:
 
   sync_tag_to_main:
     name: Sync tag to main HEAD (channel=current)
-    if: github.event_name == 'workflow_dispatch' && inputs.channel == 'current' && startsWith(inputs.tag, 'v')
+    if: github.event_name == 'workflow_dispatch' && inputs.channel == 'current' && startsWith(inputs.tag, 'v') && !inputs.preserve_tag
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -532,7 +541,7 @@ jobs:
       - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
         with:
           version: 12
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v6
         with:
           node-version: 24
       - name: Install dependencies
@@ -542,7 +551,7 @@ jobs:
         working-directory: crates/librefang-api/dashboard
         run: pnpm run build
       - name: Upload dashboard artifact
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: dashboard-dist
           path: crates/librefang-api/static/react/
@@ -571,7 +580,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ env.RELEASE_REF }}
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: dashboard-dist
           path: crates/librefang-api/static/react/
@@ -742,7 +751,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ env.RELEASE_REF }}
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: dashboard-dist
           path: crates/librefang-api/static/react/
@@ -839,7 +848,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ env.RELEASE_REF }}
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: dashboard-dist
           path: crates/librefang-api/static/react/
@@ -896,7 +905,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ env.RELEASE_REF }}
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: dashboard-dist
           path: crates/librefang-api/static/react/
@@ -957,7 +966,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ env.RELEASE_REF }}
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: dashboard-dist
           path: crates/librefang-api/static/react/
@@ -1038,7 +1047,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ env.RELEASE_REF }}
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: dashboard-dist
           path: crates/librefang-api/static/react/
@@ -1102,7 +1111,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ env.RELEASE_REF }}
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: dashboard-dist
           path: crates/librefang-api/static/react/
@@ -1237,7 +1246,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ env.RELEASE_REF }}
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: dashboard-dist
           path: crates/librefang-api/static/react/
@@ -1465,7 +1474,8 @@ jobs:
     if: >
       (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))
       || (github.event_name == 'workflow_dispatch' && inputs.channel == 'current' && startsWith(inputs.tag, 'v'))
-    needs: [cli_mac, cli_linux, cli_musl, cli_windows]
+    # The publisher downloads public release URLs, which return 404 while the release is a draft.
+    needs: [cli_mac, cli_linux, cli_musl, cli_windows, publish_release]
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -1473,7 +1483,7 @@ jobs:
         with:
           ref: ${{ env.RELEASE_REF }}
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v6
         with:
           node-version: "24"
           registry-url: "https://registry.npmjs.org"
@@ -1502,7 +1512,7 @@ jobs:
         || (github.event_name == 'workflow_dispatch' && inputs.channel == 'current' && startsWith(inputs.tag, 'v')
           && (!contains(inputs.tag, '-') || endsWith(inputs.tag, '-lts')))
       )
-    needs: [cli_mac, cli_linux, cli_musl, cli_windows]
+    needs: [cli_mac, cli_linux, cli_musl, cli_windows, publish_release]
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
@@ -1887,6 +1897,7 @@ jobs:
             libgtk-3-dev \
             librsvg2-dev \
             libdbus-1-dev \
+            libayatana-appindicator3-dev \
             patchelf
 
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
@@ -1897,7 +1908,7 @@ jobs:
       - name: Add the target to the pinned toolchain
         run: rustup target add ${{ matrix.platform.rust_target }}
 
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v6
         with:
           node-version: 24
 
@@ -2120,7 +2131,7 @@ jobs:
       - name: Add the target to the pinned toolchain
         run: rustup target add aarch64-linux-android armv7-linux-androideabi
 
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v6
         with:
           node-version: 24
 
@@ -2352,7 +2363,7 @@ jobs:
       - name: Add the target to the pinned toolchain
         run: rustup target add aarch64-apple-ios aarch64-apple-ios-sim
 
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v6
         with:
           node-version: 24
 
@@ -2643,7 +2654,7 @@ jobs:
         # everything up via its `post:` hook at job end. Replaces ~25
         # lines of `security create-keychain / import / set-key-partition-list`
         # shell that we used to maintain by hand (refs #4385).
-        uses: apple-actions/import-codesign-certs@5142e029c445c10ffc7149d172e540235a065466 # v7.0.0
+        uses: apple-actions/import-codesign-certs@77ba2a2a8f5cfc8c405ebf3159f767c323e238f9 # v7.1.0
         with:
           p12-file-base64: ${{ secrets.APPLE_CERT_P12 }}
           p12-password: ${{ secrets.APPLE_CERT_PASSWORD }}
@@ -2663,6 +2674,25 @@ jobs:
           mkdir -p "$PROFILES_DIR"
           echo "$APPLE_PROVISIONING_PROFILE_B64" | base64 --decode \
             > "$PROFILES_DIR/librefang.mobileprovision"
+
+      - name: Verify iOS signing credentials before building
+        if: steps.keychain.outputs.signed == 'true'
+        run: |
+          set -euo pipefail
+          CERT="$RUNNER_TEMP/ios-distribution-cert.pem"
+          trap 'rm -f "$CERT"' EXIT
+          security find-certificate -c "Apple Distribution" -p signing_temp.keychain > "$CERT"
+          openssl x509 -in "$CERT" -noout -dates
+          if ! openssl x509 -in "$CERT" -noout -checkend 0; then
+            echo "::error::APPLE_CERT_P12 has expired. Replace it with a valid distribution certificate and update APPLE_PROVISIONING_PROFILE_B64 to match."
+            exit 1
+          fi
+          security verify-cert -c "$CERT" -p codeSign
+          FINGERPRINT=$(openssl x509 -in "$CERT" -noout -fingerprint -sha1 | cut -d= -f2 | tr -d ':')
+          if ! security find-identity -v -p codesigning signing_temp.keychain | grep -Fq "$FINGERPRINT"; then
+            echo "::error::APPLE_CERT_P12 has no valid code-signing identity. Check its private key, Apple trust chain, and revocation status."
+            exit 1
+          fi
 
       - name: Build signed .ipa
         if: steps.keychain.outputs.signed == 'true'
@@ -2724,7 +2754,7 @@ jobs:
         # warning instead of failing the whole release. The .ipa still
         # landed on the GitHub Release in the prior step.
         continue-on-error: true
-        uses: Apple-Actions/upload-testflight-build@14df18fee5a4ff3b76971dd382f033494a0194e9 # v5.5.0
+        uses: Apple-Actions/upload-testflight-build@155ea93be9ee6d5186c71f660a612f5eddb14510 # v5.6.0
         with:
           app-path: ${{ steps.art.outputs.ipa }}
           issuer-id: ${{ secrets.APPLE_API_KEY_ISSUER_ID }}
@@ -3058,7 +3088,7 @@ jobs:
       (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))
       || (github.event_name == 'workflow_dispatch' && inputs.channel == 'current' && startsWith(inputs.tag, 'v'))
     needs: [create_release]
-    timeout-minutes: 30
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -3078,6 +3108,15 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Add swap for release linking
+        # Fat LTO can exceed the native ARM64 runner's RAM at the final link.
+        # Keep the release profile identical to the CLI builds and provide headroom.
+        run: |
+          sudo fallocate -l 8G /swapfile-librefang
+          sudo chmod 600 /swapfile-librefang
+          sudo mkswap /swapfile-librefang
+          sudo swapon /swapfile-librefang
+          free -h
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
       - name: Extract version & platform slug
@@ -3104,7 +3143,7 @@ jobs:
           digest="${{ steps.build.outputs.digest }}"
           touch "${{ runner.temp }}/digests/${digest#sha256:}"
       - name: Upload digest
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: docker-digest-${{ steps.meta.outputs.slug }}
           path: ${{ runner.temp }}/digests/*
@@ -3165,7 +3204,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
       # `slug` here must match the slug the `docker` job derives from its platform (`${platform//\//-}`), because that is what names the digest artifact this step downloads.
       - name: Download the ${{ matrix.platform }} digest
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: docker-digest-${{ matrix.slug }}
           path: ${{ runner.temp }}/digests
@@ -3205,7 +3244,7 @@ jobs:
         # `!cancelled()` so a failed gate still publishes the findings that failed it; `conclusion != 'skipped'` keeps this quiet when the scan never ran; `continue-on-error` keeps a repository without code scanning enabled from turning a green scan red on the upload alone.
         if: ${{ !cancelled() && steps.scan.conclusion != 'skipped' && github.repository == 'librefang/librefang' }}
         continue-on-error: true
-        uses: github/codeql-action/upload-sarif@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
+        uses: github/codeql-action/upload-sarif@24c54180a607b1449ed407dd24f251e4e9147c8d # v4.38.3
         with:
           sarif_file: ${{ runner.temp }}/trivy-reports/release-${{ matrix.slug }}.sarif
           # Per-architecture: code scanning replaces the previous results for a category, so a shared one would discard one of the two platforms.
@@ -3235,7 +3274,7 @@ jobs:
         run: |
           echo "version=${RELEASE_TAG#v}" >> "$GITHUB_OUTPUT"
       - name: Download digests
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           path: ${{ runner.temp }}/digests
           pattern: docker-digest-*
@@ -3354,7 +3393,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ env.RELEASE_REF }}
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v6
         with:
           node-version: "24"
           registry-url: "https://registry.npmjs.org"
@@ -3418,7 +3457,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ env.RELEASE_REF }}
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v6
         with:
           node-version: "24"
           registry-url: "https://registry.npmjs.org"

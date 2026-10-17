@@ -326,6 +326,23 @@ fn internal_err_response(error: impl std::fmt::Display) -> axum::response::Respo
     crate::types::ApiErrorResponse::internal_scrub(error).into_response()
 }
 
+/// Remove every stored image under `name`'s derived avatar stem.
+///
+/// The stem is derived from the name (`UserId::from_name`) rather than stored on the row, so a file under it can outlive the row that owned it: hand-editing `config.toml` and reloading removes a row without running any sweep, and a delete whose unlink failed leaves the file behind.
+/// A create or import that fills such a name must clear the stem first, or `has_avatar` answers true for somebody who never set one — the create paths call this before the new row can be read back, and the delete path calls it so the same residue does not outlive the row.
+/// The filesystem's refusals are logged rather than swallowed: `remove_avatars_reporting` is what tells "a refused unlink" apart from "there was nothing stored", and a survivor is exactly the residue a later holder of the name would inherit.
+fn clear_avatar_stem(dir: &std::path::Path, name: &str) {
+    let stem = UserId::from_name(name).to_string();
+    for (path, error) in librefang_types::media::remove_avatars_reporting(dir, &stem).1 {
+        tracing::warn!(
+            user = %name,
+            path = %path.display(),
+            %error,
+            "stored avatar survived the sweep; a later holder of this name would inherit it"
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Handlers
 // ---------------------------------------------------------------------------
@@ -446,20 +463,35 @@ pub async fn create_user(
 
     let to_push = new_cfg.clone();
     let caller_uid = caller.as_ref().map(|c| c.0.user_id);
-    match persist_users(&state, caller_uid, move |users| {
-        if users.iter().any(|u| u.name == to_push.name) {
-            return Err(PersistError::Conflict(format!(
-                "user '{}' already exists",
-                to_push.name
-            )));
-        }
-        users.push(to_push);
-        Ok(())
-    })
+    // Held across the persist and the sweep below, like `update_user` and
+    // `delete_user`: an upload that resolves the new name after the row is
+    // written must not publish a file the sweep then deletes.
+    let _identity_guard = state.config_write_lock.lock().await;
+    match persist_identity_sections_locked(
+        &state,
+        caller_uid,
+        "users updated",
+        move |users, _groups| {
+            if users.iter().any(|u| u.name == to_push.name) {
+                return Err(PersistError::Conflict(format!(
+                    "user '{}' already exists",
+                    to_push.name
+                )));
+            }
+            users.push(to_push);
+            Ok(())
+        },
+    )
     .await
     {
         Ok(()) => {
+            // The row is new, so any file already under this name's stem
+            // belongs to an earlier holder whose row went away outside this
+            // API (a `config.toml` edit plus reload) — or to a delete whose
+            // sweep could not unlink. `has_avatar` would answer true for
+            // somebody who never set one, so the stem starts clean.
             let dir = state.kernel.config_snapshot().effective_user_avatars_dir();
+            clear_avatar_stem(&dir, &new_cfg.name);
             (
                 StatusCode::CREATED,
                 Json(UserView::from_config(&new_cfg, &dir)),
@@ -697,31 +729,17 @@ pub async fn delete_user(
             // takes this name inherits the previous holder's picture, and
             // `has_avatar` then answers true for somebody who never set one. The
             // agent side clears the same residue for the same reason
-            // (`agent_purge`), and this is the only place a user row goes away.
+            // (`agent_purge`).
+            //
+            // This is not the only place a user row goes away: a `config.toml`
+            // edit plus reload removes rows without running this sweep, which is
+            // why the create and import paths clear the stem themselves before
+            // the name can be read back (`clear_avatar_stem`).
             //
             // Strictly after the persist, never before: a delete that failed
             // must not have taken the picture with it.
-            // `remove_avatars` returns a count that cannot answer the question
-            // this warning asks: it swallows every per-file failure itself and
-            // documents "already gone" as its non-error, so a zero means "this
-            // user had no picture" and a failed unlink looks exactly the same.
-            // So ask the probe it already uses instead — a file that was there
-            // before and is still there afterwards is precisely the residue
-            // this branch exists to clear, and the one outcome worth a line,
-            // since the name can be recreated and would inherit the picture.
-            let avatar_key = UserId::from_name(&name).to_string();
             let dir = state.kernel.config_snapshot().effective_user_avatars_dir();
-            let had_avatar = librefang_types::media::find_avatar(&dir, &avatar_key).is_some();
-            let _ = librefang_types::media::remove_avatars(&dir, &avatar_key);
-            if had_avatar {
-                if let Some(survivor) = librefang_types::media::find_avatar(&dir, &avatar_key) {
-                    tracing::warn!(
-                        user = %name,
-                        path = %survivor.display(),
-                        "avatar survived the delete-user sweep; recreating this name would inherit it"
-                    );
-                }
-            }
+            clear_avatar_stem(&dir, &name);
             StatusCode::NO_CONTENT.into_response()
         }
         Err(PersistError::NotFound(m)) => err_response(StatusCode::NOT_FOUND, m),
@@ -881,44 +899,59 @@ pub async fn import_users(
         .map(|(i, u)| (u.clone(), req.rows[*i].api_key_hash.is_some()))
         .collect();
     let caller_uid = caller.as_ref().map(|c| c.0.user_id);
-    let result = persist_users(&state, caller_uid, move |users| {
-        let mut existed_before_row = Vec::with_capacity(payload.len());
-        for (new_u, hash_present) in &payload {
-            if let Some(idx) = users.iter().position(|u| u.name == new_u.name) {
-                existed_before_row.push(true);
-                // RBAC M3 (#3205) + M5 (#3203): preserve existing per-
-                // user policy and budget when a CSV row updates an
-                // existing user — same reasoning as `update_user`.
-                let preserved = users[idx].clone();
-                users[idx] = UserConfig {
-                    api_key_hash: if *hash_present {
-                        new_u.api_key_hash.clone()
-                    } else {
-                        preserved.api_key_hash
-                    },
-                    budget: preserved.budget,
-                    tool_policy: preserved.tool_policy,
-                    tool_categories: preserved.tool_categories,
-                    memory_access: preserved.memory_access,
-                    channel_tool_rules: preserved.channel_tool_rules,
-                    // The row being replaced was built with `emoji: None`
-                    // above, so without this an import that merely re-affirms
-                    // an existing user would clear their glyph.
-                    emoji: preserved.emoji,
-                    ..new_u.clone()
-                };
-            } else {
-                existed_before_row.push(false);
-                users.push(new_u.clone());
+    // Same critical section as `create_user`: the per-row sweeps below must
+    // not race an upload for a name this import is creating, and the persist
+    // and the sweeps are one critical section.
+    let _identity_guard = state.config_write_lock.lock().await;
+    let result = persist_identity_sections_locked(
+        &state,
+        caller_uid,
+        "users updated",
+        move |users, _groups| {
+            let mut existed_before_row = Vec::with_capacity(payload.len());
+            for (new_u, hash_present) in &payload {
+                if let Some(idx) = users.iter().position(|u| u.name == new_u.name) {
+                    existed_before_row.push(true);
+                    // RBAC M3 (#3205) + M5 (#3203): preserve existing per-
+                    // user policy and budget when a CSV row updates an
+                    // existing user — same reasoning as `update_user`.
+                    let preserved = users[idx].clone();
+                    users[idx] = UserConfig {
+                        api_key_hash: if *hash_present {
+                            new_u.api_key_hash.clone()
+                        } else {
+                            preserved.api_key_hash
+                        },
+                        budget: preserved.budget,
+                        tool_policy: preserved.tool_policy,
+                        tool_categories: preserved.tool_categories,
+                        memory_access: preserved.memory_access,
+                        channel_tool_rules: preserved.channel_tool_rules,
+                        // The row being replaced was built with `emoji: None`
+                        // above, so without this an import that merely re-affirms
+                        // an existing user would clear their glyph.
+                        emoji: preserved.emoji,
+                        ..new_u.clone()
+                    };
+                } else {
+                    existed_before_row.push(false);
+                    users.push(new_u.clone());
+                }
             }
-        }
-        Ok(existed_before_row)
-    })
+            Ok(existed_before_row)
+        },
+    )
     .await;
 
     match result {
         Ok(existed_before_row) => {
+            let dir = state.kernel.config_snapshot().effective_user_avatars_dir();
             for ((i, u), existed) in to_apply.into_iter().zip(existed_before_row) {
+                if !existed {
+                    // A row that creates a name must not adopt the picture of
+                    // an earlier holder — see `clear_avatar_stem`.
+                    clear_avatar_stem(&dir, &u.name);
+                }
                 let status = if existed {
                     updated += 1;
                     "updated"

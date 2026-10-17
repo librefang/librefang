@@ -1113,6 +1113,24 @@
       "manifest_history": "Історія маніфесту",
       "manifest_history_load_err": "Не вдалося завантажити історію маніфесту.",
       "no_history": "Змін конфігурації ще не зафіксовано.",
+      "manifest_change_source": {
+        "api": "API edit",
+        "model": "Model change",
+        "skills": "Skills change",
+        "workspaces": "Workspaces change",
+        "channels": "Channels change",
+        "routing": "Routing change",
+        "schedule": "Schedule change",
+        "tool-filters": "Tool filters change",
+        "mcp-servers": "MCP servers change",
+        "provisioning": "Provisioned",
+        "restore": "Restored",
+        "suspend": "Suspended",
+        "resume": "Resumed",
+        "suspend-persist-failed": "Suspend write failed",
+        "resume-persist-failed": "Resume write failed",
+        "unknown": "Unknown source"
+      },
       "restore_title": "Відновити цю версію?",
       "restore_confirm": "Відновити '{{name}}' до версії, збереженої {{timestamp}} ({{source}})? Це перезапише поточний agent.toml агента; знімок, записаний після цього, міститиме відновлений вміст, а не той, який він замінив.",
       "restore_btn": "Відновити",
@@ -4695,8 +4713,11 @@
   },
   "agentTypes": {
     "change_source": {
+      "agent-tool": "Agent tool",
       "create": "Created",
       "dashboard": "Dashboard edit",
+      "pre-registry-restore": "Pre-restore snapshot",
+      "registry-restore": "Restored from registry",
       "restore": "Restored",
       "toml": "Raw TOML edit",
       "unknown": "Unknown source"

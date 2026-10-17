@@ -132,6 +132,7 @@ fn avatar_id(user: &UserConfig) -> String {
 /// extensions; moving all four anyway takes a shadow file left by a crash
 /// between an upload's write and its clear out of the freed stem, where it
 /// would otherwise become the next holder's image.
+/// The new stem is cleared first, for the mirror reason: any file already under it belongs to a name with no row — residue from a holder removed by hand-editing `config.toml` plus reload, or from a sweep that failed — and [`librefang_types::media::find_avatar`] probes `png` before `webp`, so a residual `png` would shadow the picture just moved in and the rename would appear to have done nothing.
 /// A missing source is not an error — a user who never uploaded one has
 /// nothing to move.
 /// A real failure is returned rather than swallowed: the picture has a live
@@ -141,8 +142,24 @@ pub(crate) fn move_user_avatar(
     old_name: &str,
     new_name: &str,
 ) -> std::io::Result<()> {
+    if old_name == new_name {
+        // The clear below would delete the picture and the "move" would then
+        // find nothing. `update_user` skips the call for an unchanged name;
+        // this keeps the helper itself safe for the next caller.
+        return Ok(());
+    }
     let old_id = UserId::from_name(old_name).to_string();
     let new_id = UserId::from_name(new_name).to_string();
+    // Anything under the new stem predates the rename — the row being moved
+    // there does not exist yet — so it can only be residue, and it would
+    // shadow the files moved below.
+    for (path, error) in librefang_types::media::remove_avatars_reporting(dir, &new_id).1 {
+        tracing::warn!(
+            path = %path.display(),
+            %error,
+            "stale avatar under the rename target survived the clear; it may shadow the moved picture"
+        );
+    }
     for ext in librefang_types::media::AVATAR_EXTENSIONS {
         let old_path = librefang_types::media::avatar_path(dir, &old_id, ext);
         let new_path = librefang_types::media::avatar_path(dir, &new_id, ext);
@@ -433,7 +450,8 @@ pub async fn serve_my_avatar(
     params(("name" = String, Path, description = "User name (case-sensitive)")),
     responses(
         (status = 200, description = "Removed", body = crate::types::JsonObject),
-        (status = 404, description = "No such user", body = crate::types::JsonObject)
+        (status = 404, description = "No such user", body = crate::types::JsonObject),
+        (status = 500, description = "The stored image could not be removed", body = crate::types::JsonObject)
     )
 )]
 pub async fn delete_user_avatar(
@@ -450,7 +468,26 @@ pub async fn delete_user_avatar(
     };
 
     let dir = state.kernel.config_snapshot().effective_user_avatars_dir();
-    let removed = librefang_types::media::remove_avatars(&dir, &avatar_id(&user));
+    let (removed, failures) =
+        librefang_types::media::remove_avatars_reporting(&dir, &avatar_id(&user));
+    if !failures.is_empty() {
+        // A file the filesystem refused to unlink — a permission error, a
+        // read-only mount, a directory squatting on a candidate name — is
+        // still this user's stored avatar, so a 200 here would report a
+        // deletion that did not happen while `has_avatar` stayed true.
+        // `remove_avatars` cannot tell that apart from "there was nothing
+        // stored", which is why this route asks the reporting variant.
+        return super::internal_err_response(format!(
+            "could not remove {} of the stored avatar file(s) for user '{}': {}",
+            failures.len(),
+            user.name,
+            failures
+                .iter()
+                .map(|(path, error)| format!("{}: {error}", path.display()))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
 
     (
         StatusCode::OK,
@@ -680,6 +717,57 @@ mod tests {
         assert!(
             librefang_types::media::find_avatar(dir.path(), &old).is_none(),
             "nothing may be left under the old stem"
+        );
+    }
+
+    /// Residue under the *new* stem must not shadow the picture moved onto it.
+    ///
+    /// A file can only be there before the move if a previous holder of the
+    /// new name lost its row outside this API — a `config.toml` edit plus
+    /// reload — or a sweep failed. `find_avatar` probes `png` before `webp`,
+    /// so without the clear the moved `.webp` would be invisible and the
+    /// residual `.png` would keep being served as the renamed user's picture.
+    #[test]
+    fn moving_an_avatar_clears_residue_under_the_new_stem() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let old = UserId::from_name("Alice").to_string();
+        let new = UserId::from_name("Alicia").to_string();
+        std::fs::write(
+            librefang_types::media::avatar_path(dir.path(), &old, "webp"),
+            b"webp",
+        )
+        .expect("write webp");
+        let residue = librefang_types::media::avatar_path(dir.path(), &new, "png");
+        std::fs::write(&residue, b"residue").expect("write residue");
+
+        move_user_avatar(dir.path(), "Alice", "Alicia").expect("move");
+
+        assert!(!residue.exists(), "the residue must be cleared");
+        let found = librefang_types::media::find_avatar(dir.path(), &new)
+            .expect("the moved picture must be findable");
+        assert_eq!(found.extension().and_then(|e| e.to_str()), Some("webp"));
+        assert_eq!(std::fs::read(&found).expect("read"), b"webp");
+        assert!(
+            librefang_types::media::find_avatar(dir.path(), &old).is_none(),
+            "nothing may be left under the old stem"
+        );
+    }
+
+    /// A same-name call is a no-op, not a delete: the clear that protects
+    /// against residue would otherwise remove the picture and the move would
+    /// then find nothing.
+    #[test]
+    fn moving_a_name_onto_itself_keeps_the_picture() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let id = UserId::from_name("Alice").to_string();
+        let path = librefang_types::media::avatar_path(dir.path(), &id, "png");
+        std::fs::write(&path, b"png").expect("write png");
+
+        move_user_avatar(dir.path(), "Alice", "Alice").expect("no-op");
+
+        assert_eq!(
+            std::fs::read(&path).expect("the picture must survive"),
+            b"png"
         );
     }
 

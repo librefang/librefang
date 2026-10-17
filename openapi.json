@@ -7,7 +7,7 @@
       "name": "MIT",
       "url": "https://opensource.org/licenses/MIT"
     },
-    "version": "2026.9.19"
+    "version": "2026.10.16"
   },
   "paths": {
     "/.well-known/agent.json": {
@@ -15659,6 +15659,16 @@
           },
           "404": {
             "description": "No such user",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The stored image could not be removed",
             "content": {
               "application/json": {
                 "schema": {

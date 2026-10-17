@@ -1,0 +1,1 @@
+Manifest history rows and the restore confirmation now render the store's `change_source` as a label — `model` as Model change, `suspend` as Suspended, and the other fourteen tokens the store can write — instead of the raw word the kernel records. (#8603, #8601) (@DaBlitzStein)

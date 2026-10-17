@@ -15,7 +15,9 @@
 //! The enrichment is **additive** — callers keep the existing
 //! `[File: ...] saved to ...` path block so tools that legitimately want
 //! the raw bytes (e.g. `media_transcribe`, custom file readers) still
-//! work. The returned blocks are inserted *before* the path block.
+//! work. The returned blocks are appended *after* that path block, which
+//! leads the message so an agent keys on the on-disk path before it reads
+//! the (bounded) inlined body (#8626).
 //!
 //! Audio/voice are intentionally NOT enriched here — they go through
 //! `media_transcribe` out of band, and decoding them inline would just

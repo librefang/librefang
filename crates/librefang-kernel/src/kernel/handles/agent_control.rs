@@ -516,6 +516,25 @@ impl kernel_handle::AgentControl for LibreFangKernel {
             }
         })?;
 
+        // The same guarantee every HTTP write path keeps (#8574 follow-up): the file on disk is
+        // not the only record, the content is snapshotted into `template_versions` too, so
+        // `GET /api/templates/{name}/history` can show — and restore — a type an agent authored.
+        // Best-effort like every post-write snapshot: the manifest is already on disk, so a
+        // failure costs one history row, never the write.
+        //
+        // `"agent-tool"` names the surface, the way `"dashboard"` does on the API side: the
+        // write reaches here through the `agent_type_create` tool (#7722), and this is the
+        // change_source a history row needs to distinguish an agent-authored type from an
+        // operator's `create` / `toml` / `dashboard` write.
+        let store = librefang_memory::TemplateVersionStore::new(self.memory.substrate.pool());
+        if let Err(e) = store.record_version(&created.name, &created.manifest_toml, "agent-tool") {
+            tracing::warn!(
+                agent_type = %created.name,
+                error = %e,
+                "Failed to record the template version snapshot for the tool-authored type"
+            );
+        }
+
         tracing::info!(
             agent_type = %created.name,
             "Agent type created through the agent-facing tool"

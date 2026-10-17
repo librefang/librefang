@@ -73,6 +73,92 @@ pub(super) fn tool_memory_store(
     Ok(format!("Stored value under key '{key}'."))
 }
 
+/// Keys a recall miss may name, at most.
+///
+/// Small on purpose: the hint competes with the model's own belief that the key exists, and a long list reads as a directory to scan rather than as a nudge toward the name it should have used.
+const RECALL_MISS_HINT_KEYS: usize = 5;
+/// Longest number of prefix probes one miss may run.
+///
+/// Each probe is an indexed range scan with the same limit, so a wide key costs a handful of cheap queries — and only on a miss.
+const RECALL_MISS_MAX_PROBES: usize = 4;
+/// Shortest prefix worth probing.
+///
+/// Below this a range scan degenerates into "the first few keys alphabetically", which says nothing about which one the model meant.
+const RECALL_MISS_MIN_PROBE_LEN: usize = 3;
+
+/// Prefixes of `key` worth asking the store about, longest first.
+///
+/// A prefix search cannot rank by string distance, and the repo has no similarity crate (Dependency Policy) — so the "closest by name" set has to come from the shape of the requested key itself.
+/// The probes are the key's own cumulative prefixes at its separators, because that is the axis a model actually drifts along: a key that exists as `…-success-story` is reached by trimming `…-docx-v41` off the end, one token at a time.
+///
+/// Longest first, then capped: a longer prefix matches fewer keys, so the hits it returns are the ones nearest to the request, and the broadest probes are the ones a capped budget drops.
+fn recall_miss_probes(key: &str) -> Vec<&str> {
+    let mut probes: Vec<&str> = key
+        .char_indices()
+        .filter(|&(i, c)| i >= RECALL_MISS_MIN_PROBE_LEN && matches!(c, '-' | '_' | ':'))
+        .map(|(i, _)| &key[..i])
+        .collect();
+    if key.len() >= RECALL_MISS_MIN_PROBE_LEN {
+        // A longer key that merely *starts* with the requested one is also a near name, and the exact-key miss does not rule it out.
+        probes.push(key);
+    }
+    probes.sort_by_key(|p| std::cmp::Reverse(p.len()));
+    probes.truncate(RECALL_MISS_MAX_PROBES);
+    probes
+}
+
+/// The result of a `memory_recall` miss.
+///
+/// A bare `No value found` is a dead end the model answers by varying the key until the iteration cap ends the turn (#8625): the store is the only party that knows the key space, and the miss returned none of it, while the loop guard cannot see the pattern because every invented key is fresh params.
+///
+/// The shape mirrors `tool_memory_semantic_search`'s empty branch below: name the store that was searched, name the same-scope keys that *do* exist, and point at the other store.
+/// Hint lookups are best-effort — a handle that does not implement the probe, or a store error, degrades to the pointer-only message rather than failing the recall.
+fn recall_miss_message(
+    key: &str,
+    kh: &Arc<dyn KernelHandle>,
+    caller_agent_id: Option<&str>,
+    peer_id: Option<&str>,
+) -> String {
+    let mut nearby: Vec<String> = Vec::new();
+    for probe in recall_miss_probes(key) {
+        if nearby.len() >= RECALL_MISS_HINT_KEYS {
+            break;
+        }
+        let Ok(found) =
+            kh.memory_keys_with_prefix(probe, caller_agent_id, peer_id, RECALL_MISS_HINT_KEYS)
+        else {
+            break;
+        };
+        for candidate in found {
+            if !nearby.contains(&candidate) {
+                nearby.push(candidate);
+            }
+            if nearby.len() >= RECALL_MISS_HINT_KEYS {
+                break;
+            }
+        }
+    }
+
+    if nearby.is_empty() {
+        return format!(
+            "No value found for key '{key}'. (Searched this agent's key/value memory, which is \
+             keyed and exact: use memory_list to see every key in this scope, or \
+             memory_semantic_search for meaning-based lookup — a miss in one store says nothing \
+             about the other.)"
+        );
+    }
+    let names = nearby
+        .iter()
+        .map(|k| format!("'{k}'"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "No value found for key '{key}'. Closest keys in this agent's key/value memory: {names}. \
+         Use memory_list to see every key in this scope, or memory_semantic_search for \
+         meaning-based lookup."
+    )
+}
+
 pub(super) fn tool_memory_recall(
     input: &serde_json::Value,
     kernel: Option<&Arc<dyn KernelHandle>>,
@@ -100,7 +186,7 @@ pub(super) fn tool_memory_recall(
             let rendered = serde_json::to_string_pretty(&val).unwrap_or_else(|_| val.to_string());
             Ok(truncate_output(&rendered, MAX_RECALL_BYTES))
         }
-        None => Ok(format!("No value found for key '{key}'.")),
+        None => Ok(recall_miss_message(key, kh, caller_agent_id, peer_id)),
     }
 }
 
@@ -521,4 +607,33 @@ pub(super) async fn tool_memory_semantic_stats(
     // `stats` is built from a `BTreeMap` kernel-side and `serde_json::Map` is
     // key-sorted, so this rendering is byte-identical across processes (#3298).
     Ok(serde_json::to_string_pretty(&stats).unwrap_or_else(|_| stats.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn miss_probes_trim_the_requested_key_at_its_own_separators_longest_first() {
+        // The axis the model drifts along: `…-docx-v41` is answered by naming `…-success-story`, so the probe order has to run from the request outwards.
+        assert_eq!(
+            recall_miss_probes("file-acme-success-story-docx-v41"),
+            [
+                "file-acme-success-story-docx-v41",
+                "file-acme-success-story-docx",
+                "file-acme-success-story",
+                "file-acme-success",
+            ]
+        );
+    }
+
+    #[test]
+    fn miss_probes_skip_names_too_short_to_be_selective() {
+        // Nothing here is worth an index range scan: a two-character prefix returns whichever keys sort first, which is not a hint.
+        assert!(recall_miss_probes("ab").is_empty());
+        assert_eq!(recall_miss_probes("secret"), ["secret"]);
+        // A separator before the minimum length is not a probe boundary.
+        assert_eq!(recall_miss_probes("12-34"), ["12-34"]);
+        assert_eq!(recall_miss_probes("a_bc_de"), ["a_bc_de", "a_bc"]);
+    }
 }

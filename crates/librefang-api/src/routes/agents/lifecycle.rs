@@ -1889,31 +1889,26 @@ pub async fn save_agent_as_agent_type(
     let home = &state.kernel.config_ref().home_dir;
     // The source agent's own name is the one this save is allowed to collide
     // with; every other live agent's name would shadow it in the catalog.
-    match agent_type_store::create_agent_type_from_manifest_in(
+    // Through the same versioned funnel every other agent-type write in this
+    // crate uses (#8574 follow-up): `snapshot_of` carries the source agent's
+    // name, and the helper records the `"create"` history baseline this call
+    // used to record by hand — so the stamp cannot drift from the write.
+    match crate::routes::agent_templates::create_agent_type_from_manifest_versioned(
+        &state,
         home,
         &template_name,
         &manifest,
         Some(&entry.manifest.name),
+        crate::routes::agent_templates::AgentTypeWrite::Create,
     ) {
-        Ok(rendered) => {
-            // Every other agent-type write path records a history baseline; this
-            // one landed none, so the first dashboard edit had nothing to
-            // restore to.
-            let _ = crate::routes::agent_templates::record_template_version(
-                &state,
-                &template_name,
-                &rendered,
-                "create",
-            );
-            (
-                StatusCode::CREATED,
-                Json(serde_json::json!({
-                    "name": template_name,
-                    "description": manifest.description,
-                })),
-            )
-                .into_response()
-        }
+        Ok(_rendered) => (
+            StatusCode::CREATED,
+            Json(serde_json::json!({
+                "name": template_name,
+                "description": manifest.description,
+            })),
+        )
+            .into_response(),
         // Same mapping (and same codes) as the sibling
         // `post_agent_template_toml` in `routes/agent_templates.rs`, so a
         // client can tell the two 409s apart instead of seeing one bare
