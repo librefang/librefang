@@ -12,7 +12,7 @@ use crate::llm_driver::{CompletionRequest, LlmDriver};
 use crate::web_search::WebToolsContext;
 use librefang_types::agent::AgentManifest;
 use librefang_types::config::ResponseFormat;
-use librefang_types::message::{Message, Role};
+use librefang_types::message::{Message, Role, TokenUsage};
 use tracing::{debug, warn};
 
 use super::strip_provider_prefix;
@@ -103,13 +103,15 @@ Rules:
 
 /// Use the LLM to generate focused search queries from the conversation history.
 /// Falls back to `None` on any failure (caller uses raw user message instead).
+///
+/// Also returns the token usage of the query-generation call, which runs on the agent's own driver and is billed like any other call of the turn; it is zero when the call failed or timed out.
 async fn generate_search_queries(
     driver: &dyn LlmDriver,
     manifest: &AgentManifest,
     session_messages: &[Message],
     user_message: &str,
     reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy,
-) -> Option<Vec<String>> {
+) -> (Option<Vec<String>>, TokenUsage) {
     // Build a compact conversation summary from the last few messages
     let recent: Vec<&Message> = session_messages
         .iter()
@@ -179,15 +181,20 @@ async fn generate_search_queries(
             Ok(Ok(resp)) => resp,
             Ok(Err(e)) => {
                 debug!("Search query generation LLM error: {e}");
-                return None;
+                return (None, TokenUsage::default());
             }
             Err(_) => {
                 debug!("Search query generation timed out");
-                return None;
+                return (None, TokenUsage::default());
             }
         };
 
-    let text = response.text();
+    (parse_search_queries(&response.text()), response.usage)
+}
+
+/// Extract the `{"queries": [...]}` object from the query generator's reply.
+/// `None` when no parseable object is found; `Some(vec![])` when the model says no search is needed.
+fn parse_search_queries(text: &str) -> Option<Vec<String>> {
     let max_attempts = 20;
     let mut scan = 0;
     let mut attempt = 0;
@@ -237,6 +244,8 @@ async fn generate_search_queries(
 
 /// Perform web search augmentation — optionally generate queries via LLM,
 /// search the web, and return formatted results for context injection.
+///
+/// The returned `TokenUsage` is the query-generation call's; the caller adds it to the turn's total so quota settlement and cost metering see it.
 pub(super) async fn web_search_augment(
     manifest: &AgentManifest,
     user_message: &str,
@@ -244,24 +253,26 @@ pub(super) async fn web_search_augment(
     driver: &dyn LlmDriver,
     session_messages: &[Message],
     reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy,
-) -> Option<String> {
+) -> (Option<String>, TokenUsage) {
     if !should_augment_web_search(manifest) {
-        return None;
+        return (None, TokenUsage::default());
     }
-    let ctx = web_ctx?;
+    let Some(ctx) = web_ctx else {
+        return (None, TokenUsage::default());
+    };
 
     // Try LLM-based query generation.
     // Some(vec![...]) = generated queries, Some(vec![]) = no search needed, None = generation failed
-    let queries = match generate_search_queries(
+    let (generated, usage) = generate_search_queries(
         driver,
         manifest,
         session_messages,
         user_message,
         reasoning_echo_policy,
     )
-    .await
-    {
-        Some(q) if q.is_empty() => return None, // LLM says no search needed
+    .await;
+    let queries = match generated {
+        Some(q) if q.is_empty() => return (None, usage), // LLM says no search needed
         Some(q) => q,
         None => {
             // Query-generation LLM failed — non-JSON response, network
@@ -312,10 +323,10 @@ pub(super) async fn web_search_augment(
     }
 
     if all_results.trim().is_empty() {
-        None
+        (None, usage)
     } else {
         debug!("Web search augmentation: injecting search results");
-        Some(all_results)
+        (Some(all_results), usage)
     }
 }
 
@@ -337,6 +348,30 @@ mod tests {
 
     struct QueryResponseDriver {
         response: String,
+    }
+
+    struct BilledQueryDriver;
+
+    #[async_trait::async_trait]
+    impl LlmDriver for BilledQueryDriver {
+        async fn complete(&self, _req: CompletionRequest) -> Result<CompletionResponse, LlmError> {
+            Ok(CompletionResponse {
+                text_synthesized_from_thinking: false,
+                content: vec![ContentBlock::Text {
+                    text: r#"{"queries": []}"#.to_string(),
+                    provider_metadata: None,
+                }],
+                tool_calls: vec![],
+                stop_reason: StopReason::EndTurn,
+                usage: TokenUsage {
+                    input_tokens: 6_000,
+                    output_tokens: 12,
+                    ..Default::default()
+                },
+                actual_provider: None,
+                actual_model: None,
+            })
+        }
     }
 
     impl ResponseFormatRecordingDriver {
@@ -443,6 +478,23 @@ mod tests {
         );
     }
 
+    /// The query-generation call runs on the agent's own driver every turn; its usage must reach the caller so the loop can add it to the turn's total instead of leaving it unmetered.
+    #[tokio::test]
+    async fn search_query_generation_reports_its_token_usage() {
+        let (queries, usage) = generate_search_queries(
+            &BilledQueryDriver,
+            &test_manifest(),
+            &[],
+            "hello there",
+            librefang_types::model_catalog::ReasoningEchoPolicy::None,
+        )
+        .await;
+
+        assert_eq!(queries, Some(Vec::new()));
+        assert_eq!(usage.input_tokens, 6_000);
+        assert_eq!(usage.output_tokens, 12);
+    }
+
     #[tokio::test]
     async fn search_query_parser_allows_closing_brace_in_json_string() {
         let driver = QueryResponseDriver {
@@ -455,7 +507,8 @@ mod tests {
             "rust parser",
             librefang_types::model_catalog::ReasoningEchoPolicy::None,
         )
-        .await;
+        .await
+        .0;
 
         assert_eq!(queries, Some(vec!["rust } parser".to_string()]));
     }
@@ -472,7 +525,8 @@ mod tests {
             "rust parser",
             librefang_types::model_catalog::ReasoningEchoPolicy::None,
         )
-        .await;
+        .await
+        .0;
 
         assert_eq!(queries, Some(vec!["rust { parser".to_string()]));
     }
@@ -489,7 +543,8 @@ mod tests {
             "rust parser",
             librefang_types::model_catalog::ReasoningEchoPolicy::None,
         )
-        .await;
+        .await
+        .0;
 
         assert_eq!(queries, Some(vec!["rust \"}\" parser".to_string()]));
     }
@@ -506,7 +561,8 @@ mod tests {
             "rust parser",
             librefang_types::model_catalog::ReasoningEchoPolicy::None,
         )
-        .await;
+        .await
+        .0;
 
         assert_eq!(
             queries,

@@ -22,6 +22,7 @@ use agent_client_protocol::schema::v1::{
     TerminalOutputResponse, TextContent, WaitForTerminalExitRequest, WaitForTerminalExitResponse,
 };
 // `ProtocolVersion` is re-exported at the `schema` root (not under `v1`) in agent-client-protocol 1.x.
+use agent_client_protocol::schema::v1::SessionId as AcpSessionId;
 use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::{ConnectionTo, JsonRpcResponse, Responder, SentRequest};
 use async_trait::async_trait;
@@ -52,6 +53,13 @@ struct MockKernel {
     /// Optional canned history for `fetch_session_history` to return —
     /// drives the session/load history-replay test.
     canned_history: AsyncMutex<Vec<(librefang_types::message::Role, String)>>,
+    /// When set, `send_prompt` with no canned events keeps its channel open until the receiver is dropped, standing in for a long-running turn.
+    hold_open: std::sync::atomic::AtomicBool,
+    /// Every `cancel_prompt` call, in order.
+    cancels: std::sync::Mutex<Vec<(AgentId, LfSessionId)>>,
+    /// Session-bound handles registered through `register_session_fs` / `register_session_terminal`, the way `KernelAdapter` binds them.
+    registered_fs: std::sync::Mutex<Vec<(LfSessionId, FsClientHandle)>>,
+    registered_terminal: std::sync::Mutex<Vec<(LfSessionId, TerminalClientHandle)>>,
 }
 
 impl MockKernel {
@@ -65,7 +73,25 @@ impl MockKernel {
             fs_client: std::sync::Mutex::new(None),
             terminal_client: std::sync::Mutex::new(None),
             canned_history: AsyncMutex::new(Vec::new()),
+            hold_open: std::sync::atomic::AtomicBool::new(false),
+            cancels: std::sync::Mutex::new(Vec::new()),
+            registered_fs: std::sync::Mutex::new(Vec::new()),
+            registered_terminal: std::sync::Mutex::new(Vec::new()),
         })
+    }
+
+    fn registered_fs_handle(&self) -> Option<FsClientHandle> {
+        self.registered_fs
+            .lock()
+            .ok()
+            .and_then(|g| g.last().map(|(_, h)| h.clone()))
+    }
+
+    fn registered_terminal_handle(&self) -> Option<TerminalClientHandle> {
+        self.registered_terminal
+            .lock()
+            .ok()
+            .and_then(|g| g.last().map(|(_, h)| h.clone()))
     }
 
     async fn set_events(&self, events: Vec<StreamEvent>) {
@@ -130,6 +156,7 @@ impl AcpKernel for MockKernel {
     ) -> AcpResult<mpsc::Receiver<StreamEvent>> {
         *self.last_session_id.lock().await = Some(librefang_session_id);
         let evs = std::mem::take(&mut *self.canned_events.lock().await);
+        let hold_open = self.hold_open.load(std::sync::atomic::Ordering::SeqCst);
         let (tx, rx) = mpsc::channel(16);
         tokio::spawn(async move {
             for ev in evs {
@@ -137,8 +164,44 @@ impl AcpKernel for MockKernel {
                     break;
                 }
             }
+            if hold_open {
+                tx.closed().await;
+            }
         });
         Ok(rx)
+    }
+
+    async fn cancel_prompt(&self, agent_id: AgentId, librefang_session_id: LfSessionId) {
+        self.cancels
+            .lock()
+            .expect("cancels lock")
+            .push((agent_id, librefang_session_id));
+    }
+
+    fn register_session_fs(
+        &self,
+        lf_session_id: LfSessionId,
+        acp_session_id: &agent_client_protocol::schema::v1::SessionId,
+    ) {
+        if let Some(handle) = self.fs_client_handle() {
+            self.registered_fs
+                .lock()
+                .expect("registered_fs lock")
+                .push((lf_session_id, handle.with_session(acp_session_id.clone())));
+        }
+    }
+
+    fn register_session_terminal(
+        &self,
+        lf_session_id: LfSessionId,
+        acp_session_id: &agent_client_protocol::schema::v1::SessionId,
+    ) {
+        if let Some(handle) = self.terminal_client_handle() {
+            self.registered_terminal
+                .lock()
+                .expect("registered_terminal lock")
+                .push((lf_session_id, handle.with_session(acp_session_id.clone())));
+        }
     }
 
     fn subscribe_approvals(&self) -> broadcast::Receiver<ApprovalEvent> {
@@ -438,6 +501,74 @@ async fn prompt_after_cancel_returns_end_turn() {
         .await;
 }
 
+/// `session/cancel` during a running turn must stop the kernel-side loop, not just stop forwarding its events.
+/// Dropping the event receiver alone left the loop calling the LLM and running tools in the background.
+#[tokio::test(flavor = "current_thread")]
+async fn cancel_mid_turn_stops_the_kernel_run() {
+    use tokio::task::LocalSet;
+
+    let local = LocalSet::new();
+    local
+        .run_until(async {
+            let kernel = MockKernel::new(Vec::new());
+            kernel
+                .hold_open
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            let kernel_for_client = Arc::clone(&kernel);
+            let (server_reader, server_writer, client_reader, client_writer) = duplex_pair();
+            let server_transport =
+                agent_client_protocol::ByteStreams::new(server_writer, server_reader);
+            let client_transport =
+                agent_client_protocol::ByteStreams::new(client_writer, client_reader);
+
+            tokio::task::spawn_local(async move {
+                let _ = librefang_acp::run_with_transport(
+                    kernel,
+                    AgentId(Uuid::nil()),
+                    server_transport,
+                )
+                .await;
+            });
+
+            let client = agent_client_protocol::Client.builder();
+            let result = client
+                .connect_with(client_transport, async |cx: ConnectionTo<agent_client_protocol::Agent>| -> Result<(), agent_client_protocol::Error> {
+                    let _: InitializeResponse =
+                        recv(cx.send_request(InitializeRequest::new(ProtocolVersion::LATEST)))
+                            .await?;
+                    let new_resp: NewSessionResponse =
+                        recv(cx.send_request(NewSessionRequest::new(PathBuf::from("/tmp/proj"))))
+                            .await?;
+                    let session_id = new_resp.session_id;
+
+                    let sent = cx.send_request(PromptRequest::new(
+                        session_id.clone(),
+                        vec![ContentBlock::Text(TextContent::new("long turn"))],
+                    ));
+                    // Wait until the turn is running on the kernel side.
+                    let lf_id = wait_for_session_id(&kernel_for_client).await;
+                    cx.send_notification(CancelNotification::new(session_id))?;
+
+                    // A prompt pumped inside the dispatch loop never sees the cancel, so the turn would run until the kernel finished it; bound the wait so that regression fails instead of hanging.
+                    let resp: PromptResponse = tokio::time::timeout(Duration::from_secs(5), recv(sent))
+                        .await
+                        .expect("session/cancel must end the running turn")?;
+                    assert_eq!(resp.stop_reason, StopReason::Cancelled);
+                    let cancels = kernel_for_client.cancels.lock().expect("cancels lock").clone();
+                    assert_eq!(
+                        cancels,
+                        vec![(AgentId(Uuid::nil()), lf_id)],
+                        "session/cancel must stop the kernel run for that session"
+                    );
+                    Ok(())
+                })
+                .await;
+
+            assert!(result.is_ok(), "client driver failed: {result:?}");
+        })
+        .await;
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn permission_round_trip_resolves_kernel_approval() {
     use tokio::task::LocalSet;
@@ -632,11 +763,14 @@ async fn fs_read_text_file_round_trip() {
 
             // Client side: declare fs.read_text_file capability and
             // answer with a canned body when the server asks for it.
+            let seen_sids: Arc<std::sync::Mutex<Vec<AcpSessionId>>> = Arc::default();
+            let seen_capture = Arc::clone(&seen_sids);
             let client = agent_client_protocol::Client.builder().on_receive_request(
                 async move |req: ReadTextFileRequest,
                             responder: Responder<ReadTextFileResponse>,
                             _cx| {
                     assert_eq!(req.path, PathBuf::from("/tmp/hello.txt"));
+                    seen_capture.lock().expect("seen lock").push(req.session_id.clone());
                     responder.respond(ReadTextFileResponse::new("canned editor content"))
                 },
                 agent_client_protocol::on_receive_request!(),
@@ -667,6 +801,26 @@ async fn fs_read_text_file_round_trip() {
                             .await
                             .expect("read_text_file should succeed");
                         assert_eq!(content, "canned editor content");
+
+                        // The kernel-facing path: an unbound handle refuses with `Unavailable` (so the runtime falls back to local fs) rather than sending a request with no session the editor could resolve.
+                        use librefang_kernel_handle::AcpFsClient;
+                        let unbound = AcpFsClient::read_text_file(&handle, PathBuf::from("/tmp/hello.txt"), None, None).await;
+                        assert!(
+                            matches!(unbound, Err(librefang_kernel_handle::KernelOpError::Unavailable(_))),
+                            "unbound handle must report Unavailable, got {unbound:?}"
+                        );
+
+                        // `session/new` binds a handle to the session the editor minted, and the trait impl names it on the wire.
+                        let new_resp: NewSessionResponse =
+                            recv(cx.send_request(NewSessionRequest::new(PathBuf::from("/tmp/proj"))))
+                                .await?;
+                        let bound = poll_for(|| kernel_for_driver.registered_fs_handle()).await;
+                        let content = AcpFsClient::read_text_file(&bound, PathBuf::from("/tmp/hello.txt"), None, None)
+                            .await
+                            .expect("bound read_text_file should succeed");
+                        assert_eq!(content, "canned editor content");
+                        let seen = seen_sids.lock().expect("seen lock").clone();
+                        assert_eq!(seen.last(), Some(&new_resp.session_id), "fs/read_text_file must carry the minted ACP session id");
                         Ok(())
                     },
                 )
@@ -717,21 +871,30 @@ async fn terminal_run_command_round_trip() {
             });
 
             // Client side: stub all four `terminal/*` requests the
-            // run_command dance issues.
+            // run_command dance issues, recording the session id each one names.
+            let seen_sids: Arc<std::sync::Mutex<Vec<AcpSessionId>>> = Arc::default();
+            let (seen_create, seen_wait, seen_output, seen_release) = (
+                Arc::clone(&seen_sids),
+                Arc::clone(&seen_sids),
+                Arc::clone(&seen_sids),
+                Arc::clone(&seen_sids),
+            );
             let client = agent_client_protocol::Client
                 .builder()
                 .on_receive_request(
-                    async move |_req: CreateTerminalRequest,
+                    async move |req: CreateTerminalRequest,
                                 responder: Responder<CreateTerminalResponse>,
                                 _cx| {
+                        seen_create.lock().expect("seen lock").push(req.session_id.clone());
                         responder.respond(CreateTerminalResponse::new(TerminalId::new("term-1")))
                     },
                     agent_client_protocol::on_receive_request!(),
                 )
                 .on_receive_request(
-                    async move |_req: WaitForTerminalExitRequest,
+                    async move |req: WaitForTerminalExitRequest,
                                 responder: Responder<WaitForTerminalExitResponse>,
                                 _cx| {
+                        seen_wait.lock().expect("seen lock").push(req.session_id.clone());
                         let mut exit = TerminalExitStatus::default();
                         exit.exit_code = Some(0);
                         responder.respond(WaitForTerminalExitResponse::new(exit))
@@ -739,17 +902,21 @@ async fn terminal_run_command_round_trip() {
                     agent_client_protocol::on_receive_request!(),
                 )
                 .on_receive_request(
-                    async move |_req: TerminalOutputRequest,
+                    async move |req: TerminalOutputRequest,
                                 responder: Responder<TerminalOutputResponse>,
                                 _cx| {
+                        seen_output.lock().expect("seen lock").push(req.session_id.clone());
                         responder.respond(TerminalOutputResponse::new("hello world\n", false))
                     },
                     agent_client_protocol::on_receive_request!(),
                 )
                 .on_receive_request(
-                    async move |_req: ReleaseTerminalRequest,
+                    async move |req: ReleaseTerminalRequest,
                                 responder: Responder<ReleaseTerminalResponse>,
-                                _cx| { responder.respond(ReleaseTerminalResponse::default()) },
+                                _cx| {
+                        seen_release.lock().expect("seen lock").push(req.session_id.clone());
+                        responder.respond(ReleaseTerminalResponse::default())
+                    },
                     agent_client_protocol::on_receive_request!(),
                 );
 
@@ -762,13 +929,26 @@ async fn terminal_run_command_round_trip() {
                         init_req.client_capabilities.terminal = true;
                         let _: InitializeResponse = recv(cx.send_request(init_req)).await?;
 
-                        let handle = poll_for(|| kernel_for_driver.terminal_client_handle()).await;
-                        assert!(handle.capabilities().terminal);
+                        let unbound = poll_for(|| kernel_for_driver.terminal_client_handle()).await;
+                        assert!(unbound.capabilities().terminal);
 
                         // Drive `run_command` through the
                         // `AcpTerminalClient` trait — the same path the
                         // runtime's `shell_exec` arm uses.
                         use librefang_kernel_handle::AcpTerminalClient;
+                        let refused = unbound
+                            .run_command("echo".to_string(), Vec::new(), Vec::new(), None, None)
+                            .await;
+                        assert!(
+                            matches!(refused, Err(librefang_kernel_handle::KernelOpError::Unavailable(_))),
+                            "an unbound terminal handle must not send requests, got {refused:?}"
+                        );
+                        assert!(seen_sids.lock().expect("seen lock").is_empty());
+
+                        let new_resp: NewSessionResponse =
+                            recv(cx.send_request(NewSessionRequest::new(PathBuf::from("/tmp/proj"))))
+                                .await?;
+                        let handle = poll_for(|| kernel_for_driver.registered_terminal_handle()).await;
                         let result = handle
                             .run_command(
                                 "echo".to_string(),
@@ -783,6 +963,12 @@ async fn terminal_run_command_round_trip() {
                         assert!(!result.truncated);
                         assert_eq!(result.exit_code, Some(0));
                         assert_eq!(result.signal, None);
+                        let seen = seen_sids.lock().expect("seen lock").clone();
+                        assert_eq!(seen.len(), 4, "create, wait_for_exit, output and release");
+                        assert!(
+                            seen.iter().all(|sid| *sid == new_resp.session_id),
+                            "every terminal/* request must carry the minted ACP session id: {seen:?}"
+                        );
                         Ok(())
                     },
                 )

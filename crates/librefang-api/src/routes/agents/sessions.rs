@@ -1441,7 +1441,9 @@ pub async fn export_session_trajectory(
     params(("id" = String, Path, description = "Agent ID")),
     request_body(content = crate::types::JsonObject, description = "Exported session JSON"),
     responses(
-        (status = 200, description = "Session imported successfully", body = crate::types::JsonObject)
+        (status = 200, description = "Session imported successfully", body = crate::types::JsonObject),
+        (status = 400, description = "Malformed export, unsupported export version, export from another agent, or no messages"),
+        (status = 404, description = "Agent not found")
     )
 )]
 pub async fn import_session(
@@ -1477,6 +1479,19 @@ pub async fn import_session(
                 "session_id": new_session_id.0.to_string(),
                 "message": "Session imported successfully"
             })),
+        ),
+        // A bad export file is the caller's to fix, so its message is returned as-is instead of being scrubbed into a 500.
+        Err(crate::error::KernelError::LibreFang(
+            librefang_types::error::LibreFangError::InvalidInput(msg),
+        )) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": msg})),
+        ),
+        Err(crate::error::KernelError::LibreFang(
+            librefang_types::error::LibreFangError::AgentNotFound(_),
+        )) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
         ),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,

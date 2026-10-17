@@ -1125,6 +1125,151 @@ fn apply_seccomp_allowlist(_allow_network: bool) -> bool {
     false
 }
 
+/// Wrap the launcher in `unshare` namespaces according to the sandbox flags.
+///
+/// `allow_network = false` adds `unshare --net` and `allow_filesystem = false` adds `unshare --mount`, each only where the kernel grants the namespace (best-effort, see [`unshare_namespace_works`]).
+fn sandboxed_launcher(
+    launcher: String,
+    args: Vec<String>,
+    config: &HookConfig,
+) -> (String, Vec<String>) {
+    let (mut l, mut a) = (launcher, args);
+    if !config.allow_network {
+        (l, a) = try_wrap_with_unshare(&l, &a);
+    }
+    if !config.allow_filesystem {
+        (l, a) = try_wrap_with_unshare_mount(&l, &a);
+    }
+    (l, a)
+}
+
+/// Scoped TMPDIR handed to a hook subprocess whose filesystem writes are denied; removed on drop.
+struct HookTmpDir(PathBuf);
+
+impl Drop for HookTmpDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// Environment the sandbox layers on top of [`hook_baseline_env`]; identical for one-shot and persistent hook subprocesses.
+///
+/// - `allow_network = false`: proxy-blocking vars so well-behaved HTTP clients honour the restriction, plus `LIBREFANG_SANDBOX=1`.
+/// - `allow_filesystem = false`: `LIBREFANG_READONLY_FS=1`, `HOME=/dev/null` and `TMPDIR` pointing at `tmpdir`.
+/// - `max_memory_mb`: advisory `LIBREFANG_MAX_MEMORY_MB`.
+/// - `state_file`: `LIBREFANG_STATE_FILE`.
+fn hook_sandbox_env(config: &HookConfig, tmpdir: Option<&Path>) -> Vec<(String, String)> {
+    let mut env: Vec<(String, String)> = Vec::new();
+    let mut set = |k: &str, v: &str| env.push((k.to_string(), v.to_string()));
+    if !config.allow_network {
+        set("no_proxy", "*");
+        set("NO_PROXY", "*");
+        set("http_proxy", "");
+        set("https_proxy", "");
+        set("HTTP_PROXY", "");
+        set("HTTPS_PROXY", "");
+        set("LIBREFANG_SANDBOX", "1");
+    }
+    if !config.allow_filesystem {
+        set("LIBREFANG_READONLY_FS", "1");
+        set("HOME", "/dev/null");
+        if let Some(tmp) = tmpdir {
+            set("TMPDIR", &tmp.display().to_string());
+        }
+    }
+    if let Some(mb) = config.max_memory_mb {
+        set("LIBREFANG_MAX_MEMORY_MB", &mb.to_string());
+    }
+    if let Some(ref state_path) = config.state_file {
+        set(
+            "LIBREFANG_STATE_FILE",
+            state_path.to_string_lossy().as_ref(),
+        );
+    }
+    env
+}
+
+/// Apply the hook sandbox to `cmd`: working directory, [`hook_sandbox_env`], the shared state file, the Landlock read-only restriction and the seccomp allowlist.
+///
+/// Called by both [`run_hook_json`] and [`HookProcessPool`] after the baseline env, so a plugin gets the same confinement whether or not it sets `persistent_subprocess`.
+/// Returns the scoped TMPDIR (when filesystem writes are denied), which must outlive the subprocess.
+fn apply_hook_sandbox(cmd: &mut Command, config: &HookConfig) -> Option<HookTmpDir> {
+    if let Some(ref wd) = config.working_dir {
+        cmd.current_dir(wd);
+    }
+
+    let tmpdir = if !config.allow_filesystem {
+        let tmp = std::env::temp_dir().join(format!("librefang_hook_{}", uuid_v4_hex()));
+        let _ = std::fs::create_dir_all(&tmp);
+        debug!(
+            tmpdir = %tmp.display(),
+            "Filesystem isolation: LIBREFANG_READONLY_FS=1, HOME=/dev/null, scoped TMPDIR"
+        );
+        Some(HookTmpDir(tmp))
+    } else {
+        None
+    };
+
+    // Shared state KV store: ensure the file exists so hook scripts can read/write persistent state across invocations.
+    if let Some(ref state_path) = config.state_file {
+        if !state_path.exists() {
+            if let Some(parent) = state_path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let _ = std::fs::write(state_path, "{}");
+        }
+        debug!(state_file = %state_path.display(), "Shared state file injected");
+    }
+    if let Some(mb) = config.max_memory_mb {
+        debug!(
+            max_memory_mb = mb,
+            "Memory limit set (advisory via env var; hard limit requires libc dep)"
+        );
+    }
+
+    for (k, v) in hook_sandbox_env(config, tmpdir.as_ref().map(|t| t.0.as_path())) {
+        cmd.env(k, v);
+    }
+
+    // Apply Landlock filesystem restriction in the child process before exec.
+    // This is done via unsafe pre_exec which runs in the forked child after fork()
+    // but before exec(), so it restricts only the child's filesystem access.
+    #[cfg(all(target_os = "linux", feature = "landlock-sandbox"))]
+    if !config.allow_filesystem {
+        let write_dir = tmpdir.as_ref().map(|t| t.0.clone());
+        // SAFETY: pre_exec runs after fork() in the child.
+        // We only call try_apply_landlock_readonly which uses only async-signal-safe-equivalent operations (syscalls via the landlock crate).
+        unsafe {
+            cmd.pre_exec(move || {
+                try_apply_landlock_readonly(write_dir.as_deref());
+                Ok(())
+            });
+        }
+    }
+
+    // Apply seccomp syscall allowlist (requires seccomp-sandbox feature).
+    // Applied unconditionally when the feature is enabled — seccomp is a defence-in-depth measure independent of filesystem restrictions.
+    #[cfg(all(target_os = "linux", feature = "seccomp-sandbox"))]
+    {
+        let allow_net = config.allow_network;
+        unsafe {
+            cmd.pre_exec(move || {
+                // Non-fatal: log failure but don't abort the spawn.
+                if !apply_seccomp_allowlist(allow_net) {
+                    // Can't use tracing here (post-fork), use stderr.
+                    let _ = std::io::Write::write_all(
+                        &mut std::io::stderr(),
+                        b"[librefang] seccomp filter failed to apply\n",
+                    );
+                }
+                Ok(())
+            });
+        }
+    }
+
+    tmpdir
+}
+
 /// Removes every complete (`\n`-terminated) line from the front of `pending` and returns them decoded lossily, newline included.
 /// With `at_eof`, a trailing unterminated line is returned too, matching what `read_line` used to yield for it.
 fn take_hook_output_lines(pending: &mut Vec<u8>, at_eof: bool) -> Vec<String> {
@@ -1180,21 +1325,7 @@ pub async fn run_hook_json(
     // On other platforms, proxy-blocking env vars (set below) are the only mechanism.
     // Additionally, when allow_filesystem=false on Linux, also attempt `unshare --mount`
     // for mount namespace isolation (best-effort; falls back if unshare unavailable).
-    let (launcher, args) = {
-        let mut l = base_launcher.clone();
-        let mut a = base_args.clone();
-        if !config.allow_network {
-            let wrapped = try_wrap_with_unshare(&l, &a);
-            l = wrapped.0;
-            a = wrapped.1;
-        }
-        if !config.allow_filesystem {
-            let wrapped = try_wrap_with_unshare_mount(&l, &a);
-            l = wrapped.0;
-            a = wrapped.1;
-        }
-        (l, a)
-    };
+    let (launcher, args) = sandboxed_launcher(base_launcher, base_args, config);
 
     let agent_id = input.get("agent_id").and_then(|v| v.as_str()).unwrap_or("");
     let message = input.get("message").and_then(|v| v.as_str()).unwrap_or("");
@@ -1211,10 +1342,6 @@ pub async fn run_hook_json(
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-
-    if let Some(ref wd) = config.working_dir {
-        cmd.current_dir(wd);
-    }
 
     // SECURITY: Wipe inherited environment, then re-add only a safe baseline.
     // Matches the hardening in python_runtime so V / Node / Go plugins don't
@@ -1267,104 +1394,9 @@ pub async fn run_hook_json(
         cmd.env(key, expand_env_value(val));
     }
 
-    // Soft network isolation: inject proxy-blocking env vars so well-behaved
-    // HTTP clients (requests, urllib, curl) honour the restriction.
-    // On Linux we additionally wrap with `unshare --net` (done above when building
-    // the launcher/args). Inject LIBREFANG_SANDBOX=1 so hook scripts can detect
-    // they are running in a sandboxed environment.
-    if !config.allow_network {
-        cmd.env("no_proxy", "*");
-        cmd.env("NO_PROXY", "*");
-        cmd.env("http_proxy", "");
-        cmd.env("https_proxy", "");
-        cmd.env("HTTP_PROXY", "");
-        cmd.env("HTTPS_PROXY", "");
-        cmd.env("LIBREFANG_SANDBOX", "1");
-    }
-
-    // Filesystem isolation: advisory env vars + per-call tmpdir cleanup.
-    // On Linux, unshare --mount wrapping is done above when building launcher/args.
-    let _hook_tmpdir: Option<std::path::PathBuf> = if !config.allow_filesystem {
-        cmd.env("LIBREFANG_READONLY_FS", "1");
-        cmd.env("HOME", "/dev/null");
-        let tmp = std::env::temp_dir().join(format!("librefang_hook_{}", uuid_v4_hex()));
-        let _ = std::fs::create_dir_all(&tmp);
-        cmd.env("TMPDIR", tmp.display().to_string());
-        debug!(
-            tmpdir = %tmp.display(),
-            "Filesystem isolation: LIBREFANG_READONLY_FS=1, HOME=/dev/null, scoped TMPDIR"
-        );
-        Some(tmp)
-    } else {
-        None
-    };
-
-    // Memory limit: expose to hook scripts via env var so well-behaved scripts
-    // can self-limit (Python: `resource.setrlimit`, Node: `--max-old-space-size`).
-    // Hard kernel-level enforcement requires the `libc` crate (not currently a
-    // direct dependency). Scripts that read LIBREFANG_MAX_MEMORY_MB can apply
-    // their own limits.
-    if let Some(mb) = config.max_memory_mb {
-        cmd.env("LIBREFANG_MAX_MEMORY_MB", mb.to_string());
-        debug!(
-            max_memory_mb = mb,
-            "Memory limit set (advisory via env var; hard limit requires libc dep)"
-        );
-    }
-
-    // Shared state KV store: ensure the file exists and inject its path so hook
-    // scripts can read/write persistent state across invocations.
-    if let Some(ref state_path) = config.state_file {
-        if !state_path.exists() {
-            if let Some(parent) = state_path.parent() {
-                let _ = std::fs::create_dir_all(parent);
-            }
-            let _ = std::fs::write(state_path, "{}");
-        }
-        cmd.env(
-            "LIBREFANG_STATE_FILE",
-            state_path.to_string_lossy().as_ref(),
-        );
-        debug!(state_file = %state_path.display(), "Shared state file injected");
-    }
-
-    // Apply Landlock filesystem restriction in the child process before exec.
-    // This is done via unsafe pre_exec which runs in the forked child after fork()
-    // but before exec(), so it restricts only the child's filesystem access.
-    #[cfg(all(target_os = "linux", feature = "landlock-sandbox"))]
-    if !config.allow_filesystem {
-        let write_dir = _hook_tmpdir.clone();
-        // SAFETY: pre_exec runs after fork() in the child. We only call
-        // try_apply_landlock_readonly which uses only async-signal-safe-equivalent
-        // operations (syscalls via the landlock crate).
-        unsafe {
-            cmd.pre_exec(move || {
-                try_apply_landlock_readonly(write_dir.as_deref());
-                Ok(())
-            });
-        }
-    }
-
-    // Apply seccomp syscall allowlist (requires seccomp-sandbox feature).
-    // Applied unconditionally when the feature is enabled — seccomp is a
-    // defence-in-depth measure independent of filesystem restrictions.
-    #[cfg(all(target_os = "linux", feature = "seccomp-sandbox"))]
-    {
-        let allow_net = config.allow_network;
-        unsafe {
-            cmd.pre_exec(move || {
-                // Non-fatal: log failure but don't abort the spawn.
-                if !apply_seccomp_allowlist(allow_net) {
-                    // Can't use tracing here (post-fork), use stderr.
-                    let _ = std::io::Write::write_all(
-                        &mut std::io::stderr(),
-                        b"[librefang] seccomp filter failed to apply\n",
-                    );
-                }
-                Ok(())
-            });
-        }
-    }
+    // Sandbox env (proxy blocking, read-only FS markers, scoped HOME / TMPDIR, memory hint, shared state path), Landlock and seccomp.
+    // Shared with the persistent pool through `apply_hook_sandbox` so the two spawn paths cannot drift.
+    let _hook_tmpdir = apply_hook_sandbox(&mut cmd, config);
 
     let mut child = cmd.spawn().map_err(|e| {
         if e.kind() == std::io::ErrorKind::NotFound {
@@ -1560,11 +1592,7 @@ pub async fn run_hook_json(
         }
     };
 
-    // Clean up per-call tmpdir created for filesystem isolation.
-    if let Some(ref tmp) = _hook_tmpdir {
-        let _ = std::fs::remove_dir_all(tmp);
-    }
-
+    // The per-call tmpdir created for filesystem isolation is removed when `_hook_tmpdir` drops, on every return path.
     out
 }
 
@@ -1758,12 +1786,70 @@ struct PersistentProcess {
     /// Kept alive so `kill_on_drop` fires when this struct is dropped.
     /// Also used by `health_check` to probe liveness via `try_wait`.
     child: tokio::process::Child,
+    /// Scoped TMPDIR of a filesystem-sandboxed process; lives as long as the process.
+    _tmpdir: Option<HookTmpDir>,
+    /// Sandbox settings the process was spawned with.
+    sandbox: SpawnSandbox,
+}
+
+/// The spawn-time sandbox settings of a persistent process.
+///
+/// They are fixed for the life of the process, so a call whose config differs (a pre-warmed process spawned with defaults, or a bootstrap override flipping `allow_network`) needs a fresh process instead of reusing one confined differently.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SpawnSandbox {
+    allow_network: bool,
+    allow_filesystem: bool,
+    working_dir: Option<PathBuf>,
+    max_memory_mb: Option<u64>,
+}
+
+impl SpawnSandbox {
+    fn of(config: &HookConfig) -> Self {
+        Self {
+            allow_network: config.allow_network,
+            allow_filesystem: config.allow_filesystem,
+            working_dir: config.working_dir.clone(),
+            max_memory_mb: config.max_memory_mb,
+        }
+    }
+}
+
+/// Why a persistent hook call failed, which decides whether replaying the request is safe.
+enum PersistentCallError {
+    /// The process was gone before it could have handled the request (stdin write failed, or stdout hit EOF with no reply), so restarting and replaying cannot duplicate work.
+    ProcessGone(PluginRuntimeError),
+    /// The process may have received and acted on the request (timeout, invalid or oversized output, read error); replaying could run side effects twice.
+    MaybeDelivered(PluginRuntimeError),
+}
+
+impl PersistentCallError {
+    fn into_inner(self) -> PluginRuntimeError {
+        match self {
+            Self::ProcessGone(e) | Self::MaybeDelivered(e) => e,
+        }
+    }
+}
+
+/// Pool key for a persistent hook process.
+///
+/// The shared state path is per agent (`agent_scoped_state_path`) and reaches the script as the spawn-time `LIBREFANG_STATE_FILE` env var, so a process is only reusable for calls with the same state file.
+/// The two parts are joined with NUL, which cannot occur in a path.
+fn pool_key(script_path: &str, state_file: Option<&Path>) -> String {
+    match state_file {
+        Some(state) => format!("{script_path}\0{}", state.to_string_lossy()),
+        None => script_path.to_string(),
+    }
+}
+
+/// Script path part of a [`pool_key`].
+fn pool_key_script(key: &str) -> &str {
+    key.split('\0').next().unwrap_or(key)
 }
 
 type HookProcessSlot = std::sync::Arc<tokio::sync::Mutex<Option<PersistentProcess>>>;
 type HookProcessMap = std::collections::HashMap<String, HookProcessSlot>;
 
-/// Pool of persistent hook subprocesses, keyed by script path.
+/// Pool of persistent hook subprocesses, keyed by script path (and shared state file, see [`pool_key`]).
 ///
 /// Each entry is `Arc<tokio::sync::Mutex<Option<PersistentProcess>>>` — `None` means
 /// the process crashed and needs restarting. The outer `std::sync::Mutex` lets
@@ -1819,7 +1905,7 @@ impl HookProcessPool {
 
         let slot = {
             let mut map = self.lock_processes();
-            map.entry(script_path.to_string())
+            map.entry(pool_key(script_path, config.state_file.as_deref()))
                 .or_insert_with(|| std::sync::Arc::new(tokio::sync::Mutex::new(None)))
                 .clone()
         };
@@ -1834,34 +1920,66 @@ impl HookProcessPool {
             None
         };
 
+        // A process that exited while idle is replaced before the request is sent.
+        if let Some(ref mut proc) = *guard {
+            if let Ok(Some(status)) = proc.child.try_wait() {
+                warn!(
+                    script = script_path,
+                    "Persistent hook process exited while idle ({}); restarting",
+                    classify_exit_status(&status)
+                );
+                *guard = None;
+            }
+        }
+        if guard
+            .as_ref()
+            .is_some_and(|proc| proc.sandbox != SpawnSandbox::of(config))
+        {
+            debug!(
+                script = script_path,
+                "Persistent hook process was spawned with different sandbox settings; restarting"
+            );
+            *guard = None;
+        }
+
         // Ensure process is running.
         if guard.is_none() {
             *guard = Some(Self::spawn(script_path, runtime.clone(), config).await?);
         }
 
-        // Try to call; on failure, evict the dead slot then restart and retry once.
-        let result = Self::do_call(guard.as_mut().unwrap(), input, timeout).await;
-        if result.is_err() {
-            // Probe exit status before evicting so we can produce a classified label.
-            let exit_label = if let Some(ref mut proc) = *guard {
-                match proc.child.try_wait() {
-                    Ok(Some(status)) => {
-                        let label = classify_exit_status(&status);
-                        format!("Persistent hook process exited unexpectedly: {label}")
-                    }
+        match Self::do_call(guard.as_mut().unwrap(), input, timeout).await {
+            Ok(value) => Ok(value),
+            Err(PersistentCallError::ProcessGone(e)) => {
+                // The request never reached a live process, so restarting and replaying it once is safe.
+                let exit_label = match guard.as_mut().map(|proc| proc.child.try_wait()) {
+                    Some(Ok(Some(status))) => format!(
+                        "Persistent hook process exited unexpectedly: {}",
+                        classify_exit_status(&status)
+                    ),
                     _ => "Persistent hook process crashed; restarting".to_string(),
+                };
+                warn!(script = script_path, error = %e, "{}", exit_label);
+                // Evict before spawn so that a subsequent call never sees a dead process even if the spawn below fails (returns Err and drops the guard).
+                *guard = None;
+                *guard = Some(Self::spawn(script_path, runtime, config).await?);
+                let retried = Self::do_call(guard.as_mut().unwrap(), input, timeout).await;
+                if retried.is_err() {
+                    *guard = None;
                 }
-            } else {
-                "Persistent hook process crashed; restarting".to_string()
-            };
-            warn!(script = script_path, "{}", exit_label);
-            // Evict before spawn so that a subsequent call never sees a dead process
-            // even if the spawn below fails (returns Err and drops the guard).
-            *guard = None;
-            *guard = Some(Self::spawn(script_path, runtime, config).await?);
-            return Self::do_call(guard.as_mut().unwrap(), input, timeout).await;
+                retried.map_err(PersistentCallError::into_inner)
+            }
+            Err(PersistentCallError::MaybeDelivered(e)) => {
+                // The process may already have acted on the request: replaying it could duplicate side effects, and a timed-out or garbled process may be out of step with the request/response framing.
+                // Discard it so the next call starts fresh, and surface the error once.
+                warn!(
+                    script = script_path,
+                    error = %e,
+                    "Persistent hook call failed; discarding the process without replaying the request"
+                );
+                *guard = None;
+                Err(e)
+            }
         }
-        result
     }
 
     async fn spawn(
@@ -1870,7 +1988,8 @@ impl HookProcessPool {
         config: &HookConfig,
     ) -> Result<PersistentProcess, PluginRuntimeError> {
         validate_path_traversal(script_path)?;
-        let (launcher, args) = build_command(runtime.clone(), script_path)?;
+        let (base_launcher, base_args) = build_command(runtime.clone(), script_path)?;
+        let (launcher, args) = sandboxed_launcher(base_launcher, base_args, config);
         let mut cmd = tokio::process::Command::new(&launcher);
         cmd.args(&args)
             .stdin(std::process::Stdio::piped())
@@ -1885,38 +2004,8 @@ impl HookProcessPool {
         for (k, v) in hook_baseline_env(&runtime, config) {
             cmd.env(k, v);
         }
-        if !config.allow_network {
-            cmd.env("no_proxy", "*")
-                .env("NO_PROXY", "*")
-                .env("http_proxy", "")
-                .env("https_proxy", "")
-                .env("HTTP_PROXY", "")
-                .env("HTTPS_PROXY", "");
-        }
-        if let Some(mb) = config.max_memory_mb {
-            cmd.env("LIBREFANG_MAX_MEMORY_MB", mb.to_string());
-        }
-
-        // Apply seccomp syscall allowlist (requires seccomp-sandbox feature).
-        // Applied unconditionally when the feature is enabled — seccomp is a
-        // defence-in-depth measure independent of filesystem restrictions.
-        #[cfg(all(target_os = "linux", feature = "seccomp-sandbox"))]
-        {
-            let allow_net = config.allow_network;
-            unsafe {
-                cmd.pre_exec(move || {
-                    // Non-fatal: log failure but don't abort the spawn.
-                    if !apply_seccomp_allowlist(allow_net) {
-                        // Can't use tracing here (post-fork), use stderr.
-                        let _ = std::io::Write::write_all(
-                            &mut std::io::stderr(),
-                            b"[librefang] seccomp filter failed to apply\n",
-                        );
-                    }
-                    Ok(())
-                });
-            }
-        }
+        // Same confinement as the one-shot path (`unshare` wrapping above, then env, Landlock, seccomp, working dir and state file here); before this, `persistent_subprocess = true` silently ran the hook with the real network namespace, real HOME and unrestricted writes.
+        let tmpdir = apply_hook_sandbox(&mut cmd, config);
 
         let mut child = cmd
             .spawn()
@@ -1934,6 +2023,8 @@ impl HookProcessPool {
             stdin,
             stdout: BufReader::new(stdout),
             child,
+            _tmpdir: tmpdir,
+            sandbox: SpawnSandbox::of(config),
         })
     }
 
@@ -1941,14 +2032,15 @@ impl HookProcessPool {
         proc: &mut PersistentProcess,
         input: &serde_json::Value,
         timeout: Duration,
-    ) -> Result<serde_json::Value, PluginRuntimeError> {
+    ) -> Result<serde_json::Value, PersistentCallError> {
+        use PersistentCallError::{MaybeDelivered, ProcessGone};
         // 4 MiB cap, enforced *during* the read (the shared transport caps as it
         // accumulates) rather than after — a hook streaming without a newline
         // can't grow memory without bound.
         const MAX_OUTPUT_BYTES: usize = 4 * 1024 * 1024;
 
-        let mut line =
-            serde_json::to_string(input).map_err(|e| PluginRuntimeError::Io(e.to_string()))?;
+        let mut line = serde_json::to_string(input)
+            .map_err(|e| MaybeDelivered(PluginRuntimeError::Io(e.to_string())))?;
         line.push('\n');
 
         // The persistent pool previously enforced no timeout on either the
@@ -1968,21 +2060,22 @@ impl HookProcessPool {
 
         let write_budget = deadline.saturating_duration_since(tokio::time::Instant::now());
         if write_budget.is_zero() {
-            return Err(PluginRuntimeError::Io(format!(
+            return Err(MaybeDelivered(PluginRuntimeError::Io(format!(
                 "persistent hook timed out after {}s (no budget left before write)",
                 timeout.as_secs()
-            )));
+            ))));
         }
+        // A write that cannot complete means the process is gone or no longer reading its stdin; either way it has not consumed this request.
         librefang_subprocess::write_line_timeout(&mut proc.stdin, line.as_bytes(), write_budget)
             .await
-            .map_err(|e| PluginRuntimeError::Io(format!("write stdin: {e}")))?;
+            .map_err(|e| ProcessGone(PluginRuntimeError::Io(format!("write stdin: {e}"))))?;
 
         let read_budget = deadline.saturating_duration_since(tokio::time::Instant::now());
         if read_budget.is_zero() {
-            return Err(PluginRuntimeError::Io(format!(
+            return Err(MaybeDelivered(PluginRuntimeError::Io(format!(
                 "persistent hook timed out after {}s (no budget left before read)",
                 timeout.as_secs()
-            )));
+            ))));
         }
         let mut buf = Vec::new();
         let response = match tokio::time::timeout(
@@ -1993,22 +2086,27 @@ impl HookProcessPool {
         {
             Ok(Ok(librefang_subprocess::Line::Data(s))) => s,
             Ok(Ok(librefang_subprocess::Line::Eof)) => {
-                return Err(PluginRuntimeError::Io(
+                // EOF with no reply: the process died (crash, OOM kill, SIGSYS) rather than answering.
+                return Err(ProcessGone(PluginRuntimeError::Io(
                     "persistent process closed stdout".into(),
-                ));
+                )));
             }
             Ok(Ok(librefang_subprocess::Line::TooLong)) => {
-                return Err(PluginRuntimeError::InvalidOutput(format!(
+                return Err(MaybeDelivered(PluginRuntimeError::InvalidOutput(format!(
                     "Hook output exceeds maximum size ({MAX_OUTPUT_BYTES} bytes limit). \
                      Truncate your hook's JSON response."
-                )));
+                ))));
             }
-            Ok(Err(e)) => return Err(PluginRuntimeError::Io(format!("read stdout: {e}"))),
+            Ok(Err(e)) => {
+                return Err(MaybeDelivered(PluginRuntimeError::Io(format!(
+                    "read stdout: {e}"
+                ))))
+            }
             Err(_) => {
-                return Err(PluginRuntimeError::Io(format!(
+                return Err(MaybeDelivered(PluginRuntimeError::Io(format!(
                     "persistent hook timed out after {}s",
                     timeout.as_secs()
-                )));
+                ))));
             }
         };
 
@@ -2019,8 +2117,11 @@ impl HookProcessPool {
             }
         }
 
-        serde_json::from_str(response.trim())
-            .map_err(|e| PluginRuntimeError::InvalidOutput(format!("JSON parse: {e}")))
+        serde_json::from_str(response.trim()).map_err(|e| {
+            MaybeDelivered(PluginRuntimeError::InvalidOutput(format!(
+                "JSON parse: {e}"
+            )))
+        })
     }
 
     /// Check which persistent subprocesses are still alive.
@@ -2032,7 +2133,7 @@ impl HookProcessPool {
     /// - If `try_wait` returns an exit status or an error, the slot is evicted
     ///   (set to `None`) so the next `call()` will restart it.
     ///
-    /// Returns the list of script-path keys for alive processes.
+    /// Returns the sorted, de-duplicated script paths that have at least one alive process.
     pub async fn health_check(&self) -> Vec<String> {
         let mut alive = Vec::new();
         let entries: Vec<(
@@ -2047,7 +2148,7 @@ impl HookProcessPool {
                 Ok(mut guard) => {
                     if let Some(ref mut proc) = *guard {
                         match proc.child.try_wait() {
-                            Ok(None) => alive.push(key), // still running
+                            Ok(None) => alive.push(pool_key_script(&key).to_string()), // still running
                             _ => {
                                 // Exited or error — evict so next call restarts it.
                                 *guard = None;
@@ -2058,10 +2159,13 @@ impl HookProcessPool {
                 }
                 Err(_) => {
                     // Locked means in-use; assume alive.
-                    alive.push(key);
+                    alive.push(pool_key_script(&key).to_string());
                 }
             }
         }
+        // One script can own several slots (one per shared state file); report it once.
+        alive.sort();
+        alive.dedup();
         alive
     }
 
@@ -2071,11 +2175,16 @@ impl HookProcessPool {
     /// the process will be restarted naturally when the call finishes and the next
     /// caller re-enters `call()`.
     pub async fn evict(&self, script_path: &str) {
-        let slot = {
+        // Every slot of the script, whatever shared state file it was spawned for.
+        let slots: Vec<HookProcessSlot> = {
             let guard = self.lock_processes();
-            guard.get(script_path).cloned()
+            guard
+                .iter()
+                .filter(|(key, _)| pool_key_script(key) == script_path)
+                .map(|(_, slot)| slot.clone())
+                .collect()
         };
-        if let Some(arc) = slot {
+        for arc in slots {
             // `try_lock` is intentional: if a call is in progress we don't
             // want to block waiting for it to finish.  The next completed call
             // will see the process is dead and restart it anyway.
@@ -2089,7 +2198,13 @@ impl HookProcessPool {
     pub async fn evict_all(&self) {
         let keys: Vec<String> = {
             let guard = self.lock_processes();
-            guard.keys().cloned().collect()
+            let mut scripts: Vec<String> = guard
+                .keys()
+                .map(|key| pool_key_script(key).to_string())
+                .collect();
+            scripts.sort();
+            scripts.dedup();
+            scripts
         };
         for key in keys {
             self.evict(&key).await;
@@ -2143,7 +2258,7 @@ impl HookProcessPool {
         let slot_arc = {
             let mut procs = self.lock_processes();
             procs
-                .entry(script_path.to_string())
+                .entry(pool_key(script_path, config.state_file.as_deref()))
                 .or_insert_with(|| std::sync::Arc::new(tokio::sync::Mutex::new(None)))
                 .clone()
         };

@@ -182,27 +182,70 @@ impl OidcAudience {
 
 /// Cached JWKS keyset for a provider.
 struct CachedJwks {
+    /// The last keyset fetched successfully; empty until one is.
     keys: Vec<JwksKey>,
-    fetched_at: std::time::Instant,
+    /// When `keys` was fetched; `None` while no fetch has ever succeeded.
+    fetched_at: Option<std::time::Instant>,
+    /// When the JWKS URI was last contacted, successfully or not.
+    attempted_at: std::time::Instant,
+    /// The error of the last attempt when it failed, served until [`OAUTH_REFETCH_MIN_INTERVAL`] has passed.
+    last_error: Option<String>,
 }
 
 /// In-memory JWKS cache shared across requests. Maps JWKS URI to cached keys.
 #[derive(Default)]
 pub struct JwksCache {
     inner: RwLock<HashMap<String, CachedJwks>>,
+    /// One lock per JWKS URI, serializing that URI's network fetches so a burst of concurrent requests that all miss the cache (for example tokens carrying random `kid`s, each forcing a refresh) produces one outbound fetch rather than one per request.
+    /// Keyed by URI so a stalled IdP holding its own lock for the full request timeout does not hold up fetches for any other provider.
+    /// The keys are JWKS URIs of configured providers, so the map stays as small as the provider list.
+    fetch_locks: dashmap::DashMap<String, Arc<tokio::sync::Mutex<()>>>,
+}
+
+impl JwksCache {
+    /// The single-flight lock for `jwks_uri`, created on first use.
+    fn fetch_lock(&self, jwks_uri: &str) -> Arc<tokio::sync::Mutex<()>> {
+        self.fetch_locks
+            .entry(jwks_uri.to_string())
+            .or_default()
+            .clone()
+    }
 }
 
 /// JWKS cache TTL — 1 hour. Providers rotate keys infrequently.
 const JWKS_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(3600);
+
+/// Minimum spacing between two network fetches of the same JWKS URI or discovery document outside the normal TTL.
+///
+/// It bounds two things.
+/// A failed fetch is remembered for this long, so an unreachable IdP costs one outbound request per interval instead of one per authenticated API request.
+/// A token whose `kid` is missing from the cached keyset forces a re-fetch (the IdP may have rotated its signing key), and this caps how often that can happen, so tokens carrying random `kid`s cannot turn the daemon into an outbound-request amplifier.
+const OAUTH_REFETCH_MIN_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Total per-request budget for outbound OIDC calls (discovery, JWKS, token exchange, userinfo).
+const OAUTH_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// HTTP client for every outbound OIDC request.
+///
+/// Redirect following is disabled (see [`librefang_kernel::http_client::oauth_client_builder`]): a `307`/`308` on the token POST would replay `client_secret`, the authorization code or the refresh token to the redirect target, and a `302` on discovery or JWKS would turn into a blind SSRF.
+/// A 3xx therefore surfaces as a non-success status, which every caller already treats as an error.
+/// The total timeout keeps a stalled IdP from holding a login callback for the 300 s read timeout.
+fn oidc_http_client() -> Result<reqwest::Client, String> {
+    librefang_kernel::http_client::oauth_client_builder()
+        .timeout(OAUTH_REQUEST_TIMEOUT)
+        .build()
+        .map_err(|e| format!("Failed to build OAuth HTTP client: {e}"))
+}
 
 /// Global JWKS cache instance (lazily initialized).
 static JWKS_CACHE: std::sync::LazyLock<JwksCache> = std::sync::LazyLock::new(JwksCache::default);
 
 // ── Discovery Cache ─────────────────────────────────────────────────────
 
-/// Cached OIDC discovery document.
+/// Cached OIDC discovery outcome: the document, or the error of a failed fetch.
 struct CachedDiscovery {
-    doc: OidcDiscovery,
+    /// A failure is cached for [`OAUTH_REFETCH_MIN_INTERVAL`] only, a success for [`DISCOVERY_CACHE_TTL`].
+    doc: Result<OidcDiscovery, String>,
     fetched_at: std::time::Instant,
 }
 
@@ -1666,6 +1709,12 @@ pub async fn oidc_auth_middleware(
         return next.run(request).await;
     };
 
+    // Master keys, per-user API keys and dashboard session tokens are opaque strings, not JWTs.
+    // `validate_jwt_cached` would reject them at `decode_header` anyway, so resolving providers for them (which may run OIDC discovery over the network) only adds latency, and while an IdP is unreachable it would stall every non-SSO request.
+    if !looks_like_jwt(&token) {
+        return next.run(request).await;
+    }
+
     // Resolve providers and try to validate.
     let providers = resolve_providers(config).await;
     for provider in &providers {
@@ -1732,6 +1781,11 @@ pub async fn oidc_auth_middleware(
     }
 
     next.run(request).await
+}
+
+/// Whether `token` has a decodable JWT header, the first check `validate_jwt_cached` applies.
+fn looks_like_jwt(token: &str) -> bool {
+    jsonwebtoken::decode_header(token).is_ok()
 }
 
 /// The two provider-level conditions a validated token must also satisfy before any of its claims become a LibreFang grant (#7744, extended to group membership in #7746).
@@ -2097,14 +2151,20 @@ async fn discover_oidc_cached(issuer_url: &str) -> Result<OidcDiscovery, String>
     {
         let read = DISCOVERY_CACHE.inner.read().await;
         if let Some(cached) = read.get(&key) {
-            if cached.fetched_at.elapsed() < DISCOVERY_CACHE_TTL {
-                return Ok(cached.doc.clone());
+            let ttl = if cached.doc.is_ok() {
+                DISCOVERY_CACHE_TTL
+            } else {
+                OAUTH_REFETCH_MIN_INTERVAL
+            };
+            if cached.fetched_at.elapsed() < ttl {
+                return cached.doc.clone();
             }
         }
     }
 
     // Fetch fresh.
-    let doc = discover_oidc(issuer_url).await?;
+    // A failure is cached too: `oidc_auth_middleware` resolves providers on every bearer request, so without a negative entry an unreachable IdP would cost one blocking outbound fetch per API call.
+    let doc = discover_oidc(issuer_url).await;
 
     // Update cache.
     {
@@ -2118,7 +2178,7 @@ async fn discover_oidc_cached(issuer_url: &str) -> Result<OidcDiscovery, String>
         );
     }
 
-    Ok(doc)
+    doc
 }
 
 /// Fetch the OIDC discovery document from `{issuer}/.well-known/openid-configuration`.
@@ -2127,7 +2187,7 @@ async fn discover_oidc(issuer_url: &str) -> Result<OidcDiscovery, String> {
         "{}/.well-known/openid-configuration",
         issuer_url.trim_end_matches('/')
     );
-    let resp = librefang_kernel::http_client::new_client()
+    let resp = oidc_http_client()?
         .get(&url)
         .send()
         .await
@@ -2151,7 +2211,7 @@ async fn exchange_code(
     client_secret: &str,
     redirect_uri: &str,
 ) -> Result<TokenResponse, String> {
-    let client = librefang_kernel::http_client::new_client();
+    let client = oidc_http_client()?;
     let resp = client
         .post(token_endpoint)
         .form(&[
@@ -2186,7 +2246,7 @@ async fn exchange_refresh_token(
     client_id: &str,
     client_secret: &str,
 ) -> Result<TokenResponse, String> {
-    let client = librefang_kernel::http_client::new_client();
+    let client = oidc_http_client()?;
     let resp = client
         .post(token_endpoint)
         .form(&[
@@ -2214,20 +2274,95 @@ async fn exchange_refresh_token(
 }
 
 /// Fetch JWKS from a URI using the global cache.
-async fn fetch_jwks_cached(jwks_uri: &str) -> Result<Vec<JwksKey>, String> {
-    // Check cache.
-    {
-        let read = JWKS_CACHE.inner.read().await;
-        if let Some(cached) = read.get(jwks_uri) {
-            if cached.fetched_at.elapsed() < JWKS_CACHE_TTL {
-                return Ok(cached.keys.clone());
-            }
-        }
+///
+/// `force_refresh` bypasses the TTL for a token whose `kid` is not in the cached keyset, which is what an IdP signing-key rotation looks like from here.
+/// A forced refresh and a retry after a failed fetch are both throttled to one per [`OAUTH_REFETCH_MIN_INTERVAL`] per URI; inside that window the cached keyset (or the cached error) is returned without contacting the IdP.
+async fn fetch_jwks_cached(jwks_uri: &str, force_refresh: bool) -> Result<Vec<JwksKey>, String> {
+    if let Some(hit) = jwks_cache_lookup(&*JWKS_CACHE.inner.read().await, jwks_uri, force_refresh) {
+        return hit;
+    }
+
+    // Single-flight: the throttle above is only checked against completed fetches, so without this lock every request that missed concurrently would fetch.
+    // Re-check after acquiring it, because the holder this request waited on has usually just refreshed the entry.
+    let fetch_lock = JWKS_CACHE.fetch_lock(jwks_uri);
+    let _fetch_guard = fetch_lock.lock().await;
+    if let Some(hit) = jwks_cache_lookup(&*JWKS_CACHE.inner.read().await, jwks_uri, force_refresh) {
+        return hit;
     }
 
     // Fetch fresh keys.
-    debug!(jwks_uri, "Fetching JWKS keys");
-    let resp = librefang_kernel::http_client::new_client()
+    debug!(jwks_uri, force_refresh, "Fetching JWKS keys");
+    let fetched = fetch_jwks(jwks_uri).await;
+    let now = std::time::Instant::now();
+
+    // Update cache.
+    let mut write = JWKS_CACHE.inner.write().await;
+    match fetched {
+        Ok(keys) => {
+            write.insert(
+                jwks_uri.to_string(),
+                CachedJwks {
+                    keys: keys.clone(),
+                    fetched_at: Some(now),
+                    attempted_at: now,
+                    last_error: None,
+                },
+            );
+            Ok(keys)
+        }
+        Err(err) => {
+            // Keep a still-fresh keyset when a forced refresh fails: tokens signed with the old key must keep validating through an IdP blip.
+            let entry = write
+                .entry(jwks_uri.to_string())
+                .or_insert_with(|| CachedJwks {
+                    keys: Vec::new(),
+                    fetched_at: None,
+                    attempted_at: now,
+                    last_error: None,
+                });
+            entry.attempted_at = now;
+            entry.last_error = Some(err.clone());
+            if entry
+                .fetched_at
+                .is_some_and(|at| at.elapsed() < JWKS_CACHE_TTL)
+            {
+                Ok(entry.keys.clone())
+            } else {
+                Err(err)
+            }
+        }
+    }
+}
+
+/// The cached answer for `jwks_uri`, or `None` when the caller must contact the IdP.
+///
+/// A fresh keyset answers a normal lookup; a forced refresh, or a retry after a failed fetch, is answered from the cache while the last attempt is within [`OAUTH_REFETCH_MIN_INTERVAL`].
+fn jwks_cache_lookup(
+    cache: &HashMap<String, CachedJwks>,
+    jwks_uri: &str,
+    force_refresh: bool,
+) -> Option<Result<Vec<JwksKey>, String>> {
+    let cached = cache.get(jwks_uri)?;
+    let fresh = cached
+        .fetched_at
+        .is_some_and(|at| at.elapsed() < JWKS_CACHE_TTL);
+    if fresh && !force_refresh {
+        return Some(Ok(cached.keys.clone()));
+    }
+    if cached.attempted_at.elapsed() < OAUTH_REFETCH_MIN_INTERVAL {
+        if fresh {
+            return Some(Ok(cached.keys.clone()));
+        }
+        if let Some(ref err) = cached.last_error {
+            return Some(Err(err.clone()));
+        }
+    }
+    None
+}
+
+/// Fetch a JWKS document over the network, bypassing the cache.
+async fn fetch_jwks(jwks_uri: &str) -> Result<Vec<JwksKey>, String> {
+    let resp = oidc_http_client()?
         .get(jwks_uri)
         .send()
         .await
@@ -2239,19 +2374,6 @@ async fn fetch_jwks_cached(jwks_uri: &str) -> Result<Vec<JwksKey>, String> {
         .json()
         .await
         .map_err(|e| format!("Failed to parse JWKS: {e}"))?;
-
-    // Update cache.
-    {
-        let mut write = JWKS_CACHE.inner.write().await;
-        write.insert(
-            jwks_uri.to_string(),
-            CachedJwks {
-                keys: jwks.keys.clone(),
-                fetched_at: std::time::Instant::now(),
-            },
-        );
-    }
-
     Ok(jwks.keys)
 }
 
@@ -2264,7 +2386,15 @@ async fn validate_jwt_cached(
     let header =
         jsonwebtoken::decode_header(token).map_err(|e| format!("Invalid JWT header: {e}"))?;
 
-    let keys = fetch_jwks_cached(jwks_uri).await?;
+    let mut keys = fetch_jwks_cached(jwks_uri, false).await?;
+
+    // An unknown `kid` usually means the IdP rotated its signing key after the keyset was cached.
+    // Re-fetch once (throttled inside `fetch_jwks_cached`) instead of rejecting every new token until the TTL expires.
+    if let Some(ref kid) = header.kid {
+        if !keys.iter().any(|k| k.kid.as_deref() == Some(kid.as_str())) {
+            keys = fetch_jwks_cached(jwks_uri, true).await?;
+        }
+    }
 
     // Find the matching key.
     let key = if let Some(ref kid) = header.kid {
@@ -2343,7 +2473,7 @@ async fn fetch_userinfo(
     userinfo_url: &str,
     access_token: &str,
 ) -> Result<serde_json::Value, String> {
-    let client = librefang_kernel::http_client::new_client();
+    let client = oidc_http_client()?;
     let resp = client
         .get(userinfo_url)
         .bearer_auth(access_token)
@@ -3019,10 +3149,15 @@ mod tests {
                         y: None,
                         crv: None,
                     }],
-                    fetched_at: std::time::Instant::now(),
+                    fetched_at: Some(std::time::Instant::now()),
+                    attempted_at: std::time::Instant::now(),
+                    last_error: None,
                 },
             );
-            assert_eq!(write.len(), 1, "seed must populate cache");
+            assert!(
+                write.contains_key("https://idp-a.example.com/.well-known/jwks.json"),
+                "seed must populate cache"
+            );
         }
 
         // Invalidate as the hot-reload pipeline would.
@@ -3031,14 +3166,16 @@ mod tests {
         // Wait for the detached invalidation task to land — it runs
         // on the same multi-thread runtime, so a single yield is not
         // sufficient under heavier test concurrency. Bounded retry.
+        // Check the seeded key rather than emptiness: failed discovery / JWKS fetches are negatively cached, so concurrently running tests that exercise those paths may legitimately add their own entries.
+        let seeded = "https://idp-a.example.com/.well-known/jwks.json";
         for _ in 0..50 {
-            if JWKS_CACHE.inner.read().await.is_empty() {
+            if !JWKS_CACHE.inner.read().await.contains_key(seeded) {
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
         assert!(
-            JWKS_CACHE.inner.read().await.is_empty(),
+            !JWKS_CACHE.inner.read().await.contains_key(seeded),
             "invalidate_oauth_caches must drop all JWKS entries so a \
              subsequent token validation re-fetches from the new IdP"
         );
@@ -3058,7 +3195,7 @@ mod tests {
             write.insert(
                 "https://idp-a.example.com".to_string(),
                 CachedDiscovery {
-                    doc: OidcDiscovery {
+                    doc: Ok(OidcDiscovery {
                         issuer: "https://idp-a.example.com".to_string(),
                         authorization_endpoint: "https://idp-a.example.com/authorize".to_string(),
                         token_endpoint: "https://idp-a.example.com/token".to_string(),
@@ -3067,23 +3204,28 @@ mod tests {
                         scopes_supported: vec![],
                         response_types_supported: vec![],
                         id_token_signing_alg_values_supported: vec![],
-                    },
+                    }),
                     fetched_at: std::time::Instant::now(),
                 },
             );
-            assert_eq!(write.len(), 1, "seed must populate cache");
+            assert!(
+                write.contains_key("https://idp-a.example.com"),
+                "seed must populate cache"
+            );
         }
 
         invalidate_oauth_caches();
 
+        // Seeded key, not emptiness — see the JWKS test above.
+        let seeded = "https://idp-a.example.com";
         for _ in 0..50 {
-            if DISCOVERY_CACHE.inner.read().await.is_empty() {
+            if !DISCOVERY_CACHE.inner.read().await.contains_key(seeded) {
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
         assert!(
-            DISCOVERY_CACHE.inner.read().await.is_empty(),
+            !DISCOVERY_CACHE.inner.read().await.contains_key(seeded),
             "invalidate_oauth_caches must drop all discovery entries so a \
              subsequent OIDC handshake re-fetches the new IdP's document"
         );
@@ -3106,8 +3248,316 @@ mod tests {
         // Wait a tick for the detached tasks to complete.
         tokio::task::yield_now().await;
 
-        assert!(JWKS_CACHE.inner.read().await.is_empty());
-        assert!(DISCOVERY_CACHE.inner.read().await.is_empty());
+        // No emptiness assertion: failed discovery / JWKS fetches are negatively cached, so a concurrently running test may add an entry of its own at any point; the seeded-key tests above pin the clearing contract.
+        // Taking both write locks proves the detached clears released them.
+        drop(JWKS_CACHE.inner.write().await);
+        drop(DISCOVERY_CACHE.inner.write().await);
+    }
+
+    /// The JWKS single-flight lock is per URI: a fetch stalled on one IdP must not hold up a fetch for another provider, while two misses on the same URI still collapse into one fetch.
+    #[tokio::test]
+    async fn jwks_fetch_lock_is_keyed_by_uri() {
+        let cache = JwksCache::default();
+        let stalled = cache.fetch_lock("https://idp-a.example/jwks");
+        let _held = stalled.lock().await;
+        assert!(
+            cache
+                .fetch_lock("https://idp-b.example/jwks")
+                .try_lock()
+                .is_ok(),
+            "another provider's fetch must not wait on the stalled one"
+        );
+        assert!(
+            cache
+                .fetch_lock("https://idp-a.example/jwks")
+                .try_lock()
+                .is_err(),
+            "a second miss on the same URI must wait for the fetch in flight"
+        );
+    }
+
+    // ── outbound OIDC requests: redirects, negative caching, key rotation ──
+
+    /// Bind a local listener for `app` and return its `http://addr` base URL.
+    async fn spawn_local_idp(app: axum::Router) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        format!("http://{addr}")
+    }
+
+    /// A route that counts how often it is hit, standing in for an attacker-controlled redirect target.
+    fn counting_route(hits: Arc<std::sync::atomic::AtomicUsize>) -> axum::routing::MethodRouter {
+        axum::routing::any(move || {
+            let hits = hits.clone();
+            async move {
+                hits.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                "stolen"
+            }
+        })
+    }
+
+    #[tokio::test]
+    async fn oidc_outbound_requests_do_not_follow_redirects() {
+        let stolen = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let app = axum::Router::new()
+            .route(
+                "/token",
+                axum::routing::post(|| async {
+                    (
+                        StatusCode::TEMPORARY_REDIRECT,
+                        [(axum::http::header::LOCATION, "/stolen")],
+                    )
+                }),
+            )
+            .route(
+                "/.well-known/openid-configuration",
+                axum::routing::get(|| async {
+                    (
+                        StatusCode::FOUND,
+                        [(axum::http::header::LOCATION, "/stolen")],
+                    )
+                }),
+            )
+            .route("/stolen", counting_route(stolen.clone()));
+        let base = spawn_local_idp(app).await;
+
+        let exchanged = exchange_code(
+            &format!("{base}/token"),
+            "auth-code",
+            "client",
+            "client-secret",
+            "https://app.example/callback",
+        )
+        .await;
+        assert!(
+            exchanged.is_err(),
+            "a 307 from the token endpoint must fail the exchange"
+        );
+        let refreshed = exchange_refresh_token(
+            &format!("{base}/token"),
+            "refresh",
+            "client",
+            "client-secret",
+        )
+        .await;
+        assert!(refreshed.is_err());
+        assert!(discover_oidc(&base).await.is_err());
+        assert_eq!(
+            stolen.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "client_secret / code / refresh_token must never be replayed to a redirect target"
+        );
+    }
+
+    #[test]
+    fn looks_like_jwt_skips_opaque_api_keys_and_session_tokens() {
+        assert!(!looks_like_jwt("lf_master_0123456789abcdef"));
+        assert!(!looks_like_jwt("4b0e0b6c-1f8a-4f8e-9f7e-0c2d3a4b5c6d"));
+        assert!(!looks_like_jwt(""));
+        let header = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(br#"{"alg":"RS256","typ":"JWT","kid":"k1"}"#);
+        assert!(looks_like_jwt(&format!("{header}.e30.sig")));
+    }
+
+    // Guard held across awaits on purpose — see the JWKS invalidation test below.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn failed_discovery_and_jwks_fetches_are_negatively_cached() {
+        let _g = OAUTH_CACHE_TEST_MUTEX
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let discovery_hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let jwks_hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (dh, jh) = (discovery_hits.clone(), jwks_hits.clone());
+        let app = axum::Router::new()
+            .route(
+                "/.well-known/openid-configuration",
+                axum::routing::get(move || {
+                    let dh = dh.clone();
+                    async move {
+                        dh.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        StatusCode::SERVICE_UNAVAILABLE
+                    }
+                }),
+            )
+            .route(
+                "/jwks",
+                axum::routing::get(move || {
+                    let jh = jh.clone();
+                    async move {
+                        jh.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        StatusCode::SERVICE_UNAVAILABLE
+                    }
+                }),
+            );
+        let base = spawn_local_idp(app).await;
+
+        for _ in 0..3 {
+            assert!(discover_oidc_cached(&base).await.is_err());
+            assert!(fetch_jwks_cached(&format!("{base}/jwks"), false)
+                .await
+                .is_err());
+        }
+        assert_eq!(
+            discovery_hits.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "an unreachable IdP must cost one discovery fetch per interval, not one per request"
+        );
+        assert_eq!(jwks_hits.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    /// RSA keypair plus the JWK of its public half, for signing test tokens.
+    fn rsa_test_key(kid: &str) -> (jsonwebtoken::EncodingKey, serde_json::Value) {
+        use argon2::password_hash::rand_core::OsRng;
+        use rsa::pkcs8::EncodePrivateKey;
+        use rsa::traits::PublicKeyParts;
+        let private_key = rsa::RsaPrivateKey::new(&mut OsRng, 2048).expect("RSA keygen");
+        let pem = private_key
+            .to_pkcs8_pem(rsa::pkcs8::LineEnding::LF)
+            .expect("PKCS#8 encode");
+        let encoding_key =
+            jsonwebtoken::EncodingKey::from_rsa_pem(pem.as_bytes()).expect("encoding key");
+        let public = private_key.to_public_key();
+        let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        let jwk = serde_json::json!({
+            "kty": "RSA",
+            "kid": kid,
+            "use": "sig",
+            "alg": "RS256",
+            "n": b64.encode(public.n().to_bytes_be()),
+            "e": b64.encode(public.e().to_bytes_be()),
+        });
+        (encoding_key, jwk)
+    }
+
+    fn sign_test_token(key: &jsonwebtoken::EncodingKey, kid: &str) -> String {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let mut header = jsonwebtoken::Header::new(Algorithm::RS256);
+        header.kid = Some(kid.to_string());
+        jsonwebtoken::encode(
+            &header,
+            &serde_json::json!({"sub": "user-1", "aud": "client", "iat": now, "exp": now + 300}),
+            key,
+        )
+        .expect("encode JWT")
+    }
+
+    // Guard held across awaits on purpose — see the JWKS invalidation test below.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn concurrent_forced_jwks_refreshes_share_one_fetch() {
+        let _g = OAUTH_CACHE_TEST_MUTEX
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let hits_h = hits.clone();
+        let app = axum::Router::new().route(
+            "/jwks",
+            axum::routing::get(move || {
+                let hits = hits_h.clone();
+                async move {
+                    hits.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    // Keep the fetch in flight long enough for every concurrent caller to miss the cache.
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    Json(serde_json::json!({ "keys": [] }))
+                }
+            }),
+        );
+        let jwks_uri = format!("{}/jwks", spawn_local_idp(app).await);
+
+        fetch_jwks_cached(&jwks_uri, false)
+            .await
+            .expect("initial fetch");
+        {
+            let mut write = JWKS_CACHE.inner.write().await;
+            let entry = write.get_mut(&jwks_uri).expect("cached keyset");
+            entry.attempted_at = std::time::Instant::now()
+                .checked_sub(OAUTH_REFETCH_MIN_INTERVAL + std::time::Duration::from_secs(1))
+                .expect("monotonic clock far enough from boot");
+        }
+
+        // A burst of tokens with unknown `kid`s, as an unauthenticated caller can send to any endpoint.
+        let results =
+            futures::future::join_all((0..16).map(|_| fetch_jwks_cached(&jwks_uri, true))).await;
+        assert!(results.iter().all(Result::is_ok));
+        assert_eq!(
+            hits.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "concurrent forced refreshes must collapse into one outbound fetch"
+        );
+    }
+
+    // Guard held across awaits on purpose — see the JWKS invalidation test below.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn unknown_kid_forces_a_throttled_jwks_refresh() {
+        let _g = OAUTH_CACHE_TEST_MUTEX
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let (old_key, old_jwk) = rsa_test_key("old");
+        let (new_key, new_jwk) = rsa_test_key("new");
+        let served = Arc::new(std::sync::Mutex::new(
+            serde_json::json!({ "keys": [old_jwk] }),
+        ));
+        let hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (served_h, hits_h) = (served.clone(), hits.clone());
+        let app = axum::Router::new().route(
+            "/jwks",
+            axum::routing::get(move || {
+                let served = served_h.clone();
+                let hits = hits_h.clone();
+                async move {
+                    hits.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    let body = served.lock().unwrap().clone();
+                    Json(body)
+                }
+            }),
+        );
+        let jwks_uri = format!("{}/jwks", spawn_local_idp(app).await);
+
+        validate_jwt_cached(&sign_test_token(&old_key, "old"), &jwks_uri, "client")
+            .await
+            .expect("token signed with the published key validates");
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        // The IdP rotates its signing key; the cached keyset is still inside its TTL.
+        *served.lock().unwrap() = serde_json::json!({ "keys": [new_jwk] });
+        // Move the last fetch outside the refresh throttle window.
+        {
+            let mut write = JWKS_CACHE.inner.write().await;
+            let entry = write.get_mut(&jwks_uri).expect("cached keyset");
+            entry.attempted_at = std::time::Instant::now()
+                .checked_sub(OAUTH_REFETCH_MIN_INTERVAL + std::time::Duration::from_secs(1))
+                .expect("monotonic clock far enough from boot");
+        }
+
+        validate_jwt_cached(&sign_test_token(&new_key, "new"), &jwks_uri, "client")
+            .await
+            .expect(
+                "a token signed with the rotated key must validate without waiting for the TTL",
+            );
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 2);
+
+        // A token with an unknown `kid` right after a refresh must not trigger another fetch.
+        let err = validate_jwt_cached(
+            &sign_test_token(&new_key, "random-kid"),
+            &jwks_uri,
+            "client",
+        )
+        .await
+        .expect_err("unknown kid stays unknown");
+        assert!(err.contains("No JWKS key found"), "{err}");
+        assert_eq!(
+            hits.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "forced JWKS refreshes must be throttled per URI"
+        );
     }
 
     // ── claim-path resolution (#7746) ───────────────────────────────────

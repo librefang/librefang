@@ -955,25 +955,27 @@ impl LibreFangKernel {
             KernelError::LibreFang(LibreFangError::AgentNotFound(agent_id.to_string()))
         })?;
 
+        // These are caller-fixable problems with the uploaded export, not daemon faults, so they are reported as `InvalidInput` rather than `Internal`.
         // Validate version
         if export.version != 1 {
-            return Err(KernelError::LibreFang(LibreFangError::Internal(format!(
-                "Unsupported session export version: {}",
-                export.version
-            ))));
+            return Err(KernelError::LibreFang(LibreFangError::InvalidInput(
+                format!("Unsupported session export version: {}", export.version),
+            )));
         }
 
         // Validate agent_id matches (prevent importing another agent's session)
         if !export.agent_id.is_empty() && export.agent_id != agent_id.to_string() {
-            return Err(KernelError::LibreFang(LibreFangError::Internal(format!(
-                "Session was exported from agent '{}', cannot import into '{}'",
-                export.agent_id, agent_id
-            ))));
+            return Err(KernelError::LibreFang(LibreFangError::InvalidInput(
+                format!(
+                    "Session was exported from agent '{}', cannot import into '{}'",
+                    export.agent_id, agent_id
+                ),
+            )));
         }
 
         // Validate messages are not empty
         if export.messages.is_empty() {
-            return Err(KernelError::LibreFang(LibreFangError::Internal(
+            return Err(KernelError::LibreFang(LibreFangError::InvalidInput(
                 "Cannot import session with no messages".to_string(),
             )));
         }

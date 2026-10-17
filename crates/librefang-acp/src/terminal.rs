@@ -64,6 +64,9 @@ impl TerminalCapabilities {
 #[derive(Clone)]
 pub struct TerminalClientHandle {
     inner: Arc<TerminalClientInner>,
+    /// The editor-facing ACP session this handle serves, set by [`Self::with_session`].
+    /// Editors resolve the `sessionId` of a `terminal/*` request to the thread that owns the PTY, so the kernel-side trait impl refuses to run a command without one.
+    session_id: Option<AcpSessionId>,
 }
 
 struct TerminalClientInner {
@@ -75,6 +78,16 @@ impl TerminalClientHandle {
     pub(crate) fn new(cx: ConnectionTo<Client>, caps: TerminalCapabilities) -> Self {
         Self {
             inner: Arc::new(TerminalClientInner { cx, caps }),
+            session_id: None,
+        }
+    }
+
+    /// A copy of this handle bound to `session_id`, the ACP session the editor minted.
+    /// The kernel registers one bound handle per session, and its `AcpTerminalClient` impl names that session on every request.
+    pub fn with_session(&self, session_id: AcpSessionId) -> Self {
+        Self {
+            inner: Arc::clone(&self.inner),
+            session_id: Some(session_id),
         }
     }
 
@@ -212,10 +225,6 @@ impl TerminalClientHandle {
             Err(_) => Err(AcpError::internal("terminal/release timed out")),
         }
     }
-
-    fn dummy_acp_session_id() -> AcpSessionId {
-        AcpSessionId::new(String::new())
-    }
 }
 
 /// Bridge into [`librefang_kernel_handle::AcpTerminalClient`] so the
@@ -235,7 +244,9 @@ impl AcpTerminalClient for TerminalClientHandle {
         // We need the terminal id alive across all four, and we always
         // release at the end (even on intermediate failure) so the
         // editor doesn't leak terminals.
-        let sid = TerminalClientHandle::dummy_acp_session_id();
+        let sid = self.session_id.clone().ok_or_else(|| {
+            KernelOpError::unavailable("terminal client is not bound to an ACP session")
+        })?;
         let terminal_id = self
             .create(sid.clone(), command, args, env, cwd, output_byte_limit)
             .await

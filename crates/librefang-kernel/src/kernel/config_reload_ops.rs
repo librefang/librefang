@@ -355,8 +355,8 @@ impl LibreFangKernel {
                     // Atomic swap — readers in flight keep the old snapshot.
                     let count = self.mcp_catalog_reload(&new_config.home_dir);
                     info!("Hot-reload: reloaded {count} MCP catalog entry/entries");
-                    // Effective MCP server list now == config.mcp_servers directly.
-                    let new_mcp = new_config.mcp_servers.clone();
+                    // Effective MCP server list = config.mcp_servers with the DB-backed rows overlaid, the same merge boot applies.
+                    let new_mcp = self.merge_db_mcp_servers(&new_config.mcp_servers);
                     let mut effective = self
                         .mcp
                         .effective_mcp_servers
@@ -374,7 +374,8 @@ impl LibreFangKernel {
                 }
                 HotAction::ReloadMcpServers => {
                     info!("Hot-reload: MCP server config updated");
-                    let new_mcp = new_config.mcp_servers.clone();
+                    // Overlay the DB-backed rows exactly as boot does; diffing the bare file list classified every DB-backed server as removed and disconnected it.
+                    let new_mcp = self.merge_db_mcp_servers(&new_config.mcp_servers);
 
                     // Snapshot the previous effective list so we can diff
                     // which entries actually changed. Existing connections
@@ -424,7 +425,7 @@ impl LibreFangKernel {
                         }
                     }
 
-                    let count = {
+                    let (count, added) = {
                         let mut effective = self
                             .mcp
                             .effective_mcp_servers
@@ -438,13 +439,16 @@ impl LibreFangKernel {
                         for name in old_names.difference(&new_names) {
                             self.mcp.mcp_health.unregister(name);
                         }
-                        for name in new_names.difference(&old_names) {
+                        let mut added: Vec<String> =
+                            new_names.difference(&old_names).cloned().collect();
+                        added.sort();
+                        for name in &added {
                             self.mcp.mcp_health.register(name);
                             auth_state_resets.insert(name.clone());
                         }
                         let count = new_mcp.len();
                         *effective = new_mcp;
-                        count
+                        (count, added)
                     };
 
                     if !auth_state_resets.is_empty() {
@@ -459,18 +463,21 @@ impl LibreFangKernel {
                         .mcp_generation
                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
-                    if to_reconnect.is_empty() {
+                    if to_reconnect.is_empty() && added.is_empty() {
                         info!(
                             "Hot-reload: effective MCP server list rebuilt \
                              ({count} total, no reconnects needed)"
                         );
                     } else {
+                        // A newly added server needs a connect too: the health loop only reconnects servers already in `McpStatus::Error`, so without this it stays unconnected until a restart.
                         info!(
                             servers = ?to_reconnect,
+                            added = ?added,
                             "Hot-reload: effective MCP server list rebuilt \
                              ({count} total, {} server(s) need reconnection \
-                             to apply config changes)",
-                            to_reconnect.len()
+                             to apply config changes, {} added)",
+                            to_reconnect.len(),
+                            added.len()
                         );
                         // Fire-and-forget: `disconnect_mcp_server` drops the
                         // stale slot and `connect_mcp_servers` is idempotent
@@ -486,7 +493,7 @@ impl LibreFangKernel {
                                 });
                             } else {
                                 tracing::warn!(
-                                    server_count = to_reconnect.len(),
+                                    server_count = to_reconnect.len() + added.len(),
                                     "Hot-reload: kernel self-handle dropped \
                                      — MCP servers will keep stale config \
                                      until next restart"
@@ -653,6 +660,22 @@ impl LibreFangKernel {
         router::invalidate_hand_route_cache();
         router::invalidate_template_rule_cache();
     }
+
+    /// Overlay the DB-backed `mcp_server_configs` rows on a file-sourced server list (DB wins by name), the merge boot and `reload_mcp_servers` already apply.
+    /// Falls back to the file list when the table cannot be read.
+    fn merge_db_mcp_servers(
+        &self,
+        file_servers: &[librefang_types::config::McpServerConfigEntry],
+    ) -> Vec<librefang_types::config::McpServerConfigEntry> {
+        let store = librefang_memory::McpConfigStore::new(self.memory.substrate.pool());
+        match store.merge_over(file_servers.to_vec()) {
+            Ok((merged, _added, _overridden)) => merged,
+            Err(e) => {
+                warn!("Hot-reload: failed to merge DB-backed MCP configs: {e}");
+                file_servers.to_vec()
+            }
+        }
+    }
 }
 
 /// Rebuild credential pools from a new config snapshot.
@@ -695,6 +718,8 @@ fn rebuild_credential_pools(
 
     for pool_cfg in &config.credential_pools {
         if pool_cfg.keys.is_empty() {
+            // Clearing the key list disables the pool; keeping the old entry would keep rotating through the keys the operator just removed.
+            pools.remove(&pool_cfg.provider);
             continue;
         }
         // Same labeled-keys discipline as the boot path: carry the operator
@@ -738,5 +763,43 @@ fn rebuild_credential_pools(
             "Hot-reload: rebuilt credential pool"
         );
         pools.insert(pool_cfg.provider.clone(), pool);
+    }
+}
+
+#[cfg(test)]
+mod credential_pool_reload_tests {
+    use super::rebuild_credential_pools;
+    use librefang_types::config::{CredentialPoolConfig, CredentialPoolKeyConfig, KernelConfig};
+
+    fn config_with_keys(keys: Vec<CredentialPoolKeyConfig>) -> KernelConfig {
+        KernelConfig {
+            credential_pools: vec![CredentialPoolConfig {
+                provider: "openai".to_string(),
+                strategy: Default::default(),
+                keys,
+            }],
+            ..KernelConfig::default()
+        }
+    }
+
+    #[test]
+    fn emptying_a_pools_keys_removes_the_live_pool() {
+        let pools = dashmap::DashMap::new();
+        // `PATH` is always set, so the key resolves without mutating the process environment.
+        rebuild_credential_pools(
+            &pools,
+            &config_with_keys(vec![CredentialPoolKeyConfig {
+                api_key_env: "PATH".to_string(),
+                label: "primary".to_string(),
+                priority: 0,
+            }]),
+        );
+        assert!(pools.contains_key("openai"));
+
+        rebuild_credential_pools(&pools, &config_with_keys(Vec::new()));
+        assert!(
+            !pools.contains_key("openai"),
+            "a pool whose keys were cleared must stop serving the old keys"
+        );
     }
 }

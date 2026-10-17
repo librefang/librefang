@@ -1476,7 +1476,12 @@ async fn dispatch_tool_call(
             match browser_ctx {
                 Some(mgr) => {
                     let aid = caller_agent_id.unwrap_or("default");
-                    crate::browser_tools::tool_browser_navigate(input, mgr, aid).await
+                    let ctx: Option<&WebToolsContext> = *web_ctx;
+                    let allowed_hosts: &[String] = ctx
+                        .map(|c| c.fetch.config().ssrf_allowed_hosts.as_slice())
+                        .unwrap_or(&[]);
+                    crate::browser_tools::tool_browser_navigate(input, mgr, aid, allowed_hosts)
+                        .await
                 }
                 None => Err(ToolError::Unavailable("Browser tools")),
             }

@@ -3237,9 +3237,8 @@ impl App {
                                 .send()
                             {
                                 if let Ok(body) = resp.json::<serde_json::Value>() {
-                                    let provider = body["model_provider"].as_str().unwrap_or("?");
-                                    let model = body["model_name"].as_str().unwrap_or("?");
-                                    self.chat.model_label = format!("{provider}/{model}");
+                                    self.chat.model_label =
+                                        crate::api_json::agent_model_label(&body);
                                 }
                             }
                             self.chat.push_message(

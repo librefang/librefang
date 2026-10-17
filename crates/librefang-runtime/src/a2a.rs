@@ -229,6 +229,28 @@ pub struct A2aArtifact {
 // A2A Task Store — tracks task lifecycle
 // ---------------------------------------------------------------------------
 
+/// Whether a task status is final: completed, failed or cancelled tasks never change state again.
+fn is_terminal_status(status: &A2aTaskStatus) -> bool {
+    matches!(
+        status,
+        A2aTaskStatus::Completed | A2aTaskStatus::Failed | A2aTaskStatus::Cancelled
+    )
+}
+
+/// Outcome of a state change requested on a stored task.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum A2aTaskTransition {
+    /// The change was applied and persisted.
+    Applied,
+    /// The task is already completed, failed or cancelled and was left unchanged (A2A `TaskNotCancelable` for a cancel).
+    AlreadyTerminal,
+    /// No task with that id exists in memory or in the backing store.
+    NotFound,
+}
+
+/// Message recorded on a task that was still in flight when the previous daemon process stopped.
+const INTERRUPTED_TASK_MESSAGE: &str = "Task interrupted by daemon restart";
+
 /// Entry in the task store that pairs a task with its last-updated timestamp.
 #[derive(Debug, Clone)]
 struct TrackedTask {
@@ -341,8 +363,9 @@ impl A2aTaskStore {
                     db: Some(Arc::clone(&db)),
                 };
 
-                // Prune rows older than 7 days, then load survivors into memory.
+                // Prune rows older than 7 days, fail tasks the previous process left in flight, then load survivors into memory.
                 store.db_prune_old_tasks();
+                store.db_fail_interrupted_tasks();
                 store.db_load_into_memory();
                 store
             }
@@ -375,6 +398,110 @@ impl A2aTaskStore {
             warn!("a2a_tasks: failed to prune old tasks: {e}");
         } else {
             debug!("a2a_tasks: pruned rows created before unix={cutoff}");
+        }
+    }
+
+    /// Mark every task the previous daemon process left `Submitted` or `Working` as `Failed`.
+    ///
+    /// Such a task was being driven by an in-process `send_message` future that died with that process, so nothing will ever complete it; without this sweep `GET /a2a/tasks/{id}` reports `working` for the whole retention window.
+    /// Covers every row, not only the `max_tasks` most recent ones that get loaded into memory.
+    /// `InputRequired` is left alone because it waits on the remote caller, not on this process.
+    fn db_fail_interrupted_tasks(&self) {
+        let Some(db_arc) = &self.db else {
+            return;
+        };
+        let rows = {
+            let conn = lock_a2a_recover(db_arc, "database");
+            let mut stmt = match conn.prepare(
+                "SELECT id, status, session_id, messages_json, artifacts_json, agent_id, caller_a2a_agent_id
+                 FROM a2a_tasks_v2
+                 WHERE status LIKE '%working%' OR status LIKE '%submitted%'",
+            ) {
+                Ok(s) => s,
+                Err(e) => {
+                    warn!("a2a_tasks: failed to prepare interrupted-task query: {e}");
+                    return;
+                }
+            };
+            let rows: Vec<_> = match stmt.query_map([], decode_row_columns) {
+                Ok(iter) => iter.filter_map(|r| r.ok()).collect(),
+                Err(e) => {
+                    warn!("a2a_tasks: failed to query interrupted tasks: {e}");
+                    return;
+                }
+            };
+            rows
+        };
+
+        let mut failed = 0usize;
+        for (id, status_json, session_id, messages_json, artifacts_json, agent_id, caller) in rows {
+            let Some(mut task) = decode_task_row(
+                id,
+                &status_json,
+                session_id,
+                &messages_json,
+                &artifacts_json,
+                agent_id,
+                caller,
+            ) else {
+                continue;
+            };
+            if !matches!(
+                task.status.state(),
+                A2aTaskStatus::Submitted | A2aTaskStatus::Working
+            ) {
+                continue;
+            }
+            task.messages.push(A2aMessage {
+                role: "agent".to_string(),
+                parts: vec![A2aPart::Text {
+                    text: INTERRUPTED_TASK_MESSAGE.to_string(),
+                }],
+            });
+            task.status = A2aTaskStatus::Failed.into();
+            self.db_upsert(&task);
+            failed += 1;
+        }
+        if failed > 0 {
+            info!("a2a_tasks: marked {failed} task(s) interrupted by the previous daemon run as failed");
+        }
+    }
+
+    /// Look a task up in the SQLite backing store only.
+    fn db_get(&self, task_id: &str) -> Option<A2aTask> {
+        let db_arc = self.db.as_ref()?;
+        let result = {
+            let conn = lock_a2a_recover(db_arc, "database");
+            conn.query_row(
+                "SELECT id, status, session_id, messages_json, artifacts_json, agent_id, caller_a2a_agent_id FROM a2a_tasks_v2 WHERE id = ?1",
+                rusqlite::params![task_id],
+                decode_row_columns,
+            )
+        };
+
+        match result {
+            Ok((
+                id,
+                status_json,
+                session_id,
+                messages_json,
+                artifacts_json,
+                agent_id,
+                caller_a2a_agent_id,
+            )) => decode_task_row(
+                id,
+                &status_json,
+                session_id,
+                &messages_json,
+                &artifacts_json,
+                agent_id,
+                caller_a2a_agent_id,
+            ),
+            Err(rusqlite::Error::QueryReturnedNoRows) => None,
+            Err(e) => {
+                warn!("a2a_tasks: DB lookup for {task_id} failed: {e}");
+                None
+            }
         }
     }
 
@@ -520,18 +647,17 @@ impl A2aTaskStore {
         self.db_upsert(&task);
 
         let mut tasks = lock_a2a_recover(&self.tasks, "tasks");
+        self.insert_into_memory(&mut tasks, task);
+    }
 
+    /// Put `task` into the in-memory map after the TTL sweep and capacity eviction.
+    fn insert_into_memory(&self, tasks: &mut HashMap<String, TrackedTask>, task: A2aTask) {
         // Lazy TTL sweep — remove all expired tasks regardless of state.
-        Self::evict_expired(&mut tasks, self.task_ttl);
+        Self::evict_expired(tasks, self.task_ttl);
 
         // Capacity eviction: prefer terminal-state tasks, fall back to oldest.
-        if tasks.len() >= self.max_tasks {
-            let is_terminal = |t: &TrackedTask| {
-                matches!(
-                    t.task.status.state(),
-                    A2aTaskStatus::Completed | A2aTaskStatus::Failed | A2aTaskStatus::Cancelled
-                )
-            };
+        if tasks.len() >= self.max_tasks && !tasks.contains_key(&task.id) {
+            let is_terminal = |t: &TrackedTask| is_terminal_status(t.task.status.state());
 
             // Try to evict the oldest terminal task first.
             let evict_key = tasks
@@ -574,104 +700,97 @@ impl A2aTaskStore {
         }
 
         // Slow path: query the DB for tasks that may have been evicted from memory.
-        let db_arc = self.db.as_ref()?;
-        let conn = lock_a2a_recover(db_arc, "database");
-        let result = conn.query_row(
-            "SELECT id, status, session_id, messages_json, artifacts_json, agent_id, caller_a2a_agent_id FROM a2a_tasks_v2 WHERE id = ?1",
-            rusqlite::params![task_id],
-            |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, Option<String>>(2)?,
-                    row.get::<_, String>(3)?,
-                    row.get::<_, String>(4)?,
-                    row.get::<_, Option<String>>(5)?,
-                    row.get::<_, Option<String>>(6)?,
-                ))
-            },
-        );
-
-        match result {
-            Ok((
-                id,
-                status_json,
-                session_id,
-                messages_json,
-                artifacts_json,
-                agent_id,
-                caller_a2a_agent_id,
-            )) => decode_task_row(
-                id,
-                &status_json,
-                session_id,
-                &messages_json,
-                &artifacts_json,
-                agent_id,
-                caller_a2a_agent_id,
-            ),
-            Err(rusqlite::Error::QueryReturnedNoRows) => None,
-            Err(e) => {
-                warn!("a2a_tasks: DB lookup for {task_id} failed: {e}");
-                None
-            }
-        }
+        self.db_get(task_id)
     }
 
-    /// Update a task's status and optionally add messages/artifacts.
-    pub fn update_status(&self, task_id: &str, status: A2aTaskStatus) -> bool {
+    /// Apply `change` to a non-terminal task and persist it.
+    ///
+    /// A task missing from memory (capacity or TTL eviction, or never loaded because only the `max_tasks` most recent rows are loaded at boot) is read back from the backing store, changed, persisted and reinserted, so the change is never silently dropped while `get()` keeps serving the stale row.
+    /// A task that is already completed, failed or cancelled is left unchanged.
+    fn transition(&self, task_id: &str, change: impl FnOnce(&mut A2aTask)) -> A2aTaskTransition {
         let _mutation_order = lock_a2a_recover(&self.mutation_order, "mutation order");
-        let task = {
+        // `FnOnce` is applied on exactly one of the two branches below.
+        let mut change = Some(change);
+        let in_memory = {
             let mut tasks = lock_a2a_recover(&self.tasks, "tasks");
-            let Some(tracked) = tasks.get_mut(task_id) else {
-                return false;
-            };
-            tracked.task.status = status.into();
-            tracked.updated_at = Instant::now();
-            tracked.task.clone()
+            match tasks.get_mut(task_id) {
+                Some(tracked) if is_terminal_status(tracked.task.status.state()) => {
+                    return A2aTaskTransition::AlreadyTerminal;
+                }
+                Some(tracked) => {
+                    if let Some(change) = change.take() {
+                        change(&mut tracked.task);
+                    }
+                    tracked.updated_at = Instant::now();
+                    Some(tracked.task.clone())
+                }
+                None => None,
+            }
+        };
+
+        let task = match in_memory {
+            Some(task) => task,
+            None => {
+                // The task map lock is not held across the SQLite read.
+                let Some(mut task) = self.db_get(task_id) else {
+                    return A2aTaskTransition::NotFound;
+                };
+                if is_terminal_status(task.status.state()) {
+                    return A2aTaskTransition::AlreadyTerminal;
+                }
+                if let Some(change) = change.take() {
+                    change(&mut task);
+                }
+                let mut tasks = lock_a2a_recover(&self.tasks, "tasks");
+                self.insert_into_memory(&mut tasks, task.clone());
+                task
+            }
         };
         self.db_upsert(&task);
-        true
+        A2aTaskTransition::Applied
+    }
+
+    /// Update a task's status.
+    ///
+    /// Returns `true` when the change was applied; `false` when the task does not exist or is already in a terminal state, which it never leaves.
+    pub fn update_status(&self, task_id: &str, status: A2aTaskStatus) -> bool {
+        self.transition(task_id, |task| task.status = status.into()) == A2aTaskTransition::Applied
     }
 
     /// Complete a task with a response message and optional artifacts.
+    ///
+    /// No-op when the task is already terminal (for example cancelled while it was running).
     pub fn complete(&self, task_id: &str, response: A2aMessage, artifacts: Vec<A2aArtifact>) {
-        let _mutation_order = lock_a2a_recover(&self.mutation_order, "mutation order");
-        let task = {
-            let mut tasks = lock_a2a_recover(&self.tasks, "tasks");
-            tasks.get_mut(task_id).map(|tracked| {
-                tracked.task.messages.push(response);
-                tracked.task.artifacts.extend(artifacts);
-                tracked.task.status = A2aTaskStatus::Completed.into();
-                tracked.updated_at = Instant::now();
-                tracked.task.clone()
-            })
-        };
-        if let Some(task) = task {
-            self.db_upsert(&task);
-        }
+        self.transition(task_id, |task| {
+            task.messages.push(response);
+            task.artifacts.extend(artifacts);
+            task.status = A2aTaskStatus::Completed.into();
+        });
     }
 
     /// Fail a task with an error message.
+    ///
+    /// No-op when the task is already terminal.
     pub fn fail(&self, task_id: &str, error_message: A2aMessage) {
-        let _mutation_order = lock_a2a_recover(&self.mutation_order, "mutation order");
-        let task = {
-            let mut tasks = lock_a2a_recover(&self.tasks, "tasks");
-            tasks.get_mut(task_id).map(|tracked| {
-                tracked.task.messages.push(error_message);
-                tracked.task.status = A2aTaskStatus::Failed.into();
-                tracked.updated_at = Instant::now();
-                tracked.task.clone()
-            })
-        };
-        if let Some(task) = task {
-            self.db_upsert(&task);
-        }
+        self.transition(task_id, |task| {
+            task.messages.push(error_message);
+            task.status = A2aTaskStatus::Failed.into();
+        });
+    }
+
+    /// Cancel a task, reporting whether it was cancelled, was already terminal, or does not exist.
+    pub fn try_cancel(&self, task_id: &str) -> A2aTaskTransition {
+        self.transition(task_id, |task| {
+            task.status = A2aTaskStatus::Cancelled.into()
+        })
     }
 
     /// Cancel a task.
+    ///
+    /// Returns `true` when the task exists.
+    /// A task that already completed, failed or was cancelled keeps its status (A2A `TaskNotCancelable`), so callers must report the status `get()` returns rather than assume `cancelled`; use [`Self::try_cancel`] to tell the cases apart.
     pub fn cancel(&self, task_id: &str) -> bool {
-        self.update_status(task_id, A2aTaskStatus::Cancelled)
+        self.try_cancel(task_id) != A2aTaskTransition::NotFound
     }
 
     /// Count of tracked tasks.
@@ -691,6 +810,30 @@ fn now_unix_secs() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs() as i64
+}
+
+/// Raw column tuple of one `a2a_tasks_v2` row, in `SELECT id, status, session_id, messages_json, artifacts_json, agent_id, caller_a2a_agent_id` order.
+type TaskRowColumns = (
+    String,
+    String,
+    Option<String>,
+    String,
+    String,
+    Option<String>,
+    Option<String>,
+);
+
+/// Read the seven task columns from a row selected in [`TaskRowColumns`] order.
+fn decode_row_columns(row: &rusqlite::Row<'_>) -> rusqlite::Result<TaskRowColumns> {
+    Ok((
+        row.get(0)?,
+        row.get(1)?,
+        row.get(2)?,
+        row.get(3)?,
+        row.get(4)?,
+        row.get(5)?,
+        row.get(6)?,
+    ))
 }
 
 /// Decode one row from the `a2a_tasks_v2` schema into an `A2aTask`.
@@ -1319,6 +1462,106 @@ mod tests {
         );
     }
 
+    fn bare_task(id: &str, status: A2aTaskStatus) -> A2aTask {
+        A2aTask {
+            id: id.to_string(),
+            session_id: None,
+            status: status.into(),
+            messages: vec![],
+            artifacts: vec![],
+            agent_id: None,
+            caller_a2a_agent_id: None,
+        }
+    }
+
+    fn agent_text(text: &str) -> A2aMessage {
+        A2aMessage {
+            role: "agent".to_string(),
+            parts: vec![A2aPart::Text {
+                text: text.to_string(),
+            }],
+        }
+    }
+
+    #[test]
+    fn cancel_does_not_overwrite_a_terminal_task() {
+        let store = A2aTaskStore::new(10);
+        store.insert(bare_task("done", A2aTaskStatus::Working));
+        store.complete("done", agent_text("result"), vec![]);
+
+        assert_eq!(store.try_cancel("done"), A2aTaskTransition::AlreadyTerminal);
+        // The task exists, so `cancel` still reports true, but the status is untouched.
+        assert!(store.cancel("done"));
+        assert_eq!(store.get("done").unwrap().status, A2aTaskStatus::Completed);
+        assert!(!store.update_status("done", A2aTaskStatus::Working));
+        assert_eq!(store.get("done").unwrap().status, A2aTaskStatus::Completed);
+
+        // A task cancelled while running stays cancelled when the run finishes.
+        store.insert(bare_task("cancelled", A2aTaskStatus::Working));
+        assert_eq!(store.try_cancel("cancelled"), A2aTaskTransition::Applied);
+        store.complete("cancelled", agent_text("late"), vec![]);
+        let cancelled = store.get("cancelled").unwrap();
+        assert_eq!(cancelled.status, A2aTaskStatus::Cancelled);
+        assert!(cancelled.messages.is_empty());
+
+        assert_eq!(store.try_cancel("missing"), A2aTaskTransition::NotFound);
+    }
+
+    #[test]
+    fn completing_a_task_evicted_from_memory_persists_the_result() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("a2a.db");
+        let store = A2aTaskStore::with_persistence(1, &db_path);
+        store.insert(bare_task("in-flight", A2aTaskStatus::Working));
+        // Capacity 1 and no terminal task: the in-flight task is evicted from memory.
+        store.insert(bare_task("newer", A2aTaskStatus::Working));
+        assert!(!store.tasks.lock().unwrap().contains_key("in-flight"));
+
+        store.complete("in-flight", agent_text("answer"), vec![]);
+
+        let got = store.get("in-flight").expect("task must still exist");
+        assert_eq!(got.status, A2aTaskStatus::Completed);
+        assert_eq!(got.messages.len(), 1);
+        drop(store);
+
+        let reopened = A2aTaskStore::with_persistence(10, &db_path);
+        assert_eq!(
+            reopened.get("in-flight").unwrap().status,
+            A2aTaskStatus::Completed
+        );
+    }
+
+    #[test]
+    fn restart_fails_tasks_left_in_flight() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("a2a.db");
+        {
+            let store = A2aTaskStore::with_persistence(10, &db_path);
+            store.insert(bare_task("working", A2aTaskStatus::Working));
+            store.insert(bare_task("submitted", A2aTaskStatus::Submitted));
+            store.insert(bare_task("input", A2aTaskStatus::InputRequired));
+            store.insert(bare_task("done", A2aTaskStatus::Completed));
+        }
+
+        // Cap of 1 so most rows are not loaded into memory: the sweep must still reach them.
+        let restarted = A2aTaskStore::with_persistence(1, &db_path);
+        for id in ["working", "submitted"] {
+            let task = restarted.get(id).unwrap();
+            assert_eq!(task.status, A2aTaskStatus::Failed, "{id}");
+            match &task.messages.last().unwrap().parts[0] {
+                A2aPart::Text { text } => assert_eq!(text, INTERRUPTED_TASK_MESSAGE),
+                other => panic!("unexpected part {other:?}"),
+            }
+        }
+        assert_eq!(
+            restarted.get("input").unwrap().status,
+            A2aTaskStatus::InputRequired
+        );
+        let done = restarted.get("done").unwrap();
+        assert_eq!(done.status, A2aTaskStatus::Completed);
+        assert!(done.messages.is_empty());
+    }
+
     #[test]
     fn persistence_wait_does_not_hold_task_map_lock() {
         let dir = tempfile::tempdir().unwrap();
@@ -1561,7 +1804,8 @@ mod tests {
         let original = A2aTask {
             id: "round-trip-1".to_string(),
             session_id: Some("session-abc".to_string()),
-            status: A2aTaskStatus::Working.into(),
+            // Terminal, so the restart sweep that fails in-flight tasks leaves it as written.
+            status: A2aTaskStatus::Completed.into(),
             // Deliberately interleave user / agent / user so the old schema
             // (which split by role) would scramble the order on reload.
             messages: vec![

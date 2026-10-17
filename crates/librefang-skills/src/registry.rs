@@ -513,9 +513,13 @@ impl SkillRegistry {
         Self::dedup_tool_defs(&matching)
     }
 
-    /// Return all installed skill names.
+    /// Return all installed skill names, sorted.
+    ///
+    /// Sorted for the same reason as [`Self::list`] (#3298): `skills` is a `HashMap`, whose iteration order changes from process to process, and this vector is served verbatim as the agent-skills API's `available` list.
     pub fn skill_names(&self) -> Vec<String> {
-        self.skills.keys().cloned().collect()
+        let mut names: Vec<String> = self.skills.keys().cloned().collect();
+        names.sort();
+        names
     }
 
     /// Names of on-disk skill directories under `skills_dir` that hold a `skill.toml` but are NOT currently loaded (compared by path, so a skill whose manifest name differs from its directory name is matched correctly).
@@ -1484,6 +1488,27 @@ input_schema = { type = "object" }
             names_a,
             vec!["alpha".to_string(), "beta".to_string(), "gamma".to_string()],
             "list() must be sorted by skill name"
+        );
+    }
+
+    #[test]
+    fn skill_names_is_sorted() {
+        let dir = TempDir::new().unwrap();
+        let mut reg = SkillRegistry::new(dir.path().to_path_buf());
+        // Enough entries that HashMap iteration order essentially never matches sorted order by chance.
+        let names = [
+            "kilo", "alpha", "juliet", "delta", "hotel", "bravo", "lima", "echo", "india",
+            "charlie", "golf", "foxtrot",
+        ];
+        for name in names {
+            install_with_tool(&mut reg, name, &format!("{name}_tool"));
+        }
+        let mut expected: Vec<String> = names.iter().map(|n| n.to_string()).collect();
+        expected.sort();
+        assert_eq!(
+            reg.skill_names(),
+            expected,
+            "skill_names() must be sorted, not HashMap order"
         );
     }
 

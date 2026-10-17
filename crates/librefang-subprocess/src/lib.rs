@@ -112,13 +112,7 @@ pub struct SubprocessTransport {
 impl SubprocessTransport {
     /// Spawn the child and start the background reader + stderr drain.
     pub fn spawn(cfg: TransportConfig) -> std::io::Result<Self> {
-        let mut child = Command::new(&cfg.command)
-            .args(&cfg.args)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true)
-            .spawn()?;
+        let mut child = build_command(&cfg).spawn()?;
 
         let stdin = child
             .stdin
@@ -211,23 +205,33 @@ impl SubprocessTransport {
                 // grow the daemon's memory without bound. 64 KiB per line is
                 // ample for log lines; an over-cap line is skipped rather than
                 // buffered.
+                // The drain must keep reading after an over-cap line: ending the task drops the read end of the pipe, and the child's next stderr write then dies of EPIPE / SIGPIPE (a tqdm-style `\r` progress bar with no `\n` hits this within seconds).
                 const STDERR_MAX_LINE_BYTES: usize = 64 * 1024;
                 let mut reader = BufReader::new(stderr);
                 let mut buf: Vec<u8> = Vec::new();
+                // Warn once per over-cap run rather than once per 64 KiB slice of it.
+                let mut in_overlong_line = false;
                 loop {
                     match read_capped_line(&mut reader, &mut buf, STDERR_MAX_LINE_BYTES).await {
                         Ok(Line::Data(line)) => {
+                            if in_overlong_line {
+                                // The remainder of the discarded over-cap line, not a line of its own.
+                                in_overlong_line = false;
+                                continue;
+                            }
                             debug!(target: "subprocess_transport", label = %label, "{line}");
                         }
                         Ok(Line::Eof) => break,
                         Ok(Line::TooLong) => {
-                            warn!(
-                                label = %label,
-                                cap = STDERR_MAX_LINE_BYTES,
-                                "subprocess transport: stderr line exceeded cap; \
-                                 dropping stderr drain"
-                            );
-                            break;
+                            if !in_overlong_line {
+                                warn!(
+                                    label = %label,
+                                    cap = STDERR_MAX_LINE_BYTES,
+                                    "subprocess transport: stderr line exceeded cap; \
+                                     discarding it in capped slices"
+                                );
+                                in_overlong_line = true;
+                            }
                         }
                         Err(_) => break,
                     }
@@ -413,6 +417,26 @@ impl SupervisedTransport {
     }
 }
 
+/// Daemon-internal secrets a transport child must never inherit.
+///
+/// `LIBREFANG_VAULT_KEY` decrypts `vault.enc`, which holds every provider and channel credential; the daemon loads it into its own environment from `.env` at boot, so it is removed explicitly at spawn.
+/// This crate sits below `librefang-runtime`, so it mirrors the vault entry of the runtime's reserved list rather than importing it.
+const DAEMON_ONLY_ENV: &[&str] = &["LIBREFANG_VAULT_KEY"];
+
+/// Build the child `Command` for `cfg`: piped stdio, reaped on drop, and without the daemon-only secrets in its inherited environment.
+fn build_command(cfg: &TransportConfig) -> Command {
+    let mut cmd = Command::new(&cfg.command);
+    cmd.args(&cfg.args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    for k in DAEMON_ONLY_ENV {
+        cmd.env_remove(k);
+    }
+    cmd
+}
+
 /// Outcome of a [`read_capped_line`] call.
 pub enum Line {
     /// A `\n`-terminated line (terminator stripped), decoded lossily as UTF-8.
@@ -565,6 +589,58 @@ while True:
         // The buffer never grew past the cap — the unbounded-memory risk of
         // `.lines()` / `next_line()` is gone.
         assert!(buf.len() <= cap, "buffer must not exceed the cap");
+    }
+
+    #[test]
+    fn spawned_child_does_not_inherit_the_vault_key() {
+        let cmd = build_command(&TransportConfig::new(
+            "does-not-need-to-exist",
+            vec![],
+            Duration::from_secs(5),
+            "test",
+        ));
+        let removed = cmd
+            .as_std()
+            .get_envs()
+            .any(|(k, v)| k == "LIBREFANG_VAULT_KEY" && v.is_none());
+        assert!(
+            removed,
+            "the vault master key must be removed from the child's inherited environment"
+        );
+    }
+
+    #[tokio::test]
+    async fn overlong_stderr_line_does_not_kill_the_child() {
+        let Some(py) = python() else {
+            eprintln!("skipping: no python3");
+            return;
+        };
+        // 200 KiB of stderr with no newline (a `\r` progress bar), then a stderr line per request.
+        // If the drain stops at the 64 KiB cap it closes the pipe, and the child's next stderr write raises BrokenPipeError and kills it.
+        let body = r#"
+import sys, json
+sys.stderr.write("x" * (200 * 1024))
+sys.stderr.flush()
+while True:
+    line = sys.stdin.readline()
+    if not line:
+        break
+    line = line.strip()
+    if not line:
+        continue
+    req = json.loads(line)
+    sys.stderr.write("progress " + "y" * (100 * 1024) + "\n")
+    sys.stderr.flush()
+    sys.stdout.write(json.dumps({"id": req["id"], "ok": {"echo": req.get("method")}}) + "\n")
+    sys.stdout.flush()
+"#;
+        let dir = tempfile::tempdir().unwrap();
+        let t = spawn_py(py, dir.path(), body, 10);
+        for method in ["first", "second", "third"] {
+            let r = t.request(json!({ "method": method })).await.unwrap();
+            assert_eq!(r, json!({ "echo": method }));
+        }
+        assert!(t.is_alive());
     }
 
     #[tokio::test]

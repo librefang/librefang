@@ -79,6 +79,50 @@ async fn read_event_line<R: tokio::io::AsyncBufRead + Unpin>(
     }
 }
 
+/// Cap on one sidecar stderr line.
+///
+/// Stderr carries log lines, not protocol events, so it gets a small cap of its own instead of the 64 MiB event cap.
+const MAX_STDERR_LINE_BYTES: usize = 64 * 1024;
+
+/// Drain a sidecar's stderr until EOF or a read error, handing each line to `on_line`.
+///
+/// An over-cap line is discarded whole, in capped slices including its tail, and the drain keeps reading.
+/// Ending the drain would drop the read end of the pipe, and the adapter's next stderr write would then die of EPIPE / SIGPIPE.
+async fn drain_sidecar_stderr<R: tokio::io::AsyncBufRead + Unpin>(
+    reader: &mut R,
+    adapter: &str,
+    mut on_line: impl FnMut(&str),
+) {
+    let mut line_buf: Vec<u8> = Vec::new();
+    // Warn once per over-cap run rather than once per slice of it.
+    let mut in_overlong_line = false;
+    loop {
+        match librefang_subprocess::read_capped_line(reader, &mut line_buf, MAX_STDERR_LINE_BYTES)
+            .await
+        {
+            Ok(librefang_subprocess::Line::Data(line)) => {
+                if in_overlong_line {
+                    // The remainder of the discarded over-cap line, not a line of its own; feeding it to the translator would log (or parse) a truncated fragment.
+                    in_overlong_line = false;
+                    continue;
+                }
+                on_line(&line);
+            }
+            Ok(librefang_subprocess::Line::TooLong) => {
+                if !in_overlong_line {
+                    warn!(
+                        adapter = %adapter,
+                        cap = MAX_STDERR_LINE_BYTES,
+                        "[sidecar stderr] line exceeded cap; discarding it in capped slices"
+                    );
+                    in_overlong_line = true;
+                }
+            }
+            Ok(librefang_subprocess::Line::Eof) | Err(_) => break,
+        }
+    }
+}
+
 /// Deserialize `T`, mapping an explicit JSON `null` to `T::default()`.
 ///
 /// `#[serde(default)]` alone only covers an *omitted* field; a present
@@ -896,6 +940,13 @@ pub fn warn_secret_prefix_collisions(names: &[String]) -> usize {
     collisions.len()
 }
 
+/// Daemon-internal secrets that a sidecar child must never inherit.
+///
+/// `LIBREFANG_VAULT_KEY` decrypts `vault.enc`, which holds every instance's and provider's credentials, so handing it to one sidecar defeats the per-instance `<PREFIX>__KEY` isolation entirely.
+/// The daemon loads it into its own environment from `.env` / `secrets.env` at boot, so it has to be removed explicitly at spawn.
+/// An operator who really wants a sidecar to hold it can still name it in `[sidecar_channels.env]`.
+pub(crate) const DAEMON_ONLY_ENV: &[&str] = &["LIBREFANG_VAULT_KEY"];
+
 /// One spawn's environment decisions: pairs to set on the child, and keys
 /// the child must not inherit from the daemon's own environment.
 struct SpawnEnv {
@@ -909,9 +960,16 @@ struct SpawnEnv {
 /// may name a key that `secrets.env` also namespaces, and the explicit value
 /// must survive. `Command` replays these in call order, so setting after
 /// removing keeps that precedence.
+///
+/// Daemon-internal secrets ([`DAEMON_ONLY_ENV`]) are always removed unless the operator set them explicitly, because the daemon's own environment carries them and the child would otherwise inherit them.
 fn apply_spawn_env(cmd: &mut Command, withheld: &[String], env_map: &HashMap<String, String>) {
     for k in withheld {
         cmd.env_remove(k);
+    }
+    for k in DAEMON_ONLY_ENV {
+        if !env_map.contains_key(*k) {
+            cmd.env_remove(k);
+        }
     }
     for (k, v) in env_map {
         cmd.env(k, v);
@@ -959,6 +1017,9 @@ async fn build_spawn_env(
                  cannot reach it"
             );
             withheld.push(k);
+            continue;
+        } else if DAEMON_ONLY_ENV.contains(&k.as_str()) {
+            // Never re-emit a daemon-only secret from secrets.env / .env; only an explicit `[sidecar_channels.env]` entry may hand it to the child.
             continue;
         } else if std::env::var(&k).is_err() {
             // Global secrets.env: parent process env wins (dotenv precedence).
@@ -1168,9 +1229,8 @@ async fn spawn_once(
         // newline grow the buffer without bound and OOM the daemon — the exact
         // hazard the stdout path was capped against (MAX_EVENT_LINE_BYTES).
         let mut reader = BufReader::new(child_stderr);
-        let mut line_buf: Vec<u8> = Vec::new();
-        while let Ok(Some(line)) = read_event_line(&mut reader, &mut line_buf).await {
-            match stderr_translator.handle_line(&line) {
+        drain_sidecar_stderr(&mut reader, &stderr_name, |line| {
+            match stderr_translator.handle_line(line) {
                 StderrAction::Warn(msg) => {
                     warn!(adapter = %stderr_name, "{msg}");
                 }
@@ -1178,7 +1238,8 @@ async fn spawn_once(
                     debug!(adapter = %stderr_name, "{msg}");
                 }
             }
-        }
+        })
+        .await;
     });
 
     let (ready_tx, ready_rx) = oneshot::channel::<()>();
@@ -4656,6 +4717,70 @@ mod tests {
             unset,
             "a foreign namespaced secret in .env must be unset on the child too"
         );
+    }
+
+    #[tokio::test]
+    async fn stderr_drain_keeps_reading_after_an_overlong_line() {
+        // A `\r` progress bar with no `\n` used to end the drain (the 64 MiB event cap mapped to `Err`), dropping the pipe's read end so the adapter's next stderr write died of EPIPE.
+        let mut payload = vec![b'x'; MAX_STDERR_LINE_BYTES * 3];
+        payload.extend_from_slice(b"\nafter the progress bar\n");
+        let mut reader = tokio::io::BufReader::new(&payload[..]);
+        let mut lines: Vec<String> = Vec::new();
+        drain_sidecar_stderr(&mut reader, "test", |line| lines.push(line.to_string())).await;
+        assert_eq!(
+            lines.last().map(String::as_str),
+            Some("after the progress bar"),
+            "the drain must keep reading past an over-cap line"
+        );
+        assert_eq!(
+            lines,
+            vec!["after the progress bar".to_string()],
+            "the over-cap line, tail included, must be discarded rather than surfaced as a fragment"
+        );
+    }
+
+    #[tokio::test]
+    async fn spawn_env_never_hands_the_vault_key_to_the_child() {
+        // The daemon loads `LIBREFANG_VAULT_KEY` from `.env` into its own environment, so every sidecar child would inherit the vault master key and could decrypt every other instance's credentials.
+        // The real key name is used because that is the name the spawn must strip; the test only ever inspects the `Command`, it never spawns.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(tmp.path().join(".env"), "LIBREFANG_VAULT_KEY=from_dotenv\n").unwrap();
+
+        let ctx_env: HashMap<String, String> = HashMap::new();
+        let spawn_env = build_spawn_env(tmp.path(), "solo", &ctx_env).await;
+        let env_map: HashMap<String, String> = spawn_env.apply.iter().cloned().collect();
+        assert!(
+            !env_map.contains_key("LIBREFANG_VAULT_KEY"),
+            "the vault key from .env must not be re-emitted to the child"
+        );
+        let mut cmd = Command::new("does-not-need-to-exist");
+        apply_spawn_env(&mut cmd, &spawn_env.withheld, &env_map);
+        let unset = cmd
+            .as_std()
+            .get_envs()
+            .any(|(k, v)| k == "LIBREFANG_VAULT_KEY" && v.is_none());
+        assert!(
+            unset,
+            "the vault key must be explicitly removed so the daemon's inherited copy cannot reach the child"
+        );
+    }
+
+    #[tokio::test]
+    async fn spawn_env_keeps_an_explicitly_configured_vault_key() {
+        // An operator who names the key in `[sidecar_channels.env]` opted in deliberately; that explicit value must survive.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let mut ctx_env: HashMap<String, String> = HashMap::new();
+        ctx_env.insert("LIBREFANG_VAULT_KEY".to_string(), "explicit".to_string());
+        let spawn_env = build_spawn_env(tmp.path(), "solo", &ctx_env).await;
+        let env_map: HashMap<String, String> = spawn_env.apply.iter().cloned().collect();
+        let mut cmd = Command::new("does-not-need-to-exist");
+        apply_spawn_env(&mut cmd, &spawn_env.withheld, &env_map);
+        let value = cmd
+            .as_std()
+            .get_envs()
+            .find(|(k, _)| *k == "LIBREFANG_VAULT_KEY")
+            .and_then(|(_, v)| v.map(|v| v.to_string_lossy().into_owned()));
+        assert_eq!(value.as_deref(), Some("explicit"));
     }
 
     #[tokio::test]

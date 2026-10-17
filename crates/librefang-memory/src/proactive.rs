@@ -4982,6 +4982,37 @@ mod tests {
         assert_eq!(count_after, 1);
     }
 
+    /// A permanent `user_memory` fact and an identical `session_memory` row are not duplicates: session rows are TTL-swept, so folding the user fact into one loses it once the session row decays.
+    #[tokio::test]
+    async fn test_find_duplicates_does_not_group_across_memory_scopes() {
+        let substrate = MemorySubstrate::open_in_memory(0.1).unwrap();
+        let store = ProactiveMemoryStore::with_default_config(Arc::new(substrate));
+        let agent = AgentId::new();
+        for scope in [scopes::USER, scopes::SESSION] {
+            store
+                .semantic
+                .remember(
+                    agent,
+                    "User prefers metric units",
+                    MemorySource::Conversation,
+                    scope,
+                    HashMap::new(),
+                )
+                .unwrap();
+        }
+
+        let groups = store
+            .find_duplicates(&agent.to_string(), None)
+            .await
+            .unwrap();
+        assert!(
+            groups.iter().all(|g| g.len() < 2),
+            "user_memory and session_memory rows must not be grouped: {groups:?}"
+        );
+        assert_eq!(store.consolidate(&agent.to_string()).await.unwrap(), 0);
+        assert_eq!(store.count(&agent.to_string(), None).unwrap(), 2);
+    }
+
     /// `consolidate` must not merge near-duplicates that belong to different tenants (peer, chat scope or session scope): the losing row would be soft-deleted beyond the reach of its own tenant's reads.
     #[tokio::test]
     async fn test_consolidate_does_not_merge_across_tenants() {
