@@ -1113,6 +1113,7 @@ async fn test_engine_compaction_honours_the_callers_resolved_config() {
                 usage: TokenUsage::default(),
                 actual_provider: None,
                 actual_model: None,
+                text_synthesized_from_thinking: false,
             })
         }
     }
