@@ -61,7 +61,7 @@ pub use self::types::{AgentLoopResult, ExperimentContext, LoopOptions, LoopPhase
 
 use self::end_turn::{
     build_silent_agent_loop_result, classify_end_turn_retry, finalize_end_turn_text,
-    finalize_successful_end_turn, gated_proactive_memory_for_memorize,
+    finalize_iteration_cap_text, finalize_successful_end_turn, gated_proactive_memory_for_memorize,
     gated_proactive_memory_for_retrieve, maybe_fold_stale_tool_results, session_recall_scope,
     EndTurnRetry, EndTurnRetryContext, FinalizeEndTurnContext, FinalizeEndTurnResultData,
 };
@@ -346,6 +346,12 @@ fn sanitize_agent_label(name: &str) -> String {
 /// Maps the loop result to a stable metric `reason` label; no `empty_response` branch (empty replies retry in-loop and land on `completed`).
 fn classify_exit_reason(result: &LibreFangResult<AgentLoopResult>) -> &'static str {
     match result {
+        // #8556: the loop now returns `Ok` when it exhausts its iteration
+        // budget and delivers the best-so-far text, so without this arm the
+        // `max_iterations` reason would never be counted again. The flag is
+        // the only thing that distinguishes a capped turn from an ordinary
+        // completed one.
+        Ok(r) if r.hit_iteration_cap => "max_iterations",
         Ok(_) => "completed",
         Err(LibreFangError::MaxIterationsExceeded(_)) => "max_iterations",
         Err(LibreFangError::RepeatedToolFailures { .. }) => "repeated_tool_failures",
@@ -717,6 +723,12 @@ async fn run_agent_loop_inner(
 ) -> LibreFangResult<AgentLoopResult> {
     info!(agent = %manifest.name, "Starting agent loop");
 
+    // Wall-clock start of the turn, used by the iteration-cap exit to report a
+    // real `latency_ms` (#8556 review P7). Ordinary exits leave `latency_ms`
+    // at 0 because the kernel overwrites it after the loop; the cap exit
+    // reports its own so a direct runtime caller sees a real figure.
+    let turn_start = Instant::now();
+
     // Start index of new messages added during this turn. Initialized to
     // current session length so early returns (before the user message is
     // pushed) expose an empty slice to callers. Updated after
@@ -728,6 +740,7 @@ async fn run_agent_loop_inner(
     // Early return if driver is not configured
     if !driver.is_configured() {
         return Ok(AgentLoopResult {
+            hit_iteration_cap: false,
             silent: true,
             provider_not_configured: true,
             new_messages_start,
@@ -1204,6 +1217,7 @@ async fn run_agent_loop_inner(
         if opts.interrupt.as_ref().is_some_and(|i| i.is_cancelled()) {
             debug!(iteration, "Agent loop interrupted by session cancel signal");
             return Ok(AgentLoopResult {
+                hit_iteration_cap: false,
                 silent: true,
                 new_messages_start,
                 ..Default::default()
@@ -1599,6 +1613,7 @@ async fn run_agent_loop_inner(
             forced_tools_stripped_this_turn,
             response.stop_reason,
             response.tool_calls.is_empty(),
+            response.text_synthesized_from_thinking,
         ) {
             let recovered = recover_text_tool_calls(&response.text(), available_tools);
             if !recovered.is_empty() {
@@ -2310,6 +2325,7 @@ async fn run_agent_loop_inner(
                     };
                     fire_hook_best_effort(hooks, &ctx);
                     return Ok(AgentLoopResult {
+                        hit_iteration_cap: false,
                         response: text,
                         total_usage,
                         iterations: iteration + 1,
@@ -2369,9 +2385,23 @@ async fn run_agent_loop_inner(
         }
     }
 
-    // Save session before failing so conversation history is preserved.
-    // Fork and incognito turns skip — both are ephemeral and must not
-    // pollute canonical session history even when the loop bailed out.
+    // The iteration budget is exhausted.
+    // Rather than failing with `MaxIterationsExceeded` — which reaches the kernel's Err arm, alerts operators only, and leaves the user with silence — deliver the prose accumulated from intermediate tool_use iterations, marked as cut off.
+    // The `hit_iteration_cap` flag lets the kernel surface an operator notification while the user still receives the partial answer (#8556).
+    let (text, cap_notice) = finalize_iteration_cap_text(&accumulated_text, max_iterations);
+    warn!(
+        agent = %manifest.name,
+        iterations = max_iterations,
+        response_len = text.len(),
+        "Max iterations reached — delivering best-so-far response"
+    );
+
+    // #8556 review P6: the accumulated prose was already committed to the session by each tool-use turn's `StagedToolUseTurn::commit`, so re-pushing it here would duplicate it on reload.
+    // Only the cut-off notice is new; persist it as the turn's closing assistant message so a reload, and the model on the next turn, both see that this turn did not finish.
+    session.push_message(Message::assistant(&cap_notice));
+
+    // Persist. Fork and incognito turns skip — both are ephemeral and must
+    // not pollute canonical session history.
     repair_session_before_save(session, agent_id_str.as_str(), "max_iterations");
     if !opts.is_fork && !opts.incognito {
         if let Err(e) = memory.save_session_async(session).await {
@@ -2379,21 +2409,52 @@ async fn run_agent_loop_inner(
         }
     }
 
-    // Fire AgentLoopEnd hook on max iterations exceeded
+    // Fire AgentLoopEnd hook on max iterations reached — with delivery.
     let ctx = crate::hooks::HookContext {
         agent_name: &manifest.name,
         agent_id: agent_id_str.as_str(),
         event: librefang_types::agent::HookEvent::AgentLoopEnd,
         data: serde_json::json!({
+            // Kept as the pre-#8556 value so hook scripts filtering on it still match; `delivered` says the partial response now reaches the user.
             "reason": "max_iterations_exceeded",
+            "delivered": true,
             "iterations": max_iterations,
             "session_id": session.id.to_string(),
             "is_fork": opts.is_fork,
+            "response_length": text.len(),
         }),
     };
     fire_hook_best_effort(hooks, &ctx);
 
-    Err(LibreFangError::MaxIterationsExceeded(max_iterations))
+    // #8556 review P4: mirror `finalize_successful_end_turn`, which fires
+    // `LoopPhase::Done` at the end of a normal turn. Consumers keyed on
+    // "done" must see a capped turn complete too.
+    if let Some(cb) = on_phase {
+        cb(LoopPhase::Done);
+    }
+
+    Ok(AgentLoopResult {
+        response: text,
+        total_usage,
+        iterations: max_iterations,
+        cost_usd: None,
+        silent: false,
+        directives: Default::default(),
+        // A capped turn never finished, so it must not seed a background skill review from its trajectory (#8556).
+        skill_evolution_suggested: false,
+        decision_traces,
+        memories_saved,
+        memories_used,
+        memory_conflicts,
+        provider_not_configured: false,
+        experiment_context: experiment_context.clone(),
+        latency_ms: turn_start.elapsed().as_millis() as u64,
+        new_messages_start,
+        owner_notice: std::mem::take(&mut pending_owner_notice),
+        actual_provider: last_actual_provider.clone(),
+        actual_model: last_actual_model.clone(),
+        hit_iteration_cap: true,
+    })
 }
 
 #[cfg(test)]

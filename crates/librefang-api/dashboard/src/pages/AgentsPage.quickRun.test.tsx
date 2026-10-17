@@ -151,6 +151,7 @@ vi.mock("../lib/mutations/agents", () => ({
   useDeleteAgentAvatar: () => ({ mutate: vi.fn(), mutateAsync: vi.fn(), isPending: false }),
   useUpdateAgentIdentity: () => ({ mutate: vi.fn(), isPending: false }),
   useUploadAgentAvatar: () => ({ mutate: vi.fn(), isPending: false }),
+  useRestoreAgentManifestVersion: () => ({ mutate: vi.fn(), isPending: false }),
 }));
 vi.mock("../lib/mutations/prompts", () => ({
   useBindPromptVersionToAgent: () => ({ mutate: vi.fn(), isPending: false }),

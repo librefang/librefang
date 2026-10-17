@@ -942,6 +942,7 @@ key_required = true
             ) -> Result<CompletionResponse, LlmError> {
                 *self.0.lock().unwrap() = Some(req.model.clone());
                 Ok(CompletionResponse {
+                    text_synthesized_from_thinking: false,
                     content: vec![ContentBlock::Text {
                         text: "ok".to_string(),
                         provider_metadata: None,

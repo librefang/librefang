@@ -1,0 +1,3 @@
+Echo `reasoning_content` from every historical assistant turn with a Thinking block on DeepSeek V4 thinking models, not just the turns carrying `tool_calls`.
+DeepSeek's current contract requires the full echo whenever the request carries `tools` — "even for turns where the model did not perform a tool call" — and answers 400 "The reasoning_content in the thinking mode must be passed back to the API." when any previous turn's reasoning is missing.
+A session therefore worked through its first tool loop and broke from the second user turn on, once a text-only final-answer turn was part of the replayed history (#8639) (@DaBlitzStein)

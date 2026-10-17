@@ -60,6 +60,44 @@ fn register_agent_watcher_slot(
     guard.push(handle);
 }
 
+/// Re-serialize a patched `agent.toml` into the canonical layout `persist_full_manifest_at` records, so suspend/resume history rows are directly comparable with the `update` rows they sit next to.
+///
+/// `persist_agent_enabled` writes the operator's file with only the root `enabled` value patched, preserving comments and key order.
+/// Snapshotting that text verbatim would make consecutive rows alternate between the operator's layout and the serializer's, so the History tab would report nearly every line as changed when only `enabled` moved.
+///
+/// Falls back to the raw text when the file does not parse; by then the caller has already written it, so the best available record is what is on disk.
+fn normalize_manifest_toml(content: &str) -> String {
+    match toml::from_str::<librefang_types::agent::AgentManifest>(content) {
+        Ok(manifest) => toml::to_string_pretty(&manifest).unwrap_or_else(|_| content.to_string()),
+        Err(_) => content.to_string(),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct RootEnabledDocument {
+    #[serde(default)]
+    enabled: Option<toml::Spanned<bool>>,
+}
+
+/// Set the root-level `enabled` key of an `agent.toml` to `enabled`, leaving every other byte of the file as written.
+///
+/// Only the root key is touched.
+/// The previous line-based patch rewrote every line starting with `enabled`, which also flipped `[skill_workshop] enabled`, each `[[triggers]] enabled` and `[rl_export] enabled`, so a suspend disabled every declarative trigger and a resume switched on the default-off skill workshop.
+/// The value is located by its span in the parsed document, so comments, key order and nested tables survive.
+/// A file without a root `enabled` gets one prepended, because a root key written after the first table header would belong to that table.
+fn patch_root_enabled(source: &str, enabled: bool) -> Result<String, toml::de::Error> {
+    let document: RootEnabledDocument = toml::from_str(source)?;
+    let value = if enabled { "true" } else { "false" };
+    Ok(match document.enabled {
+        Some(current) => {
+            let mut patched = source.to_string();
+            patched.replace_range(current.span(), value);
+            patched
+        }
+        None => format!("enabled = {value}\n{source}"),
+    })
+}
+
 /// The request a turn sends, as automatic compaction prices it (#8519).
 ///
 /// The agent loop's overflow guard estimates the history together with the system prompt and every tool schema the turn offers, so a compaction threshold that leaves either out is crossed later than the guard's, by exactly the size of the tool set.
@@ -328,7 +366,7 @@ impl LibreFangKernel {
     }
 
     /// Write enabled flag to agent's TOML file.
-    fn persist_agent_enabled(&self, _agent_id: AgentId, name: &str, enabled: bool) {
+    fn persist_agent_enabled(&self, agent_id: AgentId, name: &str, enabled: bool) {
         let cfg = self.config.load();
         // Check both workspaces/agents/ and workspaces/hands/ directories
         let agents_path = cfg
@@ -348,26 +386,33 @@ impl LibreFangKernel {
         };
         match std::fs::read_to_string(&toml_path) {
             Ok(content) => {
-                // Simple: replace or append enabled field
-                let new_content = if content.contains("enabled =") || content.contains("enabled=") {
-                    content
-                        .lines()
-                        .map(|line| {
-                            if line.trim_start().starts_with("enabled") && line.contains('=') {
-                                format!("enabled = {enabled}")
-                            } else {
-                                line.to_string()
-                            }
-                        })
-                        .collect::<Vec<_>>()
-                        .join("\n")
-                } else {
-                    // Append after [agent] section or at end
-                    format!("{content}\nenabled = {enabled}\n")
+                let new_content = match patch_root_enabled(&content, enabled) {
+                    Ok(patched) => patched,
+                    Err(e) => {
+                        warn!("Refusing to rewrite agent TOML for {name} while persisting enabled={enabled}: {e}");
+                        return;
+                    }
+                };
+                // Suspend/resume rewrites `agent.toml` outside `persist_full_manifest_at`, so it must record its own history snapshot or the one path an operator toggles from the dashboard would be missing from the History tab.
+                // Record the serializer's canonical layout, not `new_content` (the operator's file with the `enabled` line patched), so this row is comparable with the `update` rows it sits next to instead of differing on every comment and key.
+                let snapshot = normalize_manifest_toml(&new_content);
+                let change_source = if enabled { "resume" } else { "suspend" };
+                let store =
+                    librefang_memory::ManifestVersionStore::new(self.memory.substrate.pool());
+                let record = |source: &str| {
+                    if let Err(e) =
+                        store.record_version(&agent_id.to_string(), name, &snapshot, source)
+                    {
+                        warn!("Failed to record manifest version snapshot for {name}: {e}");
+                    }
                 };
                 if let Err(e) = atomic_write_toml(&toml_path, &new_content) {
                     warn!("Failed to persist enabled={enabled} for {name}: {e}");
+                    // The registry has already moved (suspend/resume call `set_state` first), so a disk-write failure leaves state and disk disagreeing; record the attempted snapshot as `*-persist-failed` so the History tab can show it rather than going silent.
+                    record(&format!("{change_source}-persist-failed"));
+                    return;
                 }
+                record(change_source);
             }
             Err(e) => warn!("Failed to read agent TOML for {name}: {e}"),
         }
@@ -1177,5 +1222,62 @@ mod tests {
             .expect("watcher registered after agent removal was not aborted")
             .expect("watcher dropped without signaling");
         assert!(slot.lock().unwrap().is_empty());
+    }
+
+    const MANIFEST_WITH_NESTED_FLAGS: &str = r#"# operator comment
+name = "nested"
+enabled = true
+module = "builtin:chat"
+
+[model]
+provider = "openai"
+model = "gpt-4o"
+
+[skill_workshop]
+enabled = false
+
+[[triggers]]
+name = "on-spawn"
+pattern = "lifecycle"
+enabled = true
+
+[rl_export]
+enabled = false
+"#;
+
+    #[test]
+    fn patch_root_enabled_rewrites_only_the_root_key() {
+        let patched = super::patch_root_enabled(MANIFEST_WITH_NESTED_FLAGS, false).expect("patch");
+        let expected = MANIFEST_WITH_NESTED_FLAGS.replacen(
+            "name = \"nested\"\nenabled = true",
+            "name = \"nested\"\nenabled = false",
+            1,
+        );
+        assert_eq!(patched, expected);
+
+        let value: toml::Value = toml::from_str(&patched).expect("patched file parses");
+        assert_eq!(value["enabled"].as_bool(), Some(false));
+        assert_eq!(value["skill_workshop"]["enabled"].as_bool(), Some(false));
+        assert_eq!(value["triggers"][0]["enabled"].as_bool(), Some(true));
+        assert_eq!(value["rl_export"]["enabled"].as_bool(), Some(false));
+
+        let resumed = super::patch_root_enabled(&patched, true).expect("patch back");
+        assert_eq!(resumed, MANIFEST_WITH_NESTED_FLAGS);
+    }
+
+    #[test]
+    fn patch_root_enabled_prepends_a_missing_root_key_instead_of_appending_into_the_last_table() {
+        let source = "name = \"bare\"\n\n[skill_workshop]\nenabled = true\n";
+        let patched = super::patch_root_enabled(source, false).expect("patch");
+        assert_eq!(patched, format!("enabled = false\n{source}"));
+
+        let value: toml::Value = toml::from_str(&patched).expect("patched file parses");
+        assert_eq!(value["enabled"].as_bool(), Some(false));
+        assert_eq!(value["skill_workshop"]["enabled"].as_bool(), Some(true));
+    }
+
+    #[test]
+    fn patch_root_enabled_refuses_a_file_that_does_not_parse() {
+        assert!(super::patch_root_enabled("name = \"broken\n[", true).is_err());
     }
 }

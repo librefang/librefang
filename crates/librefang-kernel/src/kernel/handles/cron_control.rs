@@ -179,14 +179,13 @@ impl kernel_handle::CronControl for LibreFangKernel {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::super::super::LibreFangKernel;
     use librefang_runtime::kernel_handle::CronControl;
     use librefang_types::config::KernelConfig;
 
     /// An agent-authored job must not be able to point the daemon-spawned wake gate at an executable outside `<home>/scripts/`.
-    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
     async fn cron_create_rejects_pre_check_script_outside_scripts_allowlist() {
         let dir = tempfile::tempdir().unwrap();

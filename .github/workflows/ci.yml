@@ -222,19 +222,6 @@ jobs:
             FULL_TEST=false; TREASON="selective"
           fi
 
-          {
-            echo "rust=$RUST"
-            echo "docs=$DOCS"
-            echo "ci=$CI"
-            echo "install=$INSTALL"
-            echo "full_run=$FULL"
-            echo "full_test=$FULL_TEST"
-            echo "skill_sdk=$SKILL_SDK"
-            echo "sidecar_rust=$SIDECAR_RUST"
-            echo "sdk_python=$SDK_PYTHON"
-          } >> "$GITHUB_OUTPUT"
-          echo "Route: full_run=$FULL ($REASON), full_test=$FULL_TEST ($TREASON)"
-
           # Directly-touched crates (no downstream fan-out — on purpose).
           DIRECT=$(printf '%s\n' "$CHANGED" \
             | sed -n 's|^crates/\([A-Za-z0-9_-][A-Za-z0-9_-]*\)/.*|\1|p' \
@@ -264,6 +251,28 @@ jobs:
 
           echo "crates=$DIRECT" >> "$GITHUB_OUTPUT"
           echo "Affected crates: ${DIRECT:-<none>}"
+
+          # A selective run puts every affected crate on one runner (only shard 1 runs), which is right for the usual one-to-three-crate PR but not for a sweep.
+          # A PR touching most of the workspace compiles nearly everything on that one runner and then runs the whole suite serially, which overran the 45-minute job budget even with every test passing (#8588).
+          # Past this many directly-touched crates the sharded full run is cheaper in wall-clock than the selective one, so switch to it.
+          WIDE_SELECTIVE_THRESHOLD=8
+          DIRECT_COUNT=$(printf '%s\n' $DIRECT | grep -c . || true)
+          if [ "$FULL_TEST" = "false" ] && [ "$DIRECT_COUNT" -ge "$WIDE_SELECTIVE_THRESHOLD" ]; then
+            FULL_TEST=true; TREASON="$DIRECT_COUNT crates affected (>= $WIDE_SELECTIVE_THRESHOLD): sharded full run"
+          fi
+
+          {
+            echo "rust=$RUST"
+            echo "docs=$DOCS"
+            echo "ci=$CI"
+            echo "install=$INSTALL"
+            echo "full_run=$FULL"
+            echo "full_test=$FULL_TEST"
+            echo "skill_sdk=$SKILL_SDK"
+            echo "sidecar_rust=$SIDECAR_RUST"
+            echo "sdk_python=$SDK_PYTHON"
+          } >> "$GITHUB_OUTPUT"
+          echo "Route: full_run=$FULL ($REASON), full_test=$FULL_TEST ($TREASON)"
 
   # ── Reject dashboard build artifacts in PRs ────────────────────────────────────
   no-build-artifacts:
@@ -846,7 +855,7 @@ jobs:
         with:
           version: 12
       # No `cache: pnpm`: this job only runs `pnpm audit`, which never populates the store, so there is nothing to cache. pnpm 12 does not even create the store directory, and setup-node's post-job save then fails the job with "Path Validation Error".
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v6
         with:
           node-version: 24
       - name: Run security audit
@@ -870,6 +879,7 @@ jobs:
             --ignore RUSTSEC-2023-0086 \
             --ignore RUSTSEC-2024-0370 \
             --ignore RUSTSEC-2023-0071 \
+            --ignore RUSTSEC-2024-0449 \
             --web
 
   # ── Secrets scanning (independent) ─────────────────────────────────────────────

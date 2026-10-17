@@ -844,7 +844,7 @@ pub fn set_agent_enabled(
             return Err(e);
         }
     }
-    kernel.persist_manifest_to_disk(agent_id);
+    kernel.persist_manifest_to_disk(agent_id, "auto-dream");
     kernel.audit_log().record(
         agent_id.to_string(),
         librefang_runtime::audit::AuditAction::ConfigChange,

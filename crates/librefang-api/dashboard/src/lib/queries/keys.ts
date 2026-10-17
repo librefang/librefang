@@ -92,6 +92,10 @@ export const agentKeys = {
   // configured on this instance".
   channels: (agentId: string) =>
     [...agentKeys.all, "channels", agentId] as const,
+  // Manifest version history (#8041) — nested under `detail(agentId)`, not a sibling of it: every control-plane write that records a snapshot already invalidates the agent's detail, so the History tab refreshes itself.
+  // As a sibling it would need each mutation to remember a second, explicit invalidation and would sit stale after the very edit that added a row.
+  manifestHistory: (agentId: string) =>
+    [...agentKeys.detail(agentId), "manifestHistory"] as const,
   // The avatar image itself (#8339), cached as a Blob because
   // `GET /api/agents/{id}/avatar` is authenticated and an `<img src>` carries
   // no bearer token. Its own subtree rather than a leaf under `detail(id)`:
@@ -119,6 +123,24 @@ export const agentKeys = {
 export const agentAvatarKeys = {
   all: ["agentAvatars"] as const,
   avatar: (agentId: string) => [...agentAvatarKeys.all, agentId] as const,
+};
+
+// Workspace identity file bytes — `GET|PUT /api/agents/{id}/files/{filename}`
+// (`crates/librefang-api/src/routes/agents/files.rs`). A separate domain from
+// `agentKeys` on purpose: the write replaces a file in the agent's workspace
+// and does not touch the manifest, so a save must not invalidate the agent
+// detail, the manifest cache or any of the per-agent subtrees above.
+//
+// The listing (`GET /api/agents/{id}/files`) reports per-file `exists` and
+// `size_bytes`, both of which a write changes — hence `lists()` in the
+// mutation's invalidation even though the editor itself only reads one file.
+export const agentFileKeys = {
+  all: ["agentFiles"] as const,
+  lists: () => [...agentFileKeys.all, "list"] as const,
+  list: (agentId: string) => [...agentFileKeys.lists(), agentId] as const,
+  details: () => [...agentFileKeys.all, "detail"] as const,
+  detail: (agentId: string, filename: string) =>
+    [...agentFileKeys.details(), agentId, filename] as const,
 };
 
 // Central prompt repository (#6160). The fleet-wide overview
@@ -161,15 +183,11 @@ export const modelKeys = {
 };
 
 // Profile-based model routing. `profiles()` is the kernel-wide catalog
-// (builtin asset + `~/.librefang/model_profiles.toml`); `agent(id)` is one
-// agent's mode + router override. Both hang off `all` so a mutation can
-// invalidate the whole domain in a single call.
+// (builtin asset + `~/.librefang/model_profiles.toml`).
 export const modelRouterKeys = {
   all: ["modelRouter"] as const,
   lists: () => [...modelRouterKeys.all, "list"] as const,
   profiles: () => [...modelRouterKeys.lists(), "profiles"] as const,
-  details: () => [...modelRouterKeys.all, "detail"] as const,
-  agent: (agentId: string) => [...modelRouterKeys.details(), agentId] as const,
 };
 
 export const providerKeys = {
@@ -566,15 +584,9 @@ export const authzKeys = {
   all: ["authz"] as const,
   effectives: () => [...authzKeys.all, "effective"] as const,
   effective: (name: string) => [...authzKeys.effectives(), name] as const,
-  // The calling credential's own identity. A sibling of `effectives()` rather
-  // than a member of it: every `effective` key is one per named subject, and
-  // "who am I" takes no subject argument.
+  // The calling credential's own identity (#8339). A sibling of `effectives()` rather than a member of it: every `effective` key is one per named subject, and "who am I" takes no subject argument.
   //
-  // The user mutations invalidate this one — the emoji patch, both image
-  // writes, and the bulk import through `authzKeys.all` — because `emoji` and
-  // `has_avatar` are answers only this read carries. It is also `gcTime: 0` (see
-  // `authzQueries.whoami`), which keeps a stale copy from outliving the page
-  // that read it.
+  // The user mutations invalidate this one — the emoji patch, both image writes, and the bulk import through `authzKeys.all` — because `emoji` and `has_avatar` are answers only this read carries. It is also `gcTime: 0` (see `authzQueries.whoami`), which keeps a stale copy from outliving the page that read it — the credential can change while the SPA is loaded.
   whoami: () => [...authzKeys.all, "whoami"] as const,
 };
 

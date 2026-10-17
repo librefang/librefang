@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  agentFileKeys,
   agentKeys,
   agentTypeKeys,
   modelKeys,
@@ -119,6 +120,55 @@ describe("query key factories", () => {
       const l = agentKeys.list({ includeHands: false });
       const ls = agentKeys.lists();
       expect(l.slice(0, ls.length)).toEqual(ls);
+    });
+  });
+
+  describe("agentFileKeys", () => {
+    it("generates hierarchical keys", () => {
+      expect(agentFileKeys.all).toEqual(["agentFiles"]);
+      expect(agentFileKeys.lists()).toEqual(["agentFiles", "list"]);
+      expect(agentFileKeys.list("abc")).toEqual(["agentFiles", "list", "abc"]);
+      expect(agentFileKeys.details()).toEqual(["agentFiles", "detail"]);
+      expect(agentFileKeys.detail("abc", "IDENTITY.md")).toEqual([
+        "agentFiles",
+        "detail",
+        "abc",
+        "IDENTITY.md",
+      ]);
+    });
+
+    it("detail is nested under details", () => {
+      const d = agentFileKeys.detail("abc", "IDENTITY.md");
+      const ds = agentFileKeys.details();
+      expect(d.slice(0, ds.length)).toEqual(ds);
+    });
+
+    it("list is nested under lists", () => {
+      const l = agentFileKeys.list("abc");
+      const ls = agentFileKeys.lists();
+      expect(l.slice(0, ls.length)).toEqual(ls);
+    });
+
+    // The file write serves one agent's one file; a save must not invalidate
+    // another agent's cached read.
+    it("scopes detail per agent and per filename", () => {
+      expect(agentFileKeys.detail("abc", "IDENTITY.md")).not.toEqual(
+        agentFileKeys.detail("xyz", "IDENTITY.md"),
+      );
+      expect(agentFileKeys.detail("abc", "IDENTITY.md")).not.toEqual(
+        agentFileKeys.detail("abc", "SOUL.md"),
+      );
+    });
+
+    // Separate domain from `agentKeys` on purpose: writing a workspace file
+    // does not touch the agent manifest, and sharing the `agents` prefix would
+    // make `agentKeys.all` invalidation refetch every file read (and vice
+    // versa) on unrelated edits.
+    it("does not share a prefix with agentKeys", () => {
+      expect(agentFileKeys.all).not.toEqual(agentKeys.all);
+      expect(
+        agentFileKeys.detail("abc", "IDENTITY.md").slice(0, 1),
+      ).not.toEqual(agentKeys.all);
     });
   });
 
@@ -518,6 +568,7 @@ describe("query key factories", () => {
   describe("all factories exist", () => {
     const factories = [
       agentKeys,
+      agentFileKeys,
       agentTypeKeys,
       modelKeys,
       providerKeys,

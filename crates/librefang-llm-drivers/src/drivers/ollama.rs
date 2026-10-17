@@ -775,6 +775,7 @@ impl LlmDriver for OllamaDriver {
         );
 
         Ok(CompletionResponse {
+            text_synthesized_from_thinking: false,
             content: content_blocks,
             stop_reason,
             tool_calls,
@@ -1024,6 +1025,7 @@ impl LlmDriver for OllamaDriver {
             .await;
 
         Ok(CompletionResponse {
+            text_synthesized_from_thinking: false,
             content: content_blocks,
             stop_reason,
             tool_calls,

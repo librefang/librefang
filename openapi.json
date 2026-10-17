@@ -7,7 +7,7 @@
       "name": "MIT",
       "url": "https://opensource.org/licenses/MIT"
     },
-    "version": "2026.9.19"
+    "version": "2026.10.16"
   },
   "paths": {
     "/.well-known/agent.json": {
@@ -821,7 +821,7 @@
           }
         ],
         "requestBody": {
-          "description": "Partial agent fields to update",
+          "description": "Partial agent fields to update. `expected_version` (optional) is the `ETag` from `GET /api/agents/{id}/manifest`; a mismatch answers 409 (#8424).",
           "content": {
             "application/json": {
               "schema": {
@@ -834,6 +834,16 @@
         "responses": {
           "200": {
             "description": "Partially update an agent (name, description, model, system prompt)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The manifest changed after this editor read it; reload before saving (#8424)",
             "content": {
               "application/json": {
                 "schema": {
@@ -1121,7 +1131,7 @@
           }
         ],
         "requestBody": {
-          "description": "Object containing the channel allowlist",
+          "description": "Object containing the channel allowlist. `expected_version` (optional) is the `ETag` from `GET /api/agents/{id}/manifest`; a mismatch answers 409 (#8424).",
           "content": {
             "application/json": {
               "schema": {
@@ -1144,6 +1154,16 @@
           },
           "400": {
             "description": "Malformed request body",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The `expected_version` no longer matches the live manifest; another writer saved after the read. Reload and re-apply (#8424)",
             "content": {
               "application/json": {
                 "schema": {
@@ -2012,6 +2032,115 @@
         }
       }
     },
+    "/api/agents/{id}/manifest-history": {
+      "get": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "GET /api/agents/{id}/manifest-history — how this agent's config changed over time.",
+        "description": "Returns an array of manifest snapshots, newest first.\nEach entry carries the full TOML so the dashboard can render a diff between consecutive versions and offer a one-click restore.",
+        "operationId": "list_agent_manifest_history",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Agent UUID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Max entries to return (default 30, max 200)",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Manifest version history, newest first",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid agent id or limit"
+          },
+          "404": {
+            "description": "Agent not found or not accessible to the caller"
+          }
+        }
+      }
+    },
+    "/api/agents/{id}/manifest-history/{version_id}/restore": {
+      "post": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "POST /api/agents/{id}/manifest-history/{version_id}/restore — roll an agent's manifest back to a stored snapshot.",
+        "description": "Mirrors `restore_template_version`: the stored TOML is parsed and applied through `restore_manifest_snapshot`, which re-runs the module-path security check, preserves the runtime-only fields (name, tags, workspace, resolved `exec_policy`, current `enabled`) and persists the result — the restore itself is recorded in the history as a fresh `restore` snapshot.\nUnlike a plain `update_manifest`, the restore also reconciles the runtime side effects a changed snapshot implies: the background loop is stopped and restarted on a schedule change, named workspaces are created on a workspaces change, and the canonical session is dropped on a model or endpoint change.",
+        "operationId": "restore_agent_manifest_version",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Agent UUID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "version_id",
+            "in": "path",
+            "description": "Version row id to restore",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Agent manifest restored",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid agent id"
+          },
+          "404": {
+            "description": "Agent or version not found, the version belongs to another agent, or the agent is not accessible to the caller"
+          },
+          "423": {
+            "description": "This agent is provisioned by the deployment; its manifest cannot be changed through the API",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/agents/{id}/mcp_servers": {
       "get": {
         "tags": [
@@ -2060,7 +2189,7 @@
           }
         ],
         "requestBody": {
-          "description": "Object containing the MCP server allowlist",
+          "description": "Object containing the MCP server allowlist. `expected_version` (optional) is the `ETag` from `GET /api/agents/{id}/manifest`; a mismatch answers 409 (#8424).",
           "content": {
             "application/json": {
               "schema": {
@@ -2083,6 +2212,16 @@
           },
           "400": {
             "description": "Malformed request body",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The `expected_version` no longer matches the live manifest; another writer saved after the read. Reload and re-apply (#8424)",
             "content": {
               "application/json": {
                 "schema": {
@@ -3335,11 +3474,11 @@
           }
         ],
         "requestBody": {
-          "description": "Array of skill names",
+          "description": "Object with the `skills` array to store. `expected_version` (optional) is the `ETag` from `GET /api/agents/{id}/manifest`; a mismatch answers 409 (#8424).",
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/JsonArray"
+                "$ref": "#/components/schemas/JsonObject"
               }
             }
           },
@@ -3348,6 +3487,16 @@
         "responses": {
           "200": {
             "description": "Update an agent's skill allowlist",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The `expected_version` no longer matches the live manifest; another writer saved after the read. Reload and re-apply (#8424)",
             "content": {
               "application/json": {
                 "schema": {
@@ -3524,6 +3673,16 @@
         "responses": {
           "200": {
             "description": "Updated tool configuration, echoing the stored `capabilities_tools`, `tool_allowlist`, `tool_blocklist` and `disabled` values. Carries an additional `warnings` array of strings naming each stored `tool_allowlist` entry that provably cannot admit any tool; the key is absent when there is nothing to report. The check runs whenever the request submits `tool_allowlist` or `capabilities_tools` — narrowing the grant surface is itself a way to render a stored entry inert — and is skipped for a request that submits only `tool_blocklist` or only `disabled`, and for an agent left with `tools_disabled = true`, where no allowlist entry can admit anything anyway.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The `expected_version` no longer matches the live manifest; another writer saved after the read. Reload and re-apply (#8424)",
             "content": {
               "application/json": {
                 "schema": {
@@ -15492,6 +15651,16 @@
                 }
               }
             }
+          },
+          "500": {
+            "description": "The stored image could not be removed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
           }
         }
       }
@@ -17440,6 +17609,7 @@
           "task",
           "response",
           "status",
+          "truncated",
           "provider",
           "model",
           "iterations",
@@ -17521,6 +17691,10 @@
           "tool_calls": {
             "type": "integer",
             "format": "int64"
+          },
+          "truncated": {
+            "type": "boolean",
+            "description": "True when the worker hit its per-turn iteration cap and delivered a\npartial answer (#8556) — the run completed, but was cut off."
           },
           "worker_name": {
             "type": "string",
@@ -18322,6 +18496,13 @@
               "type": "string"
             },
             "description": "`channel_type` strings the agent may receive messages from.\nAn empty list clears the allowlist, which means \"all channels\" (`mode = \"all\"`)."
+          },
+          "expected_version": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Manifest ETag from `GET /api/agents/{id}/manifest` (#8424).\nWhen present and no longer current the request is refused with 409 instead of silently overwriting a write made after the read."
           }
         },
         "additionalProperties": false
@@ -18346,6 +18527,13 @@
           "mcp_servers"
         ],
         "properties": {
+          "expected_version": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Manifest ETag from `GET /api/agents/{id}/manifest` (#8424).\nWhen present and no longer current the request is refused with 409 instead of silently overwriting a write made after the read."
+          },
           "mcp_servers": {
             "type": "array",
             "items": {
@@ -18376,6 +18564,13 @@
               "null"
             ],
             "description": "`agent.toml: tools_disabled` — the master switch that removes every tool from the agent before any of the three filters above are consulted.\n`None` = no change, `Some(true)` = disable all tools, `Some(false)` = re-enable them.\n\nNamed `disabled` to match the key `GET /api/agents/{id}/tools` already returns.\nUntil #7742 the GET returned it and no request could write it, and every successful write forced it back to `false` — so an operator editing a blocklist re-enabled every tool without asking."
+          },
+          "expected_version": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Manifest ETag from `GET /api/agents/{id}/manifest` (#8424).\nWhen present and no longer current the request is refused with 409 instead of silently overwriting a write made after the read."
           },
           "tool_allowlist": {
             "type": [

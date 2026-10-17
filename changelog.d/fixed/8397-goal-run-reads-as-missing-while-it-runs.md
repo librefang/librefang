@@ -1,5 +1,0 @@
-A goal run is no longer reported as missing while it is running.
-`GoalRunner::state()` read the run registry and then took the run's own state lock with `try_lock`, so a read that arrived while the run loop was doing its bookkeeping returned `None` — the same answer the function gives for a goal that has no run at all.
-Every consumer above it renders that as "this run does not exist": `GET /api/goals/{id}/run` answered `{"running": false}` with no `run` key, and `POST /api/goals/{id}/start` read back its own new run as a failed start, which took `main` red twice on the macOS lane (#8388, #8391).
-The read now waits for that lock instead of skipping it, so `None` means the run is genuinely absent, and the wait is bounded by the loop's existing contract never to hold the lock across I/O — a contract the guard's non-`Send` type now also enforces, for the await half, at compile time.
-`POST /api/goals/{id}/start` no longer retries that readback eight times across yields: the retry existed only to step around a `try_lock` that could not wait, and one read settles it now (#8428) (@DaBlitzStein)

@@ -1385,11 +1385,12 @@ impl LibreFangKernel {
                     "ok",
                 );
 
-                // Push task_completed notification for autonomous (hand) agents
+                // Push task_completed notification for autonomous (hand) agents.
+                // A capped turn (#8556) did not complete its task; it gets the `max_iterations` notification below instead.
                 if let Some(entry) = self.agents.registry.get(agent_id) {
                     let is_autonomous = entry.tags.iter().any(|t| t.starts_with("hand:"))
                         || entry.manifest.autonomous.is_some();
-                    if is_autonomous {
+                    if is_autonomous && !result.hit_iteration_cap {
                         let name = &entry.name;
                         let msg = format!(
                             "Agent \"{}\" completed task (in={}, out={} tokens)",
@@ -1403,6 +1404,38 @@ impl LibreFangKernel {
                         )
                         .await;
                     }
+                }
+
+                // #8556: the loop hit its per-turn iteration cap and delivered
+                // the best-so-far text rather than failing. The user still got
+                // a response, but surface an operator notification so the
+                // truncation is observable (mirrors the task_completed push).
+                //
+                // Deliberately NOT `supervisor.record_panic()`: this turn did
+                // not fail — it delivered an answer — and the supervisor's only
+                // event API is the panic counter, so recording here would
+                // report a healthy partial response as a crash. The
+                // `librefang_agent_loop_exits_total{reason="max_iterations"}`
+                // counter (via `classify_exit_reason`) plus this notification
+                // are the observability surface for a capped turn.
+                if result.hit_iteration_cap {
+                    let name = self
+                        .agents
+                        .registry
+                        .get(agent_id)
+                        .map(|a| a.name.clone())
+                        .unwrap_or_else(|| agent_id.to_string());
+                    let msg = format!(
+                        "Agent \"{}\" hit the iteration cap after {} iterations — delivered a partial response",
+                        name, result.iterations
+                    );
+                    self.push_notification(
+                        &agent_id.to_string(),
+                        "max_iterations",
+                        &msg,
+                        resolved_session_id.as_ref(),
+                    )
+                    .await;
                 }
 
                 // Skill evolution: check if any skill_evolve_* tools were used
@@ -1455,7 +1488,9 @@ impl LibreFangKernel {
                 // the cooldown slot if this loop actually suggested a
                 // review AND the agent didn't already evolve a skill
                 // AND the registry isn't frozen AND auto_evolve is on.
+                // A capped turn (#8556) never finished, so its trajectory is not one to distill a skill from.
                 let eligible = result.skill_evolution_suggested
+                    && !result.hit_iteration_cap
                     && !used_evolution_tool
                     && !registry_frozen
                     && entry.manifest.auto_evolve;
@@ -3486,6 +3521,32 @@ impl LibreFangKernel {
                                 v.task_id == turn_task_id
                             });
                     }
+
+                    // #8556: mirror the non-streaming Ok arm — a capped turn
+                    // delivered a partial response; surface an operator
+                    // notification (the streaming path has no task_completed
+                    // push to hang it off).
+                    if result.hit_iteration_cap {
+                        let name = kernel_clone
+                            .agents
+                            .registry
+                            .get(agent_id)
+                            .map(|a| a.name.clone())
+                            .unwrap_or_else(|| agent_id.to_string());
+                        let msg = format!(
+                            "Agent \"{}\" hit the iteration cap after {} iterations — delivered a partial response",
+                            name, result.iterations
+                        );
+                        kernel_clone
+                            .push_notification(
+                                &agent_id.to_string(),
+                                "max_iterations",
+                                &msg,
+                                Some(&effective_session_id),
+                            )
+                            .await;
+                    }
+
                     Ok(result)
                 }
                 Err(e) => {

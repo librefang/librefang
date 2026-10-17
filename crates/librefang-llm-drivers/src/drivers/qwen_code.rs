@@ -783,6 +783,7 @@ impl QwenCodeDriver {
                 .unwrap_or_default();
             let usage = parsed.usage.unwrap_or_default();
             return Ok(CompletionResponse {
+                text_synthesized_from_thinking: false,
                 content: vec![ContentBlock::Text {
                     text: text.clone(),
                     provider_metadata: None,
@@ -805,6 +806,7 @@ impl QwenCodeDriver {
         // to dump raw JSON into the chat on fallthrough.
         let (text, usage) = extract_text_from_qwen_output(&stdout);
         Ok(CompletionResponse {
+            text_synthesized_from_thinking: false,
             content: vec![ContentBlock::Text {
                 text,
                 provider_metadata: None,
@@ -1117,6 +1119,7 @@ impl QwenCodeDriver {
             .await;
 
         Ok(CompletionResponse {
+            text_synthesized_from_thinking: false,
             content: vec![ContentBlock::Text {
                 text: full_text,
                 provider_metadata: None,

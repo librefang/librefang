@@ -2848,7 +2848,7 @@ fn materialize_hand_agent_manifest(label: &str, hand_id: &str, hand_toml: &str) 
     manifest
 }
 
-/// `ScheduleMode` has no `PartialEq`, so the schedule assertions destructure.
+/// The schedule assertions destructure so they can also pin the continuous interval, not just the variant.
 fn assert_continuous_schedule(manifest: &AgentManifest, expected_interval_secs: u64, why: &str) {
     match manifest.schedule {
         ScheduleMode::Continuous {
@@ -3459,7 +3459,7 @@ async fn resolved_exec_policy_survives_reload_and_update_manifest() {
         .clone();
     replacement.exec_policy = None;
     kernel
-        .update_manifest(agent_id, replacement)
+        .update_manifest(agent_id, replacement, "test")
         .expect("manifest update should succeed");
     assert_eq!(
         resolved_policy("after update_manifest"),
@@ -3517,7 +3517,7 @@ fn update_manifest_notifies_registry_watchers_exactly_once_per_tags_change() {
     replacement.tags = vec!["beta".to_string()];
 
     kernel
-        .update_manifest(agent_id, replacement)
+        .update_manifest(agent_id, replacement, "test")
         .expect("manifest update should succeed");
 
     assert!(
@@ -5247,7 +5247,7 @@ fn test_persist_manifest_leaves_shared_hand_toml_untouched() {
     kernel
         .set_agent_skills(agent_id, Vec::new())
         .expect("set_agent_skills should succeed");
-    kernel.persist_manifest_to_disk(agent_id);
+    kernel.persist_manifest_to_disk(agent_id, "test");
 
     assert_eq!(
         std::fs::read_to_string(&hand_toml).unwrap(),
@@ -5955,7 +5955,7 @@ fn concurrent_full_and_mcp_manifest_persists_keep_both_registry_updates() {
             None,
         )
         .expect("spawn");
-    kernel.persist_manifest_to_disk(agent_id);
+    kernel.persist_manifest_to_disk(agent_id, "test");
     register_mcp_server(&kernel, "concurrent-server");
     kernel
         .tools_ref()
@@ -6004,7 +6004,7 @@ fn concurrent_full_and_mcp_manifest_persists_keep_both_registry_updates() {
         .expect("model registry update");
     let full_writer = {
         let kernel = Arc::clone(&kernel);
-        std::thread::spawn(move || kernel.persist_manifest_to_disk(agent_id))
+        std::thread::spawn(move || kernel.persist_manifest_to_disk(agent_id, "test"))
     };
     drop(write_guard);
     mcp_writer.join().unwrap();
@@ -6014,6 +6014,53 @@ fn concurrent_full_and_mcp_manifest_persists_keep_both_registry_updates() {
         toml::from_str(&std::fs::read_to_string(toml_path).unwrap()).unwrap();
     assert_eq!(persisted.model.model, "concurrent-model");
     assert_eq!(persisted.mcp_servers, vec!["concurrent-server"]);
+    kernel.shutdown();
+}
+
+/// `set_agent_mcp_servers` patches the `mcp_servers` line in place instead of re-serializing the manifest through `persist_full_manifest_at`, so its history row is recorded on that path alone.
+/// Without it the MCP allowlist would be the one manifest change the History tab never shows.
+#[test]
+fn set_agent_mcp_servers_records_its_own_history_snapshot() {
+    let tmp = tempfile::tempdir().unwrap();
+    let toml_path = tmp.path().join("agent.toml");
+    let kernel = boot_kernel_at(tmp.path());
+    let agent_id = kernel
+        .spawn_agent_inner(
+            AgentManifest {
+                name: "mcp-history-agent".to_string(),
+                source_template: None,
+                ..Default::default()
+            },
+            None,
+            Some(toml_path.clone()),
+            None,
+        )
+        .expect("spawn");
+    // Materialise agent.toml first, so the MCP persist takes the in-place patch path rather than the missing-file full-serialize fallback.
+    kernel.persist_manifest_to_disk(agent_id, "test");
+    register_mcp_server(&kernel, "history-server");
+
+    kernel
+        .set_agent_mcp_servers(agent_id, vec!["history-server".to_string()])
+        .expect("allowlist update must persist");
+
+    let store = librefang_memory::ManifestVersionStore::new(kernel.memory.substrate.pool());
+    let versions = store.list_for_agent(&agent_id.to_string(), 10).unwrap();
+    let snapshot = versions
+        .iter()
+        .find(|version| version.change_source == "mcp-servers")
+        .unwrap_or_else(|| {
+            panic!("the in-place MCP persist must record its own history row: {versions:?}")
+        });
+    assert_eq!(
+        toml::from_str::<AgentManifest>(&snapshot.manifest_toml)
+            .expect("snapshot TOML parses as a manifest")
+            .mcp_servers,
+        vec!["history-server".to_string()],
+        "the snapshot must carry the new allowlist: {}",
+        snapshot.manifest_toml
+    );
+
     kernel.shutdown();
 }
 
@@ -10235,6 +10282,86 @@ async fn test_push_notification_health_check_failed_agent_rule_overrides_alert_c
     );
 
     kernel.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_max_iterations_notification_falls_back_to_alert_channels() {
+    // #8556: a capped turn now returns Ok with a partial answer instead of reaching the Err arm's `task_failed` push, so its `max_iterations` notification must reach `alert_channels` by default or operators lose the alert entirely.
+    let dir = tempfile::tempdir().unwrap();
+    let home_dir = dir.path().to_path_buf();
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+
+    let mut config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    config.notification = NotificationConfig {
+        approval_channels: Vec::new(),
+        alert_channels: vec![NotificationTarget {
+            channel_type: "test".to_string(),
+            recipient: "ops".to_string(),
+            thread_id: None,
+        }],
+        agent_rules: Vec::new(),
+    };
+
+    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+    let adapter = Arc::new(RecordingChannelAdapter::new("test"));
+    let sent = adapter.sent.clone();
+    kernel
+        .mesh
+        .channel_adapters
+        .insert("test".to_string(), adapter);
+
+    kernel
+        .push_notification("agent-xyz", "max_iterations", "hit the cap", None)
+        .await;
+
+    let recorded = sent.lock().unwrap().clone();
+    assert_eq!(
+        recorded,
+        vec!["ops:hit the cap".to_string()],
+        "max_iterations must fall back to alert_channels when no agent_rule matches"
+    );
+
+    kernel.shutdown();
+}
+
+#[test]
+fn test_every_alert_event_is_a_known_notification_event() {
+    // Boot validation warns about an agent_rule naming an event outside KNOWN_NOTIFICATION_EVENTS, so every event the kernel routes must be listed there.
+    let notification = NotificationConfig {
+        approval_channels: vec![NotificationTarget {
+            channel_type: "test".to_string(),
+            recipient: "approvals".to_string(),
+            thread_id: None,
+        }],
+        alert_channels: vec![NotificationTarget {
+            channel_type: "test".to_string(),
+            recipient: "ops".to_string(),
+            thread_id: None,
+        }],
+        agent_rules: Vec::new(),
+    };
+    for event in [
+        "approval_requested",
+        "task_completed",
+        "task_failed",
+        "tool_failure",
+        "health_check_failed",
+        "model_migrated",
+        "max_iterations",
+    ] {
+        assert!(
+            !super::resolve_notification_targets(&notification, "a", None, event, None).is_empty(),
+            "{event} must route to a global channel list"
+        );
+        assert!(
+            super::KNOWN_NOTIFICATION_EVENTS.contains(&event),
+            "{event} must be a known notification event"
+        );
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -14962,6 +15089,7 @@ mod try_summarize_trim_tests {
         async fn complete(&self, _req: CompletionRequest) -> Result<CompletionResponse, LlmError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             Ok(CompletionResponse {
+                text_synthesized_from_thinking: false,
                 content: vec![ContentBlock::Text {
                     text: self.summary.clone(),
                     provider_metadata: None,
@@ -16957,6 +17085,447 @@ fn suspend_resume_actually_transition_in_memory_state() {
     kernel.shutdown();
 }
 
+/// A suspend whose `agent.toml` write fails must still record the disagreement.
+/// `suspend_agent` has already moved the registry to `Suspended`, so going silent leaves the registry saying suspended, disk still saying `enabled = true`, and the History tab showing no row at all.
+///
+/// Unix-only because the write failure is produced by clearing the directory's write bit, which has no `std` equivalent on Windows.
+#[cfg(unix)]
+#[test]
+fn a_failed_suspend_write_records_a_persist_failed_snapshot() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp
+        .path()
+        .join("librefang-kernel-suspend-persist-failed-8504");
+    std::fs::create_dir_all(&home_dir).unwrap();
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    let name = "suspend-persist-failed-agent";
+    let agent_dir = config.effective_agent_workspaces_dir().join(name);
+    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+
+    let agent_id = kernel
+        .spawn_agent_inner(
+            AgentManifest {
+                name: name.to_string(),
+                source_template: None,
+                description: "exercises a failed suspend write".to_string(),
+                author: "test".to_string(),
+                module: "builtin:chat".to_string(),
+                ..Default::default()
+            },
+            None,
+            None,
+            None,
+        )
+        .expect("agent should spawn");
+
+    let store = librefang_memory::ManifestVersionStore::new(kernel.memory.substrate.pool());
+    kernel.persist_manifest_to_disk(agent_id, "test");
+    assert_eq!(
+        store
+            .list_for_agent(&agent_id.to_string(), 10)
+            .unwrap()
+            .len(),
+        1,
+        "the baseline full persist must be the only row before the failing suspend"
+    );
+
+    // Remove the directory's write bit so `atomic_write_toml`'s `create_new` staging file cannot be created.
+    // The manifest itself stays readable, which is the branch under test: read succeeds, write fails.
+    let mut perms = std::fs::metadata(&agent_dir).unwrap().permissions();
+    perms.set_mode(0o555);
+    std::fs::set_permissions(&agent_dir, perms).unwrap();
+
+    // Root (e.g. the `Dockerfile.rust-dev` flow) ignores the write bit, so the write this test depends on failing would succeed.
+    // Probe instead of checking the euid, so any other environment where the mode is not enforced is skipped the same way.
+    let probe = agent_dir.join(".write-probe");
+    if std::fs::write(&probe, b"probe").is_ok() {
+        let _ = std::fs::remove_file(&probe);
+        let mut perms = std::fs::metadata(&agent_dir).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&agent_dir, perms).unwrap();
+        eprintln!("skipping: a 0o555 directory is still writable here (running as root?)");
+        kernel.shutdown();
+        return;
+    }
+
+    let suspend_result = kernel.suspend_agent(agent_id);
+
+    let mut perms = std::fs::metadata(&agent_dir).unwrap().permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(&agent_dir, perms).unwrap();
+
+    suspend_result.expect("suspend is best-effort on the disk write and still returns Ok");
+    let after = store
+        .list_for_agent(&agent_id.to_string(), 10)
+        .expect("history read should succeed");
+    assert_eq!(
+        after.first().map(|v| v.change_source.as_str()),
+        Some("suspend-persist-failed"),
+        "a suspend whose disk write failed must record the disagreement instead of going silent: {after:?}"
+    );
+
+    kernel.shutdown();
+}
+
+/// `persist_agent_enabled` writes the operator's file with only the `enabled` value patched.
+/// Recording that text verbatim would place the operator's comments next to the `update` rows' `toml::to_string_pretty` output, so two neighbouring snapshots would differ on nearly every line when only `enabled` moved.
+/// The recorded snapshot must be the serializer's layout.
+#[test]
+fn a_suspend_snapshot_is_normalized_to_the_serializer_layout() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().join("librefang-kernel-suspend-normalized-8504");
+    std::fs::create_dir_all(&home_dir).unwrap();
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    let name = "suspend-normalized-agent";
+    let manifest_path = config
+        .effective_agent_workspaces_dir()
+        .join(name)
+        .join("agent.toml");
+    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+
+    let agent_id = kernel
+        .spawn_agent_inner(
+            AgentManifest {
+                name: name.to_string(),
+                source_template: None,
+                description: "exercises snapshot normalization".to_string(),
+                author: "test".to_string(),
+                module: "builtin:chat".to_string(),
+                ..Default::default()
+            },
+            None,
+            None,
+            None,
+        )
+        .expect("agent should spawn");
+
+    let store = librefang_memory::ManifestVersionStore::new(kernel.memory.substrate.pool());
+    kernel.persist_manifest_to_disk(agent_id, "test");
+
+    let original = std::fs::read_to_string(&manifest_path).expect("baseline manifest on disk");
+    std::fs::write(
+        &manifest_path,
+        format!("# operator note: keep this comment\n{original}"),
+    )
+    .expect("hand-written manifest");
+
+    kernel
+        .suspend_agent(agent_id)
+        .expect("suspend should succeed");
+
+    let after = store
+        .list_for_agent(&agent_id.to_string(), 10)
+        .expect("history read should succeed");
+    let newest = after.first().expect("suspend snapshot");
+    assert_eq!(newest.change_source, "suspend");
+    assert!(
+        !newest.manifest_toml.contains("# operator note"),
+        "the snapshot must use the serializer's canonical layout, not the hand-written file text:\n{}",
+        newest.manifest_toml
+    );
+    // Parse rather than search for `enabled = false`: the serialized `[skill_workshop]` table carries that exact line too, so a substring match would pass even if the root flag never moved.
+    let snapshot: AgentManifest =
+        toml::from_str(&newest.manifest_toml).expect("suspend snapshot must parse");
+    assert!(
+        !snapshot.enabled,
+        "the normalized snapshot must still carry the toggled value:\n{}",
+        newest.manifest_toml
+    );
+
+    kernel.shutdown();
+}
+
+/// Restoring a `suspend` snapshot must not write its `enabled = false` onto a live agent.
+///
+/// `update_manifest` pins `name`, `tags`, `workspace` and `exec_policy` but not `enabled`, so before `restore_manifest_snapshot` the registry, the DB and `agent.toml` all flipped to disabled while the agent kept running — the dashboard reported Running, and `boot.rs` read the persisted flag on the next start and refused to spawn it.
+#[test]
+fn restoring_a_suspend_snapshot_keeps_the_agent_enabled() {
+    use librefang_types::agent::AgentState;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().join("librefang-kernel-restore-suspend-8504");
+    std::fs::create_dir_all(&home_dir).unwrap();
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    let name = "restore-suspend-agent";
+    let kernel =
+        Arc::new(LibreFangKernel::boot_with_config(config.clone()).expect("Kernel should boot"));
+
+    let agent_id = kernel
+        .spawn_agent_inner(
+            AgentManifest {
+                name: name.to_string(),
+                source_template: None,
+                description: "exercises restore of a suspend row".to_string(),
+                author: "test".to_string(),
+                module: "builtin:chat".to_string(),
+                ..Default::default()
+            },
+            None,
+            None,
+            None,
+        )
+        .expect("agent should spawn");
+
+    // Suspend records the snapshot with `enabled = false`; resume returns the live agent to enabled, so the restore below runs against a Running agent.
+    // The baseline persist materializes `agent.toml`, which is what `persist_agent_enabled` patches before recording its row.
+    kernel.persist_manifest_to_disk(agent_id, "test");
+    kernel
+        .suspend_agent(agent_id)
+        .expect("suspend should succeed");
+    kernel
+        .resume_agent(agent_id)
+        .expect("resume should succeed");
+
+    let store = librefang_memory::ManifestVersionStore::new(kernel.memory.substrate.pool());
+    let versions = store
+        .list_for_agent(&agent_id.to_string(), 10)
+        .expect("history read should succeed");
+    let suspend_row = versions
+        .iter()
+        .find(|row| row.change_source == "suspend")
+        .expect("a suspend row must be recorded");
+    let snapshot: AgentManifest =
+        toml::from_str(&suspend_row.manifest_toml).expect("suspend snapshot must parse");
+    assert!(
+        !snapshot.enabled,
+        "the suspend snapshot must carry enabled = false:\n{}",
+        suspend_row.manifest_toml
+    );
+
+    // The History tab's restore button reaches `restore_manifest_snapshot`, not `update_manifest` directly.
+    kernel
+        .restore_manifest_snapshot(agent_id, snapshot, "restore")
+        .expect("restore should succeed");
+
+    let after = kernel
+        .agents
+        .registry
+        .get(agent_id)
+        .expect("agent still registered");
+    assert!(
+        after.manifest.enabled,
+        "restoring a suspend row must not disable the live agent"
+    );
+    assert_eq!(
+        after.state,
+        AgentState::Running,
+        "the restore must not change the agent's runtime state either"
+    );
+
+    // The disk copy is what `boot.rs` reads on the next start, so it must not carry the snapshot's `enabled = false` either.
+    let toml_path = config
+        .effective_agent_workspaces_dir()
+        .join(name)
+        .join("agent.toml");
+    let disk = std::fs::read_to_string(&toml_path).expect("agent.toml on disk");
+    let disk_manifest: AgentManifest = toml::from_str(&disk).expect("disk manifest must parse");
+    assert!(
+        disk_manifest.enabled,
+        "the persisted agent.toml must stay enabled:\n{disk}"
+    );
+
+    kernel.shutdown();
+}
+
+/// Suspend and resume patch only the root `enabled` key of `agent.toml` (#8504).
+///
+/// The earlier line-based patch rewrote every line starting with `enabled`, so a suspend wrote `enabled = false` onto every declarative trigger and a resume wrote `enabled = true` into the default-off `[skill_workshop]` table.
+/// Both the file on disk and the history snapshots recorded alongside it carried the flipped flags, and restoring a `resume` row then switched the skill workshop on for the live agent.
+#[test]
+fn suspend_and_resume_leave_nested_enabled_flags_alone() {
+    use librefang_types::agent::ManifestTrigger;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().join("librefang-kernel-nested-enabled-8504");
+    std::fs::create_dir_all(&home_dir).unwrap();
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    let name = "nested-enabled-agent";
+    let manifest_path = config
+        .effective_agent_workspaces_dir()
+        .join(name)
+        .join("agent.toml");
+    let kernel = Arc::new(LibreFangKernel::boot_with_config(config).expect("Kernel should boot"));
+
+    let agent_id = kernel
+        .spawn_agent_inner(
+            AgentManifest {
+                name: name.to_string(),
+                source_template: None,
+                description: "carries nested enabled flags".to_string(),
+                author: "test".to_string(),
+                module: "builtin:chat".to_string(),
+                triggers: vec![ManifestTrigger {
+                    pattern: serde_json::json!({ "task_posted": {} }),
+                    prompt_template: "New task: {{event}}".to_string(),
+                    enabled: true,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+            None,
+            None,
+            None,
+        )
+        .expect("agent should spawn");
+    kernel.persist_manifest_to_disk(agent_id, "test");
+
+    let assert_nested_flags = |toml_text: &str, root_enabled: bool, what: &str| {
+        let manifest: AgentManifest = toml::from_str(toml_text)
+            .unwrap_or_else(|e| panic!("{what} must parse: {e}\n{toml_text}"));
+        assert_eq!(
+            manifest.enabled, root_enabled,
+            "{what}: root flag\n{toml_text}"
+        );
+        assert!(
+            !manifest.skill_workshop.enabled,
+            "{what}: the default-off skill workshop must stay off\n{toml_text}"
+        );
+        assert_eq!(
+            manifest.triggers.len(),
+            1,
+            "{what}: trigger count\n{toml_text}"
+        );
+        assert!(
+            manifest.triggers[0].enabled,
+            "{what}: the declarative trigger must stay enabled\n{toml_text}"
+        );
+    };
+    let store = librefang_memory::ManifestVersionStore::new(kernel.memory.substrate.pool());
+    let newest = |source: &str| {
+        let versions = store
+            .list_for_agent(&agent_id.to_string(), 10)
+            .expect("history read should succeed");
+        let row = versions.first().expect("a history row").clone();
+        assert_eq!(row.change_source, source, "{versions:?}");
+        row.manifest_toml
+    };
+
+    kernel
+        .suspend_agent(agent_id)
+        .expect("suspend should succeed");
+    assert_nested_flags(
+        &std::fs::read_to_string(&manifest_path).unwrap(),
+        false,
+        "agent.toml after suspend",
+    );
+    assert_nested_flags(&newest("suspend"), false, "suspend snapshot");
+
+    kernel
+        .resume_agent(agent_id)
+        .expect("resume should succeed");
+    assert_nested_flags(
+        &std::fs::read_to_string(&manifest_path).unwrap(),
+        true,
+        "agent.toml after resume",
+    );
+    let resume_snapshot = newest("resume");
+    assert_nested_flags(&resume_snapshot, true, "resume snapshot");
+
+    // Restoring the resume row is the path that used to switch the skill workshop on for the live agent.
+    kernel
+        .restore_manifest_snapshot(
+            agent_id,
+            toml::from_str(&resume_snapshot).expect("resume snapshot parses"),
+            "restore",
+        )
+        .expect("restore should succeed");
+    let live = kernel
+        .agents
+        .registry
+        .get(agent_id)
+        .expect("agent still registered")
+        .manifest
+        .clone();
+    assert!(!live.skill_workshop.enabled);
+    assert!(live.triggers.iter().all(|trigger| trigger.enabled));
+
+    kernel.shutdown();
+}
+
+/// Restoring a snapshot reconciles its declarative `[[triggers]]` into the trigger engine, the same way `reload_agent_from_disk` does.
+/// Without it a trigger in the restored snapshot sat in the manifest but never fired until the next daemon restart.
+#[test]
+fn restoring_a_snapshot_reconciles_its_declarative_triggers() {
+    use librefang_types::agent::ManifestTrigger;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().join("librefang-kernel-restore-triggers-8504");
+    std::fs::create_dir_all(&home_dir).unwrap();
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    let kernel = Arc::new(LibreFangKernel::boot_with_config(config).expect("Kernel should boot"));
+
+    let agent_id = kernel
+        .spawn_agent_inner(
+            AgentManifest {
+                name: "restore-triggers-agent".to_string(),
+                source_template: None,
+                description: "starts without triggers".to_string(),
+                author: "test".to_string(),
+                module: "builtin:chat".to_string(),
+                ..Default::default()
+            },
+            None,
+            None,
+            None,
+        )
+        .expect("agent should spawn");
+    assert!(kernel
+        .workflows
+        .triggers
+        .list_agent_triggers(agent_id)
+        .is_empty());
+
+    let mut snapshot = kernel
+        .agents
+        .registry
+        .get(agent_id)
+        .expect("agent registered")
+        .manifest
+        .clone();
+    snapshot.triggers = vec![ManifestTrigger {
+        pattern: serde_json::json!({ "task_posted": {} }),
+        prompt_template: "Restored trigger: {{event}}".to_string(),
+        ..Default::default()
+    }];
+    kernel
+        .restore_manifest_snapshot(agent_id, snapshot, "restore")
+        .expect("restore should succeed");
+
+    let triggers = kernel.workflows.triggers.list_agent_triggers(agent_id);
+    assert_eq!(
+        triggers
+            .iter()
+            .map(|trigger| trigger.prompt_template.as_str())
+            .collect::<Vec<_>>(),
+        vec!["Restored trigger: {{event}}"],
+        "the restored snapshot's trigger must be live after the restore"
+    );
+
+    kernel.shutdown();
+}
+
 /// #5137: `sync_default_model_agents` previously discarded update and save errors, so a provider switch could half-apply with no signal.
 /// The legacy concrete row must still migrate successfully.
 /// An agent carrying `default/default` must retain that sentinel because execution-time resolution now follows the effective global model.
@@ -18567,6 +19136,7 @@ mod provider_budget_gate_5980 {
                 _req: CompletionRequest,
             ) -> Result<CompletionResponse, LlmError> {
                 Ok(CompletionResponse {
+                    text_synthesized_from_thinking: false,
                     content: vec![ContentBlock::Text {
                         text: "served by healthy provider".to_string(),
                         provider_metadata: None,

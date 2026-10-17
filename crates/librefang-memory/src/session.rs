@@ -12,7 +12,7 @@ use r2d2_sqlite::SqliteConnectionManager;
 ///
 /// The usage totals are correlated subqueries, so they run only for the rows on the page and each one seeks `idx_usage_session`.
 /// A `LEFT JOIN` against a `GROUP BY session_id` aggregate had to materialize the aggregate over all of `usage_events` on every request, and with no `created_at` index the sort was a full scan of `sessions` too.
-/// `idx_sessions_created` (v63) now supplies the order, so `LIMIT` stops after one page.
+/// `idx_sessions_created` (v64) now supplies the order, so `LIMIT` stops after one page.
 const LIST_SESSIONS_PAGE_SQL: &str =
     "SELECT s.id, s.agent_id, s.messages, s.context_window_tokens, s.created_at, s.label,
             s.message_count,
@@ -352,7 +352,7 @@ impl SessionStore {
             Ok(_) => {}
             Err(e) => warn!(error = %e, "FTS reconcile: orphan cleanup failed"),
         }
-        // The rowid map (v63) is dropped with its session by the `sessions_fts_map_ad` trigger; this sweeps any entry that predates the trigger or outlived its session another way.
+        // The rowid map (v64) is dropped with its session by the `sessions_fts_map_ad` trigger; this sweeps any entry that predates the trigger or outlived its session another way.
         if let Err(e) = conn.execute(
             "DELETE FROM sessions_fts_map WHERE session_id NOT IN (SELECT id FROM sessions)",
             [],
@@ -711,7 +711,7 @@ impl SessionStore {
         // derived by decoding the blob.
         let message_count = messages_to_persist.len() as i64;
 
-        // Whether this save creates the session. A brand-new session has no FTS row to replace, so the delete below can skip its full-index fallback scan when there is no rowid mapping (v63); every delete path removes a session's FTS row with it and `reconcile_fts_index` sweeps older orphans at boot.
+        // Whether this save creates the session. A brand-new session has no FTS row to replace, so the delete below can skip its full-index fallback scan when there is no rowid mapping (v64); every delete path removes a session's FTS row with it and `reconcile_fts_index` sweeps older orphans at boot.
         let session_existed = {
             use rusqlite::OptionalExtension;
             tx.query_row(
@@ -774,7 +774,7 @@ impl SessionStore {
             rusqlite::params![session_id_str, agent_id_str, content],
         )
         .map_err(|e| LibreFangError::memory_msg(format!("FTS insert failed: {e}")))?;
-        // Record where the row landed so the next save can address it by rowid (v63).
+        // Record where the row landed so the next save can address it by rowid (v64).
         tx.execute(
             "INSERT OR REPLACE INTO sessions_fts_map (session_id, fts_rowid) VALUES (?1, ?2)",
             rusqlite::params![session_id_str, tx.last_insert_rowid()],
@@ -1281,7 +1281,7 @@ impl SessionStore {
             std::collections::HashMap::new();
 
         // Pass 1: sessions_24h grouped by agent_id.
-        // The unary `+` keeps the planner from walking an `agent_id`-leading index over the whole table for the GROUP BY; it range-scans `idx_sessions_created` over the 24h window instead (v63).
+        // The unary `+` keeps the planner from walking an `agent_id`-leading index over the whole table for the GROUP BY; it range-scans `idx_sessions_created` over the 24h window instead (v64).
         let mut stmt_s = conn
             .prepare(AGENTS_SESSIONS_24H_SQL)
             .map_err(LibreFangError::memory)?;
@@ -2209,7 +2209,7 @@ impl SessionStore {
 /// Remove `session_id`'s row from `sessions_fts`.
 ///
 /// `session_id` is `UNINDEXED` in the FTS5 table and FTS5 has no secondary index, so `WHERE session_id = ?` scans the whole index.
-/// The row is addressed by the rowid `sessions_fts_map` recorded for it instead (v63), and the `session_id` check on that one row makes a stale mapping harmless.
+/// The row is addressed by the rowid `sessions_fts_map` recorded for it instead (v64), and the `session_id` check on that one row makes a stale mapping harmless.
 /// The scan remains as the fallback when the mapped row is gone, so drift is repaired rather than leaving a second searchable row behind.
 /// With no mapping at all the scan runs only when `scan_if_unmapped` is set; `save_session` clears it for a session it is creating, which has no FTS row to find, so a fresh session (every `session_mode = "new"` cron fire) does not pay a full-index scan either.
 fn delete_session_fts_row(

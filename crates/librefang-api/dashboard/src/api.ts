@@ -282,7 +282,7 @@ export interface SkillDetail {
   license: string;
   tags: string[];
   runtime: string;
-  /** Tools the skill provides. */
+  /** Tools this skill *provides*. Its needs are in `required_tools`. */
   tools: SkillToolInfo[];
   /** Built-in tools the skill needs granted (manifest `[requirements]`); empty when it declares none. */
   required_tools: string[];
@@ -1575,6 +1575,53 @@ export async function getAgentDetail(agentId: string): Promise<AgentDetail> {
   return get<AgentDetail>(`/api/agents/${encodeURIComponent(agentId)}`);
 }
 
+// ── Workspace identity files (`GET|PUT /api/agents/{id}/files/{filename}`) ──
+//
+// The daemon reads and writes these as opaque bytes: `read_identity_file`
+// returns the file verbatim and the prompt builder injects it under
+// `## Identity` (capped at 500 chars), so nothing here is parsed as a schema.
+// `filename` is checked against the daemon's `KNOWN_IDENTITY_FILES` allowlist,
+// not against anything client-side — a name outside it comes back 400.
+//
+// A missing file is a 404 on the read (the daemon cannot distinguish "absent"
+// from an I/O failure for this route), while the write creates it, so callers
+// treat a 404 as "not written yet" rather than as an error to report.
+
+/** Response of `GET /api/agents/{id}/files/{filename}` — a whitelisted identity file's bytes. */
+export interface AgentIdentityFile {
+  name: string;
+  content: string;
+  size_bytes: number;
+}
+
+/** Response of `PUT /api/agents/{id}/files/{filename}`. */
+export interface AgentIdentityFileWriteResult {
+  status: string;
+  name: string;
+  size_bytes: number;
+}
+
+export async function getAgentFile(
+  agentId: string,
+  filename: string,
+): Promise<AgentIdentityFile> {
+  return get<AgentIdentityFile>(
+    `/api/agents/${encodeURIComponent(agentId)}/files/${encodeURIComponent(filename)}`,
+  );
+}
+
+/** Writes `content` as the whole file — the daemon replaces it, it does not merge. */
+export async function setAgentFile(
+  agentId: string,
+  filename: string,
+  content: string,
+): Promise<AgentIdentityFileWriteResult> {
+  return put<AgentIdentityFileWriteResult>(
+    `/api/agents/${encodeURIComponent(agentId)}/files/${encodeURIComponent(filename)}`,
+    { content },
+  );
+}
+
 /** 24-hour KPI rollup for one agent — backs the AgentsPage detail-panel
  *  KPI tiles. See `GET /api/agents/{id}/stats`. */
 export interface AgentStats24h {
@@ -1619,6 +1666,71 @@ export async function listAgentEvents(
     `/api/agents/${encodeURIComponent(agentId)}/events?limit=${limit}`,
   );
   return data.events ?? [];
+}
+
+/**
+ * What produced a stored manifest version, as the kernel's `ManifestVersionStore` writes it.
+ *
+ * Closed inventory of every `manifest_versions.change_source` token a producer can record:
+ * `model`, `skills`, `workspaces`, `channels`, `routing`, `schedule`, `tool-filters` and
+ * `mcp-servers` are the per-field setters in `crates/librefang-kernel/src/kernel/agent_state.rs`;
+ * `api` is the control-plane persist in `crates/librefang-api/src/routes/agents/{config,lifecycle}.rs`;
+ * `provisioning` is the deployment reconcile in `crates/librefang-kernel/src/kernel/provisioning_ops.rs`;
+ * `restore` is the manifest-history restore route in `crates/librefang-api/src/routes/agents/observability.rs`;
+ * `suspend` / `resume` — plus the `*-persist-failed` variants recorded when the `agent.toml` write
+ * fails — come from `persist_agent_enabled` in `crates/librefang-kernel/src/kernel/agent_runtime.rs`;
+ * `unknown` is the SQLite column default (`crates/librefang-memory/src/migration.rs`), which no
+ * producer writes but an older row can carry.
+ * Every entry needs an `agents.detail.manifest_change_source.<value>` locale key — render through
+ * `manifestChangeSourceLabel` in `lib/changeSource.ts`, never the raw token.
+ */
+export const MANIFEST_CHANGE_SOURCES = [
+  "model",
+  "skills",
+  "workspaces",
+  "channels",
+  "routing",
+  "schedule",
+  "tool-filters",
+  "mcp-servers",
+  "api",
+  "provisioning",
+  "restore",
+  "suspend",
+  "resume",
+  "suspend-persist-failed",
+  "resume-persist-failed",
+  "unknown",
+] as const;
+export type ManifestChangeSource = (typeof MANIFEST_CHANGE_SOURCES)[number];
+
+/** One snapshot in an agent's manifest version history. */
+export interface ManifestVersionEntry {
+  id: number;
+  agent_id: string;
+  agent_name: string;
+  timestamp: string;
+  manifest_toml: string;
+  // The column is free text on the server, so a producer this list does not know yet still type-checks and renders verbatim.
+  change_source: ManifestChangeSource | (string & {});
+}
+
+export async function getAgentManifestHistory(
+  agentId: string,
+  limit = 30,
+): Promise<ManifestVersionEntry[]> {
+  const data = await get<{ versions?: ManifestVersionEntry[] }>(
+    `/api/agents/${encodeURIComponent(agentId)}/manifest-history?limit=${limit}`,
+  );
+  return data.versions ?? [];
+}
+
+/** POST /api/agents/{id}/manifest-history/{version_id}/restore. */
+export async function restoreAgentManifestVersion(
+  agentId: string,
+  versionId: number,
+): Promise<{ status: string; agent_id: string; restored_version_id: number }> {
+  return post(`/api/agents/${encodeURIComponent(agentId)}/manifest-history/${versionId}/restore`, {});
 }
 
 /**
@@ -1764,8 +1876,18 @@ export type AgentSchedulePatch =
  * as an `AgentManifest` and every other field on this request is ignored.
  * Powers the dashboard's full manifest editor (#7742), seeded from
  * `getAgentManifest` and serialized via `serializeManifestForm`. */
-export async function patchAgent(agentId: string, body: { name?: string; description?: string; system_prompt?: string; model?: string; provider?: string; mcp_servers?: string[]; schedule?: AgentSchedulePatch; manifest_toml?: string; auto_evolve?: boolean }): Promise<ApiActionResponse> {
+export async function patchAgent(agentId: string, body: { name?: string; description?: string; system_prompt?: string; model?: string; provider?: string; mcp_servers?: string[]; schedule?: AgentSchedulePatch; manifest_toml?: string; auto_evolve?: boolean; expected_version?: string }): Promise<ApiActionResponse> {
   return patch<ApiActionResponse>(`/api/agents/${encodeURIComponent(agentId)}`, body);
+}
+
+/** A manifest read with its optimistic-concurrency token (#8424).
+ *
+ * `version` is the `ETag` of the GET; `PATCH /api/agents/{id}` answers 409
+ * when the `expected_version` it is sent no longer matches the manifest, so a
+ * save built on a stale read cannot silently undo a concurrent write. */
+export interface AgentManifestSnapshot {
+  manifest_toml: string;
+  version: string | null;
 }
 
 // --- Agent visual identity: emoji, colour, avatar image (#8339) ------------
@@ -1964,8 +2086,19 @@ export async function updateUserIdentity(
  * writes back. Reflects the live in-memory manifest, not necessarily the
  * on-disk `agent.toml` (they can differ for a moment after a partial PATCH
  * that hasn't flushed to disk yet). */
-export async function getAgentManifest(agentId: string): Promise<string> {
-  return getText(`/api/agents/${encodeURIComponent(agentId)}/manifest`);
+export async function getAgentManifest(agentId: string): Promise<AgentManifestSnapshot> {
+  const response = await fetchWithTimeout(
+    `/api/agents/${encodeURIComponent(agentId)}/manifest`,
+    { headers: buildHeaders() },
+  );
+  if (!response.ok) {
+    throw await parseError(response);
+  }
+  return {
+    manifest_toml: await response.text(),
+    // The ETag is quoted per RFC 9110; the PATCH body carries the bare token.
+    version: response.headers.get("ETag")?.replace(/^"|"$/g, "") ?? null,
+  };
 }
 
 /** Response shape for `GET /api/agents/{id}/channels`. */
@@ -1985,10 +2118,11 @@ export interface AgentChannelsResponse {
 export async function setAgentChannels(
   agentId: string,
   channels: string[],
+  expectedVersion?: string,
 ): Promise<{ status: string; channels: string[] }> {
   return put<{ status: string; channels: string[] }>(
     `/api/agents/${encodeURIComponent(agentId)}/channels`,
-    { channels },
+    { channels, ...(expectedVersion ? { expected_version: expectedVersion } : {}) },
   );
 }
 
@@ -2010,8 +2144,16 @@ export async function getAgentTools(agentId: string): Promise<AgentToolsResponse
   return get<AgentToolsResponse>(`/api/agents/${encodeURIComponent(agentId)}/tools`);
 }
 
-export async function updateAgentTools(agentId: string, payload: { capabilities_tools?: string[]; tool_allowlist?: string[]; tool_blocklist?: string[] }): Promise<AgentToolsResponse> {
-  return put<AgentToolsResponse>(`/api/agents/${encodeURIComponent(agentId)}/tools`, payload);
+export async function updateAgentTools(
+  agentId: string,
+  payload: { capabilities_tools?: string[]; tool_allowlist?: string[]; tool_blocklist?: string[] },
+  /** Manifest ETag from the open editor; the server answers 409 on a mismatch (#8424). */
+  expectedVersion?: string,
+): Promise<AgentToolsResponse> {
+  return put<AgentToolsResponse>(`/api/agents/${encodeURIComponent(agentId)}/tools`, {
+    ...payload,
+    ...(expectedVersion ? { expected_version: expectedVersion } : {}),
+  });
 }
 
 /**
@@ -2126,10 +2268,11 @@ export async function getAgentChannels(
 export async function setAgentSkills(
   agentId: string,
   skills: string[],
+  expectedVersion?: string,
 ): Promise<{ status: string; skills: string[] }> {
   return put<{ status: string; skills: string[] }>(
     `/api/agents/${encodeURIComponent(agentId)}/skills`,
-    { skills },
+    { skills, ...(expectedVersion ? { expected_version: expectedVersion } : {}) },
   );
 }
 
@@ -2154,10 +2297,14 @@ const AGENT_LIST_LIMIT = 500;
 export async function setAgentMcpServers(
   agentId: string,
   mcpServers: string[],
+  expectedVersion?: string,
 ): Promise<{ status: string; mcp_servers: string[] }> {
   return put<{ status: string; mcp_servers: string[] }>(
     `/api/agents/${encodeURIComponent(agentId)}/mcp_servers`,
-    { mcp_servers: mcpServers },
+    {
+      mcp_servers: mcpServers,
+      ...(expectedVersion ? { expected_version: expectedVersion } : {}),
+    },
   );
 }
 
@@ -2355,10 +2502,25 @@ export async function restoreAgentTypeFromRegistry(
 /**
  * What produced a stored version, as the server writes it.
  *
- * `create`, `dashboard` and `restore` are the `record_template_version` call sites in `routes/agent_templates.rs`; `toml` is reserved for the raw-TOML save path that #8028 adds, so the label is ready before that producer lands; `unknown` is the SQLite column default (`crates/librefang-memory/src/migration.rs`), which no producer writes but an older row can carry.
+ * The producers: `routes/agent_templates.rs` records `create` (the flat and raw-TOML creates),
+ * `dashboard` (the editor's save), `toml` (a raw-TOML save), `restore` and `registry-restore`,
+ * plus `pre-registry-restore`, the snapshot it takes right before `restore_from_registry`
+ * overwrites the current file; the kernel records `agent-tool` when the agent-facing
+ * `agent_type_create` tool authors a type (`kernel/handles/agent_control.rs`); `unknown` is the
+ * SQLite column default (`crates/librefang-memory/src/migration.rs`), which no producer writes
+ * but an older row can carry.
  * Every entry needs an `agentTypes.change_source.<value>` locale key — render through `changeSourceLabel` in `lib/changeSource.ts`, never the raw token.
  */
-export const CHANGE_SOURCES = ["create", "dashboard", "restore", "toml", "unknown"] as const;
+export const CHANGE_SOURCES = [
+  "agent-tool",
+  "create",
+  "dashboard",
+  "pre-registry-restore",
+  "registry-restore",
+  "restore",
+  "toml",
+  "unknown",
+] as const;
 export type ChangeSource = (typeof CHANGE_SOURCES)[number];
 
 export interface TemplateVersionEntry {
@@ -2649,36 +2811,9 @@ export async function listModelRouterProfiles(): Promise<ModelRouterProfiles> {
   return get<ModelRouterProfiles>("/api/model-router/profiles");
 }
 
-export interface AgentModelRouting {
-  mode: "fixed" | "flexible";
-  allowed_profiles: string[];
-  cost_budget?: CostTier | null;
-  default_profile?: string | null;
-  /// Per-agent router opt-out (#7781 review). `true` means the router never
-  /// touches this agent even in `flexible` mode — surfaced so the panel can
-  /// warn an operator their allowlist/budget edits have no effect.
-  fixed?: boolean;
-  /** Why the kernel will not route this agent's model whatever is stored here, or `null` when routing is live (#8446).
-   *  Response-only: the server ignores it on a PUT. */
-  routing_inert_reason?: ModelRoutingInertReason | null;
-  /** `agent.toml: pinned_model` — what Stable mode runs instead of any routed choice; `null` means the manifest model. Response-only. */
-  pinned_model?: string | null;
-}
-
 /** Why no router chooses an agent's model (#8446).
  *  `"stable_mode"`: the kernel runs in Stable mode, which freezes model choice to `pinned_model` (else the manifest model) and runs neither the profile router nor the tier router. */
 export type ModelRoutingInertReason = "stable_mode";
-
-export async function getAgentModelRouting(agentId: string): Promise<AgentModelRouting> {
-  return get<AgentModelRouting>(`/api/agents/${encodeURIComponent(agentId)}/model_routing`);
-}
-
-export async function updateAgentModelRouting(
-  agentId: string,
-  routing: AgentModelRouting,
-): Promise<AgentModelRouting> {
-  return put<AgentModelRouting>(`/api/agents/${encodeURIComponent(agentId)}/model_routing`, routing);
-}
 
 export async function listModels(params?: { provider?: string; tier?: string; available?: boolean }): Promise<{ models: ModelItem[]; total: number; available: number }> {
   const query = new URLSearchParams();

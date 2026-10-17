@@ -1,19 +1,16 @@
-import { type FormEvent, useCallback, useId, useMemo, useState } from "react";
+import { type FormEvent, useCallback, useId, useState } from "react";
 import { useTranslation } from "react-i18next";
 import {
   AlertCircle,
   Clock,
   Loader2,
-  Pause,
   Pencil,
-  Play,
   Plus,
   Trash2,
   Zap,
 } from "lucide-react";
 import type {
   AgentDetail,
-  AgentSchedulePatch,
   CreateTriggerPayload,
   CronJobItem,
   CronScheduleSpec,
@@ -28,7 +25,6 @@ import { formatRelativeTime } from "../lib/datetime";
 import { useUIStore } from "../lib/store";
 import { useAgentTriggers } from "../lib/queries/schedules";
 import { useCronJobs } from "../lib/queries/runtime";
-import { usePatchAgent } from "../lib/mutations/agents";
 import {
   useCreateCronJob,
   useCreateTrigger,
@@ -67,9 +63,6 @@ const TRIGGER_PATTERN_PRESETS = [
   { labelKey: "scheduler.trigger_preset_all_events", defaultLabel: "all events", value: '"all"' },
   { labelKey: "scheduler.trigger_preset_custom_json", defaultLabel: "custom JSON…", value: "custom" },
 ] as const;
-
-/** Default continuous interval when the user first switches from manual. */
-const DEFAULT_CONTINUOUS_INTERVAL = 120;
 
 /**
  * Render a {@link CronJobItem}'s schedule field into a one-line summary.
@@ -130,60 +123,23 @@ function isCronKindCron(schedule: unknown): boolean {
   );
 }
 
-/** Parse the human-readable schedule summary the backend puts on
- * `AgentDetail.schedule` (rendered by `format_schedule_mode` in
- * `routes/agents.rs`) into a discriminated mode tag.
- *
- * Backend serialisation:
- *   Reactive            → "manual"
- *   Periodic { cron }   → the raw cron expression string
- *   Proactive { … }     → "proactive"
- *   Continuous { secs } → "continuous · <secs>s"
- *
- * Returning a tagged union avoids the earlier two-flag shape that
- * collapsed periodic/proactive into "not continuous, not reactive →
- * render as Manual" — that misled users into thinking the toggle would
- * leave their cron / proactive schedule alone (Codex P2 review on
- * PR #5256). */
-type ParsedScheduleMode =
-  | { kind: "reactive" }
-  | { kind: "continuous"; intervalSecs: number }
-  | { kind: "periodic"; cron: string }
-  | { kind: "proactive" };
-
-function parseScheduleMode(schedule: string | undefined): ParsedScheduleMode {
-  if (!schedule || schedule === "manual" || schedule === "reactive") {
-    return { kind: "reactive" };
-  }
-  if (schedule === "proactive") {
-    return { kind: "proactive" };
-  }
-  if (schedule.startsWith("continuous")) {
-    const match = schedule.match(/(\d+)\s*s/);
-    return {
-      kind: "continuous",
-      intervalSecs: match ? Number(match[1]) : DEFAULT_CONTINUOUS_INTERVAL,
-    };
-  }
-  // Fallthrough: backend rendered a raw cron expression (periodic mode).
-  // We treat anything else as periodic-with-this-string rather than
-  // silently downgrading to manual.
-  return { kind: "periodic", cron: schedule };
-}
-
 interface AgentSchedulePanelProps {
   agent: AgentDetail;
 }
 
 /**
- * Editable Schedule tab for the agent detail panel (issue #4924).
+ * The Schedule tab's runtime-registry half (issue #4924).
  *
  * Sections:
- *  - **Mode**: continuous toggle + editable `check_interval_secs`.
  *  - **Cron jobs**: list + create/edit/delete/toggle. POST/PUT/DELETE
  *    against `/api/cron/jobs`.
  *  - **Event triggers**: list + create/edit/delete/toggle. POST/PATCH/
  *    DELETE against `/api/triggers`.
+ *
+ * Both are records in the runtime registry, not manifest fields, which is
+ * why they live here rather than in the manifest form below them on the
+ * same tab — the form owns the manifest's `[schedule]` (mode, cron,
+ * conditions) and every other field an `agent.toml` admits.
  *
  * All API access goes through the existing hooks layer
  * (`useCronJobs`, `useAgentTriggers`, `useCreate*` / `useUpdate*` /
@@ -202,7 +158,6 @@ export function AgentSchedulePanel({ agent }: AgentSchedulePanelProps) {
   const cronJobsQuery = useCronJobs(agent.id);
   const triggersQuery = useAgentTriggers(agent.id);
 
-  const patchAgent = usePatchAgent();
   const createCron = useCreateCronJob();
   const updateCron = useUpdateCronJob();
   const deleteCron = useDeleteCronJob();
@@ -210,36 +165,6 @@ export function AgentSchedulePanel({ agent }: AgentSchedulePanelProps) {
   const createTrigger = useCreateTrigger();
   const updateTrigger = useUpdateTrigger();
   const deleteTrigger = useDeleteTrigger();
-
-  const parsedMode = useMemo(() => parseScheduleMode(agent.schedule), [agent.schedule]);
-  const isContinuous = parsedMode.kind === "continuous";
-  const isReactive = parsedMode.kind === "reactive";
-  const continuousInterval =
-    parsedMode.kind === "continuous" ? parsedMode.intervalSecs : DEFAULT_CONTINUOUS_INTERVAL;
-
-  // ----- continuous interval editor (inline) -------------------------------
-  const [editingInterval, setEditingInterval] = useState(false);
-  const [intervalDraft, setIntervalDraft] = useState<string>(String(continuousInterval));
-
-  // ----- periodic cron editor (inline, #7742) -------------------------------
-  // `agent.schedule` only carries a human-readable summary string, so the
-  // draft seeds from the parsed cron expression when we have one (periodic
-  // mode) and from empty otherwise — there is no richer source to read from
-  // here. `parsedMode.cron` is only defined in periodic branches; the
-  // `undefined` fallback covers the render before that branch is known.
-  const [editingCron, setEditingCron] = useState(false);
-  const [cronDraft, setCronDraft] = useState<string>(
-    parsedMode.kind === "periodic" ? parsedMode.cron : "",
-  );
-
-  // ----- proactive conditions editor (inline, #7742) ------------------------
-  // Same limitation as the cron draft above: the schedule summary string
-  // doesn't carry the current condition list, so this can only submit a
-  // *replacement* list, not show what's live today. The full manifest
-  // editor (AgentManifestForm, seeded from the raw manifest TOML) is the
-  // only surface that shows the true current conditions.
-  const [editingConditions, setEditingConditions] = useState(false);
-  const [conditionsDraft, setConditionsDraft] = useState<string>("");
 
   // ----- cron create / edit ------------------------------------------------
   const [cronModal, setCronModal] = useState<
@@ -522,324 +447,11 @@ export function AgentSchedulePanel({ agent }: AgentSchedulePanelProps) {
     [deleteTrigger, addToast, t],
   );
 
-  // ----- continuous mode toggle / interval edit ----------------------------
-  const submitSchedule = useCallback(
-    (next: AgentSchedulePatch, successLabel: string) => {
-      patchAgent.mutate(
-        { agentId: agent.id, body: { schedule: next } },
-        {
-          onSuccess: () => {
-            addToast(successLabel, "success");
-            setEditingInterval(false);
-            setEditingCron(false);
-            setEditingConditions(false);
-          },
-          onError: (err) => {
-            const msg = err instanceof Error ? err.message : String(err);
-            addToast(msg || t("common.error", { defaultValue: "Error" }), "error");
-          },
-        },
-      );
-    },
-    [patchAgent, agent.id, addToast, t],
-  );
-
-  const saveInterval = useCallback(() => {
-    const parsed = Number(intervalDraft);
-    if (!Number.isFinite(parsed) || parsed < 1) {
-      addToast(
-        t("agents.detail.schedule_invalid_interval", {
-          defaultValue: "Interval must be a positive integer (seconds)",
-        }),
-        "error",
-      );
-      return;
-    }
-    submitSchedule(
-      { continuous: { check_interval_secs: Math.floor(parsed) } },
-      t("agents.detail.schedule_updated", { defaultValue: "Schedule updated" }),
-    );
-  }, [intervalDraft, submitSchedule, addToast, t]);
-
-  const saveCron = useCallback(() => {
-    const trimmed = cronDraft.trim();
-    if (!trimmed) {
-      addToast(
-        t("agents.form.cron_required_error", { defaultValue: "Cron expression is required" }),
-        "error",
-      );
-      return;
-    }
-    submitSchedule(
-      { periodic: { cron: trimmed } },
-      t("agents.detail.schedule_updated", { defaultValue: "Schedule updated" }),
-    );
-  }, [cronDraft, submitSchedule, addToast, t]);
-
-  const saveConditions = useCallback(() => {
-    const conditions = conditionsDraft
-      .split(",")
-      .map((c) => c.trim())
-      .filter(Boolean);
-    // Refuse an empty submit, exactly as `saveCron` does for a blank cron.
-    //
-    // The textarea starts empty and is never seeded from the live schedule —
-    // the panel has no read of the current condition list to seed it with — so
-    // "empty" here means "the operator typed nothing", not "the operator wants
-    // no conditions". Sending `conditions: []` on that would clear a proactive
-    // schedule the operator never looked at, and report it as a save.
-    //
-    // Clearing conditions deliberately is still available: switch the mode
-    // away from proactive, which is an explicit choice rather than the
-    // side effect of opening a drawer and pressing Save.
-    if (conditions.length === 0) {
-      addToast(
-        t("agents.detail.proactive_conditions_required", {
-          defaultValue: "Enter at least one condition, separated by commas",
-        }),
-        "error",
-      );
-      return;
-    }
-    submitSchedule(
-      { proactive: { conditions } },
-      t("agents.detail.schedule_updated", { defaultValue: "Schedule updated" }),
-    );
-  }, [conditionsDraft, submitSchedule, addToast, t]);
-
   const cronJobs = (cronJobsQuery.data ?? []) as CronJobItem[];
   const triggers = triggersQuery.data ?? [];
 
   return (
     <div className="flex flex-col gap-4">
-      {/* ---- Mode section ---------------------------------------------------- */}
-      <div className="text-[11px] uppercase font-semibold tracking-[0.08em] text-text-dim">
-        {t("agents.detail.schedule_mode", { defaultValue: "Mode" })}
-      </div>
-      <div className="px-3.5 py-3 rounded-lg border border-border-subtle bg-main/40 flex items-center gap-3">
-        <div className="w-8 h-8 rounded-md bg-brand/10 text-brand grid place-items-center shrink-0">
-          {isContinuous ? <Play className="w-4 h-4" /> : <Pause className="w-4 h-4" />}
-        </div>
-        <div className="flex-1 min-w-0">
-          <div className="font-mono text-[13px] text-text-main">
-            {parsedMode.kind === "continuous"
-              ? `${t("agents.detail.schedule_continuous", { defaultValue: "Continuous" })} (${parsedMode.intervalSecs}s)`
-              : parsedMode.kind === "periodic"
-                ? `${t("agents.detail.schedule_periodic", { defaultValue: "Periodic" })} (${parsedMode.cron})`
-                : parsedMode.kind === "proactive"
-                  ? t("agents.detail.schedule_proactive", { defaultValue: "Proactive" })
-                  : t("agents.detail.schedule_manual", { defaultValue: "Manual" })}
-          </div>
-          <div className="text-[11px] text-text-dim/80 mt-0.5">
-            {parsedMode.kind === "continuous"
-              ? t("agents.detail.schedule_continuous_desc", {
-                  defaultValue: "agent checks for work on a fixed interval",
-                })
-              : parsedMode.kind === "periodic"
-                ? t("agents.detail.schedule_periodic_desc", {
-                    defaultValue:
-                      "agent fires on the cron expression set in the manifest — edit via agent.toml",
-                  })
-                : parsedMode.kind === "proactive"
-                  ? t("agents.detail.schedule_proactive_desc", {
-                      defaultValue:
-                        "agent monitors conditions set in the manifest — edit via agent.toml",
-                    })
-                  : t("agents.detail.schedule_manual_desc", {
-                      defaultValue: "wakes on incoming messages and events only",
-                    })}
-          </div>
-        </div>
-        {parsedMode.kind === "continuous" ? (
-          <div className="flex items-center gap-2 shrink-0">
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={() => {
-                setIntervalDraft(String(continuousInterval));
-                setEditingInterval((v) => !v);
-              }}
-              disabled={patchAgent.isPending}
-            >
-              <Pencil className="w-3.5 h-3.5 mr-1" />
-              {t("common.edit", { defaultValue: "Edit" })}
-            </Button>
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={() =>
-                submitSchedule(
-                  "reactive",
-                  t("agents.detail.schedule_updated", { defaultValue: "Schedule updated" }),
-                )
-              }
-              disabled={patchAgent.isPending}
-            >
-              {t("agents.detail.switch_to_manual", { defaultValue: "Switch to manual" })}
-            </Button>
-          </div>
-        ) : parsedMode.kind === "reactive" ? (
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={() =>
-              submitSchedule(
-                { continuous: { check_interval_secs: DEFAULT_CONTINUOUS_INTERVAL } },
-                t("agents.detail.schedule_updated", { defaultValue: "Schedule updated" }),
-              )
-            }
-            disabled={patchAgent.isPending}
-          >
-            {t("agents.detail.switch_to_continuous", { defaultValue: "Switch to continuous" })}
-          </Button>
-        ) : parsedMode.kind === "periodic" ? (
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={() => {
-              setCronDraft(parsedMode.cron);
-              setEditingCron((v) => !v);
-            }}
-            disabled={patchAgent.isPending}
-          >
-            <Pencil className="w-3.5 h-3.5 mr-1" />
-            {t("common.edit", { defaultValue: "Edit" })}
-          </Button>
-        ) : (
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={() => setEditingConditions((v) => !v)}
-            disabled={patchAgent.isPending}
-          >
-            <Pencil className="w-3.5 h-3.5 mr-1" />
-            {t("common.edit", { defaultValue: "Edit" })}
-          </Button>
-        )}
-      </div>
-      {isContinuous && editingInterval && (
-        <div className="px-3.5 py-3 rounded-lg border border-border-subtle bg-main/40 flex items-end gap-2 flex-wrap">
-          <div className="flex-1 min-w-[140px]">
-            <label
-              htmlFor={`${formId}-interval`}
-              className="text-[10px] font-bold text-text-dim uppercase"
-            >
-              {t("agents.detail.check_interval_secs", {
-                defaultValue: "Check interval (seconds)",
-              })}
-            </label>
-            <input
-              id={`${formId}-interval`}
-              type="number"
-              min={1}
-              value={intervalDraft}
-              onChange={(e) => setIntervalDraft(e.target.value)}
-              className={INPUT_CLASS}
-            />
-          </div>
-          <Button
-            variant="primary"
-            size="sm"
-            onClick={saveInterval}
-            disabled={patchAgent.isPending}
-          >
-            {patchAgent.isPending ? (
-              <Loader2 className="w-3.5 h-3.5 animate-spin mr-1" />
-            ) : null}
-            {t("common.save", { defaultValue: "Save" })}
-          </Button>
-          <Button
-            variant="secondary"
-            size="sm"
-            onClick={() => setEditingInterval(false)}
-            disabled={patchAgent.isPending}
-          >
-            {t("common.cancel", { defaultValue: "Cancel" })}
-          </Button>
-        </div>
-      )}
-
-      {parsedMode.kind === "periodic" && editingCron && (
-        <div className="px-3.5 py-3 rounded-lg border border-border-subtle bg-main/40 flex items-end gap-2 flex-wrap">
-          <div className="flex-1 min-w-[200px]">
-            <label
-              htmlFor={`${formId}-cron`}
-              className="text-[10px] font-bold text-text-dim uppercase"
-            >
-              {t("agents.form.cron", { defaultValue: "Cron expression" })}
-            </label>
-            <input
-              id={`${formId}-cron`}
-              type="text"
-              value={cronDraft}
-              onChange={(e) => setCronDraft(e.target.value)}
-              placeholder={t("agents.form.cron_placeholder", { defaultValue: "0 9 * * *" })}
-              className={`${INPUT_CLASS} font-mono`}
-            />
-          </div>
-          <Button variant="primary" size="sm" onClick={saveCron} disabled={patchAgent.isPending}>
-            {patchAgent.isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin mr-1" /> : null}
-            {t("common.save", { defaultValue: "Save" })}
-          </Button>
-          <Button
-            variant="secondary"
-            size="sm"
-            onClick={() => setEditingCron(false)}
-            disabled={patchAgent.isPending}
-          >
-            {t("common.cancel", { defaultValue: "Cancel" })}
-          </Button>
-        </div>
-      )}
-
-      {parsedMode.kind === "proactive" && editingConditions && (
-        <div className="px-3.5 py-3 rounded-lg border border-border-subtle bg-main/40 flex flex-col gap-2">
-          <div>
-            <label
-              htmlFor={`${formId}-conditions`}
-              className="text-[10px] font-bold text-text-dim uppercase"
-            >
-              {t("agents.detail.proactive_conditions", { defaultValue: "Conditions (comma-separated)" })}
-            </label>
-            <input
-              id={`${formId}-conditions`}
-              type="text"
-              value={conditionsDraft}
-              onChange={(e) => setConditionsDraft(e.target.value)}
-              placeholder={t("agents.detail.proactive_conditions_placeholder", {
-                defaultValue: "e.g. agent.tags contains 'urgent'",
-              })}
-              className={INPUT_CLASS}
-            />
-            <p className="text-[10px] text-text-dim/70 mt-1">
-              {t("agents.detail.proactive_conditions_hint", {
-                defaultValue:
-                  "This replaces the full condition list — it isn't pre-filled with the current one. Use the full manifest editor to see what's live today.",
-              })}
-            </p>
-          </div>
-          <div className="flex items-center gap-2">
-            <Button
-              variant="primary"
-              size="sm"
-              onClick={saveConditions}
-              disabled={patchAgent.isPending}
-            >
-              {patchAgent.isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin mr-1" /> : null}
-              {t("common.save", { defaultValue: "Save" })}
-            </Button>
-            <Button
-              variant="secondary"
-              size="sm"
-              onClick={() => setEditingConditions(false)}
-              disabled={patchAgent.isPending}
-            >
-              {t("common.cancel", { defaultValue: "Cancel" })}
-            </Button>
-          </div>
-        </div>
-      )}
-
       {/* ---- Cron jobs ------------------------------------------------------- */}
       <div className="flex items-center justify-between mt-2">
         <div className="text-[11px] uppercase font-semibold tracking-[0.08em] text-text-dim">
@@ -965,13 +577,7 @@ export function AgentSchedulePanel({ agent }: AgentSchedulePanelProps) {
       {triggers.length === 0 ? (
         <EmptyState
           icon={<Zap className="w-6 h-6" />}
-          title={
-            isReactive
-              ? t("agents.detail.no_triggers_reactive", {
-                  defaultValue: "No triggers — agent wakes on incoming messages only",
-                })
-              : t("agents.detail.no_triggers", { defaultValue: "No event triggers" })
-          }
+          title={t("agents.detail.no_triggers", { defaultValue: "No event triggers" })}
         />
       ) : (
         <div className="flex flex-col gap-2">

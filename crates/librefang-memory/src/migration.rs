@@ -5,7 +5,7 @@
 use rusqlite::Connection;
 
 /// Current schema version.
-const SCHEMA_VERSION: u32 = 63;
+const SCHEMA_VERSION: u32 = 64;
 
 /// Run all migrations to bring the database up to date.
 pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
@@ -320,8 +320,17 @@ pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
     // with a hole below it never runs the skipped step.
     run_step!(62, migrate_v62);
 
-    // v63: indexes for the dashboard's polled listings (sessions by `created_at`, memories by `created_at`) and the `sessions_fts_map` rowid map that lets `save_session` replace its FTS row without scanning the whole index.
+    // v63 (#8556): mark an ephemeral run that hit its iteration cap.
+    // A capped worker still delivers a partial answer and is recorded as
+    // `completed`, which made truncation indistinguishable from a full run.
+    // `truncated` carries that signal without widening the `status` CHECK.
+    //
+    // This wanted to be 62 but #7974 took that number first, so it renumbers
+    // to 63 rather than skipping past it — same rule as the note above.
     run_step!(63, migrate_v63);
+
+    // v64: indexes for the dashboard's polled listings (sessions by `created_at`, memories by `created_at`) and the `sessions_fts_map` rowid map that lets `save_session` replace its FTS row without scanning the whole index.
+    run_step!(64, migrate_v64);
 
     // Audit-trail consistency (#3538): user_version must match the count
     // of distinct rows in `migrations`. Drift means an earlier migration
@@ -1598,7 +1607,28 @@ fn migrate_v62(conn: &Connection) -> Result<(), rusqlite::Error> {
     Ok(())
 }
 
-/// v63: indexes and an FTS rowid map for hot read and write paths.
+/// v63 (#8556): add `ephemeral_runs.truncated`.
+///
+/// The #8556 iteration-cap fix makes a capped worker return `Ok` with a
+/// delivered partial answer rather than `Err`, so the run record says
+/// `completed`. That erased the operator's only signal that the worker was
+/// cut off. A dedicated boolean keeps the existing `status` CHECK untouched.
+fn migrate_v63(conn: &Connection) -> Result<(), rusqlite::Error> {
+    if !try_column_exists(conn, "ephemeral_runs", "truncated")? {
+        conn.execute(
+            "ALTER TABLE ephemeral_runs ADD COLUMN truncated INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
+    }
+    conn.execute(
+        "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
+         VALUES (63, datetime('now'), 'Add ephemeral_runs.truncated so a cap-delivered worker run is distinguishable from a full one (#8556)')",
+        [],
+    )?;
+    Ok(())
+}
+
+/// v64: indexes and an FTS rowid map for hot read and write paths.
 ///
 /// `sessions(created_at)` serves `list_sessions_paginated`'s `ORDER BY created_at DESC LIMIT`, which `GET /api/sessions` runs on every dashboard poll, and the 24h window of `agents_stats_24h_bulk`.
 /// Without it every page was a full scan of `sessions` (whose rows carry the message blob) followed by a temp b-tree sort.
@@ -1611,7 +1641,7 @@ fn migrate_v62(conn: &Connection) -> Result<(), rusqlite::Error> {
 /// Duplicate FTS rows for one session are collapsed first so the backfill maps every session to its only row, and the `AFTER DELETE` trigger drops a session's map entry with the session, whichever delete path removes it.
 /// Only rows of live sessions are mapped: an orphan FTS row's session can never be deleted, so its map entry would never be dropped by the trigger (`reconcile_fts_index` removes such orphans at boot).
 /// A stale or missing entry is harmless: `save_session` checks the mapped row still belongs to the session and falls back to the scan otherwise.
-fn migrate_v63(conn: &Connection) -> Result<(), rusqlite::Error> {
+fn migrate_v64(conn: &Connection) -> Result<(), rusqlite::Error> {
     conn.execute_batch(
         "
         CREATE INDEX IF NOT EXISTS idx_sessions_created ON sessions(created_at);
@@ -1647,7 +1677,7 @@ fn migrate_v63(conn: &Connection) -> Result<(), rusqlite::Error> {
     }
     conn.execute(
         "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
-         VALUES (63, datetime('now'), 'sessions/memories created_at indexes + sessions_fts_map rowid map')",
+         VALUES (64, datetime('now'), 'sessions/memories created_at indexes + sessions_fts_map rowid map')",
         [],
     )?;
     Ok(())
@@ -5153,16 +5183,16 @@ mod tests {
     }
 
     // ---------------------------------------------------------------------
-    // v63: created_at indexes + sessions_fts_map
+    // v64: created_at indexes + sessions_fts_map
     // ---------------------------------------------------------------------
 
-    /// An upgraded database must come out of v63 with exactly one FTS row per session and every one of them mapped, so `save_session` can address it by rowid.
+    /// An upgraded database must come out of v64 with exactly one FTS row per session and every one of them mapped, so `save_session` can address it by rowid.
     /// Duplicate rows left by older drift are collapsed to the newest; otherwise the mapped delete would leave the other copy searchable.
     #[test]
-    fn migrate_v63_dedupes_and_maps_existing_fts_rows() {
+    fn migrate_v64_dedupes_and_maps_existing_fts_rows() {
         let conn = Connection::open_in_memory().unwrap();
         run_migrations(&conn).unwrap();
-        // Simulate a pre-v63 database: no map, one session with two FTS rows, one with a single row, and an orphan FTS row whose session is gone.
+        // Simulate a pre-v64 database: no map, one session with two FTS rows, one with a single row, and an orphan FTS row whose session is gone.
         conn.execute_batch(
             "DROP TRIGGER sessions_fts_map_ad;
              DROP TABLE sessions_fts_map;
@@ -5175,8 +5205,8 @@ mod tests {
         )
         .unwrap();
 
-        migrate_v63(&conn).unwrap();
-        migrate_v63(&conn).expect("v63 must survive a rerun");
+        migrate_v64(&conn).unwrap();
+        migrate_v64(&conn).expect("v64 must survive a rerun");
 
         let s1: Vec<(i64, String)> = {
             let mut stmt = conn
@@ -5215,7 +5245,7 @@ mod tests {
                     |r| r.get(0),
                 )
                 .unwrap();
-            assert_eq!(n, 1, "{index} must exist after v63");
+            assert_eq!(n, 1, "{index} must exist after v64");
         }
     }
 }

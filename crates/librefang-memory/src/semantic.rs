@@ -1940,7 +1940,7 @@ fn embedding_from_bytes(bytes: &[u8]) -> Vec<f32> {
 ///
 /// Each filter is appended only when it is present, binding one positional `?` in the order agent, category, scope; the page query then binds `LIMIT ?` and `OFFSET ?`.
 /// The previous `(?1 IS NULL OR agent_id = ?1)` form cannot use an index, so every listing visited every live memory of every agent, ran the JSON checks on each and sorted them all.
-/// A plain `agent_id = ?` lets the planner read `idx_memories_agent_created` (v63) in `created_at` order and stop after one page.
+/// A plain `agent_id = ?` lets the planner read `idx_memories_agent_created` (v64) in `created_at` order and stop after one page.
 fn list_page_sql(has_agent: bool, has_category: bool, has_scope: bool) -> (String, String) {
     let mut filter = String::from(
         "deleted = 0

@@ -499,7 +499,7 @@ async fn a_renamed_agent_recreated_from_its_own_manifest_keeps_its_workspace() {
         .rename_agent(agent_id, "nuevo".to_string())
         .expect("rename");
     // `PATCH /api/agents/{id}` persists the renamed manifest right after `rename_agent`; call the same kernel persist directly.
-    h.state.kernel.persist_manifest_to_disk(agent_id);
+    h.state.kernel.persist_manifest_to_disk(agent_id, "test");
 
     // Read the manifest the rename left behind rather than rebuilding it by hand, so the test posts exactly what a recreate from disk would.
     let nuevo = h.home_dir.join("workspaces").join("agents").join("nuevo");

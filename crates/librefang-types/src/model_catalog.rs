@@ -289,8 +289,9 @@ pub struct ModelCatalogEntry {
 ///   provider that needs only one of the two behaviours will require a
 ///   new variant (`#[non_exhaustive]` is set for that reason).
 /// * [`Self::Echo`] — the original thinking text MUST be echoed back on
-///   assistant turns containing `tool_calls`, otherwise the API returns
-///   400. DeepSeek V4 Flash (thinking-mode-on) requires this — see
+///   every historical assistant turn that has one, otherwise the API returns
+///   400. DeepSeek V4 Flash (thinking-mode-on) requires this whenever the
+///   request carries `tools` — including turns without tool calls — see
 ///   librefang/librefang#4842.
 /// * [`Self::EmptyString`] — the field must be present (empty string) on
 ///   `tool_calls` turns, with thinking disabled wire-side. Moonshot / Kimi
