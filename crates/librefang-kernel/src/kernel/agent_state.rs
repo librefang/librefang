@@ -225,7 +225,7 @@ impl LibreFangKernel {
 
     /// Persist a suspend / resume to the root `enabled` key of the agent's `agent.toml`.
     ///
-    /// The file is the first existing one of `source_toml_path`, the canonical `workspaces/agents/<name>/agent.toml` and the hands workspace, and is patched in place under the per-path manifest write lock.
+    /// The file is the first existing `agent.toml` among `source_toml_path`, the canonical `workspaces/agents/<name>/agent.toml` and the hands workspace, and is patched in place under the per-path manifest write lock.
     /// A missing file is left missing, matching the previous behaviour: the authoritative copy lives in SQLite.
     pub(super) fn persist_agent_enabled(
         &self,
@@ -250,7 +250,11 @@ impl LibreFangKernel {
             ),
         ];
         drop(cfg);
-        let Some(toml_path) = candidates.into_iter().flatten().find(|path| path.exists()) else {
+        // A hand agent's `source_toml_path` is the shared `hand.toml`, which boot reads through `extract_manifest_from_hand_toml` and never for a root `enabled`; patching it would only write a key nothing reads and record the whole hand definition as this agent's manifest in its history.
+        // Only a per-agent `agent.toml` is a target, so a hand agent without one stays a no-op as before.
+        let Some(toml_path) = candidates.into_iter().flatten().find(|path| {
+            path.file_name() == Some(std::ffi::OsStr::new("agent.toml")) && path.exists()
+        }) else {
             return;
         };
         let write_lock = self.manifest_write_lock(&toml_path);

@@ -196,8 +196,20 @@ struct CachedJwks {
 #[derive(Default)]
 pub struct JwksCache {
     inner: RwLock<HashMap<String, CachedJwks>>,
-    /// Serializes network fetches so a burst of concurrent requests that all miss the cache (for example tokens carrying random `kid`s, each forcing a refresh) produces one outbound fetch rather than one per request.
-    fetch_lock: tokio::sync::Mutex<()>,
+    /// One lock per JWKS URI, serializing that URI's network fetches so a burst of concurrent requests that all miss the cache (for example tokens carrying random `kid`s, each forcing a refresh) produces one outbound fetch rather than one per request.
+    /// Keyed by URI so a stalled IdP holding its own lock for the full request timeout does not hold up fetches for any other provider.
+    /// The keys are JWKS URIs of configured providers, so the map stays as small as the provider list.
+    fetch_locks: dashmap::DashMap<String, Arc<tokio::sync::Mutex<()>>>,
+}
+
+impl JwksCache {
+    /// The single-flight lock for `jwks_uri`, created on first use.
+    fn fetch_lock(&self, jwks_uri: &str) -> Arc<tokio::sync::Mutex<()>> {
+        self.fetch_locks
+            .entry(jwks_uri.to_string())
+            .or_default()
+            .clone()
+    }
 }
 
 /// JWKS cache TTL — 1 hour. Providers rotate keys infrequently.
@@ -2272,7 +2284,8 @@ async fn fetch_jwks_cached(jwks_uri: &str, force_refresh: bool) -> Result<Vec<Jw
 
     // Single-flight: the throttle above is only checked against completed fetches, so without this lock every request that missed concurrently would fetch.
     // Re-check after acquiring it, because the holder this request waited on has usually just refreshed the entry.
-    let _fetch_guard = JWKS_CACHE.fetch_lock.lock().await;
+    let fetch_lock = JWKS_CACHE.fetch_lock(jwks_uri);
+    let _fetch_guard = fetch_lock.lock().await;
     if let Some(hit) = jwks_cache_lookup(&*JWKS_CACHE.inner.read().await, jwks_uri, force_refresh) {
         return hit;
     }
@@ -3239,6 +3252,28 @@ mod tests {
         // Taking both write locks proves the detached clears released them.
         drop(JWKS_CACHE.inner.write().await);
         drop(DISCOVERY_CACHE.inner.write().await);
+    }
+
+    /// The JWKS single-flight lock is per URI: a fetch stalled on one IdP must not hold up a fetch for another provider, while two misses on the same URI still collapse into one fetch.
+    #[tokio::test]
+    async fn jwks_fetch_lock_is_keyed_by_uri() {
+        let cache = JwksCache::default();
+        let stalled = cache.fetch_lock("https://idp-a.example/jwks");
+        let _held = stalled.lock().await;
+        assert!(
+            cache
+                .fetch_lock("https://idp-b.example/jwks")
+                .try_lock()
+                .is_ok(),
+            "another provider's fetch must not wait on the stalled one"
+        );
+        assert!(
+            cache
+                .fetch_lock("https://idp-a.example/jwks")
+                .try_lock()
+                .is_err(),
+            "a second miss on the same URI must wait for the fetch in flight"
+        );
     }
 
     // ── outbound OIDC requests: redirects, negative caching, key rotation ──

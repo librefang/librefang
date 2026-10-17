@@ -17183,6 +17183,67 @@ fn a_suspend_snapshot_is_normalized_to_the_serializer_layout() {
     kernel.shutdown();
 }
 
+/// A hand agent's `source_toml_path` is the shared `hand.toml`, not an agent manifest.
+/// Suspend must leave it untouched and must not record the hand definition as the agent's manifest in its history, matching the no-op a hand agent without its own `agent.toml` always had.
+#[test]
+fn suspending_a_hand_agent_does_not_patch_its_hand_toml() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().join("librefang-kernel-suspend-hand-toml");
+    std::fs::create_dir_all(&home_dir).unwrap();
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    let hand_toml = config
+        .effective_hands_workspaces_dir()
+        .join("demo-hand")
+        .join("hand.toml");
+    std::fs::create_dir_all(hand_toml.parent().unwrap()).unwrap();
+    let hand_source = "id = \"demo-hand\"\nname = \"Demo Hand\"\ntools = [\"web_fetch\"]\n";
+    std::fs::write(&hand_toml, hand_source).unwrap();
+    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+
+    let agent_id = kernel
+        .spawn_agent_inner(
+            AgentManifest {
+                name: "demo-hand-role".to_string(),
+                source_template: None,
+                description: "a hand role".to_string(),
+                author: "test".to_string(),
+                module: "builtin:chat".to_string(),
+                ..Default::default()
+            },
+            None,
+            Some(hand_toml.clone()),
+            None,
+        )
+        .expect("agent should spawn");
+
+    kernel
+        .suspend_agent(agent_id)
+        .expect("suspend should succeed");
+
+    assert_eq!(
+        std::fs::read_to_string(&hand_toml).unwrap(),
+        hand_source,
+        "hand.toml must not be patched with an agent-level `enabled` key"
+    );
+    let store = librefang_memory::ManifestVersionStore::new(kernel.memory.substrate.pool());
+    let rows = store
+        .list_for_agent(&agent_id.to_string(), 10)
+        .expect("history read should succeed");
+    assert!(
+        rows.iter().all(|row| row.change_source != "suspend"),
+        "no suspend row may be recorded from hand.toml: {:?}",
+        rows.iter()
+            .map(|row| &row.change_source)
+            .collect::<Vec<_>>()
+    );
+
+    kernel.shutdown();
+}
+
 /// Restoring a `suspend` snapshot must not write its `enabled = false` onto a live agent.
 ///
 /// `update_manifest` pins `name`, `tags`, `workspace` and `exec_policy` but not `enabled`, so before `restore_manifest_snapshot` the registry, the DB and `agent.toml` all flipped to disabled while the agent kept running — the dashboard reported Running, and `boot.rs` read the persisted flag on the next start and refused to spawn it.

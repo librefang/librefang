@@ -21,7 +21,7 @@ pub fn router() -> axum::Router<Arc<AppState>> {
 /// Push the kernel's binding list into the running channel bridge's router.
 ///
 /// The router copies the bindings once when the bridge starts, so without this an added or removed binding would not route a single message until the next restart or channel reload.
-/// `resolved` is the name the new binding uses and the agent it names: the router resolves a binding through its own name cache, which is seeded only at bridge start, so a binding to an agent spawned since then would match and still route nowhere.
+/// `resolved` is the name the new binding uses and the agent it names: the router resolves a binding through its own name cache, which is seeded only at bridge start (and only when bindings existed then), so a binding to an agent defined or spawned since then would match and still route nowhere.
 /// With no bridge running (no channels configured) there is no router to update, and the next bridge start loads the kernel list itself.
 fn sync_live_router(state: &AppState, resolved: Option<(String, librefang_types::agent::AgentId)>) {
     let guard = state.bridge_manager.load();
@@ -33,6 +33,32 @@ fn sync_live_router(state: &AppState, resolved: Option<(String, librefang_types:
         router.register_agent(name, id);
     }
     router.load_bindings(&state.kernel.list_bindings());
+}
+
+/// The agent a binding's `agent` field names, whether or not it has spawned yet.
+///
+/// A spawned agent's live registry entry wins, and the canonical identity registry covers every defined agent that has not spawned (one that first runs on a cron fire, or one left Suspended), the same order the bridge uses to seed the router at start.
+/// Without the identity lookup a binding to such an agent would load into the router and still route nowhere until a restart.
+/// A UUID is accepted when either registry knows it.
+fn resolve_binding_agent(state: &AppState, agent: &str) -> Option<librefang_types::agent::AgentId> {
+    let registry = state.kernel.agent_registry();
+    let identities = state.kernel.agent_identities();
+    if let Some(id) = registry
+        .list()
+        .iter()
+        .find(|e| e.name == agent)
+        .map(|e| e.id)
+        .or_else(|| identities.get(agent))
+    {
+        return Some(id);
+    }
+    let id = agent.parse::<librefang_types::agent::AgentId>().ok()?;
+    let known = registry.get(id).is_some()
+        || identities
+            .list()
+            .values()
+            .any(|record| record.canonical_uuid == id);
+    known.then_some(id)
 }
 
 /// GET /api/bindings — List all agent bindings.
@@ -65,19 +91,7 @@ pub async fn add_binding(
     State(state): State<Arc<AppState>>,
     Json(binding): Json<librefang_types::config::AgentBinding>,
 ) -> impl IntoResponse {
-    let registry = state.kernel.agent_registry();
-    let resolved = registry
-        .list()
-        .iter()
-        .find(|e| e.name == binding.agent)
-        .map(|e| e.id)
-        .or_else(|| {
-            binding
-                .agent
-                .parse::<librefang_types::agent::AgentId>()
-                .ok()
-                .filter(|id| registry.get(*id).is_some())
-        });
+    let resolved = resolve_binding_agent(&state, &binding.agent);
     if resolved.is_none() {
         tracing::warn!(agent = %binding.agent, "Binding references unknown agent");
     }

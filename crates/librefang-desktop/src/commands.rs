@@ -163,15 +163,20 @@ pub fn import_skill_file(
         .ok_or_else(|| "No local server running".to_string())?;
     // The kernel reloads from its own home, which can differ from the default `librefang_home()`.
     let skills_dir = inner.kernel.home_dir().join("skills");
-    let count_before = inner
-        .kernel
-        .skill_registry_ref()
-        .read()
-        .unwrap_or_else(|p| p.into_inner())
-        .count();
-
     let (skill_name, skill_dir) = stage_skill_import(&skills_dir, src)?;
     let outcome = inner.kernel.reload_skills();
+    // Look for the imported directory itself rather than comparing registry sizes: the reload rebuilds the registry from disk, so its count also moves with any skill added, removed or disabled since the last reload.
+    let loaded = {
+        let registry = inner
+            .kernel
+            .skill_registry_ref()
+            .read()
+            .unwrap_or_else(|p| p.into_inner());
+        skill_dir_loaded(
+            registry.list().iter().map(|skill| skill.path.as_path()),
+            &skill_dir,
+        )
+    };
     drop(guard);
 
     if outcome.frozen {
@@ -179,7 +184,7 @@ pub fn import_skill_file(
             "Skill \"{skill_name}\" was installed, but the skill registry is frozen (Stable mode); restart LibreFang to load it"
         ));
     }
-    if outcome.count <= count_before {
+    if !loaded {
         let _ = std::fs::remove_dir_all(&skill_dir);
         return Err(format!(
             "Skill \"{skill_name}\" did not load: the manifest is invalid or was blocked by the security scan (see the logs)"
@@ -188,6 +193,19 @@ pub fn import_skill_file(
 
     info!("Imported skill \"{skill_name}\" and reloaded registry");
     Ok(skill_name)
+}
+
+/// True when one of the registry's `loaded` skill directories is `skill_dir`.
+///
+/// The registry stores each skill's canonical directory, and a manifest's name can differ from its directory's, so the comparison is by canonical path rather than by name.
+fn skill_dir_loaded<'a>(
+    loaded: impl IntoIterator<Item = &'a std::path::Path>,
+    skill_dir: &std::path::Path,
+) -> bool {
+    let Ok(dir) = std::fs::canonicalize(skill_dir) else {
+        return false;
+    };
+    loaded.into_iter().any(|path| path == dir)
 }
 
 /// Install `src` as the manifest of a new skill directory under `skills_dir`, returning the directory's name and path.
@@ -530,8 +548,8 @@ pub async fn uninstall_app(app: tauri::AppHandle) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        parse_registry_uninstall_string, stage_skill_import, uninstall_process_from_argv,
-        validate_import_agent_name,
+        parse_registry_uninstall_string, skill_dir_loaded, stage_skill_import,
+        uninstall_process_from_argv, validate_import_agent_name,
     };
     use std::ffi::OsString;
 
@@ -584,6 +602,32 @@ mod tests {
         std::fs::write(&toml, "x").unwrap();
         let (_, dir) = stage_skill_import(&skills, &toml).expect("import");
         assert!(dir.join("skill.toml").is_file());
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The import is judged by whether its own directory loaded, not by the registry's size, which also moves with unrelated skills added or removed on disk since the last reload.
+    #[test]
+    fn skill_import_success_is_judged_by_its_own_directory() {
+        let root = scratch_dir("skill-import-loaded");
+        let skills = root.join("skills");
+        let src = root.join("new-skill.md");
+        std::fs::write(&src, "x").unwrap();
+        let (_, dir) = stage_skill_import(&skills, &src).expect("import");
+        let other = skills.join("other");
+        std::fs::create_dir_all(&other).unwrap();
+        let canonical = std::fs::canonicalize(&dir).unwrap();
+        let other = std::fs::canonicalize(&other).unwrap();
+
+        // The registry lost an unrelated skill but holds the new one: success, whatever the count did.
+        assert!(skill_dir_loaded([canonical.as_path()], &dir));
+        // The registry gained an unrelated skill but not the new one: failure.
+        assert!(!skill_dir_loaded([other.as_path()], &dir));
+        // A directory that no longer exists never counts as loaded.
+        assert!(!skill_dir_loaded(
+            [canonical.as_path()],
+            &skills.join("gone")
+        ));
 
         let _ = std::fs::remove_dir_all(&root);
     }
