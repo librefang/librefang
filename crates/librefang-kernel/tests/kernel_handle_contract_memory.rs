@@ -199,6 +199,123 @@ fn test_memory_list_separates_global_and_peer_keys() {
 }
 
 #[test]
+fn test_memory_keys_with_prefix_stays_inside_the_caller_scope() {
+    let (kernel, _tmp) = boot();
+    let kh: &dyn KernelHandle = &kernel;
+
+    // Every decoy shares the probe prefix and differs from the intended row in exactly one half of the scope — the agent, the peer, or neither — so a hint lookup that dropped either half would surface one of them (#8625).
+    kh.memory_store(
+        "file-acme-success-story",
+        serde_json::json!(1),
+        Some(AGENT_A),
+        Some("peer-x"),
+    )
+    .unwrap();
+    kh.memory_store(
+        "file-acme-success-story-docx",
+        serde_json::json!(2),
+        Some(AGENT_B),
+        Some("peer-x"),
+    )
+    .unwrap();
+    kh.memory_store(
+        "file-acme-success-story-pdf",
+        serde_json::json!(3),
+        Some(AGENT_A),
+        Some("peer-y"),
+    )
+    .unwrap();
+    kh.memory_store(
+        "file-acme-global",
+        serde_json::json!(4),
+        Some(AGENT_A),
+        None,
+    )
+    .unwrap();
+    kh.memory_store("file-acme-shared", serde_json::json!(5), None, None)
+        .unwrap();
+
+    assert_eq!(
+        kh.memory_keys_with_prefix("file-acme", Some(AGENT_A), Some("peer-x"), 5)
+            .unwrap(),
+        ["file-acme-success-story"],
+        "a peer-scoped probe must return only the caller's own agent+peer keys"
+    );
+
+    // No peer scope means the caller's global rows only: peer-framed rows are invisible even though their stored form starts with the bare probe.
+    assert_eq!(
+        kh.memory_keys_with_prefix("file-acme", Some(AGENT_A), None, 5)
+            .unwrap(),
+        ["file-acme-global"],
+        "an unscoped probe must not reach peer namespaces or the shared namespace"
+    );
+
+    // The limit is pushed down to the query, so it bounds the returned keys.
+    kh.memory_store(
+        "file-acme-two",
+        serde_json::json!(6),
+        Some(AGENT_A),
+        Some("peer-x"),
+    )
+    .unwrap();
+    assert_eq!(
+        kh.memory_keys_with_prefix("file-acme", Some(AGENT_A), Some("peer-x"), 1)
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+/// The no-peer scope must not spend its `limit` on rows it is about to discard (#8625 review).
+///
+/// The framing `peer:{pid}:` lives inside the owning agent's namespace, so a bare probe over a key like `peer-config` walks straight into it: without the exclusion the two peer rows below fill the two requested slots, the visible `peerA-global` is never looked at, and the hint reports nothing as "close" to a key it has in front of it.
+#[test]
+fn test_memory_keys_with_prefix_does_not_spend_the_limit_on_invisible_rows() {
+    let (kernel, _tmp) = boot();
+    let kh: &dyn KernelHandle = &kernel;
+
+    // The framing is written by the kernel, not by the caller: a caller key may not start with `peer:` (rejected at the write boundary), so these two rows reach the agent's namespace through peer `p1`.
+    kh.memory_store("k1", serde_json::json!(1), Some(AGENT_A), Some("p1"))
+        .unwrap();
+    kh.memory_store("k2", serde_json::json!(2), Some(AGENT_A), Some("p1"))
+        .unwrap();
+    kh.memory_store("peerA-global", serde_json::json!(3), Some(AGENT_A), None)
+        .unwrap();
+
+    assert_eq!(
+        kh.memory_keys_with_prefix("peer", Some(AGENT_A), None, 2)
+            .unwrap(),
+        ["peerA-global"],
+        "the two peer-framed rows must not consume the limit meant for visible keys"
+    );
+
+    // The same rows are reachable from inside peer `p1`, stripped back to the names that peer knows, limit included.
+    assert_eq!(
+        kh.memory_keys_with_prefix("k", Some(AGENT_A), Some("p1"), 2)
+            .unwrap(),
+        ["k1", "k2"]
+    );
+
+    // The peer-scope half of the same class: a pre-fix nested plant (#5120) is dropped by the round-trip guard, and it sorts ahead of the legitimate `peerabc` row, so it would take the single requested slot and hide a key the caller can address.
+    let substrate = MemorySubsystemApi::substrate_ref(&kernel);
+    kh.memory_store("peerabc", serde_json::json!(4), None, Some("p1"))
+        .unwrap();
+    substrate
+        .structured_set(
+            shared_mem_agent_id(),
+            "peer:p1:peer:other:secret",
+            serde_json::json!("planted-nested"),
+        )
+        .expect("plant nested pre-fix row");
+    assert_eq!(
+        kh.memory_keys_with_prefix("peer", None, Some("p1"), 1)
+            .unwrap(),
+        ["peerabc"],
+        "a dropped pre-fix plant must not consume the limit meant for visible keys"
+    );
+}
+
+#[test]
 fn test_memory_recall_nonexistent_key_returns_none() {
     let (kernel, _tmp) = boot();
     let kh: &dyn KernelHandle = &kernel;
@@ -651,5 +768,101 @@ fn test_memory_store_keeps_the_prefix_available_on_an_attributed_turn() {
         kh.memory_recall("session_notes", None, Some("@alice"))
             .is_ok(),
         "the attributed key must stay recallable"
+    );
+}
+
+/// The two key-enumerating paths have to agree on visibility, in both scopes and on the limit.
+///
+/// `memory_list` is the authoritative read: it resolves every stored key through `peer_visible_key`.
+/// A hint pushes the same drop set into its query instead, so that `limit` counts rows the caller can see — and a copy of a predicate can drift from the original in either direction.
+/// Too narrow only under-counts (the downstream filter still drops the row); too wide loses a visible key outright, and no downstream filter can bring back a row the query never returned.
+/// This asserts the agreement, over a fixture that carries each shape the predicate distinguishes, rather than the individual cases one at a time.
+#[test]
+fn test_memory_keys_with_prefix_agrees_with_memory_list_on_visibility() {
+    let (kernel, _tmp) = boot();
+    let kh: &dyn KernelHandle = &kernel;
+    let substrate = MemorySubsystemApi::substrate_ref(&kernel);
+
+    // Ordinary global rows, including one whose name merely starts with `peer`.
+    kh.memory_store("file-a", serde_json::json!(1), Some(AGENT_A), None)
+        .unwrap();
+    kh.memory_store("peerA-global", serde_json::json!(2), Some(AGENT_A), None)
+        .unwrap();
+    // Legitimate peer rows for a plain peer and for a colon-bearing one (#6100).
+    kh.memory_store("k1", serde_json::json!(3), Some(AGENT_A), Some("p1"))
+        .unwrap();
+    kh.memory_store("peerabc", serde_json::json!(4), Some(AGENT_A), Some("p1"))
+        .unwrap();
+    kh.memory_store("k1", serde_json::json!(5), Some(AGENT_A), Some("T1:U2"))
+        .unwrap();
+    // Pre-fix plants the round-trip guard rejects: a nested plant inside peer `p1`, and a row under the reserved framing with no peer.
+    substrate
+        .structured_set(
+            AGENT_A.parse::<uuid::Uuid>().map(AgentId).unwrap(),
+            "peer:p1:peer:other:secret",
+            serde_json::json!("planted-nested"),
+        )
+        .expect("plant nested pre-fix row");
+    substrate
+        .structured_set(
+            AGENT_A.parse::<uuid::Uuid>().map(AgentId).unwrap(),
+            "peer:orphan",
+            serde_json::json!("planted-orphan"),
+        )
+        .expect("plant reserved-framing row");
+    // A platform compaction summary (#8645): same namespace, one conversation, never addressable from an unscoped tool call.
+    substrate
+        .structured_set(
+            AGENT_A.parse::<uuid::Uuid>().map(AgentId).unwrap(),
+            "session_0000",
+            serde_json::json!("someone else's summary"),
+        )
+        .expect("plant a session summary");
+    // A visible key that sorts *after* the summary, so a one-slot probe over `s` can only reach it once the summary is excluded inside the query.
+    kh.memory_store("st-visible", serde_json::json!(6), Some(AGENT_A), None)
+        .unwrap();
+
+    // A probe of "" covers the whole scope, so each comparison is over every row the caller may see.
+    for peer in [None, Some("p1"), Some("T1:U2")] {
+        let mut listed = kh.memory_list(Some(AGENT_A), peer).unwrap();
+        listed.sort();
+        let hinted = kh
+            .memory_keys_with_prefix("", Some(AGENT_A), peer, 100)
+            .unwrap();
+        assert_eq!(
+            hinted, listed,
+            "hint and listing must agree on visibility for peer {peer:?}"
+        );
+
+        // And the limit counts rows that survive, so the first key of a one-slot probe is the first visible key.
+        if let Some(first) = listed.first() {
+            assert_eq!(
+                kh.memory_keys_with_prefix("", Some(AGENT_A), peer, 1)
+                    .unwrap(),
+                std::slice::from_ref(first),
+                "a one-slot hint must return the first visible key for peer {peer:?}"
+            );
+        }
+    }
+
+    // The probes that walk into a hidden row *first* are the ones an exclusion narrower than the predicate would break, and the ordering in the fixture above does not put one in front.
+    // In the no-peer scope the reserved rows sort ahead of `peerA-global` (':' is 0x3A, 'A' is 0x41); inside peer `p1` the nested plant sorts ahead of `peerabc` (':' against 'a').
+    assert_eq!(
+        kh.memory_keys_with_prefix("peer", Some(AGENT_A), None, 1)
+            .unwrap(),
+        ["peerA-global"]
+    );
+    assert_eq!(
+        kh.memory_keys_with_prefix("peer", Some(AGENT_A), Some("p1"), 1)
+            .unwrap(),
+        ["peerabc"]
+    );
+
+    // The `session_` range is hidden in the no-peer scope too, and it sorts ahead of every other `s` key: without the second exclusion the single slot goes to `session_0000` and the hint comes back empty.
+    assert_eq!(
+        kh.memory_keys_with_prefix("s", Some(AGENT_A), None, 1)
+            .unwrap(),
+        ["st-visible"],
+        "a hidden session summary must not consume the limit"
     );
 }

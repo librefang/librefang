@@ -567,8 +567,7 @@ impl OpenAIDriver {
 
     /// True if this DeepSeek model has thinking mode on by default and the
     /// API **requires** `reasoning_content` to be echoed back on historical
-    /// assistant messages that contain `tool_calls`. Matches DeepSeek V4
-    /// Flash and V4 Pro.
+    /// assistant messages. Matches DeepSeek V4 Flash and V4 Pro.
     ///
     /// V4 Pro was originally excluded here (#4842 assumed it "works
     /// out-of-the-box"), but production multi-turn tool-call conversations
@@ -578,10 +577,16 @@ impl OpenAIDriver {
     /// (or DeepSeek changed the contract), so V4 Pro is now matched too.
     ///
     /// Per the DeepSeek thinking-mode docs:
-    /// > For turns that do perform tool calls, the `reasoning_content` must
-    /// > be fully passed back to the API in all subsequent requests. If your
+    /// > For requests carrying the `tools` parameter, the `reasoning_content`
+    /// > must be fully passed back to the API in all subsequent requests —
+    /// > even for turns where the model did not perform a tool call. If your
     /// > code does not correctly pass back `reasoning_content`, the API will
     /// > return a 400 error.
+    ///
+    /// The echo therefore covers *every* historical assistant turn that has a
+    /// Thinking block, not only the `tool_calls` turns — a text-only final
+    /// answer turn from the previous user turn is enough to reject the whole
+    /// request once the agent loop sends its `tools` list.
     ///
     /// This is the **opposite** of [`Self::is_deepseek_reasoner`] (R1), which
     /// must strip `reasoning_content` from historical messages, and distinct
@@ -1528,20 +1533,35 @@ impl OpenAIDriver {
                         // time (catalog metadata, with substring fallback):
                         //   * Strip       — omit (DeepSeek R1 rejects it).
                         //   * Echo        — echo the original thinking text on
-                        //                   tool_calls turns (DeepSeek V4
-                        //                   Flash; #4842).
+                        //                   every historical assistant turn
+                        //                   that has one (DeepSeek V4 Flash /
+                        //                   Pro; #4842). The current DeepSeek
+                        //                   contract requires the full echo on
+                        //                   *all* previous turns once the
+                        //                   request carries `tools` — including
+                        //                   turns without tool_calls.
                         //   * EmptyString — empty string on tool_calls turns
                         //                   (Moonshot / Kimi K2; thinking is
                         //                   also disabled wire-side below).
                         //   * None        — omit (most providers).
                         reasoning_content: match echo_policy {
                             ReasoningEchoPolicy::Strip | ReasoningEchoPolicy::None => None,
-                            ReasoningEchoPolicy::Echo if has_tool_calls => {
-                                // Empty Thinking blocks (or no Thinking block
-                                // at all) still need reasoning_content present
-                                // — V4 Flash rejects the field being missing on
-                                // a tool_calls turn, but accepts empty string.
-                                Some(thinking_parts.join(""))
+                            ReasoningEchoPolicy::Echo => {
+                                if !thinking_parts.is_empty() {
+                                    // Any turn the model reasoned on must
+                                    // round-trip its reasoning verbatim,
+                                    // tool_calls or not.
+                                    Some(thinking_parts.join(""))
+                                } else if has_tool_calls {
+                                    // No Thinking block at all: a tool_calls
+                                    // turn still needs reasoning_content
+                                    // present — V4 rejects the field being
+                                    // missing there and accepts an empty
+                                    // string (#4842).
+                                    Some(String::new())
+                                } else {
+                                    None
+                                }
                             }
                             ReasoningEchoPolicy::EmptyString if has_tool_calls => {
                                 Some(String::new())
@@ -3783,11 +3803,15 @@ mod tests {
         );
     }
 
-    /// #4842: V4 Flash assistant turns *without* tool_calls (text-only response)
-    /// don't need reasoning_content — the constraint is specifically on
-    /// tool_calls turns.
+    /// V4 Flash assistant turns *without* tool_calls must ALSO carry their
+    /// reasoning_content back once the request carries `tools` — the current
+    /// DeepSeek contract requires the echo for every previous turn, "even for
+    /// turns where the model did not perform a tool call", and the agent loop
+    /// always sends its toolset. Dropping it here was invisible on the first
+    /// tool loop and 400'd on the next user turn, once a text-only assistant
+    /// turn sat in the history.
     #[test]
-    fn test_deepseek_v4_flash_omits_reasoning_on_text_only_turn() {
+    fn test_deepseek_v4_flash_echoes_reasoning_on_text_only_turn() {
         use librefang_llm_driver::CompletionRequest;
         use librefang_types::message::{ContentBlock, Message, MessageContent, Role};
 
@@ -3834,9 +3858,171 @@ mod tests {
             .iter()
             .find(|m| m.role == "assistant")
             .expect("assistant message");
+        assert_eq!(
+            assistant_msg.reasoning_content.as_deref(),
+            Some("thinking out loud"),
+            "a text-only V4 Flash turn with a Thinking block must echo its \
+             reasoning_content — the tools-carrying request rejects the omission"
+        );
+    }
+
+    /// Production repro: the second user turn of a session whose first turn
+    /// completed a tool cycle. The history holds a tool_calls assistant turn
+    /// AND a text-only final-answer assistant turn; both carried Thinking
+    /// blocks, and both must reach the wire with `reasoning_content` or
+    /// DeepSeek answers 400 "The reasoning_content in the thinking mode must
+    /// be passed back to the API."
+    #[test]
+    fn test_deepseek_v4_flash_echoes_reasoning_on_every_historical_turn() {
+        use librefang_llm_driver::CompletionRequest;
+        use librefang_types::message::{ContentBlock, Message, MessageContent, Role};
+        use librefang_types::tool::ToolExecutionStatus;
+
+        let driver = OpenAIDriver::new(String::new(), "https://api.deepseek.com/v1".to_string());
+
+        let assistant_with_tool = Message {
+            role: Role::Assistant,
+            content: MessageContent::Blocks(vec![
+                ContentBlock::Thinking {
+                    thinking: "I should read the file first.".to_string(),
+                    provider_metadata: None,
+                },
+                ContentBlock::ToolUse {
+                    id: "call_1".to_string(),
+                    name: "read_file".to_string(),
+                    input: serde_json::json!({"path": "notes.md"}),
+                    provider_metadata: None,
+                },
+            ]),
+            pinned: false,
+            timestamp: None,
+        };
+        let tool_result = Message {
+            role: Role::User,
+            content: MessageContent::Blocks(vec![ContentBlock::ToolResult {
+                tool_use_id: "call_1".to_string(),
+                tool_name: "read_file".to_string(),
+                content: "3 notes".to_string(),
+                is_error: false,
+                status: ToolExecutionStatus::Completed,
+                approval_request_id: None,
+            }]),
+            pinned: false,
+            timestamp: None,
+        };
+        let assistant_final = Message {
+            role: Role::Assistant,
+            content: MessageContent::Blocks(vec![
+                ContentBlock::Thinking {
+                    thinking: "Now I can summarise the notes.".to_string(),
+                    provider_metadata: None,
+                },
+                ContentBlock::Text {
+                    text: "You have 3 notes.".to_string(),
+                    provider_metadata: None,
+                },
+            ]),
+            pinned: false,
+            timestamp: None,
+        };
+
+        let req = CompletionRequest {
+            model: "deepseek-v4-flash".to_string(),
+            messages: std::sync::Arc::new(vec![
+                Message::user("Please read my notes"),
+                assistant_with_tool,
+                tool_result,
+                assistant_final,
+                Message::user("Summarise them"),
+            ]),
+            tools: std::sync::Arc::new(Vec::new()),
+            max_tokens: 128,
+            temperature: 0.7,
+            system: None,
+            thinking: None,
+            prompt_caching: false,
+            cache_ttl: None,
+            prompt_cache_strategy: None,
+            response_format: None,
+            timeout_secs: None,
+            extra_body: None,
+            agent_id: None,
+            session_id: None,
+            step_id: None,
+            reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy::default(),
+
+            ..Default::default()
+        };
+        let oai = driver.build_request(&req).expect("build_request");
+        let assistants: Vec<_> = oai
+            .messages
+            .iter()
+            .filter(|m| m.role == "assistant")
+            .collect();
+        assert_eq!(
+            assistants.len(),
+            2,
+            "fixture must keep both assistant turns"
+        );
+        assert_eq!(
+            assistants[0].reasoning_content.as_deref(),
+            Some("I should read the file first."),
+            "the tool_calls turn must keep echoing its reasoning"
+        );
+        assert_eq!(
+            assistants[1].reasoning_content.as_deref(),
+            Some("Now I can summarise the notes."),
+            "the text-only turn must echo its reasoning too — DeepSeek rejects \
+             the request when any previous turn's reasoning_content is missing"
+        );
+    }
+
+    /// Guard against fabricating reasoning: a historical assistant turn with
+    /// no Thinking block and no tool_calls has nothing to pass back, so the
+    /// field stays absent. Only #4842's tool_calls fallback sends the empty
+    /// string.
+    #[test]
+    fn test_deepseek_v4_flash_omits_reasoning_when_there_is_none() {
+        use librefang_llm_driver::CompletionRequest;
+        use librefang_types::message::{Message, Role};
+
+        let driver = OpenAIDriver::new(String::new(), "https://api.deepseek.com/v1".to_string());
+        let assistant = Message {
+            role: Role::Assistant,
+            content: librefang_types::message::MessageContent::Text("Plain reply".to_string()),
+            pinned: false,
+            timestamp: None,
+        };
+        let req = CompletionRequest {
+            model: "deepseek-v4-flash".to_string(),
+            messages: std::sync::Arc::new(vec![assistant]),
+            tools: std::sync::Arc::new(Vec::new()),
+            max_tokens: 128,
+            temperature: 0.7,
+            system: None,
+            thinking: None,
+            prompt_caching: false,
+            cache_ttl: None,
+            prompt_cache_strategy: None,
+            response_format: None,
+            timeout_secs: None,
+            extra_body: None,
+            agent_id: None,
+            session_id: None,
+            step_id: None,
+            reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy::default(),
+
+            ..Default::default()
+        };
+        let oai = driver.build_request(&req).expect("build_request");
+        let assistant_msg = oai
+            .messages
+            .iter()
+            .find(|m| m.role == "assistant")
+            .expect("assistant message");
         assert!(
             assistant_msg.reasoning_content.is_none(),
-            "text-only V4 Flash assistant turn doesn't need reasoning_content round-trip"
+            "a turn with no Thinking block and no tool_calls has nothing to echo"
         );
     }
 

@@ -2717,6 +2717,76 @@ fn manifest_toml_rows(toml: &str, width: u16) -> usize {
     manifest_toml_paragraph(toml).line_count(width)
 }
 
+/// The closed inventory of `manifest_versions.change_source` tokens the kernel can write (#8604).
+///
+/// Mirrors the dashboard's `MANIFEST_CHANGE_SOURCES` (#8603): `model`, `skills`, `workspaces`,
+/// `channels`, `routing`, `schedule`, `tool-filters` and `mcp-servers` are the per-field setters
+/// in `agent_state.rs`; `api` is the control-plane persist in the agents routes; `provisioning`
+/// is the deployment reconcile; `restore` is the manifest-history restore route; `suspend` /
+/// `resume` — plus the `*-persist-failed` variants recorded when the `agent.toml` write fails —
+/// come from `persist_agent_enabled`; `unknown` is the SQLite column default, which no producer
+/// writes but an older row can carry.
+/// Every token here has a `tui-agents-manifest-source-<token>` key in all four locale packs.
+const MANIFEST_CHANGE_SOURCES: &[&str] = &[
+    "model",
+    "skills",
+    "workspaces",
+    "channels",
+    "routing",
+    "schedule",
+    "tool-filters",
+    "mcp-servers",
+    "api",
+    "provisioning",
+    "restore",
+    "suspend",
+    "resume",
+    "suspend-persist-failed",
+    "resume-persist-failed",
+    "unknown",
+];
+
+/// Operator-facing label for a stored version's `change_source` (#8604).
+///
+/// The column is free text on the server, so the value is looked up against the closed vocabulary
+/// above rather than shown: a raw `suspend-persist-failed` spliced into an otherwise translated
+/// row reads as neither language.
+/// A value outside [`MANIFEST_CHANGE_SOURCES`] — a producer this list has not been taught, or a
+/// row from an older database — comes back verbatim, because provenance is worth more than a tidy
+/// blank, and membership is checked before the Fluent lookup so a dotted token can never resolve
+/// as a nested key.
+fn manifest_change_source_label(source: &str) -> String {
+    if MANIFEST_CHANGE_SOURCES.contains(&source) {
+        crate::i18n::t(&format!("tui-agents-manifest-source-{source}"))
+    } else {
+        source.to_string()
+    }
+}
+
+/// Characters the change-source column of the version list has room for.
+///
+/// Sized to the widest label the shipped locales produce — 27 characters, Ukrainian's
+/// `Помилка запису призупинення` — so a localized label reads in full instead of being cut.
+/// The list reserves three cells for the selection glyph before the timestamp, so the label
+/// starts at cell 26 of a 120-column terminal's 53-cell pane: a budget of 27 is what fits.
+const MANIFEST_SOURCE_COLUMN_CHARS: usize = 27;
+
+/// Truncate a rendered label to [`MANIFEST_SOURCE_COLUMN_CHARS`], counting characters, with an ellipsis when it does not fit.
+///
+/// `widgets::truncate` counts bytes, which would cut a Cyrillic label at roughly half the visible
+/// text (each letter is two bytes) while an ASCII token of the same visible width passed through.
+/// Only unmapped tokens are long enough to reach this at all; the mapped labels fit by construction.
+fn truncate_manifest_source(label: &str) -> String {
+    if label.chars().count() <= MANIFEST_SOURCE_COLUMN_CHARS {
+        return label.to_string();
+    }
+    let prefix: String = label
+        .chars()
+        .take(MANIFEST_SOURCE_COLUMN_CHARS - 1)
+        .collect();
+    format!("{prefix}\u{2026}")
+}
+
 /// Render the view-only manifest version timeline.
 ///
 /// Left: one row per snapshot, newest first.
@@ -2776,7 +2846,10 @@ fn draw_manifest_history(f: &mut Frame, area: Rect, state: &mut AgentSelectState
                     format!("  {:<21}", format_manifest_timestamp(&v.timestamp)),
                     Style::default().fg(theme::CYAN),
                 ),
-                Span::styled(widgets::truncate(&v.change_source, 18), theme::dim_style()),
+                Span::styled(
+                    truncate_manifest_source(&manifest_change_source_label(&v.change_source)),
+                    theme::dim_style(),
+                ),
             ]))
         })
         .collect();
@@ -3214,8 +3287,8 @@ mod tests {
         let rendered = render(&mut state);
 
         assert!(
-            rendered.contains("api"),
-            "the change source belongs on the row:\n{rendered}"
+            rendered.contains("API edit"),
+            "the change source label belongs on the row:\n{rendered}"
         );
         assert!(
             rendered.contains("2026-09-07"),
@@ -3223,10 +3296,69 @@ mod tests {
         );
     }
 
-    /// The kernel's longest `change_source` tags (`suspend-persist-failed` and `resume-persist-failed`, 22 and 21 bytes) are wider than the column's 18 cells.
-    /// They must truncate with the ellipsis rather than overflow or vanish, and short tags such as `model` must pass through untouched.
+    /// Every token the store can write maps to its label — pinned exactly, so a key renamed in `locales/en/main.ftl` or a token added to the inventory without one fails here.
     #[test]
-    fn long_change_source_tags_render_truncated_within_the_column() {
+    fn manifest_change_source_labels_cover_the_store_vocabulary() {
+        let expected = [
+            ("model", "Model change"),
+            ("skills", "Skills change"),
+            ("workspaces", "Workspaces change"),
+            ("channels", "Channels change"),
+            ("routing", "Routing change"),
+            ("schedule", "Schedule change"),
+            ("tool-filters", "Tool filters change"),
+            ("mcp-servers", "MCP servers change"),
+            ("api", "API edit"),
+            ("provisioning", "Provisioned"),
+            ("restore", "Restored"),
+            ("suspend", "Suspended"),
+            ("resume", "Resumed"),
+            ("suspend-persist-failed", "Suspend write failed"),
+            ("resume-persist-failed", "Resume write failed"),
+            ("unknown", "Unknown source"),
+        ];
+        assert_eq!(
+            expected.len(),
+            MANIFEST_CHANGE_SOURCES.len(),
+            "the pinned vocabulary and the inventory must not drift apart"
+        );
+        for (token, label) in expected {
+            assert_eq!(
+                manifest_change_source_label(token),
+                label,
+                "{token} must render its operator-facing label"
+            );
+        }
+    }
+
+    /// A producer the TUI has not been taught, or a row from an older database, still says where it came from — verbatim — and a dotted token is never resolved as a locale key.
+    #[test]
+    fn unmapped_manifest_change_sources_render_verbatim() {
+        assert_eq!(
+            manifest_change_source_label("some_future_source"),
+            "some_future_source"
+        );
+        assert_eq!(
+            manifest_change_source_label("tui-agents-title-manifest-history"),
+            "tui-agents-title-manifest-history"
+        );
+    }
+
+    /// The labels are Fluent messages, not hardcoded English: an operator who selected another language reads the list in that language.
+    #[test]
+    fn manifest_change_source_labels_are_localized() {
+        crate::i18n::init("uk");
+        assert_eq!(manifest_change_source_label("suspend"), "Призупинено");
+        assert_eq!(
+            manifest_change_source_label("suspend-persist-failed"),
+            "Помилка запису призупинення"
+        );
+        assert_eq!(manifest_change_source_label("unknown"), "Невідоме джерело");
+    }
+
+    /// The longest known tokens now render as their labels in full; an unmapped token wider than the column is ellipsized rather than clipped mid-word by the pane edge, and the truncation cannot cut a Cyrillic label short by counting bytes.
+    #[test]
+    fn change_source_labels_fit_the_column_and_unknown_tokens_truncate() {
         let with_source = |source: &str| ManifestVersion {
             timestamp: "2026-09-07 10:00:00".to_string(),
             change_source: source.to_string(),
@@ -3238,21 +3370,36 @@ mod tests {
             with_source("suspend-persist-failed"),
             with_source("model"),
             with_source("restore"),
+            with_source("some-future-source-token-that-does-not-fit-the-column"),
         ]);
 
         let rendered = render(&mut state);
 
         assert!(
-            rendered.contains("suspend-persist-f\u{2026}"),
-            "the longest tag must still name itself inside 18 cells:\n{rendered}"
+            rendered.contains("Suspend write failed"),
+            "the longest known label must render in full:\n{rendered}"
         );
         assert!(
-            rendered.contains("model"),
-            "a short tag must render in full:\n{rendered}"
+            rendered.contains("Model change"),
+            "a short label must render in full:\n{rendered}"
         );
         assert!(
-            rendered.contains("restore"),
-            "the restore tag must render in full:\n{rendered}"
+            rendered.contains("Restored"),
+            "the restore label must render in full:\n{rendered}"
+        );
+        assert_eq!(
+            truncate_manifest_source("some-future-source-token-that-does-not-fit-the-column"),
+            "some-future-source-token-t\u{2026}",
+            "an unmapped token wider than the column must carry the ellipsis"
+        );
+        assert!(
+            rendered.contains("some-future-source-token-t\u{2026}"),
+            "the truncated token must render, not vanish:\n{rendered}"
+        );
+        assert_eq!(
+            truncate_manifest_source("Помилка запису призупинення"),
+            "Помилка запису призупинення",
+            "the widest shipped label must not be cut by byte counting"
         );
     }
 

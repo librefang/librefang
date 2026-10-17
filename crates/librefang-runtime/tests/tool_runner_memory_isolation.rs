@@ -21,6 +21,7 @@ struct IsolationKernel {
     store_agent_ids: AgentIdLog,
     recall_agent_ids: AgentIdLog,
     list_agent_ids: AgentIdLog,
+    prefix_agent_ids: AgentIdLog,
     storage: Arc<Mutex<StorageMap>>,
 }
 
@@ -28,6 +29,7 @@ struct IsolationProbes {
     store_agent_ids: AgentIdLog,
     recall_agent_ids: AgentIdLog,
     list_agent_ids: AgentIdLog,
+    prefix_agent_ids: AgentIdLog,
 }
 
 impl IsolationKernel {
@@ -35,11 +37,13 @@ impl IsolationKernel {
         let store = Arc::new(Mutex::new(Vec::new()));
         let recall = Arc::new(Mutex::new(Vec::new()));
         let list = Arc::new(Mutex::new(Vec::new()));
+        let prefix = Arc::new(Mutex::new(Vec::new()));
         let storage = Arc::new(Mutex::new(HashMap::new()));
         let kernel = Self {
             store_agent_ids: Arc::clone(&store),
             recall_agent_ids: Arc::clone(&recall),
             list_agent_ids: Arc::clone(&list),
+            prefix_agent_ids: Arc::clone(&prefix),
             storage: Arc::clone(&storage),
         };
         (
@@ -48,6 +52,7 @@ impl IsolationKernel {
                 store_agent_ids: store,
                 recall_agent_ids: recall,
                 list_agent_ids: list,
+                prefix_agent_ids: prefix,
             },
         )
     }
@@ -137,6 +142,28 @@ impl MemoryAccess for IsolationKernel {
         _channel: Option<&str>,
     ) -> Option<librefang_types::user_policy::UserMemoryAccess> {
         None
+    }
+    fn memory_keys_with_prefix(
+        &self,
+        prefix: &str,
+        agent_id: Option<&str>,
+        _peer_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<String>, librefang_kernel_handle::KernelOpError> {
+        self.prefix_agent_ids
+            .lock()
+            .unwrap()
+            .push(agent_id.map(|s| s.to_string()));
+        let guard = self.storage.lock().unwrap();
+        let mut keys: Vec<String> = guard
+            .keys()
+            .filter(|(aid, _)| *aid == agent_id.map(|s| s.to_string()))
+            .map(|(_, k)| k.clone())
+            .filter(|k| k.starts_with(prefix))
+            .collect();
+        keys.sort();
+        keys.truncate(limit);
+        Ok(keys)
     }
 }
 
@@ -473,5 +500,80 @@ async fn f4_auto_memorize_via_memory_list() {
         list_ids[0],
         Some("dddddddd-dddd-dddd-dddd-dddddddddddd".to_string()),
         "memory_list must pass caller_agent_id"
+    );
+}
+
+/// A recall miss must hand back the key space it searched (#8625).
+///
+/// Before the fix the miss was a bare `No value found for key '…'.`, so an agent convinced the key existed varied it — `…-docx-v32` … `-v41` — until the iteration cap ended the turn.
+/// The hint has to name the keys that *do* exist near the request, and it has to do it inside the caller's own agent scope: a hint that surfaced another agent's key names would be a leak the exact-key lookup itself never had.
+///
+/// Peer scoping is deliberately not asserted here: this stub ignores `peer_id`, so it can only demonstrate the agent half.
+/// That half is covered against the real kernel by `test_memory_keys_with_prefix_stays_inside_the_caller_scope`.
+#[tokio::test]
+async fn f5_recall_miss_names_nearby_keys_in_the_callers_own_scope() {
+    let (kernel, probes) = IsolationKernel::new();
+    let kernel: Arc<dyn KernelHandle> = Arc::new(kernel);
+
+    let ctx_a = make_ctx(&kernel, Some("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"));
+    let ctx_b = make_ctx(&kernel, Some("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"));
+
+    // A owns the object under a shorter name; B owns a key that shares the whole requested prefix, so a probe issued without the caller's agent id would hand A a name that belongs to B.
+    let _ = execute_tool_raw(
+        "t1",
+        "memory_store",
+        &json!({"key": "file-acme-success-story", "value": "moat"}),
+        &ctx_a,
+    )
+    .await;
+    let _ = execute_tool_raw(
+        "t2",
+        "memory_store",
+        &json!({"key": "file-acme-success-story-docx-v2", "value": "b-private"}),
+        &ctx_b,
+    )
+    .await;
+
+    let miss = execute_tool_raw(
+        "t3",
+        "memory_recall",
+        &json!({"key": "file-acme-success-story-docx-v41"}),
+        &ctx_a,
+    )
+    .await;
+
+    assert!(!miss.is_error, "a miss is not an error: {}", miss.content);
+    assert!(
+        miss.content
+            .starts_with("No value found for key 'file-acme-success-story-docx-v41'."),
+        "the miss must still open with the exact-key sentence, got: {}",
+        miss.content
+    );
+    assert!(
+        miss.content.contains("'file-acme-success-story'"),
+        "the miss must name the key that does exist, got: {}",
+        miss.content
+    );
+    assert!(
+        !miss.content.contains("docx-v2"),
+        "the hint must not enumerate another agent's keys, got: {}",
+        miss.content
+    );
+    assert!(
+        miss.content.contains("memory_list") && miss.content.contains("memory_semantic_search"),
+        "the miss must point at the full listing and the meaning-based store, got: {}",
+        miss.content
+    );
+
+    let prefix_ids = probes.prefix_agent_ids.lock().unwrap();
+    assert!(
+        !prefix_ids.is_empty(),
+        "the miss must probe the key space instead of answering bare"
+    );
+    assert!(
+        prefix_ids
+            .iter()
+            .all(|id| id.as_deref() == Some("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")),
+        "every hint probe must carry the caller's agent id, got: {prefix_ids:?}"
     );
 }

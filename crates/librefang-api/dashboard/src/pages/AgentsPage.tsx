@@ -51,6 +51,7 @@ import { QuickRunModal } from "../components/QuickRunModal";
 import { useUIStore } from "../lib/store";
 import { copyToClipboard } from "../lib/clipboard";
 import { toastErr } from "../lib/errors";
+import { manifestChangeSourceLabel } from "../lib/changeSource";
 import { Search, Users, MessageCircle, X, Cpu, Wrench, Shield, Plus, Loader2, Pause, Play, Clock, Brain, Zap, FlaskConical, Trash2, Copy, RotateCcw, Pencil, Bot, Database, FileText, MoreHorizontal, Sparkles, ChevronDown, Check, Save, GitBranch, Radio, Route, Settings, KeyRound, History } from "lucide-react";
 import { truncateId } from "../lib/string";
 import { pickLatestSessionId } from "../lib/sessionSelector";
@@ -3509,7 +3510,7 @@ export function AgentsPage() {
                 <summary className="px-3 py-2 cursor-pointer text-[12px] flex flex-wrap items-center gap-2 select-none">
                   <History className="w-3.5 h-3.5 text-text-dim shrink-0" />
                   <span className="font-medium">{versionTimestamp(v)}</span>
-                  <span className="text-text-dim">· {v.change_source}</span>
+                  <span className="text-text-dim" title={v.change_source}>· {manifestChangeSourceLabel(t, v.change_source)}</span>
                   <Button
                     variant="secondary"
                     size="sm"
@@ -3524,7 +3525,7 @@ export function AgentsPage() {
                         message: t("agents.detail.restore_confirm", {
                           name: agent.name,
                           timestamp: versionTimestamp(v),
-                          source: v.change_source,
+                          source: manifestChangeSourceLabel(t, v.change_source),
                         }),
                         tone: "destructive",
                         onConfirm: async () => {

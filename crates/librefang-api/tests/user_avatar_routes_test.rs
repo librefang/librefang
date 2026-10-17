@@ -63,6 +63,11 @@ const TINY_PNG: &[u8] = &[
 /// A minimal GIF87a header — a *different* format, for the swap test.
 const TINY_GIF: &[u8] = b"GIF87a\x01\x00\x01\x00\x80\x00\x00";
 
+/// A minimal 12-byte WebP header — the sniffer only requires `RIFF` plus
+/// `WEBP` at bytes 8–12, and the payload carries no meaning to any assertion
+/// here.
+const TINY_WEBP: &[u8] = b"RIFF\x00\x00\x00\x00WEBP";
+
 struct Harness {
     app: Router,
     state: Arc<AppState>,
@@ -1209,6 +1214,53 @@ async fn renaming_a_user_moves_the_avatar_to_the_new_stem() {
     );
 }
 
+/// A rename must clear residue that already sits under the new stem.
+///
+/// The only file that can be there is from an earlier holder of the new name
+/// whose row went away outside this API — hand-editing `config.toml` and
+/// reloading leaves the file behind. `find_avatar` probes `png` before `webp`,
+/// so without the clear the residual png would be served as the renamed user's
+/// picture and the moved webp would never be seen.
+#[tokio::test(flavor = "multi_thread")]
+async fn renaming_a_user_clears_residue_under_the_new_stem() {
+    let h = boot(vec![]).await;
+    // The upload helper takes raw bytes; these sniff as WebP, which is the
+    // point — the residual PNG below probes first.
+    upload_png_ok(&h, "Alice", TINY_WEBP).await;
+
+    let dir = users_avatar_dir(&h);
+    let residue = media::avatar_path(&dir, &expected_stem("Alicia"), "png");
+    std::fs::write(&residue, TINY_PNG).expect("seed residue");
+
+    let (status, body) = send(
+        h.app.clone(),
+        json_req(
+            Method::PUT,
+            "/api/users/Alice",
+            TEST_TOKEN,
+            serde_json::json!({ "name": "Alicia", "role": "user" }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "rename failed: {body:?}");
+    assert_eq!(body["has_avatar"], true, "{body:?}");
+
+    assert!(!residue.exists(), "the residue must be cleared by the move");
+    assert_eq!(
+        file_names(&dir),
+        vec![format!("{}.webp", expected_stem("Alicia"))],
+        "only the moved picture may remain"
+    );
+
+    let (status, _, bytes) =
+        send_raw(h.app.clone(), get("/api/users/Alicia/avatar", TEST_TOKEN)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        bytes, TINY_WEBP,
+        "the route must serve the moved picture, not the residue"
+    );
+}
+
 /// A rename of a user who never uploaded a picture is an ordinary rename: the
 /// move tolerates a missing source rather than inventing a 500 for the common
 /// case.
@@ -1284,6 +1336,39 @@ async fn deleting_an_avatar_makes_it_404_and_clears_has_avatar() {
     assert!(users_avatar_dir(&h).exists(), "the directory stays");
 }
 
+/// A refused unlink must not answer 200.
+///
+/// `remove_avatars` swallows per-file failures, so a permission error or a
+/// read-only mount answered `{"removed":0}` while the picture stayed and
+/// `has_avatar` stayed true. A directory squatting on a candidate name is the
+/// same shape — a failure that is not `NotFound` — and lets the test trigger
+/// it without mounting anything.
+#[tokio::test(flavor = "multi_thread")]
+async fn deleting_an_avatar_reports_a_refused_unlink() {
+    let h = boot(vec![]).await;
+    let dir = users_avatar_dir(&h);
+    std::fs::create_dir_all(&dir).expect("avatar dir");
+    std::fs::create_dir(media::avatar_path(&dir, &expected_stem("Alice"), "png"))
+        .expect("squat a candidate");
+
+    let (status, body) = send(
+        h.app.clone(),
+        raw(
+            Method::DELETE,
+            "/api/users/Alice/avatar",
+            TEST_TOKEN,
+            Vec::new(),
+            "application/octet-stream",
+        ),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "a deletion that did not happen must not report success: {body:?}"
+    );
+}
+
 /// Deleting a user takes the stored picture with it.
 ///
 /// The file is keyed on `UserId::from_name(name)`, a stable derivation, so
@@ -1338,6 +1423,79 @@ async fn deleting_a_user_takes_its_avatar_with_it() {
     let (status, body) = send(h.app.clone(), get("/api/users/Alice", TEST_TOKEN)).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["has_avatar"], serde_json::json!(false));
+}
+
+// ---------------------------------------------------------------------------
+// Residue from rows that went away outside the API
+// ---------------------------------------------------------------------------
+
+/// Creating a user must clear any image already stored under the new name's
+/// stem.
+///
+/// The only in-API path that removes a row sweeps its avatar (see
+/// `deleting_a_user_takes_its_avatar_with_it`), so the residue is seeded on
+/// disk directly — exactly what a `config.toml` edit plus reload leaves
+/// behind. Without the clear, `has_avatar` would answer true for a brand-new
+/// user who never set a picture.
+#[tokio::test(flavor = "multi_thread")]
+async fn creating_a_user_clears_residue_under_the_new_stem() {
+    let h = boot(vec![]).await;
+    let dir = users_avatar_dir(&h);
+    std::fs::create_dir_all(&dir).expect("avatar dir");
+    let residue = media::avatar_path(&dir, &expected_stem("Newbie"), "png");
+    std::fs::write(&residue, TINY_PNG).expect("seed residue");
+
+    let (status, body) = send(
+        h.app.clone(),
+        json_req(
+            Method::POST,
+            "/api/users",
+            TEST_TOKEN,
+            serde_json::json!({ "name": "Newbie", "role": "user" }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body:?}");
+    assert_eq!(
+        body["has_avatar"], false,
+        "the new user inherited the previous holder's picture: {body:?}"
+    );
+    assert!(!residue.exists(), "the residue must be cleared");
+
+    let (status, _) = send(h.app.clone(), get("/api/users/Newbie/avatar", TEST_TOKEN)).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+/// The import path creates rows too, so it clears the stem the same way.
+#[tokio::test(flavor = "multi_thread")]
+async fn importing_a_user_clears_residue_under_the_new_stem() {
+    let h = boot(vec![]).await;
+    let dir = users_avatar_dir(&h);
+    std::fs::create_dir_all(&dir).expect("avatar dir");
+    let residue = media::avatar_path(&dir, &expected_stem("Newbie"), "png");
+    std::fs::write(&residue, TINY_PNG).expect("seed residue");
+
+    let (status, body) = send(
+        h.app.clone(),
+        json_req(
+            Method::POST,
+            "/api/users/import",
+            TEST_TOKEN,
+            serde_json::json!({
+                "rows": [{ "name": "Newbie", "role": "user" }],
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body:?}");
+    assert_eq!(body["created"], 1, "{body:?}");
+    assert!(
+        !residue.exists(),
+        "the residue must be cleared by the import"
+    );
+
+    let (_, view) = send(h.app.clone(), get("/api/users/Newbie", TEST_TOKEN)).await;
+    assert_eq!(view["has_avatar"], false, "{view}");
 }
 
 // ---------------------------------------------------------------------------

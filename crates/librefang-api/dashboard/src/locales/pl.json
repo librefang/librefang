@@ -1163,6 +1163,24 @@
       "manifest_history": "Historia manifestu",
       "manifest_history_load_err": "Nie udało się wczytać historii manifestu.",
       "no_history": "Nie zarejestrowano jeszcze żadnych zmian konfiguracji.",
+      "manifest_change_source": {
+        "api": "API edit",
+        "model": "Model change",
+        "skills": "Skills change",
+        "workspaces": "Workspaces change",
+        "channels": "Channels change",
+        "routing": "Routing change",
+        "schedule": "Schedule change",
+        "tool-filters": "Tool filters change",
+        "mcp-servers": "MCP servers change",
+        "provisioning": "Provisioned",
+        "restore": "Restored",
+        "suspend": "Suspended",
+        "resume": "Resumed",
+        "suspend-persist-failed": "Suspend write failed",
+        "resume-persist-failed": "Resume write failed",
+        "unknown": "Unknown source"
+      },
       "restore_title": "Przywrócić tę wersję?",
       "restore_confirm": "Przywrócić '{{name}}' do wersji zapisanej {{timestamp}} ({{source}})? Spowoduje to nadpisanie bieżącego pliku agent.toml agenta; migawka zapisana później zawiera przywróconą treść, a nie treść, którą zastąpiła.",
       "restore_btn": "Przywróć",
@@ -4695,8 +4713,11 @@
   },
   "agentTypes": {
     "change_source": {
+      "agent-tool": "Agent tool",
       "create": "Created",
       "dashboard": "Dashboard edit",
+      "pre-registry-restore": "Pre-restore snapshot",
+      "registry-restore": "Restored from registry",
       "restore": "Restored",
       "toml": "Raw TOML edit",
       "unknown": "Unknown source"

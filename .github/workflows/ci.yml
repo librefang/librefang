@@ -855,7 +855,7 @@ jobs:
         with:
           version: 12
       # No `cache: pnpm`: this job only runs `pnpm audit`, which never populates the store, so there is nothing to cache. pnpm 12 does not even create the store directory, and setup-node's post-job save then fails the job with "Path Validation Error".
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v6
         with:
           node-version: 24
       - name: Run security audit

@@ -306,6 +306,84 @@ impl StructuredStore {
         Ok(keys)
     }
 
+    /// Keys of `agent_id` that begin with `prefix`, in byte order, at most `limit` of them, skipping the rows covered by `exclude_prefix`.
+    ///
+    /// A half-open range on `key` rather than `LIKE '<prefix>%'`: `kv_store`'s primary key is `(agent_id, key)` with the default BINARY collation, and SQLite only rewrites a `LIKE` into a range scan when the pattern's collation matches the column's — the default `LIKE` is ASCII case-insensitive, so this pattern would fall back to scanning every row of the agent (SQLite's "The LIKE Optimization").
+    /// Comparing the prefix as a value also keeps the index usable without the escaping a `GLOB` pattern would need, because `*`, `?` and `[` carry no meaning in a comparison.
+    ///
+    /// The upper bound is the prefix followed by the largest Unicode scalar value.
+    /// Every string that continues the prefix sorts below it, and every string that diverges from the prefix at an earlier byte sorts above it, so the range selects exactly the keys the prefix covers (a key literally equal to prefix + `U+10FFFF` and nothing else, or one that continues *past* that scalar, would be missed — a valid Rust `str` cannot contain a larger scalar, and no other continuation avoids the bound).
+    ///
+    /// `exclude_prefix` removes a second contiguous range from the result, and it exists because `limit` is applied by the query: a caller that filters rows out *after* the fact hands `limit` slots to rows it will discard, and then reports fewer keys than the store could have given it (#8625 review).
+    /// The kernel's per-peer key framing is written inside the owning agent's namespace, so the no-peer scope has to exclude it here rather than downstream.
+    /// Doing it in the same statement keeps the scan on the primary-key index: `EXPLAIN QUERY PLAN` still reports `SEARCH kv_store USING COVERING INDEX sqlite_autoindex_kv_store_1 (agent_id=? AND key>? AND key<?)`.
+    pub fn list_keys_with_prefix(
+        &self,
+        agent_id: AgentId,
+        prefix: &str,
+        exclude_prefix: Option<&str>,
+        limit: usize,
+    ) -> LibreFangResult<Vec<String>> {
+        let exclude: Vec<&str> = exclude_prefix.into_iter().collect();
+        self.list_keys_with_prefix_excluding(agent_id, prefix, &exclude, limit)
+    }
+
+    /// [`Self::list_keys_with_prefix`] with more than one excluded range.
+    ///
+    /// The unscoped tool scope hides two disjoint regions — the `peer:` framing and the
+    /// platform's `session_` summaries (#8645) — and a single exclusion slot cannot express
+    /// both. Passing every hidden prefix here keeps `limit` counting only rows the caller can
+    /// actually address, exactly as the one-prefix form does for the peer framing.
+    pub fn list_keys_with_prefix_excluding(
+        &self,
+        agent_id: AgentId,
+        prefix: &str,
+        exclude_prefixes: &[&str],
+        limit: usize,
+    ) -> LibreFangResult<Vec<String>> {
+        let conn = self.pool.get().map_err(LibreFangError::memory)?;
+        let upper = format!("{prefix}\u{10FFFF}");
+        // Each exclusion removes its own half-open range, so the scan stays on the
+        // primary-key index regardless of how many ranges the caller hides.
+        let mut sql = String::from(
+            "SELECT key FROM kv_store \
+             WHERE agent_id = ?1 AND key >= ?2 AND key < ?3",
+        );
+        let mut values = vec![
+            rusqlite::types::Value::Text(agent_id.0.to_string()),
+            rusqlite::types::Value::Text(prefix.to_string()),
+            rusqlite::types::Value::Text(upper),
+        ];
+        for (i, excluded) in exclude_prefixes.iter().enumerate() {
+            let lo = 4 + i * 2;
+            sql.push_str(&format!(" AND NOT (key >= ?{lo} AND key < ?{})", lo + 1));
+            values.push(rusqlite::types::Value::Text((*excluded).to_string()));
+            values.push(rusqlite::types::Value::Text(format!(
+                "{excluded}\u{10FFFF}"
+            )));
+        }
+        sql.push_str(&format!(
+            " ORDER BY key LIMIT ?{}",
+            4 + exclude_prefixes.len() * 2
+        ));
+        values.push(rusqlite::types::Value::Integer(limit as i64));
+
+        let mut stmt = conn.prepare(&sql).map_err(LibreFangError::memory)?;
+        let rows = stmt
+            .query_map(rusqlite::params_from_iter(values), |row| {
+                let key: String = row.get(0)?;
+                Ok(key)
+            })
+            .map_err(LibreFangError::memory)?;
+
+        let mut keys = Vec::new();
+        for row in rows {
+            let key = row.map_err(LibreFangError::memory)?;
+            keys.push(key);
+        }
+        Ok(keys)
+    }
+
     /// Save an agent entry to the database.
     pub fn save_agent(&self, entry: &AgentEntry) -> LibreFangResult<()> {
         let conn = self.pool.get().map_err(LibreFangError::memory)?;
@@ -1031,6 +1109,179 @@ mod tests {
         let agent_id = AgentId::new();
         let value = store.get(agent_id, "nonexistent").unwrap();
         assert!(value.is_none());
+    }
+
+    #[test]
+    fn list_keys_with_prefix_selects_only_the_covered_keys() {
+        let store = setup();
+        let agent_id = AgentId::new();
+        for key in [
+            "ab", "abc", "abd", "abz",
+            // A key that *contains* the prefix but does not start with it: the range must not degenerate into an infix match.
+            "zab", "a", "b",
+        ] {
+            store.set(agent_id, key, serde_json::json!(1)).unwrap();
+        }
+
+        let mut found = store
+            .list_keys_with_prefix(agent_id, "ab", None, 10)
+            .unwrap();
+        assert_eq!(found, ["ab", "abc", "abd", "abz"]);
+
+        // `key >= prefix` also means the bare prefix itself is a candidate.
+        let single = store
+            .list_keys_with_prefix(agent_id, "a", None, 10)
+            .unwrap();
+        assert_eq!(single, ["a", "ab", "abc", "abd", "abz"]);
+
+        found = store
+            .list_keys_with_prefix(agent_id, "abd", None, 10)
+            .unwrap();
+        assert_eq!(found, ["abd"]);
+
+        // Nothing above the prefix that diverges from it earlier: `zab` sorts after `ab` and would be in the range of a `key >= prefix` without the upper bound.
+        assert!(!found.contains(&"zab".to_string()));
+    }
+
+    #[test]
+    fn list_keys_with_prefix_respects_limit_and_orders_by_key() {
+        let store = setup();
+        let agent_id = AgentId::new();
+        for key in ["k1", "k2", "k3", "k4"] {
+            store.set(agent_id, key, serde_json::json!(1)).unwrap();
+        }
+
+        assert_eq!(
+            store.list_keys_with_prefix(agent_id, "k", None, 2).unwrap(),
+            ["k1", "k2"]
+        );
+        assert!(store
+            .list_keys_with_prefix(agent_id, "k", None, 0)
+            .unwrap()
+            .is_empty());
+    }
+
+    /// The exclusion exists because `LIMIT` runs inside the query: rows a caller will discard downstream must not be handed the slots (#8625 review).
+    /// These keys are shaped like the kernel's per-peer framing, where that is not a hypothetical — the framing lives inside the owning agent's namespace.
+    #[test]
+    fn list_keys_with_prefix_excludes_the_given_prefix_before_applying_the_limit() {
+        let store = setup();
+        let agent_id = AgentId::new();
+        for key in ["peer:p1:k1", "peer:p1:k2", "peerA-global", "peel", "peers"] {
+            store.set(agent_id, key, serde_json::json!(1)).unwrap();
+        }
+
+        // Without the exclusion the two peer rows eat the limit and the key the caller can actually address is never reached.
+        assert_eq!(
+            store
+                .list_keys_with_prefix(agent_id, "peer", None, 2)
+                .unwrap(),
+            ["peer:p1:k1", "peer:p1:k2"]
+        );
+        assert_eq!(
+            store
+                .list_keys_with_prefix(agent_id, "peer", Some("peer:"), 2)
+                .unwrap(),
+            ["peerA-global", "peers"]
+        );
+
+        // The limit counts rows that survive the exclusion, not rows scanned.
+        assert_eq!(
+            store
+                .list_keys_with_prefix(agent_id, "pee", Some("peer:"), 1)
+                .unwrap(),
+            ["peel"]
+        );
+        assert_eq!(
+            store
+                .list_keys_with_prefix(agent_id, "pee", Some("peer:"), 10)
+                .unwrap(),
+            ["peel", "peerA-global", "peers"]
+        );
+    }
+
+    #[test]
+    fn list_keys_with_prefix_exclusion_outside_the_range_changes_nothing() {
+        let store = setup();
+        let agent_id = AgentId::new();
+        for key in ["ab", "abc"] {
+            store.set(agent_id, key, serde_json::json!(1)).unwrap();
+        }
+
+        // An excluded range above the search range leaves every row in place...
+        assert_eq!(
+            store
+                .list_keys_with_prefix(agent_id, "ab", Some("zz"), 10)
+                .unwrap(),
+            ["ab", "abc"]
+        );
+        // ...and so does one below it, because the search range already starts past it.
+        assert_eq!(
+            store
+                .list_keys_with_prefix(agent_id, "ab", Some("aa"), 10)
+                .unwrap(),
+            ["ab", "abc"]
+        );
+
+        // The degenerate case is the empty prefix, which covers every row; no caller reaches it (the kernel passes either `None` or its reserved framing).
+        assert!(store
+            .list_keys_with_prefix(agent_id, "ab", Some(""), 10)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn list_keys_with_prefix_is_scoped_to_the_agent() {
+        let store = setup();
+        let agent_a = AgentId::new();
+        let agent_b = AgentId::new();
+        store
+            .set(agent_a, "shared-name-a", serde_json::json!(1))
+            .unwrap();
+        store
+            .set(agent_b, "shared-name-b", serde_json::json!(1))
+            .unwrap();
+
+        assert_eq!(
+            store
+                .list_keys_with_prefix(agent_a, "shared", None, 10)
+                .unwrap(),
+            ["shared-name-a"]
+        );
+        assert_eq!(
+            store
+                .list_keys_with_prefix(agent_b, "shared", None, 10)
+                .unwrap(),
+            ["shared-name-b"]
+        );
+    }
+
+    #[test]
+    fn list_keys_with_prefix_covers_non_ascii_prefixes() {
+        let store = setup();
+        let agent_id = AgentId::new();
+        for key in ["заметка-один", "заметка-два", "проект"] {
+            store.set(agent_id, key, serde_json::json!(1)).unwrap();
+        }
+
+        // Byte order (BINARY collation) puts `-два` before `-один`: `д` is D0 B4 and `о` is D0 BE.
+        assert_eq!(
+            store
+                .list_keys_with_prefix(agent_id, "заметка", None, 10)
+                .unwrap(),
+            ["заметка-два", "заметка-один"]
+        );
+        // A prefix ending mid-character is not a valid `str` and cannot be requested; the char-level prefix above is the only shape callers use.
+        assert_eq!(
+            store
+                .list_keys_with_prefix(agent_id, "за", None, 10)
+                .unwrap(),
+            ["заметка-два", "заметка-один"]
+        );
+        assert!(store
+            .list_keys_with_prefix(agent_id, "ит", None, 10)
+            .unwrap()
+            .is_empty());
     }
 
     #[test]

@@ -803,6 +803,7 @@ pub async fn post_agent_template_toml(
         &home_dir,
         &name,
         &manifest,
+        None,
         AgentTypeWrite::Create,
     ) {
         Ok(rendered) => {
@@ -872,11 +873,14 @@ fn parse_manifest_toml_body(
 //
 // Every handler in this module writes through one of the `*_versioned` helpers below, and each of
 // those imports the store's raw writer inside its own body rather than at module scope (#8021).
-// That is deliberate: a new write path cannot reach `persist_agent_type_in` /
-// `create_agent_type_in` / `create_agent_type_from_manifest_in` without first adding the import
-// right next to the raw call, so it cannot land a manifest on disk without passing through the
-// version stamp and naming the kind of change it is making — see [`AgentTypeWrite`] for the
-// vocabulary.
+// That is a review convention, not something the compiler enforces: a fully-qualified call —
+// `librefang_types::agent_type_store::persist_agent_type_in` reached through its path instead of
+// an import — compiles from any handler, the way `read_registry_agent_type` below spells its read.
+// What does hold the line is the `raw_writer_drift_guard` test further down: it scans this
+// module's source and fails when any of the three raw writers is invoked outside its
+// `*_versioned` helper, whichever call syntax reaches it. So a new write path cannot land a
+// manifest on disk without passing through the version stamp and naming the kind of change it is
+// making — see [`AgentTypeWrite`] for the vocabulary.
 use librefang_types::agent_type_store::{CreateAgentTypeError, CreatedAgentType};
 
 /// The kind of change a versioned agent-type write is making — the closed vocabulary of
@@ -889,8 +893,12 @@ use librefang_types::agent_type_store::{CreateAgentTypeError, CreatedAgentType};
 /// The lone record-only source, `pre-registry-restore` in [`restore_from_registry`], is not a
 /// write and stays a direct [`record_template_version`] call — it snapshots content *before* the
 /// versioned write below destroys it, and must be able to refuse.
+///
+/// `pub(crate)` because [`crate::routes::agents::lifecycle::save_agent_as_agent_type`] writes
+/// through [`create_agent_type_from_manifest_versioned`] with [`AgentTypeWrite::Create`], the
+/// same funnel and the same recorded source the HTTP create paths use.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum AgentTypeWrite {
+pub(crate) enum AgentTypeWrite {
     /// `PUT /api/templates/{name}/toml` — raw TOML saved over an existing type.
     Toml,
     /// `POST /api/templates` and `POST /api/templates/{name}/toml` — the first write of a new type.
@@ -920,8 +928,10 @@ impl AgentTypeWrite {
 
 /// Persist `manifest` over an existing agent type and record the version it produced, in one call.
 ///
-/// The raw `persist_agent_type_in` is imported inside this function on purpose: it is this
-/// module's only caller, so there is no module-scope path to the write that skips the stamp.
+/// The raw `persist_agent_type_in` is imported inside this function on purpose, so the write and
+/// the stamp sit on the same screen — but that import shape is a convention (a fully-qualified
+/// call would compile anyway), and the `raw_writer_drift_guard` test below is what fails when any
+/// other call site appears.
 /// The snapshot stays best-effort exactly as it was at every pre-existing call site — it runs
 /// after the manifest is already on disk, so a failure costs one history row, not content — and
 /// persistence errors propagate unchanged.
@@ -965,21 +975,23 @@ fn create_agent_type_versioned(
 
 /// Create a new agent type from an already-complete manifest and record the version it produced.
 ///
-/// The raw-TOML create's landing (#8028); same import discipline and best-effort snapshot
-/// semantics as [`persist_agent_type_versioned`].
-fn create_agent_type_from_manifest_versioned(
+/// Two callers, differing in exactly the `snapshot_of` seed: the raw-TOML create (#8028) passes
+/// `None`, the operator-authoring path with no source agent whose own name it may collide with,
+/// and `save_agent_as_agent_type` passes the live agent it is snapshotting — the one name the
+/// shadow check has to let through.
+/// Same import discipline and best-effort snapshot semantics as
+/// [`persist_agent_type_versioned`].
+pub(crate) fn create_agent_type_from_manifest_versioned(
     state: &AppState,
     home_dir: &std::path::Path,
     name: &str,
     manifest: &AgentManifest,
+    snapshot_of: Option<&str>,
     source: AgentTypeWrite,
 ) -> Result<String, CreateAgentTypeError> {
     use librefang_types::agent_type_store::create_agent_type_from_manifest_in;
 
-    // `None`: this funnel is the caller-authoring path (raw TOML from the
-    // operator), with no source agent whose own name it may collide with — the
-    // shadow check then applies unconditionally, as its `snapshot_of` doc says.
-    let rendered = create_agent_type_from_manifest_in(home_dir, name, manifest, None)?;
+    let rendered = create_agent_type_from_manifest_in(home_dir, name, manifest, snapshot_of)?;
     let _ = record_template_version(state, name, &rendered, source.as_str());
     Ok(rendered)
 }
@@ -1544,7 +1556,7 @@ pub async fn restore_from_registry(
     // Snapshot the content this call is about to destroy, before it is gone from disk
     // and was never recorded anywhere else either.
     //
-    // This is the one snapshot in this file that is not best-effort, because it is the only copy of the content the `persist_agent_type` below overwrites.
+    // This is the one snapshot in this file that is not best-effort, because it is the only copy of the content the `persist_agent_type_versioned` below overwrites.
     // An operator who hand-edited `agent.toml` has no history row for what is on disk, so a swallowed failure here — `SQLITE_BUSY` under a concurrent write is the realistic one — destroys that content and still answers 200.
     // Refusing the restore leaves both copies intact and costs the operator a retry.
     if let Err(e) =
@@ -2066,6 +2078,85 @@ mod agent_type_write_tests {
         assert_eq!(AgentTypeWrite::Dashboard.as_str(), "dashboard");
         assert_eq!(AgentTypeWrite::RegistryRestore.as_str(), "registry-restore");
         assert_eq!(AgentTypeWrite::Restore.as_str(), "restore");
+    }
+}
+
+#[cfg(test)]
+mod raw_writer_drift_guard {
+    //! Enforces the funnel the write-endpoints comment above promises: the store's raw writers
+    //! are called inside their `*_versioned` helper and nowhere else.
+    //!
+    //! It scans the source rather than checking imports on purpose. Importing the writer inside
+    //! the helper is a review convention — nothing stops a handler from spelling the call
+    //! `librefang_types::agent_type_store::persist_agent_type_in` through its path, no `use`
+    //! needed — so the property worth defending is the call site itself, whichever syntax
+    //! reaches it.
+
+    /// The module's own source: what this scan sees is exactly what rustc compiled.
+    const SOURCE: &str = include_str!("agent_templates.rs");
+
+    /// Every raw writer, paired with the one function allowed to call it.
+    const FUNNELS: &[(&str, &str)] = &[
+        ("persist_agent_type_in", "fn persist_agent_type_versioned("),
+        ("create_agent_type_in", "fn create_agent_type_versioned("),
+        (
+            "create_agent_type_from_manifest_in",
+            "fn create_agent_type_from_manifest_versioned(",
+        ),
+    ];
+
+    /// 0-based line range of `signature`'s body, closing brace included.
+    ///
+    /// `rustfmt` closes a top-level function with `}` in column 0, so the first such line after
+    /// the signature ends the function; body lines are indented, and none of these helpers holds
+    /// a column-0 brace anywhere else.
+    fn helper_body_lines(signature: &str) -> std::ops::Range<usize> {
+        let lines: Vec<&str> = SOURCE.lines().collect();
+        let start = lines
+            .iter()
+            .position(|line| {
+                // The definition, not the same string sitting in `FUNNELS` below: a signature
+                // line carries no double quotes.
+                line.contains(signature) && !line.contains('"')
+            })
+            .unwrap_or_else(|| panic!("`{signature}` not found in agent_templates.rs"));
+        let end = lines[start + 1..]
+            .iter()
+            .position(|line| line.trim_end() == "}")
+            .map(|offset| start + 1 + offset + 1)
+            .unwrap_or_else(|| panic!("closing brace of `{signature}` not found"));
+        start..end
+    }
+
+    #[test]
+    fn raw_store_writers_are_called_only_inside_their_versioned_helpers() {
+        let lines: Vec<&str> = SOURCE.lines().collect();
+        for &(writer, signature) in FUNNELS {
+            let helper = helper_body_lines(signature);
+            let needle = format!("{writer}(");
+            let call_lines: Vec<usize> = lines
+                .iter()
+                .enumerate()
+                .filter(|(_, line)| line.contains(&needle))
+                .map(|(index, _)| index)
+                .collect();
+            assert!(
+                !call_lines.is_empty(),
+                "`{writer}(` is called nowhere in this module — the helper or the writer was \
+                 probably renamed, and this guard would otherwise keep passing vacuously; update \
+                 FUNNELS so it keeps testing something"
+            );
+            for index in call_lines {
+                assert!(
+                    helper.contains(&index),
+                    "`{writer}(` is called at agent_templates.rs:{} — outside `{signature}`. \
+                     Route the write through its `*_versioned` helper (or add the new funnel and \
+                     pair it in FUNNELS) so it cannot land a manifest on disk without a version \
+                     stamp",
+                    index + 1
+                );
+            }
+        }
     }
 }
 

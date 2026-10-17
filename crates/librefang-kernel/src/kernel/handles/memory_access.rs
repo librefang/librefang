@@ -149,6 +149,59 @@ fn unrestricted_acl() -> UserMemoryAccess {
     }
 }
 
+/// The framing `peer_scoped_key` writes for a peer-scoped row: `peer:{escaped_pid}:{key}`.
+///
+/// Rows carrying it belong to that peer's namespace, never to the no-peer scope, so every read path that enumerates keys has to treat the range it covers as reserved.
+const PEER_KEY_PREFIX: &str = "peer:";
+
+/// Prefixes that are never addressable — and therefore never enumerable — from an unscoped call.
+///
+/// `peer:` covers every peer's namespace. `session_` covers the platform's per-conversation
+/// compaction summaries (#8645): they live in the same unscoped namespace as ordinary keys, but
+/// they belong to one conversation, so a tool call without peer attribution must not see them.
+///
+/// Both the visibility predicate and the query-level exclusion are built from this list, so a
+/// hidden range added here reaches the enumerating paths without a second edit to keep in step.
+const UNSCOPED_HIDDEN_PREFIXES: [&str; 2] = [
+    PEER_KEY_PREFIX,
+    librefang_memory::SESSION_SUMMARY_KEY_PREFIX,
+];
+
+/// Map a stored key to the key the caller is allowed to see under `peer_id`, or `None` when the row belongs to a namespace the caller is not addressing.
+///
+/// Every key-enumerating read path (`memory_list`, `memory_keys_with_prefix`) resolves visibility through here, so the round-trip predicate itself exists once.
+///
+/// `memory_keys_with_prefix` also pushes the *drop set* of this function into its query, because its `limit` is applied by the store and a dropped row would otherwise take a slot.
+/// That copy has to stay in step with this one, and the two directions are not symmetric: an exclusion narrower than this predicate only under-counts a hint (the `filter_map` below still drops the row), while one wider than it silently loses a key the caller can see, because nothing downstream can bring back a row the query never returned.
+/// `test_memory_keys_with_prefix_agrees_with_memory_list_on_visibility` pins the agreement between the two.
+///
+/// SECURITY (#5120 read-side residual): the write path rejects `peer:`-prefixed keys, but rows planted *before* the fix can still sit at `peer:{x}:...` in the shared substrate.
+/// A peer's row is recognised by stripping the `peer:{escaped_pid}:` framing (#6100 covers the escaping) and then requiring the recovered inner key to round-trip back through the *now-strict* `peer_scoped_key(inner, Some(pid))` to the exact stored key.
+/// That drops any recovered inner key which is itself `peer:`-prefixed (nested / double-scoped plants like `peer:victim:peer:other:k`) or otherwise malformed, so no read path can enumerate a structurally impossible row.
+/// With no peer scope, rows carrying the reserved framing are excluded outright.
+///
+/// RESIDUAL (documented in CHANGELOG, maintainer sign-off): a pre-fix plant written by a `None`-scope agent at the *exact* bytes `peer:{colon-free-pid}:{non-peer-key}` is byte-identical to a row `pid` legitimately wrote post-fix — no in-code predicate can separate the two without a writer-attribution column.
+/// Distinguishing those requires a one-shot DB scrub of `key LIKE 'peer:%'` on the shared-memory agent id; it is out of scope for an in-code substrate-boundary fix.
+fn peer_visible_key(stored: &str, peer_id: Option<&str>) -> Option<String> {
+    match peer_id {
+        Some(pid) => {
+            let prefix = format!("{PEER_KEY_PREFIX}{}:", escape_peer_id(pid));
+            let inner = stored.strip_prefix(&prefix)?;
+            match peer_scoped_key(inner, Some(pid)) {
+                Ok(canonical) if canonical == stored => Some(inner.to_string()),
+                _ => None,
+            }
+        }
+        // With no peer scope, every hidden prefix is excluded outright: the `peer:` framing of
+        // other namespaces and the platform's `session_<uuid>` summaries (#8645), which live in
+        // this very namespace but belong to one conversation.
+        None => (!UNSCOPED_HIDDEN_PREFIXES
+            .iter()
+            .any(|prefix| stored.starts_with(prefix)))
+        .then(|| stored.to_string()),
+    }
+}
+
 #[async_trait]
 impl kernel_handle::MemoryAccess for LibreFangKernel {
     fn memory_store(
@@ -267,11 +320,8 @@ impl kernel_handle::MemoryAccess for LibreFangKernel {
         peer_id: Option<&str>,
     ) -> Result<Vec<String>, kernel_handle::KernelOpError> {
         use kernel_handle::KernelOpError;
-        // (#5119 / #6100) A colon-bearing query is now allowed but stays
-        // isolated: the prefix below is built from the *escaped* peer_id, so a
-        // Slack-style `T1:U2` lists under `peer:T1%3AU2:` and can never strip
-        // `peer:T1:` off peer `T1`'s rows (and vice-versa). An empty `peer_id`
-        // is still rejected before the recovery loop runs.
+        // (#5119 / #6100) A colon-bearing query is now allowed but stays isolated: `peer_visible_key` builds the recovery prefix from the *escaped* peer_id, so a Slack-style `T1:U2` lists under `peer:T1%3AU2:` and can never strip `peer:T1:` off peer `T1`'s rows (and vice-versa).
+        // An empty `peer_id` is still rejected before the filter runs.
         reject_bad_peer_id(peer_id)?;
         let agent_id = resolve_agent_id(agent_id)?;
         let all_keys = self
@@ -279,55 +329,51 @@ impl kernel_handle::MemoryAccess for LibreFangKernel {
             .substrate
             .list_keys(agent_id)
             .map_err(|e| KernelOpError::Internal(format!("Memory list failed: {e}")))?;
-        match peer_id {
-            Some(pid) => {
-                // Build the recovery prefix from the escaped peer_id so it
-                // matches the form `peer_scoped_key` stored under (#6100).
-                let escaped_pid = escape_peer_id(pid);
-                let prefix = format!("peer:{escaped_pid}:");
-                // SECURITY (#5120 read-side residual): the write path now
-                // rejects `peer:`-prefixed keys, but rows planted *before* the
-                // fix can still sit at `peer:{x}:...` in the shared substrate.
-                // We strip `peer:{pid}:` to recover the candidate inner key,
-                // then only surface it if it round-trips back through the
-                // *now-strict* `peer_scoped_key(inner, Some(pid))` to the exact
-                // stored key. This drops any recovered inner key that is
-                // itself `peer:`-prefixed (nested / double-scoped plants like
-                // `peer:victim:peer:other:k`) or otherwise malformed, so the
-                // tool path can never enumerate a structurally-impossible row.
-                //
-                // RESIDUAL (documented in CHANGELOG, maintainer sign-off): a
-                // pre-fix plant written by a `None`-scope agent at the *exact*
-                // bytes `peer:{colon-free-pid}:{non-peer-key}` is byte-identical
-                // to a row `pid` legitimately wrote post-fix — no in-code
-                // predicate can separate the two without a writer-attribution
-                // column. Distinguishing those requires a one-shot DB scrub of
-                // `key LIKE 'peer:%'` on the shared-memory agent id; it is out
-                // of scope for an in-code substrate-boundary fix.
-                Ok(all_keys
-                    .into_iter()
-                    .filter_map(|k| {
-                        let inner = k.strip_prefix(&prefix)?;
-                        // Re-render through the strict canonical form. A
-                        // legitimate row's stored key is exactly
-                        // `peer:{pid}:{inner}`; anything that doesn't round-trip
-                        // (e.g. inner itself starts with `peer:`, peer_scoped_key
-                        // would reject it) is dropped.
-                        match peer_scoped_key(inner, Some(pid)) {
-                            Ok(canonical) if canonical == k => Some(inner.to_string()),
-                            _ => None,
-                        }
-                    })
-                    .collect())
-            }
-            None => Ok(all_keys
-                .into_iter()
-                .filter(|k| {
-                    !k.starts_with("peer:")
-                        && !k.starts_with(librefang_memory::SESSION_SUMMARY_KEY_PREFIX)
-                })
-                .collect()),
-        }
+        Ok(all_keys
+            .into_iter()
+            .filter_map(|k| peer_visible_key(&k, peer_id))
+            .collect())
+    }
+
+    fn memory_keys_with_prefix(
+        &self,
+        prefix: &str,
+        agent_id: Option<&str>,
+        peer_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<String>, kernel_handle::KernelOpError> {
+        use kernel_handle::KernelOpError;
+        reject_bad_peer_id(peer_id)?;
+        let agent_id = resolve_agent_id(agent_id)?;
+        // Frame the probe exactly the way `memory_recall` addresses a key: a peer's rows live under `peer:{escaped_pid}:`, so probing the bare prefix would match every peer's keys and hand one peer another's key names.
+        let scoped_prefix = match peer_id {
+            Some(pid) => format!("{PEER_KEY_PREFIX}{}:{prefix}", escape_peer_id(pid)),
+            None => prefix.to_string(),
+        };
+        // Every row `peer_visible_key` drops has to be excluded *inside* the query rather than after it: `limit` is applied by the store, so a dropped row would otherwise take a slot and hide a key this caller can address (#8625 review).
+        // The no-peer scope hides exactly `UNSCOPED_HIDDEN_PREFIXES` — the `peer:` framing and the platform's `session_` summaries — and both ranges go into the same statement.
+        // With a peer scope every framed row is the caller's own, except the pre-fix nested plants (#5120) whose inner key is itself `peer:`-prefixed — exactly the rows covered by the second framing.
+        // `test_memory_keys_with_prefix_agrees_with_memory_list_on_visibility` checks the agreement in both scopes.
+        let invisible: Vec<String> = match peer_id {
+            Some(pid) => vec![format!(
+                "{PEER_KEY_PREFIX}{}:{PEER_KEY_PREFIX}",
+                escape_peer_id(pid)
+            )],
+            None => UNSCOPED_HIDDEN_PREFIXES
+                .iter()
+                .map(|prefix| (*prefix).to_string())
+                .collect(),
+        };
+        let invisible: Vec<&str> = invisible.iter().map(String::as_str).collect();
+        let stored = self
+            .memory
+            .substrate
+            .list_keys_with_prefix_excluding(agent_id, &scoped_prefix, &invisible, limit)
+            .map_err(|e| KernelOpError::Internal(format!("Memory key lookup failed: {e}")))?;
+        Ok(stored
+            .into_iter()
+            .filter_map(|k| peer_visible_key(&k, peer_id))
+            .collect())
     }
 
     // ------------------------------------------------------------------

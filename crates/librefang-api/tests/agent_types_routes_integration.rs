@@ -813,6 +813,48 @@ async fn a_type_the_tool_creates_is_the_type_the_api_serves() {
     assert_eq!(row["editable"], true);
 }
 
+/// A type an agent authors has to be recoverable like any other (#8574 follow-up).
+///
+/// The tool path writes the same `agent-types/` file the operator paths do, so it records the
+/// same kind of history row — under its own `agent-tool` source, so the history tab can tell an
+/// agent-authored type from an operator's `create` rather than showing it as a bare token.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_tool_authored_type_records_agent_tool_in_history() {
+    let name = "at_tool_history";
+    let h = boot().await;
+
+    let result = call_agent_type_create(
+        &h,
+        json!({ "name": name, "description": "authored from a conversation" }),
+    )
+    .await;
+    assert!(
+        !result.is_error,
+        "agent_type_create failed: {}",
+        result.content
+    );
+
+    let (status, history) = get(&h, &format!("/api/templates/{name}/history")).await;
+    assert_eq!(status, StatusCode::OK, "{history}");
+    let versions = history["versions"].as_array().expect("versions array");
+    assert_eq!(
+        versions.len(),
+        1,
+        "one tool-authored create must leave exactly one snapshot, not none and not a duplicate: {history}"
+    );
+    assert_eq!(
+        versions[0]["change_source"], "agent-tool",
+        "the tool path must record its own source, not a generic one: {history}"
+    );
+    assert!(
+        versions[0]["manifest_toml"]
+            .as_str()
+            .expect("manifest_toml")
+            .contains("authored from a conversation"),
+        "the snapshot must carry the document the tool actually wrote: {history}"
+    );
+}
+
 /// An operator's document is not something an agent may overwrite by guessing its name.
 /// The refusal comes from the shared `File::create_new` claim, so it holds for the tool for the same
 /// reason it holds for `POST` — which is exactly what routing both through one store buys.

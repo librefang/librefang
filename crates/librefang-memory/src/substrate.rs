@@ -547,6 +547,32 @@ impl MemorySubstrate {
         self.structured.list_keys(agent_id)
     }
 
+    /// List the keys for an agent that begin with `prefix` and are not covered by `exclude_prefix`, at most `limit` of them.
+    ///
+    /// Used by the kernel's `memory_recall` miss hint (#8625) to name keys that do exist near the one an agent asked for, without loading the agent's whole key set to filter it here.
+    pub fn list_keys_with_prefix(
+        &self,
+        agent_id: AgentId,
+        prefix: &str,
+        exclude_prefix: Option<&str>,
+        limit: usize,
+    ) -> LibreFangResult<Vec<String>> {
+        self.structured
+            .list_keys_with_prefix(agent_id, prefix, exclude_prefix, limit)
+    }
+
+    /// [`Self::list_keys_with_prefix`] with more than one excluded range.
+    pub fn list_keys_with_prefix_excluding(
+        &self,
+        agent_id: AgentId,
+        prefix: &str,
+        exclude_prefixes: &[&str],
+        limit: usize,
+    ) -> LibreFangResult<Vec<String>> {
+        self.structured
+            .list_keys_with_prefix_excluding(agent_id, prefix, exclude_prefixes, limit)
+    }
+
     /// Delete a KV entry for an agent.
     pub fn structured_delete(&self, agent_id: AgentId, key: &str) -> LibreFangResult<()> {
         self.structured.delete(agent_id, key)

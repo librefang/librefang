@@ -1,0 +1,1 @@
+Renaming, creating or importing a user now clears any stale avatar files under the new name's stem (a leftover `.png` could shadow the moved `.webp`), moving a name onto itself keeps the picture, and deleting an avatar reports a genuine unlink failure instead of pretending it removed nothing. (#8602, #8386) (@DaBlitzStein)

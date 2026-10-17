@@ -1154,6 +1154,24 @@
       "manifest_history": "매니페스트 기록",
       "manifest_history_load_err": "매니페스트 기록을 불러오지 못했습니다.",
       "no_history": "아직 기록된 구성 변경 사항이 없습니다.",
+      "manifest_change_source": {
+        "api": "API edit",
+        "model": "Model change",
+        "skills": "Skills change",
+        "workspaces": "Workspaces change",
+        "channels": "Channels change",
+        "routing": "Routing change",
+        "schedule": "Schedule change",
+        "tool-filters": "Tool filters change",
+        "mcp-servers": "MCP servers change",
+        "provisioning": "Provisioned",
+        "restore": "Restored",
+        "suspend": "Suspended",
+        "resume": "Resumed",
+        "suspend-persist-failed": "Suspend write failed",
+        "resume-persist-failed": "Resume write failed",
+        "unknown": "Unknown source"
+      },
       "restore_title": "이 버전으로 복원할까요?",
       "restore_confirm": "'{{name}}'을(를) {{timestamp}}에 저장된 버전({{source}})으로 복원할까요? 에이전트의 현재 agent.toml을 덮어씁니다. 복원 후 기록되는 스냅샷에는 대체된 내용이 아니라 복원된 내용이 담깁니다.",
       "restore_btn": "복원",
@@ -4673,8 +4691,11 @@
   },
   "agentTypes": {
     "change_source": {
+      "agent-tool": "Agent tool",
       "create": "Created",
       "dashboard": "Dashboard edit",
+      "pre-registry-restore": "Pre-restore snapshot",
+      "registry-restore": "Restored from registry",
       "restore": "Restored",
       "toml": "Raw TOML edit",
       "unknown": "Unknown source"

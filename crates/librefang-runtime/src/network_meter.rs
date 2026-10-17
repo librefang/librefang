@@ -59,7 +59,7 @@ pub(crate) fn record(bytes: u64) {
         return;
     }
     let _ = NETWORK_BYTES.try_with(|counter| {
-        let _ = counter.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+        let _ = counter.try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
             Some(current.saturating_add(bytes))
         });
     });

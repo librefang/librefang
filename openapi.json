@@ -15651,6 +15651,16 @@
                 }
               }
             }
+          },
+          "500": {
+            "description": "The stored image could not be removed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
           }
         }
       }

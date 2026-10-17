@@ -50,6 +50,28 @@ pub trait MemoryAccess: Send + Sync {
         peer_id: Option<&str>,
     ) -> Result<Vec<String>, KernelOpError>;
 
+    /// Keys that [`Self::memory_recall`] could have returned for a key starting with `prefix`, in byte order, at most `limit` of them.
+    ///
+    /// Exists so a miss can say what *is* stored near the key the caller asked for instead of only that the key is absent (#8625).
+    /// The store is the only party that knows the key space, and an agent told nothing but "no" answers by inventing key variants until it exhausts its iteration budget.
+    ///
+    /// The scope matches `memory_recall`'s primary lookup — the same agent namespace, addressed under the same peer prefix — because a hint that enumerated a key another peer owns would be exactly the cross-peer leak the `peer:{pid}:` framing exists to prevent.
+    /// It deliberately does not follow that method's deprecated shared-namespace fallback (the pre-#5070 rows whose removal is pending), so on a legacy install a key recall can still reach may be missing from a hint.
+    /// A hint is a strict subset of what recall reads, never a superset.
+    ///
+    /// The default impl reports `Unavailable` so every existing stub and embedder keeps compiling.
+    /// Callers must treat a failure as "no hints" rather than as an error on the surrounding lookup, and must not fail a miss because a hint could not be produced.
+    fn memory_keys_with_prefix(
+        &self,
+        prefix: &str,
+        agent_id: Option<&str>,
+        peer_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<String>, KernelOpError> {
+        let _ = (prefix, agent_id, peer_id, limit);
+        Err(KernelOpError::unavailable("memory_keys_with_prefix"))
+    }
+
     /// Resolve the per-user memory ACL for the given sender + channel
     /// pair (RBAC M3, #3054 Phase 2). Returns the resolved
     /// `UserMemoryAccess` so the runtime can build a
