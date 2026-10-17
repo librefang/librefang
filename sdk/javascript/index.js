@@ -295,11 +295,11 @@ class AgentsResource {
   }
 
   async listAgentManifestHistory(id, query) {
-    return this._c._request("GET", `/api/agents/${id}/manifest-history`, undefined, query);
+    return this._c._request("GET", `/api/agents/${encodeURIComponent(String(id))}/manifest-history`, undefined, query);
   }
 
   async restoreAgentManifestVersion(id, version_id) {
-    return this._c._request("POST", `/api/agents/${id}/manifest-history/${version_id}/restore`);
+    return this._c._request("POST", `/api/agents/${encodeURIComponent(String(id))}/manifest-history/${encodeURIComponent(String(version_id))}/restore`);
   }
 
   async getAgentMcpServers(id) {

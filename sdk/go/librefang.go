@@ -448,11 +448,11 @@ func (r *AgentsResource) GetAgentManifestToml(id string) (interface{}, error) {
 }
 
 func (r *AgentsResource) ListAgentManifestHistory(id string, query map[string]string) (interface{}, error) {
-	return r.client.request("GET", fmt.Sprintf("/api/agents/%s/manifest-history", id), nil, query)
+	return r.client.request("GET", fmt.Sprintf("/api/agents/%s/manifest-history", url.PathEscape(id)), nil, query)
 }
 
 func (r *AgentsResource) RestoreAgentManifestVersion(id string, version_id string) (interface{}, error) {
-	return r.client.request("POST", fmt.Sprintf("/api/agents/%s/manifest-history/%s/restore", id, version_id), nil, nil)
+	return r.client.request("POST", fmt.Sprintf("/api/agents/%s/manifest-history/%s/restore", url.PathEscape(id), url.PathEscape(version_id)), nil, nil)
 }
 
 func (r *AgentsResource) GetAgentMcpServers(id string) (interface{}, error) {
