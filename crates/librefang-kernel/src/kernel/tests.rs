@@ -4010,6 +4010,109 @@ async fn streaming_dispatch_applies_model_selection() {
     kernel.shutdown();
 }
 
+/// A session `/model` override (#4898) must win over model selection on both the streaming and the blocking dispatch path.
+/// The blocking path once applied the override before `apply_model_selection`, so a Stable `pinned_model` (or routing) replaced it there while the streaming path kept it, and one session ran on different models depending on its entry point.
+#[tokio::test(flavor = "multi_thread")]
+async fn session_model_override_beats_model_selection_on_both_paths() {
+    use librefang_memory::session::Session as MemSession;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let backend = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/chat"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
+            format!(
+                "{}\n",
+                serde_json::json!({
+                    "message": {"content": "ok"},
+                    "done": true,
+                    "done_reason": "stop",
+                })
+            ),
+            "application/json",
+        ))
+        .mount(&backend)
+        .await;
+
+    let dir = tempfile::tempdir().unwrap();
+    let home_dir = dir.path().to_path_buf();
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        default_model: DefaultModelConfig::driverless(),
+        mode: librefang_types::config::KernelMode::Stable,
+        ..KernelConfig::default()
+    };
+    let kernel = Arc::new(LibreFangKernel::boot_with_config(config).expect("kernel should boot"));
+    kernel.set_self_handle();
+
+    let mut manifest = test_manifest("override-vs-pin", "session override precedence", vec![]);
+    manifest.model.provider = "ollama".to_string();
+    manifest.model.model = "llama3.2".to_string();
+    manifest.model.base_url = Some(backend.uri());
+    manifest.pinned_model = Some("pinned-llama".to_string());
+    let agent_id = kernel.spawn_agent(manifest).expect("spawn should succeed");
+    let session_id = kernel
+        .agents
+        .registry
+        .get(agent_id)
+        .expect("agent entry")
+        .session_id;
+    kernel
+        .memory
+        .substrate
+        .save_session(&MemSession {
+            id: session_id,
+            agent_id,
+            parent_session_id: None,
+            messages: Vec::new(),
+            context_window_tokens: 0,
+            label: None,
+            model_override: None,
+            messages_generation: 0,
+            last_repaired_generation: None,
+            peer_id: None,
+        })
+        .expect("seeding the session should succeed");
+    // `save_session` does not write `model_override`; the `/model` route sets it through this dedicated update.
+    kernel
+        .memory
+        .substrate
+        .set_session_model_override(session_id, Some("override-llama"))
+        .expect("setting the session override should succeed");
+
+    let (mut rx, join) = kernel
+        .send_message_streaming(agent_id, "streamed turn", None)
+        .expect("the streaming turn must start");
+    let drain = tokio::spawn(async move { while rx.recv().await.is_some() {} });
+    join.await
+        .expect("the streaming task joins")
+        .expect("the streamed turn must not error");
+    drain.await.expect("the drain task joins");
+
+    kernel
+        .send_message(agent_id, "blocking turn")
+        .await
+        .expect("the blocking turn must not error");
+
+    let requests = backend
+        .received_requests()
+        .await
+        .expect("requests recorded");
+    assert_eq!(requests.len(), 2, "both turns must reach the backend");
+    for (request, path) in requests.iter().zip(["streaming", "blocking"]) {
+        let body: serde_json::Value = request.body_json().expect("valid JSON body");
+        assert_eq!(
+            body["model"], "override-llama",
+            "the {path} path must run the session /model override over Stable pinning: {body}"
+        );
+    }
+
+    kernel.shutdown();
+}
+
 /// The fourth dispatcher: the **ephemeral worker spawn**.
 ///
 /// `ephemeral_spawn::spawn_ephemeral_worker` derives the worker's manifest from
@@ -21895,6 +21998,87 @@ async fn agent_cost_quota_rejection_publishes_quota_enforced_on_both_paths() {
     );
     expect_event(&mut events, "streaming");
 
+    kernel.shutdown();
+}
+
+/// A trigger on an over-quota agent's own `QuotaEnforced` event dispatches a turn the same quota check refuses, which emits the event again.
+/// The sync lifecycle path must step `PUBLISH_EVENT_DEPTH` like `publish_event` does, so that chain stops at `triggers.max_depth` instead of re-firing for as long as the agent stays over quota.
+#[tokio::test(flavor = "multi_thread")]
+async fn quota_enforced_trigger_on_own_agent_stops_at_max_depth() {
+    use crate::triggers::TriggerPattern;
+    use librefang_types::event::{EventPayload, SystemEvent};
+
+    let (kernel, agent_id, _) = kernel_with_seeded_session("quota-loop", None, 0).await;
+    kernel
+        .agents
+        .registry
+        .update_resources(agent_id, Some(0.50), None, None, None)
+        .unwrap();
+    kernel
+        .metering
+        .engine
+        .record(&librefang_memory::usage::UsageRecord {
+            agent_id,
+            provider: "test".to_string(),
+            model: "test-model".to_string(),
+            cost_usd: 5.0,
+            latency_ms: 1,
+            ..Default::default()
+        })
+        .unwrap();
+    // `cooldown_secs = 0` is the worst case: without the depth guard the chain is a tight loop.
+    kernel
+        .workflows
+        .triggers
+        .register_with_target(
+            agent_id,
+            TriggerPattern::System,
+            "quota hit: {{event}}".to_string(),
+            0,
+            None,
+            Some(0),
+            None,
+            None,
+        )
+        .expect("trigger registers");
+    let max_depth = kernel.config.load().triggers.max_depth;
+
+    let mut events = kernel.events.event_bus.subscribe_all();
+    kernel
+        .send_message(agent_id, "ping")
+        .await
+        .expect_err("an over-quota agent must be refused");
+
+    // Drain until the bus has been quiet for a while; a chain that never terminates keeps producing events and blows past the bound below.
+    let mut quota_events = 0usize;
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(20);
+    let mut last_seen = tokio::time::Instant::now();
+    while tokio::time::Instant::now() < deadline
+        && last_seen.elapsed() < std::time::Duration::from_secs(2)
+    {
+        while let Ok(event) = events.try_recv() {
+            if matches!(
+                event.payload,
+                EventPayload::System(SystemEvent::QuotaEnforced { .. })
+            ) {
+                quota_events += 1;
+                last_seen = tokio::time::Instant::now();
+            }
+        }
+        if quota_events > max_depth + 1 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+
+    assert!(
+        quota_events >= 2,
+        "the trigger must have fired at least once, saw {quota_events} QuotaEnforced events"
+    );
+    assert!(
+        quota_events <= max_depth + 1,
+        "the QuotaEnforced trigger chain must stop at triggers.max_depth ({max_depth}), saw {quota_events} events"
+    );
     kernel.shutdown();
 }
 

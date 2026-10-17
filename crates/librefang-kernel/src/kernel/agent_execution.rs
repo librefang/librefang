@@ -1341,6 +1341,16 @@ impl LibreFangKernel {
         // Stable-mode pinning, profile routing and tier routing, shared with the streaming path.
         self.apply_model_selection(&mut manifest, message, &tools, &cfg);
 
+        // An explicit session `/model` pick (#4898) wins over that selection, as on the streaming path; without this re-application, routing or a Stable `pinned_model` overwrote it here, so one session ran on different models depending on whether the turn came from the dashboard or from a channel, trigger, cron or `agent_send`.
+        // The application above stays so the thinking backfill reads the overridden model; applying it twice is idempotent.
+        if let Some(override_str) = session.model_override.as_deref() {
+            librefang_runtime::agent_loop::apply_session_model_override_to_manifest(
+                &mut manifest,
+                override_str,
+            )
+            .map_err(KernelError::LibreFang)?;
+        }
+
         // Resolve this turn's inference parameters from the agent manifest and
         // the per-model override that matches the final model.
         //
