@@ -207,12 +207,29 @@ impl ProvisioningState {
     }
 
     /// Write the state file, creating the parent directory if needed.
+    ///
+    /// Written to a unique sibling temp file, fsynced, then renamed over the target, so a crash or full disk leaves either the old state or the new one.
+    /// A plain truncate-then-write could leave a torn file, which `load` reads as empty: every provisioned resource then looks unowned and removed declarations are silently never pruned.
     pub fn save(&self, path: &Path) -> std::io::Result<()> {
+        use std::io::Write as _;
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
         let json = serde_json::to_vec_pretty(self).map_err(std::io::Error::other)?;
-        std::fs::write(path, json)
+        let tmp = crate::persist_tmp_path(path);
+        let written = (|| -> std::io::Result<()> {
+            let mut f = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&tmp)?;
+            f.write_all(&json)?;
+            f.sync_all()?;
+            std::fs::rename(&tmp, path)
+        })();
+        if written.is_err() {
+            let _ = std::fs::remove_file(&tmp);
+        }
+        written
     }
 
     /// Whether a resource is currently owned by the deployment.
@@ -590,6 +607,38 @@ mod tests {
             state.resources.insert(p.key(), p);
         }
         state
+    }
+
+    /// `save` must publish a new file by rename rather than truncating the existing one in place, so a crash mid-write can never leave a torn state file that `load` reads as empty.
+    /// A rename gives the path a new inode; an in-place `std::fs::write` keeps the old one.
+    #[cfg(unix)]
+    #[test]
+    fn save_replaces_the_state_file_atomically() {
+        use std::os::unix::fs::MetadataExt as _;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("provisioning-state.json");
+
+        state(&[("a", "sha256:aa")]).save(&path).unwrap();
+        let first_inode = std::fs::metadata(&path).unwrap().ino();
+
+        let next = state(&[("a", "sha256:aa"), ("b", "sha256:bb")]);
+        next.save(&path).unwrap();
+        assert_ne!(
+            std::fs::metadata(&path).unwrap().ino(),
+            first_inode,
+            "the state file must be replaced by rename, not rewritten in place"
+        );
+        assert_eq!(ProvisioningState::load(&path).resources, next.resources);
+
+        let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .filter(|n| n != "provisioning-state.json")
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "no temp files may be left behind: {leftovers:?}"
+        );
     }
 
     #[test]

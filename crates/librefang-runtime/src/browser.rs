@@ -359,7 +359,7 @@ async fn http_discover_target(cdp_endpoint: &str) -> Result<(String, Option<Stri
 struct BrowserSession {
     process: Option<tokio::process::Child>,
     cdp: CdpConnection,
-    #[allow(dead_code)]
+    /// When the last command started or finished; [`BrowserManager::reap_idle`] closes the session once this is older than `[browser] idle_timeout_secs`.
     last_active: Instant,
     _user_data_dir: Option<TempDir>,
     /// Target ID of the tab created during attach mode.
@@ -414,6 +414,8 @@ impl BrowserSession {
         cmd.stderr(std::process::Stdio::piped());
         cmd.stdout(std::process::Stdio::null());
         cmd.stdin(std::process::Stdio::null());
+        // A launch that fails or is cancelled before the session is built (no DevTools URL, no page target, a dropped turn) drops `child`; without this the Chromium process outlived it.
+        cmd.kill_on_drop(true);
 
         // SECURITY: clear environment, pass only essentials
         cmd.env_clear();
@@ -1315,6 +1317,11 @@ impl BrowserManager {
         self.sessions.contains_key(agent_id)
     }
 
+    /// Number of open browser sessions across all agents.
+    pub fn session_count(&self) -> usize {
+        self.sessions.len()
+    }
+
     /// Send a command to an agent's browser session (creating one if needed).
     pub async fn send_command(
         &self,
@@ -1324,6 +1331,8 @@ impl BrowserManager {
         let session = self.get_or_create(agent_id).await?;
         let mut guard = session.lock().await;
         let resp = guard.execute(cmd, self.config.max_content_chars).await;
+        // Idle time counts from the end of the last command, not its start, so a long navigation is not reaped the moment it returns.
+        guard.last_active = Instant::now();
 
         if !resp.success {
             if let Some(ref err) = resp.error {
@@ -1377,9 +1386,45 @@ impl BrowserManager {
         }
     }
 
-    /// Clean up an agent's browser session (called after agent loop ends).
+    /// Clean up an agent's browser session, for the agent-kill path.
     pub async fn cleanup_agent(&self, agent_id: &str) {
         self.close_session(agent_id).await;
+    }
+
+    /// Close every session that has been idle for longer than `[browser] idle_timeout_secs`, returning how many were closed.
+    ///
+    /// A session whose lock is held is mid-command and is skipped.
+    /// `idle_timeout_secs = 0` disables reaping.
+    /// Without this, a session lived until the model happened to call `browser_close`, so agents that finished (or were deleted) without closing kept a Chromium process each and, at `max_sessions`, locked every other agent out of the browser until the daemon restarted.
+    pub async fn reap_idle(&self) -> usize {
+        if self.config.idle_timeout_secs == 0 {
+            return 0;
+        }
+        let timeout = Duration::from_secs(self.config.idle_timeout_secs);
+        let idle: Vec<String> = self
+            .sessions
+            .iter()
+            .filter(|entry| {
+                entry
+                    .value()
+                    .try_lock()
+                    .is_ok_and(|session| session.last_active.elapsed() >= timeout)
+            })
+            .map(|entry| entry.key().clone())
+            .collect();
+        for agent_id in &idle {
+            info!(agent_id = %agent_id, "Closing idle browser session");
+            self.close_session(agent_id).await;
+        }
+        idle.len()
+    }
+
+    /// Close every session, for daemon shutdown.
+    pub async fn close_all(&self) {
+        let agent_ids: Vec<String> = self.sessions.iter().map(|e| e.key().clone()).collect();
+        for agent_id in &agent_ids {
+            self.close_session(agent_id).await;
+        }
     }
 
     /// Get existing session or create a new one.
@@ -1387,6 +1432,9 @@ impl BrowserManager {
         if let Some(entry) = self.sessions.get(agent_id) {
             return Ok(Arc::clone(entry.value()));
         }
+
+        // Reclaim abandoned sessions before counting against the cap, so a slot held by an agent that never called `browser_close` is not lost for the life of the daemon.
+        self.reap_idle().await;
 
         if self.sessions.len() >= self.config.max_sessions {
             return Err(format!(
@@ -3455,6 +3503,36 @@ mod tests {
 
         let err = http_discover_target(&server.uri()).await.unwrap_err();
         assert!(err.contains("404"), "unexpected error: {err}");
+    }
+
+    /// A session the model never closed must be reclaimed once idle past `idle_timeout_secs`, while a recently used one stays.
+    #[tokio::test]
+    async fn reap_idle_closes_only_sessions_idle_past_the_timeout() {
+        let config = BrowserConfig {
+            idle_timeout_secs: 60,
+            ..BrowserConfig::default()
+        };
+        let mgr = BrowserManager::new(config);
+        for agent in ["stale", "fresh"] {
+            let (url, _seen) = spawn_mock_cdp(MockCdp::PageLevel).await;
+            let session = BrowserSession::attach(&url, None)
+                .await
+                .unwrap_or_else(|e| panic!("attach failed: {e}"));
+            mgr.sessions
+                .insert(agent.to_string(), Arc::new(Mutex::new(session)));
+        }
+        let stale = mgr.sessions.get("stale").unwrap().value().clone();
+        stale.lock().await.last_active = Instant::now()
+            .checked_sub(Duration::from_secs(120))
+            .expect("monotonic clock is past two minutes");
+        drop(stale);
+
+        assert_eq!(mgr.reap_idle().await, 1);
+        assert!(!mgr.has_session("stale"));
+        assert!(mgr.has_session("fresh"));
+
+        mgr.close_all().await;
+        assert!(mgr.sessions.is_empty());
     }
 }
 

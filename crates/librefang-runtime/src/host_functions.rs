@@ -1030,6 +1030,10 @@ fn host_agent_send(state: &GuestState, params: &serde_json::Value) -> serde_json
     ) {
         return e;
     }
+    // Mirrors the builtin `agent_send` tool: the turn running this guest holds the agent's own lock, so a send to itself can only deadlock.
+    if target == state.agent_id {
+        return json!({"error": "agent_send: an agent cannot send a message to itself"});
+    }
     let kernel = match &state.kernel {
         Some(k) => k,
         None => return json!({"error": "No kernel handle available"}),
@@ -1038,7 +1042,12 @@ fn host_agent_send(state: &GuestState, params: &serde_json::Value) -> serde_json
     // while the host-to-agent round-trip is in flight. Plain block_on inside
     // spawn_blocking creates a nested runtime that starves the watchdog.
     let handle = state.tokio_handle.clone();
-    match tokio::task::block_in_place(|| handle.block_on(kernel.send_to_agent(target, message))) {
+    // Re-establish the dispatching turn's held locks around the nested send, so a cycle back to this agent (by name, or through another agent) is rejected by the kernel's re-entry check instead of parking on the lock this turn holds.
+    let send = crate::held_agent_locks::scope_with(
+        state.held_locks.clone(),
+        kernel.send_to_agent(target, message),
+    );
+    match tokio::task::block_in_place(|| handle.block_on(send)) {
         Ok(response) => json!({"ok": response}),
         Err(e) => json!({"error": e.to_string()}),
     }
@@ -1558,6 +1567,8 @@ mod tests {
             std::collections::HashMap<(Option<String>, String), serde_json::Value>,
         >,
         protected_paths: std::sync::Mutex<Vec<std::path::PathBuf>>,
+        /// The held-agent-locks registry each `send_to_agent` call observed.
+        sends_saw_held: std::sync::Mutex<Vec<Vec<librefang_types::agent::AgentId>>>,
     }
 
     impl RecordingKernel {
@@ -1567,6 +1578,7 @@ mod tests {
                 recalled: std::sync::Mutex::new(Vec::new()),
                 preloaded: std::sync::Mutex::new(std::collections::HashMap::new()),
                 protected_paths: std::sync::Mutex::new(Vec::new()),
+                sends_saw_held: std::sync::Mutex::new(Vec::new()),
             })
         }
 
@@ -1596,7 +1608,11 @@ mod tests {
             _: &str,
             _: &str,
         ) -> Result<String, librefang_kernel_handle::KernelOpError> {
-            Err("not implemented".into())
+            self.sends_saw_held
+                .lock()
+                .unwrap()
+                .push(crate::held_agent_locks::held_snapshot());
+            Ok("pong".to_string())
         }
         fn list_agents(&self) -> Vec<librefang_kernel_handle::AgentInfo> {
             vec![]
@@ -1796,6 +1812,39 @@ mod tests {
             agent_id.to_string(),
             tokio::runtime::Handle::current(),
         )
+    }
+
+    /// The guest runs off the task holding its agent's lock, so the nested send must carry the dispatching turn's held locks for the kernel's #5125 re-entry check to see them.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn agent_send_carries_the_dispatching_turns_held_locks() {
+        let kernel = RecordingKernel::new();
+        let me = librefang_types::agent::AgentId::new();
+        let mut state = state_with_kernel(
+            &me.to_string(),
+            vec![Capability::AgentMessage("*".to_string())],
+            std::sync::Arc::clone(&kernel),
+        );
+        state.held_locks = crate::held_agent_locks::HeldLocksSnapshot {
+            agents: vec![me],
+            sessions: vec![],
+        };
+        let out = host_agent_send(&state, &json!({"target": "peer", "message": "hi"}));
+        assert_eq!(out, json!({"ok": "pong"}));
+        assert_eq!(*kernel.sends_saw_held.lock().unwrap(), vec![vec![me]]);
+    }
+
+    /// A send to the guest's own agent id can only deadlock on the lock its own turn holds, so it is refused before reaching the kernel.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn agent_send_to_self_is_rejected() {
+        let kernel = RecordingKernel::new();
+        let state = state_with_kernel(
+            "agent-self",
+            vec![Capability::AgentMessage("*".to_string())],
+            std::sync::Arc::clone(&kernel),
+        );
+        let out = host_agent_send(&state, &json!({"target": "agent-self", "message": "hi"}));
+        assert!(out["error"].as_str().unwrap().contains("itself"), "{out}");
+        assert!(kernel.sends_saw_held.lock().unwrap().is_empty());
     }
 
     /// Regression test for Bug #3837: kv_get must pass agent_id to the

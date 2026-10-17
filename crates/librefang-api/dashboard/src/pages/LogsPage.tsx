@@ -8,6 +8,7 @@ import { Input } from "../components/ui/Input";
 import { InlineEmpty } from "../components/ui/InlineEmpty";
 import { FileText, Search, Download, Loader2 } from "lucide-react";
 import { truncateId } from "../lib/string";
+import { downloadBlob } from "../lib/download";
 import { useAuditRecent } from "../lib/queries/runtime";
 import type { AuditEntry } from "../api";
 
@@ -108,13 +109,7 @@ export function LogsPage() {
       [JSON.stringify(projectAuditLogExport(filteredLogs), null, 2)],
       { type: "application/json" },
     );
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `audit-log-${new Date().toISOString().split("T")[0]}.json`;
-    a.click();
-    // Delay revoke so Safari does not lose blob URL during async download handoff.
-    setTimeout(() => URL.revokeObjectURL(url), 100);
+    downloadBlob(blob, `audit-log-${new Date().toISOString().split("T")[0]}.json`);
   };
 
   return (

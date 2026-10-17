@@ -1,5 +1,6 @@
 import { formatBytes, formatCost, formatNumber } from "../lib/format";
 import { safeStorageGet, safeStorageSet } from "../lib/safeStorage";
+import { downloadBlob } from "../lib/download";
 import { memo, useEffect, useMemo, useRef, useState, useCallback } from "react";
 import { useTranslation } from "react-i18next";
 import { motion } from "motion/react";
@@ -20,7 +21,8 @@ import { useChatCommands, type ChatCommand } from "../lib/queries/commands";
 import { backendCommandNames, commandLabel, menuCommands, shouldHoldSlashSend } from "../lib/chatCommands";
 import { agentKeys, approvalKeys } from "../lib/queries/keys";
 import { groupedPicker } from "../lib/chatPicker";
-import { applyForeignTerminalFrame, isTerminalFrameType, normalizeToolOutput, terminalFrameOwner } from "../lib/chat";
+import { appendCanvas, applyForeignTerminalFrame, isTerminalFrameType, normalizeToolOutput, parseCanvasFrame, terminalFrameOwner, type ChatCanvas as ChatCanvasData } from "../lib/chat";
+import { ChatCanvas } from "../components/ChatCanvas";
 import {
   deriveDropdownActiveSessionId,
   pickSessionDropdownLabel,
@@ -111,6 +113,9 @@ interface ChatMessage {
   /** Image attachments — {file_id, filename} sourced from session history
    *  (`AgentSessionMessage.images`) or the user's pending uploads at send. */
   images?: ChatAttachment[];
+  /** Canvases the agent presented with `canvas_present` during this turn, from the WS `canvas` frame.
+   *  Live-only: session history does not carry them, so a reloaded transcript shows the tool call without the rendering. */
+  canvases?: ChatCanvasData[];
 }
 
 interface ChatAttachment {
@@ -1187,6 +1192,12 @@ export function useChatMessages(
               if (entry) {
                 addSkillOutput({ skillName: entry.tool, agentId: sendAgentId, content: entry.content });
               }
+            } else if (data.type === "canvas") {
+              // `canvas_present` replaces its `tool_end` with this frame; without a branch here the rendered canvas was dropped and only the tool's server-side file path reached the user.
+              const canvas = parseCanvasFrame(data);
+              if (canvas) {
+                updateAgentMessages(sendAgentId, prev => appendCanvas(prev, botMsg.id, canvas));
+              }
             } else if (data.type === "silent_complete") {
               const rafHandle = rafHandleRef.current.get(botMsg.id);
               if (rafHandle !== undefined) cancelAnimationFrame(rafHandle);
@@ -1579,6 +1590,14 @@ export const MessageBubble = memo(function MessageBubble({ message, usageFooter,
         {!isUser && message.tools && message.tools.length > 0 && (
           <div className="w-full mb-1.5">
             <ToolCallsPanel tools={message.tools} />
+          </div>
+        )}
+
+        {!isUser && message.canvases && message.canvases.length > 0 && (
+          <div className="w-full mb-1.5 flex flex-col gap-1.5">
+            {message.canvases.map((canvas) => (
+              <ChatCanvas key={canvas.id} canvas={canvas} />
+            ))}
           </div>
         )}
 
@@ -3618,14 +3637,7 @@ export function ChatPage() {
       }
 
       const blob = new Blob([markdown], { type: "text/markdown;charset=utf-8" });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = exportFilename(selectedAgent?.name ?? "conversation", exportedAt);
-      a.click();
-      // Revoking immediately can cancel the download in Safari; one turn of
-      // the event loop is enough and the object is small.
-      setTimeout(() => URL.revokeObjectURL(url), 0);
+      downloadBlob(blob, exportFilename(selectedAgent?.name ?? "conversation", exportedAt));
     },
     [messages, exportSelection, exportThinking, selectedAgent, activeSessionId, addToast, t],
   );

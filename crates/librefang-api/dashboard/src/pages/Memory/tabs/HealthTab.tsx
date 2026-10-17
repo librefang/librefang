@@ -5,6 +5,7 @@ import { Badge } from "../../../components/ui/Badge";
 import { Button } from "../../../components/ui/Button";
 import { useMemoryConfig, useMemoryHealth } from "../../../lib/queries/memory";
 import { useAutoDreamStatus } from "../../../lib/queries/autoDream";
+import { toastErr } from "../../../lib/errors";
 import { formatRelativeMs } from "../formatters";
 
 interface Props {
@@ -17,9 +18,13 @@ export function HealthTab({ onOpenConfig }: Props) {
   const healthQuery = useMemoryHealth();
   const dreamQuery = useAutoDreamStatus();
 
+  // Each card has three states: the answer is known, the request is still in flight, or it failed.
+  // Missing data must never be rendered as a negative fact ("Not reachable", "Disabled"), because an operator reads those as diagnoses.
   const config = configQuery.data;
-  const embeddingAvailable = healthQuery.data ?? false;
+  const embeddingAvailable = healthQuery.data;
   const dream = dreamQuery.data;
+  const tLoading = () => t("common.loading", { defaultValue: "Loading..." });
+  const tUnknown = () => t("common.unknown", { defaultValue: "Unknown" });
   const now = Date.now();
   const tNever = () => t("common.never", { defaultValue: "never" });
   const tJustNow = () => t("common.just_now", { defaultValue: "just now" });
@@ -42,8 +47,10 @@ export function HealthTab({ onOpenConfig }: Props) {
     (a) => a.progress?.status === "failed" || a.progress?.status === "aborted",
   ).length;
 
-  const embeddingTone = embeddingAvailable ? "success" : "warning";
+  const embeddingTone =
+    embeddingAvailable === undefined ? "default" : embeddingAvailable ? "success" : "warning";
   const proactiveOn = config?.proactive_memory?.enabled ?? false;
+  const configStatus = config === undefined ? (configQuery.isError ? tUnknown() : tLoading()) : undefined;
 
   return (
     <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
@@ -54,14 +61,22 @@ export function HealthTab({ onOpenConfig }: Props) {
           title={t("memory.health_embedding_title", { defaultValue: "Embedding backbone" })}
           tone={embeddingTone}
           status={
-            embeddingAvailable
-              ? t("memory.health_embedding_ok", { defaultValue: "Reachable" })
-              : t("memory.health_embedding_down", { defaultValue: "Not reachable" })
+            embeddingAvailable === undefined
+              ? healthQuery.isError
+                ? tUnknown()
+                : tLoading()
+              : embeddingAvailable
+                ? t("memory.health_embedding_ok", { defaultValue: "Reachable" })
+                : t("memory.health_embedding_down", { defaultValue: "Not reachable" })
           }
         />
         <DefRow
           label={t("memory.health_provider", { defaultValue: "Provider" })}
-          value={config?.embedding_provider || t("memory.auto", { defaultValue: "auto-detect" })}
+          value={
+            config === undefined
+              ? "—"
+              : config.embedding_provider || t("memory.auto", { defaultValue: "auto-detect" })
+          }
         />
         <DefRow
           label={t("memory.health_model", { defaultValue: "Model" })}
@@ -69,19 +84,40 @@ export function HealthTab({ onOpenConfig }: Props) {
         />
         <DefRow
           label={t("memory.health_api_key_env", { defaultValue: "API key env" })}
-          value={config?.embedding_api_key_env || t("memory.health_unset", { defaultValue: "unset" })}
+          value={
+            config === undefined
+              ? "—"
+              : config.embedding_api_key_env || t("memory.health_unset", { defaultValue: "unset" })
+          }
         />
-        <p className="text-[11px] text-text-dim mt-3">
-          {embeddingAvailable
-            ? t("memory.health_embed_hint_ok", {
-                defaultValue:
-                  "Liveness probe succeeded — the configured embedding backend responded to a test call.",
-              })
-            : t("memory.health_embed_hint_fail", {
-                defaultValue:
-                  "Liveness probe failed. Memory writes will skip vector indexing until the provider is reachable. Check API key, base URL, and that the local server (Ollama / vLLM / LM Studio) is running.",
-              })}
-        </p>
+        {embeddingAvailable === undefined ? (
+          healthQuery.isError && (
+            <LoadFailed
+              message={toastErr(healthQuery.error, t("common.error", { defaultValue: "Error" }))}
+              retryLabel={t("common.retry", { defaultValue: "Retry" })}
+              onRetry={() => void healthQuery.refetch()}
+            />
+          )
+        ) : (
+          <p className="text-[11px] text-text-dim mt-3">
+            {embeddingAvailable
+              ? t("memory.health_embed_hint_ok", {
+                  defaultValue:
+                    "Liveness probe succeeded — the configured embedding backend responded to a test call.",
+                })
+              : t("memory.health_embed_hint_fail", {
+                  defaultValue:
+                    "Liveness probe failed. Memory writes will skip vector indexing until the provider is reachable. Check API key, base URL, and that the local server (Ollama / vLLM / LM Studio) is running.",
+                })}
+          </p>
+        )}
+        {configQuery.isError && config === undefined && (
+          <LoadFailed
+            message={toastErr(configQuery.error, t("common.error", { defaultValue: "Error" }))}
+            retryLabel={t("common.retry", { defaultValue: "Retry" })}
+            onRetry={() => void configQuery.refetch()}
+          />
+        )}
       </Card>
 
       {/* Proactive memory */}
@@ -91,29 +127,38 @@ export function HealthTab({ onOpenConfig }: Props) {
           title={t("memory.health_proactive_title", { defaultValue: "Proactive memory" })}
           tone={proactiveOn ? "success" : "default"}
           status={
-            proactiveOn
+            configStatus ??
+            (proactiveOn
               ? t("memory.health_proactive_on", { defaultValue: "Enabled" })
-              : t("memory.health_proactive_off", { defaultValue: "Disabled" })
+              : t("memory.health_proactive_off", { defaultValue: "Disabled" }))
           }
         />
         <DefRow
           label={t("memory.health_extraction_model", { defaultValue: "Extraction model" })}
-          value={config?.proactive_memory?.extraction_model || t("memory.health_use_default", { defaultValue: "kernel default" })}
+          value={
+            config === undefined
+              ? "—"
+              : config.proactive_memory?.extraction_model || t("memory.health_use_default", { defaultValue: "kernel default" })
+          }
         />
         <DefRow
           label={t("memory.health_auto_memorize", { defaultValue: "Auto memorize" })}
           value={
-            (config?.proactive_memory?.auto_memorize ?? true)
-              ? t("common.on", { defaultValue: "ON" })
-              : t("common.off", { defaultValue: "Off" })
+            config === undefined
+              ? "—"
+              : (config.proactive_memory?.auto_memorize ?? true)
+                ? t("common.on", { defaultValue: "ON" })
+                : t("common.off", { defaultValue: "Off" })
           }
         />
         <DefRow
           label={t("memory.health_auto_retrieve", { defaultValue: "Auto retrieve" })}
           value={
-            (config?.proactive_memory?.auto_retrieve ?? true)
-              ? t("common.on", { defaultValue: "ON" })
-              : t("common.off", { defaultValue: "Off" })
+            config === undefined
+              ? "—"
+              : (config.proactive_memory?.auto_retrieve ?? true)
+                ? t("common.on", { defaultValue: "ON" })
+                : t("common.off", { defaultValue: "Off" })
           }
         />
         <DefRow
@@ -129,32 +174,47 @@ export function HealthTab({ onOpenConfig }: Props) {
           title={t("memory.health_dream_title", { defaultValue: "Auto-Dream" })}
           tone={dream?.enabled ? (dreamFailures > 0 ? "warning" : "success") : "default"}
           status={
-            dream?.enabled
-              ? dreamFailures > 0
-                ? t("memory.health_dream_with_errors", {
-                    defaultValue: "Running with errors",
-                  })
-                : t("memory.health_dream_on", { defaultValue: "Running" })
-              : t("memory.health_dream_off", { defaultValue: "Disabled" })
+            dream === undefined
+              ? dreamQuery.isError
+                ? tUnknown()
+                : tLoading()
+              : dream.enabled
+                ? dreamFailures > 0
+                  ? t("memory.health_dream_with_errors", {
+                      defaultValue: "Running with errors",
+                    })
+                  : t("memory.health_dream_on", { defaultValue: "Running" })
+                : t("memory.health_dream_off", { defaultValue: "Disabled" })
           }
         />
         <DefRow
           label={t("memory.health_dream_enrolled", { defaultValue: "Agents enrolled" })}
-          value={`${optedIn.length} / ${dream?.agents.length ?? 0}`}
+          value={dream === undefined ? "—" : `${optedIn.length} / ${dream.agents.length}`}
         />
         <DefRow
           label={t("memory.health_dream_last", {
             defaultValue: "Last successful consolidation",
           })}
-          value={formatRelativeMs(lastConsolidatedAt, now, i18n.language, tNever, tJustNow)}
+          value={
+            dream === undefined
+              ? "—"
+              : formatRelativeMs(lastConsolidatedAt, now, i18n.language, tNever, tJustNow)
+          }
         />
         <DefRow
           label={t("memory.health_dream_failed", {
             defaultValue: "Enrolled agents with broken last run",
           })}
-          value={String(dreamFailures)}
+          value={dream === undefined ? "—" : String(dreamFailures)}
           tone={dreamFailures > 0 ? "warning" : undefined}
         />
+        {dreamQuery.isError && dream === undefined && (
+          <LoadFailed
+            message={toastErr(dreamQuery.error, t("common.error", { defaultValue: "Error" }))}
+            retryLabel={t("common.retry", { defaultValue: "Retry" })}
+            onRetry={() => void dreamQuery.refetch()}
+          />
+        )}
         {dreamFailures > 0 && (
           <p className="text-[11px] text-warning/90 mt-3 flex items-start gap-1.5">
             <AlertTriangle className="w-3 h-3 mt-0.5 shrink-0" />
@@ -211,6 +271,28 @@ function SectionHeader({
           {status}
         </Badge>
       )}
+    </div>
+  );
+}
+
+function LoadFailed({
+  message,
+  retryLabel,
+  onRetry,
+}: {
+  message: string;
+  retryLabel: string;
+  onRetry: () => void;
+}) {
+  return (
+    <div role="alert" className="mt-3 flex items-start justify-between gap-2 text-[11px] text-error">
+      <span className="flex items-start gap-1.5">
+        <AlertTriangle className="w-3 h-3 mt-0.5 shrink-0" />
+        {message}
+      </span>
+      <Button variant="secondary" size="sm" onClick={onRetry}>
+        {retryLabel}
+      </Button>
     </div>
   );
 }

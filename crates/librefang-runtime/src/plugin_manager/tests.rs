@@ -1,4 +1,7 @@
-use super::install::{parse_plugin_i18n_blocks, pip_in_venv, resolve_python_install};
+use super::install::{
+    output_with_deadline, parse_plugin_i18n_blocks, pip_in_venv, resolve_python_install,
+    scrub_secret_env,
+};
 use super::registry::{
     fetch_verified_index_with_cache_path, is_valid_registry_pubkey_b64, registry_cache_sig_path,
     registry_index_urls, registry_pubkey_cache_path, EMBEDDED_REGISTRY_PUBKEYS,
@@ -1325,4 +1328,48 @@ fn doctor_reflects_a_newly_written_plugin_without_waiting_for_the_probe_ttl() {
         now_listed,
         "the plugin list must be re-read on every call, not cached with the probe table"
     );
+}
+
+// Package managers run the plugin author's lifecycle scripts, so the install command must not inherit the vault key, provider keys or channel tokens.
+#[test]
+fn dependency_install_env_drops_inherited_secrets_and_keeps_the_rest() {
+    let mut cmd = tokio::process::Command::new("true");
+    let inherited = [
+        "PATH",
+        "HOME",
+        "HTTPS_PROXY",
+        "LIBREFANG_VAULT_KEY",
+        "ANTHROPIC_API_KEY",
+        "SLACK_BOT_TOKEN",
+    ]
+    .map(std::ffi::OsString::from);
+    scrub_secret_env(&mut cmd, inherited);
+    let removed: Vec<String> = cmd
+        .as_std()
+        .get_envs()
+        .filter(|(_, v)| v.is_none())
+        .map(|(k, _)| k.to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(
+        removed,
+        [
+            "ANTHROPIC_API_KEY",
+            "LIBREFANG_VAULT_KEY",
+            "SLACK_BOT_TOKEN"
+        ]
+    );
+}
+
+// A stalled clone or install used to hold the request open forever; the deadline must kill it and report why.
+#[cfg(unix)]
+#[tokio::test]
+async fn output_with_deadline_kills_a_command_that_overruns() {
+    let mut cmd = tokio::process::Command::new("sleep");
+    cmd.arg("30");
+    let started = std::time::Instant::now();
+    let err = output_with_deadline(&mut cmd, std::time::Duration::from_millis(200), "sleep")
+        .await
+        .unwrap_err();
+    assert!(err.contains("did not finish within"), "{err}");
+    assert!(started.elapsed() < std::time::Duration::from_secs(10));
 }

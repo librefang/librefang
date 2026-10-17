@@ -51,6 +51,7 @@ import { Select } from "../components/ui/Select";
 import { Modal } from "../components/ui/Modal";
 import { ConfirmDialog } from "../components/ui/ConfirmDialog";
 import { EmptyState } from "../components/ui/EmptyState";
+import { ErrorState } from "../components/ui/ErrorState";
 import { CardSkeleton } from "../components/ui/Skeleton";
 import { StaggerList } from "../components/ui/StaggerList";
 
@@ -201,6 +202,21 @@ export function GroupsPage() {
           <CardSkeleton />
           <CardSkeleton />
         </StaggerList>
+      ) : groupsQuery.isError && groupsQuery.data === undefined ? (
+        // A failed list must not read as "No groups yet": that copy invites creating a duplicate of a group that still exists in config.toml.
+        <ErrorState
+          message={errorMessage(groupsQuery.error, t("groups.load_failed", "Could not load groups"))}
+          onRetry={handleRefresh}
+        />
+      ) : groups.length === 0 && search.trim() ? (
+        <EmptyState
+          icon={<Search className="h-8 w-8" />}
+          title={t("groups.no_match_title", "No matching groups")}
+          description={t(
+            "groups.no_match_desc",
+            "No group's name, description, members or roles match the search.",
+          )}
+        />
       ) : groups.length === 0 ? (
         <EmptyState
           icon={<Users className="h-8 w-8" />}

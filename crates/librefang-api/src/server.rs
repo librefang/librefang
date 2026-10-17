@@ -2179,6 +2179,17 @@ pub async fn build_router(
         );
     }
 
+    // `[a2a] listen_path` decides where the protocol-level A2A endpoints are mounted; read once here, so a change needs a restart.
+    // Resolved before the auth layer is built because the agent listing under a custom prefix has to be public there too.
+    let a2a_listen_path = routes::network::resolve_a2a_listen_path(
+        state
+            .kernel
+            .config_ref()
+            .a2a
+            .as_ref()
+            .map(|a2a| a2a.listen_path.as_str()),
+    );
+
     let auth_state = middleware::AuthState {
         api_key_lock: api_key_lock.clone(),
         master_key: master_key.clone(),
@@ -2190,6 +2201,8 @@ pub async fn build_router(
         // RBAC M5: hand the audit log to the auth layer so role-denial
         // events land in the same hash chain as everything else.
         audit_log: Some(state.kernel.audit().clone()),
+        a2a_agents_path: (a2a_listen_path != routes::network::DEFAULT_A2A_LISTEN_PATH)
+            .then(|| format!("{a2a_listen_path}/agents")),
     };
     let rl_cfg = state.kernel.config_ref().rate_limit.clone();
     // Reuse the boot-compiled allowlist + cached master switch from
@@ -2339,7 +2352,7 @@ pub async fn build_router(
         // ensures memory exhaustion DoS attacks via /a2a/tasks/send are always
         // bounded (Bug #3785).
         .merge(
-            routes::network::protocol_router()
+            routes::network::protocol_router(&a2a_listen_path)
                 .layer(RequestBodyLimitLayer::new(1024 * 1024)),
         )
         // MCP HTTP endpoint (protocol-level, not versioned)

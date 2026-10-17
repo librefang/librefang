@@ -99,6 +99,9 @@ pub(super) async fn dispatch_due_jobs(
         .workflows
         .command_queue
         .semaphore_for_lane(librefang_runtime::command_lane::Lane::Cron);
+    // Inline branches change job state (a one-shot `record_success` / `record_skipped` removes the job) without a spawned task to persist afterwards.
+    // Left to the 20-tick periodic flush, a crash in that window restored the old jobs.json and re-fired the job.
+    let mut inline_state_changed = false;
     for job in due {
         let job_id = job.id;
         let agent_id = job.agent_id;
@@ -129,6 +132,7 @@ pub(super) async fn dispatch_due_jobs(
                             .workflows
                             .cron_scheduler
                             .record_failure(job_id, &format!("payload encode failed: {e}"));
+                        inline_state_changed = true;
                         continue;
                     }
                 };
@@ -139,6 +143,7 @@ pub(super) async fn dispatch_due_jobs(
                 );
                 kernel.publish_event(event).await;
                 kernel.workflows.cron_scheduler.record_success(job_id);
+                inline_state_changed = true;
             }
             librefang_types::scheduler::CronAction::AgentTurn {
                 message,
@@ -165,6 +170,7 @@ pub(super) async fn dispatch_due_jobs(
                         "Cron: agent is Suspended, skipping fire"
                     );
                     kernel.workflows.cron_scheduler.record_skipped(job_id);
+                    inline_state_changed = true;
                     continue;
                 }
 
@@ -580,6 +586,11 @@ pub(super) async fn dispatch_due_jobs(
                     }
                 });
             }
+        }
+    }
+    if inline_state_changed {
+        if let Err(e) = kernel.workflows.cron_scheduler.persist() {
+            tracing::warn!("Cron persist after inline fires failed: {e}");
         }
     }
 }
@@ -1572,6 +1583,55 @@ mod dispatch_tests {
             );
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
+
+        kernel.shutdown();
+    }
+
+    /// An inline `SystemEvent` fire must reach `cron_jobs.json` before `dispatch_due_jobs` returns, not on the next 20-tick periodic flush, or a crash in that window re-fires the job on restart.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn inline_system_event_fire_is_persisted_immediately() {
+        let dir = tempfile::tempdir().unwrap();
+        let home_dir = dir.path().to_path_buf();
+        std::fs::create_dir_all(home_dir.join("data")).unwrap();
+        let config = KernelConfig {
+            home_dir: home_dir.clone(),
+            data_dir: home_dir.join("data"),
+            ..KernelConfig::default()
+        };
+        let kernel =
+            Arc::new(LibreFangKernel::boot_with_config(config).expect("Kernel should boot"));
+        let agent_id = kernel
+            .agents
+            .registry
+            .list()
+            .iter()
+            .find(|a| a.name == "assistant")
+            .expect("assistant should exist")
+            .id;
+
+        let scheduler = &kernel.workflows.cron_scheduler;
+        let event_id = scheduler
+            .add_job(
+                job(
+                    agent_id,
+                    "inline-event",
+                    CronAction::SystemEvent { text: "x".into() },
+                ),
+                false,
+            )
+            .unwrap();
+        scheduler.persist().unwrap();
+        let due = vec![scheduler.get_job(event_id).unwrap()];
+
+        dispatch_due_jobs(&kernel, due).await;
+
+        let reloaded = crate::cron::CronScheduler::new(&home_dir, 100);
+        reloaded.load().unwrap();
+        assert_eq!(
+            reloaded.get_meta(event_id).unwrap().last_status.as_deref(),
+            Some("ok"),
+            "the inline fire's state must be on disk when dispatch returns"
+        );
 
         kernel.shutdown();
     }

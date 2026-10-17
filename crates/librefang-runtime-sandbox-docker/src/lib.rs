@@ -263,6 +263,61 @@ pub async fn is_docker_available() -> bool {
     }
 }
 
+/// Removes a named container on drop unless disarmed.
+///
+/// `create_sandbox` holds one from just before `docker run` until it returns the container id.
+/// If the caller is cancelled first (a tool timeout, `/stop`, a client disconnect, often during a slow implicit image pull), the daemon still creates and starts the container, and since its id never reaches a pool or a guard nothing would ever remove it.
+struct PendingContainerGuard {
+    name: Option<String>,
+    on_abandon: Option<Box<dyn FnOnce(String) + Send>>,
+}
+
+impl PendingContainerGuard {
+    fn new(name: &str, on_abandon: Box<dyn FnOnce(String) + Send>) -> Self {
+        Self {
+            name: Some(name.to_string()),
+            on_abandon: Some(on_abandon),
+        }
+    }
+
+    /// The container was handed to the caller, which now owns its lifetime.
+    fn disarm(&mut self) {
+        self.name = None;
+    }
+}
+
+impl Drop for PendingContainerGuard {
+    fn drop(&mut self) {
+        if let (Some(name), Some(on_abandon)) = (self.name.take(), self.on_abandon.take()) {
+            on_abandon(name);
+        }
+    }
+}
+
+/// Spawn a best-effort `docker rm -f <name>` for a container whose creation was abandoned.
+fn remove_abandoned_container(name: String) {
+    let Ok(handle) = tokio::runtime::Handle::try_current() else {
+        warn!(container = %name, "No runtime to remove an abandoned Docker sandbox; it may leak");
+        return;
+    };
+    handle.spawn(async move {
+        let result = tokio::process::Command::new("docker")
+            .arg("rm")
+            .arg("-f")
+            .arg(&name)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .await;
+        match result {
+            Ok(status) if status.success() => {
+                debug!(container = %name, "Removed abandoned Docker sandbox")
+            }
+            _ => debug!(container = %name, "No abandoned Docker sandbox to remove"),
+        }
+    });
+}
+
 /// Create and start a sandbox container for an agent.
 pub async fn create_sandbox(
     config: &DockerSandboxConfig,
@@ -330,8 +385,13 @@ pub async fn create_sandbox(
     cmd.stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
 
+    // Dropping the future must also stop the CLI, and the guard below removes whatever the daemon created by then.
+    cmd.kill_on_drop(true);
+
     debug!(container = %container_name, image = %config.image, "Creating Docker sandbox");
 
+    let mut pending =
+        PendingContainerGuard::new(&container_name, Box::new(remove_abandoned_container));
     let output = cmd
         .output()
         .await
@@ -343,6 +403,7 @@ pub async fn create_sandbox(
     }
 
     let container_id = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    pending.disarm();
 
     Ok(SandboxContainer {
         container_id,
@@ -914,6 +975,36 @@ pub fn config_hash(config: &DockerSandboxConfig) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn pending_guard_recording() -> (
+        PendingContainerGuard,
+        std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    ) {
+        let removed = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = std::sync::Arc::clone(&removed);
+        let guard = PendingContainerGuard::new(
+            "librefang-sandbox-x",
+            Box::new(move |name| sink.lock().unwrap().push(name)),
+        );
+        (guard, removed)
+    }
+
+    /// A `create_sandbox` future dropped while `docker run` is pending must remove the container by name, because its id never reaches anything that could.
+    #[test]
+    fn pending_container_guard_removes_an_abandoned_container() {
+        let (guard, removed) = pending_guard_recording();
+        drop(guard);
+        assert_eq!(*removed.lock().unwrap(), ["librefang-sandbox-x"]);
+    }
+
+    /// Once the id is returned the caller owns the container, so the guard must leave it alone.
+    #[test]
+    fn pending_container_guard_leaves_a_delivered_container() {
+        let (mut guard, removed) = pending_guard_recording();
+        guard.disarm();
+        drop(guard);
+        assert!(removed.lock().unwrap().is_empty());
+    }
 
     #[test]
     fn test_sanitize_container_name_valid() {

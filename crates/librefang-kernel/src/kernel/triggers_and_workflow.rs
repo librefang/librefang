@@ -321,7 +321,7 @@ impl LibreFangKernel {
             .workflows
             .triggers
             .evaluate_with_resolver(&event, |id| {
-                self.agents.registry.get(id).map(|e| e.name.clone())
+                self.agents.registry.get_arc(id).map(|e| e.name.clone())
             });
         if !triggered.is_empty() || trigger_state_mutated {
             if let Err(e) = self.workflows.triggers.persist() {
@@ -1020,7 +1020,7 @@ impl LibreFangKernel {
         match self.workflows.triggers.task_posted_coverage_for(
             assignee_id,
             Some(&entry.name),
-            |id| self.agents.registry.get(id).map(|e| e.name.clone()),
+            |id| self.agents.registry.get_arc(id).map(|e| e.name.clone()),
         ) {
             TaskPostedCoverage::Covered(trigger_id) => {
                 debug!(

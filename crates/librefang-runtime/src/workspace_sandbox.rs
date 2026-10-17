@@ -191,10 +191,67 @@ pub fn resolve_sandbox_path_ext(
     Ok(canon_candidate)
 }
 
+/// File name of the agent manifest the kernel persists at the root of a spawned agent's workspace.
+const AGENT_MANIFEST_FILE: &str = "agent.toml";
+
+/// Refuse a write whose resolved target is the agent's own persisted manifest, `<workspace_root>/agent.toml`.
+///
+/// A spawned agent's workspace is the directory the kernel stores its `agent.toml` in, and boot re-reads that file and adopts it as the agent's manifest when it differs from the database copy.
+/// Without this guard an agent holding only `file_write` could rewrite its own capabilities, exec policy, workspace grants and author, and have them take effect on the next restart or reload.
+/// `resolved` must be a path returned by [`resolve_sandbox_path_ext`], whose parent is canonical.
+/// The leaf is compared case-insensitively because on a case-insensitive volume (macOS APFS default, NTFS) `AGENT.toml` names the same on-disk file.
+/// Trailing dots and spaces and an NTFS stream suffix (`agent.toml::$DATA`) are ignored for the same reason: Win32 path normalisation maps `agent.toml.` and `agent.toml::$DATA` onto the manifest itself, and refusing those names on other platforms costs nothing.
+pub fn deny_own_manifest_write(resolved: &Path, workspace_root: &Path) -> Result<(), String> {
+    let Ok(canon_root) = workspace_root.canonicalize() else {
+        return Ok(());
+    };
+    let is_manifest = resolved.parent() == Some(canon_root.as_path())
+        && resolved.file_name().is_some_and(|n| {
+            let name = n.to_string_lossy();
+            let name = name.split(':').next().unwrap_or_default();
+            name.trim_end_matches(['.', ' '])
+                .eq_ignore_ascii_case(AGENT_MANIFEST_FILE)
+        });
+    if is_manifest {
+        return Err(format!(
+            "Write denied: '{}' is this agent's own manifest and is read-only to agent tools; ask an operator to change the agent's configuration instead",
+            resolved.display()
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    /// Win32 maps `agent.toml.`, `agent.toml ` and `agent.toml::$DATA` onto the manifest file, so each spelling must be refused at the workspace root while unrelated names stay writable.
+    #[test]
+    fn deny_own_manifest_write_covers_win32_aliases() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        for name in [
+            "agent.toml",
+            "Agent.TOML",
+            "agent.toml.",
+            "agent.toml .",
+            "agent.toml::$DATA",
+            "agent.toml:stream",
+        ] {
+            assert!(
+                deny_own_manifest_write(&root.join(name), dir.path()).is_err(),
+                "{name}"
+            );
+        }
+        for name in ["agent.toml.bak", "my-agent.toml", "agent.tom"] {
+            assert!(
+                deny_own_manifest_write(&root.join(name), dir.path()).is_ok(),
+                "{name}"
+            );
+        }
+        assert!(deny_own_manifest_write(&root.join("sub").join("agent.toml"), dir.path()).is_ok());
+    }
 
     #[test]
     fn test_relative_path_inside_workspace() {

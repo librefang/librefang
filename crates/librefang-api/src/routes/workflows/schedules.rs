@@ -303,8 +303,10 @@ pub async fn create_schedule(
 
     match state.kernel.cron().add_job(job.clone(), false) {
         Ok(job_id) => {
+            // Same contract as the `/api/cron/jobs` handlers (#3515): a change that never reached disk reverts on the next restart, so it is a 500, not a success.
             if let Err(e) = state.kernel.cron().persist() {
-                tracing::warn!("Failed to persist cron jobs: {e}");
+                tracing::error!("Failed to persist cron jobs after schedule create: {e}");
+                return super::cron_persist_failed_response("create", &e.to_string());
             }
             let mut entry = cron_job_to_schedule_json(&job);
             entry["id"] = serde_json::Value::String(job_id.to_string());
@@ -509,7 +511,8 @@ pub async fn update_schedule(
     {
         Ok(_job) => {
             if let Err(e) = state.kernel.cron().persist() {
-                tracing::warn!("Failed to persist cron jobs: {e}");
+                tracing::error!("Failed to persist cron jobs after schedule update: {e}");
+                return super::cron_persist_failed_response("update", &e.to_string());
             }
             (
                 StatusCode::OK,
@@ -539,7 +542,8 @@ pub async fn delete_schedule(
     match state.kernel.cron().remove_job(job_id) {
         Ok(_) => {
             if let Err(e) = state.kernel.cron().persist() {
-                tracing::warn!("Failed to persist cron jobs: {e}");
+                tracing::error!("Failed to persist cron jobs after schedule delete: {e}");
+                return super::cron_persist_failed_response("delete", &e.to_string());
             }
             (
                 StatusCode::OK,

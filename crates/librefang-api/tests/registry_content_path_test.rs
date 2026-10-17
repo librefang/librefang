@@ -333,3 +333,39 @@ async fn rejected_provider_overwrite_restores_previous_file() {
     assert_eq!(status, StatusCode::BAD_REQUEST, "{response}");
     assert_eq!(std::fs::read_to_string(path).unwrap(), previous);
 }
+
+/// A caller-chosen `api_key_env` is planted into the daemon's process environment and `secrets.env`.
+/// A loader / interpreter knob such as `NODE_OPTIONS` must be refused before anything is written, so the environment, `secrets.env` and the providers directory are all left untouched.
+#[tokio::test(flavor = "multi_thread")]
+async fn provider_api_key_env_rejects_process_knobs() {
+    let h = boot().await;
+    let before = std::env::var_os("NODE_OPTIONS");
+    let body = serde_json::json!({
+        "id": "env-knob-provider",
+        "display_name": "Env Knob",
+        "api_key_env": "NODE_OPTIONS",
+        "api_key": "--require=/tmp/evil.js",
+        "base_url": "https://example.invalid/v1",
+        "key_required": true
+    });
+    let (status, resp) = post_json(&h.app, "/api/registry/content/provider", body).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{resp}");
+    assert_eq!(std::env::var_os("NODE_OPTIONS"), before);
+    assert!(!h.home_dir.join("providers/env-knob-provider.toml").exists());
+    let secrets = std::fs::read_to_string(h.home_dir.join("secrets.env")).unwrap_or_default();
+    assert!(!secrets.contains("NODE_OPTIONS"), "{secrets}");
+
+    // Without an inline key the name would still be persisted as the catalog `api_key_env` that `set_provider_key` trusts, so it is refused there too.
+    let body = serde_json::json!({
+        "provider": {
+            "id": "env-knob-provider",
+            "display_name": "Env Knob",
+            "api_key_env": "GITHUB_TOKEN",
+            "base_url": "https://example.invalid/v1",
+            "key_required": true
+        }
+    });
+    let (status, resp) = post_json(&h.app, "/api/registry/content/provider", body).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{resp}");
+    assert!(!h.home_dir.join("providers/env-knob-provider.toml").exists());
+}

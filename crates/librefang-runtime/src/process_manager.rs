@@ -527,6 +527,37 @@ impl ProcessManager {
         }
     }
 
+    /// Kill every process `agent_id` owns, returning how many were killed.
+    ///
+    /// For the agent-kill path: the children run in their own process group without `kill_on_drop`, so nothing else reaches them once the agent is gone, and `kill` is ownership-checked against an agent that no longer exists.
+    pub async fn kill_all_for_agent(&self, agent_id: &str) -> usize {
+        let owned: Vec<ProcessId> = self
+            .processes
+            .iter()
+            .filter(|entry| entry.value().agent_id == agent_id)
+            .map(|entry| entry.key().clone())
+            .collect();
+        let mut killed = 0;
+        for id in owned {
+            if self.force_kill(&id).await.is_ok() {
+                killed += 1;
+            }
+        }
+        killed
+    }
+
+    /// Kill every managed process, for daemon shutdown, returning how many were killed.
+    pub async fn kill_all(&self) -> usize {
+        let all: Vec<ProcessId> = self.processes.iter().map(|e| e.key().clone()).collect();
+        let mut killed = 0;
+        for id in all {
+            if self.force_kill(&id).await.is_ok() {
+                killed += 1;
+            }
+        }
+        killed
+    }
+
     /// Total process count.
     pub fn count(&self) -> usize {
         self.processes.len()
@@ -599,6 +630,24 @@ mod tests {
         assert!(result.unwrap_err().contains("max: 1"));
 
         let _ = pm.kill(&id1, "agent1").await;
+    }
+
+    /// A deleted agent's processes are unreachable through the ownership-checked `kill`, so the kill path must be able to sweep them all without touching other agents' processes.
+    #[tokio::test]
+    async fn test_kill_all_for_agent_spares_other_agents() {
+        let pm = ProcessManager::new(5);
+        let (cmd, args) = long_running_proc();
+        pm.start("doomed", cmd, &args, &[], &[]).await.unwrap();
+        pm.start("doomed", cmd, &args, &[], &[]).await.unwrap();
+        let (keep, _) = pm.start("other", cmd, &args, &[], &[]).await.unwrap();
+
+        assert_eq!(pm.kill_all_for_agent("doomed").await, 2);
+        assert!(pm.list("doomed").is_empty());
+        assert_eq!(pm.list("other").len(), 1);
+
+        assert_eq!(pm.kill_all().await, 1);
+        assert_eq!(pm.count(), 0);
+        assert!(pm.kill(&keep, "other").await.is_err());
     }
 
     #[tokio::test]

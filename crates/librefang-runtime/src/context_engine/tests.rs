@@ -1087,3 +1087,95 @@ async fn test_default_engine_compact_honours_reasoning_echo_policy() {
         "newest assistant turn keeps its reasoning"
     );
 }
+
+/// The engine is built once at boot from the global `[compaction]`, so the agent's resolved settings must reach it per call; otherwise `agent.toml [compaction] keep_recent` was ignored by every engine-driven compaction.
+#[tokio::test]
+async fn test_engine_compaction_honours_the_callers_resolved_config() {
+    use crate::llm_driver::{CompletionResponse, LlmError};
+    use librefang_types::message::{ContentBlock, TokenUsage};
+    use librefang_types::model_catalog::ReasoningEchoPolicy;
+
+    struct SummaryDriver;
+
+    #[async_trait]
+    impl LlmDriver for SummaryDriver {
+        async fn complete(
+            &self,
+            _req: crate::llm_driver::CompletionRequest,
+        ) -> Result<CompletionResponse, LlmError> {
+            Ok(CompletionResponse {
+                content: vec![ContentBlock::Text {
+                    text: "Summary of prior conversation".to_string(),
+                    provider_metadata: None,
+                }],
+                stop_reason: librefang_types::message::StopReason::EndTurn,
+                tool_calls: vec![],
+                usage: TokenUsage::default(),
+                actual_provider: None,
+                actual_model: None,
+                text_synthesized_from_thinking: false,
+            })
+        }
+    }
+
+    let global = librefang_types::config::CompactionTomlConfig {
+        keep_recent: 4,
+        ..Default::default()
+    };
+    let config = ContextEngineConfig {
+        compaction: Some(global.clone()),
+        ..Default::default()
+    };
+    let mut messages = Vec::new();
+    for n in 0..10 {
+        messages.push(Message::user(format!("question {n}")));
+        messages.push(Message::assistant(format!("answer {n}")));
+    }
+    let agent_id = librefang_types::agent::AgentId::new();
+    let per_agent = CompactionConfig::from_toml(&librefang_types::config::CompactionTomlConfig {
+        keep_recent: 8,
+        ..global
+    });
+
+    let engines: Vec<Box<dyn ContextEngine>> = vec![
+        Box::new(DefaultContextEngine::new(
+            config.clone(),
+            make_memory(),
+            None,
+        )),
+        Box::new(SummaryContextEngine::new(
+            DefaultContextEngine::new(config.clone(), make_memory(), None),
+            0.8,
+        )),
+        Box::new(StackedContextEngine::new(vec![Box::new(
+            DefaultContextEngine::new(config.clone(), make_memory(), None),
+        )])),
+    ];
+    for engine in engines {
+        let boot = engine
+            .compact(
+                agent_id,
+                &messages,
+                Arc::new(SummaryDriver),
+                "m",
+                200_000,
+                ReasoningEchoPolicy::None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(boot.kept_messages.len(), 4);
+        let resolved = engine
+            .compact_with_config(
+                agent_id,
+                &messages,
+                Arc::new(SummaryDriver),
+                "m",
+                200_000,
+                ReasoningEchoPolicy::None,
+                Some(&per_agent),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resolved.kept_messages.len(), 8);
+    }
+}

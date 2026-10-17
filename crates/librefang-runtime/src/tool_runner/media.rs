@@ -502,6 +502,12 @@ fn resolve_transcript_dest(
                 name: "out_path",
                 reason,
             })?;
+    crate::workspace_sandbox::deny_own_manifest_write(&resolved, root).map_err(|reason| {
+        ToolError::InvalidParameter {
+            name: "out_path",
+            reason,
+        }
+    })?;
 
     Ok(resolved)
 }

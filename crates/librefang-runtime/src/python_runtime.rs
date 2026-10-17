@@ -304,6 +304,9 @@ async fn run_python_with_stdin(
         }
     }
 
+    // A dropped turn (client disconnect, `/stop`, agent kill) drops `child`; without this the interpreter kept running to completion, or forever.
+    cmd.kill_on_drop(true);
+
     let mut child = cmd.spawn().map_err(|e| {
         if e.kind() == std::io::ErrorKind::NotFound {
             PythonError::PythonNotFound(format!(
@@ -315,22 +318,12 @@ async fn run_python_with_stdin(
         }
     })?;
 
-    // Write input to stdin
-    if let Some(mut stdin) = child.stdin.take() {
-        stdin
-            .write_all(input_line.as_bytes())
-            .await
-            .map_err(|e| PythonError::Io(e.to_string()))?;
-        stdin
-            .write_all(b"\n")
-            .await
-            .map_err(|e| PythonError::Io(e.to_string()))?;
-        drop(stdin); // Close stdin to signal EOF
-    }
-
-    // Read output with timeout
+    // The deadline covers writing the input as well as reading the output.
+    // A script that reads only `LIBREFANG_MESSAGE` never drains stdin, so once the input outgrew the pipe buffer an untimed write blocked forever while the turn held the agent's lock.
+    // Writing concurrently with the reads also means the script's output cannot fill its pipe while it waits on us, and stdout and stderr are drained together for the same reason.
     let timeout = Duration::from_secs(config.timeout_secs);
     let result = tokio::time::timeout(timeout, async {
+        let stdin = child.stdin.take();
         let stdout = child
             .stdout
             .take()
@@ -340,55 +333,74 @@ async fn run_python_with_stdin(
             .take()
             .ok_or_else(|| PythonError::Io("Failed to capture stderr".to_string()))?;
 
-        let mut stdout_reader = BufReader::new(stdout);
-        let mut stderr_reader = BufReader::new(stderr);
-
-        let mut stdout_lines = Vec::new();
-        let mut stderr_text = String::new();
-
-        // Read all stdout lines
-        let mut line = String::new();
-        loop {
-            line.clear();
-            match stdout_reader.read_line(&mut line).await {
-                Ok(0) => break,
-                Ok(_) => stdout_lines.push(line.trim_end().to_string()),
-                Err(e) => {
-                    warn!("Python stdout read error: {e}");
-                    break;
-                }
+        let write_input = async move {
+            let Some(mut stdin) = stdin else {
+                return Ok(());
+            };
+            let written = async {
+                stdin.write_all(input_line.as_bytes()).await?;
+                stdin.write_all(b"\n").await
             }
-        }
+            .await;
+            drop(stdin); // Close stdin to signal EOF
+            match written {
+                // The script exited or closed stdin without reading all of it, which is its choice: the message also arrives in `LIBREFANG_MESSAGE`.
+                Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
+                Err(e) => Err(PythonError::Io(e.to_string())),
+                Ok(()) => Ok(()),
+            }
+        };
 
-        // Read stderr
-        let mut stderr_line = String::new();
-        loop {
-            stderr_line.clear();
-            match stderr_reader.read_line(&mut stderr_line).await {
-                Ok(0) => break,
-                Ok(_) => {
-                    // Stream each non-empty line to tracing as it arrives so
-                    // operators can monitor long-running Python tools live
-                    // (#3256). The full line stays in `stderr_text` either way
-                    // — the post-exit `debug!` summary below is independent.
-                    //
-                    // Reminder for tool authors: Python block-buffers
-                    // stdout/stderr by default — pass `flush=True` to
-                    // `print()` or run with `python -u` for line-buffered
-                    // output to actually see progress in real time.
-                    if let Some(trimmed) = trim_for_log(&stderr_line) {
-                        tracing::info!(
-                            target: PYTHON_STDERR_TARGET,
-                            agent_id = %agent_id,
-                            script = %script_path,
-                            "{trimmed}"
-                        );
+        let read_stdout = async {
+            let mut stdout_reader = BufReader::new(stdout);
+            let mut stdout_lines = Vec::new();
+            let mut line = String::new();
+            loop {
+                line.clear();
+                match stdout_reader.read_line(&mut line).await {
+                    Ok(0) => break,
+                    Ok(_) => stdout_lines.push(line.trim_end().to_string()),
+                    Err(e) => {
+                        warn!("Python stdout read error: {e}");
+                        break;
                     }
-                    stderr_text.push_str(&stderr_line);
                 }
-                Err(_) => break,
             }
-        }
+            stdout_lines
+        };
+
+        let read_stderr = async {
+            let mut stderr_reader = BufReader::new(stderr);
+            let mut stderr_text = String::new();
+            let mut stderr_line = String::new();
+            loop {
+                stderr_line.clear();
+                match stderr_reader.read_line(&mut stderr_line).await {
+                    Ok(0) => break,
+                    Ok(_) => {
+                        // Stream each non-empty line to tracing as it arrives so operators can monitor long-running Python tools live (#3256).
+                        // The full line stays in `stderr_text` either way — the post-exit `debug!` summary below is independent.
+                        //
+                        // Reminder for tool authors: Python block-buffers stdout/stderr by default — pass `flush=True` to `print()` or run with `python -u` for line-buffered output to actually see progress in real time.
+                        if let Some(trimmed) = trim_for_log(&stderr_line) {
+                            tracing::info!(
+                                target: PYTHON_STDERR_TARGET,
+                                agent_id = %agent_id,
+                                script = %script_path,
+                                "{trimmed}"
+                            );
+                        }
+                        stderr_text.push_str(&stderr_line);
+                    }
+                    Err(_) => break,
+                }
+            }
+            stderr_text
+        };
+
+        let (written, stdout_lines, stderr_text) =
+            tokio::join!(write_input, read_stdout, read_stderr);
+        written?;
 
         let status = child
             .wait()
@@ -618,5 +630,46 @@ print(json.dumps({"type": payload.get("type"), "message": payload.get("message")
 
         assert_eq!(output["type"], "ingest");
         assert_eq!(output["message"], "hello");
+    }
+
+    /// A script that never reads stdin used to block the input write forever once the input outgrew the pipe buffer, because the write ran before the deadline started.
+    #[allow(deprecated)]
+    #[tokio::test]
+    async fn test_run_python_script_that_ignores_large_stdin_finishes() {
+        let config = PythonConfig {
+            timeout_secs: 20,
+            ..PythonConfig::default()
+        };
+        if std::process::Command::new(&config.interpreter)
+            .arg("--version")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_err()
+        {
+            eprintln!("Skipping: python interpreter unavailable");
+            return;
+        }
+
+        let tmp = tempfile::tempdir().unwrap();
+        let script_path = tmp.path().join("ignores_stdin.py");
+        std::fs::write(
+            &script_path,
+            r#"import json
+print(json.dumps({"type": "response", "text": "done"}))
+"#,
+        )
+        .unwrap();
+
+        // Well past any pipe buffer, carried in a field that does not also go through the environment.
+        let input = serde_json::json!({"payload": "x".repeat(4 * 1024 * 1024)});
+        let result = tokio::time::timeout(
+            Duration::from_secs(60),
+            run_python_json(script_path.to_str().unwrap(), &input, &config),
+        )
+        .await
+        .expect("the run must not hang on a stdin the script never reads")
+        .unwrap();
+        assert_eq!(result.response, "done");
     }
 }

@@ -28,7 +28,11 @@ use tracing::warn;
 /// to block; releasing to the pool is a synchronous map insert.
 struct SandboxGuard {
     container: Option<SandboxContainer>,
+    /// The pool key the container is released under on drop; `None` destroys it instead.
+    /// Empty until [`SandboxGuard::rearm`], so a guard dropped mid-exec (the turn was cancelled, the tool timed out, the client disconnected) destroys a container whose workload may still be running rather than pooling it.
     key: Option<PoolKey>,
+    /// The key the container would be pooled under once an exec has finished cleanly.
+    reusable_key: Option<PoolKey>,
     pool: Arc<ContainerPool>,
     /// The agent this call runs as, recorded on release so `scope = "shared"` can tell an
     /// agent picking its own container back up from a handover to a different one.
@@ -44,7 +48,8 @@ impl SandboxGuard {
     ) -> Self {
         Self {
             container: Some(container),
-            key,
+            key: None,
+            reusable_key: key,
             pool,
             agent_id: agent_id.to_string(),
         }
@@ -71,6 +76,15 @@ impl SandboxGuard {
     /// releasing it to the pool.
     fn poison(&mut self) {
         self.key = None;
+        self.reusable_key = None;
+    }
+
+    /// Mark the container fit for reuse, so the guard releases it to the pool on drop.
+    /// Called only once an exec has completed with a result that leaves the container idle.
+    fn rearm(&mut self) {
+        if let Some(key) = self.reusable_key.take() {
+            self.key = Some(key);
+        }
     }
 }
 
@@ -83,14 +97,21 @@ impl Drop for SandboxGuard {
             Some(key) => self.pool.release(container, key, &self.agent_id),
             None => {
                 let container_id = container.container_id.clone();
-                tokio::task::block_in_place(|| {
-                    let rt = tokio::runtime::Handle::current();
-                    rt.block_on(async {
-                        if let Err(e) = crate::docker_sandbox::destroy_sandbox(&container).await {
-                            warn!("Failed to destroy Docker sandbox {container_id}: {e}");
-                        }
-                    });
-                });
+                // This path now also runs whenever a `docker_exec` future is dropped mid-exec, so it must not panic where `block_in_place` cannot be used: outside any runtime, or on a current-thread runtime.
+                let Ok(rt) = tokio::runtime::Handle::try_current() else {
+                    warn!("No Tokio runtime to destroy Docker sandbox {container_id}; it may leak");
+                    return;
+                };
+                let destroy = async move {
+                    if let Err(e) = crate::docker_sandbox::destroy_sandbox(&container).await {
+                        warn!("Failed to destroy Docker sandbox {container_id}: {e}");
+                    }
+                };
+                if rt.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread {
+                    tokio::task::block_in_place(|| rt.block_on(destroy));
+                } else {
+                    rt.spawn(destroy);
+                }
             }
         }
     }
@@ -205,6 +226,8 @@ pub(super) async fn tool_docker_exec(
         // container is in. Dropping the pool key makes the guard tear it down rather than
         // hand it on.
         guard.poison();
+    } else {
+        guard.rearm();
     }
     let exec_result = exec_result.map_err(ToolError::upstream_msg)?;
 
@@ -331,7 +354,9 @@ mod tests {
             created_at: chrono::Utc::now(),
         };
 
-        let guard = SandboxGuard::new(container, Some(key.clone()), Arc::clone(&pool), "agent-1");
+        let mut guard =
+            SandboxGuard::new(container, Some(key.clone()), Arc::clone(&pool), "agent-1");
+        guard.rearm();
         drop(guard);
 
         assert_eq!(
@@ -369,6 +394,33 @@ mod tests {
         assert!(
             pool.is_empty(),
             "a poisoned container must be destroyed, not pooled"
+        );
+    }
+
+    /// A guard dropped before its exec finished (a cancelled turn, a tool timeout, a client disconnect) must not pool the container: the in-container workload may still be running, and the next call for the same key would run beside it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn guard_dropped_mid_exec_does_not_return_the_container_to_the_pool() {
+        let pool = Arc::new(ContainerPool::new());
+        let cfg = librefang_types::config::DockerSandboxConfig {
+            enabled: true,
+            scope: DockerScope::Agent,
+            ..Default::default()
+        };
+        let key = PoolKey::derive(&cfg, "agent-1", None, std::path::Path::new("/tmp"))
+            .expect("agent scope always yields a key");
+        let container = SandboxContainer {
+            container_id: "guard-cancelled-1".to_string(),
+            agent_id: "agent-1".to_string(),
+            created_at: chrono::Utc::now(),
+        };
+
+        // No `rearm`: this is the state the guard is in while `exec_in_sandbox` is still pending.
+        let guard = SandboxGuard::new(container, Some(key), Arc::clone(&pool), "agent-1");
+        drop(guard);
+
+        assert!(
+            pool.is_empty(),
+            "a container whose exec never finished must be destroyed, not pooled"
         );
     }
 
