@@ -620,3 +620,36 @@ fn test_memory_recall_rejects_session_summary_prefix_key() {
         "expected InvalidInput, got {err:?}"
     );
 }
+
+#[test]
+fn test_memory_store_keeps_the_prefix_available_on_an_attributed_turn() {
+    let (kernel, _tmp) = boot();
+    let kh: &dyn KernelHandle = &kernel;
+
+    // An attributed key is stored under `peer:<id>:<key>`, which cannot collide
+    // with the platform's unscoped `session_<uuid>` summaries — refusing it here
+    // would break keys agents legitimately use (#8645, review round 2 finding 1).
+    kh.memory_store(
+        "session_notes",
+        serde_json::json!("mine"),
+        None,
+        Some("@alice"),
+    )
+    .expect("a peer-scoped key must not be refused as a reserved-prefix key");
+
+    // NOTE the argument order: (agent_id, peer_id). Passing "@alice" first made
+    // `resolve_agent_id` parse it as a UUID and fail — which is what the first
+    // version of this test did, and why it was dropped on a false diagnosis.
+    let keys = kh
+        .memory_list(None, Some("@alice"))
+        .expect("listing alice's keys must succeed");
+    assert!(
+        keys.iter().any(|k| k.contains("session_notes")),
+        "the attributed key must stay readable, got {keys:?}"
+    );
+    assert!(
+        kh.memory_recall("session_notes", None, Some("@alice"))
+            .is_ok(),
+        "the attributed key must stay recallable"
+    );
+}
