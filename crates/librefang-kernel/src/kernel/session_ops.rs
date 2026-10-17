@@ -1631,8 +1631,9 @@ fn persist_session_summary(
 
     // Collision-free key: session id is unique per session. Pre-#4869
     // this was `session_{date}_{slug}` which silently overwrote across
-    // sessions ending with the same slugified user message.
-    let key = format!("session_{}", session_id.0);
+    // sessions ending with the same slugified user message. Shared with the
+    // compaction mirror in `MemorySubstrate::store_llm_summary` (#8645).
+    let key = librefang_memory::session_summary_key(&session_id);
     if let Err(e) =
         memory.structured_set(agent_id, &key, serde_json::Value::String(summary.clone()))
     {
