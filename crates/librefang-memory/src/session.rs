@@ -664,7 +664,7 @@ impl SessionStore {
     /// a single transaction so a crash between them cannot leave the session row
     /// and the FTS index inconsistent.
     pub fn save_session(&self, session: &Session) -> LibreFangResult<()> {
-        let conn = self.pool.get().map_err(LibreFangError::memory)?;
+        let mut conn = self.pool.get().map_err(LibreFangError::memory)?;
         // Trim the tail of the message history before serialising so the
         // stored blob never exceeds MAX_PERSISTED_MESSAGES.  We keep the
         // *most recent* messages (slice from the end) so context is preserved.
@@ -695,13 +695,10 @@ impl SessionStore {
         let session_id_str = session.id.0.to_string();
         let agent_id_str = session.agent_id.0.to_string();
 
-        // Wrap session upsert + FTS update in a single transaction so a crash
-        // between the three statements cannot leave session and FTS data
-        // inconsistent. `unchecked_transaction` is safe here because we own
-        // the `PooledConnection` for the duration of the transaction; no
-        // other thread can access this `Connection`.
+        // Wrap session upsert + FTS update in a single transaction so a crash between the statements cannot leave session and FTS data inconsistent.
+        // BEGIN IMMEDIATE because the first statement is the `session_existed` read: a deferred transaction would start as a reader and, if another connection committed before the upsert, fail the upgrade with SQLITE_BUSY_SNAPSHOT, which the busy timeout does not retry.
         let tx = conn
-            .unchecked_transaction()
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(LibreFangError::memory)?;
 
         // `message_count` is denormalised here so `list_sessions()` can
@@ -1661,7 +1658,7 @@ impl SessionStore {
         if retention_days == 0 {
             return Ok(Vec::new());
         }
-        let conn = self.pool.get().map_err(LibreFangError::memory)?;
+        let mut conn = self.pool.get().map_err(LibreFangError::memory)?;
         let cutoff = Utc::now() - chrono::Duration::days(i64::from(retention_days));
         let cutoff_str = cutoff.to_rfc3339();
         // Clear the FTS index rows for the same selector first, then the
@@ -1671,8 +1668,9 @@ impl SessionStore {
         // privacy regression `delete_session` (#3548) guards against. The FTS
         // DELETE must run before the sessions DELETE so its subquery can still
         // resolve the ids being removed.
+        // BEGIN IMMEDIATE: the id read below precedes the first write, and a deferred transaction would fail that upgrade with SQLITE_BUSY_SNAPSHOT (not retried by the busy timeout) whenever another connection committed in between.
         let tx = conn
-            .unchecked_transaction()
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(LibreFangError::memory)?;
         // Resolve the doomed ids inside the same transaction, before anything is deleted, so the returned list matches exactly what the DELETEs below remove.
         let removed_ids = Self::select_session_ids_in_tx(
@@ -1712,7 +1710,7 @@ impl SessionStore {
         if max_per_agent == 0 {
             return Ok(Vec::new());
         }
-        let conn = self.pool.get().map_err(LibreFangError::memory)?;
+        let mut conn = self.pool.get().map_err(LibreFangError::memory)?;
 
         // Single-query approach using window functions (SQLite 3.25+).
         // ROW_NUMBER partitions by agent and ranks by recency; rows beyond
@@ -1729,8 +1727,9 @@ impl SessionStore {
                     ) AS rn
                     FROM sessions
                 ) WHERE rn > ?1";
+        // BEGIN IMMEDIATE for the same reason as `cleanup_expired_sessions`: the id read precedes the first write.
         let tx = conn
-            .unchecked_transaction()
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(LibreFangError::memory)?;
         let removed_ids = Self::select_session_ids_in_tx(
             &tx,

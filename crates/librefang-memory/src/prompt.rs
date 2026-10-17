@@ -418,8 +418,9 @@ impl PromptStore {
         let mut conn = self.pool.get().map_err(LibreFangError::memory)?;
         // The experiment, its variants and their metrics rows are one unit: a failure on any variant must leave none of them behind.
         // Without the transaction a bad second variant committed the experiment and the first variant, so the list showed a half-built experiment and a retry created a duplicate.
+        // BEGIN IMMEDIATE because the variant checks read before the first write: a deferred transaction would fail its upgrade with SQLITE_BUSY_SNAPSHOT, which the busy timeout does not retry, whenever another connection committed in between.
         let tx = conn
-            .transaction()
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(|e| LibreFangError::Internal(e.to_string()))?;
 
         // Check each variant's prompt version up front so a mistyped id surfaces as a typed not-found (404) rather than an opaque foreign-key failure (500).
