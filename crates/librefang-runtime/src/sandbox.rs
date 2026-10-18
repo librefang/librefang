@@ -184,8 +184,21 @@ pub struct GuestState {
     timeout: std::time::Duration,
 }
 
+impl GuestState {
+    /// Wall-clock budget this guest has left, for host calls that block outside WASM where epoch interruption cannot reach them.
+    pub(crate) fn remaining_budget(&self) -> std::time::Duration {
+        self.timeout.saturating_sub(self.start.elapsed())
+    }
+}
+
 #[cfg(test)]
 impl GuestState {
+    /// Override the wall-clock budget, for host-function tests that exercise it.
+    pub(crate) fn with_timeout(mut self, timeout: std::time::Duration) -> Self {
+        self.timeout = timeout;
+        self
+    }
+
     /// Build a `GuestState` for unit tests in sibling modules. The host_functions
     /// tests don't exercise WASM memory growth, so the limiter is set to
     /// effectively unbounded.

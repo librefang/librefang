@@ -420,8 +420,269 @@ async fn create_experiment_with_unknown_agent_surfaces_store_error() {
         })),
     )
     .await;
-    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "body={body:?}");
+    // Variants without a `prompt_version_id` default to the nil UUID; completing such an experiment would deactivate the agent's prompt and activate nothing, so the route rejects it before the store is touched.
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body={body:?}");
     assert!(body.get("error").is_some(), "error envelope: {body:?}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn create_experiment_rejects_missing_or_foreign_variant_versions() {
+    let h = boot().await;
+    let agent_id = seeded_agent_id(&h);
+    let own = create_prompt_version(&h, &agent_id, "Own prompt.").await;
+    let foreign = create_prompt_version(&h, AGENT_UUID, "Foreign prompt.").await;
+    let path = format!("/api/agents/{agent_id}/prompts/experiments");
+    for (label, variants) in [
+        ("no variants", serde_json::json!([])),
+        (
+            "nil version",
+            serde_json::json!([{"name": "control", "prompt_version_id": own["id"]}, {"name": "treatment"}]),
+        ),
+        (
+            "unknown version",
+            serde_json::json!([{"name": "control", "prompt_version_id": VERSION_ID}]),
+        ),
+        (
+            "another agent's version",
+            serde_json::json!([{"name": "control", "prompt_version_id": own["id"]}, {"name": "treatment", "prompt_version_id": foreign["id"]}]),
+        ),
+    ] {
+        let (status, body) = json_request(
+            &h,
+            Method::POST,
+            &path,
+            Some(serde_json::json!({"name": "exp", "variants": variants})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "[{label}] body={body:?}");
+    }
+    let (_, listed) = json_request(&h, Method::GET, &path, None).await;
+    assert_eq!(
+        listed["total"], 0,
+        "no experiment may be persisted: {listed:?}"
+    );
+}
+
+/// Activating a version under another agent's id used to clear that agent's active version and leave the owning agent with two active rows; an unknown version id cleared the agent's active version and still answered `{"success": true}`.
+#[tokio::test(flavor = "multi_thread")]
+async fn activate_rejects_foreign_or_unknown_version_without_touching_active_state() {
+    let h = boot().await;
+    let agent_a = seeded_agent_id(&h);
+    let a_version = create_prompt_version(&h, &agent_a, "Agent A prompt.").await;
+    let a_version_id = a_version["id"].as_str().unwrap().to_string();
+    let b_version = create_prompt_version(&h, AGENT_UUID, "Agent B prompt.").await;
+    let b_version_id = b_version["id"].as_str().unwrap().to_string();
+    let (status, _) = json_request(
+        &h,
+        Method::POST,
+        &format!("/api/prompts/versions/{a_version_id}/activate"),
+        Some(serde_json::json!({"agent_id": agent_a})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // B's version under A's id.
+    let (status, body) = json_request(
+        &h,
+        Method::POST,
+        &format!("/api/prompts/versions/{b_version_id}/activate"),
+        Some(serde_json::json!({"agent_id": agent_a})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body={body:?}");
+
+    // A version id that does not exist.
+    let (status, body) = json_request(
+        &h,
+        Method::POST,
+        &format!("/api/prompts/versions/{VERSION_ID}/activate"),
+        Some(serde_json::json!({"agent_id": agent_a})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "body={body:?}");
+
+    // A keeps its one active version; B gained none.
+    let (_, a_list) = json_request(
+        &h,
+        Method::GET,
+        &format!("/api/agents/{agent_a}/prompts/versions"),
+        None,
+    )
+    .await;
+    let active: Vec<_> = a_list["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|v| v["is_active"] == true)
+        .map(|v| v["id"].clone())
+        .collect();
+    assert_eq!(active, vec![serde_json::json!(a_version_id)], "{a_list:?}");
+    let (_, b_list) = json_request(
+        &h,
+        Method::GET,
+        &format!("/api/agents/{AGENT_UUID}/prompts/versions"),
+        None,
+    )
+    .await;
+    assert!(
+        b_list["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|v| v["is_active"] == false),
+        "{b_list:?}"
+    );
+}
+
+// ----- owner-scoping (#6753) -----
+
+async fn request_as(
+    h: &Harness,
+    path: &str,
+    user: librefang_api::middleware::AuthenticatedApiUser,
+) -> (StatusCode, serde_json::Value) {
+    let mut req = Request::builder()
+        .method(Method::GET)
+        .uri(path)
+        .body(Body::empty())
+        .unwrap();
+    req.extensions_mut().insert(user);
+    let resp = h.app.clone().oneshot(req).await.unwrap();
+    let status = resp.status();
+    let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20)
+        .await
+        .unwrap();
+    (
+        status,
+        serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null),
+    )
+}
+
+fn user(
+    name: &str,
+    role: librefang_kernel::auth::UserRole,
+) -> librefang_api::middleware::AuthenticatedApiUser {
+    librefang_api::middleware::AuthenticatedApiUser {
+        name: name.to_string(),
+        role,
+        user_id: librefang_types::agent::UserId::from_name(name),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn prompt_reads_are_scoped_to_the_agent_author_for_non_admins() {
+    use librefang_kernel::auth::UserRole;
+    let h = boot().await;
+    let spawn = |name: &str, author: &str| {
+        h.state
+            .kernel
+            .spawn_agent_typed(librefang_types::agent::AgentManifest {
+                name: name.to_string(),
+                author: author.to_string(),
+                model: librefang_types::agent::ModelConfig {
+                    system_prompt: format!("SECRET-{name}"),
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+            .expect("spawn")
+            .to_string()
+    };
+    let alice_agent = spawn("prompt-alice", "alice");
+    let bob_agent = spawn("prompt-bob", "bob");
+    let alice_version = create_prompt_version(&h, &alice_agent, "Alice v1.").await;
+    let alice_version_id = alice_version["id"].as_str().unwrap().to_string();
+    let bob_version = create_prompt_version(&h, &bob_agent, "Bob v1.").await;
+    let (status, alice_exp) = json_request(
+        &h,
+        Method::POST,
+        &format!("/api/agents/{alice_agent}/prompts/experiments"),
+        Some(serde_json::json!({"name": "e", "variants": [{"name": "c", "prompt_version_id": alice_version_id}]})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{alice_exp:?}");
+    let alice_exp_id = alice_exp["id"].as_str().unwrap().to_string();
+
+    let bob = || user("bob", UserRole::User);
+
+    let (status, body) = request_as(&h, "/api/prompts/overview", bob()).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        !body.to_string().contains("SECRET-prompt-alice"),
+        "{body:?}"
+    );
+    assert!(body.to_string().contains("SECRET-prompt-bob"), "{body:?}");
+
+    for path in [
+        format!("/api/agents/{alice_agent}/prompts/versions"),
+        format!("/api/agents/{alice_agent}/prompts/experiments"),
+    ] {
+        let (status, body) = request_as(&h, &path, bob()).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{path}: {body:?}");
+    }
+    let (status, body) = request_as(
+        &h,
+        &format!("/api/agents/{bob_agent}/prompts/versions"),
+        bob(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["items"][0]["id"], bob_version["id"], "{body:?}");
+
+    let (status, body) = request_as(
+        &h,
+        &format!("/api/prompts/versions/{alice_version_id}"),
+        bob(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body,
+        serde_json::Value::Null,
+        "foreign version must look missing"
+    );
+    let (_, body) = request_as(
+        &h,
+        &format!("/api/prompts/experiments/{alice_exp_id}"),
+        bob(),
+    )
+    .await;
+    assert_eq!(
+        body,
+        serde_json::Value::Null,
+        "foreign experiment must look missing"
+    );
+    let (status, body) = request_as(
+        &h,
+        &format!("/api/prompts/experiments/{alice_exp_id}/metrics"),
+        bob(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body,
+        serde_json::json!([]),
+        "foreign metrics must look empty"
+    );
+
+    // Admin is unrestricted.
+    let (_, body) = request_as(&h, "/api/prompts/overview", user("ops", UserRole::Admin)).await;
+    assert!(body.to_string().contains("SECRET-prompt-alice"), "{body:?}");
+    let (_, body) = request_as(
+        &h,
+        &format!("/api/prompts/versions/{alice_version_id}"),
+        user("ops", UserRole::Admin),
+    )
+    .await;
+    assert_eq!(body["id"], alice_version_id);
+    // Creation seeds one zeroed metrics row per variant, so the empty list bob got above is the scoping, not an absence of data.
+    let (_, body) = request_as(
+        &h,
+        &format!("/api/prompts/experiments/{alice_exp_id}/metrics"),
+        user("ops", UserRole::Admin),
+    )
+    .await;
+    assert_eq!(body.as_array().map(Vec::len), Some(1), "{body:?}");
 }
 
 #[tokio::test(flavor = "multi_thread")]

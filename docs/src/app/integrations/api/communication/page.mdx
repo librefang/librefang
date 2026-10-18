@@ -269,6 +269,7 @@ Get the status and result of an A2A task (unversioned).
 ### POST /a2a/tasks/&lbrace;id&rbrace;/cancel
 
 Cancel a running A2A task (unversioned).
+A task that has already completed, failed or been cancelled keeps its status and the request returns `409 Conflict` with code `task_not_cancelable` (A2A `TaskNotCancelable`); an unknown id returns `404 Not Found`.
 
 **Response** `200 OK`:
 

@@ -15183,6 +15183,95 @@ async fn reload_pushes_trigger_cooldown_and_per_event_budget_into_the_live_engin
     kernel.shutdown();
 }
 
+fn stdio_mcp_entry(name: &str) -> librefang_types::config::McpServerConfigEntry {
+    librefang_types::config::McpServerConfigEntry {
+        name: name.to_string(),
+        template_id: None,
+        transport: Some(librefang_types::config::McpTransportEntry::Stdio {
+            command: format!("/nonexistent/librefang-test-mcp-{name}"),
+            args: vec![],
+        }),
+        timeout_secs: 5,
+        env: vec![],
+        headers: vec![],
+        oauth: None,
+        taint_scanning: true,
+        taint_policy: None,
+    }
+}
+
+/// A config hot-reload of `[[mcp_servers]]` must overlay the DB-backed servers like boot does, and must attempt a connection for a server the edit added.
+/// Before the fix the DB-backed server dropped out of the effective list, and a pure addition never spawned the connect task.
+#[tokio::test(flavor = "multi_thread")]
+async fn mcp_hot_reload_keeps_db_servers_and_connects_added_ones() {
+    let dir = tempfile::tempdir().unwrap();
+    let home_dir = dir.path().to_path_buf();
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+
+    let mut baseline = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    baseline.mcp_servers = vec![stdio_mcp_entry("file-a")];
+    baseline.clamp_bounds();
+    let config_path = home_dir.join("config.toml");
+    std::fs::write(&config_path, toml::to_string_pretty(&baseline).unwrap()).unwrap();
+
+    let kernel = Arc::new(LibreFangKernel::boot_with_config(baseline.clone()).expect("boot"));
+    kernel.set_self_handle();
+
+    // Store a DB-backed server and apply the same overlay boot applies, so the live list is what a `mcp_runtime_store = "db"` daemon would hold.
+    let store = librefang_memory::McpConfigStore::new(kernel.memory.substrate.pool());
+    store.upsert(&stdio_mcp_entry("db-b")).unwrap();
+    {
+        let merged = store.merge_over(baseline.mcp_servers.clone()).unwrap().0;
+        *kernel.mcp.effective_mcp_servers.write().unwrap() = merged;
+    }
+
+    let mut updated = baseline;
+    updated.mcp_servers.push(stdio_mcp_entry("file-c"));
+    std::fs::write(&config_path, toml::to_string_pretty(&updated).unwrap()).unwrap();
+    kernel
+        .reload_config()
+        .await
+        .expect("reload of an mcp_servers edit must succeed");
+
+    let names: Vec<String> = kernel
+        .mcp
+        .effective_mcp_servers
+        .read()
+        .unwrap()
+        .iter()
+        .map(|server| server.name.clone())
+        .collect();
+    assert!(
+        names.contains(&"db-b".to_string()),
+        "hot-reload must keep the DB-backed server, got {names:?}"
+    );
+    assert!(names.contains(&"file-c".to_string()));
+
+    // The added server's command does not exist, so a connect attempt records an error on its health entry; no attempt leaves it untouched.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    loop {
+        let attempted = kernel
+            .mcp
+            .mcp_health
+            .get_health("file-c")
+            .is_some_and(|health| health.last_error.is_some());
+        if attempted {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "hot-reload must attempt to connect a newly added MCP server"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+
+    kernel.shutdown();
+}
+
 // ─── #5117: kill_agent_with_purge propagates DB delete failure ───────────────
 
 /// Happy-path regression for #5117: `kill_agent_with_purge` previously
@@ -16746,6 +16835,194 @@ fn suspend_resume_actually_transition_in_memory_state() {
     kernel.shutdown();
 }
 
+/// Suspend / resume must patch only the root `enabled` key of `agent.toml`.
+/// The old line-based rewrite turned every nested `enabled = ...` (here `[skill_workshop]`) into the new value, so a resume silently switched on the skill workshop.
+#[test]
+fn suspend_resume_persists_only_root_enabled_flag() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().to_path_buf();
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+
+    let toml_path = home_dir
+        .join("agent-manifests")
+        .join("enabled-persist-agent")
+        .join("agent.toml");
+    let agent_id = kernel
+        .spawn_agent_inner(
+            AgentManifest {
+                name: "enabled-persist-agent".to_string(),
+                source_template: None,
+                description: "suspend/resume enabled persistence".to_string(),
+                author: "test".to_string(),
+                module: "builtin:chat".to_string(),
+                ..Default::default()
+            },
+            None,
+            Some(toml_path.clone()),
+            None,
+        )
+        .expect("agent should spawn");
+
+    let entry = kernel.agents.registry.get(agent_id).unwrap();
+    let mut source = toml::to_string_pretty(&entry.manifest).unwrap();
+    source = source
+        .lines()
+        .filter(|line| !line.starts_with("enabled ="))
+        .collect::<Vec<_>>()
+        .join("\n");
+    if !source.contains("[skill_workshop]") {
+        source.push_str("\n[skill_workshop]\nenabled = false\n");
+    }
+    std::fs::create_dir_all(toml_path.parent().unwrap()).unwrap();
+    std::fs::write(&toml_path, &source).unwrap();
+
+    kernel.suspend_agent(agent_id).expect("suspend");
+    let suspended: AgentManifest =
+        toml::from_str(&std::fs::read_to_string(&toml_path).unwrap()).unwrap();
+    assert!(
+        !suspended.enabled,
+        "suspend must persist a root enabled = false"
+    );
+    assert!(!suspended.skill_workshop.enabled);
+
+    kernel.resume_agent(agent_id).expect("resume");
+    let resumed: AgentManifest =
+        toml::from_str(&std::fs::read_to_string(&toml_path).unwrap()).unwrap();
+    assert!(resumed.enabled);
+    assert!(
+        !resumed.skill_workshop.enabled,
+        "resume must not switch on the skill workshop"
+    );
+
+    kernel.shutdown();
+}
+
+/// A spawned agent's canonical session must be the one spawn created and seeded with the reset prompt, and a respawn must restore it rather than mint another.
+#[test]
+fn spawn_uses_created_session_and_respawn_restores_it() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().to_path_buf();
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+    let mut config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    config.session.reset_prompt = Some("Always answer in English".to_string());
+    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+
+    let manifest = AgentManifest {
+        name: "session-spawn-agent".to_string(),
+        source_template: None,
+        description: "spawn session wiring".to_string(),
+        author: "test".to_string(),
+        module: "builtin:chat".to_string(),
+        ..Default::default()
+    };
+    let agent_id = kernel
+        .spawn_agent_inner(manifest.clone(), None, None, None)
+        .expect("agent should spawn");
+    let session_id = kernel.agents.registry.get(agent_id).unwrap().session_id;
+    let session = kernel
+        .memory
+        .substrate
+        .get_session(session_id)
+        .unwrap()
+        .expect("the entry's session must exist in the substrate");
+    assert!(
+        format!("{:?}", session.messages).contains("Always answer in English"),
+        "the canonical session must carry the configured reset prompt"
+    );
+
+    kernel.agents.registry.remove(agent_id).unwrap();
+    let respawned = kernel
+        .spawn_agent_inner(manifest, None, None, Some(agent_id))
+        .expect("agent should respawn");
+    assert_eq!(respawned, agent_id);
+    assert_eq!(
+        kernel.agents.registry.get(agent_id).unwrap().session_id,
+        session_id,
+        "respawn must restore the existing session"
+    );
+    assert_eq!(
+        kernel
+            .memory
+            .substrate
+            .get_agent_session_ids(agent_id)
+            .unwrap()
+            .len(),
+        1,
+        "respawn must not create an orphan session"
+    );
+
+    kernel.shutdown();
+}
+
+/// A wrong export file is the caller's mistake, so `import_session` must report it as `InvalidInput`, which the API can turn into a 400 with the message instead of a scrubbed 500.
+#[test]
+fn import_session_reports_bad_exports_as_invalid_input() {
+    use librefang_types::error::LibreFangError;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().to_path_buf();
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+    let agent_id = kernel
+        .spawn_agent_inner(
+            AgentManifest {
+                name: "import-target-agent".to_string(),
+                source_template: None,
+                description: "import validation".to_string(),
+                author: "test".to_string(),
+                module: "builtin:chat".to_string(),
+                ..Default::default()
+            },
+            None,
+            None,
+            None,
+        )
+        .expect("agent should spawn");
+
+    let export = |version: u32, owner: String, messages: Vec<librefang_types::message::Message>| {
+        librefang_memory::session::SessionExport {
+            version,
+            agent_name: "other".to_string(),
+            agent_id: owner,
+            session_id: SessionId::new().0.to_string(),
+            messages,
+            context_window_tokens: 0,
+            label: None,
+            exported_at: chrono::Utc::now().to_rfc3339(),
+            metadata: Default::default(),
+        }
+    };
+    let message = || vec![librefang_types::message::Message::user("hello")];
+    let cases = [
+        export(2, agent_id.to_string(), message()),
+        export(1, AgentId::new().to_string(), message()),
+        export(1, agent_id.to_string(), Vec::new()),
+    ];
+    for case in cases {
+        match kernel.import_session(agent_id, case) {
+            Err(KernelError::LibreFang(LibreFangError::InvalidInput(_))) => {}
+            other => panic!("expected InvalidInput, got {other:?}"),
+        }
+    }
+
+    kernel.shutdown();
+}
+
 /// A suspend whose `agent.toml` write fails must still record the disagreement.
 /// `suspend_agent` has already moved the registry to `Suspended`, so going silent leaves the registry saying suspended, disk still saying `enabled = true`, and the History tab showing no row at all.
 ///
@@ -16901,6 +17178,67 @@ fn a_suspend_snapshot_is_normalized_to_the_serializer_layout() {
         !snapshot.enabled,
         "the normalized snapshot must still carry the toggled value:\n{}",
         newest.manifest_toml
+    );
+
+    kernel.shutdown();
+}
+
+/// A hand agent's `source_toml_path` is the shared `hand.toml`, not an agent manifest.
+/// Suspend must leave it untouched and must not record the hand definition as the agent's manifest in its history, matching the no-op a hand agent without its own `agent.toml` always had.
+#[test]
+fn suspending_a_hand_agent_does_not_patch_its_hand_toml() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().join("librefang-kernel-suspend-hand-toml");
+    std::fs::create_dir_all(&home_dir).unwrap();
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    let hand_toml = config
+        .effective_hands_workspaces_dir()
+        .join("demo-hand")
+        .join("hand.toml");
+    std::fs::create_dir_all(hand_toml.parent().unwrap()).unwrap();
+    let hand_source = "id = \"demo-hand\"\nname = \"Demo Hand\"\ntools = [\"web_fetch\"]\n";
+    std::fs::write(&hand_toml, hand_source).unwrap();
+    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+
+    let agent_id = kernel
+        .spawn_agent_inner(
+            AgentManifest {
+                name: "demo-hand-role".to_string(),
+                source_template: None,
+                description: "a hand role".to_string(),
+                author: "test".to_string(),
+                module: "builtin:chat".to_string(),
+                ..Default::default()
+            },
+            None,
+            Some(hand_toml.clone()),
+            None,
+        )
+        .expect("agent should spawn");
+
+    kernel
+        .suspend_agent(agent_id)
+        .expect("suspend should succeed");
+
+    assert_eq!(
+        std::fs::read_to_string(&hand_toml).unwrap(),
+        hand_source,
+        "hand.toml must not be patched with an agent-level `enabled` key"
+    );
+    let store = librefang_memory::ManifestVersionStore::new(kernel.memory.substrate.pool());
+    let rows = store
+        .list_for_agent(&agent_id.to_string(), 10)
+        .expect("history read should succeed");
+    assert!(
+        rows.iter().all(|row| row.change_source != "suspend"),
+        "no suspend row may be recorded from hand.toml: {:?}",
+        rows.iter()
+            .map(|row| &row.change_source)
+            .collect::<Vec<_>>()
     );
 
     kernel.shutdown();

@@ -269,6 +269,7 @@ A2A Agent Card 发现端点。返回服务器的 A2A Agent Card，描述其能�
 ### POST /a2a/tasks/&lbrace;id&rbrace;/cancel
 
 取消正在运行的 A2A 任务（无版本前缀）。
+已完成、已失败或已取消的任务保持原状态，请求返回 `409 Conflict`，错误码为 `task_not_cancelable`（A2A `TaskNotCancelable`）；未知 id 返回 `404 Not Found`。
 
 **响应** `200 OK`：
 

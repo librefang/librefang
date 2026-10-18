@@ -915,6 +915,8 @@ impl LlmDriver for AnthropicDriver {
             // iteration instead of fetching the rest of the SSE for nobody
             // (#3769).
             let mut receiver_dropped = false;
+            // A complete message ends with `message_delta` (carrying `stop_reason`) and `message_stop`; seeing neither means the connection was cut short.
+            let mut saw_message_end = false;
 
             let mut byte_stream = resp.bytes_stream();
             while let Some(chunk_result) = byte_stream.next().await {
@@ -1115,6 +1117,7 @@ impl LlmDriver for AnthropicDriver {
                         }
                         "message_delta" => {
                             if let Some(sr) = json["delta"]["stop_reason"].as_str() {
+                                saw_message_end = true;
                                 stop_reason = match sr {
                                     "end_turn" => StopReason::EndTurn,
                                     "tool_use" => StopReason::ToolUse,
@@ -1155,7 +1158,8 @@ impl LlmDriver for AnthropicDriver {
                                 },
                             });
                         }
-                        _ => {} // message_stop, ping, etc.
+                        "message_stop" => saw_message_end = true,
+                        _ => {} // ping, etc.
                     }
                 }
             }
@@ -1164,6 +1168,20 @@ impl LlmDriver for AnthropicDriver {
             // still buffering so a CJK character truncated by the final
             // chunk surfaces as U+FFFD instead of vanishing (#3448).
             buffer.push_str(&utf8.finish());
+
+            // Whatever accumulated is partial in both cases below; returning it as Ok would hide the failure from retry and failover (mirrors the OpenAI driver).
+            if receiver_dropped {
+                return Err(LlmError::Http("stream receiver dropped".to_string()));
+            }
+            if !saw_message_end {
+                warn!(
+                    blocks = blocks.len(),
+                    "Anthropic stream ended before message_delta / message_stop"
+                );
+                return Err(LlmError::Http(
+                    "Anthropic stream ended before message_stop".to_string(),
+                ));
+            }
 
             // Build CompletionResponse from accumulated blocks
             let mut content = Vec::new();
@@ -3578,6 +3596,58 @@ mod tests {
             max_tokens: 16,
             ..Default::default()
         }
+    }
+
+    /// Regression: a stream that closes after content deltas but before `message_delta` / `message_stop` (proxy idle timeout, truncating gateway) must surface as an error, not as a successful `EndTurn` carrying half an answer.
+    #[tokio::test]
+    async fn streaming_truncated_before_message_stop_is_error() {
+        let sse_body = "event: message_start\n\
+                        data: {\"type\":\"message_start\",\"message\":{\"id\":\"m\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"model\":\"claude-test\",\"usage\":{\"input_tokens\":5,\"output_tokens\":0}}}\n\n\
+                        event: content_block_start\n\
+                        data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n\
+                        event: content_block_delta\n\
+                        data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"half an ans\"}}\n\n"
+            .to_string();
+        let base = spawn_sse_server(sse_body).await;
+        let driver = AnthropicDriver::new("test-key".to_string(), base);
+
+        let (tx, _rx) = tokio::sync::mpsc::channel(64);
+        let err = driver
+            .stream(stream_test_request(), tx)
+            .await
+            .expect_err("a stream cut off before message_stop must not be returned as Ok");
+        assert!(
+            matches!(err, LlmError::Http(ref m) if m.contains("message_stop")),
+            "truncated stream must map to an Http error so retry/failover engages, got {err:?}"
+        );
+    }
+
+    /// A complete stream (message_delta + message_stop) still succeeds with the mapped stop reason.
+    #[tokio::test]
+    async fn streaming_complete_message_is_ok() {
+        let sse_body = "event: message_start\n\
+                        data: {\"type\":\"message_start\",\"message\":{\"id\":\"m\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"model\":\"claude-test\",\"usage\":{\"input_tokens\":5,\"output_tokens\":0}}}\n\n\
+                        event: content_block_start\n\
+                        data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n\
+                        event: content_block_delta\n\
+                        data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"done\"}}\n\n\
+                        event: content_block_stop\n\
+                        data: {\"type\":\"content_block_stop\",\"index\":0}\n\n\
+                        event: message_delta\n\
+                        data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"max_tokens\"},\"usage\":{\"output_tokens\":1}}\n\n\
+                        event: message_stop\n\
+                        data: {\"type\":\"message_stop\"}\n\n"
+            .to_string();
+        let base = spawn_sse_server(sse_body).await;
+        let driver = AnthropicDriver::new("test-key".to_string(), base);
+
+        let (tx, _rx) = tokio::sync::mpsc::channel(64);
+        let resp = driver
+            .stream(stream_test_request(), tx)
+            .await
+            .expect("a complete stream must succeed");
+        assert_eq!(resp.text(), "done");
+        assert_eq!(resp.stop_reason, StopReason::MaxTokens);
     }
 
     /// Regression: Anthropic can emit `event: error` mid-stream over an already-HTTP-200 SSE body (commonly `overloaded_error` under load).

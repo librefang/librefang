@@ -8,6 +8,10 @@ daemon-started-bg = 守护进程已在后台启动
 daemon-still-starting = 守护进程已在后台启动，仍在初始化中
 daemon-stopped-ok = 守护进程已停止
 daemon-stopped-forced = 守护进程已停止（强制）
+daemon-stop-waiting = 正在等待守护进程（PID { $pid }）完成关闭...
+daemon-stop-kill-failed = 强制终止后守护进程（PID { $pid }）仍在运行
+daemon-stop-kill-failed-fix = 请手动结束进程 { $pid }，然后重新运行该命令
+daemon-stop-timeout = 守护进程未在 { $secs } 秒内停止
 daemon-error = 守护进程错误：{ $error }
 daemon-already-running = 守护进程已在 { $url } 运行
 daemon-already-running-fix = 使用 `librefang status` 检查状态，或先停止它
@@ -440,6 +444,7 @@ acp-error-resolve-agent = 解析智能体 '{ $name }' 失败: { $error }
 acp-error-server = ACP 服务器错误: { $error }
 acp-error-uds-connect = ACP UDS 连接失败 { $path }: { $error }
 acp-error-pipe-connect = ACP 命名管道连接失败 { $name }: { $error }
+acp-error-agent-attached = 正在运行的守护进程的 ACP 监听器只服务 '{ $default }' 智能体，因此守护进程运行时无法使用 '--agent { $name }'；请省略 --agent，或停止守护进程以在进程内运行 '{ $name }'
 
 # tui/chat_runner.rs
 chat-runner-owner-notice = [owner_notice] { $preview }

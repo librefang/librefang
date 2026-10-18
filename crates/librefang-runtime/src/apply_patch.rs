@@ -97,6 +97,9 @@ pub enum PatchOp {
 /// A single hunk within a file update — describes one contiguous change region.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Hunk {
+    /// Text of the `@@` header (e.g. `def second():` for `@@ def second():`), used to scope the anchor search to the region after that line.
+    /// `None` when the header is a bare `@@`.
+    pub scope: Option<String>,
     /// Lines of unchanged context before the change (for anchoring).
     pub context_before: Vec<String>,
     /// Old lines to be removed (without `-` prefix).
@@ -196,7 +199,7 @@ pub fn parse_patch(input: &str) -> Result<Vec<PatchOp>, String> {
 
             // Collect content lines (prefixed with +)
             let mut content_lines = Vec::new();
-            while i < body.len() && !body[i].trim().starts_with("***") {
+            while i < body.len() && !is_section_marker(body[i]) {
                 let l = body[i];
                 if let Some(stripped) = l.strip_prefix('+') {
                     content_lines.push(stripped.to_string());
@@ -227,9 +230,10 @@ pub fn parse_patch(input: &str) -> Result<Vec<PatchOp>, String> {
 
             // Parse hunks
             let mut hunks = Vec::new();
-            while i < body.len() && !body[i].trim().starts_with("***") {
-                let l = body[i].trim();
-                if l.starts_with("@@") {
+            while i < body.len() && !is_section_marker(body[i]) {
+                let l = body[i];
+                if is_hunk_header(l) {
+                    let scope = parse_hunk_scope(l);
                     i += 1;
                     // Parse hunk body
                     let mut context_before = Vec::new();
@@ -239,9 +243,7 @@ pub fn parse_patch(input: &str) -> Result<Vec<PatchOp>, String> {
                     let mut in_change = false;
                     let mut past_change = false;
 
-                    while i < body.len()
-                        && !body[i].trim().starts_with("@@")
-                        && !body[i].trim().starts_with("***")
+                    while i < body.len() && !is_hunk_header(body[i]) && !is_section_marker(body[i])
                     {
                         let hl = body[i];
                         if let Some(stripped) = hl.strip_prefix('-') {
@@ -283,6 +285,7 @@ pub fn parse_patch(input: &str) -> Result<Vec<PatchOp>, String> {
                     }
 
                     hunks.push(Hunk {
+                        scope,
                         context_before,
                         old_lines,
                         new_lines,
@@ -325,6 +328,39 @@ pub fn parse_patch(input: &str) -> Result<Vec<PatchOp>, String> {
     }
 
     Ok(ops)
+}
+
+/// Whether `line` starts a new file section (`*** Add File:`, `*** Update File:`, ...).
+///
+/// Checked on the untrimmed line: inside a hunk a leading space marks a context line, so a context line whose content is `***` (a Markdown rule, a C comment) is content, not a marker.
+/// An indented file-operation header is still a marker, because the top-level loop accepts those trimmed and swallowing one into the previous hunk would silently drop that file's operation.
+fn is_section_marker(line: &str) -> bool {
+    if line.starts_with("***") {
+        return true;
+    }
+    let trimmed = line.trim_start();
+    ["*** Add File:", "*** Update File:", "*** Delete File:"]
+        .iter()
+        .any(|header| trimmed.starts_with(header))
+}
+
+/// Whether `line` is a hunk header.
+///
+/// Checked on the untrimmed line for the same reason as [`is_section_marker`]: ` @@ -1 +1 @@` inside a hunk is a context line of a diff fixture.
+fn is_hunk_header(line: &str) -> bool {
+    line.starts_with("@@")
+}
+
+/// Extract the scope text from a hunk header: `@@ def foo():` and `@@ def foo(): @@` both yield `def foo():`, a bare `@@` yields `None`.
+fn parse_hunk_scope(header: &str) -> Option<String> {
+    let rest = header.strip_prefix("@@")?;
+    let rest = rest.trim();
+    let rest = rest.strip_suffix("@@").unwrap_or(rest).trim();
+    if rest.is_empty() {
+        None
+    } else {
+        Some(rest.to_string())
+    }
 }
 
 /// Resolve a patch path through workspace confinement.
@@ -509,11 +545,27 @@ pub async fn apply_patch_ext(
 /// Each hunk's `context_before` + `old_lines` + `context_after` are searched for
 /// in the content. When found, `old_lines` are replaced with `new_lines`.
 /// Includes fuzzy whitespace fallback on mismatch.
+///
+/// Hunks are located in file order: the search for each hunk starts after the previous hunk's replacement.
+/// A hunk whose `@@` header names a line present in the file (e.g. `@@ def second():`) is anchored at the first match at or after that line, so a block that occurs more than once is edited in the scope the model named.
+/// Without a usable scope, an anchor that matches more than once is rejected rather than silently applied to the first occurrence.
+/// The file's line ending style (LF or CRLF) is preserved.
 fn apply_hunks(content: &str, hunks: &[Hunk]) -> Result<String, String> {
     let mut lines: Vec<String> = content.lines().map(|l| l.to_string()).collect();
 
     // Track if original file ended with newline
     let trailing_newline = content.ends_with('\n');
+    // `lines()` strips both `\n` and `\r\n`, so remember which one the file uses and rejoin with it.
+    let crlf_count = content.matches("\r\n").count();
+    let lf_count = content.matches('\n').count();
+    let line_ending = if crlf_count > 0 && crlf_count * 2 >= lf_count {
+        "\r\n"
+    } else {
+        "\n"
+    };
+
+    // Position just past the previous hunk's replacement.
+    let mut cursor = 0usize;
 
     for (hunk_idx, hunk) in hunks.iter().enumerate() {
         let anchor: Vec<&str> = hunk
@@ -524,79 +576,134 @@ fn apply_hunks(content: &str, hunks: &[Hunk]) -> Result<String, String> {
             .map(|s| s.as_str())
             .collect();
 
+        // Locate the scope line named by the `@@` header, if it exists in the file.
+        // Headers that do not name a line (`@@ hunk 1 @@`, `@@ -10,3 +10,4 @@`) fall back to an unscoped search.
+        let scope_pos = hunk
+            .scope
+            .as_deref()
+            .and_then(|scope| find_scope_line(&lines, scope, cursor));
+
         if anchor.is_empty() && hunk.old_lines.is_empty() {
-            // Pure insertion hunk — append new lines at end
-            lines.extend(hunk.new_lines.iter().cloned());
+            // Pure insertion hunk: insert after the scope line when one was named, otherwise append at end.
+            let at = scope_pos.map(|p| p + 1).unwrap_or(lines.len());
+            let inserted = hunk.new_lines.len();
+            lines.splice(at..at, hunk.new_lines.iter().cloned());
+            cursor = at + inserted;
             continue;
         }
 
-        // Find the anchor in the file
-        let pos = find_anchor(&lines, &anchor)
-            .or_else(|| find_anchor_fuzzy(&lines, &anchor))
-            .ok_or_else(|| {
-                format!(
-                    "Hunk {} failed: could not find context/old lines in file",
-                    hunk_idx + 1
-                )
-            })?;
+        let not_found = || {
+            format!(
+                "Hunk {} failed: could not find context/old lines in file",
+                hunk_idx + 1
+            )
+        };
+
+        // Prefer matches after the previous hunk, then fall back to the whole file for out-of-order hunks.
+        let unique = |start: usize| -> Result<Option<usize>, String> {
+            let exact = find_all_anchors(&lines, &anchor, start, false);
+            let matches = if exact.is_empty() {
+                find_all_anchors(&lines, &anchor, start, true)
+            } else {
+                exact
+            };
+            match matches.as_slice() {
+                    [] => Ok(None),
+                    [only] => Ok(Some(*only)),
+                    [first, ..] => Err(format!(
+                        "Hunk {} failed: context/old lines match {} places in the file (first at line {}); add more context lines or an `@@ <line>` scope header naming the enclosing line",
+                        hunk_idx + 1,
+                        matches.len(),
+                        first + 1
+                    )),
+                }
+        };
+        let unscoped = || -> Result<usize, String> {
+            match unique(cursor)? {
+                Some(p) => Ok(p),
+                None if cursor > 0 => unique(0)?.ok_or_else(not_found),
+                None => Err(not_found()),
+            }
+        };
+
+        // The scope disambiguates: take the first match at or after the scope line.
+        // A scope line that happens to exist with the anchor elsewhere (before it) falls back to the unscoped search, which still rejects an ambiguous anchor.
+        let scoped = scope_pos.and_then(|scope_line| {
+            find_anchor_from(&lines, &anchor, scope_line)
+                .or_else(|| find_anchor_fuzzy_from(&lines, &anchor, scope_line))
+        });
+        let pos = match scoped {
+            Some(p) => p,
+            None => unscoped()?,
+        };
 
         // Replace: remove context_before + old_lines, insert context_before + new_lines
         let remove_count = hunk.context_before.len() + hunk.old_lines.len();
         let mut replacement: Vec<String> = hunk.context_before.clone();
         replacement.extend(hunk.new_lines.iter().cloned());
+        let replacement_len = replacement.len();
 
         lines.splice(pos..pos + remove_count, replacement);
+        cursor = pos + replacement_len;
     }
 
-    let mut result = lines.join("\n");
+    let mut result = lines.join(line_ending);
     if trailing_newline && !result.ends_with('\n') {
-        result.push('\n');
+        result.push_str(line_ending);
     }
     Ok(result)
 }
 
-/// Find an exact match for the anchor lines in the file.
-fn find_anchor(file_lines: &[String], anchor: &[&str]) -> Option<usize> {
-    if anchor.is_empty() {
-        return Some(file_lines.len());
-    }
-    if anchor.len() > file_lines.len() {
-        return None;
-    }
-
-    'outer: for start in 0..=file_lines.len() - anchor.len() {
-        for (j, expected) in anchor.iter().enumerate() {
-            if file_lines[start + j] != *expected {
-                continue 'outer;
-            }
-        }
-        return Some(start);
-    }
-    None
+/// Find the first line at or after `from` whose trimmed text equals the trimmed `scope`.
+fn find_scope_line(file_lines: &[String], scope: &str, from: usize) -> Option<usize> {
+    let scope = scope.trim();
+    file_lines
+        .iter()
+        .enumerate()
+        .skip(from)
+        .find(|(_, l)| l.trim() == scope)
+        .map(|(i, _)| i)
 }
 
-/// Fuzzy anchor matching — trims trailing whitespace before comparing.
-fn find_anchor_fuzzy(file_lines: &[String], anchor: &[&str]) -> Option<usize> {
-    if anchor.is_empty() {
-        return Some(file_lines.len());
+/// Every start position at or after `from` where `anchor` matches, exactly or ignoring trailing whitespace.
+fn find_all_anchors(
+    file_lines: &[String],
+    anchor: &[&str],
+    from: usize,
+    fuzzy: bool,
+) -> Vec<usize> {
+    if anchor.is_empty() || anchor.len() > file_lines.len() {
+        return Vec::new();
     }
-    if anchor.len() > file_lines.len() {
-        return None;
-    }
+    (from..=file_lines.len() - anchor.len())
+        .filter(|&start| {
+            anchor.iter().enumerate().all(|(j, expected)| {
+                if fuzzy {
+                    file_lines[start + j].trim_end() == expected.trim_end()
+                } else {
+                    file_lines[start + j] == *expected
+                }
+            })
+        })
+        .collect()
+}
 
-    'outer: for start in 0..=file_lines.len() - anchor.len() {
-        for (j, expected) in anchor.iter().enumerate() {
-            if file_lines[start + j].trim_end() != expected.trim_end() {
-                continue 'outer;
-            }
-        }
-        warn!(
-            "Patch hunk matched with fuzzy whitespace at line {}",
-            start + 1
-        );
-        return Some(start);
+/// First exact match of `anchor` at or after `from`.
+fn find_anchor_from(file_lines: &[String], anchor: &[&str], from: usize) -> Option<usize> {
+    find_all_anchors(file_lines, anchor, from, false)
+        .first()
+        .copied()
+}
+
+/// First trailing-whitespace-insensitive match of `anchor` at or after `from`.
+fn find_anchor_fuzzy_from(file_lines: &[String], anchor: &[&str], from: usize) -> Option<usize> {
+    let pos = find_all_anchors(file_lines, anchor, from, true)
+        .first()
+        .copied();
+    if let Some(p) = pos {
+        warn!("Patch hunk matched with fuzzy whitespace at line {}", p + 1);
     }
-    None
+    pos
 }
 
 #[cfg(test)]
@@ -730,6 +837,7 @@ mod tests {
     fn test_apply_hunks_simple() {
         let content = "line1\nline2\nline3\n";
         let hunks = vec![Hunk {
+            scope: None,
             context_before: vec!["line1".to_string()],
             old_lines: vec!["line2".to_string()],
             new_lines: vec!["replaced".to_string()],
@@ -747,12 +855,14 @@ mod tests {
         let content = "a\nb\nc\nd\ne\n";
         let hunks = vec![
             Hunk {
+                scope: None,
                 context_before: vec!["a".to_string()],
                 old_lines: vec!["b".to_string()],
                 new_lines: vec!["B".to_string()],
                 context_after: vec![],
             },
             Hunk {
+                scope: None,
                 context_before: vec!["c".to_string()],
                 old_lines: vec!["d".to_string()],
                 new_lines: vec!["D".to_string(), "D2".to_string()],
@@ -770,6 +880,7 @@ mod tests {
     fn test_apply_hunks_context_mismatch() {
         let content = "alpha\nbeta\ngamma\n";
         let hunks = vec![Hunk {
+            scope: None,
             context_before: vec!["nonexistent".to_string()],
             old_lines: vec!["also_nonexistent".to_string()],
             new_lines: vec!["new".to_string()],
@@ -782,6 +893,7 @@ mod tests {
     fn test_apply_hunks_rejects_trailing_context_mismatch() {
         let content = "before\nold\nunexpected\n";
         let hunks = vec![Hunk {
+            scope: None,
             context_before: vec!["before".to_string()],
             old_lines: vec!["old".to_string()],
             new_lines: vec!["new".to_string()],
@@ -795,6 +907,7 @@ mod tests {
     fn test_apply_hunks_uses_trailing_context_to_disambiguate_anchor() {
         let content = "before\nold\nwrong\nbefore\nold\nexpected\n";
         let hunks = vec![Hunk {
+            scope: None,
             context_before: vec!["before".to_string()],
             old_lines: vec!["old".to_string()],
             new_lines: vec!["new".to_string()],
@@ -811,6 +924,7 @@ mod tests {
     fn test_apply_hunks_fuzzy_whitespace() {
         let content = "line1  \nline2\t\nline3\n";
         let hunks = vec![Hunk {
+            scope: None,
             context_before: vec!["line1".to_string()],
             old_lines: vec!["line2".to_string()],
             new_lines: vec!["replaced".to_string()],
@@ -824,6 +938,7 @@ mod tests {
     fn test_apply_hunks_preserves_unchanged() {
         let content = "header\nkeep1\nkeep2\nold_line\nkeep3\nfooter\n";
         let hunks = vec![Hunk {
+            scope: None,
             context_before: vec!["keep2".to_string()],
             old_lines: vec!["old_line".to_string()],
             new_lines: vec!["new_line".to_string()],
@@ -845,13 +960,13 @@ mod tests {
             .into_iter()
             .map(String::from)
             .collect();
-        assert_eq!(find_anchor(&lines, &["b", "c"]), Some(1));
+        assert_eq!(find_anchor_from(&lines, &["b", "c"], 0), Some(1));
     }
 
     #[test]
     fn test_find_anchor_not_found() {
         let lines: Vec<String> = vec!["a", "b", "c"].into_iter().map(String::from).collect();
-        assert_eq!(find_anchor(&lines, &["x", "y"]), None);
+        assert_eq!(find_anchor_from(&lines, &["x", "y"], 0), None);
     }
 
     #[test]
@@ -860,7 +975,7 @@ mod tests {
             .into_iter()
             .map(String::from)
             .collect();
-        assert_eq!(find_anchor_fuzzy(&lines, &["a", "b"]), Some(0));
+        assert_eq!(find_anchor_fuzzy_from(&lines, &["a", "b"], 0), Some(0));
     }
 
     #[tokio::test]
@@ -883,6 +998,7 @@ mod tests {
                 path: "existing.txt".to_string(),
                 move_to: None,
                 hunks: vec![Hunk {
+                    scope: None,
                     context_before: vec!["line1".to_string()],
                     old_lines: vec!["line2".to_string()],
                     new_lines: vec!["replaced".to_string()],
@@ -964,6 +1080,7 @@ mod tests {
             path: "src.txt".to_string(),
             move_to: Some("dest".to_string()),
             hunks: vec![Hunk {
+                scope: None,
                 context_before: vec![],
                 old_lines: vec!["a".to_string()],
                 new_lines: vec!["b".to_string()],
@@ -1076,6 +1193,7 @@ mod tests {
             path: "src.txt".to_string(),
             move_to: Some(move_target.to_string_lossy().into_owned()),
             hunks: vec![Hunk {
+                scope: None,
                 context_before: vec![],
                 old_lines: vec!["line1".to_string()],
                 new_lines: vec!["LINE1".to_string()],
@@ -1156,5 +1274,144 @@ mod tests {
         let result = apply_patch_ext(&ops, dir.path(), &[], &[]).await;
         assert!(result.is_ok(), "errors: {:?}", result.errors);
         assert_eq!(result.files_added, 1);
+    }
+
+    fn parse_single_update(patch: &str) -> Vec<Hunk> {
+        match parse_patch(patch).unwrap().remove(0) {
+            PatchOp::UpdateFile { hunks, .. } => hunks,
+            other => panic!("Expected UpdateFile, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn scope_header_targets_the_named_block_not_the_first_duplicate() {
+        let content = "def first():\n    return None\n\ndef second():\n    return None\n";
+        let hunks = parse_single_update(
+            "*** Begin Patch\n*** Update File: m.py\n@@ def second():\n-    return None\n+    return 0\n*** End Patch",
+        );
+        assert_eq!(hunks[0].scope.as_deref(), Some("def second():"));
+        assert_eq!(
+            apply_hunks(content, &hunks).unwrap(),
+            "def first():\n    return None\n\ndef second():\n    return 0\n"
+        );
+    }
+
+    #[test]
+    fn ambiguous_anchor_without_scope_is_rejected() {
+        let content = "def first():\n    return None\n\ndef second():\n    return None\n";
+        let hunks = parse_single_update(
+            "*** Begin Patch\n*** Update File: m.py\n@@\n-    return None\n+    return 0\n*** End Patch",
+        );
+        assert_eq!(hunks[0].scope, None);
+        let err = apply_hunks(content, &hunks).unwrap_err();
+        assert!(err.contains("match 2 places"), "{err}");
+    }
+
+    #[test]
+    fn later_hunk_searches_after_the_previous_one() {
+        let content = "a\nx\nb\nx\n";
+        let hunks = vec![
+            Hunk {
+                scope: None,
+                context_before: vec!["a".to_string()],
+                old_lines: vec!["x".to_string()],
+                new_lines: vec!["X1".to_string()],
+                context_after: vec![],
+            },
+            Hunk {
+                scope: None,
+                context_before: vec![],
+                old_lines: vec!["x".to_string()],
+                new_lines: vec!["X2".to_string()],
+                context_after: vec![],
+            },
+        ];
+        assert_eq!(apply_hunks(content, &hunks).unwrap(), "a\nX1\nb\nX2\n");
+    }
+
+    #[test]
+    fn insertion_hunk_with_scope_inserts_after_the_scope_line() {
+        let content = "fn a() {}\nfn b() {\n}\n";
+        let hunks = parse_single_update(
+            "*** Begin Patch\n*** Update File: m.rs\n@@ fn b() {\n+    body();\n*** End Patch",
+        );
+        assert_eq!(
+            apply_hunks(content, &hunks).unwrap(),
+            "fn a() {}\nfn b() {\n    body();\n}\n"
+        );
+    }
+
+    #[test]
+    fn non_line_header_falls_back_to_unscoped_search() {
+        let content = "line1\nline2\nline3\n";
+        let hunks = parse_single_update(
+            "*** Begin Patch\n*** Update File: f.txt\n@@ -1,3 +1,3 @@\n line1\n-line2\n+replaced\n*** End Patch",
+        );
+        assert_eq!(
+            apply_hunks(content, &hunks).unwrap(),
+            "line1\nreplaced\nline3\n"
+        );
+    }
+
+    #[test]
+    fn crlf_line_endings_are_preserved() {
+        let content = "one\r\ntwo\r\nthree\r\n";
+        let hunks = vec![Hunk {
+            scope: None,
+            context_before: vec!["one".to_string()],
+            old_lines: vec!["two".to_string()],
+            new_lines: vec!["TWO".to_string()],
+            context_after: vec![],
+        }];
+        assert_eq!(
+            apply_hunks(content, &hunks).unwrap(),
+            "one\r\nTWO\r\nthree\r\n"
+        );
+    }
+
+    #[test]
+    fn lf_line_endings_stay_lf() {
+        let content = "one\ntwo\n";
+        let hunks = vec![Hunk {
+            scope: None,
+            context_before: vec![],
+            old_lines: vec!["two".to_string()],
+            new_lines: vec!["TWO".to_string()],
+            context_after: vec![],
+        }];
+        assert_eq!(apply_hunks(content, &hunks).unwrap(), "one\nTWO\n");
+    }
+
+    #[test]
+    fn indented_file_header_still_starts_a_new_operation() {
+        let patch = "*** Begin Patch\n*** Update File: a.txt\n@@\n-x\n+y\n  *** Delete File: b.txt\n*** End Patch";
+        let ops = parse_patch(patch).unwrap();
+        assert_eq!(ops.len(), 2, "{ops:?}");
+        assert!(matches!(&ops[1], PatchOp::DeleteFile { path } if path == "b.txt"));
+    }
+
+    #[test]
+    fn scope_line_after_the_anchor_falls_back_to_unscoped_search() {
+        let content = "keep\nold\ndef later():\n";
+        let hunks = parse_single_update(
+            "*** Begin Patch\n*** Update File: m.py\n@@ def later():\n keep\n-old\n+new\n*** End Patch",
+        );
+        assert_eq!(
+            apply_hunks(content, &hunks).unwrap(),
+            "keep\nnew\ndef later():\n"
+        );
+    }
+
+    #[test]
+    fn context_lines_starting_with_markers_stay_in_the_hunk() {
+        let patch = "*** Begin Patch\n*** Update File: README.md\n@@\n intro\n ***\n @@ -1 +1 @@\n-old\n+new\n*** End Patch";
+        let hunks = parse_single_update(patch);
+        assert_eq!(hunks.len(), 1);
+        assert_eq!(hunks[0].context_before, vec!["intro", "***", "@@ -1 +1 @@"]);
+        let content = "intro\n***\n@@ -1 +1 @@\nold\n";
+        assert_eq!(
+            apply_hunks(content, &hunks).unwrap(),
+            "intro\n***\n@@ -1 +1 @@\nnew\n"
+        );
     }
 }

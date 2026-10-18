@@ -24,8 +24,22 @@ pub fn router() -> axum::Router<Arc<AppState>> {
         )
         .route("/media/music", axum::routing::post(generate_music))
         .route("/media/providers", axum::routing::get(list_media_providers))
-        .route("/media/transcribe", axum::routing::post(transcribe_audio))
+        .route(
+            "/media/transcribe",
+            axum::routing::post(transcribe_audio)
+                // Without this the `Bytes` extractor applies axum's default 2 MiB cap before the handler runs, so any recording between 2 MiB and the advertised `MAX_TRANSCRIBE_BYTES` got a bodiless 413 and the handler's own check was dead code.
+                // The headroom lets a body just over the cap reach the handler and get its JSON 413, the same pattern as the knowledge and avatar uploads.
+                .layer(axum::extract::DefaultBodyLimit::max(
+                    MAX_TRANSCRIBE_BYTES + TRANSCRIBE_BODY_LIMIT_HEADROOM_BYTES,
+                )),
+        )
 }
+
+/// Largest audio body `POST /api/media/transcribe` accepts.
+const MAX_TRANSCRIBE_BYTES: usize = 10 * 1024 * 1024;
+
+/// Slack between the handler's cap and the `Bytes` extractor's, see the layer in [`router`].
+const TRANSCRIBE_BODY_LIMIT_HEADROOM_BYTES: usize = 64 * 1024;
 
 // ── Helpers ─────────────────────────────────────────────────────────────
 
@@ -574,8 +588,7 @@ pub async fn transcribe_audio(
         return ApiErrorResponse::bad_request("Empty audio body").into_response();
     }
 
-    // 10 MB limit
-    if body.len() > 10 * 1024 * 1024 {
+    if body.len() > MAX_TRANSCRIBE_BYTES {
         return (
             StatusCode::PAYLOAD_TOO_LARGE,
             Json(serde_json::json!({"error": "Audio too large (max 10MB)"})),

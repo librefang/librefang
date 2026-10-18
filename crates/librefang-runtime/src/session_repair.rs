@@ -145,6 +145,9 @@ pub fn validate_and_repair_with_stats(messages: &[Message]) -> (Vec<Message>, Re
             });
         }
 
+        // Phase 2-pre: Split user turns that carry ToolResults behind other content.
+        split_text_led_tool_result_turns(&mut cleaned);
+
         // Phase 2a: Rescue ToolResult blocks stuck in assistant-role messages.
         let rescued_count = rescue_misplaced_tool_results(&mut cleaned);
         stats.misplaced_results_rescued = rescued_count;
@@ -376,6 +379,92 @@ pub(crate) fn ensure_starts_with_user(mut messages: Vec<Message>) -> Vec<Message
     messages
 }
 
+/// Deliver `results` (ToolResult blocks) in the user turn immediately after the assistant message at `assistant_idx`.
+///
+/// When that user turn is already a tool-result delivery (it carries ToolResult blocks), the results join it ahead of its first non-ToolResult block, so trailing guidance text stays after every result.
+/// Otherwise — a plain user question, an attachment, or no user turn at all — a new tool-result-only user message is inserted right after the assistant.
+/// Folding the results into a real user text turn would produce `[Text, ToolResult]`: Anthropic rejects a tool_result that follows text in a user message, and the OpenAI-compatible driver emits only the `role=tool` messages for such a turn, so the user's words never reach the model.
+/// Phase 3 never merges a tool-result-only message, so the inserted message stays separate from the user turn that follows it.
+fn deliver_tool_results_after(
+    messages: &mut Vec<Message>,
+    assistant_idx: usize,
+    results: Vec<ContentBlock>,
+) {
+    let pos = (assistant_idx + 1).min(messages.len());
+    if let Some(next) = messages.get_mut(pos).filter(|m| m.role == Role::User) {
+        if let MessageContent::Blocks(blocks) = &mut next.content {
+            if blocks
+                .iter()
+                .any(|b| matches!(b, ContentBlock::ToolResult { .. }))
+            {
+                let at = blocks
+                    .iter()
+                    .position(|b| !matches!(b, ContentBlock::ToolResult { .. }))
+                    .unwrap_or(blocks.len());
+                blocks.splice(at..at, results);
+                return;
+            }
+        }
+    }
+    messages.insert(
+        pos,
+        Message {
+            role: Role::User,
+            content: MessageContent::Blocks(results),
+            pinned: false,
+            timestamp: None,
+        },
+    );
+}
+
+/// Phase 2-pre: split a user message whose ToolResult blocks come after other content into a tool-result-only message followed by the rest.
+///
+/// Earlier repairs folded synthetic or rescued results into the user's own question, producing `[Text, ToolResult]`, and those sessions are persisted.
+/// Anthropic rejects a tool_result behind text in a user message and the OpenAI-compatible driver emits only the `role=tool` messages for it, and because the same history is rebuilt every turn the session would never recover without this split.
+/// A message that leads with its ToolResults (results, then trailing guidance text) is the shape the loop itself writes and is left alone.
+fn split_text_led_tool_result_turns(messages: &mut Vec<Message>) {
+    let mut i = 0;
+    while i < messages.len() {
+        let needs_split = messages[i].role == Role::User
+            && match &messages[i].content {
+                MessageContent::Blocks(blocks) => {
+                    !matches!(blocks.first(), Some(ContentBlock::ToolResult { .. }))
+                        && blocks
+                            .iter()
+                            .any(|b| matches!(b, ContentBlock::ToolResult { .. }))
+                }
+                MessageContent::Text(_) => false,
+            };
+        if !needs_split {
+            i += 1;
+            continue;
+        }
+        let MessageContent::Blocks(blocks) = std::mem::replace(
+            &mut messages[i].content,
+            MessageContent::Text(String::new()),
+        ) else {
+            unreachable!("needs_split only holds for Blocks content");
+        };
+        let (results, rest): (Vec<ContentBlock>, Vec<ContentBlock>) = blocks
+            .into_iter()
+            .partition(|b| matches!(b, ContentBlock::ToolResult { .. }));
+        debug!(
+            msg_idx = i,
+            results = results.len(),
+            "Split ToolResults out of a user turn that led with other content"
+        );
+        messages[i].content = MessageContent::Blocks(results);
+        let rest_msg = Message {
+            role: Role::User,
+            content: MessageContent::Blocks(rest),
+            pinned: messages[i].pinned,
+            timestamp: messages[i].timestamp,
+        };
+        messages.insert(i + 1, rest_msg);
+        i += 2;
+    }
+}
+
 /// Phase 2a: Rescue ToolResult blocks from assistant-role messages.
 ///
 /// After a crash, ToolResult blocks may end up inside an assistant-role message
@@ -420,32 +509,7 @@ fn rescue_misplaced_tool_results(messages: &mut Vec<Message>) -> usize {
     // Insert rescued blocks into user-role messages after each assistant message.
     // Process in reverse order so indices stay valid during insertion.
     for (assistant_idx, rescued_blocks) in to_rescue.into_iter().rev() {
-        let insert_pos = assistant_idx + 1;
-        if insert_pos < messages.len() && messages[insert_pos].role == Role::User {
-            // Append to existing user message
-            if let MessageContent::Blocks(existing) = &mut messages[insert_pos].content {
-                existing.extend(rescued_blocks);
-            } else {
-                let old = std::mem::replace(
-                    &mut messages[insert_pos].content,
-                    MessageContent::Text(String::new()),
-                );
-                let mut new_blocks = content_to_blocks(old);
-                new_blocks.extend(rescued_blocks);
-                messages[insert_pos].content = MessageContent::Blocks(new_blocks);
-            }
-        } else {
-            // Create a new user message for the rescued blocks
-            messages.insert(
-                insert_pos.min(messages.len()),
-                Message {
-                    role: Role::User,
-                    content: MessageContent::Blocks(rescued_blocks),
-                    pinned: false,
-                    timestamp: None,
-                },
-            );
-        }
+        deliver_tool_results_after(messages, assistant_idx, rescued_blocks);
 
         debug!(
             assistant_idx,
@@ -466,10 +530,8 @@ fn rescue_misplaced_tool_results(messages: &mut Vec<Message>) -> usize {
 ///
 /// Returns the number of synthetic ToolResult blocks inserted.
 fn enforce_adjacent_tool_result_pairs(messages: &mut Vec<Message>) -> usize {
-    // For each assistant with ToolUse blocks, check the
-    // IMMEDIATELY FOLLOWING message for satisfaction. Missing ids get
-    // a synthetic inserted in the adjacent user (or a new user is inserted
-    // / appended as needed).
+    // For each assistant with ToolUse blocks, check the IMMEDIATELY FOLLOWING message for satisfaction.
+    // Missing ids get a synthetic result delivered by `deliver_tool_results_after`: joined to an adjacent tool-result delivery, or in a new user message inserted right after the assistant.
     let mut positional_synthetic: usize = 0;
     let mut i: usize = 0;
     while i < messages.len() {
@@ -532,47 +594,7 @@ fn enforce_adjacent_tool_result_pairs(messages: &mut Vec<Message>) -> usize {
             })
             .collect();
 
-        if i + 1 < messages.len() {
-            if messages[i + 1].role == Role::User {
-                // Amend the adjacent user: either extend its Blocks, or upgrade
-                // its Text content to Blocks with the original text preserved.
-                let next = &mut messages[i + 1];
-                match &mut next.content {
-                    MessageContent::Blocks(bs) => {
-                        bs.extend(synthetic_blocks);
-                    }
-                    MessageContent::Text(_) => {
-                        let old = std::mem::replace(
-                            &mut next.content,
-                            MessageContent::Text(String::new()),
-                        );
-                        let mut new_blocks = content_to_blocks(old);
-                        new_blocks.extend(synthetic_blocks);
-                        next.content = MessageContent::Blocks(new_blocks);
-                    }
-                }
-            } else {
-                // Next message is not a User — insert a new user message
-                // immediately after this assistant.
-                messages.insert(
-                    i + 1,
-                    Message {
-                        role: Role::User,
-                        content: MessageContent::Blocks(synthetic_blocks),
-                        pinned: false,
-                        timestamp: None,
-                    },
-                );
-            }
-        } else {
-            // Tail of history — append a new user message.
-            messages.push(Message {
-                role: Role::User,
-                content: MessageContent::Blocks(synthetic_blocks),
-                pinned: false,
-                timestamp: None,
-            });
-        }
+        deliver_tool_results_after(messages, i, synthetic_blocks);
 
         positional_synthetic += missing_count;
         // Skip the user we just amended/inserted.
@@ -710,32 +732,7 @@ fn reorder_tool_results(messages: &mut Vec<Message>) -> usize {
 
     for (orig_assistant_idx, blocks) in sorted_insertions {
         if let Some(&current_idx) = current_assistant_positions.get(&orig_assistant_idx) {
-            let insert_pos = (current_idx + 1).min(messages.len());
-            // Check if there's already a user message at insert_pos with ToolResults
-            // If so, append to it; otherwise create a new message.
-            if insert_pos < messages.len() && messages[insert_pos].role == Role::User {
-                if let MessageContent::Blocks(existing) = &mut messages[insert_pos].content {
-                    existing.extend(blocks);
-                } else {
-                    let text_content = std::mem::replace(
-                        &mut messages[insert_pos].content,
-                        MessageContent::Text(String::new()),
-                    );
-                    let mut new_blocks = content_to_blocks(text_content);
-                    new_blocks.extend(blocks);
-                    messages[insert_pos].content = MessageContent::Blocks(new_blocks);
-                }
-            } else {
-                messages.insert(
-                    insert_pos,
-                    Message {
-                        role: Role::User,
-                        content: MessageContent::Blocks(blocks),
-                        pinned: false,
-                        timestamp: None,
-                    },
-                );
-            }
+            deliver_tool_results_after(messages, current_idx, blocks);
         }
     }
 
@@ -810,31 +807,7 @@ fn insert_synthetic_results(messages: &mut Vec<Message>) -> usize {
     sorted.sort_by_key(|b| std::cmp::Reverse(b.0));
 
     for (assistant_idx, blocks) in sorted {
-        let insert_pos = assistant_idx + 1;
-        if insert_pos < messages.len() && messages[insert_pos].role == Role::User {
-            // Check if this user message already has ToolResult blocks
-            if let MessageContent::Blocks(existing) = &mut messages[insert_pos].content {
-                existing.extend(blocks);
-            } else {
-                let old = std::mem::replace(
-                    &mut messages[insert_pos].content,
-                    MessageContent::Text(String::new()),
-                );
-                let mut new_blocks = content_to_blocks(old);
-                new_blocks.extend(blocks);
-                messages[insert_pos].content = MessageContent::Blocks(new_blocks);
-            }
-        } else {
-            messages.insert(
-                insert_pos.min(messages.len()),
-                Message {
-                    role: Role::User,
-                    content: MessageContent::Blocks(blocks),
-                    pinned: false,
-                    timestamp: None,
-                },
-            );
-        }
+        deliver_tool_results_after(messages, assistant_idx, blocks);
     }
 
     count

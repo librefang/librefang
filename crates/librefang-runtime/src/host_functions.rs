@@ -331,9 +331,36 @@ fn host_fs_read(state: &GuestState, params: &serde_json::Value) -> serde_json::V
     ) {
         return e;
     }
-    match std::fs::read_to_string(&canonical) {
+    // The read happens on the host, outside the guest's memory limiter, so it is bounded by the same 1 MiB cap as every other guest-bound payload (#3866).
+    // The stat rejects an honestly large file without reading it; the `take` still bounds a file that grows after the stat.
+    use std::io::Read;
+    let file = match std::fs::File::open(&canonical) {
+        Ok(f) => f,
+        Err(e) => return json!({"error": format!("fs_read failed: {e}")}),
+    };
+    if let Ok(meta) = file.metadata() {
+        if meta.len() > MAX_GUEST_RESULT_BYTES as u64 {
+            return json!({"error": format!(
+                "fs_read failed: file is {} bytes (max {MAX_GUEST_RESULT_BYTES})",
+                meta.len()
+            )});
+        }
+    }
+    let mut bytes = Vec::new();
+    if let Err(e) = file
+        .take(MAX_GUEST_RESULT_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+    {
+        return json!({"error": format!("fs_read failed: {e}")});
+    }
+    if bytes.len() > MAX_GUEST_RESULT_BYTES {
+        return json!({"error": format!(
+            "fs_read failed: file exceeds {MAX_GUEST_RESULT_BYTES} bytes"
+        )});
+    }
+    match String::from_utf8(bytes) {
         Ok(content) => json!({"ok": content}),
-        Err(e) => json!({"error": format!("fs_read failed: {e}")}),
+        Err(_) => json!({"error": "fs_read failed: stream did not contain valid UTF-8"}),
     }
 }
 
@@ -453,10 +480,20 @@ fn host_fs_list(state: &GuestState, params: &serde_json::Value) -> serde_json::V
     }
     match std::fs::read_dir(&canonical) {
         Ok(entries) => {
-            let names: Vec<String> = entries
-                .filter_map(|e| e.ok())
-                .map(|e| e.file_name().to_string_lossy().to_string())
-                .collect();
+            // Bound the listing by its serialized size so a directory with millions of entries cannot be collected into host memory; stop at the first entry past the cap.
+            let mut names: Vec<String> = Vec::new();
+            let mut total_bytes = 0usize;
+            for entry in entries.filter_map(|e| e.ok()) {
+                let name = entry.file_name().to_string_lossy().to_string();
+                // Two quotes and a separator per JSON array element.
+                total_bytes = total_bytes.saturating_add(name.len() + 3);
+                if total_bytes > MAX_GUEST_RESULT_BYTES {
+                    return json!({"error": format!(
+                        "fs_list failed: listing exceeds {MAX_GUEST_RESULT_BYTES} bytes"
+                    )});
+                }
+                names.push(name);
+            }
             json!({"ok": names})
         }
         Err(e) => json!({"error": format!("fs_list failed: {e}")}),
@@ -554,6 +591,12 @@ fn host_net_fetch(state: &GuestState, params: &serde_json::Value) -> serde_json:
     // The guest is running on a blocking-pool thread, so the byte meter `tool_runner::dispatch` installed as a tokio task-local is invisible here and `read_body_capped`'s reports below would be dropped.
     // `WasmSandbox::execute` carried a handle to that counter into `GuestState`; it goes back into the task-local around the fetch so a guest's egress is charged to the tool call that started it.
     let network_meter = state.network_meter.clone();
+    // The guest's wall-clock budget is enforced by epoch interruption, which only traps once control returns to WASM, never while this host call is parked in `block_in_place`.
+    // Bound the whole fetch (every redirect hop and the body read) by what is left of that budget so a slow-drip server cannot hold the call far past `timeout_secs`.
+    let remaining = state.remaining_budget();
+    if remaining.is_zero() {
+        return json!({"error": "net_fetch failed: guest wall-clock budget exhausted"});
+    }
     tokio::task::block_in_place(|| {
         let fetch = async {
             // SECURITY: follow redirects MANUALLY, re-running the SSRF check,
@@ -648,6 +691,16 @@ fn host_net_fetch(state: &GuestState, params: &serde_json::Value) -> serde_json:
                 current_url = next.to_string();
             }
             json!({"error": format!("SSRF blocked: too many redirects (cap: {MAX_REDIRECTS})")})
+        };
+        let fetch = async {
+            tokio::time::timeout(remaining, fetch)
+                .await
+                .unwrap_or_else(|_| {
+                    json!({"error": format!(
+                        "net_fetch timed out after {:.1}s (guest wall-clock budget)",
+                        remaining.as_secs_f32()
+                    )})
+                })
         };
         match network_meter {
             Some(counter) => handle.block_on(crate::network_meter::scoped(counter, fetch)),
@@ -1350,6 +1403,62 @@ mod tests {
             "write should succeed without a kernel, got: {result}"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// fs_read must refuse a file larger than the guest result cap instead of buffering it into host memory.
+    #[tokio::test]
+    async fn test_fs_read_rejects_file_over_cap() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dir = tmp.path().canonicalize().unwrap();
+        let big = dir.join("big.log");
+        std::fs::write(&big, vec![b'a'; MAX_GUEST_RESULT_BYTES + 1]).unwrap();
+        let small = dir.join("small.log");
+        std::fs::write(&small, b"hello").unwrap();
+        let state = test_state(vec![Capability::FileRead(format!(
+            "{}/*",
+            dir.to_string_lossy()
+        ))]);
+
+        let result = host_fs_read(&state, &json!({"path": big.to_str().unwrap()}));
+        let err = result["error"].as_str().expect("oversized read must fail");
+        assert!(err.contains("max") || err.contains("exceeds"), "{err}");
+
+        let result = host_fs_read(&state, &json!({"path": small.to_str().unwrap()}));
+        assert_eq!(
+            result["ok"], "hello",
+            "small file must still read: {result}"
+        );
+    }
+
+    /// fs_list must refuse a listing whose serialized size exceeds the guest result cap.
+    #[tokio::test]
+    async fn test_fs_list_rejects_listing_over_cap() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dir = tmp.path().canonicalize().unwrap();
+        // 255-byte names: ~4.1k entries cross 1 MiB.
+        let entries = MAX_GUEST_RESULT_BYTES / 258 + 2;
+        for i in 0..entries {
+            let name = format!("{i:0>255}");
+            std::fs::write(dir.join(name), b"").unwrap();
+        }
+        let state = test_state(vec![Capability::FileRead(
+            dir.to_string_lossy().into_owned(),
+        )]);
+        let result = host_fs_list(&state, &json!({"path": dir.to_str().unwrap()}));
+        let err = result["error"]
+            .as_str()
+            .expect("oversized listing must fail");
+        assert!(err.contains("exceeds"), "{err}");
+    }
+
+    /// net_fetch is bounded by the guest's remaining wall-clock budget, so a guest whose budget is spent cannot start a host-side fetch that epoch interruption could not stop.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_net_fetch_refuses_when_budget_exhausted() {
+        let state = test_state(vec![Capability::NetConnect("*".to_string())])
+            .with_timeout(std::time::Duration::ZERO);
+        let result = host_net_fetch(&state, &json!({"url": "https://example.com/"}));
+        let err = result["error"].as_str().expect("must fail without budget");
+        assert!(err.contains("budget"), "{err}");
     }
 
     #[tokio::test]

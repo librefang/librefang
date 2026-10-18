@@ -63,6 +63,8 @@ impl McpConfigStore {
     }
 
     /// Ordered by `name` so the boot-time merge is deterministic across processes.
+    ///
+    /// A row whose `entry_json` no longer decodes is logged and skipped; only SQL / pool failures return `Err`.
     pub fn load_all(&self) -> LibreFangResult<Vec<McpServerConfigEntry>> {
         let c = self.pool.get().map_err(LibreFangError::memory)?;
         let mut stmt = c
@@ -84,10 +86,17 @@ impl McpConfigStore {
             let (name, json) = row.map_err(|e| {
                 LibreFangError::memory_msg(format!("mcp config load_all row read failed: {e}"))
             })?;
-            let entry: McpServerConfigEntry = serde_json::from_str(&json).map_err(|e| {
-                LibreFangError::memory_msg(format!("mcp config '{name}' deserialize failed: {e}"))
-            })?;
-            result.push(entry);
+            // One undecodable row (a downgrade, a transport schema change, a hand edit) must not take every other DB-backed server down with it.
+            // Both callers fall back to the file-only list on `Err`, and the reload path then diffs that list against the running set, so an all-or-nothing error here disconnects every healthy DB-backed server.
+            // Skip the bad row loudly instead; `get` still surfaces it as `Err` for anyone asking about that name.
+            match serde_json::from_str::<McpServerConfigEntry>(&json) {
+                Ok(entry) => result.push(entry),
+                Err(e) => tracing::warn!(
+                    name = %name,
+                    error = %e,
+                    "Skipping MCP server config row that no longer deserializes"
+                ),
+            }
         }
         Ok(result)
     }
@@ -241,6 +250,36 @@ mod tests {
         let store = in_memory_store();
         assert_eq!(store.count().unwrap(), 0);
         assert!(store.load_all().unwrap().is_empty());
+    }
+
+    #[test]
+    fn load_all_skips_undecodable_row_and_keeps_the_rest() {
+        let store = in_memory_store();
+        store.upsert(&sample_entry("good", "g")).unwrap();
+        {
+            let c = store.pool.get().unwrap();
+            c.execute(
+                "INSERT INTO mcp_server_configs (name, entry_json) VALUES ('broken', '{\"name\":\"broken\",\"transport\":{\"type\":\"no-such-transport\"}}')",
+                [],
+            )
+            .unwrap();
+        }
+        assert!(
+            store.get("broken").is_err(),
+            "get still surfaces the bad row"
+        );
+
+        let names: Vec<String> = store
+            .load_all()
+            .unwrap()
+            .into_iter()
+            .map(|e| e.name)
+            .collect();
+        assert_eq!(names, vec!["good"]);
+
+        let (merged, added, _) = store.merge_over(vec![]).unwrap();
+        assert_eq!(added, 1);
+        assert_eq!(merged[0].name, "good");
     }
 
     #[test]

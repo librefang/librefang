@@ -13,7 +13,7 @@ use std::net::{SocketAddr, TcpListener};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::watch;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 /// Handle to the running embedded server. Drop or call `shutdown()` to stop.
 pub struct ServerHandle {
@@ -30,7 +30,9 @@ pub struct ServerHandle {
 }
 
 impl ServerHandle {
-    /// Signal the server to shut down and wait for the background thread.
+    /// Signal the server to shut down, wait up to [`SERVER_STOP_TIMEOUT`] for the background thread, then shut the kernel down.
+    ///
+    /// The wait is bounded because axum's graceful shutdown waits for every open connection to close, and a dashboard WebSocket or SSE stream in a still-open webview never does; an unbounded join would hang Quit and the updater's restart.
     pub fn shutdown(mut self) {
         // Only proceed if shutdown hasn't been initiated yet
         if self
@@ -40,12 +42,30 @@ impl ServerHandle {
         {
             let _ = self.shutdown_tx.send(true);
             if let Some(handle) = self.server_thread.take() {
-                let _ = handle.join();
+                if !join_with_timeout(handle, SERVER_STOP_TIMEOUT) {
+                    warn!(
+                        timeout_secs = SERVER_STOP_TIMEOUT.as_secs(),
+                        "Embedded server did not stop in time; shutting the kernel down anyway"
+                    );
+                }
             }
             self.kernel.shutdown();
             info!("LibreFang embedded server stopped");
         }
     }
+}
+
+/// How long [`ServerHandle::shutdown`] waits for the server thread before shutting the kernel down regardless.
+const SERVER_STOP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Join `handle`, giving up after `timeout`; returns whether the thread finished in time.
+fn join_with_timeout(handle: std::thread::JoinHandle<()>, timeout: std::time::Duration) -> bool {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = handle.join();
+        let _ = tx.send(());
+    });
+    rx.recv_timeout(timeout).is_ok()
 }
 
 impl Drop for ServerHandle {
@@ -172,5 +192,28 @@ async fn run_embedded_server(
         if let Ok(Some(ref mut b)) = std::sync::Arc::try_unwrap(old) {
             b.stop().await;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::join_with_timeout;
+    use std::time::Duration;
+
+    #[test]
+    fn join_with_timeout_reports_a_finished_thread() {
+        let handle = std::thread::spawn(|| {});
+        assert!(join_with_timeout(handle, Duration::from_secs(5)));
+    }
+
+    /// A server thread stuck in graceful shutdown (an open dashboard WebSocket) must not block Quit forever.
+    #[test]
+    fn join_with_timeout_gives_up_on_a_stuck_thread() {
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let handle = std::thread::spawn(move || {
+            let _ = release_rx.recv();
+        });
+        assert!(!join_with_timeout(handle, Duration::from_millis(50)));
+        let _ = release_tx.send(());
     }
 }

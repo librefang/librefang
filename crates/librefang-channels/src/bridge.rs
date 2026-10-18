@@ -1597,6 +1597,13 @@ impl BridgeManager {
         }
     }
 
+    /// The router this bridge dispatches inbound messages through.
+    ///
+    /// Exposed so routing state changed at runtime (e.g. `/api/bindings`) can be pushed into the live router instead of waiting for the next bridge start.
+    pub fn router(&self) -> &Arc<AgentRouter> {
+        &self.router
+    }
+
     /// Attach a message journal for crash recovery.
     pub fn with_journal(mut self, journal: crate::message_journal::MessageJournal) -> Self {
         self.journal = Some(journal);
@@ -4788,6 +4795,44 @@ async fn dispatch_message(
     if let ChannelContent::ButtonCallback { ref action, .. } = message.content {
         if action.starts_with("prov:") || action.starts_with("model:") || action == "back:providers"
         {
+            // These callbacks are the button form of `/models` (browsing) and `/model` (switching), and they `return` before the command gates below.
+            // Apply the same channel command policy and RBAC check the typed commands get, otherwise any member who can see (or forge) a keyboard switches the bound agent's model.
+            let gated_cmd = if action.starts_with("model:") {
+                "model"
+            } else {
+                "models"
+            };
+            if !is_command_allowed(gated_cmd, overrides.as_ref()) {
+                debug!(
+                    channel = ct_str,
+                    user_id = %message.sender.platform_id,
+                    action = %action,
+                    "ButtonCallback menu: /{gated_cmd} is disabled by channel command policy, refusing the callback"
+                );
+                send_response(
+                    adapter,
+                    &message.sender,
+                    format!("/{gated_cmd} is disabled on this channel."),
+                    thread_id,
+                    output_format,
+                )
+                .await;
+                return;
+            }
+            if let Err(denied) = handle
+                .authorize_channel_user(ct_str, sender_user_id(message), "chat")
+                .await
+            {
+                send_response(
+                    adapter,
+                    &message.sender,
+                    format!("Access denied: {denied}"),
+                    thread_id,
+                    output_format,
+                )
+                .await;
+                return;
+            }
             let Some(message_id) = resolve_callback_message_id(message) else {
                 warn!(
                     channel = ct_str,

@@ -507,13 +507,13 @@ pub(super) async fn dispatch_due_jobs(
 
                     match resolved_id {
                         Some(wf_id) => {
-                            match tokio::time::timeout(
-                                timeout,
-                                kernel_job.run_workflow(wf_id, input_text),
-                            )
-                            .await
+                            // The job's timeout goes into the run rather than around it: an outer `tokio::time::timeout` would drop the run's own timeout branch, leaving a timed-out run stuck in `Running` forever.
+                            // On expiry the run is failed in place and the error ("Workflow timed out after Ns") is recorded below, still classified as a timeout.
+                            match kernel_job
+                                .run_workflow_with_timeout(wf_id, input_text, timeout)
+                                .await
                             {
-                                Ok(Ok((run_id, output))) => {
+                                Ok((run_id, output)) => {
                                     // `run_workflow` returns `Ok` for a run that finished and for a run that suspended itself at a human-in-the-loop gate alike.
                                     // The fire itself succeeded either way, which is what `record_success` records — but the delivered body must not present the pre-gate artifact as the job's result, or the reviewer the gate was raised for never learns there is anything to review.
                                     let paused_reason =
@@ -543,23 +543,13 @@ pub(super) async fn dispatch_due_jobs(
                                         )
                                         .await;
                                 }
-                                Ok(Err(e)) => {
+                                Err(e) => {
                                     let err_msg = format!("{e}");
-                                    tracing::warn!(job = %job_name, error = %err_msg, "Cron workflow failed");
+                                    tracing::warn!(job = %job_name, error = %err_msg, timeout_s, "Cron workflow failed");
                                     kernel_job
                                         .workflows
                                         .cron_scheduler
                                         .record_failure(job_id, &err_msg);
-                                    if let Err(e) = kernel_job.workflows.cron_scheduler.persist() {
-                                        tracing::warn!(job = %job_name, "Cron post-run persist failed: {e}");
-                                    }
-                                }
-                                Err(_) => {
-                                    tracing::warn!(job = %job_name, timeout_s, "Cron workflow timed out");
-                                    kernel_job.workflows.cron_scheduler.record_failure(
-                                        job_id,
-                                        &format!("workflow timed out after {timeout_s}s"),
-                                    );
                                     if let Err(e) = kernel_job.workflows.cron_scheduler.persist() {
                                         tracing::warn!(job = %job_name, "Cron post-run persist failed: {e}");
                                     }

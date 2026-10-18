@@ -773,10 +773,17 @@ pub async fn auth_callback(
     // but before the vault load of `pkce_state` / `pkce_verifier` and
     // before the proxied `http_client.post(...)` further down — keeps
     // the verifier inside the vault on any empty-code probe.
-    let code_param = match params.code.as_deref().map(str::trim) {
-        Some(c) if !c.is_empty() => c.to_string(),
-        _ => {
-            return auth_failed("Missing authorization code.");
+    //
+    // An RFC 6749 §4.1.2.1 error redirect (`?error=access_denied&state=…`) carries no `code` by definition, so the gate applies only when `error` is absent.
+    // Rejecting it here used to make the error branch below unreachable: a denied consent never recorded `McpAuthState::Error` (the dashboard stayed on PendingAuth) and returned before `_flow_cleanup` was armed, orphaning the per-flow vault entries.
+    let code_param = if params.error.is_some() {
+        None
+    } else {
+        match params.code.as_deref().map(str::trim) {
+            Some(c) if !c.is_empty() => Some(c.to_string()),
+            _ => {
+                return auth_failed("Missing authorization code.");
+            }
         }
     };
 
@@ -875,9 +882,10 @@ pub async fn auth_callback(
         return auth_failed(format!("{error}: {desc}"));
     }
 
-    // The `code` was already validated as present and non-empty above
-    // (before any vault read), so unwrap is safe here.
-    let code = code_param;
+    // The `code` was already validated as present and non-empty above (before any vault read) whenever `error` is absent, and the `error` case returned just above.
+    let Some(code) = code_param else {
+        return auth_failed("Missing authorization code.");
+    };
 
     let pkce_verifier = match load("pkce_verifier") {
         Ok(Some(v)) => v,

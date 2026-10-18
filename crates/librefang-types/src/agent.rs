@@ -1996,7 +1996,7 @@ pub struct ManifestCapabilities {
     /// Read it through [`ManifestCapabilities::allows_own_memory_read`] rather than matching on the `Option` at call sites.
     #[serde(
         default,
-        deserialize_with = "crate::serde_compat::option_vec_lenient",
+        deserialize_with = "crate::serde_compat::option_vec_lenient_deny",
         skip_serializing_if = "Option::is_none"
     )]
     pub memory_read: Option<Vec<String>>,
@@ -2004,7 +2004,7 @@ pub struct ManifestCapabilities {
     /// See [`Self::memory_read`] for why this is an `Option` and not a plain `Vec`.
     #[serde(
         default,
-        deserialize_with = "crate::serde_compat::option_vec_lenient",
+        deserialize_with = "crate::serde_compat::option_vec_lenient_deny",
         skip_serializing_if = "Option::is_none"
     )]
     pub memory_write: Option<Vec<String>>,
@@ -2935,6 +2935,26 @@ mod tests {
             !declared_empty.allows_own_memory_write(),
             "regression #7605: memory_write = [] must block automatic memorization"
         );
+    }
+
+    /// A wrong-shaped memory scope (`memory_read = false`) used to deserialize to `None`, the unrestricted default — the opposite of what the operator wrote.
+    /// It must deny instead, and a bare string must keep its single scope.
+    #[test]
+    fn wrong_shaped_memory_scopes_fail_closed() {
+        let caps: ManifestCapabilities = toml::from_str(
+            "memory_read = false
+memory_write = 0",
+        )
+        .expect("parse");
+        assert_eq!(caps.memory_read, Some(vec![]));
+        assert!(!caps.allows_own_memory_read());
+        assert!(!caps.allows_own_memory_write());
+
+        let single: ManifestCapabilities =
+            toml::from_str("memory_read = \"kv:*\"\ntools = \"web_fetch\"").expect("parse");
+        assert_eq!(single.memory_read, Some(vec!["kv:*".to_string()]));
+        assert!(!single.allows_own_memory_read());
+        assert_eq!(single.tools, vec!["web_fetch".to_string()]);
     }
 
     #[test]

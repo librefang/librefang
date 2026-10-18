@@ -615,6 +615,17 @@ pub(crate) fn exhaustion_reason_for(failover: &FailoverReason) -> Option<Exhaust
 /// seconds is barely delayed; long enough that the store retains its value.
 const MIN_RATE_LIMIT_EXHAUSTION_BACKOFF: Duration = Duration::from_secs(30);
 
+/// Upper bound on a rate-limit exhaustion window derived from a server hint.
+/// `retry_after_ms` is parsed with saturation, so a hostile or broken `Retry-After` can carry a value near `u64::MAX` ms; `Instant + Duration` panics on overflow, which would take down the whole request instead of skipping one provider.
+const MAX_RATE_LIMIT_EXHAUSTION_BACKOFF: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// `now + hinted`, floored at [`MIN_RATE_LIMIT_EXHAUSTION_BACKOFF`] and capped at [`MAX_RATE_LIMIT_EXHAUSTION_BACKOFF`] so the addition can never overflow.
+fn rate_limit_exhaustion_until(now: Instant, hinted: Duration) -> Instant {
+    now + hinted
+        .max(MIN_RATE_LIMIT_EXHAUSTION_BACKOFF)
+        .min(MAX_RATE_LIMIT_EXHAUSTION_BACKOFF)
+}
+
 /// Compute the auto-clear `Instant` for an exhaustion record based on the
 /// underlying error. RateLimit honours the server's `Retry-After` hint
 /// (parsed from `LlmError::RateLimited.retry_after_ms` / `Overloaded`)
@@ -627,8 +638,7 @@ pub(crate) fn exhaustion_until_for(err: &LlmError, failover: &FailoverReason) ->
     let now = Instant::now();
     match failover {
         FailoverReason::RateLimit(Some(ms)) if *ms > 0 => {
-            let hinted = Duration::from_millis(*ms);
-            Some(now + hinted.max(MIN_RATE_LIMIT_EXHAUSTION_BACKOFF))
+            Some(rate_limit_exhaustion_until(now, Duration::from_millis(*ms)))
         }
         FailoverReason::RateLimit(_) => {
             // Server didn't tell us when to retry. Pull the embedded hint
@@ -644,7 +654,7 @@ pub(crate) fn exhaustion_until_for(err: &LlmError, failover: &FailoverReason) ->
                 _ => None,
             };
             let hinted = Duration::from_millis(hint_ms.unwrap_or(DEFAULT_RATE_LIMIT_SLEEP_MS));
-            Some(now + hinted.max(MIN_RATE_LIMIT_EXHAUSTION_BACKOFF))
+            Some(rate_limit_exhaustion_until(now, hinted))
         }
         FailoverReason::CreditExhausted | FailoverReason::AuthError => {
             Some(now + DEFAULT_LONG_BACKOFF)
@@ -1751,6 +1761,27 @@ mod tests {
             delta_long >= Duration::from_secs(290) && delta_long <= Duration::from_secs(310),
             "until should honour large hint, got {delta_long:?}"
         );
+    }
+
+    /// A saturated `retry_after_ms` (a huge `Retry-After` parsed with saturation) must not overflow `Instant + Duration` and panic; it is capped instead.
+    #[test]
+    fn exhaustion_until_caps_saturated_retry_after() {
+        let err = LlmError::RateLimited {
+            retry_after_ms: u64::MAX,
+            message: None,
+        };
+        for reason in [
+            FailoverReason::RateLimit(Some(u64::MAX)),
+            FailoverReason::RateLimit(None),
+        ] {
+            let until = exhaustion_until_for(&err, &reason).expect("rate-limit sets an `until`");
+            let delta = until.saturating_duration_since(Instant::now());
+            assert!(
+                delta <= MAX_RATE_LIMIT_EXHAUSTION_BACKOFF,
+                "saturated hint must be capped, got {delta:?}"
+            );
+            assert!(delta >= MAX_RATE_LIMIT_EXHAUSTION_BACKOFF - Duration::from_secs(5));
+        }
     }
 
     #[test]

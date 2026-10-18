@@ -13,6 +13,7 @@
 //!   - POST   /api/a2a/send
 //!   - GET    /api/a2a/tasks/{id}/status
 //!   - POST   /api/a2a/agents/{id}/approve
+//!   - POST   /a2a/tasks/{id}/cancel
 //!
 //! Mutating endpoints that initiate real outbound HTTP (`/discover`,
 //! `/send`, `/tasks/{id}/status`) are covered only on their
@@ -478,4 +479,81 @@ async fn approve_requires_auth() {
     )
     .await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
+}
+
+// ---------------------------------------------------------------------------
+// POST /a2a/tasks/{id}/cancel
+// ---------------------------------------------------------------------------
+
+fn a2a_task(
+    id: &str,
+    status: librefang_kernel::a2a::A2aTaskStatus,
+) -> librefang_kernel::a2a::A2aTask {
+    librefang_kernel::a2a::A2aTask {
+        id: id.to_string(),
+        session_id: None,
+        status: status.into(),
+        messages: vec![],
+        artifacts: vec![],
+        agent_id: None,
+        caller_a2a_agent_id: None,
+    }
+}
+
+/// A task that already finished keeps its status, so the route must answer 409 (A2A `TaskNotCancelable`) rather than a 200 that reads as a successful cancel.
+/// A live task is still cancelled with 200, and an unknown id is still 404.
+#[tokio::test(flavor = "multi_thread")]
+async fn cancel_task_distinguishes_cancelled_terminal_and_unknown() {
+    use librefang_kernel::a2a::A2aTaskStatus;
+
+    let h = boot("test-secret-key").await;
+    let tasks = h.state.kernel.a2a_tasks();
+    tasks.insert(a2a_task("task-working", A2aTaskStatus::Working));
+    tasks.insert(a2a_task("task-done", A2aTaskStatus::Completed));
+
+    let (status, body) = send(
+        &h,
+        Method::POST,
+        "/a2a/tasks/task-working/cancel",
+        None,
+        true,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["id"], "task-working", "{body}");
+    assert_eq!(
+        tasks.get("task-working").expect("task kept").status,
+        A2aTaskStatus::Cancelled
+    );
+
+    let (status, body) = send(&h, Method::POST, "/a2a/tasks/task-done/cancel", None, true).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["code"], "task_not_cancelable", "{body}");
+    assert!(body["message"].is_string(), "{body}");
+    assert_eq!(
+        tasks.get("task-done").expect("task kept").status,
+        A2aTaskStatus::Completed,
+        "a finished task must keep its status"
+    );
+
+    // Cancelling twice is the same case: the second request finds a terminal task.
+    let (status, _) = send(
+        &h,
+        Method::POST,
+        "/a2a/tasks/task-working/cancel",
+        None,
+        true,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+
+    let (status, body) = send(
+        &h,
+        Method::POST,
+        "/a2a/tasks/no-such-task/cancel",
+        None,
+        true,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
 }
