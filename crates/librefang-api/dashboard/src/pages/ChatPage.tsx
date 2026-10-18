@@ -55,7 +55,7 @@ import { Typewriter_v2 } from "../components/Typewriter_v2";
 import { AuthenticatedImage } from "../components/AuthenticatedImage";
 import { AgentAvatar } from "../components/AgentAvatar";
 import { Avatar } from "../components/ui/Avatar";
-import { useWhoami, whoamiPersonName } from "../lib/queries/authz";
+import { canListAllAgents, useWhoami, whoamiPersonName } from "../lib/queries/authz";
 import { useUserAvatarUrl } from "../lib/queries/users";
 import { useMathPlugins } from "../lib/hooks/useMathPlugins";
 import {
@@ -3683,9 +3683,41 @@ export function ChatPage() {
     [openChatTabs, selectedAgentId],
   );
 
+  // Session ids whose tab was opened while the loaded session list could not
+  // have contained them (#8596): the list on screen was fetched before the
+  // session existed — created in another window, by the CLI, or reached from
+  // the Sessions page — so its silence must not be read as "the server no
+  // longer has this session". Per agent and session id, the time the tab was
+  // opened; the session prune below only trusts a list for visits that
+  // predate that list's own fetch, i.e. that the list had a chance to answer.
+  const unconfirmedTabOpenedAt = useRef<Map<string, Map<string, number>>>(new Map());
+
   useEffect(() => {
-    if (selectedAgentId && activeSessionId) openChatTab(selectedAgentId, activeSessionId);
-  }, [selectedAgentId, activeSessionId, openChatTab]);
+    if (!selectedAgentId || !activeSessionId) return;
+    // `agentTabs` is in the dependencies on purpose, not only navigation: a
+    // prune against a list that is stale (10 s `staleTime`), or another
+    // window's `rehydrate()` through the storage listener, can drop the tab
+    // of the session on screen, and nothing else would add it back. When the
+    // id is already open and newest, `openChatTab` returns the same state, so
+    // the extra runs cost nothing and cannot loop.
+    openChatTab(selectedAgentId, activeSessionId);
+
+    // A visit the loaded list cannot confirm is stamped so the prune below
+    // does not drop it on sight (#8596): the list predates this tab, so its
+    // silence is not evidence. Once a fetch that already knew about the visit
+    // answers, the stamp is older than that fetch and stops protecting the
+    // tab. Stamped once per session: re-stamping on every effect run would
+    // keep pushing the list's chance to answer past the horizon.
+    const loadedSessions = sessionsQuery.data;
+    if (loadedSessions && !loadedSessions.some((s) => s.session_id === activeSessionId)) {
+      const bySession =
+        unconfirmedTabOpenedAt.current.get(selectedAgentId) ?? new Map<string, number>();
+      if (!bySession.has(activeSessionId)) {
+        bySession.set(activeSessionId, Date.now());
+        unconfirmedTabOpenedAt.current.set(selectedAgentId, bySession);
+      }
+    }
+  }, [selectedAgentId, activeSessionId, agentTabs, openChatTab, sessionsQuery.data]);
 
   useEffect(() => {
     // A session deleted from the dropdown, another browser tab, or the CLI
@@ -3696,20 +3728,57 @@ export function ChatPage() {
     // so it prunes the stale tabs instead of being skipped (#8326 review).
     const loaded = sessionsQuery.data;
     if (!selectedAgentId || !loaded) return;
-    pruneChatTabs(
-      selectedAgentId,
-      new Set(loaded.map((session) => session.session_id).filter((id): id is string => !!id)),
+    const valid = new Set(
+      loaded.map((session) => session.session_id).filter((id): id is string => !!id),
     );
-  }, [selectedAgentId, sessionsQuery.data, pruneChatTabs]);
+    // The session on screen is always valid, however stale the list: a tab
+    // removed here would be appended back at the end by the open effect
+    // above, moving the active tab under the cursor.
+    if (activeSessionId) valid.add(activeSessionId);
+    // A tab opened after this snapshot was fetched is missing from it because
+    // the snapshot never had a chance to include it, not because the server
+    // is done with the session (#8596). Keep it until a fetch that already
+    // knew about the visit answers — that fetch is what makes the list
+    // authoritative again.
+    const openedAt = unconfirmedTabOpenedAt.current.get(selectedAgentId);
+    if (openedAt) {
+      for (const [sessionId, time] of openedAt) {
+        if (time > sessionsQuery.dataUpdatedAt) valid.add(sessionId);
+      }
+    }
+    pruneChatTabs(selectedAgentId, valid);
+  }, [
+    selectedAgentId,
+    sessionsQuery.data,
+    sessionsQuery.dataUpdatedAt,
+    activeSessionId,
+    pruneChatTabs,
+  ]);
 
   useEffect(() => {
     // Tabs are keyed by agent, so a deleted agent would otherwise leave its
     // entry in the persisted store forever. The list is authoritative only
-    // when it includes hand agents (`includeHands`): with them hidden the
-    // query returns a subset, and a hidden agent must not lose its tabs.
+    // when it could have seen every agent the tabs may hold (#8596):
+    //   - it includes hand agents (`includeHands`): with them hidden the
+    //     query returns a subset, and a hidden agent must not lose its tabs;
+    //   - the server did not owner-scope it (`canListAllAgents`): for roles
+    //     below Admin it serves only the caller's own agents, so an absent id
+    //     is not an absent agent;
+    //   - it is not a truncated page (`truncated`): past the page limit the
+    //     tail is missing from the response, not from the registry.
+    // The role is `undefined` until `whoami` answers, and that resolves to no
+    // prune: a late prune is a stale tab, a wrong one is silent tab loss.
     if (agentsQuery.data === undefined || !showHandAgents) return;
+    if (!canListAllAgents(whoami.data?.role)) return;
+    if (agentsQuery.truncated) return;
     pruneChatTabAgents(new Set(agentsQuery.data.map((agent) => agent.id)));
-  }, [agentsQuery.data, showHandAgents, pruneChatTabAgents]);
+  }, [
+    agentsQuery.data,
+    agentsQuery.truncated,
+    showHandAgents,
+    whoami.data?.role,
+    pruneChatTabAgents,
+  ]);
 
   const handleCloseTab = useCallback(
     (sessionId: string) => {

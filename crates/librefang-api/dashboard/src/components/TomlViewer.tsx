@@ -6,6 +6,9 @@ import { Modal } from "./ui/Modal";
 import { useUIStore } from "../lib/store";
 import { copyToClipboard } from "../lib/clipboard";
 import { tabContent } from "../lib/motion";
+import { useRovingTabs } from "../lib/useRovingTabs";
+
+const TOML_VIEWER_TABS = ["toml", "markdown"] as const;
 
 interface TomlViewerProps {
   isOpen: boolean;
@@ -51,6 +54,11 @@ export function TomlViewer({
   const { t } = useTranslation();
   const addToast = useUIStore((s) => s.addToast);
   const [tab, setTab] = useState<"toml" | "markdown">("toml");
+  const tabNav = useRovingTabs({
+    ids: TOML_VIEWER_TABS,
+    activeId: tab,
+    onSelect: setTab,
+  });
   const pendingDownloadsRef = useRef(
     new Map<ReturnType<typeof setTimeout>, string>(),
   );
@@ -167,7 +175,9 @@ export function TomlViewer({
                 id="toml-viewer-tab-toml"
                 aria-selected={tab === "toml"}
                 aria-controls="toml-viewer-panel"
+                tabIndex={tabNav.tabIndexFor("toml")}
                 onClick={() => setTab("toml")}
+                onKeyDown={(event) => tabNav.onKeyDown(event, "toml")}
                 disabled={editing}
                 className={`text-[10px] font-bold uppercase px-2 py-1 rounded ${
                   tab === "toml" ? "bg-brand text-white" : "text-text-dim hover:text-text"
@@ -181,7 +191,9 @@ export function TomlViewer({
                 id="toml-viewer-tab-markdown"
                 aria-selected={tab === "markdown"}
                 aria-controls="toml-viewer-panel"
+                tabIndex={tabNav.tabIndexFor("markdown")}
                 onClick={() => setTab("markdown")}
+                onKeyDown={(event) => tabNav.onKeyDown(event, "markdown")}
                 disabled={editing}
                 className={`text-[10px] font-bold uppercase px-2 py-1 rounded ${
                   tab === "markdown" ? "bg-brand text-white" : "text-text-dim hover:text-text"

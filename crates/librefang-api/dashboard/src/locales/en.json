@@ -3927,11 +3927,11 @@
       "help": "Keyboard shortcuts",
       "help_title": "Tab shortcuts",
       "help_switch": "Switch tab",
-      "help_switch_key": "Click",
+      "help_switch_key": "Click / ← →",
       "help_rename": "Rename tab",
       "help_rename_key": "Double-click",
       "help_close": "Close tab",
-      "help_close_key": "Middle-click / ✕",
+      "help_close_key": "Middle-click / ✕ / Del",
       "help_new": "New tab",
       "help_new_key": "＋"
     },

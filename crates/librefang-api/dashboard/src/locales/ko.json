@@ -3923,11 +3923,11 @@
       "help": "키보드 단축키",
       "help_title": "탭 단축키",
       "help_switch": "탭 전환",
-      "help_switch_key": "클릭",
+      "help_switch_key": "클릭 / ← →",
       "help_rename": "탭 이름 바꾸기",
       "help_rename_key": "두 번 클릭",
       "help_close": "탭 닫기",
-      "help_close_key": "마우스 가운데 버튼 클릭 / ✕",
+      "help_close_key": "마우스 가운데 버튼 / ✕ / Del",
       "help_new": "새 탭",
       "help_new_key": "＋"
     },

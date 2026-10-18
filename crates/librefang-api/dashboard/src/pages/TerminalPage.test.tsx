@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { TerminalPage } from "./TerminalPage";
+import { TERMINAL_PANEL_ID, terminalTabId } from "../components/terminalTabIds";
 
 const invalidateQueries = vi.fn();
 const navigateMock = vi.fn();
@@ -233,6 +234,25 @@ describe("TerminalPage", () => {
     });
     expect(invalidateQueries).not.toHaveBeenCalledWith({ queryKey: ["terminal"] });
     expect(invalidateQueries).not.toHaveBeenCalledWith({ queryKey: ["terminal", "health"] });
+  });
+
+  it("exposes the terminal surface as the panel of the window tab strip", async () => {
+    renderPage();
+
+    const panel = screen.getByRole("tabpanel");
+    expect(panel).toHaveAttribute("id", TERMINAL_PANEL_ID);
+
+    // Once a window is active, the panel is labelled by its tab so a screen
+    // reader names the surface it belongs to (#8597).
+    const ws = MockWebSocket.instances[0];
+    act(() => {
+      ws.emitOpen();
+      ws.emitMessage({ type: "active_window", window_id: "window-1" });
+    });
+
+    await waitFor(() => {
+      expect(panel).toHaveAttribute("aria-labelledby", terminalTabId("window-1"));
+    });
   });
 
   it("uses the latest callback when an auto-reconnect timer fires", async () => {

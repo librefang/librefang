@@ -367,6 +367,33 @@ describe("McpServersPage", () => {
     vi.useRealTimers();
   });
 
+  // Issue #8597 — the view tabs had arrow handling on the container but no
+  // roving tabindex and no link to the panel.
+  it("roves the view tabs and links them to the panel they switch", () => {
+    setServers([makeServer({ id: "srv-1", name: "Brave Search MCP" })]);
+    renderPage();
+
+    const tablist = screen.getByRole("tablist", { name: "Server views" });
+    const tabs = within(tablist).getAllByRole("tab");
+    expect(tabs).toHaveLength(2);
+
+    const panel = screen.getByRole("tabpanel");
+    for (const tab of tabs) {
+      expect(tab).toHaveAttribute("aria-controls", panel.id);
+      expect(tab.id).not.toBe("");
+    }
+    const stops = tabs.filter((tab) => tab.tabIndex === 0);
+    expect(stops).toHaveLength(1);
+    expect(stops[0]).toHaveAttribute("aria-selected", "true");
+    expect(panel).toHaveAttribute("aria-labelledby", stops[0].id);
+
+    fireEvent.keyDown(tabs[0], { key: "End" });
+    expect(tabs[1]).toHaveAttribute("aria-selected", "true");
+    expect(tabs[1].tabIndex).toBe(0);
+    expect(tabs[0].tabIndex).toBe(-1);
+    expect(document.activeElement).toBe(tabs[1]);
+  });
+
   it("exposes the Add server and Reload action buttons in the page header", () => {
     setServers([]);
     renderPage();
