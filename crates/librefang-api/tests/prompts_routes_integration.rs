@@ -398,13 +398,9 @@ async fn list_experiments_rejects_non_uuid_agent_id() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn create_experiment_with_unknown_agent_surfaces_store_error() {
-    // The experiments table has FK constraints on the agent. Posting an
-    // experiment for an agent_id that has no rows in the agents/prompt
-    // store yields a 500 with the FK violation surfaced through the
-    // structured error envelope. This pins the contract that the route
-    // does NOT panic on store failure and that the bad_request path is
-    // distinguishable (4xx) from the store-failure path (5xx).
+async fn create_experiment_with_unknown_prompt_version_is_not_found() {
+    // Variants posted without a `prompt_version_id` reference the nil version, which does not exist.
+    // The store checks every variant's version inside the creating transaction and reports the missing one as a 404 with the structured error envelope, instead of letting the foreign-key violation surface as a 500.
     let h = boot().await;
     let path = format!("/api/agents/{AGENT_UUID}/prompts/experiments");
     let (status, body) = json_request(
@@ -420,7 +416,7 @@ async fn create_experiment_with_unknown_agent_surfaces_store_error() {
         })),
     )
     .await;
-    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "body={body:?}");
+    assert_eq!(status, StatusCode::NOT_FOUND, "body={body:?}");
     assert!(body.get("error").is_some(), "error envelope: {body:?}");
 }
 

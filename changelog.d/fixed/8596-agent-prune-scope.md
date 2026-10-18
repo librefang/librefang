@@ -1,0 +1,1 @@
+Chat tab pruning now checks that the agent list can prove absence before dropping a tab: it is skipped when the caller is not an admin/owner (their list is owner-scoped) or when the list page is truncated, and a tab opened after the cached list was fetched survives until a newer list omits it. (#8599, #8596) (@DaBlitzStein)

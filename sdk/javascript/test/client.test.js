@@ -56,3 +56,22 @@ test("HTTP failures reject with LibreFangError details", async () => {
     },
   );
 });
+
+test("path parameters are percent-encoded as one path segment", async () => {
+  const requests = [];
+  globalThis.fetch = async (url, options) => {
+    requests.push({ url, options });
+    return new Response("{}", {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  };
+
+  const client = new LibreFang("http://localhost:4545");
+  await client.memory.getAgentKvKey("agent 1", "prefs?v=2/../x#frag%");
+
+  assert.equal(
+    requests[0].url,
+    "http://localhost:4545/api/memory/agents/agent%201/kv/prefs%3Fv%3D2%2F..%2Fx%23frag%25",
+  );
+});

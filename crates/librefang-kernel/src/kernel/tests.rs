@@ -3937,6 +3937,182 @@ async fn top_p_catalog_override_reaches_the_streaming_dispatch() {
     kernel.shutdown();
 }
 
+/// The streaming dispatch must run the same model selection as `execute_llm_agent`.
+///
+/// It once applied only the session `/model` override, so Stable-mode `pinned_model`, `[model_router]` profiles and tier routing were silently skipped for every dashboard chat and channel message.
+/// Stable mode's pin is the deterministic member of that selection, so the wire body's `model` is what this holds.
+#[tokio::test(flavor = "multi_thread")]
+async fn streaming_dispatch_applies_model_selection() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let backend = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/chat"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
+            format!(
+                "{}\n",
+                serde_json::json!({
+                    "message": {"content": "ok"},
+                    "done": true,
+                    "done_reason": "stop",
+                })
+            ),
+            "application/json",
+        ))
+        .mount(&backend)
+        .await;
+
+    let dir = tempfile::tempdir().unwrap();
+    let home_dir = dir.path().to_path_buf();
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        default_model: DefaultModelConfig::driverless(),
+        mode: librefang_types::config::KernelMode::Stable,
+        ..KernelConfig::default()
+    };
+    let kernel = Arc::new(LibreFangKernel::boot_with_config(config).expect("kernel should boot"));
+    kernel.set_self_handle();
+
+    let mut manifest = test_manifest("pinned-stream", "streaming model selection", vec![]);
+    manifest.model.provider = "ollama".to_string();
+    manifest.model.model = "llama3.2".to_string();
+    manifest.model.base_url = Some(backend.uri());
+    manifest.pinned_model = Some("pinned-llama".to_string());
+    let agent_id = kernel.spawn_agent(manifest).expect("spawn should succeed");
+
+    let (mut rx, join) = kernel
+        .send_message_streaming(agent_id, "streamed turn", None)
+        .expect("the streaming turn must start");
+    let drain = tokio::spawn(async move { while rx.recv().await.is_some() {} });
+    join.await
+        .expect("the streaming task joins")
+        .expect("the streamed turn must not error");
+    drain.await.expect("the drain task joins");
+
+    let requests = backend
+        .received_requests()
+        .await
+        .expect("requests recorded");
+    assert_eq!(
+        requests.len(),
+        1,
+        "the streamed turn must reach the backend"
+    );
+    let body: serde_json::Value = requests[0].body_json().expect("valid JSON body");
+    assert_eq!(
+        body["model"], "pinned-llama",
+        "a streamed turn in Stable mode must use the agent's pinned_model: {body}"
+    );
+
+    kernel.shutdown();
+}
+
+/// A session `/model` override (#4898) must win over model selection on both the streaming and the blocking dispatch path.
+/// The blocking path once applied the override before `apply_model_selection`, so a Stable `pinned_model` (or routing) replaced it there while the streaming path kept it, and one session ran on different models depending on its entry point.
+#[tokio::test(flavor = "multi_thread")]
+async fn session_model_override_beats_model_selection_on_both_paths() {
+    use librefang_memory::session::Session as MemSession;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let backend = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/chat"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
+            format!(
+                "{}\n",
+                serde_json::json!({
+                    "message": {"content": "ok"},
+                    "done": true,
+                    "done_reason": "stop",
+                })
+            ),
+            "application/json",
+        ))
+        .mount(&backend)
+        .await;
+
+    let dir = tempfile::tempdir().unwrap();
+    let home_dir = dir.path().to_path_buf();
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        default_model: DefaultModelConfig::driverless(),
+        mode: librefang_types::config::KernelMode::Stable,
+        ..KernelConfig::default()
+    };
+    let kernel = Arc::new(LibreFangKernel::boot_with_config(config).expect("kernel should boot"));
+    kernel.set_self_handle();
+
+    let mut manifest = test_manifest("override-vs-pin", "session override precedence", vec![]);
+    manifest.model.provider = "ollama".to_string();
+    manifest.model.model = "llama3.2".to_string();
+    manifest.model.base_url = Some(backend.uri());
+    manifest.pinned_model = Some("pinned-llama".to_string());
+    let agent_id = kernel.spawn_agent(manifest).expect("spawn should succeed");
+    let session_id = kernel
+        .agents
+        .registry
+        .get(agent_id)
+        .expect("agent entry")
+        .session_id;
+    kernel
+        .memory
+        .substrate
+        .save_session(&MemSession {
+            id: session_id,
+            agent_id,
+            parent_session_id: None,
+            messages: Vec::new(),
+            context_window_tokens: 0,
+            label: None,
+            model_override: None,
+            messages_generation: 0,
+            last_repaired_generation: None,
+            peer_id: None,
+        })
+        .expect("seeding the session should succeed");
+    // `save_session` does not write `model_override`; the `/model` route sets it through this dedicated update.
+    kernel
+        .memory
+        .substrate
+        .set_session_model_override(session_id, Some("override-llama"))
+        .expect("setting the session override should succeed");
+
+    let (mut rx, join) = kernel
+        .send_message_streaming(agent_id, "streamed turn", None)
+        .expect("the streaming turn must start");
+    let drain = tokio::spawn(async move { while rx.recv().await.is_some() {} });
+    join.await
+        .expect("the streaming task joins")
+        .expect("the streamed turn must not error");
+    drain.await.expect("the drain task joins");
+
+    kernel
+        .send_message(agent_id, "blocking turn")
+        .await
+        .expect("the blocking turn must not error");
+
+    let requests = backend
+        .received_requests()
+        .await
+        .expect("requests recorded");
+    assert_eq!(requests.len(), 2, "both turns must reach the backend");
+    for (request, path) in requests.iter().zip(["streaming", "blocking"]) {
+        let body: serde_json::Value = request.body_json().expect("valid JSON body");
+        assert_eq!(
+            body["model"], "override-llama",
+            "the {path} path must run the session /model override over Stable pinning: {body}"
+        );
+    }
+
+    kernel.shutdown();
+}
+
 /// The fourth dispatcher: the **ephemeral worker spawn**.
 ///
 /// `ephemeral_spawn::spawn_ephemeral_worker` derives the worker's manifest from
@@ -4991,6 +5167,94 @@ fn test_skills_config_extra_dirs_loaded_as_overlay() {
     kernel.shutdown();
 }
 
+/// `[skills] load_user = false` must keep the primary skills directory out of the registry at boot and on reload, leaving only the `extra_dirs` overlay.
+#[test]
+fn test_skills_config_load_user_false_skips_primary_dir() {
+    let dir = tempfile::tempdir().unwrap();
+    let home_dir = dir.path().to_path_buf();
+    std::fs::create_dir_all(home_dir.join("skills")).unwrap();
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+    install_test_skill(&home_dir.join("skills"), "user-skill", &[]);
+    let external_dir = dir.path().join("external-skills");
+    install_test_skill(&external_dir, "curated-skill", &[]);
+
+    let mut config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    config.skills.load_user = false;
+    config.skills.extra_dirs = vec![external_dir.clone()];
+
+    let kernel = LibreFangKernel::boot_with_config(config).expect("boot");
+    {
+        let registry = kernel.skills.skill_registry.read().unwrap();
+        assert!(
+            registry.get("user-skill").is_none(),
+            "boot must honour load_user = false"
+        );
+        assert!(registry.get("curated-skill").is_some());
+    }
+
+    kernel.reload_skills();
+    {
+        let registry = kernel.skills.skill_registry.read().unwrap();
+        assert!(
+            registry.get("user-skill").is_none(),
+            "reload must honour load_user = false"
+        );
+        assert!(registry.get("curated-skill").is_some());
+    }
+
+    kernel.shutdown();
+}
+
+/// The `ReloadSkills` hot action runs before `reload_config` swaps the new config in, so it must rebuild the registry from the incoming `[skills]`; reading `self.config` there kept a newly disabled skill loaded.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_reload_skills_hot_action_uses_incoming_skills_config() {
+    let dir = tempfile::tempdir().unwrap();
+    let home_dir = dir.path().to_path_buf();
+    std::fs::create_dir_all(home_dir.join("skills")).unwrap();
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+    install_test_skill(&home_dir.join("skills"), "kept-skill", &[]);
+    install_test_skill(&home_dir.join("skills"), "bad-skill", &[]);
+
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    let kernel = LibreFangKernel::boot_with_config(config.clone()).expect("boot");
+    assert!(kernel
+        .skills
+        .skill_registry
+        .read()
+        .unwrap()
+        .get("bad-skill")
+        .is_some());
+
+    let mut new_config = config.clone();
+    new_config.skills.disabled = vec!["bad-skill".to_string()];
+    let plan = crate::config_reload::build_reload_plan(&config, &new_config);
+    assert!(plan
+        .hot_actions
+        .contains(&crate::config_reload::HotAction::ReloadSkills));
+
+    // The live config still holds the old policy at this point, exactly as in `reload_config`.
+    kernel.apply_hot_actions_inner(&plan, &new_config).await;
+
+    {
+        let registry = kernel.skills.skill_registry.read().unwrap();
+        assert!(
+            registry.get("bad-skill").is_none(),
+            "a skill disabled by the reload must be gone from the rebuilt registry"
+        );
+        assert!(registry.get("kept-skill").is_some());
+    }
+
+    kernel.shutdown();
+}
+
 #[test]
 fn test_set_agent_skills_persists_allowlist_to_agent_toml() {
     // Regression: set_agent_skills wrote only the SQLite blob, never
@@ -5041,6 +5305,184 @@ fn test_set_agent_skills_persists_allowlist_to_agent_toml() {
     assert!(
         written.contains("persist-skill"),
         "agent.toml must contain the assigned skill so it survives a restart, got:\n{written}"
+    );
+
+    kernel.shutdown();
+}
+
+/// Every role of a hand shares one `hand.toml` as its `source_toml_path`; a per-agent manifest edit must not overwrite that hand definition with one role's flat manifest.
+#[test]
+fn test_persist_manifest_leaves_shared_hand_toml_untouched() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().to_path_buf();
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    let kernel = LibreFangKernel::boot_with_config(config).expect("boot");
+
+    let hand_dir = home_dir.join("workspaces").join("hands").join("demo-hand");
+    std::fs::create_dir_all(&hand_dir).unwrap();
+    let hand_toml = hand_dir.join("hand.toml");
+    let original =
+        "id = \"demo-hand\"\nname = \"Demo\"\n\n[agents.operator]\nname = \"demo-operator\"\n";
+    std::fs::write(&hand_toml, original).unwrap();
+
+    let agent_id = kernel
+        .spawn_agent_inner(
+            AgentManifest {
+                name: "demo-operator".to_string(),
+                source_template: None,
+                description: "hand role".to_string(),
+                author: "test".to_string(),
+                module: "builtin:chat".to_string(),
+                ..Default::default()
+            },
+            None,
+            Some(hand_toml.clone()),
+            None,
+        )
+        .expect("spawn");
+
+    kernel
+        .set_agent_skills(agent_id, Vec::new())
+        .expect("set_agent_skills should succeed");
+    kernel.persist_manifest_to_disk(agent_id, "test");
+
+    assert_eq!(
+        std::fs::read_to_string(&hand_toml).unwrap(),
+        original,
+        "a hand role's manifest edit must leave the shared hand.toml byte-identical"
+    );
+
+    kernel.shutdown();
+}
+
+/// The auto-dream opt-in is a manifest field; a toggle that only touched the in-memory registry reverted on the next restart because boot re-syncs from agent.toml.
+#[test]
+fn test_auto_dream_toggle_persists_to_db_and_agent_toml() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().to_path_buf();
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    let kernel = LibreFangKernel::boot_with_config(config).expect("boot");
+
+    let toml_path = home_dir
+        .join("agent-manifests")
+        .join("dream-agent")
+        .join("agent.toml");
+    let agent_id = kernel
+        .spawn_agent_inner(
+            AgentManifest {
+                name: "dream-agent".to_string(),
+                source_template: None,
+                description: "auto-dream persistence regression".to_string(),
+                author: "test".to_string(),
+                module: "builtin:chat".to_string(),
+                ..Default::default()
+            },
+            None,
+            Some(toml_path.clone()),
+            None,
+        )
+        .expect("spawn");
+
+    crate::auto_dream::set_agent_enabled(&kernel, agent_id, true).expect("toggle");
+
+    let stored = kernel
+        .memory
+        .substrate
+        .load_agent(agent_id)
+        .expect("load")
+        .expect("agent row");
+    assert!(
+        stored.manifest.auto_dream_enabled,
+        "the SQLite row must carry the opt-in"
+    );
+    let on_disk: AgentManifest =
+        toml::from_str(&std::fs::read_to_string(&toml_path).expect("agent.toml written"))
+            .expect("agent.toml parses");
+    assert!(
+        on_disk.auto_dream_enabled,
+        "agent.toml must carry the opt-in so boot reconciliation keeps it"
+    );
+
+    kernel.shutdown();
+}
+
+/// Killing an agent must emit `LifecycleEvent::Terminated` through trigger evaluation, or `agent_terminated` watchdog triggers can never fire.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_kill_agent_fires_agent_terminated_trigger() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().to_path_buf();
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    let kernel = LibreFangKernel::boot_with_config(config).expect("boot");
+
+    let watcher = kernel
+        .spawn_agent_inner(
+            AgentManifest {
+                name: "terminate-watcher".to_string(),
+                source_template: None,
+                description: "watchdog".to_string(),
+                author: "test".to_string(),
+                module: "builtin:chat".to_string(),
+                ..Default::default()
+            },
+            None,
+            None,
+            None,
+        )
+        .expect("spawn watcher");
+    let victim = kernel
+        .spawn_agent_inner(
+            AgentManifest {
+                name: "terminate-victim".to_string(),
+                source_template: None,
+                description: "worker".to_string(),
+                author: "test".to_string(),
+                module: "builtin:chat".to_string(),
+                ..Default::default()
+            },
+            None,
+            None,
+            None,
+        )
+        .expect("spawn victim");
+
+    let trigger_id = kernel
+        .workflows
+        .triggers
+        .register(
+            watcher,
+            crate::triggers::TriggerPattern::AgentTerminated,
+            "worker died: {{event}}".to_string(),
+            0,
+        )
+        .expect("register trigger");
+
+    kernel.kill_agent(victim).expect("kill");
+
+    let trigger = kernel
+        .workflows
+        .triggers
+        .get(trigger_id)
+        .expect("trigger still registered");
+    assert_eq!(
+        trigger.fire_count, 1,
+        "killing an agent must fire the agent_terminated trigger exactly once"
     );
 
     kernel.shutdown();
@@ -21185,4 +21627,483 @@ async fn unset_max_tokens_reaches_the_wire_as_the_catalog_ceiling() {
     );
 
     kernel.shutdown();
+}
+
+/// The `session_id_override` ownership check reads only the owner column (performance-5): it must reject a foreign session without decoding its history.
+/// The foreign session's blob is made undecodable, so a check that still loaded the full session would surface a decode error instead of the ownership rejection.
+#[tokio::test(flavor = "multi_thread")]
+async fn session_override_ownership_check_does_not_decode_history() {
+    let pinned = SessionId::new();
+    let (kernel, owner, foreign_sid) =
+        kernel_with_seeded_session("ownership-meta-owner", Some(pinned), 2).await;
+    let intruder = kernel
+        .spawn_agent(test_manifest(
+            "ownership-meta-intruder",
+            "ownership check regression",
+            vec![],
+        ))
+        .expect("spawn should succeed");
+    assert_ne!(owner, intruder);
+    kernel
+        .memory
+        .substrate
+        .pool()
+        .get()
+        .unwrap()
+        .execute(
+            "UPDATE sessions SET messages = ?1 WHERE id = ?2",
+            rusqlite::params![vec![0xc1u8], foreign_sid.0.to_string()],
+        )
+        .unwrap();
+
+    let err = kernel
+        .send_message_with_session_override(intruder, "ping", None, None, None, Some(foreign_sid))
+        .await
+        .expect_err("a foreign session must be rejected");
+    assert!(
+        err.to_string().contains("belongs to a different agent"),
+        "non-streaming check must reject on ownership, got: {err}"
+    );
+
+    let err = kernel
+        .send_message_streaming_with_routing_and_session_override(
+            intruder,
+            "ping",
+            None,
+            Some(foreign_sid),
+        )
+        .await
+        .expect_err("a foreign session must be rejected (streaming)");
+    assert!(
+        err.to_string().contains("belongs to a different agent"),
+        "streaming check must reject on ownership, got: {err}"
+    );
+
+    kernel.shutdown();
+}
+
+#[cfg(unix)]
+async fn start_sleeper(kernel: &LibreFangKernel, agent: &str) {
+    kernel
+        .processes
+        .manager
+        .start(agent, "sleep", &["30".to_string()], &[], &[])
+        .await
+        .expect("sleep should start");
+}
+
+/// Deleting an agent must kill the processes it started with `process_start` (concurrency-2): `process_kill` is ownership-checked, so once the agent is gone nothing else can stop them.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn kill_agent_kills_its_managed_processes() {
+    let (kernel, agent_id, _) = kernel_with_seeded_session("kill-procs", None, 0).await;
+    let other = AgentId::new();
+    start_sleeper(&kernel, &agent_id.to_string()).await;
+    start_sleeper(&kernel, &other.to_string()).await;
+    assert_eq!(kernel.processes.manager.count(), 2);
+
+    kernel.kill_agent(agent_id).expect("kill should succeed");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !kernel
+        .processes
+        .manager
+        .list(&agent_id.to_string())
+        .is_empty()
+    {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the deleted agent's managed processes must be killed"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert_eq!(
+        kernel.processes.manager.list(&other.to_string()).len(),
+        1,
+        "another agent's processes must survive"
+    );
+
+    kernel.shutdown();
+    assert_eq!(
+        kernel.processes.manager.count(),
+        0,
+        "shutdown must kill every managed process before returning (concurrency-1/2)"
+    );
+}
+
+/// Records the compaction settings the kernel hands a context engine, standing in for the boot-time engine.
+struct CompactionRecordingEngine {
+    seen_keep_recent: Arc<std::sync::Mutex<Vec<Option<usize>>>>,
+}
+
+#[async_trait::async_trait]
+impl librefang_runtime::context_engine::ContextEngine for CompactionRecordingEngine {
+    async fn bootstrap(
+        &self,
+        _config: &librefang_runtime::context_engine::ContextEngineConfig,
+    ) -> librefang_types::error::LibreFangResult<()> {
+        Ok(())
+    }
+
+    async fn ingest(
+        &self,
+        _agent_id: AgentId,
+        _user_message: &str,
+        _peer_id: Option<&str>,
+    ) -> librefang_types::error::LibreFangResult<librefang_runtime::context_engine::IngestResult>
+    {
+        Ok(librefang_runtime::context_engine::IngestResult {
+            recalled_memories: Vec::new(),
+        })
+    }
+
+    async fn assemble(
+        &self,
+        _agent_id: AgentId,
+        _messages: &mut Vec<librefang_types::message::Message>,
+        _system_prompt: &str,
+        _tools: &[librefang_types::tool::ToolDefinition],
+        _context_window_tokens: usize,
+    ) -> librefang_types::error::LibreFangResult<librefang_runtime::context_engine::AssembleResult>
+    {
+        Ok(librefang_runtime::context_engine::AssembleResult {
+            recovery: librefang_runtime::context_overflow::RecoveryStage::None,
+        })
+    }
+
+    async fn compact(
+        &self,
+        agent_id: AgentId,
+        messages: &[librefang_types::message::Message],
+        driver: Arc<dyn librefang_runtime::llm_driver::LlmDriver>,
+        model: &str,
+        context_window_tokens: usize,
+        reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy,
+    ) -> librefang_types::error::LibreFangResult<librefang_runtime::compactor::CompactionResult>
+    {
+        self.compact_with_config(
+            agent_id,
+            messages,
+            driver,
+            model,
+            context_window_tokens,
+            reasoning_echo_policy,
+            None,
+        )
+        .await
+    }
+
+    async fn compact_with_config(
+        &self,
+        _agent_id: AgentId,
+        messages: &[librefang_types::message::Message],
+        _driver: Arc<dyn librefang_runtime::llm_driver::LlmDriver>,
+        _model: &str,
+        _context_window_tokens: usize,
+        _reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy,
+        compaction: Option<&librefang_runtime::compactor::CompactionConfig>,
+    ) -> librefang_types::error::LibreFangResult<librefang_runtime::compactor::CompactionResult>
+    {
+        self.seen_keep_recent
+            .lock()
+            .unwrap()
+            .push(compaction.map(|c| c.keep_recent));
+        Ok(librefang_runtime::compactor::CompactionResult {
+            summary: "summary".to_string(),
+            kept_messages: messages.to_vec(),
+            compacted_count: 0,
+            chunks_used: 1,
+            used_fallback: false,
+        })
+    }
+
+    async fn after_turn(
+        &self,
+        _agent_id: AgentId,
+        _messages: &[librefang_types::message::Message],
+    ) -> librefang_types::error::LibreFangResult<()> {
+        Ok(())
+    }
+
+    fn truncate_tool_result(&self, content: &str, _context_window_tokens: usize) -> String {
+        content.to_string()
+    }
+}
+
+/// Manual `/compact` through a context engine must hand the engine the agent's merged `[compaction]` settings (config-4).
+/// Without them the engine compacts with the global settings it was built from at boot, so an `agent.toml` `keep_recent` override is ignored.
+#[tokio::test(flavor = "multi_thread")]
+async fn manual_compact_passes_per_agent_compaction_overrides_to_engine() {
+    let dir = tempfile::tempdir().unwrap();
+    let home_dir = dir.path().to_path_buf();
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+    let mut kernel = LibreFangKernel::boot_with_config(KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        default_model: DefaultModelConfig::driverless(),
+        ..KernelConfig::default()
+    })
+    .expect("kernel should boot");
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    kernel.context_engine = Some(Box::new(CompactionRecordingEngine {
+        seen_keep_recent: Arc::clone(&seen),
+    }));
+    let kernel = Arc::new(kernel);
+    kernel.set_self_handle();
+
+    let mut manifest = test_manifest("compact-override", "config-4 regression", vec![]);
+    manifest.compaction = Some(librefang_types::agent::CompactionOverrides {
+        keep_recent: Some(37),
+        ..Default::default()
+    });
+    let agent_id = kernel.spawn_agent(manifest).expect("spawn should succeed");
+    let sid = kernel.agents.registry.get(agent_id).unwrap().session_id;
+    let mut session = kernel
+        .memory
+        .substrate
+        .get_session(sid)
+        .unwrap()
+        .unwrap_or_else(|| librefang_memory::session::Session {
+            id: sid,
+            agent_id,
+            parent_session_id: None,
+            messages: Vec::new(),
+            context_window_tokens: 0,
+            label: None,
+            model_override: None,
+            messages_generation: 0,
+            last_repaired_generation: None,
+            peer_id: None,
+        });
+    for i in 0..4 {
+        session.push_message(librefang_types::message::Message::user(format!("m{i}")));
+    }
+    kernel.memory.substrate.save_session(&session).unwrap();
+
+    kernel
+        .compact_agent_session(agent_id, true)
+        .await
+        .expect("forced compaction should succeed");
+    assert_eq!(
+        *seen.lock().unwrap(),
+        vec![Some(37)],
+        "the engine must receive the agent's merged compaction config"
+    );
+    kernel.shutdown();
+}
+
+/// Renaming an agent must carry its `/agent` conversation bindings to the new name (persistence-4).
+/// Both binding tables store names, so a binding left on the old name resolves to nothing and the chat falls back to other routing.
+#[test]
+fn rename_agent_moves_conversation_bindings_to_the_new_name() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().to_path_buf();
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+    let kernel = LibreFangKernel::boot_with_config(KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    })
+    .expect("kernel should boot");
+    let agent_id = kernel
+        .spawn_agent(test_manifest("support", "binding rename test", vec![]))
+        .expect("spawn should succeed");
+    let bindings = kernel.memory.substrate.channel_bindings();
+    bindings
+        .set_conversation_binding("tg-bot", "chat-1", "support", "user:1")
+        .unwrap();
+
+    kernel
+        .rename_agent(agent_id, "helpdesk".to_string())
+        .expect("rename should succeed");
+
+    let bound = bindings.resolve("tg-bot", "chat-1").unwrap();
+    assert_eq!(bound.as_deref(), Some("helpdesk"));
+    assert_eq!(
+        kernel
+            .agents
+            .registry
+            .find_by_name(bound.as_deref().unwrap())
+            .map(|e| e.id),
+        Some(agent_id),
+        "the binding must resolve back to the renamed agent"
+    );
+    kernel.shutdown();
+}
+
+/// Per-agent cost quota enforcement must announce itself as `SystemEvent::QuotaEnforced` (wiring-5), and the streaming path must enforce the quota before dispatch like the non-streaming one.
+/// The desktop app turns that event into the "Quota Enforced" OS notification; before this nothing ever published it.
+#[tokio::test(flavor = "multi_thread")]
+async fn agent_cost_quota_rejection_publishes_quota_enforced_on_both_paths() {
+    use librefang_types::event::{EventPayload, SystemEvent};
+
+    let (kernel, agent_id, _) = kernel_with_seeded_session("quota-event", None, 0).await;
+    kernel
+        .agents
+        .registry
+        .update_resources(agent_id, Some(0.50), None, None, None)
+        .unwrap();
+    kernel
+        .metering
+        .engine
+        .record(&librefang_memory::usage::UsageRecord {
+            agent_id,
+            provider: "test".to_string(),
+            model: "test-model".to_string(),
+            cost_usd: 5.0,
+            latency_ms: 1,
+            ..Default::default()
+        })
+        .unwrap();
+
+    let mut events = kernel.events.event_bus.subscribe_all();
+    let expect_event =
+        |events: &mut tokio::sync::broadcast::Receiver<Arc<librefang_types::event::Event>>,
+         path: &str| {
+            let mut seen = false;
+            while let Ok(event) = events.try_recv() {
+                if let EventPayload::System(SystemEvent::QuotaEnforced {
+                    agent_id: id,
+                    spent,
+                    limit,
+                }) = &event.payload
+                {
+                    assert_eq!(*id, agent_id);
+                    assert!((*spent - 5.0).abs() < 1e-9 && (*limit - 0.50).abs() < 1e-9);
+                    seen = true;
+                }
+            }
+            assert!(seen, "{path} quota rejection must publish QuotaEnforced");
+        };
+
+    let err = kernel
+        .send_message(agent_id, "ping")
+        .await
+        .expect_err("an over-quota agent must be refused");
+    assert!(matches!(
+        err,
+        KernelError::LibreFang(LibreFangError::QuotaExceeded(_))
+    ));
+    expect_event(&mut events, "non-streaming");
+
+    let err = kernel
+        .send_message_streaming_with_routing_and_session_override(agent_id, "ping", None, None)
+        .await
+        .expect_err("an over-quota agent must be refused before a streaming turn starts");
+    assert!(
+        matches!(
+            err,
+            KernelError::LibreFang(LibreFangError::QuotaExceeded(_))
+        ),
+        "got {err:?}"
+    );
+    expect_event(&mut events, "streaming");
+
+    kernel.shutdown();
+}
+
+/// A trigger on an over-quota agent's own `QuotaEnforced` event dispatches a turn the same quota check refuses, which emits the event again.
+/// The sync lifecycle path must step `PUBLISH_EVENT_DEPTH` like `publish_event` does, so that chain stops at `triggers.max_depth` instead of re-firing for as long as the agent stays over quota.
+#[tokio::test(flavor = "multi_thread")]
+async fn quota_enforced_trigger_on_own_agent_stops_at_max_depth() {
+    use crate::triggers::TriggerPattern;
+    use librefang_types::event::{EventPayload, SystemEvent};
+
+    let (kernel, agent_id, _) = kernel_with_seeded_session("quota-loop", None, 0).await;
+    kernel
+        .agents
+        .registry
+        .update_resources(agent_id, Some(0.50), None, None, None)
+        .unwrap();
+    kernel
+        .metering
+        .engine
+        .record(&librefang_memory::usage::UsageRecord {
+            agent_id,
+            provider: "test".to_string(),
+            model: "test-model".to_string(),
+            cost_usd: 5.0,
+            latency_ms: 1,
+            ..Default::default()
+        })
+        .unwrap();
+    // `cooldown_secs = 0` is the worst case: without the depth guard the chain is a tight loop.
+    kernel
+        .workflows
+        .triggers
+        .register_with_target(
+            agent_id,
+            TriggerPattern::System,
+            "quota hit: {{event}}".to_string(),
+            0,
+            None,
+            Some(0),
+            None,
+            None,
+        )
+        .expect("trigger registers");
+    let max_depth = kernel.config.load().triggers.max_depth;
+
+    let mut events = kernel.events.event_bus.subscribe_all();
+    kernel
+        .send_message(agent_id, "ping")
+        .await
+        .expect_err("an over-quota agent must be refused");
+
+    // Drain until the bus has been quiet for a while; a chain that never terminates keeps producing events and blows past the bound below.
+    let mut quota_events = 0usize;
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(20);
+    let mut last_seen = tokio::time::Instant::now();
+    while tokio::time::Instant::now() < deadline
+        && last_seen.elapsed() < std::time::Duration::from_secs(2)
+    {
+        while let Ok(event) = events.try_recv() {
+            if matches!(
+                event.payload,
+                EventPayload::System(SystemEvent::QuotaEnforced { .. })
+            ) {
+                quota_events += 1;
+                last_seen = tokio::time::Instant::now();
+            }
+        }
+        if quota_events > max_depth + 1 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+
+    assert!(
+        quota_events >= 2,
+        "the trigger must have fired at least once, saw {quota_events} QuotaEnforced events"
+    );
+    assert!(
+        quota_events <= max_depth + 1,
+        "the QuotaEnforced trigger chain must stop at triggers.max_depth ({max_depth}), saw {quota_events} events"
+    );
+    kernel.shutdown();
+}
+
+/// Shutdown must announce `SystemEvent::KernelStopping` on the bus (wiring-5) before subscribers are torn down.
+#[test]
+fn shutdown_publishes_kernel_stopping() {
+    use librefang_types::event::{EventPayload, SystemEvent};
+
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().to_path_buf();
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+    let kernel = LibreFangKernel::boot_with_config(KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    })
+    .expect("kernel should boot");
+    let mut events = kernel.events.event_bus.subscribe_all();
+    kernel.shutdown();
+    let mut stopping = false;
+    while let Ok(event) = events.try_recv() {
+        stopping |= matches!(
+            event.payload,
+            EventPayload::System(SystemEvent::KernelStopping)
+        );
+    }
+    assert!(stopping, "shutdown must publish KernelStopping");
 }

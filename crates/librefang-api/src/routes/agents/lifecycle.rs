@@ -365,6 +365,16 @@ async fn spawn_agent_inner(
                 crate::error::KernelError::LibreFang(
                     librefang_types::error::LibreFangError::AgentAlreadyExists(_),
                 ) => (StatusCode::CONFLICT, "agent_already_exists"),
+                // A caller mistake the kernel types (reserved name prefix, unsatisfiable `tool_exec_backend`, …) follows the canonical table instead of collapsing into a scrubbed 500.
+                crate::error::KernelError::LibreFang(inner)
+                    if crate::error::kernel_op_status(inner)
+                        != StatusCode::INTERNAL_SERVER_ERROR =>
+                {
+                    (
+                        crate::error::kernel_op_status(inner),
+                        crate::error::kernel_op_code(inner),
+                    )
+                }
                 _ => (StatusCode::INTERNAL_SERVER_ERROR, "spawn_failed"),
             };
             // 409 (duplicate name) echoes the kernel message — useful
@@ -773,6 +783,22 @@ pub async fn list_agents(
             params.owner = Some(user.0.name.clone());
         }
     }
+    // Bulk-fetch 24h sessions/cost so each row carries its own KPI without forcing the dashboard to re-aggregate from /api/sessions (which is pagination-clipped).
+    // The query is synchronous SQLite work over the 24h window, so it runs on the blocking pool rather than stalling a runtime worker on every dashboard poll.
+    // It is fetched before the catalog guard is taken so no guard is held across the `.await`.
+    let substrate = std::sync::Arc::clone(state.kernel.memory_substrate());
+    let bulk_stats =
+        match tokio::task::spawn_blocking(move || substrate.agents_stats_24h_bulk()).await {
+            Ok(Ok(stats)) => Some(stats),
+            Ok(Err(error)) => {
+                tracing::warn!(%error, "agent list: 24h stats query failed; rows omit KPI");
+                None
+            }
+            Err(error) => {
+                tracing::warn!(%error, "agent list: 24h stats task failed; rows omit KPI");
+                None
+            }
+        };
     let catalog_guard = state.kernel.model_catalog_ref().load();
     let catalog: Option<&librefang_kernel::model_catalog::ModelCatalog> = Some(&catalog_guard);
     let dm = {
@@ -879,11 +905,6 @@ pub async fn list_agents(
         .min(MAX_AGENT_LIST_LIMIT);
     let agents: Vec<std::sync::Arc<librefang_types::agent::AgentEntry>> =
         agents.into_iter().skip(offset).take(limit).collect();
-
-    // Bulk-fetch 24h sessions/cost so each row carries its own KPI without
-    // forcing the dashboard to re-aggregate from /api/sessions (which is
-    // pagination-clipped).
-    let bulk_stats = state.kernel.memory_substrate().agents_stats_24h_bulk().ok();
 
     // `e` is &Arc<AgentEntry>; `as_ref()` on Arc yields the &AgentEntry the
     // helper expects without forcing a manifest deep-clone (#3569).
@@ -1548,6 +1569,36 @@ pub async fn patch_agent(
         };
     }
 
+    // Parse the fields that can refuse the request on shape alone (`mcp_servers`, `schedule`) before the first mutation.
+    // Parsed after the name / description / model / prompt writes, a 400 here left those already applied in memory, answered as an error and reverted at the next restart.
+    let mcp_servers_patch = match patch_agent_mcp_servers(&body) {
+        Ok(servers) => servers,
+        Err(error) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": error})),
+            );
+        }
+    };
+    let schedule_patch = match body.get("schedule") {
+        Some(schedule_val) => {
+            match serde_json::from_value::<librefang_types::agent::ScheduleMode>(
+                schedule_val.clone(),
+            ) {
+                Ok(schedule) => Some(schedule),
+                Err(e) => {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(
+                            serde_json::json!({"error": t.t_args("api-error-generic", &[("error", &e.to_string())])}),
+                        ),
+                    );
+                }
+            }
+        }
+        None => None,
+    };
+
     // Apply partial updates using dedicated registry methods
     if let Some(name) = body.get("name").and_then(|v| v.as_str()) {
         // `rename_agent`, not the bare registry rename, so IDENTITY.md's front matter follows the new name (#8469).
@@ -1602,15 +1653,7 @@ pub async fn patch_agent(
             );
         }
     }
-    if let Some(mcp_servers) = match patch_agent_mcp_servers(&body) {
-        Ok(servers) => servers,
-        Err(error) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": error})),
-            );
-        }
-    } {
+    if let Some(mcp_servers) = mcp_servers_patch {
         if let Err(e) = state.kernel.set_agent_mcp_servers(agent_id, mcp_servers) {
             return (
                 StatusCode::BAD_REQUEST,
@@ -1630,35 +1673,17 @@ pub async fn patch_agent(
     // `save_agent` + `persist_manifest_to_disk` again here would be a
     // redundant double-write on every schedule PATCH.
     let mut schedule_persisted = false;
-    if let Some(schedule_val) = body.get("schedule") {
-        match serde_json::from_value::<librefang_types::agent::ScheduleMode>(schedule_val.clone()) {
-            Ok(schedule) => {
-                // Go through `set_agent_schedule` (not `agent_registry()
-                // .update_schedule`) so the background loop is stopped /
-                // restarted to match — otherwise a Reactive→Continuous
-                // (or Continuous→Reactive) toggle from the dashboard
-                // would return 200 but the runtime would keep running
-                // the previous schedule until the daemon restarts
-                // (#4984).
-                if let Err(e) = state.kernel.clone().set_agent_schedule(agent_id, schedule) {
-                    return (
-                        StatusCode::BAD_REQUEST,
-                        Json(
-                            serde_json::json!({"error": t.t_args("api-error-generic", &[("error", &e.to_string())])}),
-                        ),
-                    );
-                }
-                schedule_persisted = true;
-            }
-            Err(e) => {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(
-                        serde_json::json!({"error": t.t_args("api-error-generic", &[("error", &e.to_string())])}),
-                    ),
-                );
-            }
+    if let Some(schedule) = schedule_patch {
+        // Go through `set_agent_schedule` (not `agent_registry().update_schedule`) so the background loop is stopped / restarted to match — otherwise a Reactive→Continuous (or Continuous→Reactive) toggle from the dashboard would return 200 but the runtime would keep running the previous schedule until the daemon restarts (#4984).
+        if let Err(e) = state.kernel.clone().set_agent_schedule(agent_id, schedule) {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(
+                    serde_json::json!({"error": t.t_args("api-error-generic", &[("error", &e.to_string())])}),
+                ),
+            );
         }
+        schedule_persisted = true;
     }
 
     if let Some(auto_evolve) = body.get("auto_evolve").and_then(|v| v.as_bool()) {

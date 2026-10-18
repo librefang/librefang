@@ -419,6 +419,11 @@ pub struct PeerConfig {
     /// SECURITY (#3876): Optional cumulative LLM token cap per peer per hour.
     /// `None` means unlimited. Default: None.
     pub max_llm_tokens_per_peer_per_hour: Option<u64>,
+    /// Maximum number of inbound connections served at once, from `[network] max_peers`.
+    ///
+    /// Enforced in the accept loop before any handshake, so unauthenticated clients cannot exhaust file descriptors and tasks by holding connections open until the handshake timeout.
+    /// `0` means unlimited. Default: 50.
+    pub max_peers: u32,
 }
 
 impl Default for PeerConfig {
@@ -430,6 +435,7 @@ impl Default for PeerConfig {
             shared_secret: String::new(),
             max_messages_per_peer_per_minute: 60,
             max_llm_tokens_per_peer_per_hour: None,
+            max_peers: 50,
         }
     }
 }
@@ -1198,14 +1204,33 @@ impl PeerNode {
         registry: PeerRegistry,
         handle: Arc<dyn PeerHandle>,
     ) {
+        // One permit per live inbound connection, taken before the handshake so an unauthenticated flood cannot hold more than `max_peers` sockets and tasks.
+        let slots = match node.config.max_peers {
+            0 => None,
+            n => Some(Arc::new(tokio::sync::Semaphore::new(n as usize))),
+        };
         loop {
             match listener.accept().await {
                 Ok((stream, addr)) => {
+                    let permit = match slots.as_ref().map(|s| Arc::clone(s).try_acquire_owned()) {
+                        Some(Err(_)) => {
+                            warn!(
+                                "OFP: rejecting connection from {}: max_peers ({}) connections already open",
+                                addr, node.config.max_peers
+                            );
+                            drop(stream);
+                            continue;
+                        }
+                        Some(Ok(permit)) => Some(permit),
+                        None => None,
+                    };
                     debug!("OFP: accepted connection from {}", addr);
                     let node = Arc::clone(&node);
                     let registry = registry.clone();
                     let handle = Arc::clone(&handle);
                     tokio::spawn(async move {
+                        // Held for the life of the connection, released when it ends.
+                        let _permit = permit;
                         if let Err(e) =
                             Self::handle_inbound(stream, addr, &node, &registry, &*handle).await
                         {
@@ -1979,6 +2004,7 @@ mod tests {
             shared_secret: "test-secret-for-unit-tests".to_string(),
             max_messages_per_peer_per_minute: 0, // unlimited for tests
             max_llm_tokens_per_peer_per_hour: None,
+            max_peers: 0,
         };
         let (node1, _task1) = PeerNode::start(config1, registry1.clone(), handle1.clone())
             .await
@@ -1994,6 +2020,7 @@ mod tests {
             shared_secret: "test-secret-for-unit-tests".to_string(),
             max_messages_per_peer_per_minute: 0, // unlimited for tests
             max_llm_tokens_per_peer_per_hour: None,
+            max_peers: 0,
         };
         let (node2, _task2) = PeerNode::start(config2, registry2.clone(), handle2.clone())
             .await
@@ -2120,6 +2147,7 @@ mod tests {
             shared_secret: "test-secret-for-unit-tests".to_string(),
             max_messages_per_peer_per_minute: 0, // unlimited for tests
             max_llm_tokens_per_peer_per_hour: None,
+            max_peers: 0,
         };
         let (node1, _task1) = PeerNode::start(config1, registry1.clone(), handle1.clone())
             .await
@@ -2134,6 +2162,7 @@ mod tests {
             shared_secret: "test-secret-for-unit-tests".to_string(),
             max_messages_per_peer_per_minute: 0, // unlimited for tests
             max_llm_tokens_per_peer_per_hour: None,
+            max_peers: 0,
         };
         let (node2, _task2) = PeerNode::start(config2, registry2.clone(), handle2.clone())
             .await
@@ -2171,6 +2200,7 @@ mod tests {
             shared_secret: "test-secret-for-unit-tests".to_string(),
             max_messages_per_peer_per_minute: 0, // unlimited for tests
             max_llm_tokens_per_peer_per_hour: None,
+            max_peers: 0,
         };
         let (node1, _task1) = PeerNode::start(config1, registry1.clone(), handle1.clone())
             .await
@@ -2185,6 +2215,7 @@ mod tests {
             shared_secret: "test-secret-for-unit-tests".to_string(),
             max_messages_per_peer_per_minute: 0, // unlimited for tests
             max_llm_tokens_per_peer_per_hour: None,
+            max_peers: 0,
         };
         let (node2, _task2) = PeerNode::start(config2, registry2.clone(), handle2.clone())
             .await
@@ -2281,6 +2312,7 @@ mod tests {
             shared_secret: "test-secret-for-unit-tests".to_string(),
             max_messages_per_peer_per_minute: 0, // unlimited for tests
             max_llm_tokens_per_peer_per_hour: None,
+            max_peers: 0,
         };
         let (node, _task) = PeerNode::start(config, registry.clone(), handle.clone())
             .await
@@ -2327,6 +2359,7 @@ mod tests {
             shared_secret: "test-secret-for-unit-tests".to_string(),
             max_messages_per_peer_per_minute: 0, // unlimited for tests
             max_llm_tokens_per_peer_per_hour: None,
+            max_peers: 0,
         };
         let (node, _task) = PeerNode::start(config, registry, handle).await.unwrap();
 
@@ -2361,6 +2394,7 @@ mod tests {
             shared_secret: "test-secret-for-unit-tests".to_string(),
             max_messages_per_peer_per_minute: 0, // unlimited for tests
             max_llm_tokens_per_peer_per_hour: None,
+            max_peers: 0,
         };
         let (node, _task) = PeerNode::start(config, registry, handle).await.unwrap();
 
@@ -2397,6 +2431,7 @@ mod tests {
             shared_secret: "test-secret-for-unit-tests".to_string(),
             max_messages_per_peer_per_minute: 0, // unlimited for tests
             max_llm_tokens_per_peer_per_hour: None,
+            max_peers: 0,
         };
         let (node1, _task1) = PeerNode::start(config1, registry1.clone(), handle1.clone())
             .await
@@ -2411,6 +2446,7 @@ mod tests {
             shared_secret: "test-secret-for-unit-tests".to_string(),
             max_messages_per_peer_per_minute: 0, // unlimited for tests
             max_llm_tokens_per_peer_per_hour: None,
+            max_peers: 0,
         };
         let (node2, _task2) = PeerNode::start(config2, registry2.clone(), handle2.clone())
             .await
@@ -2803,6 +2839,7 @@ mod tests {
             shared_secret: "test-secret-for-unit-tests".to_string(),
             max_messages_per_peer_per_minute: 0,
             max_llm_tokens_per_peer_per_hour: None,
+            max_peers: 0,
         };
         let (node, _task) = PeerNode::start(config, registry, handle).await.unwrap();
 
@@ -2932,7 +2969,52 @@ mod tests {
             shared_secret: "test-secret-for-unit-tests".to_string(),
             max_messages_per_peer_per_minute: 0,
             max_llm_tokens_per_peer_per_hour: None,
+            max_peers: 0,
         }
+    }
+
+    /// `max_peers` caps inbound connections before any handshake: an unauthenticated client past the cap is dropped at accept, and a freed slot is reusable.
+    #[tokio::test]
+    async fn max_peers_caps_unauthenticated_inbound_connections() {
+        use tokio::io::AsyncReadExt;
+
+        let mut config = test_config("cap-node", "cap");
+        config.max_peers = 1;
+        let (node, _task) =
+            PeerNode::start(config, PeerRegistry::new(), Arc::new(TestHandle::new()))
+                .await
+                .unwrap();
+        let addr = node.local_addr();
+
+        // Holds the only slot: the server waits for its handshake and never closes it inside the window.
+        let mut first = TcpStream::connect(addr).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Over the cap: the server drops the socket straight away, so the read sees EOF (or a reset).
+        let mut second = TcpStream::connect(addr).await.unwrap();
+        let mut buf = [0u8; 1];
+        let read = tokio::time::timeout(Duration::from_secs(2), second.read(&mut buf))
+            .await
+            .expect("a connection over max_peers must be closed promptly");
+        assert!(matches!(read, Ok(0) | Err(_)), "got {read:?}");
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(300), first.read(&mut buf))
+                .await
+                .is_err(),
+            "the connection holding the slot must stay open"
+        );
+
+        // Closing the first connection frees its slot for the next client.
+        drop(first);
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let mut third = TcpStream::connect(addr).await.unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(300), third.read(&mut buf))
+                .await
+                .is_err(),
+            "a freed slot must admit the next connection"
+        );
     }
 
     /// Two nodes with Ed25519 keypairs complete a handshake AND each pins

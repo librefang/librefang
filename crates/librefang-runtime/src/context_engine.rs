@@ -376,6 +376,34 @@ pub trait ContextEngine: Send + Sync {
         reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy,
     ) -> LibreFangResult<CompactionResult>;
 
+    /// [`compact`](Self::compact) with the agent's resolved compaction settings.
+    ///
+    /// `compaction` carries the agent's `agent.toml [compaction]` overrides merged over the current global `[compaction]`; `None` means the engine's own configuration.
+    /// An engine built at boot otherwise compacts with the global settings it was constructed from, ignoring per-agent overrides and later config reloads.
+    /// The default ignores `compaction`, which suits an engine that does not summarise through the built-in compactor; engines that do, or that delegate to one, override it.
+    #[allow(clippy::too_many_arguments)]
+    async fn compact_with_config(
+        &self,
+        agent_id: AgentId,
+        messages: &[Message],
+        driver: Arc<dyn LlmDriver>,
+        model: &str,
+        context_window_tokens: usize,
+        reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy,
+        compaction: Option<&CompactionConfig>,
+    ) -> LibreFangResult<CompactionResult> {
+        let _ = compaction;
+        self.compact(
+            agent_id,
+            messages,
+            driver,
+            model,
+            context_window_tokens,
+            reasoning_echo_policy,
+        )
+        .await
+    }
+
     /// Called after a complete turn (LLM response + tool execution).
     ///
     /// Use this to persist state, trigger background compaction, update
@@ -670,6 +698,28 @@ impl ContextEngine for DefaultContextEngine {
         context_window_tokens: usize,
         reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy,
     ) -> LibreFangResult<CompactionResult> {
+        self.compact_with_config(
+            agent_id,
+            messages,
+            driver,
+            model,
+            context_window_tokens,
+            reasoning_echo_policy,
+            None,
+        )
+        .await
+    }
+
+    async fn compact_with_config(
+        &self,
+        agent_id: AgentId,
+        messages: &[Message],
+        driver: Arc<dyn LlmDriver>,
+        model: &str,
+        context_window_tokens: usize,
+        reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy,
+        compaction: Option<&CompactionConfig>,
+    ) -> LibreFangResult<CompactionResult> {
         // Build a temporary session for the compactor, using the per-agent
         // context window rather than the boot-time default.
         let session = librefang_memory::session::Session {
@@ -686,7 +736,10 @@ impl ContextEngine for DefaultContextEngine {
             peer_id: None,
         };
 
-        let mut compaction_config = self.compaction_config.clone();
+        // The caller's resolved settings (per-agent `[compaction]` overrides merged over the live global config) win over the boot-time copy this engine was built with.
+        let mut compaction_config = compaction
+            .cloned()
+            .unwrap_or_else(|| self.compaction_config.clone());
         compaction_config.context_window_tokens = context_window_tokens;
 
         compactor::compact_session(
@@ -1036,17 +1089,40 @@ impl ContextEngine for StackedContextEngine {
         context_window_tokens: usize,
         reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy,
     ) -> LibreFangResult<CompactionResult> {
+        self.compact_with_config(
+            agent_id,
+            messages,
+            driver,
+            model,
+            context_window_tokens,
+            reasoning_echo_policy,
+            None,
+        )
+        .await
+    }
+
+    async fn compact_with_config(
+        &self,
+        agent_id: AgentId,
+        messages: &[Message],
+        driver: Arc<dyn LlmDriver>,
+        model: &str,
+        context_window_tokens: usize,
+        reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy,
+        compaction: Option<&CompactionConfig>,
+    ) -> LibreFangResult<CompactionResult> {
         // First engine that succeeds with a non-fallback result wins.
         let mut last_fallback: Option<CompactionResult> = None;
         for (i, engine) in self.engines.iter().enumerate() {
             match engine
-                .compact(
+                .compact_with_config(
                     agent_id,
                     messages,
                     driver.clone(),
                     model,
                     context_window_tokens,
                     reasoning_echo_policy,
+                    compaction,
                 )
                 .await
             {
@@ -1074,13 +1150,14 @@ impl ContextEngine for StackedContextEngine {
         self.engines
             .first()
             .expect("engines is non-empty")
-            .compact(
+            .compact_with_config(
                 agent_id,
                 messages,
                 driver,
                 model,
                 context_window_tokens,
                 reasoning_echo_policy,
+                compaction,
             )
             .await
     }
@@ -1715,14 +1792,37 @@ impl ContextEngine for SummaryContextEngine {
         context_window_tokens: usize,
         reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy,
     ) -> LibreFangResult<CompactionResult> {
+        self.compact_with_config(
+            agent_id,
+            messages,
+            driver,
+            model,
+            context_window_tokens,
+            reasoning_echo_policy,
+            None,
+        )
+        .await
+    }
+
+    async fn compact_with_config(
+        &self,
+        agent_id: AgentId,
+        messages: &[Message],
+        driver: Arc<dyn LlmDriver>,
+        model: &str,
+        context_window_tokens: usize,
+        reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy,
+        compaction: Option<&CompactionConfig>,
+    ) -> LibreFangResult<CompactionResult> {
         self.inner
-            .compact(
+            .compact_with_config(
                 agent_id,
                 messages,
                 driver,
                 model,
                 context_window_tokens,
                 reasoning_echo_policy,
+                compaction,
             )
             .await
     }

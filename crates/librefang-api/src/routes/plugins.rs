@@ -2060,7 +2060,7 @@ pub async fn context_engine_metrics_summary(
         .context_engine_ref()
         .and_then(|e| e.hook_metrics())
     else {
-        return (StatusCode::NO_CONTENT, Json(serde_json::json!({}))).into_response();
+        return StatusCode::NO_CONTENT.into_response();
     };
 
     let hook_data = [

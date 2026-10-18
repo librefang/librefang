@@ -36,6 +36,7 @@ import { Badge } from "../components/ui/Badge";
 import { InlineEmpty } from "../components/ui/InlineEmpty";
 import { useUIStore } from "../lib/store";
 import { toastErr } from "../lib/errors";
+import { downloadBlob } from "../lib/download";
 import {
   Play, Save, Trash2, Plus, FolderOpen, Loader2,
   Maximize2, Minimize2, ArrowLeft, X, Group, ChevronDown, ChevronRight,
@@ -1234,12 +1235,7 @@ function CanvasPageInner() {
   const exportWorkflow = useCallback(() => {
     const data = { nodes, edges, name: workflowName, description: workflowDescription };
     const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `${workflowName || "workflow"}.json`;
-    a.click();
-    URL.revokeObjectURL(url);
+    downloadBlob(blob, `${workflowName || "workflow"}.json`);
     showToast(t("canvas.exported"));
   }, [nodes, edges, workflowName, workflowDescription, showToast, t]);
 

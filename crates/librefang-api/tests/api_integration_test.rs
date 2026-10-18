@@ -124,6 +124,7 @@ async fn start_test_server_with_builder(builder: MockKernelBuilder) -> TestServe
         require_auth_for_reads: false,
         allow_no_auth: false,
         audit_log: None,
+        a2a_agents_path: None,
     };
 
     let app = Router::new()
@@ -2114,6 +2115,7 @@ async fn start_test_server_with_auth(api_key: &str) -> TestServer {
         // open-server path to keep them green.
         allow_no_auth: true,
         audit_log: None,
+        a2a_agents_path: None,
     };
 
     let app = Router::new()
@@ -4133,6 +4135,7 @@ async fn start_test_server_with_rbac_users(
         // `allow_no_auth = true` the middleware would 401 first.
         allow_no_auth: true,
         audit_log: Some(state.kernel.audit().clone()),
+        a2a_agents_path: None,
     };
 
     let app = Router::new()
@@ -4429,6 +4432,7 @@ async fn start_test_server_with_full_user_configs(
         require_auth_for_reads: false,
         allow_no_auth: true,
         audit_log: Some(state.kernel.audit().clone()),
+        a2a_agents_path: None,
     };
 
     let app = Router::new()

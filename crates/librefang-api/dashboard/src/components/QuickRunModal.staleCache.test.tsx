@@ -71,9 +71,9 @@ describe("QuickRunModal over a stale cached agent list (#8385)", () => {
     // The cache exactly as the spawn mutation's invalidation leaves it: a list
     // fetched before agent-b existed, marked stale with no active subscriber to
     // refetch it.
-    qc.setQueryData(agentKeys.list(), [ALPHA]);
+    qc.setQueryData(agentKeys.list(), { items: [ALPHA], truncated: false });
     await qc.invalidateQueries({ queryKey: agentKeys.lists() });
-    listAgentsMock.mockResolvedValue([ALPHA, BRAVO]);
+    listAgentsMock.mockResolvedValue({ items: [ALPHA, BRAVO], truncated: false });
 
     render(
       <QueryClientProvider client={qc}>

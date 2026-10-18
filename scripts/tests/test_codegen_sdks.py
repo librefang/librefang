@@ -229,7 +229,7 @@ def main():
         "python-toml-raw-body-sig",
     )
     assert_in(
-        'self._c._request("PUT", f"/api/templates/{name}/toml", body, content_type=content_type)',
+        'self._c._request("PUT", f"/api/templates/{quote(str(name), safe=\'\')}/toml", body, content_type=content_type)',
         py,
         "python-toml-raw-body-call",
     )
@@ -256,6 +256,13 @@ def main():
         "rust-toml-raw-body-sig",
     )
     assert_in("do_req_raw(", rs, "rust-toml-raw-body-call")
+
+    # Path parameters are percent-encoded as one segment, and Python booleans reach the query string as `true` / `false`.
+    assert_in('f"/api/memory/agents/{quote(str(id), safe=\'\')}/kv/{quote(str(key), safe=\'\')}"', py, "python-path-param-encoded")
+    assert_in("from urllib.parse import quote, urlencode", py, "python-quote-import")
+    assert_in('("true" if v else "false") if isinstance(v, bool) else v', py, "python-bool-query")
+    assert_in("/api/memory/agents/${encodeURIComponent(String(id))}/kv/${encodeURIComponent(String(key))}", js, "js-path-param-encoded")
+    assert_in('fmt.Sprintf("/api/memory/agents/%s/kv/%s", url.PathEscape(id), url.PathEscape(key))', go, "go-path-param-encoded")
 
     # Reserved-word escape works
     expect(mod._py_safe("class") == "class_", "Python reserved-word escape")

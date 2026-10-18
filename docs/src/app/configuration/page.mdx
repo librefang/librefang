@@ -1344,7 +1344,7 @@ url = "https://reviewer.example.com/.well-known/agent.json"
 | `enabled` | bool | `false` | Whether A2A protocol is enabled. |
 | `name` | string | `"LibreFang Agent OS"` | Service-level display name shown in the well-known agent card. |
 | `description` | string | `""` | Service-level description shown in the well-known agent card. |
-| `listen_path` | string | `"/a2a"` | URL path prefix for A2A endpoints. |
+| `listen_path` | string | `"/a2a"` | URL path prefix for the A2A protocol endpoints (`<listen_path>/agents`, `<listen_path>/tasks/...`); `/.well-known/agent.json` always stays at the root. Read at startup, so a change needs a restart. A value whose first segment is already taken (`api`, `v1`, `mcp`, `hooks`, `channels`, `dashboard`, `auth`, `locales`, `.well-known`) or that contains characters other than letters, digits, `-`, `_`, `.`, `~` falls back to `/a2a` with a warning. Under a non-default prefix, `<listen_path>/agents` requires authentication. |
 | `external_agents` | list of objects | `[]` | External A2A agents to discover and interact with. |
 
 **`external_agents` entries:**

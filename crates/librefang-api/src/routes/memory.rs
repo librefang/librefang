@@ -761,10 +761,10 @@ pub async fn memory_delete(
     State(state): State<Arc<AppState>>,
     api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
     Path(memory_id): Path<String>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
     let store = match get_pm_store(&state) {
         Ok(s) => s,
-        Err(e) => return e,
+        Err(e) => return e.into_response(),
     };
 
     let user_ref = api_user.as_ref().map(|e| &e.0);
@@ -774,10 +774,12 @@ pub async fn memory_delete(
     let real_agent_id = match store.find_agent_id_for_memory(&memory_id) {
         Ok(Some(aid)) => aid.0.to_string(),
         Ok(None) => {
-            return ApiErrorResponse::not_found("Memory not found").into_json_tuple();
+            return ApiErrorResponse::not_found("Memory not found")
+                .into_json_tuple()
+                .into_response();
         }
         Err(e) => {
-            return internal_error(e);
+            return internal_error(e).into_response();
         }
     };
 
@@ -785,12 +787,14 @@ pub async fn memory_delete(
         .delete_with_guard(&memory_id, &real_agent_id, &guard)
         .await
     {
-        Ok(true) => (StatusCode::NO_CONTENT, Json(serde_json::json!(null))),
-        Ok(false) => ApiErrorResponse::not_found("Memory not found").into_json_tuple(),
+        Ok(true) => StatusCode::NO_CONTENT.into_response(),
+        Ok(false) => ApiErrorResponse::not_found("Memory not found")
+            .into_json_tuple()
+            .into_response(),
         Err(librefang_types::error::LibreFangError::AuthDenied(reason)) => {
-            auth_denied_for(&state, user_ref, reason)
+            auth_denied_for(&state, user_ref, reason).into_response()
         }
-        Err(e) => internal_error(e),
+        Err(e) => internal_error(e).into_response(),
     }
 }
 
@@ -938,21 +942,21 @@ pub async fn memory_reset_agent(
     State(state): State<Arc<AppState>>,
     api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
     Path(agent_id): Path<String>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
     let store = match get_pm_store(&state) {
         Ok(s) => s,
-        Err(e) => return e,
+        Err(e) => return e.into_response(),
     };
 
     let user_ref = api_user.as_ref().map(|e| &e.0);
     let guard = guard_for_user(&state, user_ref);
 
     match store.reset_with_guard(&agent_id, &guard) {
-        Ok(_count) => (StatusCode::NO_CONTENT, Json(serde_json::json!(null))),
+        Ok(_count) => StatusCode::NO_CONTENT.into_response(),
         Err(librefang_types::error::LibreFangError::AuthDenied(reason)) => {
-            auth_denied_for(&state, user_ref, reason)
+            auth_denied_for(&state, user_ref, reason).into_response()
         }
-        Err(e) => internal_error(e),
+        Err(e) => internal_error(e).into_response(),
     }
 }
 
@@ -975,10 +979,10 @@ pub async fn memory_clear_level(
     State(state): State<Arc<AppState>>,
     api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
     Path((agent_id, level_str)): Path<(String, String)>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
     let store = match get_pm_store(&state) {
         Ok(s) => s,
-        Err(e) => return e,
+        Err(e) => return e.into_response(),
     };
 
     let user_ref = api_user.as_ref().map(|e| &e.0);
@@ -999,16 +1003,17 @@ pub async fn memory_clear_level(
                         level_str
                     )
                 })),
-            );
+            )
+                .into_response();
         }
     };
 
     match store.clear_level_with_guard(&agent_id, level, &guard) {
-        Ok(_count) => (StatusCode::NO_CONTENT, Json(serde_json::json!(null))),
+        Ok(_count) => StatusCode::NO_CONTENT.into_response(),
         Err(librefang_types::error::LibreFangError::AuthDenied(reason)) => {
-            auth_denied_for(&state, user_ref, reason)
+            auth_denied_for(&state, user_ref, reason).into_response()
         }
-        Err(e) => internal_error(e),
+        Err(e) => internal_error(e).into_response(),
     }
 }
 

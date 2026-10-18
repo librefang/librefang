@@ -89,6 +89,7 @@ fn build_harness() -> VaultHarness {
         require_auth_for_reads: false,
         allow_no_auth: true,
         audit_log: Some(state.kernel.audit().clone()),
+        a2a_agents_path: None,
     };
 
     let app = Router::new()
