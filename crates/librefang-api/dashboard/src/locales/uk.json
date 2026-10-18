@@ -3941,11 +3941,11 @@
       "help": "Гарячі клавіші",
       "help_title": "Гарячі клавіші для вкладок",
       "help_switch": "Переключити вкладку",
-      "help_switch_key": "Клік",
+      "help_switch_key": "Клік / ← →",
       "help_rename": "Перейменувати вкладку",
       "help_rename_key": "Подвійний клік",
       "help_close": "Закрити вкладку",
-      "help_close_key": "Клік коліщатком миші / ✕",
+      "help_close_key": "Клік коліщатком миші / ✕ / Del",
       "help_new": "Нова вкладка",
       "help_new_key": "＋"
     },

@@ -8,7 +8,7 @@
 
 import React from "react";
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { act, render, screen, fireEvent, waitFor } from "@testing-library/react";
+import { act, render, screen, fireEvent, waitFor, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryPage } from "./index";
 import {
@@ -370,6 +370,41 @@ describe("MemoryPage (redesigned)", () => {
     expect(typeof call.search).toBe("function");
     const next = call.search({});
     expect(next.tab).toBe("kv");
+  });
+
+  // Issue #8597 — the memory tab bar announced `role="tablist"` with no panel
+  // linkage, no roving tabindex and no arrow keys.
+  it("links every tab to one panel and keeps a roving tab stop", () => {
+    renderPage();
+    const tablist = screen.getByRole("tablist", { name: "Memory views" });
+    const tabs = within(tablist).getAllByRole("tab");
+    expect(tabs).toHaveLength(4);
+
+    const panel = screen.getByRole("tabpanel");
+    for (const tab of tabs) {
+      expect(tab).toHaveAttribute("aria-controls", panel.id);
+      expect(tab.id).not.toBe("");
+    }
+
+    const stops = tabs.filter((tab) => tab.tabIndex === 0);
+    expect(stops).toHaveLength(1);
+    expect(stops[0]).toHaveAttribute("aria-selected", "true");
+    expect(panel).toHaveAttribute("aria-labelledby", stops[0].id);
+  });
+
+  it("moves to the next tab with ArrowRight and focuses the target", () => {
+    renderPage();
+    const tabs = within(screen.getByRole("tablist")).getAllByRole("tab");
+    tabs[0].focus();
+
+    fireEvent.keyDown(tabs[0], { key: "ArrowRight" });
+
+    expect(navigateMock).toHaveBeenCalledTimes(1);
+    const next = navigateMock.mock.calls[0][0].search({});
+    expect(next.tab).toBe("kv");
+    // The selection rides on the URL; the mocked router does not re-render,
+    // but the roving tab stop and focus must land on the target regardless.
+    expect(document.activeElement).toBe(tabs[1]);
   });
 
   it("opens the Add Memory drawer and calls useAddMemory.mutate", async () => {

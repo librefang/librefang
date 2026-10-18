@@ -208,7 +208,17 @@ export function useAgents(
   opts: { includeHands?: boolean } = {},
   options: QueryOverrides = {},
 ) {
-  return useQuery(withOverrides(agentQueries.list(opts), options));
+  const query = useQuery(withOverrides(agentQueries.list(opts), options));
+  // The query caches the whole envelope — `items` plus the server's
+  // `truncated` — and the hook splits it, the way `useSessions` does for
+  // `listSessions`. `.data` stays the array every existing call site reads;
+  // `.truncated` is for the callers that must not read a missing id as
+  // "deleted" when the page it came from had its tail cut off (#8596).
+  return {
+    ...query,
+    data: query.data?.items,
+    truncated: query.data?.truncated ?? false,
+  };
 }
 
 export function useAgentDetail(agentId: string, options: QueryOverrides = {}) {
