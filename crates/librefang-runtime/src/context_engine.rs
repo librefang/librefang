@@ -730,7 +730,7 @@ impl ContextEngine for DefaultContextEngine {
             context_window_tokens: context_window_tokens as u64,
             label: None,
             model_override: None,
-
+            reasoning_effort: None,
             messages_generation: 0,
             last_repaired_generation: None,
             peer_id: None,

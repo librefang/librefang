@@ -26,6 +26,19 @@ pub trait CatalogQuery: Send + Sync {
         librefang_types::model_catalog::ReasoningEchoPolicy::None
     }
 
+    /// The reasoning-effort policy `model` advertises (#8591), from the
+    /// catalog entry plus any operator override.
+    ///
+    /// An undeclared policy (empty set, no default) means the entry published
+    /// nothing: drivers then keep their pre-#8591 spelling for the legacy
+    /// tokens. The kernel uses the same value to coerce a request outside the
+    /// declared set to the nearest supported rung. Default impl returns the
+    /// undeclared policy so existing mocks and stubs keep compiling and behave
+    /// exactly as before the field existed.
+    fn reasoning_policy_for(&self, _model: &str) -> librefang_types::config::ReasoningEffortPolicy {
+        librefang_types::config::ReasoningEffortPolicy::default()
+    }
+
     /// What is known about the given model's vision (image) input support, resolved from the model catalog (#6010, refs #7957).
     /// Consulted at request-build time to decide whether image content blocks may be sent to the model or must be redacted to a text placeholder first — text-only OpenAI-compatible models reject image content parts with HTTP 400 (`unknown variant image_url, expected text`).
     ///

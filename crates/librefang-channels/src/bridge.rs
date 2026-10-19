@@ -345,16 +345,25 @@ pub trait ChannelBridgeHandle: Send + Sync {
         Err("Not implemented".to_string())
     }
 
-    /// Toggle extended thinking for one conversation on `agent_id`.
+    /// Pin (or clear) the per-session reasoning-effort override for one
+    /// conversation on `agent_id` (#8591).
+    ///
+    /// `effort` is `None` to clear the pin — the agent / global / compiled
+    /// default decides again — `Some("none")` for the explicit non-think
+    /// toggle, or `Some(<rung>)` for a graded effort. The token vocabulary is
+    /// [`crate::commands::parse_think_argument`]'s; the implementation stores
+    /// it on the session `(channel, chat_id)` resolves to, so the next inbound
+    /// turn applies it after the agent/global default and before any
+    /// per-message override.
     ///
     /// `scope` is the conversation the command was typed in, not the agent: one agent commonly serves many chats across many channel accounts, and `/think` acks say "for this chat", so the preference must be stored and read back per conversation (#7140). Implementations that key it by `agent_id` alone leak one user's reasoning mode — and its cost — into every other conversation the agent serves.
-    async fn set_thinking(
+    async fn set_reasoning_effort(
         &self,
         _agent_id: AgentId,
-        _on: bool,
+        _effort: Option<&str>,
         _scope: &crate::types::ConversationScope,
     ) -> Result<String, String> {
-        Ok("Extended thinking preference saved.".to_string())
+        Ok("Reasoning effort preference saved.".to_string())
     }
 
     /// List installed skills as formatted text for channel display.
@@ -7827,14 +7836,21 @@ async fn handle_command(
             }
         }
         "think" => {
-            // Bare `/think` means "on"; anything that is not a recognised on/off word is a typo, and silently reading it as "off" is how `/think of` used to disable thinking while acking success.
-            let on = match args.first().map(|a| a.to_ascii_lowercase()).as_deref() {
-                None | Some("on") | Some("true") | Some("enable") | Some("enabled") => true,
-                Some("off") | Some("false") | Some("disable") | Some("disabled") => false,
-                Some(other) => {
-                    return format!("Unknown argument '{other}'. Usage: /think [on|off]");
-                }
-            };
+            // The vocabulary is `commands::parse_think_argument` — the same
+            // parser the TUI chat runner uses, so the two surfaces cannot
+            // drift. A typo used to be read as "off" (`/think of` disabled
+            // thinking while acking success); now it is answered with the
+            // usage line and changes nothing.
+            let effort =
+                match crate::commands::parse_think_argument(args.first().map(String::as_str)) {
+                    Ok(effort) => effort,
+                    Err(other) => {
+                        let usage = crate::commands::lookup("think")
+                            .map(|def| def.usage())
+                            .unwrap_or_else(|| "Usage: /think".to_string());
+                        return format!("Unknown argument '{other}'. {usage}");
+                    }
+                };
             let agent_id = resolved_agent;
             match agent_id {
                 Some(aid) => {
@@ -7844,7 +7860,7 @@ async fn handle_command(
                     let scope =
                         crate::types::ConversationScope::new(ch, account_id, chat.as_deref());
                     handle
-                        .set_thinking(aid, on, &scope)
+                        .set_reasoning_effort(aid, effort, &scope)
                         .await
                         .unwrap_or_else(|e| format!("Error: {e}"))
                 }
@@ -8331,10 +8347,10 @@ mod tests {
         }
     }
 
-    /// Records every `/think` toggle with the conversation scope it arrived with, so a test can assert the command path passes the conversation identity down instead of the bare agent id (#7140).
+    /// Records every `/think` pin with the conversation scope it arrived with, so a test can assert the command path passes the conversation identity down instead of the bare agent id (#7140).
     struct ThinkRecorderHandle {
         agents: Mutex<Vec<(AgentId, String)>>,
-        calls: Mutex<Vec<(AgentId, bool, crate::types::ConversationScope)>>,
+        calls: Mutex<Vec<(AgentId, Option<String>, crate::types::ConversationScope)>>,
     }
 
     impl ThinkRecorderHandle {
@@ -8361,16 +8377,16 @@ mod tests {
         async fn spawn_agent_by_name(&self, _manifest_name: &str) -> Result<AgentId, String> {
             Err("spawn not implemented in mock".to_string())
         }
-        async fn set_thinking(
+        async fn set_reasoning_effort(
             &self,
             agent_id: AgentId,
-            on: bool,
+            effort: Option<&str>,
             scope: &crate::types::ConversationScope,
         ) -> Result<String, String> {
             self.calls
                 .lock()
                 .unwrap()
-                .push((agent_id, on, scope.clone()));
+                .push((agent_id, effort.map(str::to_string), scope.clone()));
             Ok("ok".to_string())
         }
         fn record_consumer_lag(&self, _n: u64, _ctx: &'static str) {
@@ -9609,7 +9625,7 @@ mod tests {
         );
     }
 
-    /// Regression for #7140: `/think` acks say "for this chat", so the command path must hand `set_thinking` the conversation it was typed in. One agent commonly serves many Telegram chats; passing the bare agent id is what made one user's toggle rewrite everybody else's turns.
+    /// Regression for #7140: `/think` acks say "for this chat", so the command path must hand `set_reasoning_effort` the conversation it was typed in. One agent commonly serves many Telegram chats; passing the bare agent id is what made one user's pin rewrite everybody else's turns.
     #[tokio::test]
     async fn think_command_carries_the_conversation_scope() {
         let agent = AgentId::new();
@@ -9633,9 +9649,9 @@ mod tests {
             librefang_user: None,
         };
 
-        let on = handle_command(
+        let medium = handle_command(
             "think",
-            &["on".to_string()],
+            &["medium".to_string()],
             &handle,
             &router,
             dispatch_resolution(
@@ -9653,7 +9669,7 @@ mod tests {
             "member-1",
         )
         .await;
-        assert_eq!(on, "ok");
+        assert_eq!(medium, "ok");
 
         let off = handle_command(
             "think",
@@ -9678,19 +9694,23 @@ mod tests {
         assert_eq!(off, "ok");
 
         let calls = recorder.calls.lock().unwrap().clone();
-        assert_eq!(calls.len(), 2, "both toggles must reach the handle");
+        assert_eq!(calls.len(), 2, "both pins must reach the handle");
         assert_eq!(calls[0].0, agent);
         assert_eq!(calls[1].0, agent, "same agent serves both chats");
-        assert!(calls[0].1, "/think on");
-        assert!(!calls[1].1, "/think off");
+        assert_eq!(calls[0].1.as_deref(), Some("medium"), "/think medium");
+        assert_eq!(
+            calls[1].1.as_deref(),
+            Some("none"),
+            "/think off is the explicit non-think toggle, not a cleared pin"
+        );
         assert_ne!(
             calls[0].2, calls[1].2,
             "two chats on one agent must produce different scopes, or the \
-             second toggle overwrites the first"
+             second pin overwrites the first"
         );
 
         // The scope is the same (channel, chat_id) pair `/new` resets, plus
-        // the account — so `set_thinking` and the message path agree on the key.
+        // the account — so the pin and the message path agree on the key.
         let (channel, chat) =
             session_scope(&ChannelType::Telegram, &chat_one.platform_id, "member-1");
         assert_eq!(
@@ -9721,7 +9741,7 @@ mod tests {
         for account in ["bot-a", "bot-b"] {
             handle_command(
                 "think",
-                &["on".to_string()],
+                &["high".to_string()],
                 &handle,
                 &router,
                 dispatch_resolution(
@@ -9743,6 +9763,8 @@ mod tests {
 
         let calls = recorder.calls.lock().unwrap().clone();
         assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].1.as_deref(), Some("high"));
+        assert_eq!(calls[1].1.as_deref(), Some("high"));
         assert_ne!(
             calls[0].2, calls[1].2,
             "one chat id under two bot accounts must not collapse to one scope"
@@ -9787,13 +9809,17 @@ mod tests {
             "member-1",
         )
         .await;
-        assert!(result.contains("Usage: /think [on|off]"), "got: {result}");
+        assert!(
+            result.contains("Usage: /think [none|minimal|low|medium|high|xhigh|max|on|off]"),
+            "got: {result}"
+        );
         assert!(
             recorder.calls.lock().unwrap().is_empty(),
-            "a typo must not silently toggle anything"
+            "a typo must not silently pin anything"
         );
 
-        // Bare `/think` still means "on".
+        // Bare `/think` clears the pin back to the agent/global default; it
+        // no longer forces thinking on (the test below pins `None`).
         let result = handle_command(
             "think",
             &[],
@@ -9815,7 +9841,113 @@ mod tests {
         )
         .await;
         assert_eq!(result, "ok");
-        assert!(recorder.calls.lock().unwrap()[0].1);
+        assert_eq!(
+            recorder.calls.lock().unwrap()[0].1,
+            None,
+            "bare /think clears the pin"
+        );
+    }
+
+    /// Drive one `/think <arg>` through the real dispatcher with the harness's
+    /// standard Telegram `bot-a` sender, returning the reply.
+    async fn think_with(
+        handle: &Arc<dyn ChannelBridgeHandle>,
+        router: &Arc<AgentRouter>,
+        chat: &ChannelUser,
+        arg: Option<&str>,
+    ) -> String {
+        let args: Vec<String> = arg.map(|a| vec![a.to_string()]).unwrap_or_default();
+        handle_command(
+            "think",
+            &args,
+            handle,
+            router,
+            dispatch_resolution(handle, router, chat, &ChannelType::Telegram, Some("bot-a")).await,
+            chat,
+            &ChannelType::Telegram,
+            Some("bot-a"),
+            None,
+            "member-1",
+        )
+        .await
+    }
+
+    /// The pre-#8591 on/off spellings keep their old words with the pin
+    /// semantics #8591 gives them: `on` (and synonyms) clears the pin back to
+    /// the agent/global default, `off` (and synonyms) pins the explicit
+    /// non-think token.
+    #[tokio::test]
+    async fn think_command_aliases_clear_on_and_pin_none_on_off() {
+        let agent = AgentId::new();
+        let recorder = Arc::new(ThinkRecorderHandle::new(vec![(
+            agent,
+            "shared-agent".to_string(),
+        )]));
+        let handle: Arc<dyn ChannelBridgeHandle> = recorder.clone();
+        let router = Arc::new(AgentRouter::new());
+        router.set_channel_default("telegram:bot-a".to_string(), agent);
+        let chat = ChannelUser {
+            platform_id: "chat-1".to_string(),
+            display_name: "Group One".to_string(),
+            librefang_user: None,
+        };
+
+        for alias in ["on", "true", "enable", "enabled"] {
+            let reply = think_with(&handle, &router, &chat, Some(alias)).await;
+            assert_eq!(reply, "ok", "alias {alias}");
+        }
+        for alias in ["off", "false", "disable", "disabled"] {
+            let reply = think_with(&handle, &router, &chat, Some(alias)).await;
+            assert_eq!(reply, "ok", "alias {alias}");
+        }
+
+        let calls = recorder.calls.lock().unwrap().clone();
+        assert_eq!(calls.len(), 8, "every alias must reach the handle");
+        for call in calls.iter().take(4) {
+            assert_eq!(call.1, None, "the on-aliases must clear the pin");
+        }
+        for call in calls.iter().skip(4) {
+            assert_eq!(
+                call.1.as_deref(),
+                Some("none"),
+                "the off-aliases must pin the explicit non-think toggle"
+            );
+        }
+    }
+
+    /// Every canonical rung round-trips to the handle verbatim: the pin can
+    /// reach levels the old boolean could not name (#8591).
+    #[tokio::test]
+    async fn think_command_accepts_every_canonical_level() {
+        let agent = AgentId::new();
+        let recorder = Arc::new(ThinkRecorderHandle::new(vec![(
+            agent,
+            "shared-agent".to_string(),
+        )]));
+        let handle: Arc<dyn ChannelBridgeHandle> = recorder.clone();
+        let router = Arc::new(AgentRouter::new());
+        router.set_channel_default("telegram:bot-a".to_string(), agent);
+        let chat = ChannelUser {
+            platform_id: "chat-1".to_string(),
+            display_name: "Group One".to_string(),
+            librefang_user: None,
+        };
+
+        for level in librefang_types::config::CANONICAL_REASONING_EFFORTS {
+            let reply = think_with(&handle, &router, &chat, Some(level)).await;
+            assert_eq!(reply, "ok", "level {level}");
+        }
+
+        let calls = recorder.calls.lock().unwrap().clone();
+        let recorded: Vec<Option<&str>> = calls.iter().map(|c| c.1.as_deref()).collect();
+        assert_eq!(
+            recorded,
+            librefang_types::config::CANONICAL_REASONING_EFFORTS
+                .iter()
+                .map(|l| Some(*l))
+                .collect::<Vec<_>>(),
+            "the command must forward each rung unchanged"
+        );
     }
 
     /// Regression test for #5672 Layer B: `/agent` in bot-a must NOT

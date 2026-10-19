@@ -205,7 +205,7 @@ async fn streamed_thinking_signature_is_captured_and_replayed_verbatim() {
 
     // The turn that produced those blocks asked for thinking on a model that takes the adaptive form, so the removed budget spelling must not appear alongside them.
     assert_eq!(body["thinking"], serde_json::json!({"type": "adaptive"}));
-    // No `reasoning_mode` was set, so no rung is invented and the API's own default effort applies.
+    // No `reasoning_effort` was set, so no rung is invented and the API's own default effort applies.
     assert!(
         body.get("output_config").is_none(),
         "an unconfigured depth must be left to the API default, got {body}",

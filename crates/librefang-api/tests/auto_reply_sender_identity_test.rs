@@ -187,11 +187,11 @@ async fn auto_reply_turn_records_the_sender_channel() {
 
 /// The auto-reply turn must honour the conversation's `/think`.
 ///
-/// The adapter stores that preference per `(agent, conversation)` and
-/// `send_message_with_sender` is the only place that reads it. The agent is given
-/// its own reasoning config so that "inherit" and "off" produce different
-/// requests — with no config on either side the two are indistinguishable and
-/// this test would pass by construction.
+/// The adapter pins the effort on the session the conversation resolves to
+/// (`channel_session_id`), and the kernel's resolution chain applies it on
+/// later turns; the agent is given its own reasoning config so that "inherit"
+/// and "off" produce different requests — with no config on either side the
+/// two are indistinguishable and this test would pass by construction.
 #[tokio::test(flavor = "multi_thread")]
 async fn auto_reply_turn_honours_the_conversation_think_setting() {
     let server = MockServer::start().await;
@@ -227,15 +227,15 @@ async fn auto_reply_turn_honours_the_conversation_think_setting() {
          provider, else this test cannot discriminate; bodies were {after_first:?}"
     );
 
-    // The same conversation switches reasoning off.
+    // The same conversation pins the explicit non-think toggle.
     adapter
-        .set_thinking(
+        .set_reasoning_effort(
             agent_id,
-            false,
+            Some("none"),
             &ConversationScope::from_sender(&telegram_dm()),
         )
         .await
-        .expect("set_thinking");
+        .expect("set_reasoning_effort");
 
     let before_second = after_first.len();
     adapter

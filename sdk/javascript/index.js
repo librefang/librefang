@@ -1461,6 +1461,10 @@ class SessionsResource {
   async patchSessionModel(id, data) {
     return this._c._request("PATCH", `/api/sessions/${encodeURIComponent(String(id))}/model`, data, undefined);
   }
+
+  async patchSessionReasoning(id, data) {
+    return this._c._request("PATCH", `/api/sessions/${encodeURIComponent(String(id))}/reasoning`, data, undefined);
+  }
 }
 
 // ── Skills Resource

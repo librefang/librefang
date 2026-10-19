@@ -416,16 +416,19 @@ impl OllamaDriver {
             // and adding latency. Keeping the explicit `false` preserves
             // the pre-#4810 user-visible behaviour exactly.
             //
-            // `reasoning_mode = "none"` (#7946) is an explicit request NOT to
+            // `reasoning_effort = "none"` (#7946) is an explicit request NOT to
             // reason, so it reads as `think: false` even though a
             // `ThinkingConfig` is present. The kernel has to materialise one to
             // carry the mode (so the OpenAI-compatible drivers can send their
             // explicit non-think toggle), and without this check that config
             // would flip `think` to `true` for an agent that asked for the
             // opposite.
-            think: Some(request.thinking.as_ref().is_some_and(|tc| {
-                tc.reasoning_mode != Some(librefang_types::config::ReasoningMode::None)
-            })),
+            think: Some(
+                request
+                    .thinking
+                    .as_ref()
+                    .is_some_and(|tc| !tc.reasoning_effort.as_ref().is_some_and(|m| m.is_none())),
+            ),
             format,
             options,
             extra_body: request.extra_body.clone(),
@@ -1264,7 +1267,7 @@ mod tests {
         assert_eq!(wire.think, Some(false));
     }
 
-    /// `reasoning_mode = "none"` (#7946) must read as `think: false`.
+    /// `reasoning_effort = "none"` (#7946) must read as `think: false`.
     ///
     /// The kernel materialises a `ThinkingConfig` to carry that mode — it has
     /// to, so the OpenAI-compatible drivers can send their explicit non-think
@@ -1272,11 +1275,11 @@ mod tests {
     /// `think: true`, flipping chain-of-thought *on* for an agent that asked
     /// for the opposite.
     #[test]
-    fn build_request_think_field_false_for_reasoning_mode_none() {
+    fn build_request_think_field_false_for_reasoning_effort_none() {
         let driver = OllamaDriver::new(String::new(), "http://x".to_string());
         let mut r = req("qwen3:8b");
         r.thinking = Some(ThinkingConfig {
-            reasoning_mode: Some(librefang_types::config::ReasoningMode::None),
+            reasoning_effort: Some(librefang_types::config::ReasoningMode::none()),
             ..Default::default()
         });
         let wire = driver.build_request(&r).expect("build");
@@ -1285,16 +1288,16 @@ mod tests {
 
     /// Positive control: a graded mode leaves the pre-#7946 `think: true`.
     #[test]
-    fn build_request_think_field_true_for_a_graded_reasoning_mode() {
+    fn build_request_think_field_true_for_a_graded_reasoning_effort() {
         let driver = OllamaDriver::new(String::new(), "http://x".to_string());
         for mode in [
-            librefang_types::config::ReasoningMode::Low,
-            librefang_types::config::ReasoningMode::High,
-            librefang_types::config::ReasoningMode::Max,
+            librefang_types::config::ReasoningMode::low(),
+            librefang_types::config::ReasoningMode::high(),
+            librefang_types::config::ReasoningMode::max(),
         ] {
             let mut r = req("qwen3:8b");
             r.thinking = Some(ThinkingConfig {
-                reasoning_mode: Some(mode),
+                reasoning_effort: Some(mode.clone()),
                 ..Default::default()
             });
             let wire = driver.build_request(&r).expect("build");
