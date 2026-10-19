@@ -195,10 +195,7 @@ async fn resolve_manifest(
         req.manifest_toml.clone()
     };
 
-    // Size guard — bounds the inline `manifest_toml` and the content of a
-    // resolved template file alike. `MAX_MANIFEST_SIZE` no longer covers only
-    // the client-supplied body: a template is still read into memory here, so
-    // the same cap applies before either is parsed or verified.
+    // Size guard — bounds the inline `manifest_toml` and the content of a resolved template file alike: a template is read into memory here, so the same cap applies before either is parsed or verified.
     if manifest_toml.len() > MAX_MANIFEST_SIZE {
         let t = ErrorTranslator::new(lang);
         return Err(ManifestError {
