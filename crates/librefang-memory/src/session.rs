@@ -2084,6 +2084,29 @@ impl SessionStore {
         Ok((summary, recent))
     }
 
+    /// Drop the agent-scoped compaction summary when `session_id` owns it (#8645 review).
+    ///
+    /// The canonical row is shared by every conversation of an agent, and #6493 gates its
+    /// summary by `compacted_summary_session_id`. A reset that recreates the same deterministic
+    /// sid, or a delete that removes it, must therefore take the summary with it — otherwise
+    /// `canonical_context` hands the fresh conversation the summary of the history that was
+    /// just cleared. Returns whether the row was changed.
+    pub fn clear_compacted_summary_for_session(
+        &self,
+        agent_id: AgentId,
+        session_id: SessionId,
+    ) -> LibreFangResult<bool> {
+        let mut canonical = self.load_canonical(agent_id)?;
+        if canonical.compacted_summary_session_id != Some(session_id) {
+            return Ok(false);
+        }
+        canonical.compacted_summary = None;
+        canonical.compacted_summary_session_id = None;
+        canonical.updated_at = Utc::now().to_rfc3339();
+        self.save_canonical(&canonical)?;
+        Ok(true)
+    }
+
     /// Persist a canonical session to SQLite.
     fn save_canonical(&self, canonical: &CanonicalSession) -> LibreFangResult<()> {
         let conn = self.pool.get().map_err(LibreFangError::memory)?;

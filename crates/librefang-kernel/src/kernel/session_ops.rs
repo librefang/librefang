@@ -280,6 +280,11 @@ impl LibreFangKernel {
         for sid in &removed {
             librefang_runtime::file_read_tracker::forget_session(sid);
         }
+        // The summaries of a deleted conversation must not stay readable: a leftover mirror in
+        // `kv_store` is exactly what #3548/#7991 removed from the session tables (#8645 review).
+        if let Some(agent_id) = owner {
+            self.forget_session_summaries(agent_id, &removed);
+        }
         Ok(removed)
     }
 
@@ -393,6 +398,9 @@ impl LibreFangKernel {
         Self::purge_jsonl_files(entry, &pre_delete_sids);
         // Channel sids are deterministic, so the next inbound lands on the same id; a surviving `file_read_tracker` bucket would answer its first read with a "see above" stub pointing at the history just deleted.
         Self::forget_file_read_state(&pre_delete_sids);
+        // Same reason for the summaries: the mirror and any canonical summary owned by a
+        // cleared sid would otherwise describe history the user just wiped (#8645 review).
+        self.forget_session_summaries(agent_id, &pre_delete_sids);
 
         // Create a fresh session and inject reset prompt if configured
         let mut new_session = self
@@ -561,6 +569,10 @@ impl LibreFangKernel {
 
             // Best-effort JSONL cleanup (see `reset_all_sessions` for rationale).
             Self::purge_jsonl_files(entry, std::slice::from_ref(&sid));
+
+            // The sid is reused immediately below, so the summaries of the cleared history
+            // must go with it; otherwise the fresh session reads them as its own (#8645 review).
+            self.forget_session_summaries(agent_id, std::slice::from_ref(&sid));
         }
         // The sid is reused below, so the old `file_read_tracker` bucket must go with the history: its "see above" stubs would point at messages that no longer exist.
         // Unconditional because it is a no-op for a sid that never had a bucket.
@@ -648,6 +660,47 @@ impl LibreFangKernel {
     fn forget_file_read_state(sids: &[SessionId]) {
         for sid in sids {
             librefang_runtime::file_read_tracker::forget_session(sid);
+        }
+    }
+
+    /// Drop the summaries that describe a conversation once its history is gone (#8645 review).
+    ///
+    /// Two artifacts outlive the `sessions` row and are read by the next turn that lands on
+    /// the same deterministic sid: the per-session compaction mirror in `kv_store`, and the
+    /// agent-scoped canonical summary when this session owns it. Leaving either behind makes a
+    /// reset or a delete hand the fresh conversation the summary of the history it just lost.
+    ///
+    /// Best-effort by design: the history deletion has already committed, and a leftover
+    /// summary is a stale-context bug, not a reason to fail the operation half-way.
+    fn forget_session_summaries(&self, agent_id: AgentId, sids: &[SessionId]) {
+        for sid in sids {
+            let key = librefang_memory::compaction_summary_key(sid);
+            if let Err(error) = self.memory.substrate.structured_delete(agent_id, &key) {
+                tracing::warn!(
+                    agent_id = %agent_id,
+                    session_id = %sid.0,
+                    %error,
+                    "Failed to remove the compaction mirror of a removed session"
+                );
+            }
+            match self
+                .memory
+                .substrate
+                .clear_compacted_summary_for_session(agent_id, *sid)
+            {
+                Ok(true) => tracing::debug!(
+                    agent_id = %agent_id,
+                    session_id = %sid.0,
+                    "Cleared the canonical compaction summary owned by the removed session"
+                ),
+                Ok(false) => {}
+                Err(error) => tracing::warn!(
+                    agent_id = %agent_id,
+                    session_id = %sid.0,
+                    %error,
+                    "Failed to clear the canonical compaction summary of a removed session"
+                ),
+            }
         }
     }
 
@@ -740,6 +793,10 @@ impl LibreFangKernel {
         Self::purge_jsonl_files(&entry, &pre_delete_sids);
         // Channel sids are reused by the next inbound, so their tracker buckets must not outlive the history (see `reset_all_sessions`).
         Self::forget_file_read_state(&pre_delete_sids);
+        // And neither must the summaries: `delete_canonical_session` above drops the canonical
+        // row, but the per-session mirrors live in `kv_store` and are only reachable here
+        // (#8645 review).
+        self.forget_session_summaries(agent_id, &pre_delete_sids);
 
         // Create a fresh session and inject reset prompt if configured
         let mut new_session = self
@@ -1631,8 +1688,9 @@ fn persist_session_summary(
 
     // Collision-free key: session id is unique per session. Pre-#4869
     // this was `session_{date}_{slug}` which silently overwrote across
-    // sessions ending with the same slugified user message. Shared with the
-    // compaction mirror in `MemorySubstrate::store_llm_summary` (#8645).
+    // sessions ending with the same slugified user message. The compaction
+    // mirror has its own `compaction_summary_` namespace (#8645 review), so
+    // the two writers cannot overwrite or impersonate each other.
     let key = librefang_memory::session_summary_key(&session_id);
     if let Err(e) =
         memory.structured_set(agent_id, &key, serde_json::Value::String(summary.clone()))
@@ -2195,6 +2253,93 @@ mod reset_lock_and_tracker_tests {
             .get_session(session.id)
             .unwrap()
             .is_none());
+        kernel.shutdown();
+    }
+
+    /// A reset, a clear and a delete all reuse or remove the deterministic sid, and none of them
+    /// may leave the summaries of the cleared conversation behind (#8645 review).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn forgetting_a_conversation_also_forgets_its_summaries() {
+        let dir = tempfile::tempdir().unwrap();
+        let kernel = boot(&dir);
+
+        let seed = |agent_id: AgentId, sid: SessionId| {
+            kernel
+                .memory
+                .substrate
+                .store_llm_summary(
+                    agent_id,
+                    "summary of the cleared history",
+                    vec![Message::user("old")],
+                    Some(sid),
+                )
+                .unwrap();
+        };
+        let mirror = |agent_id: AgentId, sid: SessionId| {
+            kernel
+                .memory
+                .substrate
+                .structured_get(agent_id, &librefang_memory::compaction_summary_key(&sid))
+                .unwrap()
+        };
+        let summary = |agent_id: AgentId, sid: SessionId| {
+            kernel
+                .memory
+                .substrate
+                .canonical_context(agent_id, Some(sid), None)
+                .unwrap()
+                .0
+        };
+
+        // 1. `reset_one_session` recreates the SAME sid, so both the mirror and an owned
+        //    canonical summary would be read back as the fresh conversation's own.
+        let agent = spawn(&kernel, "forget-summaries-reset");
+        let sid = override_session(&kernel, agent).id;
+        seed(agent, sid);
+        assert_eq!(
+            summary(agent, sid).as_deref(),
+            Some("summary of the cleared history")
+        );
+        let entry = kernel.agents.registry.get(agent).expect("agent must exist");
+        kernel
+            .reset_one_session(agent, sid, &entry, false)
+            .await
+            .unwrap();
+        assert_eq!(
+            summary(agent, sid),
+            None,
+            "a reset must not leave the cleared conversation's canonical summary in the prompt"
+        );
+        assert_eq!(
+            mirror(agent, sid),
+            None,
+            "a reset must remove the compaction mirror"
+        );
+
+        // 2. `clear_agent_history` deletes the canonical row wholesale; the kv mirror has to
+        //    follow, or the dashboard listing still serves the wiped conversation.
+        let agent = spawn(&kernel, "forget-summaries-clear");
+        let sid = override_session(&kernel, agent).id;
+        seed(agent, sid);
+        kernel.clear_agent_history(agent).await.unwrap();
+        assert_eq!(
+            mirror(agent, sid),
+            None,
+            "clearing history must remove the compaction mirror"
+        );
+
+        // 3. `delete_session` removes the cascade rows; a reader of `kv_store` must not be able
+        //    to recover what #3548/#7991 removed from the session tables.
+        let agent = spawn(&kernel, "forget-summaries-delete");
+        let sid = override_session(&kernel, agent).id;
+        seed(agent, sid);
+        kernel.delete_session(sid).await.unwrap();
+        assert_eq!(
+            mirror(agent, sid),
+            None,
+            "deleting a session must remove the compaction mirror"
+        );
+
         kernel.shutdown();
     }
 

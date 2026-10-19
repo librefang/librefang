@@ -189,22 +189,40 @@ pub fn restrict_db_file_permissions(db_path: &Path) {
     }
 }
 
-/// KV key under which the summary of a single session is stored (#8645).
+/// KV key under which `reset_session` stores its summary of a cleared session (#4869).
+///
+/// This is an agent-visible namespace: agents keep their own `session_…` keys, and
+/// #4869 writes the reset summary here so the conversation can still be recalled
+/// afterwards. It is deliberately **not** where the compaction mirror lives.
+pub fn session_summary_key(session_id: &SessionId) -> String {
+    format!("{}{}", SESSION_SUMMARY_KEY_PREFIX, session_id.0)
+}
+
+/// Prefix of [`session_summary_key`].
+pub const SESSION_SUMMARY_KEY_PREFIX: &str = "session_";
+
+/// KV key under which the compaction mirror of one session lives (#8645).
 ///
 /// The compaction summary itself lives once per agent (`canonical_sessions`,
 /// keyed by `agent_id`), and #6493/#6497 gated its *read* by owning session so
 /// one conversation's summary could not leak into another's prompt. The storage
 /// stayed agent-scoped, so only the session that compacted last could read a
 /// summary and every other session's compaction overwrote it. Keeping a copy
-/// under the session's own key — the channel `reset_session` already used for
-/// its summaries (#4869) — makes the summary readable for the conversation it
-/// actually describes.
-pub fn session_summary_key(session_id: &SessionId) -> String {
-    format!("{}{}", SESSION_SUMMARY_KEY_PREFIX, session_id.0)
+/// under the session's own key makes the summary readable for the conversation
+/// it actually describes.
+///
+/// It deliberately does **not** reuse `session_<sid>`: the reset path already
+/// writes a summary of the *previous* history to that key, and the next turn on
+/// the same deterministic sid cannot tell the two apart — a reset summary would
+/// be served to the fresh conversation as if it were its compaction summary
+/// (#8645 review). A prefix of its own also lets the tool boundary reserve the
+/// mirror outright without touching `session_` keys agents already use.
+pub fn compaction_summary_key(session_id: &SessionId) -> String {
+    format!("{}{}", COMPACTION_SUMMARY_KEY_PREFIX, session_id.0)
 }
 
-/// Prefix under which every per-session summary lives.
-pub const SESSION_SUMMARY_KEY_PREFIX: &str = "session_";
+/// Prefix of [`compaction_summary_key`]; reserved at the memory-tool boundary.
+pub const COMPACTION_SUMMARY_KEY_PREFIX: &str = "compaction_summary_";
 
 /// Cap on the mirrored copy of a summary.
 ///
@@ -578,6 +596,22 @@ impl MemorySubstrate {
         self.structured.delete(agent_id, key)
     }
 
+    /// Drop the agent-scoped compaction summary when `session_id` owns it (#8645 review).
+    ///
+    /// The canonical row is shared by every conversation of an agent, and #6493 gates its
+    /// summary by `compacted_summary_session_id`. A reset that recreates the same deterministic
+    /// sid, or a delete that removes it, must take the summary with it — otherwise
+    /// `canonical_context` serves the fresh conversation the summary of the history that was
+    /// just cleared.
+    pub fn clear_compacted_summary_for_session(
+        &self,
+        agent_id: AgentId,
+        session_id: SessionId,
+    ) -> LibreFangResult<bool> {
+        self.sessions
+            .clear_compacted_summary_for_session(agent_id, session_id)
+    }
+
     /// Synchronous set in the structured store (for kernel handle use).
     pub fn structured_set(
         &self,
@@ -892,13 +926,13 @@ impl MemorySubstrate {
         canonical.or_else(|| self.per_session_summary(agent_id, want))
     }
 
-    /// Read the summary stored under the session's own key, if any.
+    /// Read the compaction mirror stored under the session's own key, if any.
     ///
     /// Best-effort by design: this is an additive fallback, so a KV-store
     /// failure must not turn a prompt-assembly path that used to succeed (from
     /// the canonical row) into an error.
     fn per_session_summary(&self, agent_id: AgentId, session_id: SessionId) -> Option<String> {
-        match self.structured_get(agent_id, &session_summary_key(&session_id)) {
+        match self.structured_get(agent_id, &compaction_summary_key(&session_id)) {
             Ok(Some(value)) => value
                 .as_str()
                 .filter(|text| !text.trim().is_empty())
@@ -961,7 +995,7 @@ impl MemorySubstrate {
         let Some(session_id) = owning_session_id else {
             return Ok(());
         };
-        let key = session_summary_key(&session_id);
+        let key = compaction_summary_key(&session_id);
         if summary.trim().is_empty() {
             // The canonical row is written unconditionally, empty summary
             // included; leaving the previous mirror behind would resurrect it
@@ -2339,6 +2373,24 @@ mod tests {
             .canonical_context(agent, Some(session_a), None)
             .unwrap();
         assert_eq!(summary.as_deref(), Some("summary of A"));
+
+        // The mirror must not reuse the reset path's `session_` key: a reset summary is
+        // written there for the *previous* history, and the next turn on the same sid could
+        // not tell it apart from a compaction summary (#8645 review).
+        assert!(
+            substrate
+                .structured_get(agent, &session_summary_key(&session_a))
+                .unwrap()
+                .is_none(),
+            "the compaction mirror must live in its own namespace, not under `session_`"
+        );
+        assert!(
+            substrate
+                .structured_get(agent, &compaction_summary_key(&session_a))
+                .unwrap()
+                .is_some(),
+            "the mirror belongs under `compaction_summary_`"
+        );
     }
 
     /// The #6493 guarantee has to survive: a session that owns no summary reads

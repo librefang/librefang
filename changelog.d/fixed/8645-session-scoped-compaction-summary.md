@@ -1,3 +1,4 @@
 Compaction summaries are now kept per session as well as per agent.
 A conversation keeps reading its own summary after another conversation on the same agent compacts — before, the agent-scoped `canonical_sessions` row held a single summary, so only the session that compacted last could read one and every other session lost its compressed history to the next compaction.
-The per-session copies share the reserved `session_` key/value namespace the platform already uses, so the memory tools now refuse `session_`-prefixed keys on turns without peer attribution and no longer list them, while peer-scoped keys of that shape keep working (#8646) (@nevgenov)
+The per-session copy lives in its own reserved key namespace, separate from the `session_` summaries the reset path writes, so a reset summary cannot be served to the next conversation as if it were a compaction summary.
+A reset, a clear or a delete now removes both the per-session copy and any canonical summary the removed conversation owned, and the `session_` keys agents already use are left untouched (#8646) (@nevgenov)

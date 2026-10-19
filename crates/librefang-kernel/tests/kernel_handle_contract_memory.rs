@@ -700,19 +700,19 @@ fn test_concurrent_goal_update_loses_no_writes_5138() {
 }
 
 #[test]
-fn test_memory_store_rejects_session_summary_prefix_key() {
+fn test_memory_store_rejects_compaction_summary_prefix_key() {
     let (kernel, _tmp) = boot();
     let kh: &dyn KernelHandle = &kernel;
-    use librefang_memory::SESSION_SUMMARY_KEY_PREFIX;
+    use librefang_memory::COMPACTION_SUMMARY_KEY_PREFIX;
 
     let err = kh
         .memory_store(
-            &format!("{SESSION_SUMMARY_KEY_PREFIX}0192-uuid"),
+            &format!("{COMPACTION_SUMMARY_KEY_PREFIX}0192-uuid"),
             serde_json::json!("planted"),
             None,
             None,
         )
-        .expect_err("the per-session summary namespace must be closed to the tools (#8645)");
+        .expect_err("the compaction-mirror namespace must be closed to the tools (#8645)");
     assert!(
         matches!(err, KernelOpError::InvalidInput(_)),
         "expected InvalidInput, got {err:?}"
@@ -720,18 +720,18 @@ fn test_memory_store_rejects_session_summary_prefix_key() {
 }
 
 #[test]
-fn test_memory_recall_rejects_session_summary_prefix_key() {
+fn test_memory_recall_rejects_compaction_summary_prefix_key() {
     let (kernel, _tmp) = boot();
     let kh: &dyn KernelHandle = &kernel;
-    use librefang_memory::SESSION_SUMMARY_KEY_PREFIX;
+    use librefang_memory::COMPACTION_SUMMARY_KEY_PREFIX;
 
     let err = kh
         .memory_recall(
-            &format!("{SESSION_SUMMARY_KEY_PREFIX}0192-uuid"),
+            &format!("{COMPACTION_SUMMARY_KEY_PREFIX}0192-uuid"),
             None,
             None,
         )
-        .expect_err("the per-session summary namespace must be closed on recall (#8645)");
+        .expect_err("the compaction-mirror namespace must be closed on recall (#8645)");
     assert!(
         matches!(err, KernelOpError::InvalidInput(_)),
         "expected InvalidInput, got {err:?}"
@@ -739,15 +739,15 @@ fn test_memory_recall_rejects_session_summary_prefix_key() {
 }
 
 #[test]
-fn test_memory_store_keeps_the_prefix_available_on_an_attributed_turn() {
+fn test_memory_store_keeps_the_reserved_prefix_available_on_an_attributed_turn() {
     let (kernel, _tmp) = boot();
     let kh: &dyn KernelHandle = &kernel;
 
     // An attributed key is stored under `peer:<id>:<key>`, which cannot collide
-    // with the platform's unscoped `session_<uuid>` summaries — refusing it here
-    // would break keys agents legitimately use (#8645, review round 2 finding 1).
+    // with the platform's unscoped `compaction_summary_<uuid>` mirrors — refusing
+    // it here would break peer-scoped keys agents legitimately use (#8645).
     kh.memory_store(
-        "session_notes",
+        "compaction_summary_notes",
         serde_json::json!("mine"),
         None,
         Some("@alice"),
@@ -756,18 +756,44 @@ fn test_memory_store_keeps_the_prefix_available_on_an_attributed_turn() {
 
     // NOTE the argument order: (agent_id, peer_id). Passing "@alice" first made
     // `resolve_agent_id` parse it as a UUID and fail — which is what the first
-    // version of this test did, and why it was dropped on a false diagnosis.
+    // version of a related test did, and why it was dropped on a false diagnosis.
     let keys = kh
         .memory_list(None, Some("@alice"))
         .expect("listing alice's keys must succeed");
     assert!(
-        keys.iter().any(|k| k.contains("session_notes")),
+        keys.iter().any(|k| k.contains("compaction_summary_notes")),
         "the attributed key must stay readable, got {keys:?}"
     );
     assert!(
-        kh.memory_recall("session_notes", None, Some("@alice"))
+        kh.memory_recall("compaction_summary_notes", None, Some("@alice"))
             .is_ok(),
         "the attributed key must stay recallable"
+    );
+}
+
+/// `session_` keys are agent-visible and predate the compaction mirror (#8645 review).
+///
+/// #4869 writes reset summaries there for the agent to recall, and agents keep keys of
+/// their own under that prefix. Reserving the whole namespace broke both on every
+/// unattributed turn — so the boundary must leave it alone.
+#[test]
+fn test_memory_store_keeps_agent_session_keys_available_unscoped() {
+    let (kernel, _tmp) = boot();
+    let kh: &dyn KernelHandle = &kernel;
+
+    kh.memory_store("session_notes", serde_json::json!("mine"), None, None)
+        .expect("an agent key that starts with `session_` must stay writable");
+    assert_eq!(
+        kh.memory_recall("session_notes", None, None).unwrap(),
+        Some(serde_json::json!("mine")),
+        "the unscoped key must stay recallable"
+    );
+    let keys = kh
+        .memory_list(None, None)
+        .expect("listing keys must succeed");
+    assert!(
+        keys.iter().any(|k| k == "session_notes"),
+        "the unscoped key must stay listable, got {keys:?}"
     );
 }
 
@@ -810,17 +836,22 @@ fn test_memory_keys_with_prefix_agrees_with_memory_list_on_visibility() {
             serde_json::json!("planted-orphan"),
         )
         .expect("plant reserved-framing row");
-    // A platform compaction summary (#8645): same namespace, one conversation, never addressable from an unscoped tool call.
+    // A platform compaction mirror (#8645): its own namespace, one conversation, never addressable from an unscoped tool call.
     substrate
         .structured_set(
             AGENT_A.parse::<uuid::Uuid>().map(AgentId).unwrap(),
-            "session_0000",
+            "compaction_summary_0000",
             serde_json::json!("someone else's summary"),
         )
-        .expect("plant a session summary");
-    // A visible key that sorts *after* the summary, so a one-slot probe over `s` can only reach it once the summary is excluded inside the query.
-    kh.memory_store("st-visible", serde_json::json!(6), Some(AGENT_A), None)
-        .unwrap();
+        .expect("plant a compaction mirror");
+    // A visible key that sorts *after* the mirror, so a one-slot probe can only reach it once the mirror is excluded inside the query.
+    kh.memory_store(
+        "compactionz-visible",
+        serde_json::json!(6),
+        Some(AGENT_A),
+        None,
+    )
+    .unwrap();
 
     // A probe of "" covers the whole scope, so each comparison is over every row the caller may see.
     for peer in [None, Some("p1"), Some("T1:U2")] {
@@ -858,11 +889,11 @@ fn test_memory_keys_with_prefix_agrees_with_memory_list_on_visibility() {
         ["peerabc"]
     );
 
-    // The `session_` range is hidden in the no-peer scope too, and it sorts ahead of every other `s` key: without the second exclusion the single slot goes to `session_0000` and the hint comes back empty.
+    // The `compaction_summary_` range is hidden in the no-peer scope too, and it sorts ahead of `compactionz-visible` ('_' is 0x5F, 'z' is 0x7A): without the second exclusion the single slot goes to the mirror and the hint comes back empty.
     assert_eq!(
-        kh.memory_keys_with_prefix("s", Some(AGENT_A), None, 1)
+        kh.memory_keys_with_prefix("compaction", Some(AGENT_A), None, 1)
             .unwrap(),
-        ["st-visible"],
-        "a hidden session summary must not consume the limit"
+        ["compactionz-visible"],
+        "a hidden compaction mirror must not consume the limit"
     );
 }
