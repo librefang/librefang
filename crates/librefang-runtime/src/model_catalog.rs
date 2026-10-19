@@ -1446,6 +1446,32 @@ impl ModelCatalog {
             .map(|m| self.effective_capabilities(m))
     }
 
+    /// The reasoning-effort policy in force for an entry (#8591).
+    ///
+    /// An operator override in `model_overrides.json` wins field by field —
+    /// including `Some(vec![])`, which declares "no effort enum" for a
+    /// budget-controlled model — and `None` defers to the entry's own
+    /// declaration. This is what the kernel's coercion and any selection
+    /// surface must read; the entry's raw fields stay the catalog's own
+    /// statement.
+    pub fn effective_reasoning_policy(
+        &self,
+        entry: &ModelCatalogEntry,
+    ) -> librefang_types::config::ReasoningEffortPolicy {
+        let key = format!("{}:{}", entry.provider, entry.id);
+        let o = self.overrides.get(&key);
+        librefang_types::config::ReasoningEffortPolicy {
+            supported_efforts: o
+                .and_then(|x| x.supported_efforts.clone())
+                .unwrap_or_else(|| entry.supported_efforts.clone()),
+            default_effort: o
+                .and_then(|x| x.default_effort.clone())
+                .or_else(|| entry.default_effort.clone()),
+            off_allowed: o.and_then(|x| x.off_allowed).unwrap_or(entry.off_allowed),
+            mandatory: o.and_then(|x| x.mandatory).unwrap_or(entry.mandatory),
+        }
+    }
+
     /// Resolve what is actually *known* about an entry's image-input support, applying any operator override (refs #7957).
     ///
     /// Precedence, highest first:

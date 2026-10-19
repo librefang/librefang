@@ -946,6 +946,7 @@ impl LibreFangKernel {
                 context_window_tokens: 0,
                 label: None,
                 model_override: None,
+                reasoning_effort: None,
                 messages_generation: 0,
                 last_repaired_generation: None,
                 peer_id: peer_id_for_new_session.clone(),
@@ -1104,8 +1105,24 @@ impl LibreFangKernel {
             manifest.thinking = cfg.thinking.clone();
         }
 
+        // Apply the per-session reasoning override (#8591): the rung between
+        // agent/global and per-call. After the backfill so it beats the agent
+        // or global level, before `apply_thinking_override` so a per-message
+        // token still wins — frame > session > agent > global > compiled.
+        if let Some(token) = session.reasoning_effort.as_deref() {
+            super::manifest_helpers::apply_session_reasoning_effort(&mut manifest, token);
+        }
+
         // Apply per-call thinking override (from API request).
         apply_thinking_override(&mut manifest, thinking_override);
+
+        // Coercion (#8591): the catalog's declared policy is authoritative, and
+        // this is the last point before the request is built — so it sees the
+        // effective token after every override. A token outside the set is
+        // mapped to the nearest supported rung with a warning, never forwarded
+        // and never 400-ed.
+        let reasoning_policy = self.lookup_reasoning_policy(&manifest.model.model);
+        super::manifest_helpers::coerce_reasoning_effort_to_model(&mut manifest, &reasoning_policy);
 
         // Lazy backfill: create workspace for existing agents spawned before workspaces
         if manifest.workspace.is_none() {

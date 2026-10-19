@@ -430,6 +430,13 @@ pub async fn get_agent_session(
                             "context_window_tokens": 0,
                             "label": null,
                             "messages": [],
+                            // Shape parity with the materialized branch: a
+                            // client that reads `reasoning_effort` on the
+                            // first GET (right after the agent spawns and
+                            // before any turn writes the row) must not see
+                            // the field disappear. An unmaterialized row owns
+                            // no pin, so the value is null.
+                            "reasoning_effort": serde_json::Value::Null,
                             "compacted_summary": compacted_summary,
                         })),
                     ),

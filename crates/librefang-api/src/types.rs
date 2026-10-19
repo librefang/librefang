@@ -469,27 +469,33 @@ pub struct MessageRequest {
     /// - `None`: use the manifest/global default
     ///
     /// Kept as a boolean for backward compatibility. Prefer
-    /// [`Self::reasoning_mode`], which is strictly more expressive and wins
+    /// [`Self::reasoning_effort`], which is strictly more expressive and wins
     /// when both are present (#7946).
     #[serde(default)]
     pub thinking: Option<bool>,
-    /// Per-task reasoning mode: `"none"` | `"low"` | `"high"` | `"max"` (#7946).
+    /// Per-task reasoning effort: `"none"` | `"low"` | `"medium"` | `"high"`
+    /// | `"xhigh"` | `"max"` | `"minimal"` — or any token the target model's
+    /// catalog entry declares (#7946, open vocabulary #8591).
     ///
-    /// Top rung of the resolution order — per-call > per-agent (`agent.toml`
-    /// `[thinking] reasoning_mode`) > global (`config.toml` `[thinking]
-    /// reasoning_mode`) > compiled default (the `budget_tokens` bucket).
+    /// Top rung of the resolution order — per-call > per-session
+    /// (`PATCH /api/sessions/{id}/reasoning`) > per-agent (`agent.toml`
+    /// `[thinking] reasoning_effort`) > global (`config.toml` `[thinking]
+    /// reasoning_effort`) > compiled default (the `budget_tokens` bucket).
     ///
     /// Added alongside [`Self::thinking`] rather than widening it, because the
     /// boolean is in the wire contract of every existing client and a JSON
     /// `true` cannot grow a third value without breaking them. The two are not
     /// redundant either: `thinking: false` merely omits the reasoning opt-in,
-    /// while `reasoning_mode: "none"` sends the provider's explicit non-think
+    /// while `reasoning_effort: "none"` sends the provider's explicit non-think
     /// toggle — the difference between "we did not ask it to think" and "we
     /// asked it not to", which is the whole point on a model that reasons by
     /// default.
-    #[serde(default)]
+    ///
+    /// `reasoning_mode` is accepted as a deprecated alias on the wire
+    /// (#8591); responses and documentation use `reasoning_effort`.
+    #[serde(default, alias = "reasoning_mode")]
     #[schema(value_type = Option<String>, example = "high")]
-    pub reasoning_mode: Option<librefang_types::config::ReasoningMode>,
+    pub reasoning_effort: Option<librefang_types::config::ReasoningMode>,
     /// Whether the response should include the model's thinking/reasoning trace.
     ///
     /// `None` defaults to `true` when thinking content is available.

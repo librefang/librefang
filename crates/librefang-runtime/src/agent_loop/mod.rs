@@ -1462,6 +1462,13 @@ async fn run_agent_loop_inner(
             .as_ref()
             .map(|k| k.reasoning_echo_policy_for(&api_model))
             .unwrap_or_default();
+        // Catalog-driven reasoning policy (#8591). Undeclared keeps the legacy
+        // wire spellings; a declared set drives verbatim passthrough and
+        // nearest-rung coercion, and is what the drivers gate on.
+        let reasoning_policy = kernel
+            .as_ref()
+            .map(|k| k.reasoning_policy_for(&api_model))
+            .unwrap_or_default();
 
         // Catalog-driven vision-capability gate (#6010, refs #7957). Only a model the catalog
         // *declares* text-only gets its image content blocks redacted to a text placeholder before
@@ -1537,6 +1544,7 @@ async fn run_agent_loop_inner(
             // path enforces the cross-account guard too.
             sender_account_id: sender_account_id.clone(),
             reasoning_echo_policy,
+            reasoning_policy,
         };
         // The stripped-tools request has been built; restore tools for any
         // subsequent iteration (the degrade is a single forced prose turn).

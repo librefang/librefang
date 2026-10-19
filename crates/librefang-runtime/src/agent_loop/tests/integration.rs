@@ -384,6 +384,7 @@ fn fresh_session() -> librefang_memory::session::Session {
         context_window_tokens: 0,
         label: None,
         model_override: None,
+        reasoning_effort: None,
         messages_generation: 0,
         last_repaired_generation: None,
         peer_id: None,
@@ -496,7 +497,7 @@ async fn test_empty_response_after_tool_use_returns_fallback() {
         context_window_tokens: 0,
         label: None,
         model_override: None,
-
+        reasoning_effort: None,
         messages_generation: 0,
         last_repaired_generation: None,
         peer_id: None,
@@ -562,7 +563,7 @@ async fn test_empty_response_max_tokens_returns_fallback() {
         context_window_tokens: 0,
         label: None,
         model_override: None,
-
+        reasoning_effort: None,
         messages_generation: 0,
         last_repaired_generation: None,
         peer_id: None,
@@ -628,7 +629,7 @@ async fn test_normal_response_not_replaced_by_fallback() {
         context_window_tokens: 0,
         label: None,
         model_override: None,
-
+        reasoning_effort: None,
         messages_generation: 0,
         last_repaired_generation: None,
         peer_id: None,
@@ -685,7 +686,7 @@ async fn test_success_response_preserves_reply_directives() {
         context_window_tokens: 0,
         label: None,
         model_override: None,
-
+        reasoning_effort: None,
         messages_generation: 0,
         last_repaired_generation: None,
         peer_id: None,
@@ -747,7 +748,7 @@ async fn test_max_tokens_partial_response_preserves_reply_directives() {
         context_window_tokens: 0,
         label: None,
         model_override: None,
-
+        reasoning_effort: None,
         messages_generation: 0,
         last_repaired_generation: None,
         peer_id: None,
@@ -1064,7 +1065,7 @@ async fn test_history_fold_stub_appears_in_llm_request_after_enough_tool_cycles(
         context_window_tokens: 0,
         label: None,
         model_override: None,
-
+        reasoning_effort: None,
         messages_generation: 0,
         last_repaired_generation: None,
         peer_id: None,
@@ -1196,7 +1197,7 @@ async fn maybe_fold_stale_tool_results_persists_rewrites_to_session_messages() {
         context_window_tokens: 0,
         label: None,
         model_override: None,
-
+        reasoning_effort: None,
         messages_generation: 0,
         last_repaired_generation: None,
         peer_id: None,
@@ -1381,6 +1382,7 @@ async fn maybe_fold_stale_tool_results_resets_file_read_dedup_tracker() {
         context_window_tokens: 0,
         label: None,
         model_override: None,
+        reasoning_effort: None,
         messages_generation: 0,
         last_repaired_generation: None,
         peer_id: None,
@@ -1451,7 +1453,7 @@ async fn test_streaming_max_continuations_return_preserves_reply_directives() {
         context_window_tokens: 0,
         label: None,
         model_override: None,
-
+        reasoning_effort: None,
         messages_generation: 0,
         last_repaired_generation: None,
         peer_id: None,
@@ -1659,7 +1661,7 @@ fn cascade_leak_fixture() -> (
         context_window_tokens: 0,
         label: None,
         model_override: None,
-
+        reasoning_effort: None,
         messages_generation: 0,
         last_repaired_generation: None,
         peer_id: None,
@@ -1775,6 +1777,7 @@ async fn cascade_leak_guard_aborts_tool_use_stop_reason_in_streaming_path() {
         context_window_tokens: 0,
         label: None,
         model_override: None,
+        reasoning_effort: None,
         messages_generation: 0,
         last_repaired_generation: None,
         peer_id: None,
@@ -1868,7 +1871,7 @@ async fn test_streaming_max_continuations_with_directives_preserves_reply_direct
         context_window_tokens: 0,
         label: None,
         model_override: None,
-
+        reasoning_effort: None,
         messages_generation: 0,
         last_repaired_generation: None,
         peer_id: None,
@@ -1934,7 +1937,7 @@ async fn test_streaming_empty_response_after_tool_use_returns_fallback() {
         context_window_tokens: 0,
         label: None,
         model_override: None,
-
+        reasoning_effort: None,
         messages_generation: 0,
         last_repaired_generation: None,
         peer_id: None,
@@ -2079,7 +2082,7 @@ async fn test_empty_first_response_retries_and_recovers() {
         context_window_tokens: 0,
         label: None,
         model_override: None,
-
+        reasoning_effort: None,
         messages_generation: 0,
         last_repaired_generation: None,
         peer_id: None,
@@ -2139,7 +2142,7 @@ async fn test_empty_first_response_fallback_when_retry_also_empty() {
         context_window_tokens: 0,
         label: None,
         model_override: None,
-
+        reasoning_effort: None,
         messages_generation: 0,
         last_repaired_generation: None,
         peer_id: None,
@@ -2205,7 +2208,7 @@ async fn test_streaming_empty_response_max_tokens_returns_fallback() {
         context_window_tokens: 0,
         label: None,
         model_override: None,
-
+        reasoning_effort: None,
         messages_generation: 0,
         last_repaired_generation: None,
         peer_id: None,
@@ -2587,7 +2590,7 @@ async fn test_max_tokens_pure_markup_overflow_replaced_with_honest_reply() {
         context_window_tokens: 0,
         label: None,
         model_override: None,
-
+        reasoning_effort: None,
         messages_generation: 0,
         last_repaired_generation: None,
         peer_id: None,
@@ -3417,6 +3420,7 @@ fn run_agent_loop_future_size_stays_within_its_order_of_magnitude() {
         context_window_tokens: 0,
         label: None,
         model_override: None,
+        reasoning_effort: None,
         messages_generation: 0,
         last_repaired_generation: None,
         peer_id: None,
