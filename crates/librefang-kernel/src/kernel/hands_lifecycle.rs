@@ -273,17 +273,18 @@ impl LibreFangKernel {
             // can pin one while inheriting the other (e.g. provider="openai"
             // with model="default" inherits the global default model name).
             //
-            // When inheriting provider, also fill api_key_env / base_url
-            // from global config — but only if the hand didn't set them
-            // explicitly, to preserve legacy HAND.toml credential overrides.
+            // When inheriting the provider, the credential and endpoint pins
+            // are REPLACED, not merely filled when absent: the instance
+            // default can be hot-swapped to another vendor, and a pin left
+            // over from the previous default would send that vendor's key to
+            // the new endpoint (401). Same rule as `resolve_driver_for_owner`;
+            // a hand that wants a pinned credential must name its provider
+            // explicitly.
             if manifest.model.provider == "default" {
-                manifest.model.provider = cfg.default_model.provider.clone();
-                if manifest.model.api_key_env.is_none() {
-                    manifest.model.api_key_env = Some(cfg.default_model.api_key_env.clone());
-                }
-                if manifest.model.base_url.is_none() {
-                    manifest.model.base_url = cfg.default_model.base_url.clone();
-                }
+                super::manifest_helpers::inherit_default_provider(
+                    &mut manifest.model,
+                    &cfg.default_model,
+                );
             }
             if manifest.model.model == "default" {
                 manifest.model.model = cfg.default_model.model.clone();
@@ -1033,19 +1034,14 @@ impl LibreFangKernel {
         manifest: &librefang_types::agent::AgentManifest,
     ) -> (String, String, Option<String>, Option<String>) {
         let cfg = self.config.load();
-        let mut provider = manifest.model.provider.clone();
-        let mut model = manifest.model.model.clone();
-        let mut api_key_env = manifest.model.api_key_env.clone();
-        let mut base_url = manifest.model.base_url.clone();
-        if provider == "default" {
-            provider = cfg.default_model.provider.clone();
-            if api_key_env.is_none() {
-                api_key_env = Some(cfg.default_model.api_key_env.clone());
-            }
-            if base_url.is_none() {
-                base_url = cfg.default_model.base_url.clone();
-            }
+        let mut resolved = manifest.model.clone();
+        if resolved.provider == "default" {
+            // Pin replacement, same rule as `resolve_driver_for_owner`: a stale
+            // `api_key_env` / `base_url` on the sentinel must not survive the
+            // switch to the effective default.
+            super::manifest_helpers::inherit_default_provider(&mut resolved, &cfg.default_model);
         }
+        let mut model = resolved.model.clone();
         if model == "default" {
             model = cfg.default_model.model.clone();
         }
@@ -1057,11 +1053,16 @@ impl LibreFangKernel {
         // form while spawn stored the bare form — the two paths disagree,
         // and `clear_hand_agent_runtime_override_resets_manifest_and_state`
         // catches it.
-        let stripped = strip_provider_prefix(&model, &provider);
+        let stripped = strip_provider_prefix(&model, &resolved.provider);
         if stripped != model {
             model = stripped;
         }
-        (model, provider, api_key_env, base_url)
+        (
+            model,
+            resolved.provider,
+            resolved.api_key_env,
+            resolved.base_url,
+        )
     }
 
     pub fn update_hand_agent_runtime_override(

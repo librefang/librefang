@@ -28,6 +28,26 @@ fn should_use_managed_everyapi(
         && managed_available
 }
 
+/// A manifest credential (`api_key_env`) or endpoint (`base_url`) pin applies
+/// only when the manifest names an explicit provider.
+///
+/// A pin on the `"default"` (or empty) provider sentinel is stale by
+/// construction: the instance default can be hot-swapped to another vendor at
+/// any time (config `[default_model]`, or the WebUI's
+/// `default_model_override`), and a surviving pin would then send the previous
+/// vendor's credential to the new endpoint — the production incident: a
+/// `DEEPSEEK_API_KEY` pin on a manifest whose default had become an
+/// `othervendor` gateway, 401 on primary and fallback alike. On the sentinel
+/// the effective default supplies provider, model, credential and endpoint;
+/// only an explicit provider owns its pins.
+fn applied_pin<'a>(provider: &str, pin: Option<&'a str>) -> Option<&'a str> {
+    if is_default_provider_sentinel(provider) {
+        None
+    } else {
+        pin
+    }
+}
+
 impl LibreFangKernel {
     /// Resolve the LLM driver for an agent.
     ///
@@ -219,8 +239,22 @@ impl LibreFangKernel {
             .into());
         }
 
-        let has_custom_key = manifest.model.api_key_env.is_some();
-        let has_custom_url = manifest.model.base_url.is_some();
+        // A manifest credential (`api_key_env`) or endpoint (`base_url`) pin is
+        // an operator override only for an explicit provider. On the
+        // `"default"` sentinel the manifest does not own those fields: the
+        // instance default can be hot-swapped to another vendor at any moment,
+        // so a stale pin would send the previous vendor's key to the new
+        // endpoint (production: 401 on primary and every fallback slot). On
+        // the sentinel, provider, model, credential and endpoint all come from
+        // the effective default.
+        let manifest_api_key_env = applied_pin(
+            &manifest.model.provider,
+            manifest.model.api_key_env.as_deref(),
+        );
+        let manifest_base_url =
+            applied_pin(&manifest.model.provider, manifest.model.base_url.as_deref());
+        let has_custom_key = manifest_api_key_env.is_some();
+        let has_custom_url = manifest_base_url.is_some();
         let has_explicit_key = has_custom_key
             || cfg.provider_api_keys.contains_key(agent_provider)
             || cfg.auth_profiles.contains_key(agent_provider)
@@ -247,8 +281,8 @@ impl LibreFangKernel {
         }
 
         // Resolve base_url (shared between pooled and single-key paths).
-        let base_url = if has_custom_url {
-            manifest.model.base_url.clone()
+        let base_url = if let Some(pinned) = manifest_base_url {
+            Some(pinned.to_string())
         } else if agent_provider == default_provider {
             effective_default
                 .base_url
@@ -328,12 +362,8 @@ impl LibreFangKernel {
         } else {
             // No credential pool — resolve a single API key the traditional
             // way.
-            let global_api_key = if has_custom_key {
-                manifest
-                    .model
-                    .api_key_env
-                    .as_ref()
-                    .and_then(|env| std::env::var(env).ok())
+            let global_api_key = if let Some(env) = manifest_api_key_env {
+                std::env::var(env).ok()
             } else if agent_provider == default_provider {
                 if !effective_default.api_key_env.is_empty() {
                     std::env::var(&effective_default.api_key_env).ok()
@@ -448,15 +478,36 @@ impl LibreFangKernel {
                     );
                     continue;
                 }
+                // Same sentinel rule as the primary slot: when the slot's
+                // provider is the `"default"` sentinel, its credential and
+                // endpoint pins are stale and must not apply — the slot takes
+                // them from the effective default (or, when the model names a
+                // different vendor, from that provider's own
+                // catalog/convention resolution). An explicit slot provider
+                // keeps its pins.
+                let fb_uses_default_sentinel = is_default_provider_sentinel(&fb.provider);
+                let fb_api_key_env = applied_pin(&fb.provider, fb.api_key_env.as_deref());
+                let fb_base_url_pin = applied_pin(&fb.provider, fb.base_url.as_deref());
                 // Global credential candidate for this fallback slot. An
                 // agent-pinned `api_key_env` on the fallback is an operator
-                // override; otherwise use the same operator-explicit > catalog
-                // `api_key_env` > convention resolution as the primary path. A
-                // custom catalog provider used only as a fallback model would
-                // otherwise 401 on the convention-only env var — the same #5755
-                // bug as the primary branch above. Refs: #5755, #5807.
-                let fb_global_key = if let Some(env) = &fb.api_key_env {
+                // override — unless the slot declared the provider sentinel, in
+                // which case the pin is stale and the slot follows the primary
+                // rule: the effective default's own env var when the resolution
+                // lands on the default provider, else the same
+                // operator-explicit > catalog `api_key_env` > convention
+                // resolution as the primary path. A custom catalog provider
+                // used only as a fallback model would otherwise 401 on the
+                // convention-only env var — the same #5755 bug as the primary
+                // branch above. Refs: #5755, #5807.
+                let fb_global_key = if let Some(env) = fb_api_key_env {
                     std::env::var(env).ok()
+                } else if fb_uses_default_sentinel && fb_provider == *default_provider {
+                    let env_var = if effective_default.api_key_env.is_empty() {
+                        self.resolve_non_default_api_key_env(&cfg, &fb_provider)
+                    } else {
+                        effective_default.api_key_env.clone()
+                    };
+                    std::env::var(&env_var).ok()
                 } else {
                     let env_var = self.resolve_non_default_api_key_env(&cfg, &fb_provider);
                     std::env::var(&env_var).ok()
@@ -467,11 +518,13 @@ impl LibreFangKernel {
                 // failover from the primary would silently charge the operator's
                 // credential (a chargeback leak). An agent-pinned `api_key_env`
                 // on the fallback still wins (operator override), so it is not
-                // shadowed by a user key. Route through the same shared
+                // shadowed by a user key — but a stale pin on a sentinel slot
+                // does not count as a pin (`fb_api_key_env` already dropped
+                // it). Route through the same shared
                 // `resolve_provider_credential` helper the primary path uses
                 // (ae1f59b9) rather than a parallel inline copy of the
                 // precedence contract.
-                let fb_user_key: Option<String> = if fb.api_key_env.is_some() {
+                let fb_user_key: Option<String> = if fb_api_key_env.is_some() {
                     None
                 } else {
                     let canonical_fb_provider =
@@ -485,10 +538,16 @@ impl LibreFangKernel {
                 let config = DriverConfig {
                     provider: fb_provider.clone(),
                     api_key: fb_api_key,
-                    base_url: fb
-                        .base_url
-                        .clone()
-                        .or_else(|| self.lookup_provider_url(&fb_provider)),
+                    // A sentinel slot that lands on the effective default takes
+                    // the default's endpoint, not its own stale pin (mirrors
+                    // the primary's `agent_provider == default_provider` arm);
+                    // every other slot keeps the pin-or-lookup behaviour.
+                    base_url: if fb_uses_default_sentinel && fb_provider == *default_provider {
+                        effective_default.base_url.clone()
+                    } else {
+                        fb_base_url_pin.map(str::to_string)
+                    }
+                    .or_else(|| self.lookup_provider_url(&fb_provider)),
                     vertex_ai: cfg.vertex_ai.clone(),
                     azure_openai: cfg.azure_openai.clone(),
                     mcp_bridge: Some(build_mcp_bridge_cfg(&cfg)),
@@ -509,10 +568,17 @@ impl LibreFangKernel {
                 let fallback_driver = if should_use_managed_everyapi(
                     &fb_provider,
                     config.api_key.is_some(),
-                    fb.api_key_env.is_some()
+                    fb_api_key_env.is_some()
                         || cfg.provider_api_keys.contains_key(&fb_provider)
-                        || cfg.auth_profiles.contains_key(&fb_provider),
-                    fb.base_url.is_some() || cfg.provider_urls.contains_key(&fb_provider),
+                        || cfg.auth_profiles.contains_key(&fb_provider)
+                        || (fb_uses_default_sentinel
+                            && fb_provider == *default_provider
+                            && !effective_default.api_key_env.trim().is_empty()),
+                    fb_base_url_pin.is_some()
+                        || cfg.provider_urls.contains_key(&fb_provider)
+                        || (fb_uses_default_sentinel
+                            && fb_provider == *default_provider
+                            && effective_default.base_url.is_some()),
                     self.is_managed_everyapi(&fb_provider),
                 ) {
                     Ok(Arc::new(crate::everyapi_driver::ManagedEveryApiDriver::new(
@@ -608,6 +674,32 @@ impl LibreFangKernel {
                 resolution.driver
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod sentinel_pin_tests {
+    use super::applied_pin;
+
+    /// A manifest credential/endpoint pin applies only for an explicit
+    /// provider; on the `"default"`/empty sentinel the effective default owns
+    /// those fields (production incident: stale `DEEPSEEK_API_KEY` pin sent to
+    /// an `othervendor` default → 401 on primary and fallback alike).
+    #[test]
+    fn sentinel_provider_drops_credential_and_endpoint_pins() {
+        assert_eq!(applied_pin("default", Some("DEEPSEEK_API_KEY")), None);
+        assert_eq!(applied_pin("", Some("DEEPSEEK_API_KEY")), None);
+        assert_eq!(
+            applied_pin("default", Some("https://stale.example/v1")),
+            None
+        );
+
+        // An explicit provider keeps its operator override.
+        assert_eq!(
+            applied_pin("othervendor", Some("OTHERVENDOR_KEY")),
+            Some("OTHERVENDOR_KEY")
+        );
+        assert_eq!(applied_pin("othervendor", None), None);
     }
 }
 
