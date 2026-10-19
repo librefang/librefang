@@ -1902,6 +1902,61 @@ pub fn get_evolution_info(skill: &InstalledSkill) -> SkillEvolutionMeta {
     load_evolution_meta(&skill.path)
 }
 
+/// Restore a skill's `skill.toml` + `prompt_context.md` from a history
+/// snapshot (#8021).
+///
+/// This is the write half of the API's
+/// `POST /api/skills/{name}/history/{version_id}/restore`: the snapshot
+/// content comes from `librefang-memory`'s `skill_versions`, but the write has
+/// to land here so it takes the same per-skill lock as every other mutation
+/// (a concurrent evolve/patch/uninstall must not interleave) and uses the same
+/// atomic temp+rename write.
+///
+/// Semantics: it *is* the restore, not a rollback to the previous version —
+/// whatever `manifest_toml` / `prompt_context` the row carried is written
+/// verbatim, and the caller records the resulting state as a fresh `restore`
+/// snapshot. The manifest is parsed here even though the API already parsed it
+/// for its 500-on-corrupt contract, so an unparseable document can never reach
+/// disk through any caller.
+///
+/// The caller is responsible for the frozen-registry gate
+/// (`reject_if_frozen` on the API side): this module is filesystem-only and has
+/// no registry to consult.
+pub fn restore_skill_snapshot(
+    skills_dir: &Path,
+    name: &str,
+    manifest_toml: &str,
+    prompt_context: &str,
+) -> Result<(), SkillError> {
+    validate_name(name)?;
+    // The snapshot must be a parseable manifest before anything is written; a
+    // corrupt row has to fail as a 500 on the API side, not half-apply.
+    toml::from_str::<SkillManifest>(manifest_toml).map_err(SkillError::from)?;
+
+    // Resolve through the manifest when the directory is not named after the
+    // skill (slug ≠ `[skill] name`) — same resolution as update/delete.
+    let Some(skill_dir) = resolve_installed_skill_dir(skills_dir, name) else {
+        return Err(SkillError::NotFound(format!(
+            "Skill '{name}' directory does not exist"
+        )));
+    };
+
+    // Serialize against concurrent evolve/patch/uninstall on this skill, then
+    // re-check existence under the lock: an uninstall that won the race turns
+    // this into a NotFound instead of resurrecting a deleted skill directory.
+    let _lock = acquire_skill_lock(&skill_dir)?;
+    if !skill_dir.exists() {
+        return Err(SkillError::NotFound(format!(
+            "Skill '{name}' directory does not exist"
+        )));
+    }
+
+    atomic_write(&skill_dir.join("skill.toml"), manifest_toml)?;
+    atomic_write(&skill_dir.join("prompt_context.md"), prompt_context)?;
+    info!(skill = name, "Restored skill from version history");
+    Ok(())
+}
+
 /// Record a successful skill usage (for tracking effectiveness).
 ///
 /// Serializes read-modify-write against the per-skill evolution lock so
@@ -2636,6 +2691,66 @@ mod tests {
         let content =
             std::fs::read_to_string(dir.path().join("rollbackable/prompt_context.md")).unwrap();
         assert_eq!(content, "# Original content");
+    }
+
+    // ── Version-history restore (#8021) ────────────────────────────
+
+    /// `restore_skill_snapshot` writes a stored snapshot back under the
+    /// per-skill lock, and refuses before touching disk when the name no
+    /// longer exists or the snapshot's manifest cannot be parsed.
+    #[test]
+    fn test_restore_skill_snapshot() {
+        let dir = TempDir::new().unwrap();
+        create_skill(
+            dir.path(),
+            "restorable",
+            "Restore test",
+            "# Original content",
+            vec![],
+            None,
+        )
+        .unwrap();
+
+        // A snapshot carrying a different prompt and a different version.
+        let mut manifest: SkillManifest = toml::from_str(
+            &std::fs::read_to_string(dir.path().join("restorable/skill.toml")).unwrap(),
+        )
+        .unwrap();
+        manifest.skill.version = "0.9.9".to_string();
+        manifest.prompt_context = None;
+        let snapshot_toml = toml::to_string_pretty(&manifest).unwrap();
+
+        restore_skill_snapshot(dir.path(), "restorable", &snapshot_toml, "# Snapshot body")
+            .expect("restore must succeed");
+
+        let restored =
+            std::fs::read_to_string(dir.path().join("restorable/prompt_context.md")).unwrap();
+        assert_eq!(restored, "# Snapshot body");
+        let restored_toml =
+            std::fs::read_to_string(dir.path().join("restorable/skill.toml")).unwrap();
+        assert!(
+            restored_toml.contains("0.9.9"),
+            "restore must write the manifest verbatim, got: {restored_toml}"
+        );
+
+        // An unknown skill is NotFound, not a resurrection.
+        let err = restore_skill_snapshot(dir.path(), "never-installed", &snapshot_toml, "x")
+            .expect_err("an uninstalled skill must not be restorable");
+        assert!(matches!(err, SkillError::NotFound(_)), "got: {err:?}");
+
+        // A corrupt snapshot must not half-apply: the prompt on disk stays put.
+        let err = restore_skill_snapshot(dir.path(), "restorable", "name = [not-a-skill", "bad")
+            .expect_err("an unparseable manifest must be refused");
+        assert!(
+            matches!(err, SkillError::TomlParse(_)),
+            "expected a parse error, got: {err:?}"
+        );
+        let content =
+            std::fs::read_to_string(dir.path().join("restorable/prompt_context.md")).unwrap();
+        assert_eq!(
+            content, "# Snapshot body",
+            "the refused restore wrote anyway"
+        );
     }
 
     // ── SemVer bump tests ──────────────────────────────────────────

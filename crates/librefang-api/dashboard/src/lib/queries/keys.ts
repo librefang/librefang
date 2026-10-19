@@ -243,6 +243,13 @@ export const skillKeys = {
     [...skillKeys.detail(name), "supportingFile"] as const,
   supportingFile: (name: string, path: string) =>
     [...skillKeys.supportingFiles(name), path] as const,
+  // Skill version history (#8021) — the store snapshots behind the drawer's
+  // History section. Nested under `detail(name)`, not a sibling of it, for the
+  // same reason as `agentKeys.manifestHistory`: every dashboard write that
+  // records a snapshot already invalidates the skill's detail, so the history
+  // refreshes after the very edit that added a row instead of needing each
+  // mutation to remember a second, explicit invalidation.
+  history: (name: string) => [...skillKeys.detail(name), "history"] as const,
   // Skill workshop (#3328) pending-candidate queries. Hierarchical so
   // `invalidateQueries({ queryKey: skillKeys.pending() })` clears every
   // pending list / detail at once after an approve / reject mutation.

@@ -1568,6 +1568,14 @@ class SkillsResource {
     return this._c._request("GET", `/api/skills/${encodeURIComponent(String(name))}/file`, undefined, query);
   }
 
+  async listSkillHistory(name, query) {
+    return this._c._request("GET", `/api/skills/${encodeURIComponent(String(name))}/history`, undefined, query);
+  }
+
+  async restoreSkillVersion(name, version_id) {
+    return this._c._request("POST", `/api/skills/${encodeURIComponent(String(name))}/history/${encodeURIComponent(String(version_id))}/restore`);
+  }
+
   async proposeSkillToRegistry(name) {
     return this._c._request("POST", `/api/skills/${encodeURIComponent(String(name))}/propose`);
   }

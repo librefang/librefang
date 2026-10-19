@@ -13939,6 +13939,115 @@
         }
       }
     },
+    "/api/skills/{name}/history": {
+      "get": {
+        "tags": [
+          "skills"
+        ],
+        "summary": "GET /api/skills/{name}/history — how this skill changed over time.",
+        "description": "Returns an array of snapshots, newest first. Each entry carries the full\n`skill.toml` and `prompt_context.md` so the dashboard can render a diff\nbetween consecutive versions and offer a one-click restore.",
+        "operationId": "list_skill_history",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Skill name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Max entries (default 30, max 200)",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Skill version history, newest first",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid skill name or limit"
+          },
+          "404": {
+            "description": "Skill not installed"
+          }
+        }
+      }
+    },
+    "/api/skills/{name}/history/{version_id}/restore": {
+      "post": {
+        "tags": [
+          "skills"
+        ],
+        "summary": "POST /api/skills/{name}/history/{version_id}/restore — restore a skill to a\nprior snapshot.",
+        "description": "The restore *is* the operation: the stored `skill.toml` +\n`prompt_context.md` are written back verbatim (including the version field\nthe snapshot carried) and the resulting state is recorded as a fresh\n`restore` snapshot — it is not a rollback to \"the version before this one\".",
+        "operationId": "restore_skill_version",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Skill name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "version_id",
+            "in": "path",
+            "description": "Version row id to restore",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Skill restored",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid skill name"
+          },
+          "404": {
+            "description": "Skill or version not found"
+          },
+          "500": {
+            "description": "Stored version is corrupt and cannot be restored",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/skills/{name}/propose": {
       "post": {
         "tags": [

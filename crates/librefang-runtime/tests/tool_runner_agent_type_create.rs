@@ -224,6 +224,7 @@ impl HandsControl for AgentTypeStubKernel {}
 impl A2ARegistry for AgentTypeStubKernel {}
 impl ChannelSender for AgentTypeStubKernel {}
 impl PromptStore for AgentTypeStubKernel {}
+impl SkillHistory for AgentTypeStubKernel {}
 impl GoalControl for AgentTypeStubKernel {}
 impl ToolPolicy for AgentTypeStubKernel {}
 impl librefang_kernel_handle::CatalogQuery for AgentTypeStubKernel {}
@@ -407,6 +408,7 @@ impl HandsControl for NoAgentTypesKernel {}
 impl A2ARegistry for NoAgentTypesKernel {}
 impl ChannelSender for NoAgentTypesKernel {}
 impl PromptStore for NoAgentTypesKernel {}
+impl SkillHistory for NoAgentTypesKernel {}
 impl GoalControl for NoAgentTypesKernel {}
 impl ToolPolicy for NoAgentTypesKernel {}
 impl librefang_kernel_handle::CatalogQuery for NoAgentTypesKernel {}

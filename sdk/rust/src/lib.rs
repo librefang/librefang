@@ -4806,6 +4806,30 @@ impl SkillsResource {
         .await
     }
 
+    pub async fn list_skill_history(&self, name: &str, limit: Option<&str>) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::GET,
+            &["api", "skills", name, "history"],
+            None,
+            &[("limit", limit)],
+        )
+        .await
+    }
+
+    pub async fn restore_skill_version(&self, name: &str, version_id: &str) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::POST,
+            &["api", "skills", name, "history", version_id, "restore"],
+            None,
+            &[],
+        )
+        .await
+    }
+
     pub async fn propose_skill_to_registry(&self, name: &str) -> Result<Value> {
         do_req(
             &self.client,

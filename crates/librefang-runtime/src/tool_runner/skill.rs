@@ -11,7 +11,11 @@
 //! `ToolError::upstream`; JSON serialization via `?`.
 
 use super::error::{ToolError, ToolResult};
+use crate::kernel_handle::prelude::*;
 use librefang_skills::registry::SkillRegistry;
+use librefang_types::skill_history::SkillWrite;
+use std::path::Path;
+use std::sync::Arc;
 
 /// Build the author tag for an agent-triggered evolution. Use the
 /// agent's id so the dashboard history can attribute the change.
@@ -19,6 +23,82 @@ fn agent_author_tag(caller: Option<&str>) -> String {
     caller
         .map(|id| format!("agent:{id}"))
         .unwrap_or_else(|| "agent".to_string())
+}
+
+/// Read the v1 snapshot (`skill.toml` + `prompt_context.md`) from an installed
+/// skill directory.
+///
+/// `None` when the manifest is missing or unreadable: a snapshot without its
+/// manifest cannot be restored, so recording half a snapshot would only
+/// produce a corrupt history row. A missing `prompt_context.md` records as an
+/// empty string — an inline-prompt or prompt-less skill is a legal shape.
+fn read_skill_snapshot(skill_dir: &Path) -> Option<(String, String)> {
+    let manifest_toml = std::fs::read_to_string(skill_dir.join("skill.toml")).ok()?;
+    let prompt_context =
+        std::fs::read_to_string(skill_dir.join("prompt_context.md")).unwrap_or_default();
+    Some((manifest_toml, prompt_context))
+}
+
+/// Whether the v1 history scope covers this skill directory.
+///
+/// v1 keys history by skill name alone, so only skills under the registry's
+/// global `skills_dir` are recorded: a workspace or hand skill shadowing a
+/// global name would otherwise conflate two different skills under one key.
+/// Workspace/hand skills are explicitly out of scope in v1 — see the
+/// `skill_version_store` module docs.
+fn is_global_skill_dir(registry: &SkillRegistry, skill_dir: &Path) -> bool {
+    let global = std::fs::canonicalize(registry.skills_dir())
+        .unwrap_or_else(|_| registry.skills_dir().to_path_buf());
+    let dir = std::fs::canonicalize(skill_dir).unwrap_or_else(|_| skill_dir.to_path_buf());
+    dir.starts_with(&global)
+}
+
+/// Best-effort record of one skill snapshot after a successful mutation.
+///
+/// Called *after* the content is already on disk, so a failure costs one
+/// history row, never the write — the same semantics as
+/// `record_template_version` on the API side. `snapshot` carries a pre-read
+/// snapshot for the delete path, where the files are gone by the time the
+/// operation has succeeded; every other caller passes `None` and the files are
+/// read from `skill_dir` here.
+fn record_skill_snapshot(
+    kernel: Option<&Arc<dyn KernelHandle>>,
+    registry: &SkillRegistry,
+    skill_dir: &Path,
+    skill_name: &str,
+    author: &str,
+    source: &str,
+    snapshot: Option<(String, String)>,
+) {
+    let Some(kernel) = kernel else {
+        return;
+    };
+    if !is_global_skill_dir(registry, skill_dir) {
+        tracing::debug!(
+            skill = skill_name,
+            dir = %skill_dir.display(),
+            "skill history: workspace/hand skill — v1 records global skills only"
+        );
+        return;
+    }
+    let Some((manifest_toml, prompt_context)) = snapshot.or_else(|| read_skill_snapshot(skill_dir))
+    else {
+        tracing::warn!(
+            skill = skill_name,
+            dir = %skill_dir.display(),
+            "skill history: skill.toml unreadable after a successful mutation; snapshot skipped"
+        );
+        return;
+    };
+    if let Err(e) =
+        kernel.record_skill_version(skill_name, &manifest_toml, &prompt_context, author, source)
+    {
+        tracing::warn!(
+            skill = skill_name,
+            error = %e,
+            "Failed to record skill version snapshot"
+        );
+    }
 }
 
 /// Reject evolution ops when the registry is frozen (Stable mode).
@@ -51,6 +131,7 @@ pub(super) async fn tool_skill_evolve_create(
     input: &serde_json::Value,
     skill_registry: Option<&SkillRegistry>,
     caller_agent_id: Option<&str>,
+    kernel: Option<&Arc<dyn KernelHandle>>,
 ) -> ToolResult {
     let registry = skill_registry.ok_or(ToolError::Unavailable("Skill registry"))?;
     ensure_not_frozen(registry)?;
@@ -83,6 +164,15 @@ pub(super) async fn tool_skill_evolve_create(
         Some(&author),
     )
     .map_err(ToolError::upstream)?;
+    record_skill_snapshot(
+        kernel,
+        registry,
+        &skills_dir.join(&result.skill_name),
+        &result.skill_name,
+        &author,
+        SkillWrite::Create.as_str(),
+        None,
+    );
     Ok(serde_json::to_string(&result)?)
 }
 
@@ -90,6 +180,7 @@ pub(super) async fn tool_skill_evolve_update(
     input: &serde_json::Value,
     skill_registry: Option<&SkillRegistry>,
     caller_agent_id: Option<&str>,
+    kernel: Option<&Arc<dyn KernelHandle>>,
 ) -> ToolResult {
     let registry = skill_registry.ok_or(ToolError::Unavailable("Skill registry"))?;
     ensure_not_frozen(registry)?;
@@ -125,6 +216,18 @@ pub(super) async fn tool_skill_evolve_update(
     let result =
         librefang_skills::evolution::update_skill(skill, prompt_context, changelog, Some(&author))
             .map_err(ToolError::upstream)?;
+    // The evolve surface's full rewrite records as `evolve`; the reviewer and
+    // workshop-approve paths record the same operation as `update` — see the
+    // shared `SkillWrite` vocabulary in `librefang_types::skill_history`.
+    record_skill_snapshot(
+        kernel,
+        registry,
+        &skill.path,
+        &result.skill_name,
+        &author,
+        SkillWrite::Evolve.as_str(),
+        None,
+    );
     Ok(serde_json::to_string(&result)?)
 }
 
@@ -132,6 +235,7 @@ pub(super) async fn tool_skill_evolve_patch(
     input: &serde_json::Value,
     skill_registry: Option<&SkillRegistry>,
     caller_agent_id: Option<&str>,
+    kernel: Option<&Arc<dyn KernelHandle>>,
 ) -> ToolResult {
     let registry = skill_registry.ok_or(ToolError::Unavailable("Skill registry"))?;
     ensure_not_frozen(registry)?;
@@ -173,12 +277,23 @@ pub(super) async fn tool_skill_evolve_patch(
         Some(&author),
     )
     .map_err(ToolError::upstream)?;
+    record_skill_snapshot(
+        kernel,
+        registry,
+        &skill.path,
+        &result.skill_name,
+        &author,
+        SkillWrite::Patch.as_str(),
+        None,
+    );
     Ok(serde_json::to_string(&result)?)
 }
 
 pub(super) async fn tool_skill_evolve_delete(
     input: &serde_json::Value,
     skill_registry: Option<&SkillRegistry>,
+    caller_agent_id: Option<&str>,
+    kernel: Option<&Arc<dyn KernelHandle>>,
 ) -> ToolResult {
     let registry = skill_registry.ok_or(ToolError::Unavailable("Skill registry"))?;
     ensure_not_frozen(registry)?;
@@ -192,20 +307,40 @@ pub(super) async fn tool_skill_evolve_delete(
     // this, `skill_evolve_delete` removed the global skill (or reported
     // NotFound) while leaving the workspace copy the agent was actually
     // using in place — destructive against the wrong resource.
-    let parent = match registry.get(name) {
-        Some(s) => s
-            .path
-            .parent()
-            .map(|p| p.to_path_buf())
-            .unwrap_or_else(|| registry.skills_dir().to_path_buf()),
+    let (parent, skill_dir) = match registry.get(name) {
+        Some(s) => {
+            let parent = s
+                .path
+                .parent()
+                .map(|p| p.to_path_buf())
+                .unwrap_or_else(|| registry.skills_dir().to_path_buf());
+            (parent, s.path.clone())
+        }
         // Fall back to the global dir when the registry hasn't caught up
         // yet (e.g. a skill created in this same turn hasn't been
         // hot-reloaded into the live view) — delete_skill will return
         // NotFound if nothing exists there either.
-        None => registry.skills_dir().to_path_buf(),
+        None => (
+            registry.skills_dir().to_path_buf(),
+            registry.skills_dir().join(name),
+        ),
     };
+    // Read the snapshot *before* the delete: the files this row records are
+    // what the delete is about to remove, and they cannot be read afterwards.
+    // The row itself is only written once the delete has succeeded.
+    let snapshot = read_skill_snapshot(&skill_dir);
     let result =
         librefang_skills::evolution::delete_skill(&parent, name).map_err(ToolError::upstream)?;
+    let author = agent_author_tag(caller_agent_id);
+    record_skill_snapshot(
+        kernel,
+        registry,
+        &skill_dir,
+        &result.skill_name,
+        &author,
+        SkillWrite::Delete.as_str(),
+        snapshot,
+    );
     Ok(serde_json::to_string(&result)?)
 }
 
@@ -213,6 +348,7 @@ pub(super) async fn tool_skill_evolve_rollback(
     input: &serde_json::Value,
     skill_registry: Option<&SkillRegistry>,
     caller_agent_id: Option<&str>,
+    kernel: Option<&Arc<dyn KernelHandle>>,
 ) -> ToolResult {
     let registry = skill_registry.ok_or(ToolError::Unavailable("Skill registry"))?;
     ensure_not_frozen(registry)?;
@@ -237,12 +373,23 @@ pub(super) async fn tool_skill_evolve_rollback(
     let author = agent_author_tag(caller_agent_id);
     let result = librefang_skills::evolution::rollback_skill(skill, Some(&author))
         .map_err(ToolError::upstream)?;
+    record_skill_snapshot(
+        kernel,
+        registry,
+        &skill.path,
+        &result.skill_name,
+        &author,
+        SkillWrite::Rollback.as_str(),
+        None,
+    );
     Ok(serde_json::to_string(&result)?)
 }
 
 pub(super) async fn tool_skill_evolve_write_file(
     input: &serde_json::Value,
     skill_registry: Option<&SkillRegistry>,
+    caller_agent_id: Option<&str>,
+    kernel: Option<&Arc<dyn KernelHandle>>,
 ) -> ToolResult {
     let registry = skill_registry.ok_or(ToolError::Unavailable("Skill registry"))?;
     ensure_not_frozen(registry)?;
@@ -272,12 +419,26 @@ pub(super) async fn tool_skill_evolve_write_file(
 
     let result = librefang_skills::evolution::write_supporting_file(skill, path, content)
         .map_err(ToolError::upstream)?;
+    // A supporting file is not part of the v1 snapshot, so this row pins the
+    // event (and the skill's unchanged toml/prompt) rather than a diff.
+    let author = agent_author_tag(caller_agent_id);
+    record_skill_snapshot(
+        kernel,
+        registry,
+        &skill.path,
+        &result.skill_name,
+        &author,
+        SkillWrite::FileWrite.as_str(),
+        None,
+    );
     Ok(serde_json::to_string(&result)?)
 }
 
 pub(super) async fn tool_skill_evolve_remove_file(
     input: &serde_json::Value,
     skill_registry: Option<&SkillRegistry>,
+    caller_agent_id: Option<&str>,
+    kernel: Option<&Arc<dyn KernelHandle>>,
 ) -> ToolResult {
     let registry = skill_registry.ok_or(ToolError::Unavailable("Skill registry"))?;
     ensure_not_frozen(registry)?;
@@ -304,6 +465,16 @@ pub(super) async fn tool_skill_evolve_remove_file(
 
     let result = librefang_skills::evolution::remove_supporting_file(skill, path)
         .map_err(ToolError::upstream)?;
+    let author = agent_author_tag(caller_agent_id);
+    record_skill_snapshot(
+        kernel,
+        registry,
+        &skill.path,
+        &result.skill_name,
+        &author,
+        SkillWrite::FileRemove.as_str(),
+        None,
+    );
     Ok(serde_json::to_string(&result)?)
 }
 

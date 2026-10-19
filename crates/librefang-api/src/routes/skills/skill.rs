@@ -1,5 +1,6 @@
 use super::*;
 use librefang_skills::registry::SkillRegistry;
+use librefang_types::skill_history::SkillWrite;
 use std::sync::{RwLock, RwLockReadGuard};
 
 fn read_skill_catalog_registry(
@@ -129,6 +130,7 @@ pub async fn list_skills(
 )]
 pub async fn install_skill(
     State(state): State<Arc<AppState>>,
+    api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
     Json(req): Json<SkillInstallRequest>,
 ) -> impl IntoResponse {
     // Reject path-traversal payloads on BOTH `name` and `hand` before
@@ -183,7 +185,15 @@ pub async fn install_skill(
     let dest = skills_dir.join(&req.name);
 
     // Copy under the same per-skill lock used by evolve/uninstall operations.
-    match librefang_skills::evolution::install_local_skill(&registry_src, &dest) {
+    let history_author = dashboard_author(api_user.as_ref());
+    match install_local_skill_versioned(
+        &state,
+        &registry_src,
+        &dest,
+        &req.name,
+        req.hand.is_some(),
+        &history_author,
+    ) {
         Ok(()) => {
             let version = "latest".to_string();
 
@@ -225,6 +235,7 @@ pub async fn install_skill(
 )]
 pub async fn uninstall_skill(
     State(state): State<Arc<AppState>>,
+    api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
     Json(req): Json<SkillUninstallRequest>,
 ) -> impl IntoResponse {
     // Route through the evolution module so user-initiated uninstall
@@ -232,7 +243,8 @@ pub async fn uninstall_skill(
     // `registry.remove()` path had neither — a concurrent evolve mid-rm
     // could see inconsistent state, and "/../" was accepted.
     let skills_dir = state.kernel.home_dir().join("skills");
-    match librefang_skills::evolution::uninstall_skill(&skills_dir, &req.name) {
+    let history_author = dashboard_author(api_user.as_ref());
+    match uninstall_skill_versioned(&state, &skills_dir, &req.name, &history_author) {
         Ok(result) => {
             state.kernel.reload_skills();
             (
@@ -871,13 +883,15 @@ pub async fn create_skill(
 
     // Use the evolution module for safe, validated skill creation
     let skills_dir = state.kernel.home_dir().join("skills");
-    match librefang_skills::evolution::create_skill(
+    let history_author = dashboard_author(api_user.as_ref());
+    match create_skill_versioned(
+        &state,
         &skills_dir,
         &name,
         &description,
         &prompt_context,
         tags,
-        Some("dashboard"),
+        &history_author,
     ) {
         Ok(result) => {
             audit_evolve(
@@ -1433,6 +1447,359 @@ mod supporting_file_read_tests {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Skill version history (#8021)
+// ---------------------------------------------------------------------------
+
+// The kind of change a versioned skill write is making — the closed
+// vocabulary of `skill_versions.change_source` values this module records.
+//
+// The enumeration itself lives in
+// `librefang_types::skill_history::SkillWrite` (imported at the top of this
+// module) because every surface that records — these handlers, the kernel's
+// workshop/reviewer paths and the runtime's `skill_evolve_*` tools — shares
+// it.
+//
+// Every handler in this module writes through one of the `*_versioned`
+// helpers below, and each of those imports the evolution writer inside its
+// own body rather than at module scope. That is a review convention, not
+// something the compiler enforces (a fully-qualified call compiles anyway);
+// what holds the line is the `raw_writer_drift_guard` test further down, which
+// scans this module's source and fails when any evolution writer is invoked
+// outside its versioned helper. So a new write path cannot land content on
+// disk without passing through the snapshot — and naming the kind of change it
+// is making.
+
+/// Read the v1 snapshot (`skill.toml` + `prompt_context.md`) from an installed
+/// skill directory.
+///
+/// `None` when the manifest is missing or unreadable: a snapshot without its
+/// manifest cannot be restored, so recording half a snapshot would only
+/// produce a corrupt history row. A missing `prompt_context.md` records as an
+/// empty string — inline-prompt and prompt-less skills are legal shapes.
+fn read_skill_snapshot(skill_dir: &std::path::Path) -> Option<(String, String)> {
+    let manifest_toml = std::fs::read_to_string(skill_dir.join("skill.toml")).ok()?;
+    let prompt_context =
+        std::fs::read_to_string(skill_dir.join("prompt_context.md")).unwrap_or_default();
+    Some((manifest_toml, prompt_context))
+}
+
+/// Record one version snapshot, warning on failure and returning it.
+///
+/// The failure is returned as well as logged because the caller decides
+/// whether it matters: every call site here snapshots *after* the mutation
+/// succeeded, so a failure costs one history row, never content — those
+/// callers discard the `Result` on purpose.
+pub(crate) fn record_skill_version(
+    state: &AppState,
+    skill_name: &str,
+    manifest_toml: &str,
+    prompt_context: &str,
+    source: SkillWrite,
+    author: &str,
+) -> librefang_types::error::LibreFangResult<()> {
+    let store = librefang_memory::SkillVersionStore::new(state.kernel.memory_substrate().pool());
+    store
+        .record_version(
+            skill_name,
+            manifest_toml,
+            prompt_context,
+            author,
+            source.as_str(),
+        )
+        .inspect_err(|e| {
+            tracing::warn!(
+                skill = %skill_name,
+                error = %e,
+                "Failed to record skill version snapshot"
+            );
+        })
+}
+
+/// Best-effort snapshot of an installed skill directory, after a successful
+/// mutation. An unreadable manifest skips the row (with a warning) rather than
+/// storing a snapshot that cannot be restored.
+fn record_skill_version_at_dir(
+    state: &AppState,
+    skill_dir: &std::path::Path,
+    skill_name: &str,
+    source: SkillWrite,
+    author: &str,
+) {
+    match read_skill_snapshot(skill_dir) {
+        Some((manifest_toml, prompt_context)) => {
+            let _ = record_skill_version(
+                state,
+                skill_name,
+                &manifest_toml,
+                &prompt_context,
+                source,
+                author,
+            );
+        }
+        None => tracing::warn!(
+            skill = skill_name,
+            dir = %skill_dir.display(),
+            "skill history: skill.toml unreadable after a successful mutation; snapshot skipped"
+        ),
+    }
+}
+
+/// Record an `install` snapshot for a skill that was just copied into
+/// `skills_dir` by a marketplace install (FangHub / ClawHub / Skillhub).
+///
+/// Resolves the directory through the manifest because a marketplace install
+/// may land under a slug-named directory whose `[skill] name` differs.
+pub(crate) fn record_installed_skill_version(
+    state: &AppState,
+    skills_dir: &std::path::Path,
+    skill_name: &str,
+    author: &str,
+) {
+    match librefang_skills::evolution::load_installed_skill_from_disk(skills_dir, skill_name) {
+        Ok(skill) => {
+            record_skill_version_at_dir(state, &skill.path, skill_name, SkillWrite::Install, author)
+        }
+        Err(e) => tracing::warn!(
+            skill = skill_name,
+            error = %e,
+            "skill history: installed skill could not be resolved on disk; snapshot skipped"
+        ),
+    }
+}
+
+/// History author for a dashboard request: the authenticated user's name, or
+/// `"dashboard"` on the unauthenticated loopback path — the same sentinel the
+/// evolve endpoints already pass as the evolution author.
+///
+/// `pub(crate)` so the marketplace install handlers in the sibling modules
+/// attribute their `install` snapshots the same way.
+pub(crate) fn dashboard_author(
+    api_user: Option<&axum::Extension<crate::middleware::AuthenticatedApiUser>>,
+) -> String {
+    api_user
+        .map(|u| u.0.name.clone())
+        .unwrap_or_else(|| "dashboard".to_string())
+}
+
+/// Create a skill and record the version it produced, in one call.
+///
+/// The evolution writer is imported inside this function so the write and the
+/// snapshot sit on the same screen — the `raw_writer_drift_guard` test below
+/// is what fails when any other call site appears.
+fn create_skill_versioned(
+    state: &AppState,
+    skills_dir: &std::path::Path,
+    name: &str,
+    description: &str,
+    prompt_context: &str,
+    tags: Vec<String>,
+    author: &str,
+) -> Result<librefang_skills::evolution::EvolutionResult, librefang_skills::SkillError> {
+    use librefang_skills::evolution;
+    let result = evolution::create_skill(
+        skills_dir,
+        name,
+        description,
+        prompt_context,
+        tags,
+        Some("dashboard"),
+    )?;
+    record_skill_version_at_dir(
+        state,
+        &skills_dir.join(&result.skill_name),
+        &result.skill_name,
+        SkillWrite::Create,
+        author,
+    );
+    Ok(result)
+}
+
+/// Full-rewrite a skill and record the version it produced (evolve surface).
+fn update_skill_versioned(
+    state: &AppState,
+    skill: &librefang_skills::InstalledSkill,
+    prompt_context: &str,
+    changelog: &str,
+    author: &str,
+) -> Result<librefang_skills::evolution::EvolutionResult, librefang_skills::SkillError> {
+    use librefang_skills::evolution;
+    let result = evolution::update_skill(skill, prompt_context, changelog, Some("dashboard"))?;
+    record_skill_version_at_dir(
+        state,
+        &skill.path,
+        &result.skill_name,
+        SkillWrite::Evolve,
+        author,
+    );
+    Ok(result)
+}
+
+/// Fuzzy find-and-replace and record the version it produced.
+fn patch_skill_versioned(
+    state: &AppState,
+    skill: &librefang_skills::InstalledSkill,
+    old_string: &str,
+    new_string: &str,
+    changelog: &str,
+    replace_all: bool,
+    author: &str,
+) -> Result<librefang_skills::evolution::EvolutionResult, librefang_skills::SkillError> {
+    use librefang_skills::evolution;
+    let result = evolution::patch_skill(
+        skill,
+        old_string,
+        new_string,
+        changelog,
+        replace_all,
+        Some("dashboard"),
+    )?;
+    record_skill_version_at_dir(
+        state,
+        &skill.path,
+        &result.skill_name,
+        SkillWrite::Patch,
+        author,
+    );
+    Ok(result)
+}
+
+/// Roll back to the skill's own previous evolution snapshot and record the
+/// version it produced.
+fn rollback_skill_versioned(
+    state: &AppState,
+    skill: &librefang_skills::InstalledSkill,
+    author: &str,
+) -> Result<librefang_skills::evolution::EvolutionResult, librefang_skills::SkillError> {
+    use librefang_skills::evolution;
+    let result = evolution::rollback_skill(skill, Some("dashboard"))?;
+    record_skill_version_at_dir(
+        state,
+        &skill.path,
+        &result.skill_name,
+        SkillWrite::Rollback,
+        author,
+    );
+    Ok(result)
+}
+
+/// Delete a locally-evolved skill and record the content the delete removed.
+///
+/// The snapshot is read *before* the delete — the files cannot be read
+/// afterwards — but it is only written once the delete has succeeded, so a
+/// failed delete leaves no history row claiming it happened.
+fn delete_skill_versioned(
+    state: &AppState,
+    skills_dir: &std::path::Path,
+    name: &str,
+    author: &str,
+) -> Result<librefang_skills::evolution::EvolutionResult, librefang_skills::SkillError> {
+    use librefang_skills::evolution;
+    let snapshot = evolution::load_installed_skill_from_disk(skills_dir, name)
+        .ok()
+        .and_then(|skill| read_skill_snapshot(&skill.path));
+    let result = evolution::delete_skill(skills_dir, name)?;
+    if let Some((manifest_toml, prompt_context)) = snapshot {
+        let _ = record_skill_version(
+            state,
+            &result.skill_name,
+            &manifest_toml,
+            &prompt_context,
+            SkillWrite::Delete,
+            author,
+        );
+    }
+    Ok(result)
+}
+
+/// Write a supporting file and record the version the skill was at.
+fn write_supporting_file_versioned(
+    state: &AppState,
+    skill: &librefang_skills::InstalledSkill,
+    path: &str,
+    content: &str,
+    author: &str,
+) -> Result<librefang_skills::evolution::EvolutionResult, librefang_skills::SkillError> {
+    use librefang_skills::evolution;
+    let result = evolution::write_supporting_file(skill, path, content)?;
+    record_skill_version_at_dir(
+        state,
+        &skill.path,
+        &result.skill_name,
+        SkillWrite::FileWrite,
+        author,
+    );
+    Ok(result)
+}
+
+/// Remove a supporting file and record the version the skill was at.
+fn remove_supporting_file_versioned(
+    state: &AppState,
+    skill: &librefang_skills::InstalledSkill,
+    path: &str,
+    author: &str,
+) -> Result<librefang_skills::evolution::EvolutionResult, librefang_skills::SkillError> {
+    use librefang_skills::evolution;
+    let result = evolution::remove_supporting_file(skill, path)?;
+    record_skill_version_at_dir(
+        state,
+        &skill.path,
+        &result.skill_name,
+        SkillWrite::FileRemove,
+        author,
+    );
+    Ok(result)
+}
+
+/// Install a skill from the local registry and record the version it produced.
+///
+/// `hand_scoped` installs are skipped: v1 history is keyed by skill name alone
+/// and covers the global `skills/` root, so a hand-scoped skill would conflate
+/// with a global skill of the same name. Documented limitation, see the
+/// `skill_version_store` module docs.
+fn install_local_skill_versioned(
+    state: &AppState,
+    registry_src: &std::path::Path,
+    dest: &std::path::Path,
+    skill_name: &str,
+    hand_scoped: bool,
+    author: &str,
+) -> Result<(), librefang_skills::SkillError> {
+    librefang_skills::evolution::install_local_skill(registry_src, dest)?;
+    if !hand_scoped {
+        record_skill_version_at_dir(state, dest, skill_name, SkillWrite::Install, author);
+    }
+    Ok(())
+}
+
+/// Uninstall any installed skill and record the content the uninstall removed.
+///
+/// Like [`delete_skill_versioned`], the snapshot is read before the removal and
+/// written after it succeeded.
+fn uninstall_skill_versioned(
+    state: &AppState,
+    skills_dir: &std::path::Path,
+    name: &str,
+    author: &str,
+) -> Result<librefang_skills::evolution::EvolutionResult, librefang_skills::SkillError> {
+    use librefang_skills::evolution;
+    let snapshot = evolution::load_installed_skill_from_disk(skills_dir, name)
+        .ok()
+        .and_then(|skill| read_skill_snapshot(&skill.path));
+    let result = evolution::uninstall_skill(skills_dir, name)?;
+    if let Some((manifest_toml, prompt_context)) = snapshot {
+        let _ = record_skill_version(
+            state,
+            &result.skill_name,
+            &manifest_toml,
+            &prompt_context,
+            SkillWrite::Uninstall,
+            author,
+        );
+    }
+    Ok(result)
+}
+
 /// POST /api/skills/{name}/evolve/update — full-rewrite prompt_context.
 #[utoipa::path(
     post,
@@ -1466,12 +1833,8 @@ pub async fn evolve_update_skill(
         Ok(s) => s,
         Err(e) => return e,
     };
-    match librefang_skills::evolution::update_skill(
-        &skill,
-        prompt_context,
-        changelog,
-        Some("dashboard"),
-    ) {
+    let history_author = dashboard_author(api_user.as_ref());
+    match update_skill_versioned(&state, &skill, prompt_context, changelog, &history_author) {
         Ok(r) => {
             audit_evolve(
                 &state,
@@ -1524,13 +1887,15 @@ pub async fn evolve_patch_skill(
         Ok(s) => s,
         Err(e) => return e,
     };
-    match librefang_skills::evolution::patch_skill(
+    let history_author = dashboard_author(api_user.as_ref());
+    match patch_skill_versioned(
+        &state,
         &skill,
         old_string,
         new_string,
         changelog,
         replace_all,
-        Some("dashboard"),
+        &history_author,
     ) {
         Ok(r) => {
             audit_evolve(
@@ -1570,7 +1935,8 @@ pub async fn evolve_rollback_skill(
         Ok(s) => s,
         Err(e) => return e,
     };
-    match librefang_skills::evolution::rollback_skill(&skill, Some("dashboard")) {
+    let history_author = dashboard_author(api_user.as_ref());
+    match rollback_skill_versioned(&state, &skill, &history_author) {
         Ok(r) => {
             audit_evolve(
                 &state,
@@ -1607,7 +1973,8 @@ pub async fn evolve_delete_skill(
         return resp;
     }
     let skills_dir = state.kernel.home_dir().join("skills");
-    match librefang_skills::evolution::delete_skill(&skills_dir, &name) {
+    let history_author = dashboard_author(api_user.as_ref());
+    match delete_skill_versioned(&state, &skills_dir, &name, &history_author) {
         Ok(r) => {
             audit_evolve(
                 &state,
@@ -1655,7 +2022,8 @@ pub async fn evolve_write_file(
         Ok(s) => s,
         Err(e) => return e,
     };
-    match librefang_skills::evolution::write_supporting_file(&skill, path, content) {
+    let history_author = dashboard_author(api_user.as_ref());
+    match write_supporting_file_versioned(&state, &skill, path, content, &history_author) {
         Ok(r) => {
             audit_evolve(
                 &state,
@@ -1704,7 +2072,8 @@ pub async fn evolve_remove_file(
         Ok(s) => s,
         Err(e) => return e,
     };
-    match librefang_skills::evolution::remove_supporting_file(&skill, path) {
+    let history_author = dashboard_author(api_user.as_ref());
+    match remove_supporting_file_versioned(&state, &skill, path, &history_author) {
         Ok(r) => {
             audit_evolve(
                 &state,
@@ -1717,5 +2086,302 @@ pub async fn evolve_remove_file(
             evolution_ok_response(r)
         }
         Err(e) => evolution_err_to_response(e),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Skill version history endpoints (#8021)
+// ---------------------------------------------------------------------------
+
+/// Query parameters for `GET /api/skills/{name}/history`.
+///
+/// A non-numeric `limit` is rejected at extraction (400) instead of being
+/// silently coerced to the default — same contract as the agent
+/// manifest-history route.
+#[derive(Debug, serde::Deserialize)]
+pub struct SkillHistoryQuery {
+    #[serde(default = "default_skill_history_limit")]
+    pub limit: u32,
+}
+
+/// Default page size for the skill history listing.
+fn default_skill_history_limit() -> u32 {
+    30
+}
+
+/// GET /api/skills/{name}/history — how this skill changed over time.
+///
+/// Returns an array of snapshots, newest first. Each entry carries the full
+/// `skill.toml` and `prompt_context.md` so the dashboard can render a diff
+/// between consecutive versions and offer a one-click restore.
+#[utoipa::path(
+    get,
+    path = "/api/skills/{name}/history",
+    tag = "skills",
+    operation_id = "list_skill_history",
+    params(
+        ("name" = String, Path, description = "Skill name"),
+        ("limit" = Option<u32>, Query, description = "Max entries (default 30, max 200)")
+    ),
+    responses(
+        (status = 200, description = "Skill version history, newest first", body = crate::types::JsonObject),
+        (status = 400, description = "Invalid skill name or limit"),
+        (status = 404, description = "Skill not installed")
+    )
+)]
+pub async fn list_skill_history(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+    query: Result<Query<SkillHistoryQuery>, axum::extract::rejection::QueryRejection>,
+) -> impl IntoResponse {
+    if let Err(reason) = validate_skill_identifier(&name, "name") {
+        return ApiErrorResponse::bad_request(reason).into_json_tuple();
+    }
+    let Query(params) = match query {
+        Ok(q) => q,
+        Err(rejection) => {
+            return ApiErrorResponse::bad_request(rejection.body_text()).into_json_tuple();
+        }
+    };
+    let limit = params.limit.clamp(1, 200) as usize;
+
+    // 404 for a name that is not installed — the same contract the template
+    // history route keeps. History rows for a deleted skill are retained (the
+    // delete itself is one of them) but are reached by reinstalling the same
+    // name; a name with nothing behind it must not look like it has a history.
+    if clone_installed_skill(&state, &name).is_err() {
+        return ApiErrorResponse::not_found(format!("Skill '{name}' not found"))
+            .with_code("skill_not_found")
+            .into_json_tuple();
+    }
+
+    let store = librefang_memory::SkillVersionStore::new(state.kernel.memory_substrate().pool());
+    match store.list_for_skill(&name, limit) {
+        Ok(versions) => {
+            let items: Vec<serde_json::Value> = versions
+                .iter()
+                .map(|v| {
+                    serde_json::json!({
+                        "id": v.id,
+                        "skill_name": v.skill_name,
+                        "timestamp": v.timestamp,
+                        "manifest_toml": v.manifest_toml,
+                        "prompt_context": v.prompt_context,
+                        "author": v.author,
+                        "change_source": v.change_source,
+                    })
+                })
+                .collect();
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({ "versions": items })),
+            )
+        }
+        Err(e) => ApiErrorResponse::internal_scrub(e).into_json_tuple(),
+    }
+}
+
+/// POST /api/skills/{name}/history/{version_id}/restore — restore a skill to a
+/// prior snapshot.
+///
+/// The restore *is* the operation: the stored `skill.toml` +
+/// `prompt_context.md` are written back verbatim (including the version field
+/// the snapshot carried) and the resulting state is recorded as a fresh
+/// `restore` snapshot — it is not a rollback to "the version before this one".
+#[utoipa::path(
+    post,
+    path = "/api/skills/{name}/history/{version_id}/restore",
+    tag = "skills",
+    operation_id = "restore_skill_version",
+    params(
+        ("name" = String, Path, description = "Skill name"),
+        ("version_id" = i64, Path, description = "Version row id to restore")
+    ),
+    responses(
+        (status = 200, description = "Skill restored", body = crate::types::JsonObject),
+        (status = 400, description = "Invalid skill name"),
+        (status = 404, description = "Skill or version not found"),
+        (status = 500, description = "Stored version is corrupt and cannot be restored", body = crate::types::JsonObject)
+    )
+)]
+pub async fn restore_skill_version(
+    State(state): State<Arc<AppState>>,
+    Path((name, version_id)): Path<(String, i64)>,
+    api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
+) -> impl IntoResponse {
+    if let Some(resp) = reject_if_frozen(&state) {
+        return resp;
+    }
+    if let Err(reason) = validate_skill_identifier(&name, "name") {
+        return ApiErrorResponse::bad_request(reason).into_json_tuple();
+    }
+
+    let skills_dir = state.kernel.home_dir().join("skills");
+    // Only installed skills can be restored: the write path resolves an
+    // existing directory and deliberately does not resurrect a deleted one
+    // (the delete is part of the history, not a hole to fill).
+    if clone_installed_skill(&state, &name).is_err() {
+        return ApiErrorResponse::not_found(format!("Skill '{name}' not found"))
+            .with_code("skill_not_found")
+            .into_json_tuple();
+    }
+
+    let store = librefang_memory::SkillVersionStore::new(state.kernel.memory_substrate().pool());
+    // A version id that belongs to another skill answers exactly like one that
+    // does not exist — a distinct status would let a caller probe the global
+    // id sequence for rows of skills it cannot see.
+    let version = match store.get_version(version_id) {
+        Ok(Some(v)) if v.skill_name == name => v,
+        Ok(Some(_)) | Ok(None) => {
+            return ApiErrorResponse::not_found("version not found")
+                .with_code("version_not_found")
+                .into_json_tuple();
+        }
+        Err(e) => return ApiErrorResponse::internal_scrub(e).into_json_tuple(),
+    };
+
+    // Parse before applying: a snapshot the server cannot deserialize must
+    // fail as its own static 500 rather than half-apply or echo parser
+    // internals. The evolution helper re-checks the same invariant.
+    if let Err(e) = toml::from_str::<librefang_skills::SkillManifest>(&version.manifest_toml) {
+        tracing::warn!(skill = %name, version_id, "Stored skill version is unparseable: {e}");
+        return ApiErrorResponse::internal("stored version is corrupt and cannot be restored")
+            .with_code("version_corrupt")
+            .into_json_tuple();
+    }
+
+    match librefang_skills::evolution::restore_skill_snapshot(
+        &skills_dir,
+        &name,
+        &version.manifest_toml,
+        &version.prompt_context,
+    ) {
+        Ok(()) => {
+            state.kernel.reload_skills();
+            // The restore itself is the newest snapshot, recorded under its
+            // own `restore` source so it is distinguishable from what it put
+            // back (the dedupe key includes the source).
+            let history_author = dashboard_author(api_user.as_ref());
+            let _ = record_skill_version(
+                &state,
+                &name,
+                &version.manifest_toml,
+                &version.prompt_context,
+                SkillWrite::Restore,
+                &history_author,
+            );
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "status": "ok",
+                    "skill_name": name,
+                    "restored_version_id": version_id,
+                })),
+            )
+        }
+        Err(librefang_skills::SkillError::NotFound(_)) => {
+            ApiErrorResponse::not_found(format!("Skill '{name}' not found"))
+                .with_code("skill_not_found")
+                .into_json_tuple()
+        }
+        Err(e) => evolution_err_to_response(e),
+    }
+}
+
+#[cfg(test)]
+mod raw_writer_drift_guard {
+    //! Enforces the funnel the version-history comment above promises: every
+    //! `librefang_skills::evolution` writer is called inside its `*_versioned`
+    //! helper and nowhere else, so no skill write path can land content on
+    //! disk without naming the kind of change it is making.
+    //!
+    //! It scans the source rather than checking imports on purpose. Importing
+    //! the writer inside the helper is a review convention — nothing stops a
+    //! handler from spelling the call through its path, no `use` needed — so
+    //! the property worth defending is the call site itself, whichever syntax
+    //! reaches it.
+
+    /// The module's own source: what this scan sees is exactly what rustc
+    /// compiled.
+    const SOURCE: &str = include_str!("skill.rs");
+
+    /// Every evolution writer, paired with the one function allowed to call
+    /// it.
+    const FUNNELS: &[(&str, &str)] = &[
+        ("evolution::create_skill", "fn create_skill_versioned("),
+        ("evolution::update_skill", "fn update_skill_versioned("),
+        ("evolution::patch_skill", "fn patch_skill_versioned("),
+        ("evolution::rollback_skill", "fn rollback_skill_versioned("),
+        ("evolution::delete_skill", "fn delete_skill_versioned("),
+        (
+            "evolution::write_supporting_file",
+            "fn write_supporting_file_versioned(",
+        ),
+        (
+            "evolution::remove_supporting_file",
+            "fn remove_supporting_file_versioned(",
+        ),
+        (
+            "evolution::install_local_skill",
+            "fn install_local_skill_versioned(",
+        ),
+        (
+            "evolution::uninstall_skill",
+            "fn uninstall_skill_versioned(",
+        ),
+    ];
+
+    /// 0-based line range of `signature`'s body, closing brace included.
+    ///
+    /// `rustfmt` closes a top-level function with `}` in column 0, so the
+    /// first such line after the signature ends the function; body lines are
+    /// indented, and none of these helpers holds a column-0 brace anywhere
+    /// else.
+    fn helper_body_lines(signature: &str) -> std::ops::Range<usize> {
+        let lines: Vec<&str> = SOURCE.lines().collect();
+        let start = lines
+            .iter()
+            .position(|line| {
+                // The definition, not the same string sitting in `FUNNELS`
+                // below: a signature line carries no double quotes.
+                line.contains(signature) && !line.contains('"')
+            })
+            .unwrap_or_else(|| panic!("`{signature}` not found in skill.rs"));
+        let end = lines[start + 1..]
+            .iter()
+            .position(|line| line.trim_end() == "}")
+            .map(|offset| start + 1 + offset + 1)
+            .unwrap_or_else(|| panic!("closing brace of `{signature}` not found"));
+        start..end
+    }
+
+    #[test]
+    fn evolution_writers_are_called_only_inside_their_versioned_helpers() {
+        let lines: Vec<&str> = SOURCE.lines().collect();
+        for &(writer, signature) in FUNNELS {
+            let helper = helper_body_lines(signature);
+            let needle = format!("{writer}(");
+            let call_lines: Vec<usize> = lines
+                .iter()
+                .enumerate()
+                .filter(|(_, line)| line.contains(&needle))
+                .map(|(index, _)| index)
+                .collect();
+            assert!(
+                !call_lines.is_empty(),
+                "`{needle}` is called nowhere in this module — the helper or the writer was \
+                 probably renamed, and this guard would otherwise keep passing vacuously; update \
+                 FUNNELS so it keeps testing something"
+            );
+            for index in call_lines {
+                assert!(
+                    helper.contains(&index),
+                    "`{needle}` is called at skill.rs:{} outside `{signature}`. Every skill \
+                     writer must go through its versioned helper so the version snapshot is \
+                     recorded (and the kind of change named); move the call into the helper.",
+                    index + 1
+                );
+            }
+        }
     }
 }

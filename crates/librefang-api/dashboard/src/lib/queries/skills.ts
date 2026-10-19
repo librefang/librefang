@@ -2,6 +2,7 @@ import { queryOptions, useQuery } from "@tanstack/react-query";
 import {
   listSkills,
   getSkillDetail,
+  getSkillHistory,
   getSupportingFile,
   listPendingCandidates,
   getPendingCandidate,
@@ -44,6 +45,16 @@ export const skillQueries = {
       queryKey: skillKeys.supportingFile(name, path),
       queryFn: () => getSupportingFile(name, path),
       enabled: !!name && !!path,
+      staleTime: STALE_MS,
+    }),
+  // Skill version history (#8021) — backs the drawer's History section. The
+  // key is nested under `detail(name)`, so every write that records a snapshot
+  // (and therefore invalidates the detail) refreshes this list too.
+  history: (name: string) =>
+    queryOptions({
+      queryKey: skillKeys.history(name),
+      queryFn: () => getSkillHistory(name),
+      enabled: !!name,
       staleTime: STALE_MS,
     }),
   clawhubBrowse: (sort?: string, limit?: number, cursor?: string) =>
@@ -144,6 +155,10 @@ export function useSupportingFile(
   options: QueryOverrides = {},
 ) {
   return useQuery(withOverrides(skillQueries.supportingFile(name, path), options));
+}
+
+export function useSkillHistory(name: string, options: QueryOverrides = {}) {
+  return useQuery(withOverrides(skillQueries.history(name), options));
 }
 
 export function useClawHubBrowse(sort?: string, limit?: number, cursor?: string, options: QueryOverrides = {}) {
