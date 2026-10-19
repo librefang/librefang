@@ -552,6 +552,44 @@ pub fn check_derived_env_var(env_var: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Validate a caller-chosen provider `api_key_env` name before it is planted into the process environment and `secrets.env`, or persisted as a catalog `api_key_env` that `set_provider_key` later trusts.
+///
+/// Used by `POST` / `PUT /api/registry/content/provider` when the name differs from the one the existing catalog entry already declares.
+/// The shape is `^[A-Z][A-Z0-9_]{0,63}$` ending in a credential suffix (`_KEY`, `_KEY_ID`, `_TOKEN` or `_SECRET`), which admits the key names custom providers use (`*_API_KEY`, `*_API_TOKEN`, `*_ACCESS_KEY_ID`, …) while refusing loader and interpreter knobs such as `LD_PRELOAD`, `DYLD_INSERT_LIBRARIES`, `NODE_OPTIONS` or `PATH`.
+/// `GITHUB_TOKEN` (the daemon's own promotion credential, #8164) and the `LIBREFANG_*` namespace are refused outright even though they fit the shape.
+/// A shipped entry whose name falls outside this shape (`GITHUB_TOKEN` on `github-copilot`, `GOOGLE_APPLICATION_CREDENTIALS` on `vertex-ai`) is not run through this check: the caller exempts a name equal to the one the existing catalog entry already declares.
+pub fn check_provider_api_key_env(env_var: &str) -> Result<(), String> {
+    if env_var.is_empty() || env_var.len() > 64 {
+        return Err("api_key_env must be 1-64 characters".to_string());
+    }
+    let starts_upper = env_var
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_ascii_uppercase());
+    if !starts_upper
+        || !env_var
+            .chars()
+            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+    {
+        return Err(
+            "api_key_env must start with an uppercase ASCII letter and contain only [A-Z0-9_]"
+                .to_string(),
+        );
+    }
+    if !["_KEY", "_KEY_ID", "_TOKEN", "_SECRET"]
+        .iter()
+        .any(|suffix| env_var.ends_with(suffix))
+    {
+        return Err("api_key_env must end with _KEY, _KEY_ID, _TOKEN or _SECRET".to_string());
+    }
+    if env_var == "GITHUB_TOKEN" || env_var.starts_with("LIBREFANG_") {
+        return Err(format!(
+            "api_key_env '{env_var}' is reserved for the daemon"
+        ));
+    }
+    Ok(())
+}
+
 /// Validate that a string looks like a plausible identifier (agent name, key name, etc.).
 /// Allows alphanumeric characters, hyphens, underscores, and dots.
 pub fn check_identifier(field_name: &str, value: &str) -> Result<(), ValidationError> {
@@ -847,6 +885,39 @@ mod tests {
         assert!(check_derived_env_var("my_provider_API_KEY").is_err());
         assert!(check_derived_env_var("1FOO_API_KEY").is_err());
         assert!(check_derived_env_var("_FOO_API_KEY").is_err());
+    }
+
+    #[test]
+    fn provider_api_key_env_accepts_catalog_shapes() {
+        for ok in [
+            "MY_PROVIDER_API_KEY",
+            "REPLICATE_API_TOKEN",
+            "GITHUB_MODELS_TOKEN",
+            "AWS_ACCESS_KEY_ID",
+            "CHATGPT_SESSION_TOKEN",
+            "VENDOR_SECRET",
+        ] {
+            assert!(check_provider_api_key_env(ok).is_ok(), "{ok} should pass");
+        }
+    }
+
+    #[test]
+    fn provider_api_key_env_rejects_process_knobs_and_reserved_names() {
+        for bad in [
+            "NODE_OPTIONS",
+            "LD_PRELOAD",
+            "DYLD_INSERT_LIBRARIES",
+            "PATH",
+            "GITHUB_TOKEN",
+            "LIBREFANG_VAULT_KEY",
+            "node_api_key",
+            "",
+        ] {
+            assert!(
+                check_provider_api_key_env(bad).is_err(),
+                "{bad} should fail"
+            );
+        }
     }
 
     #[test]

@@ -1,12 +1,38 @@
 //! Session management — load/save conversation history.
 
 use crate::agent_tables::{execute_agent_deletes, AgentTableGroup};
+use crate::substrate::COMPACTION_SUMMARY_KEY_PREFIX;
 use chrono::Utc;
 use librefang_types::agent::{AgentId, SessionId};
 use librefang_types::error::{LibreFangError, LibreFangResult};
 use librefang_types::message::{ContentBlock, Message, MessageContent, Role};
 use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
+
+/// Page query behind `list_sessions_paginated` (`GET /api/sessions`, polled by the dashboard).
+///
+/// The usage totals are correlated subqueries, so they run only for the rows on the page and each one seeks `idx_usage_session`.
+/// A `LEFT JOIN` against a `GROUP BY session_id` aggregate had to materialize the aggregate over all of `usage_events` on every request, and with no `created_at` index the sort was a full scan of `sessions` too.
+/// `idx_sessions_created` (v64) now supplies the order, so `LIMIT` stops after one page.
+const LIST_SESSIONS_PAGE_SQL: &str =
+    "SELECT s.id, s.agent_id, s.messages, s.context_window_tokens, s.created_at, s.label,
+            s.message_count,
+            (SELECT COALESCE(SUM(u.cost_usd), 0.0) FROM usage_events u
+              WHERE u.session_id = s.id) AS total_cost_usd,
+            (SELECT COALESCE(SUM(u.input_tokens + u.output_tokens), 0) FROM usage_events u
+              WHERE u.session_id = s.id) AS total_tokens
+     FROM sessions s
+     ORDER BY s.created_at DESC LIMIT ?1 OFFSET ?2";
+
+/// Per-agent session counts over the 24h window for `agents_stats_24h_bulk`.
+const AGENTS_SESSIONS_24H_SQL: &str = "SELECT agent_id, COUNT(*)
+     FROM sessions WHERE created_at >= ?1
+     GROUP BY +agent_id";
+
+/// Per-agent cost over the 24h window for `agents_stats_24h_bulk`.
+const AGENTS_COST_24H_SQL: &str = "SELECT agent_id, COALESCE(SUM(cost_usd), 0.0)
+     FROM usage_events WHERE timestamp >= ?1
+     GROUP BY +agent_id";
 
 /// Derive a short display label for a session from its first user message.
 ///
@@ -157,6 +183,21 @@ pub struct Session {
     /// and `SELECT ... WHERE peer_id = ?` returning nothing. Channel-
     /// derived construction sites now populate this from the inbound
     /// `SenderContext.chat_id` so per-peer queries actually work.
+    pub peer_id: Option<String>,
+}
+
+/// The scalar columns of a session row, without its message history.
+///
+/// Ownership checks and pre-lock reads only need these, and reading them through [`SessionStore::session_meta`] skips fetching and msgpack-decoding the `messages` blob, which can be several MB for a long session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionMeta {
+    /// Owning agent ID.
+    pub agent_id: AgentId,
+    /// Per-session model override (issue #4898).
+    pub model_override: Option<String>,
+    /// Estimated token count for the context window.
+    pub context_window_tokens: u64,
+    /// Conversation identifier for contact-scoped sessions; see [`Session::peer_id`].
     pub peer_id: Option<String>,
 }
 
@@ -312,6 +353,13 @@ impl SessionStore {
             Ok(_) => {}
             Err(e) => warn!(error = %e, "FTS reconcile: orphan cleanup failed"),
         }
+        // The rowid map (v64) is dropped with its session by the `sessions_fts_map_ad` trigger; this sweeps any entry that predates the trigger or outlived its session another way.
+        if let Err(e) = conn.execute(
+            "DELETE FROM sessions_fts_map WHERE session_id NOT IN (SELECT id FROM sessions)",
+            [],
+        ) {
+            warn!(error = %e, "FTS reconcile: rowid map cleanup failed");
+        }
 
         // 2. Build FTS rows for sessions that don't yet have one. We don't
         //    repopulate `content` here — only the next `save_session`
@@ -335,6 +383,40 @@ impl SessionStore {
                 "sessions_fts is missing rows for live sessions; \
                  they will be reindexed on next save_session"
             );
+        }
+    }
+
+    /// Read a session's scalar columns without loading its message history.
+    ///
+    /// Use this for ownership checks and other reads that do not need `messages`; `get_session` decodes the whole history blob.
+    pub fn session_meta(&self, session_id: SessionId) -> LibreFangResult<Option<SessionMeta>> {
+        let conn = self.pool.get().map_err(LibreFangError::memory)?;
+        let result = conn.query_row(
+            "SELECT agent_id, model_override, context_window_tokens, peer_id FROM sessions WHERE id = ?1",
+            rusqlite::params![session_id.0.to_string()],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(1).unwrap_or(None),
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, Option<String>>(3).unwrap_or(None),
+                ))
+            },
+        );
+        match result {
+            Ok((agent_str, model_override, tokens, peer_id)) => {
+                let agent_id = uuid::Uuid::parse_str(&agent_str)
+                    .map(AgentId)
+                    .map_err(LibreFangError::memory)?;
+                Ok(Some(SessionMeta {
+                    agent_id,
+                    model_override,
+                    context_window_tokens: tokens as u64,
+                    peer_id,
+                }))
+            }
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(LibreFangError::memory(e)),
         }
     }
 
@@ -583,7 +665,7 @@ impl SessionStore {
     /// a single transaction so a crash between them cannot leave the session row
     /// and the FTS index inconsistent.
     pub fn save_session(&self, session: &Session) -> LibreFangResult<()> {
-        let conn = self.pool.get().map_err(LibreFangError::memory)?;
+        let mut conn = self.pool.get().map_err(LibreFangError::memory)?;
         // Trim the tail of the message history before serialising so the
         // stored blob never exceeds MAX_PERSISTED_MESSAGES.  We keep the
         // *most recent* messages (slice from the end) so context is preserved.
@@ -614,13 +696,10 @@ impl SessionStore {
         let session_id_str = session.id.0.to_string();
         let agent_id_str = session.agent_id.0.to_string();
 
-        // Wrap session upsert + FTS update in a single transaction so a crash
-        // between the three statements cannot leave session and FTS data
-        // inconsistent. `unchecked_transaction` is safe here because we own
-        // the `PooledConnection` for the duration of the transaction; no
-        // other thread can access this `Connection`.
+        // Wrap session upsert + FTS update in a single transaction so a crash between the statements cannot leave session and FTS data inconsistent.
+        // BEGIN IMMEDIATE because the first statement is the `session_existed` read: a deferred transaction would start as a reader and, if another connection committed before the upsert, fail the upgrade with SQLITE_BUSY_SNAPSHOT, which the busy timeout does not retry.
         let tx = conn
-            .unchecked_transaction()
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(LibreFangError::memory)?;
 
         // `message_count` is denormalised here so `list_sessions()` can
@@ -629,6 +708,19 @@ impl SessionStore {
         // (post-trim), which matches the count `list_sessions` previously
         // derived by decoding the blob.
         let message_count = messages_to_persist.len() as i64;
+
+        // Whether this save creates the session. A brand-new session has no FTS row to replace, so the delete below can skip its full-index fallback scan when there is no rowid mapping (v64); every delete path removes a session's FTS row with it and `reconcile_fts_index` sweeps older orphans at boot.
+        let session_existed = {
+            use rusqlite::OptionalExtension;
+            tx.query_row(
+                "SELECT 1 FROM sessions WHERE id = ?1",
+                rusqlite::params![session_id_str],
+                |_| Ok(()),
+            )
+            .optional()
+            .map_err(LibreFangError::memory)?
+            .is_some()
+        };
 
         // Persist `messages_generation` (#5138) so the repair-skip
         // optimisation in the runtime survives a reload. Without the
@@ -668,11 +760,8 @@ impl SessionStore {
         // FTS index pointing at stale or missing content (#3451). On rollback
         // the on-disk session is unchanged, so a subsequent save retries the
         // whole pair atomically.
-        tx.execute(
-            "DELETE FROM sessions_fts WHERE session_id = ?1",
-            rusqlite::params![session_id_str],
-        )
-        .map_err(|e| LibreFangError::memory_msg(format!("FTS delete failed: {e}")))?;
+        delete_session_fts_row(&tx, &session_id_str, session_existed)
+            .map_err(|e| LibreFangError::memory_msg(format!("FTS delete failed: {e}")))?;
 
         // Always insert a FTS row, even when content is empty. The v33 migration
         // backfills a placeholder row for every session so it remains visible to
@@ -683,6 +772,12 @@ impl SessionStore {
             rusqlite::params![session_id_str, agent_id_str, content],
         )
         .map_err(|e| LibreFangError::memory_msg(format!("FTS insert failed: {e}")))?;
+        // Record where the row landed so the next save can address it by rowid (v64).
+        tx.execute(
+            "INSERT OR REPLACE INTO sessions_fts_map (session_id, fts_rowid) VALUES (?1, ?2)",
+            rusqlite::params![session_id_str, tx.last_insert_rowid()],
+        )
+        .map_err(|e| LibreFangError::memory_msg(format!("FTS map update failed: {e}")))?;
 
         tx.commit().map_err(LibreFangError::memory)?;
         Ok(())
@@ -768,18 +863,26 @@ impl SessionStore {
         // Resolve the full doomed set BEFORE deleting anything, while the
         // subtree is still there to walk, so it can be returned to the
         // caller once the deletes below have committed.
-        let removed_ids: Vec<SessionId> = {
+        let removed: Vec<(SessionId, String)> = {
             let mut stmt = tx
-                .prepare(&format!("{DOOMED_CTE} SELECT id FROM doomed"))
+                .prepare(&format!(
+                    "{DOOMED_CTE} SELECT d.id, s.agent_id FROM doomed d \
+                     JOIN sessions s ON s.id = d.id"
+                ))
                 .map_err(LibreFangError::memory)?;
             let rows = stmt
                 .query_map(rusqlite::params![id_str], |row| {
                     let id_str: String = row.get(0)?;
-                    Ok(id_str)
+                    let agent_id: String = row.get(1)?;
+                    Ok((id_str, agent_id))
                 })
                 .map_err(LibreFangError::memory)?;
             rows.flatten()
-                .filter_map(|s| uuid::Uuid::parse_str(&s).ok().map(SessionId))
+                .filter_map(|(id, agent_id)| {
+                    uuid::Uuid::parse_str(&id)
+                        .ok()
+                        .map(|uuid| (SessionId(uuid), agent_id))
+                })
                 .collect()
         };
         // The FTS delete runs first so a failure rolls the whole cascade
@@ -797,8 +900,13 @@ impl SessionStore {
             rusqlite::params![id_str],
         )
         .map_err(LibreFangError::memory)?;
+        // A deleted conversation must not leave a readable summary behind: `sessions` going away
+        // is not enough for a sid the next inbound reuses (#8645 review, #3548).
+        for (sid, agent_id) in &removed {
+            forget_session_summaries_in_tx(&tx, agent_id, &sid.0.to_string())?;
+        }
         tx.commit().map_err(LibreFangError::memory)?;
-        Ok(removed_ids)
+        Ok(removed.into_iter().map(|(sid, _)| sid).collect())
     }
 
     /// Delete exactly one session row and its own FTS row — no cascade.
@@ -810,21 +918,31 @@ impl SessionStore {
     /// `delete_session` and silently take the whole descendant subtree down
     /// with it (#7991 review).
     pub fn delete_session_only(&self, session_id: SessionId) -> LibreFangResult<()> {
+        use rusqlite::OptionalExtension;
         let conn = self.pool.get().map_err(LibreFangError::memory)?;
         let id_str = session_id.0.to_string();
         let tx = conn
             .unchecked_transaction()
             .map_err(LibreFangError::memory)?;
-        tx.execute(
-            "DELETE FROM sessions_fts WHERE session_id = ?1",
-            rusqlite::params![id_str],
-        )
-        .map_err(|e| LibreFangError::memory_msg(format!("FTS delete failed: {e}")))?;
+        // Resolve the owner while the row is still there: the summaries are keyed per agent.
+        let owner: Option<String> = tx
+            .query_row(
+                "SELECT agent_id FROM sessions WHERE id = ?1",
+                rusqlite::params![id_str],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(LibreFangError::memory)?;
+        delete_session_fts_row(&tx, &id_str, true)
+            .map_err(|e| LibreFangError::memory_msg(format!("FTS delete failed: {e}")))?;
         tx.execute(
             "DELETE FROM sessions WHERE id = ?1",
             rusqlite::params![id_str],
         )
         .map_err(LibreFangError::memory)?;
+        if let Some(owner) = owner {
+            forget_session_summaries_in_tx(&tx, &owner, &id_str)?;
+        }
         tx.commit().map_err(LibreFangError::memory)?;
         Ok(())
     }
@@ -990,6 +1108,19 @@ impl SessionStore {
         let agent_id_str = agent_id.0.to_string();
         let tx = conn.transaction().map_err(LibreFangError::memory)?;
         execute_session_agent_deletes(&tx, &agent_id_str)?;
+        tx.execute(
+            "DELETE FROM kv_store WHERE agent_id = ?1 AND key LIKE ?2",
+            rusqlite::params![agent_id_str, format!("{COMPACTION_SUMMARY_KEY_PREFIX}%")],
+        )
+        .map_err(LibreFangError::memory)?;
+        // Every session of this agent is gone, so a canonical summary can no longer have a
+        // live owner — and channel sids are deterministic, so the next inbound may reuse one.
+        tx.execute(
+            "UPDATE canonical_sessions SET compacted_summary = NULL, \
+             compacted_summary_session_id = NULL WHERE agent_id = ?1",
+            rusqlite::params![agent_id_str],
+        )
+        .map_err(LibreFangError::memory)?;
         tx.commit().map_err(LibreFangError::memory)?;
         Ok(())
     }
@@ -1186,13 +1317,10 @@ impl SessionStore {
         let mut out: std::collections::HashMap<String, (u64, f64)> =
             std::collections::HashMap::new();
 
-        // Pass 1: sessions_24h grouped by agent_id (uses idx on agent_id+created_at).
+        // Pass 1: sessions_24h grouped by agent_id.
+        // The unary `+` keeps the planner from walking an `agent_id`-leading index over the whole table for the GROUP BY; it range-scans `idx_sessions_created` over the 24h window instead (v64).
         let mut stmt_s = conn
-            .prepare(
-                "SELECT agent_id, COUNT(*)
-                 FROM sessions WHERE created_at >= ?1
-                 GROUP BY agent_id",
-            )
+            .prepare(AGENTS_SESSIONS_24H_SQL)
             .map_err(LibreFangError::memory)?;
         let rows_s = stmt_s
             .query_map(rusqlite::params![cutoff_24h], |row| {
@@ -1204,13 +1332,9 @@ impl SessionStore {
             out.entry(id).or_insert((0, 0.0)).0 = n.max(0) as u64;
         }
 
-        // Pass 2: cost_24h grouped by agent_id (uses idx on agent_id+timestamp).
+        // Pass 2: cost_24h grouped by agent_id, range-scanning `idx_usage_timestamp` for the same reason.
         let mut stmt_c = conn
-            .prepare(
-                "SELECT agent_id, COALESCE(SUM(cost_usd), 0.0)
-                 FROM usage_events WHERE timestamp >= ?1
-                 GROUP BY agent_id",
-            )
+            .prepare(AGENTS_COST_24H_SQL)
             .map_err(LibreFangError::memory)?;
         let rows_c = stmt_c
             .query_map(rusqlite::params![cutoff_24h], |row| {
@@ -1227,6 +1351,7 @@ impl SessionStore {
 
     /// Paginated session listing. `limit = None` returns all rows from `offset` onward.
     /// Pushes LIMIT/OFFSET into SQLite so we never deserialize message blobs we won't return (#3485).
+    /// See [`LIST_SESSIONS_PAGE_SQL`] for why the usage totals are correlated subqueries rather than a join.
     pub fn list_sessions_paginated(
         &self,
         limit: Option<usize>,
@@ -1237,22 +1362,7 @@ impl SessionStore {
         let lim_sql: i64 = limit.map(|n| n as i64).unwrap_or(-1);
         let off_sql: i64 = offset as i64;
         let mut stmt = conn
-            .prepare(
-                "SELECT s.id, s.agent_id, s.messages, s.context_window_tokens, s.created_at, s.label,
-                        s.message_count,
-                        COALESCE(u.total_cost_usd, 0.0) AS total_cost_usd,
-                        COALESCE(u.total_tokens, 0)    AS total_tokens
-                 FROM sessions s
-                 LEFT JOIN (
-                     SELECT session_id,
-                            SUM(cost_usd)                       AS total_cost_usd,
-                            SUM(input_tokens + output_tokens)   AS total_tokens
-                     FROM usage_events
-                     WHERE session_id IS NOT NULL
-                     GROUP BY session_id
-                 ) u ON u.session_id = s.id
-                 ORDER BY s.created_at DESC LIMIT ?1 OFFSET ?2",
-            )
+            .prepare(LIST_SESSIONS_PAGE_SQL)
             .map_err(LibreFangError::memory)?;
 
         let rows = stmt
@@ -1547,31 +1657,48 @@ impl SessionStore {
         kept_messages: Vec<Message>,
         owning_session_id: Option<SessionId>,
     ) -> LibreFangResult<()> {
-        let mut canonical = self.load_canonical(agent_id)?;
+        // `canonical_sessions` holds one row per agent shared by every session, so this read-modify-write runs under BEGIN IMMEDIATE like `append_canonical`.
+        // Without it, another session's `append_canonical` committing between the load and the save was overwritten and lost.
+        let mut conn = self.pool.get().map_err(LibreFangError::memory)?;
+        let tx = conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(LibreFangError::memory)?;
+        let mut canonical = load_canonical_in_tx(&tx, agent_id)?;
         canonical.compacted_summary = Some(summary.to_string());
         canonical.compacted_summary_session_id = owning_session_id;
-        canonical.messages = kept_messages
-            .into_iter()
-            .map(|message| CanonicalEntry {
-                message,
-                session_id: None,
-            })
-            .collect();
+        let kept = kept_messages.into_iter().map(|message| CanonicalEntry {
+            message,
+            session_id: owning_session_id,
+        });
+        match owning_session_id {
+            // Session-scoped compaction replaces only the owning session's entries (and legacy untagged ones, which the read path treats as belonging to every session).
+            // Other sessions' entries are kept as they are, and the kept messages stay tagged with their owner so they do not surface in, or fold into, another session's context.
+            Some(owner) => {
+                canonical
+                    .messages
+                    .retain(|e| matches!(e.session_id, Some(s) if s != owner));
+                canonical.messages.extend(kept);
+            }
+            // Agent-wide compaction (no owning session) replaces the whole list, as before.
+            None => canonical.messages = kept.collect(),
+        }
         canonical.compaction_cursor = 0;
         canonical.updated_at = Utc::now().to_rfc3339();
-        self.save_canonical(&canonical)
+        save_canonical_in_tx(&tx, &canonical)?;
+        tx.commit().map_err(LibreFangError::memory)?;
+        Ok(())
     }
 }
 
 impl SessionStore {
     /// Delete sessions that have not been updated within `retention_days`.
     ///
-    /// Returns the number of sessions deleted.
-    pub fn cleanup_expired_sessions(&self, retention_days: u32) -> LibreFangResult<u64> {
+    /// Returns the ids of the sessions deleted, so callers can drop process-local state keyed on them (the kernel's `file_read_tracker` buckets).
+    pub fn cleanup_expired_sessions(&self, retention_days: u32) -> LibreFangResult<Vec<SessionId>> {
         if retention_days == 0 {
-            return Ok(0);
+            return Ok(Vec::new());
         }
-        let conn = self.pool.get().map_err(LibreFangError::memory)?;
+        let mut conn = self.pool.get().map_err(LibreFangError::memory)?;
         let cutoff = Utc::now() - chrono::Duration::days(i64::from(retention_days));
         let cutoff_str = cutoff.to_rfc3339();
         // Clear the FTS index rows for the same selector first, then the
@@ -1581,9 +1708,16 @@ impl SessionStore {
         // privacy regression `delete_session` (#3548) guards against. The FTS
         // DELETE must run before the sessions DELETE so its subquery can still
         // resolve the ids being removed.
+        // BEGIN IMMEDIATE: the id read below precedes the first write, and a deferred transaction would fail that upgrade with SQLITE_BUSY_SNAPSHOT (not retried by the busy timeout) whenever another connection committed in between.
         let tx = conn
-            .unchecked_transaction()
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(LibreFangError::memory)?;
+        // Resolve the doomed ids inside the same transaction, before anything is deleted, so the returned list matches exactly what the DELETEs below remove.
+        let removed = Self::select_session_owners_in_tx(
+            &tx,
+            "SELECT id, agent_id FROM sessions WHERE updated_at < ?1",
+            rusqlite::params![cutoff_str],
+        )?;
         tx.execute(
             "DELETE FROM sessions_fts WHERE session_id IN (
                 SELECT id FROM sessions WHERE updated_at < ?1
@@ -1591,12 +1725,11 @@ impl SessionStore {
             rusqlite::params![cutoff_str],
         )
         .map_err(|e| LibreFangError::memory_msg(format!("FTS delete failed: {e}")))?;
-        let deleted = tx
-            .execute(
-                "DELETE FROM sessions WHERE updated_at < ?1",
-                rusqlite::params![cutoff_str],
-            )
-            .map_err(LibreFangError::memory)?;
+        tx.execute(
+            "DELETE FROM sessions WHERE updated_at < ?1",
+            rusqlite::params![cutoff_str],
+        )
+        .map_err(LibreFangError::memory)?;
         // This selector deletes parents by age without expanding the
         // subtree — unlike `delete_session`, it has no cascade — so a
         // child updated inside the retention window can survive its
@@ -1606,18 +1739,21 @@ impl SessionStore {
         // session because its parent aged out would be a bigger surprise
         // than a dangling reference (#7991 review).
         Self::reconcile_dangling_parent_ids(&tx)?;
+        for (sid, agent_id) in &removed {
+            forget_session_summaries_in_tx(&tx, agent_id, &sid.0.to_string())?;
+        }
         tx.commit().map_err(LibreFangError::memory)?;
-        Ok(deleted as u64)
+        Ok(removed.into_iter().map(|(sid, _)| sid).collect())
     }
 
     /// For each agent, keep only the newest `max_per_agent` sessions, deleting the rest.
     ///
-    /// Returns the total number of sessions deleted across all agents.
-    pub fn cleanup_excess_sessions(&self, max_per_agent: u32) -> LibreFangResult<u64> {
+    /// Returns the ids of the sessions deleted across all agents.
+    pub fn cleanup_excess_sessions(&self, max_per_agent: u32) -> LibreFangResult<Vec<SessionId>> {
         if max_per_agent == 0 {
-            return Ok(0);
+            return Ok(Vec::new());
         }
-        let conn = self.pool.get().map_err(LibreFangError::memory)?;
+        let mut conn = self.pool.get().map_err(LibreFangError::memory)?;
 
         // Single-query approach using window functions (SQLite 3.25+).
         // ROW_NUMBER partitions by agent and ranks by recency; rows beyond
@@ -1634,20 +1770,25 @@ impl SessionStore {
                     ) AS rn
                     FROM sessions
                 ) WHERE rn > ?1";
+        // BEGIN IMMEDIATE for the same reason as `cleanup_expired_sessions`: the id read precedes the first write.
         let tx = conn
-            .unchecked_transaction()
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(LibreFangError::memory)?;
+        let removed = Self::select_session_owners_in_tx(
+            &tx,
+            &format!("SELECT id, agent_id FROM sessions WHERE id IN ({over_limit_selector})"),
+            rusqlite::params![max_per_agent],
+        )?;
         tx.execute(
             &format!("DELETE FROM sessions_fts WHERE session_id IN ({over_limit_selector})"),
             rusqlite::params![max_per_agent],
         )
         .map_err(|e| LibreFangError::memory_msg(format!("FTS delete failed: {e}")))?;
-        let deleted = tx
-            .execute(
-                &format!("DELETE FROM sessions WHERE id IN ({over_limit_selector})"),
-                rusqlite::params![max_per_agent],
-            )
-            .map_err(LibreFangError::memory)?;
+        tx.execute(
+            &format!("DELETE FROM sessions WHERE id IN ({over_limit_selector})"),
+            rusqlite::params![max_per_agent],
+        )
+        .map_err(LibreFangError::memory)?;
         // Children carry the parent's `agent_id` (they're spawned attributed
         // to the parent — see `ephemeral_spawn.rs`), so they rank against it
         // for this per-agent cap and can outrank it, leaving a dangling
@@ -1655,9 +1796,40 @@ impl SessionStore {
         // (#7991 review — see that function's comment for why this NULLs
         // rather than cascades).
         Self::reconcile_dangling_parent_ids(&tx)?;
+        for (sid, agent_id) in &removed {
+            forget_session_summaries_in_tx(&tx, agent_id, &sid.0.to_string())?;
+        }
         tx.commit().map_err(LibreFangError::memory)?;
 
-        Ok(deleted as u64)
+        Ok(removed.into_iter().map(|(sid, _)| sid).collect())
+    }
+
+    /// Run a two-column `SELECT id, agent_id ...` inside `tx` and parse every row.
+    ///
+    /// The summary rows removed alongside a session are keyed by agent as well as by sid, so a
+    /// bulk delete that only collects ids cannot clean them up (see
+    /// [`forget_session_summaries_in_tx`]).
+    fn select_session_owners_in_tx(
+        tx: &rusqlite::Transaction<'_>,
+        sql: &str,
+        params: impl rusqlite::Params,
+    ) -> LibreFangResult<Vec<(SessionId, String)>> {
+        let mut stmt = tx.prepare(sql).map_err(LibreFangError::memory)?;
+        let rows = stmt
+            .query_map(params, |row| {
+                let id: String = row.get(0)?;
+                let agent_id: String = row.get(1)?;
+                Ok((id, agent_id))
+            })
+            .map_err(LibreFangError::memory)?;
+        let mut owners = Vec::new();
+        for row in rows {
+            let (id_str, agent_id) = row.map_err(LibreFangError::memory)?;
+            if let Ok(uuid) = uuid::Uuid::parse_str(&id_str) {
+                owners.push((SessionId(uuid), agent_id));
+            }
+        }
+        Ok(owners)
     }
 
     /// NULL out any `parent_session_id` that no longer points at a live
@@ -2083,35 +2255,71 @@ impl SessionStore {
         };
         Ok((summary, recent))
     }
+}
 
-    /// Drop the agent-scoped compaction summary when `session_id` owns it (#8645 review).
-    ///
-    /// The canonical row is shared by every conversation of an agent, and #6493 gates its
-    /// summary by `compacted_summary_session_id`. A reset that recreates the same deterministic
-    /// sid, or a delete that removes it, must therefore take the summary with it — otherwise
-    /// `canonical_context` hands the fresh conversation the summary of the history that was
-    /// just cleared. Returns whether the row was changed.
-    pub fn clear_compacted_summary_for_session(
-        &self,
-        agent_id: AgentId,
-        session_id: SessionId,
-    ) -> LibreFangResult<bool> {
-        let mut canonical = self.load_canonical(agent_id)?;
-        if canonical.compacted_summary_session_id != Some(session_id) {
-            return Ok(false);
-        }
-        canonical.compacted_summary = None;
-        canonical.compacted_summary_session_id = None;
-        canonical.updated_at = Utc::now().to_rfc3339();
-        self.save_canonical(&canonical)?;
-        Ok(true)
+/// Remove `session_id`'s row from `sessions_fts`.
+///
+/// `session_id` is `UNINDEXED` in the FTS5 table and FTS5 has no secondary index, so `WHERE session_id = ?` scans the whole index.
+/// The row is addressed by the rowid `sessions_fts_map` recorded for it instead (v64), and the `session_id` check on that one row makes a stale mapping harmless.
+/// The scan remains as the fallback when the mapped row is gone, so drift is repaired rather than leaving a second searchable row behind.
+/// With no mapping at all the scan runs only when `scan_if_unmapped` is set; `save_session` clears it for a session it is creating, which has no FTS row to find, so a fresh session (every `session_mode = "new"` cron fire) does not pay a full-index scan either.
+fn delete_session_fts_row(
+    conn: &Connection,
+    session_id: &str,
+    scan_if_unmapped: bool,
+) -> rusqlite::Result<()> {
+    use rusqlite::OptionalExtension;
+    let mapped: Option<i64> = conn
+        .query_row(
+            "SELECT fts_rowid FROM sessions_fts_map WHERE session_id = ?1",
+            [session_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let removed = match mapped {
+        Some(rowid) => conn.execute(
+            "DELETE FROM sessions_fts WHERE rowid = ?1 AND session_id = ?2",
+            rusqlite::params![rowid, session_id],
+        )?,
+        None if !scan_if_unmapped => return Ok(()),
+        None => 0,
+    };
+    if removed == 0 {
+        conn.execute(
+            "DELETE FROM sessions_fts WHERE session_id = ?1",
+            [session_id],
+        )?;
     }
+    Ok(())
+}
 
-    /// Persist a canonical session to SQLite.
-    fn save_canonical(&self, canonical: &CanonicalSession) -> LibreFangResult<()> {
-        let conn = self.pool.get().map_err(LibreFangError::memory)?;
-        save_canonical_in_tx(&conn, canonical)
-    }
+/// Remove the rows that describe one session outside the session tables (#8645 review).
+///
+/// `kv_store` holds the per-session compaction mirror and `canonical_sessions` may hold an
+/// agent-scoped summary owned by this session. Both outlive the `sessions` row and are read by
+/// the next turn that lands on the same deterministic sid, so every deletion primitive — reset,
+/// delete, retention prune — has to drop them in the same transaction as the row.
+fn forget_session_summaries_in_tx(
+    conn: &Connection,
+    agent_id: &str,
+    session_id: &str,
+) -> LibreFangResult<()> {
+    conn.execute(
+        "DELETE FROM kv_store WHERE agent_id = ?1 AND key = ?2",
+        rusqlite::params![
+            agent_id,
+            format!("{COMPACTION_SUMMARY_KEY_PREFIX}{session_id}")
+        ],
+    )
+    .map_err(LibreFangError::memory)?;
+    conn.execute(
+        "UPDATE canonical_sessions SET compacted_summary = NULL, \
+         compacted_summary_session_id = NULL WHERE agent_id = ?1 \
+         AND compacted_summary_session_id = ?2",
+        rusqlite::params![agent_id, session_id],
+    )
+    .map_err(LibreFangError::memory)?;
+    Ok(())
 }
 
 /// Load a canonical session using an already-acquired connection (e.g. inside a transaction).
@@ -2232,7 +2440,8 @@ impl SessionStore {
     ) -> Result<(), std::io::Error> {
         std::fs::create_dir_all(sessions_dir)?;
         let path = sessions_dir.join(format!("{}.jsonl", session.id.0));
-        let mut file = std::fs::File::create(&path)?;
+        // serde_json emits every token fragment as its own `write`, so an unbuffered file turns one mirror pass into tens of thousands of syscalls on a long session.
+        let mut file = std::io::BufWriter::new(std::fs::File::create(&path)?);
         let now = Utc::now().to_rfc3339();
 
         for msg in &session.messages {
@@ -2310,6 +2519,8 @@ impl SessionStore {
             file.write_all(b"\n")?;
         }
 
+        // Flush explicitly: `BufWriter`'s drop swallows a failed final write, and this function's contract is to report I/O errors.
+        file.flush()?;
         Ok(())
     }
 }
@@ -2784,6 +2995,52 @@ mod tests {
         assert_eq!(canonical.compacted_summary_session_id, None);
     }
 
+    /// A session-scoped `store_llm_summary` replaces only the owning session's canonical entries.
+    /// It used to replace the whole agent-wide list with untagged kept messages, dropping every other session's entries and leaking the owner's kept text into their context.
+    #[test]
+    fn test_store_llm_summary_keeps_other_sessions_entries() {
+        let store = setup();
+        let agent_id = AgentId::new();
+        let sid_a = SessionId::new();
+        let sid_b = SessionId::new();
+
+        store
+            .append_canonical(agent_id, &[Message::user("A old")], None, Some(sid_a))
+            .unwrap();
+        store
+            .append_canonical(agent_id, &[Message::user("B private")], None, Some(sid_b))
+            .unwrap();
+
+        store
+            .store_llm_summary(
+                agent_id,
+                "summary of A",
+                vec![Message::assistant("A kept")],
+                Some(sid_a),
+            )
+            .unwrap();
+
+        let (_, recent_b) = store
+            .canonical_context(agent_id, Some(sid_b), None)
+            .unwrap();
+        let text_b: Vec<String> = recent_b.iter().map(|m| m.content.text_content()).collect();
+        assert_eq!(
+            text_b,
+            vec!["B private".to_string()],
+            "session B keeps its own entry and does not see A's kept message"
+        );
+
+        let (_, recent_a) = store
+            .canonical_context(agent_id, Some(sid_a), None)
+            .unwrap();
+        let text_a: Vec<String> = recent_a.iter().map(|m| m.content.text_content()).collect();
+        assert_eq!(
+            text_a,
+            vec!["A kept".to_string()],
+            "session A's history is replaced by its kept messages"
+        );
+    }
+
     #[test]
     fn test_canonical_append_concurrent_no_message_loss() {
         // Regression for #3559: two sessions of the same agent appending
@@ -2844,6 +3101,118 @@ mod tests {
         assert_eq!(count_b, PER_THREAD, "session B messages dropped");
     }
 
+    /// `session_meta` must return the scalar columns without touching the history blob, so a corrupt or huge blob costs nothing on ownership checks.
+    #[test]
+    fn test_session_meta_skips_message_blob() {
+        let store = setup();
+        let agent_id = AgentId::new();
+        let mut session = store.create_session(agent_id).unwrap();
+        session.context_window_tokens = 1234;
+        session.peer_id = Some("chat-1".to_string());
+        session.push_message(Message::user("hello"));
+        store.save_session(&session).unwrap();
+        store
+            .set_session_model_override(session.id, Some("openai/gpt-4o"))
+            .unwrap();
+
+        let meta = store.session_meta(session.id).unwrap().unwrap();
+        assert_eq!(
+            meta,
+            SessionMeta {
+                agent_id,
+                model_override: Some("openai/gpt-4o".to_string()),
+                context_window_tokens: 1234,
+                peer_id: Some("chat-1".to_string()),
+            }
+        );
+        assert!(store.session_meta(SessionId::new()).unwrap().is_none());
+
+        // A blob that cannot be decoded breaks `get_session` but not `session_meta`, proving the latter never reads it.
+        store
+            .pool
+            .get()
+            .unwrap()
+            .execute(
+                "UPDATE sessions SET messages = ?1 WHERE id = ?2",
+                rusqlite::params![vec![0xc1u8], session.id.0.to_string()],
+            )
+            .unwrap();
+        assert!(store.get_session(session.id).is_err());
+        assert_eq!(
+            store.session_meta(session.id).unwrap().unwrap().agent_id,
+            agent_id
+        );
+    }
+
+    /// Retention deletes whole conversations, so it must take their summaries with them
+    /// (#8645 review): the mirror would otherwise stay readable in `kv_store`, and the
+    /// agent-scoped canonical summary would still be owned by the sid the next inbound reuses.
+    #[test]
+    fn retention_cleanup_drops_the_summaries_of_the_sessions_it_removes() {
+        let store = setup();
+        let agent = AgentId::new();
+        let session = store.create_session(agent).unwrap();
+        store
+            .store_llm_summary(
+                agent,
+                "summary of the pruned history",
+                Vec::new(),
+                Some(session.id),
+            )
+            .unwrap();
+        // The test pool holds a single connection, so planting has to finish before the
+        // cleanup opens its own transaction.
+        {
+            let conn = store.pool.get().unwrap();
+            conn.execute(
+                "INSERT INTO kv_store (agent_id, key, value, version, updated_at) \
+                 VALUES (?1, ?2, ?3, 1, ?4)",
+                rusqlite::params![
+                    agent.0.to_string(),
+                    format!("{COMPACTION_SUMMARY_KEY_PREFIX}{}", session.id.0),
+                    b"mirror".as_slice(),
+                    Utc::now().to_rfc3339()
+                ],
+            )
+            .unwrap();
+            conn.execute(
+                "UPDATE sessions SET updated_at = ?1 WHERE id = ?2",
+                rusqlite::params![
+                    (Utc::now() - chrono::Duration::days(30)).to_rfc3339(),
+                    session.id.0.to_string()
+                ],
+            )
+            .unwrap();
+        }
+
+        let removed = store.cleanup_expired_sessions(1).unwrap();
+        assert_eq!(removed, vec![session.id]);
+
+        let conn = store.pool.get().unwrap();
+        let mirrors: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM kv_store WHERE agent_id = ?1 AND key = ?2",
+                rusqlite::params![
+                    agent.0.to_string(),
+                    format!("{COMPACTION_SUMMARY_KEY_PREFIX}{}", session.id.0)
+                ],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            mirrors, 0,
+            "the compaction mirror must not outlive its session"
+        );
+        drop(conn);
+
+        let canonical = store.load_canonical(agent).unwrap();
+        assert_eq!(
+            canonical.compacted_summary, None,
+            "a summary owned by a pruned session must be cleared"
+        );
+        assert_eq!(canonical.compacted_summary_session_id, None);
+    }
+
     #[test]
     fn test_cleanup_expired_sessions() {
         let store = setup();
@@ -2866,7 +3235,8 @@ mod tests {
 
         // Cleanup with 30-day retention
         let deleted = store.cleanup_expired_sessions(30).unwrap();
-        assert_eq!(deleted, 1);
+        // The returned ids are exactly the sessions removed, so callers can drop state keyed on them.
+        assert_eq!(deleted, vec![s1.id]);
 
         // s1 should be gone, s2 should remain
         assert!(store.get_session(s1.id).unwrap().is_none());
@@ -2881,7 +3251,7 @@ mod tests {
 
         // retention_days=0 should be a no-op
         let deleted = store.cleanup_expired_sessions(0).unwrap();
-        assert_eq!(deleted, 0);
+        assert!(deleted.is_empty());
     }
 
     #[test]
@@ -2904,8 +3274,11 @@ mod tests {
         }
 
         // Keep only 2 per agent
-        let deleted = store.cleanup_excess_sessions(2).unwrap();
-        assert_eq!(deleted, 3);
+        let mut deleted = store.cleanup_excess_sessions(2).unwrap();
+        deleted.sort_by_key(|id| id.0);
+        let mut expected = session_ids[..3].to_vec();
+        expected.sort_by_key(|id| id.0);
+        assert_eq!(deleted, expected);
 
         // The 3 oldest should be gone, the 2 newest should remain
         assert!(store.get_session(session_ids[0]).unwrap().is_none());
@@ -2923,7 +3296,7 @@ mod tests {
 
         // max_per_agent=0 should be a no-op
         let deleted = store.cleanup_excess_sessions(0).unwrap();
-        assert_eq!(deleted, 0);
+        assert!(deleted.is_empty());
     }
 
     /// The retention-cleanup paths must clear the matching `sessions_fts`
@@ -2962,7 +3335,7 @@ mod tests {
         );
 
         let deleted = store.cleanup_expired_sessions(30).unwrap();
-        assert_eq!(deleted, 1);
+        assert_eq!(deleted.len(), 1);
 
         let post = store.search_sessions(needle, Some(&agent_id)).unwrap();
         assert!(
@@ -2998,7 +3371,7 @@ mod tests {
         }
 
         let deleted = store.cleanup_excess_sessions(1).unwrap();
-        assert_eq!(deleted, 1);
+        assert_eq!(deleted.len(), 1);
 
         assert!(
             store
@@ -3065,7 +3438,11 @@ mod tests {
         }
 
         let deleted = store.cleanup_expired_sessions(30).unwrap();
-        assert_eq!(deleted, 1, "only the aged-out parent should be deleted");
+        assert_eq!(
+            deleted.len(),
+            1,
+            "only the aged-out parent should be deleted"
+        );
 
         let reloaded_child = store
             .get_session(child.id)
@@ -3121,7 +3498,11 @@ mod tests {
         }
 
         let deleted = store.cleanup_excess_sessions(1).unwrap();
-        assert_eq!(deleted, 1, "only the older-ranked parent should be evicted");
+        assert_eq!(
+            deleted.len(),
+            1,
+            "only the older-ranked parent should be evicted"
+        );
 
         let reloaded_child = store
             .get_session(child.id)
@@ -4028,6 +4409,198 @@ mod tests {
             stats.prev.cost_24h
         );
         assert_eq!(stats.prev.p95_latency_ms, 600);
+    }
+
+    /// `EXPLAIN QUERY PLAN` details for `sql`, every parameter bound to a placeholder string.
+    fn query_plan(store: &SessionStore, sql: &str) -> String {
+        let conn = store.pool.get().unwrap();
+        let mut stmt = conn.prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap();
+        let n = stmt.parameter_count();
+        let params: Vec<String> = (0..n)
+            .map(|_| "2026-01-01T00:00:00+00:00".to_string())
+            .collect();
+        let rows = stmt
+            .query_map(rusqlite::params_from_iter(params.iter()), |row| {
+                row.get::<_, String>(3)
+            })
+            .unwrap();
+        rows.map(|r| r.unwrap()).collect::<Vec<_>>().join("\n")
+    }
+
+    /// The session list page must read `sessions` in `created_at` order through an index and compute usage totals per paged row.
+    /// The previous form materialized a `GROUP BY` over all of `usage_events` and sorted every session on each dashboard poll.
+    #[test]
+    fn list_sessions_page_plan_is_index_ordered_without_materializing_usage() {
+        let store = setup();
+        let plan = query_plan(&store, LIST_SESSIONS_PAGE_SQL);
+        assert!(
+            plan.contains("idx_sessions_created"),
+            "page must be ordered by idx_sessions_created; plan:\n{plan}"
+        );
+        assert!(
+            !plan.contains("TEMP B-TREE FOR ORDER BY"),
+            "page must not sort all sessions; plan:\n{plan}"
+        );
+        assert!(
+            !plan.contains("MATERIALIZE"),
+            "usage totals must not aggregate all of usage_events; plan:\n{plan}"
+        );
+        assert!(
+            plan.contains("idx_usage_session"),
+            "per-row usage totals must seek idx_usage_session; plan:\n{plan}"
+        );
+    }
+
+    /// Both bulk 24h passes must range-scan their timestamp index over the window rather than walk an `agent_id`-ordered index over the whole table.
+    #[test]
+    fn agents_stats_24h_bulk_plans_range_scan_the_window() {
+        let store = setup();
+        let sessions_plan = query_plan(&store, AGENTS_SESSIONS_24H_SQL);
+        assert!(
+            sessions_plan.contains("idx_sessions_created")
+                && sessions_plan.contains("created_at>?"),
+            "sessions pass must range-scan idx_sessions_created; plan:\n{sessions_plan}"
+        );
+        let cost_plan = query_plan(&store, AGENTS_COST_24H_SQL);
+        assert!(
+            cost_plan.contains("idx_usage_timestamp") && cost_plan.contains("timestamp>?"),
+            "cost pass must range-scan idx_usage_timestamp; plan:\n{cost_plan}"
+        );
+    }
+
+    /// `agent_stats_24h`'s per-agent window counts must seek `(agent_id, created_at)` rather than walk every session of the agent.
+    #[test]
+    fn agent_stats_24h_session_window_uses_agent_created_index() {
+        let store = setup();
+        let plan = query_plan(
+            &store,
+            "SELECT COUNT(*) FROM sessions WHERE agent_id = ?1 AND created_at >= ?2",
+        );
+        assert!(plan.contains("idx_sessions_agent_created"), "plan:\n{plan}");
+    }
+
+    fn fts_rows_for(store: &SessionStore, sid: &SessionId) -> Vec<i64> {
+        let conn = store.pool.get().unwrap();
+        let mut stmt = conn
+            .prepare("SELECT rowid FROM sessions_fts WHERE session_id = ?1")
+            .unwrap();
+        let rows = stmt
+            .query_map([sid.0.to_string()], |r| r.get::<_, i64>(0))
+            .unwrap();
+        rows.map(|r| r.unwrap()).collect()
+    }
+
+    fn fts_map_for(store: &SessionStore, sid: &SessionId) -> Option<i64> {
+        use rusqlite::OptionalExtension;
+        store
+            .pool
+            .get()
+            .unwrap()
+            .query_row(
+                "SELECT fts_rowid FROM sessions_fts_map WHERE session_id = ?1",
+                [sid.0.to_string()],
+                |r| r.get(0),
+            )
+            .optional()
+            .unwrap()
+    }
+
+    /// `save_session` records the rowid of the FTS row it wrote, so the next save replaces that row by rowid instead of scanning the whole index for it.
+    #[test]
+    fn save_session_maps_its_fts_row_by_rowid() {
+        let store = setup();
+        let mut session = store.create_session(AgentId::new()).unwrap();
+        session.messages.push(Message::user("first"));
+        store.save_session(&session).unwrap();
+        session.messages.push(Message::user("second"));
+        store.save_session(&session).unwrap();
+
+        let rows = fts_rows_for(&store, &session.id);
+        assert_eq!(rows.len(), 1, "exactly one FTS row per session");
+        assert_eq!(
+            fts_map_for(&store, &session.id),
+            Some(rows[0]),
+            "the map must point at the session's current FTS row"
+        );
+        let plan = query_plan(
+            &store,
+            "DELETE FROM sessions_fts WHERE rowid = ?1 AND session_id = ?2",
+        );
+        // FTS5 reports every access as `SCAN ... VIRTUAL TABLE INDEX 0:<constraints>`; a trailing `=` is its rowid-equality lookup, while the bare `0:` of a `session_id` filter is a full scan.
+        assert!(
+            plan.contains("VIRTUAL TABLE INDEX 0:="),
+            "the mapped delete must be a rowid lookup; plan:\n{plan}"
+        );
+    }
+
+    /// A mapping that points at a missing or foreign row must not leave a second searchable row behind: the save falls back to the session_id scan.
+    #[test]
+    fn save_session_with_stale_fts_mapping_still_replaces_the_row() {
+        let store = setup();
+        let mut session = store.create_session(AgentId::new()).unwrap();
+        session.messages.push(Message::user("hello"));
+        store.save_session(&session).unwrap();
+        let other = store.create_session(AgentId::new()).unwrap();
+        let other_rowid = fts_rows_for(&store, &other.id)[0];
+        store
+            .pool
+            .get()
+            .unwrap()
+            .execute(
+                "UPDATE sessions_fts_map SET fts_rowid = ?1 WHERE session_id = ?2",
+                rusqlite::params![other_rowid, session.id.0.to_string()],
+            )
+            .unwrap();
+
+        session.messages.push(Message::user("again"));
+        store.save_session(&session).unwrap();
+
+        assert_eq!(fts_rows_for(&store, &session.id).len(), 1);
+        assert_eq!(
+            fts_rows_for(&store, &other.id),
+            vec![other_rowid],
+            "a stale mapping must never delete another session's FTS row"
+        );
+    }
+
+    /// The boot reconcile sweeps rowid-map entries whose session no longer exists, so an entry the delete trigger never saw cannot accumulate.
+    #[test]
+    fn reconcile_fts_index_drops_map_entries_of_missing_sessions() {
+        let store = setup();
+        let live = store.create_session(AgentId::new()).unwrap();
+        let gone = SessionId::new();
+        store
+            .pool
+            .get()
+            .unwrap()
+            .execute(
+                "INSERT INTO sessions_fts_map (session_id, fts_rowid) VALUES (?1, 999999)",
+                [gone.0.to_string()],
+            )
+            .unwrap();
+
+        store.reconcile_fts_index();
+
+        assert_eq!(fts_map_for(&store, &gone), None);
+        assert!(
+            fts_map_for(&store, &live.id).is_some(),
+            "a live session's mapping must survive the sweep"
+        );
+    }
+
+    /// Deleting a session drops its map entry with it, whichever delete path removes the row.
+    #[test]
+    fn deleting_a_session_drops_its_fts_mapping() {
+        let store = setup();
+        let a = store.create_session(AgentId::new()).unwrap();
+        let b = store.create_session(AgentId::new()).unwrap();
+        assert!(fts_map_for(&store, &a.id).is_some());
+        store.delete_session_only(a.id).unwrap();
+        assert_eq!(fts_map_for(&store, &a.id), None);
+        assert!(fts_rows_for(&store, &a.id).is_empty());
+        store.delete_session(b.id).unwrap();
+        assert_eq!(fts_map_for(&store, &b.id), None);
+        assert!(fts_rows_for(&store, &b.id).is_empty());
     }
 
     /// `agents_stats_24h_bulk` returns one row per agent with non-zero

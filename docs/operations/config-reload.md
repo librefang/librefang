@@ -153,7 +153,7 @@ Dotted rows take part in the drift guard exactly as top-level rows do, so a carv
 
 | Field | Class | Meaning |
 |---|---|---|
-| `stable_prefix_mode` | N | Avoid volatile prompt-prefix additions (next message). |
+| `stable_prefix_mode` | R | Avoid volatile prompt-prefix additions. Restart-required: `DefaultContextEngine` copies the flag into its boot-time `ContextEngineConfig` and gates per-turn memory recall on that copy, so a reload could not change what the engine injects. |
 | `prompt_caching` | N | Master switch for provider prompt caching. |
 | `prompt_cache` | N | Prompt-cache breakpoint strategy. |
 | `compaction` | N | LLM-based history summarization config. |
@@ -170,7 +170,7 @@ Dotted rows take part in the drift guard exactly as top-level rows do, so a carv
 | Field | Class | Meaning |
 |---|---|---|
 | `tool_policy` | H | Global tool deny/allow rules, groups, depth limits. |
-| `approval` | H | Execution approval policy. |
+| `approval` | H | Execution approval policy. `audit_retention_days` is read by the daily retention sweep from the live config on every tick, so the swap is enough for it. |
 | `tool_timeout_secs` | N | Default per-tool execution timeout. |
 | `tool_timeouts` | N | Per-tool timeout overrides. |
 | `tool_invoke` | N | `POST /api/tools/{name}/invoke` allowlist. |
@@ -188,7 +188,7 @@ Dotted rows take part in the drift guard exactly as top-level rows do, so a carv
 | `sidecar_channels` | H | Sidecar (external-process) channel adapters (same hot action). |
 | `webhook_triggers` | H | Webhook trigger (external event injection) config. |
 | `max_cron_jobs` | H | Cron scheduler max total jobs across agents. |
-| `queue` | H/N/R | Message-queue config. `concurrency` is **H**: the reload resizes the live lane semaphores. `max_depth_per_agent` / `max_depth_global` / `task_ttl_secs` are **N**: the first two are read from the live config on every enqueue and the third on every tick of the TTL sweep, so the swap is the whole of applying them (#8219 — before it, all three were read by nothing at all and the row described a knob that did nothing). The TTL sweep is spawned at boot whether or not the TTL is set, and re-derives its own cadence from the live value, so turning the TTL on or off is as hot as changing it. `task_queue_retention_days` is **R**: the retention sweep captures it at boot. Splitting the section this way is what makes a queue edit land at all — while only `concurrency` was classified, an edit to any other field matched no branch, so the plan carried no change at all, `should_store_config` discarded the reloaded config and the reload answered "no changes detected". (A plan that matches no bucket is still dropped; a plan whose only match is restart-required is not stored either — the live config keeps the value boot wired, and the reload reports `restart_required` with the "Nothing was applied" warning.) |
+| `queue` | H/N | Message-queue config. `concurrency` is **H**: the reload resizes the live lane semaphores. `max_depth_per_agent` / `max_depth_global` / `task_ttl_secs` are **N**: the first two are read from the live config on every enqueue and the third on every tick of the TTL sweep, so the swap is the whole of applying them (#8219 — before it, all three were read by nothing at all and the row described a knob that did nothing). The TTL sweep is spawned at boot whether or not the TTL is set, and re-derives its own cadence from the live value, so turning the TTL on or off is as hot as changing it. `task_queue_retention_days` is **N**: the daily retention sweep re-reads it from the live config on every tick, and is spawned at boot whether or not any retention is set. Splitting the section this way is what makes a queue edit land at all — while only `concurrency` was classified, an edit to any other field matched no branch, so the plan carried no change at all, `should_store_config` discarded the reloaded config and the reload answered "no changes detected". (A plan that matches no bucket is still dropped; a plan whose only match is restart-required is not stored either — the live config keeps the value boot wired, and the reload reports `restart_required` with the "Nothing was applied" warning.) |
 | `triggers` | H/N | Event-trigger system config. `cooldown_secs` / `max_per_event` are **H**: `TriggerEngine` copies them into its own fields when it is built at boot, so the reload pushes the new pair into the running engine (`HotAction::UpdateTriggersConfig`). `max_depth` / `max_workflow_secs` are **N**: they are read from the live config on every event and every workflow run. While the whole section was classified **N**, a cooldown or per-event-budget edit was reported as already effective and triggers went on firing at the boot-time values until the daemon restarted. |
 | `auto_reply` | R | Auto-reply background engine config. |
 | `broadcast` | R | Broadcast routing config. |
@@ -207,7 +207,7 @@ Dotted rows take part in the drift guard exactly as top-level rows do, so a carv
 | `mcp_servers` | H | MCP server list — reconnects MCP clients. |
 | `mcp_runtime_store` | N | Selects where `/api/mcp/servers` writes land (`file` → config.toml, `db` → SQLite `mcp_server_configs`). Read live by the handler; effective on the next write. |
 | `taint_rules` | H | Named taint rule sets pushed into the shared swap (see field note: already-connected servers pick them up on next scan, not via reconnect). |
-| `a2a` | H | Agent-to-Agent protocol config. |
+| `a2a` | H | Agent-to-Agent protocol config. The reload reconciles the trusted external-agent list: entries removed from `[[a2a.external_agents]]` stop being trusted, declared agents are re-discovered in the background, agents approved through `/api/a2a/discover` are kept, and disabling `[a2a]` clears the list. `listen_path` is the exception: the HTTP router mounts the A2A endpoints at boot, so changing it is reported as restart-required. |
 | `skills` | H | Skills config (bundled + user-installed) — reloads registry. The `registry_repo` and `[skills.promotion]` sub-section are effectively **N** within that: both promotion handlers read them from `config_snapshot()` per request, so a change is live on the next promotion regardless of the registry reload the section triggers. They are left inside the section's single hot action deliberately — the reload is cheap and one classification per section is easier to keep honest than a carve-out that has to be re-argued every time a field is added. |
 | `plugins` | R | Plugin registry config. |
 | `registry` | R/N | Registry sync config. `cache_ttl_secs` / `registry_mirror` / `registry_host` are **R**: they are read when the checkout is set up. `auto_sync` is **N**: the 24 h catalog task calls `config_snapshot()` at the top of each tick and passes the value into `sync_catalog_to`, so flipping it off freezes `~/.librefang/registry/` from the next tick on, with no restart. Splitting the section this way is what makes that true — with the whole section classified R a registry-only reload is restart-required only, and a restart-required-only plan is not swapped, so the task would keep reading its boot-time value until the daemon restarted (the carve-out lets the catalog task pick the new `auto_sync` up from the live config on its next tick). Boot's own sync pass has of course already run by reload time, so `auto_sync = false` written *before* a start is still what prevents the boot-time fast-forward. |
@@ -232,13 +232,13 @@ Dotted rows take part in the drift guard exactly as top-level rows do, so a carv
 |---|---|---|
 | `budget` | H | Global spending budget — RCUs the metering snapshot. |
 | `privacy` | N | PII privacy controls for LLM context filtering. |
-| `sanitize` | N | Channel-input sanitization / prompt-injection detection. |
+| `sanitize` | H | Channel-input sanitization / prompt-injection detection. Emits `ReloadChannels`, because the channel bridge builds its `InputSanitizer` by value and only a bridge rebuild picks up the new settings. |
 
 ### Web / browser / media / canvas / TTS
 
 | Field | Class | Meaning |
 |---|---|---|
-| `web` | H | Web tools config (search + fetch) — rebuilds web context. |
+| `web` | R | Web tools config (search + fetch). Restart-required: `WebToolsContext` is built once at boot and the search / fetch engines keep their own copies of the provider, SSRF allowlist, size cap, timeout and cache TTL, with no rebuild path. |
 | `browser` | R | Browser automation config — the `BrowserManager` captures it by value at boot with no rebuild path, so a change needs a restart. |
 | `media` | R | Media-understanding config — `MediaEngine` captures it by value at boot with no rebuild path, so a change needs a restart. |
 | `capabilities` | R | Capability routing config — folded into `MediaEngine` and `MediaDriverCache` at boot; same restart contract as `media`. |
@@ -274,7 +274,7 @@ Dotted rows take part in the drift guard exactly as top-level rows do, so a carv
 | `proxy` | H | HTTP proxy for outbound connections — re-exports env + flushes driver cache. |
 | `log_level` | H* | Tracing filter (`*` = HotReload only when a log reloader is installed; otherwise R — see "Conditional" above). |
 | `language` | N | CLI/message locale (effective on next message). |
-| `mode` | N | Kernel operating mode (stable / default / dev). |
+| `mode` | R | Kernel operating mode (stable / default / dev). Restart-required: Stable mode freezes the skill registry at boot and there is no unfreeze, so a reload could only half-apply a switch. |
 | `home_dir` | R | LibreFang home directory. |
 | `data_dir` | R | Database data directory. |
 | `log_dir` | R | Custom log directory. |

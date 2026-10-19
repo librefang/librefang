@@ -280,11 +280,6 @@ impl LibreFangKernel {
         for sid in &removed {
             librefang_runtime::file_read_tracker::forget_session(sid);
         }
-        // The summaries of a deleted conversation must not stay readable: a leftover mirror in
-        // `kv_store` is exactly what #3548/#7991 removed from the session tables (#8645 review).
-        if let Some(agent_id) = owner {
-            self.forget_session_summaries(agent_id, &removed);
-        }
         Ok(removed)
     }
 
@@ -398,9 +393,6 @@ impl LibreFangKernel {
         Self::purge_jsonl_files(entry, &pre_delete_sids);
         // Channel sids are deterministic, so the next inbound lands on the same id; a surviving `file_read_tracker` bucket would answer its first read with a "see above" stub pointing at the history just deleted.
         Self::forget_file_read_state(&pre_delete_sids);
-        // Same reason for the summaries: the mirror and any canonical summary owned by a
-        // cleared sid would otherwise describe history the user just wiped (#8645 review).
-        self.forget_session_summaries(agent_id, &pre_delete_sids);
 
         // Create a fresh session and inject reset prompt if configured
         let mut new_session = self
@@ -569,10 +561,6 @@ impl LibreFangKernel {
 
             // Best-effort JSONL cleanup (see `reset_all_sessions` for rationale).
             Self::purge_jsonl_files(entry, std::slice::from_ref(&sid));
-
-            // The sid is reused immediately below, so the summaries of the cleared history
-            // must go with it; otherwise the fresh session reads them as its own (#8645 review).
-            self.forget_session_summaries(agent_id, std::slice::from_ref(&sid));
         }
         // The sid is reused below, so the old `file_read_tracker` bucket must go with the history: its "see above" stubs would point at messages that no longer exist.
         // Unconditional because it is a no-op for a sid that never had a bucket.
@@ -662,46 +650,33 @@ impl LibreFangKernel {
             librefang_runtime::file_read_tracker::forget_session(sid);
         }
     }
+    /// Delete sessions idle longer than `retention_days` and drop the process-local state keyed on them.
+    ///
+    /// Every retention caller (the background loop, the boot prune and `POST /api/sessions/cleanup`) goes through this instead of the substrate directly, so none of them can forget the `file_read_tracker` buckets.
+    /// Channel session ids are deterministic, so a stale bucket would answer the returning user's first re-read with a "see above" stub for history that no longer exists.
+    /// Returns the number of sessions removed.
+    pub fn prune_expired_sessions(&self, retention_days: u32) -> KernelResult<u64> {
+        let removed = self
+            .memory
+            .substrate
+            .cleanup_expired_sessions(retention_days)
+            .map_err(KernelError::LibreFang)?;
+        Self::forget_file_read_state(&removed);
+        Ok(removed.len() as u64)
+    }
 
-    /// Drop the summaries that describe a conversation once its history is gone (#8645 review).
+    /// Keep only the newest `max_per_agent` sessions per agent and drop the process-local state keyed on the ones removed.
     ///
-    /// Two artifacts outlive the `sessions` row and are read by the next turn that lands on
-    /// the same deterministic sid: the per-session compaction mirror in `kv_store`, and the
-    /// agent-scoped canonical summary when this session owns it. Leaving either behind makes a
-    /// reset or a delete hand the fresh conversation the summary of the history it just lost.
-    ///
-    /// Best-effort by design: the history deletion has already committed, and a leftover
-    /// summary is a stale-context bug, not a reason to fail the operation half-way.
-    fn forget_session_summaries(&self, agent_id: AgentId, sids: &[SessionId]) {
-        for sid in sids {
-            let key = librefang_memory::compaction_summary_key(sid);
-            if let Err(error) = self.memory.substrate.structured_delete(agent_id, &key) {
-                tracing::warn!(
-                    agent_id = %agent_id,
-                    session_id = %sid.0,
-                    %error,
-                    "Failed to remove the compaction mirror of a removed session"
-                );
-            }
-            match self
-                .memory
-                .substrate
-                .clear_compacted_summary_for_session(agent_id, *sid)
-            {
-                Ok(true) => tracing::debug!(
-                    agent_id = %agent_id,
-                    session_id = %sid.0,
-                    "Cleared the canonical compaction summary owned by the removed session"
-                ),
-                Ok(false) => {}
-                Err(error) => tracing::warn!(
-                    agent_id = %agent_id,
-                    session_id = %sid.0,
-                    %error,
-                    "Failed to clear the canonical compaction summary of a removed session"
-                ),
-            }
-        }
+    /// See [`Self::prune_expired_sessions`] for why every caller must go through the kernel.
+    /// Returns the number of sessions removed.
+    pub fn prune_excess_sessions(&self, max_per_agent: u32) -> KernelResult<u64> {
+        let removed = self
+            .memory
+            .substrate
+            .cleanup_excess_sessions(max_per_agent)
+            .map_err(KernelError::LibreFang)?;
+        Self::forget_file_read_state(&removed);
+        Ok(removed.len() as u64)
     }
 
     /// Best-effort removal of `<workspace>/sessions/{sid}.jsonl` mirrors after
@@ -793,10 +768,6 @@ impl LibreFangKernel {
         Self::purge_jsonl_files(&entry, &pre_delete_sids);
         // Channel sids are reused by the next inbound, so their tracker buckets must not outlive the history (see `reset_all_sessions`).
         Self::forget_file_read_state(&pre_delete_sids);
-        // And neither must the summaries: `delete_canonical_session` above drops the canonical
-        // row, but the per-session mirrors live in `kv_store` and are only reachable here
-        // (#8645 review).
-        self.forget_session_summaries(agent_id, &pre_delete_sids);
 
         // Create a fresh session and inject reset prompt if configured
         let mut new_session = self
@@ -2396,6 +2367,57 @@ mod reset_lock_and_tracker_tests {
         prime_tracker(sid, path);
         kernel.clear_agent_history(agent_id).await.unwrap();
         assert_tracker_forgotten(sid, path, "clear_agent_history");
+        kernel.shutdown();
+    }
+
+    /// Retention pruning deletes sessions in bulk; channel sids are deterministic, so a returning user lands on the same id and must not get a "see above" stub for the pruned history.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn retention_prune_forgets_file_read_tracker() {
+        let dir = tempfile::tempdir().unwrap();
+        let kernel = boot(&dir);
+        let agent_id = spawn(&kernel, "prune-tracker-test");
+        let path = Path::new("/ws/config.toml");
+
+        let expired = override_session(&kernel, agent_id).id;
+        let old_date = (chrono::Utc::now() - chrono::Duration::days(60)).to_rfc3339();
+        kernel
+            .memory
+            .substrate
+            .pool()
+            .get()
+            .unwrap()
+            .execute(
+                "UPDATE sessions SET updated_at = ?1 WHERE id = ?2",
+                rusqlite::params![old_date, expired.0.to_string()],
+            )
+            .unwrap();
+        prime_tracker(expired, path);
+        assert_eq!(kernel.prune_expired_sessions(30).unwrap(), 1);
+        assert_tracker_forgotten(expired, path, "prune_expired_sessions");
+        file_read_tracker::forget_session(&expired);
+
+        let older = override_session(&kernel, agent_id).id;
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let newer = override_session(&kernel, agent_id).id;
+        prime_tracker(older, path);
+        prime_tracker(newer, path);
+        assert!(kernel.prune_excess_sessions(1).unwrap() >= 1);
+        assert!(kernel
+            .memory
+            .substrate
+            .get_session(older)
+            .unwrap()
+            .is_none());
+        assert_tracker_forgotten(older, path, "prune_excess_sessions");
+        assert!(
+            matches!(
+                file_read_tracker::with_session(newer, |t| t.observe(path, "a=1")),
+                ReadOutcome::Unchanged { .. }
+            ),
+            "the surviving session keeps its tracker state"
+        );
+        file_read_tracker::forget_session(&older);
+        file_read_tracker::forget_session(&newer);
         kernel.shutdown();
     }
 }

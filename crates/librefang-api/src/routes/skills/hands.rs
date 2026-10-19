@@ -1734,8 +1734,23 @@ pub async fn hand_send_message(
         }
         Err(e) => {
             tracing::warn!("hand_send_message failed for instance {id}: {e}");
-            ApiErrorResponse::internal_scrub(e).into_json_tuple()
+            hand_message_error(e).into_json_tuple()
         }
+    }
+}
+
+/// Map a hand-message delivery failure to the same statuses `POST /api/agents/{id}/message` uses for the same kernel errors.
+///
+/// A hand that hits its budget is a 429 `budget_exceeded` with the reason kept, and a missing linked agent is a 404; other typed kernel errors follow the canonical `kernel_op_status` table, which still scrubs a genuine internal fault to a generic 500.
+fn hand_message_error(e: crate::error::KernelError) -> ApiErrorResponse {
+    use crate::error::KernelError;
+    use librefang_types::error::LibreFangError;
+    match e {
+        KernelError::LibreFang(inner @ LibreFangError::QuotaExceeded(_)) => {
+            ApiErrorResponse::from(inner).with_code("budget_exceeded")
+        }
+        KernelError::LibreFang(inner) => ApiErrorResponse::from(inner),
+        other => ApiErrorResponse::internal_scrub(other),
     }
 }
 
@@ -2041,5 +2056,44 @@ pub async fn install_hand_from_marketplace(
             Json(serde_json::json!({ "error": e.to_string() })),
         ),
         Err(e) => ApiErrorResponse::bad_request(format!("{e}")).into_json_tuple(),
+    }
+}
+
+#[cfg(test)]
+mod hand_message_error_tests {
+    use super::hand_message_error;
+    use crate::error::KernelError;
+    use axum::http::StatusCode;
+    use librefang_types::error::LibreFangError;
+
+    #[test]
+    fn budget_exceeded_is_429_with_reason() {
+        let (status, body) = hand_message_error(KernelError::LibreFang(
+            LibreFangError::QuotaExceeded("hourly cost budget reached".to_string()),
+        ))
+        .into_json_tuple();
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+        let rendered = body.0.to_string();
+        assert!(rendered.contains("budget_exceeded"), "{rendered}");
+        assert!(rendered.contains("hourly cost budget"), "{rendered}");
+    }
+
+    #[test]
+    fn agent_not_found_is_404() {
+        let (status, _) = hand_message_error(KernelError::LibreFang(
+            LibreFangError::AgentNotFound("a".to_string()),
+        ))
+        .into_json_tuple();
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[test]
+    fn internal_error_is_scrubbed_500() {
+        let (status, body) = hand_message_error(KernelError::LibreFang(LibreFangError::Internal(
+            "SQLITE_BUSY: database is locked at table sessions".to_string(),
+        )))
+        .into_json_tuple();
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(!body.0.to_string().contains("SQLITE"));
     }
 }

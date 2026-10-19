@@ -1,0 +1,1 @@
+A malformed `localStorage` record could crash the Chat page, and the open-tab strip could silently lose its selected tab: the persisted UI state is now sanitized on every rehydrate, and the active session is exempt from tab pruning. (#8598, #8326) (@DaBlitzStein)

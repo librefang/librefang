@@ -3,6 +3,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
 import { AnimatePresence, motion } from "motion/react";
 import { tabContent } from "../lib/motion";
+import { useRovingTabs } from "../lib/useRovingTabs";
 import { safeUrl } from "../lib/safeUrl";
 import {
   type McpServerConfigured, type McpServerConnected, type McpTransport,
@@ -24,6 +25,7 @@ import { Badge } from "../components/ui/Badge";
 import { PageHeader } from "../components/ui/PageHeader";
 import { ListSkeleton } from "../components/ui/Skeleton";
 import { EmptyState } from "../components/ui/EmptyState";
+import { ErrorState } from "../components/ui/ErrorState";
 import { DrawerPanel } from "../components/ui/DrawerPanel";
 import { ConfirmDialog } from "../components/ui/ConfirmDialog";
 import { Input } from "../components/ui/Input";
@@ -440,7 +442,8 @@ export function AuthBadge({
         pollInFlightRef.current = true;
         pollAttemptsRef.current += 1;
         try {
-          const status = await queryClient.fetchQuery(mcpQueries.authStatus(serverIdentity));
+          // `staleTime: 0` forces a network read: the shared options keep a status fresh for as long as the poll interval, so every other tick would otherwise be answered from cache and still count toward the attempt budget.
+          const status = await queryClient.fetchQuery({ ...mcpQueries.authStatus(serverIdentity), staleTime: 0 });
           const termination = authPollTermination(
             status.auth.state,
             popupClosed,
@@ -693,6 +696,11 @@ function Mini({ label, value, tone }: { label: string; value: string; tone?: "ok
 
 type DetailTab = "tools" | "logs" | "config";
 
+const MCP_DETAIL_TABS: readonly DetailTab[] = ["tools", "logs", "config"];
+const MCP_DETAIL_PANEL_ID = "mcp-detail-panel";
+const MCP_VIEW_TABS = ["servers", "catalog"] as const;
+const MCP_VIEW_PANEL_ID = "mcp-view-panel";
+
 function ServerDetailBody({
   server,
   conn,
@@ -712,6 +720,11 @@ function ServerDetailBody({
   const addToast = useUIStore((s) => s.addToast);
   const reconnectMutation = useReconnectMcpServer();
   const [tab, setTab] = useState<DetailTab>("tools");
+  const tabNav = useRovingTabs({
+    ids: MCP_DETAIL_TABS,
+    activeId: tab,
+    onSelect: setTab,
+  });
 
   const isConnected = conn?.connected ?? false;
   const transportType = getTransportType(server);
@@ -768,26 +781,19 @@ function ServerDetailBody({
           { id: "tools" as const, label: t("mcp.tab_tools", { defaultValue: "Tools" }), icon: Wrench, count: conn?.tools_count ?? 0 },
           { id: "logs" as const, label: t("mcp.tab_logs", { defaultValue: "Logs" }), icon: FileText },
           { id: "config" as const, label: t("mcp.tab_config", { defaultValue: "Config" }), icon: Settings },
-        ] as const).map((td, _i, arr) => {
+        ] as const).map((td) => {
           const active = tab === td.id;
           const Icon = td.icon;
           return (
             <button
               key={td.id}
+              id={`mcp-detail-tab-${td.id}`}
               role="tab"
               aria-selected={active}
-              tabIndex={active ? 0 : -1}
+              aria-controls={MCP_DETAIL_PANEL_ID}
+              tabIndex={tabNav.tabIndexFor(td.id)}
               onClick={() => setTab(td.id)}
-              onKeyDown={(e: React.KeyboardEvent) => {
-                if (e.key === "ArrowRight" || e.key === "ArrowLeft") {
-                  e.preventDefault();
-                  const delta = e.key === "ArrowRight" ? 1 : -1;
-                  const curIdx = arr.findIndex((a) => a.id === tab);
-                  const nextIdx = (curIdx + delta + arr.length) % arr.length;
-                  setTab(arr[nextIdx].id);
-                  (e.currentTarget.parentElement?.querySelectorAll('[role="tab"]')[nextIdx] as HTMLElement)?.focus();
-                }
-              }}
+              onKeyDown={(event) => tabNav.onKeyDown(event, td.id)}
               className={`inline-flex items-center gap-2 px-3 py-2.5 text-[12.5px] border-b-2 transition-colors ${
                 active
                   ? "border-brand font-semibold"
@@ -811,7 +817,12 @@ function ServerDetailBody({
       </div>
 
       {/* Tab body */}
-      <div role="tabpanel" className="flex-1 overflow-y-auto p-5">
+      <div
+        id={MCP_DETAIL_PANEL_ID}
+        role="tabpanel"
+        aria-labelledby={`mcp-detail-tab-${tab}`}
+        className="flex-1 overflow-y-auto p-5"
+      >
         {tab === "tools" && (
           <>
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 mb-4">
@@ -1441,6 +1452,11 @@ export function McpServersPage() {
   const addToast = useUIStore((s) => s.addToast);
 
   const [tab, setTab] = useState<"servers" | "catalog">("servers");
+  const tabNav = useRovingTabs({
+    ids: MCP_VIEW_TABS,
+    activeId: tab,
+    onSelect: setTab,
+  });
   const [showAddModal, setShowAddModal] = useState(false);
   const [editingServer, setEditingServer] = useState<McpServerConfigured | null>(null);
   const [taintEditingServer, setTaintEditingServer] = useState<McpServerConfigured | null>(null);
@@ -1645,17 +1661,15 @@ export function McpServersPage() {
         role="tablist"
         aria-label={t("mcp.tabs_label", { defaultValue: "Server views" })}
         className="flex gap-1 rounded-xl border border-border-subtle bg-surface p-1"
-        onKeyDown={(e) => {
-          if (e.key === "ArrowRight" || e.key === "ArrowLeft") {
-            e.preventDefault();
-            setTab((prev) => prev === "servers" ? "catalog" : "servers");
-          }
-        }}
       >
         <button
+          id="mcp-view-tab-servers"
           role="tab"
           aria-selected={tab === "servers"}
+          aria-controls={MCP_VIEW_PANEL_ID}
+          tabIndex={tabNav.tabIndexFor("servers")}
           onClick={() => setTab("servers")}
+          onKeyDown={(event) => tabNav.onKeyDown(event, "servers")}
           className={`flex items-center gap-1.5 px-4 py-2 rounded-lg text-xs font-bold transition-colors ${
             tab === "servers" ? "bg-brand/10 text-brand shadow-sm" : "text-text-dim hover:text-text"
           }`}
@@ -1669,9 +1683,13 @@ export function McpServersPage() {
           )}
         </button>
         <button
+          id="mcp-view-tab-catalog"
           role="tab"
           aria-selected={tab === "catalog"}
+          aria-controls={MCP_VIEW_PANEL_ID}
+          tabIndex={tabNav.tabIndexFor("catalog")}
           onClick={() => setTab("catalog")}
+          onKeyDown={(event) => tabNav.onKeyDown(event, "catalog")}
           className={`flex items-center gap-1.5 px-4 py-2 rounded-lg text-xs font-bold transition-colors ${
             tab === "catalog" ? "bg-brand/10 text-brand shadow-sm" : "text-text-dim hover:text-text"
           }`}
@@ -1682,7 +1700,7 @@ export function McpServersPage() {
       </div>
 
       <AnimatePresence mode="wait">
-      <motion.div key={tab} role="tabpanel" variants={tabContent} initial="initial" animate="animate" exit="exit" className="space-y-4">
+      <motion.div key={tab} id={MCP_VIEW_PANEL_ID} role="tabpanel" aria-labelledby={`mcp-view-tab-${tab}`} variants={tabContent} initial="initial" animate="animate" exit="exit" className="space-y-4">
       {tab === "servers" && (
         <>
           {/* Search + filter toolbar */}
@@ -1741,8 +1759,16 @@ export function McpServersPage() {
           {/* Loading */}
           {serversQuery.isLoading && <ListSkeleton rows={3} />}
 
+          {/* Load failure: without this a failed list reads as "no servers configured" and pushes the operator to re-add servers that are still in config.toml. */}
+          {serversQuery.isError && data === undefined && (
+            <ErrorState
+              message={errorMessage(serversQuery.error, t("common.error"))}
+              onRetry={() => void serversQuery.refetch()}
+            />
+          )}
+
           {/* Empty */}
-          {!serversQuery.isLoading && configured.length === 0 && (
+          {data !== undefined && configured.length === 0 && (
             <EmptyState
               icon={<Plug className="h-10 w-10" />}
               title={t("mcp.empty")}
@@ -1801,7 +1827,13 @@ export function McpServersPage() {
               />
             </div>
           )}
-          {!catalogQuery.isLoading && catalogEntries.length === 0 && (
+          {catalogQuery.isError && catalogQuery.data === undefined && (
+            <ErrorState
+              message={errorMessage(catalogQuery.error, t("common.error"))}
+              onRetry={() => void catalogQuery.refetch()}
+            />
+          )}
+          {catalogQuery.data !== undefined && catalogEntries.length === 0 && (
             <EmptyState
               icon={<Store className="h-10 w-10" />}
               title={t("mcp.catalog_empty")}

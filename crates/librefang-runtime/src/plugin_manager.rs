@@ -1614,12 +1614,15 @@ pub async fn install_plugin_deps(name: &str) -> Result<Vec<String>, String> {
                 args.join(" "),
                 manifest_file
             ));
-            let output = tokio::process::Command::new(cmd)
-                .args(&args)
-                .current_dir(&plugin_dir)
-                .output()
-                .await
-                .map_err(|e| format!("Failed to launch '{cmd}': {e}"))?;
+            let mut command = tokio::process::Command::new(cmd);
+            command.args(&args).current_dir(&plugin_dir);
+            install::scrub_secret_env(&mut command, std::env::vars_os().map(|(k, _)| k));
+            let output = install::output_with_deadline(
+                &mut command,
+                install::DEPENDENCY_INSTALL_TIMEOUT,
+                &format!("'{cmd}'"),
+            )
+            .await?;
 
             let stdout = String::from_utf8_lossy(&output.stdout).to_string();
             let stderr = String::from_utf8_lossy(&output.stderr).to_string();

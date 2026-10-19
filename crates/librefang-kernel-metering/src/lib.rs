@@ -149,6 +149,27 @@ impl Drop for MeteringReservation {
     }
 }
 
+/// An agent's spend at or over one of its per-agent cost quotas.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct QuotaBreach {
+    /// Which window was exceeded: `"hourly"`, `"daily"` or `"monthly"`.
+    pub window: &'static str,
+    /// USD spent in that window.
+    pub spent: f64,
+    /// The window's USD limit.
+    pub limit: f64,
+}
+
+impl QuotaBreach {
+    /// The `QuotaExceeded` error [`MeteringEngine::check_quota`] reports for this breach.
+    pub fn into_error(self, agent_id: AgentId) -> LibreFangError {
+        LibreFangError::QuotaExceeded(format!(
+            "Agent {} exceeded {} cost quota: ${:.4} / ${:.4}",
+            agent_id, self.window, self.spent, self.limit
+        ))
+    }
+}
+
 /// The metering engine tracks usage cost and enforces quota limits.
 pub struct MeteringEngine {
     /// Persistent usage store (SQLite-backed).
@@ -303,40 +324,51 @@ impl MeteringEngine {
     /// Check if an agent is within its spending quotas (hourly, daily, monthly).
     /// Returns Ok(()) if under all quotas, or QuotaExceeded error if over any.
     pub fn check_quota(&self, agent_id: AgentId, quota: &ResourceQuota) -> LibreFangResult<()> {
-        // Hourly check
+        match self.quota_breach(agent_id, quota)? {
+            Some(breach) => Err(breach.into_error(agent_id)),
+            None => Ok(()),
+        }
+    }
+
+    /// The first spending window (hourly, then daily, then monthly) in which the agent is at or over its quota, with the amounts, or `None` when it is within all of them.
+    ///
+    /// [`Self::check_quota`] flattens this into an error string; callers that report the enforcement (the kernel's `QuotaEnforced` event) need `spent` and `limit` as numbers.
+    pub fn quota_breach(
+        &self,
+        agent_id: AgentId,
+        quota: &ResourceQuota,
+    ) -> LibreFangResult<Option<QuotaBreach>> {
         if quota.max_cost_per_hour_usd > 0.0 {
-            let hourly_cost = self.store.query_hourly(agent_id)?;
-            if hourly_cost >= quota.max_cost_per_hour_usd {
-                return Err(LibreFangError::QuotaExceeded(format!(
-                    "Agent {} exceeded hourly cost quota: ${:.4} / ${:.4}",
-                    agent_id, hourly_cost, quota.max_cost_per_hour_usd
-                )));
+            let spent = self.store.query_hourly(agent_id)?;
+            if spent >= quota.max_cost_per_hour_usd {
+                return Ok(Some(QuotaBreach {
+                    window: "hourly",
+                    spent,
+                    limit: quota.max_cost_per_hour_usd,
+                }));
             }
         }
-
-        // Daily check
         if quota.max_cost_per_day_usd > 0.0 {
-            let daily_cost = self.store.query_daily(agent_id)?;
-            if daily_cost >= quota.max_cost_per_day_usd {
-                return Err(LibreFangError::QuotaExceeded(format!(
-                    "Agent {} exceeded daily cost quota: ${:.4} / ${:.4}",
-                    agent_id, daily_cost, quota.max_cost_per_day_usd
-                )));
+            let spent = self.store.query_daily(agent_id)?;
+            if spent >= quota.max_cost_per_day_usd {
+                return Ok(Some(QuotaBreach {
+                    window: "daily",
+                    spent,
+                    limit: quota.max_cost_per_day_usd,
+                }));
             }
         }
-
-        // Monthly check
         if quota.max_cost_per_month_usd > 0.0 {
-            let monthly_cost = self.store.query_monthly(agent_id)?;
-            if monthly_cost >= quota.max_cost_per_month_usd {
-                return Err(LibreFangError::QuotaExceeded(format!(
-                    "Agent {} exceeded monthly cost quota: ${:.4} / ${:.4}",
-                    agent_id, monthly_cost, quota.max_cost_per_month_usd
-                )));
+            let spent = self.store.query_monthly(agent_id)?;
+            if spent >= quota.max_cost_per_month_usd {
+                return Ok(Some(QuotaBreach {
+                    window: "monthly",
+                    spent,
+                    limit: quota.max_cost_per_month_usd,
+                }));
             }
         }
-
-        Ok(())
+        Ok(None)
     }
 
     /// Check global budget limits (across all agents).

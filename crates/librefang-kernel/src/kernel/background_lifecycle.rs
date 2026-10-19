@@ -496,71 +496,29 @@ impl LibreFangKernel {
         // prune below; each sub-step is independent so a config of `0` for
         // any one of them only disables that step. Failures only log; the
         // sweep is best-effort and re-runs at the next interval.
+        //
+        // The task is spawned unconditionally and re-reads all three retention values from the live config on every tick.
+        // Capturing them at boot made `[approval] audit_retention_days` and `[queue] task_queue_retention_days` edits report as applied on `POST /api/config/reload` while the sweep kept the boot values, and a daemon booted with all three at 0 never spawned the sweep at all.
         {
-            let memory_retention = cfg.memory.soft_delete_retention_days;
-            let queue_retention = cfg.queue.task_queue_retention_days;
-            let approval_retention = cfg.approval.audit_retention_days;
-            let any_enabled = memory_retention > 0 || queue_retention > 0 || approval_retention > 0;
-            if any_enabled {
-                let kernel = Arc::clone(self);
-                tokio::spawn(async move {
-                    let mut interval =
-                        tokio::time::interval(std::time::Duration::from_secs(24 * 3600));
-                    interval.tick().await; // skip immediate tick
-                    loop {
-                        interval.tick().await;
-                        if kernel.agents.supervisor.is_shutting_down() {
-                            break;
-                        }
-                        if memory_retention > 0 {
-                            match kernel
-                                .memory
-                                .substrate
-                                .prune_soft_deleted_memories(memory_retention)
-                            {
-                                Ok(n) if n > 0 => info!(
-                                    "Memory retention: hard-deleted {n} soft-deleted memories \
-                                     (older than {memory_retention} days)"
-                                ),
-                                Ok(_) => {}
-                                Err(e) => warn!("Memory retention sweep failed: {e}"),
-                            }
-                        }
-                        if queue_retention > 0 {
-                            match kernel
-                                .memory
-                                .substrate
-                                .task_prune_finished(queue_retention)
-                                .await
-                            {
-                                Ok(n) if n > 0 => info!(
-                                    "Task queue retention: pruned {n} finished tasks \
-                                     (older than {queue_retention} days)"
-                                ),
-                                Ok(_) => {}
-                                Err(e) => warn!("Task queue retention sweep failed: {e}"),
-                            }
-                        }
-                        if approval_retention > 0 {
-                            let n = kernel
-                                .governance
-                                .approval_manager
-                                .prune_audit(approval_retention);
-                            if n > 0 {
-                                info!(
-                                    "Approval audit retention: pruned {n} rows \
-                                     (older than {approval_retention} days)"
-                                );
-                            }
-                        }
+            let kernel = Arc::clone(self);
+            spawn_logged("db_retention_sweep", async move {
+                let mut interval = tokio::time::interval(std::time::Duration::from_secs(24 * 3600));
+                interval.tick().await; // skip immediate tick
+                loop {
+                    interval.tick().await;
+                    if kernel.agents.supervisor.is_shutting_down() {
+                        break;
                     }
-                });
-                info!(
-                    "DB retention sweep scheduled daily \
-                     (memory={memory_retention}d, task_queue={queue_retention}d, \
-                     approval_audit={approval_retention}d)"
-                );
-            }
+                    kernel.run_db_retention_sweep_once().await;
+                }
+            });
+            info!(
+                "DB retention sweep scheduled daily \
+                 (memory={}d, task_queue={}d, approval_audit={}d at boot; re-read every tick)",
+                cfg.memory.soft_delete_retention_days,
+                cfg.queue.task_queue_retention_days,
+                cfg.approval.audit_retention_days
+            );
         }
 
         // `[queue] task_ttl_secs` — expire tasks nobody claimed.
@@ -706,11 +664,7 @@ impl LibreFangKernel {
                         }
                         let mut total = 0u64;
                         if session_cfg.retention_days > 0 {
-                            match kernel
-                                .memory
-                                .substrate
-                                .cleanup_expired_sessions(session_cfg.retention_days)
-                            {
+                            match kernel.prune_expired_sessions(session_cfg.retention_days) {
                                 Ok(n) => total += n,
                                 Err(e) => {
                                     warn!("Session retention cleanup (expired) failed: {e}");
@@ -718,11 +672,7 @@ impl LibreFangKernel {
                             }
                         }
                         if session_cfg.max_sessions_per_agent > 0 {
-                            match kernel
-                                .memory
-                                .substrate
-                                .cleanup_excess_sessions(session_cfg.max_sessions_per_agent)
-                            {
+                            match kernel.prune_excess_sessions(session_cfg.max_sessions_per_agent) {
                                 Ok(n) => total += n,
                                 Err(e) => {
                                     warn!("Session retention cleanup (excess) failed: {e}");
@@ -753,21 +703,13 @@ impl LibreFangKernel {
             if needs_cleanup {
                 let mut pruned_total: u64 = 0;
                 if session_cfg.retention_days > 0 {
-                    match self
-                        .memory
-                        .substrate
-                        .cleanup_expired_sessions(session_cfg.retention_days)
-                    {
+                    match self.prune_expired_sessions(session_cfg.retention_days) {
                         Ok(n) => pruned_total += n,
                         Err(e) => warn!("Startup session prune (expired) failed: {e}"),
                     }
                 }
                 if session_cfg.max_sessions_per_agent > 0 {
-                    match self
-                        .memory
-                        .substrate
-                        .cleanup_excess_sessions(session_cfg.max_sessions_per_agent)
-                    {
+                    match self.prune_excess_sessions(session_cfg.max_sessions_per_agent) {
                         Ok(n) => pruned_total += n,
                         Err(e) => warn!("Startup session prune (excess) failed: {e}"),
                     }
@@ -1104,6 +1046,7 @@ impl LibreFangKernel {
             shared_secret: cfg.network.shared_secret.clone(),
             max_messages_per_peer_per_minute: cfg.network.max_messages_per_peer_per_minute,
             max_llm_tokens_per_peer_per_hour: cfg.network.max_llm_tokens_per_peer_per_hour,
+            max_peers: cfg.network.max_peers,
         };
 
         let registry = PeerRegistry::new();
@@ -1163,6 +1106,61 @@ impl LibreFangKernel {
             }
             Err(e) => {
                 warn!(error = %e, "OFP: failed to start peer node");
+            }
+        }
+    }
+
+    /// One pass of the daily DB retention sweep, reading every retention value from the live config.
+    ///
+    /// Each step is skipped when its retention is 0, and a failure in one step only logs.
+    pub(crate) async fn run_db_retention_sweep_once(&self) {
+        let (memory_retention, queue_retention, approval_retention) = {
+            let cfg = self.config_ref();
+            (
+                cfg.memory.soft_delete_retention_days,
+                cfg.queue.task_queue_retention_days,
+                cfg.approval.audit_retention_days,
+            )
+        };
+        if memory_retention > 0 {
+            match self
+                .memory
+                .substrate
+                .prune_soft_deleted_memories(memory_retention)
+            {
+                Ok(n) if n > 0 => info!(
+                    "Memory retention: hard-deleted {n} soft-deleted memories \
+                     (older than {memory_retention} days)"
+                ),
+                Ok(_) => {}
+                Err(e) => warn!("Memory retention sweep failed: {e}"),
+            }
+        }
+        if queue_retention > 0 {
+            match self
+                .memory
+                .substrate
+                .task_prune_finished(queue_retention)
+                .await
+            {
+                Ok(n) if n > 0 => info!(
+                    "Task queue retention: pruned {n} finished tasks \
+                     (older than {queue_retention} days)"
+                ),
+                Ok(_) => {}
+                Err(e) => warn!("Task queue retention sweep failed: {e}"),
+            }
+        }
+        if approval_retention > 0 {
+            let n = self
+                .governance
+                .approval_manager
+                .prune_audit(approval_retention);
+            if n > 0 {
+                info!(
+                    "Approval audit retention: pruned {n} rows \
+                     (older than {approval_retention} days)"
+                );
             }
         }
     }
@@ -1449,12 +1447,68 @@ impl LibreFangKernel {
         self.workflows.background.active_count()
     }
 
+    /// Close every browser session and kill every `process_start` child before the daemon exits.
+    ///
+    /// Neither survives a restart usefully: Chromium and the managed children run outside the daemon's process group without `kill_on_drop`, so without this they are re-parented to init and keep their ports, CPU and memory.
+    /// `shutdown` is sync, so the teardown is awaited by blocking in place on a multi-thread runtime, or on a throwaway runtime when called outside one.
+    /// On a current-thread runtime blocking would deadlock, so the teardown is spawned best-effort instead.
+    fn release_runtime_resources_on_shutdown(&self) {
+        if self.media.browser_ctx.session_count() == 0 && self.processes.manager.count() == 0 {
+            return;
+        }
+        let browser = &self.media.browser_ctx;
+        let processes = &self.processes.manager;
+        let teardown = async move {
+            let done = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                browser.close_all().await;
+                processes.kill_all().await
+            })
+            .await;
+            match done {
+                Ok(killed) => info!(killed, "Closed browser sessions and killed managed processes for shutdown"),
+                Err(_) => warn!("Browser / managed-process teardown did not finish within 10s; continuing shutdown"),
+            }
+        };
+        match tokio::runtime::Handle::try_current() {
+            Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
+                tokio::task::block_in_place(|| handle.block_on(teardown));
+            }
+            Ok(handle) => {
+                drop(teardown);
+                if let Some(kernel) = self.self_handle.get().and_then(|weak| weak.upgrade()) {
+                    handle.spawn(async move {
+                        kernel.media.browser_ctx.close_all().await;
+                        kernel.processes.manager.kill_all().await;
+                    });
+                }
+            }
+            Err(_) => match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(rt) => rt.block_on(teardown),
+                Err(e) => warn!("Could not build a runtime for shutdown teardown: {e}"),
+            },
+        }
+    }
+
     /// Gracefully shutdown the kernel.
     ///
     /// This cleanly shuts down in-memory state but preserves persistent agent
     /// data so agents are restored on the next boot.
     pub fn shutdown(&self) {
         info!("Shutting down LibreFang kernel...");
+
+        // Announce the stop on the bus while its subscribers (the desktop notification listener, WebSocket / SSE event streams) are still attached.
+        // Bus only, not `publish_event`: dispatching trigger matches to agents now would start turns the supervisor is about to refuse.
+        {
+            use librefang_types::event::{Event, EventPayload, EventTarget, SystemEvent};
+            self.events.event_bus.publish_sync(Event::new(
+                AgentId::new(),
+                EventTarget::System,
+                EventPayload::System(SystemEvent::KernelStopping),
+            ));
+        }
 
         // Signal background tasks to stop (e.g., approval expiry sweep)
         let _ = self.shutdown_tx.send(true);
@@ -1466,6 +1520,8 @@ impl LibreFangKernel {
         // tied to the standard sidecar supervisor.
 
         self.agents.supervisor.shutdown();
+
+        self.release_runtime_resources_on_shutdown();
 
         // Drain in-flight workflow runs (#3335). `Running` / `Pending`
         // are deliberately not persisted by `persist_runs` (no durable

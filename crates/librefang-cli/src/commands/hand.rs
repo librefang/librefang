@@ -326,48 +326,182 @@ pub(crate) fn cmd_hand_info(id: &str) {
     );
 }
 
-pub(crate) fn cmd_hand_check_deps(id: &str) {
-    let base = require_daemon("hand check-deps");
-    let client = daemon_client();
-    let body = daemon_json(
+/// `POST /api/hands/{id}/check-deps`, exiting 1 on a transport error, an HTTP error status or an `error` body.
+/// Gating on the status as well as the body keeps a 4xx/5xx with an empty or non-JSON body (a proxy error page, say) from being read as a clean readiness report.
+fn fetch_hand_readiness(
+    client: &reqwest::blocking::Client,
+    base: &str,
+    id: &str,
+) -> serde_json::Value {
+    let (status, body) = daemon_json_checked(
         client
             .post(format!("{base}/api/hands/{id}/check-deps"))
             .send(),
     );
-    if body.get("error").is_some() {
+    if !status.is_success() || body.get("error").is_some() {
         ui::error(&i18n::t_args(
             "label-failed-reason",
             &[("error", api_error_message(&body).unwrap_or("?"))],
         ));
-    } else {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&body).unwrap_or_default()
-        );
+        std::process::exit(1);
+    }
+    body
+}
+
+/// Keys of the mandatory requirements a check-deps response reports as unsatisfied.
+/// Optional requirements are left out because they do not gate activation (`HandRegistry::readiness` counts only non-optional ones toward `requirements_met`).
+fn unmet_mandatory_requirements(readiness: &serde_json::Value) -> Vec<String> {
+    readiness
+        .get("requirements")
+        .and_then(|r| r.as_array())
+        .map(|reqs| {
+            reqs.iter()
+                .filter(|r| !r["satisfied"].as_bool().unwrap_or(false))
+                .filter(|r| !r["optional"].as_bool().unwrap_or(false))
+                .map(|r| r["key"].as_str().unwrap_or("?").to_string())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+pub(crate) fn cmd_hand_check_deps(id: &str) {
+    let base = require_daemon("hand check-deps");
+    let client = daemon_client();
+    let body = fetch_hand_readiness(&client, &base, id);
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&body).unwrap_or_default()
+    );
+    // A check command is only scriptable if "not ready" is visible in the exit code.
+    // `requirements_met` is the daemon's own activation gate, so mandatory-only; an unmet optional requirement still exits 0.
+    if body["requirements_met"].as_bool() == Some(false) {
+        std::process::exit(1);
+    }
+}
+
+/// Per-dependency statuses from `POST /api/hands/{id}/install-deps` that leave the dependency usable or deliberately untouched.
+/// `skipped` means the requirement has no install instructions; whether that matters is decided by the readiness re-check, not by the status.
+const INSTALL_DEPS_OK_STATUSES: &[&str] = &["installed", "already_installed", "skipped"];
+
+/// One problem `hand install-deps` reports for a single dependency.
+#[derive(Debug, PartialEq, Eq)]
+enum DepProblem {
+    /// The install-deps `results` entry carries a non-success status (`error`, `timeout`, `no_command`, or none at all).
+    Failed {
+        key: String,
+        status: String,
+        message: String,
+    },
+    /// A mandatory requirement the readiness re-check still reports as unmet without a failed entry of its own: a `skipped` one (no install instructions), or an `installed` one that still does not pass its check.
+    StillMissing { key: String },
+}
+
+impl DepProblem {
+    fn key(&self) -> &str {
+        match self {
+            DepProblem::Failed { key, .. } | DepProblem::StillMissing { key } => key,
+        }
+    }
+
+    fn render(&self) -> String {
+        match self {
+            DepProblem::Failed {
+                key,
+                status,
+                message,
+            } => i18n::t_args(
+                "hand-install-deps-dep-failed",
+                &[("key", key), ("status", status), ("message", message)],
+            ),
+            DepProblem::StillMissing { key } => {
+                i18n::t_args("hand-install-deps-dep-still-missing", &[("key", key)])
+            }
+        }
+    }
+}
+
+/// Every entry in the install-deps `results` array whose status is not a success status.
+/// The endpoint answers 200 even when individual installs fail, so the CLI has to inspect each entry.
+fn install_deps_failures(body: &serde_json::Value) -> Vec<DepProblem> {
+    body.get("results")
+        .and_then(|r| r.as_array())
+        .map(|results| {
+            results
+                .iter()
+                .filter_map(|entry| {
+                    let status = entry["status"].as_str().unwrap_or("unknown");
+                    if INSTALL_DEPS_OK_STATUSES.contains(&status) {
+                        return None;
+                    }
+                    Some(DepProblem::Failed {
+                        key: entry["key"].as_str().unwrap_or("?").to_string(),
+                        status: status.to_string(),
+                        message: entry["message"].as_str().unwrap_or("").to_string(),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// What `hand install-deps` reports after the install pass and the readiness re-check.
+#[derive(Debug, PartialEq, Eq)]
+struct InstallDepsOutcome {
+    problems: Vec<DepProblem>,
+    /// True when a mandatory requirement is still unmet, which is what decides the exit code.
+    /// A failed optional install is reported but does not fail the command, since the hand can still be activated.
+    blocking: bool,
+}
+
+fn install_deps_outcome(
+    install_body: &serde_json::Value,
+    readiness: &serde_json::Value,
+) -> InstallDepsOutcome {
+    let mut problems = install_deps_failures(install_body);
+    let unmet = unmet_mandatory_requirements(readiness);
+    for key in &unmet {
+        if !problems.iter().any(|p| p.key() == key) {
+            problems.push(DepProblem::StillMissing { key: key.clone() });
+        }
+    }
+    InstallDepsOutcome {
+        problems,
+        blocking: !unmet.is_empty(),
     }
 }
 
 pub(crate) fn cmd_hand_install_deps(id: &str) {
     let base = require_daemon("hand install-deps");
     let client = daemon_client();
-    let body = daemon_json(
+    let (status, body) = daemon_json_checked(
         client
             .post(format!("{base}/api/hands/{id}/install-deps"))
             .send(),
     );
-    if body.get("error").is_some() {
+    if !status.is_success() || body.get("error").is_some() {
         ui::error(&i18n::t_args(
             "label-failed-reason",
             &[("error", api_error_message(&body).unwrap_or("?"))],
         ));
-    } else {
+        std::process::exit(1);
+    }
+    // The install response's own `requirements_met` counts optional requirements too, so re-check readiness to learn which unmet requirements actually block activation.
+    let readiness = fetch_hand_readiness(&client, &base, id);
+    let outcome = install_deps_outcome(&body, &readiness);
+    if outcome.problems.is_empty() {
         ui::success(&i18n::t_args("hand-install-deps-success", &[("id", id)]));
-        if let Some(results) = body.get("results") {
-            println!(
-                "{}",
-                serde_json::to_string_pretty(results).unwrap_or_default()
-            );
-        }
+    }
+    if let Some(results) = body.get("results") {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(results).unwrap_or_default()
+        );
+    }
+    for problem in &outcome.problems {
+        ui::error(&problem.render());
+    }
+    if outcome.blocking {
+        std::process::exit(1);
     }
 }
 
@@ -679,4 +813,193 @@ pub(crate) fn resolve_hand_instance(
                 || instance["hand_id"].as_str() == Some(id_or_hand)
         })
         .cloned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn failed(key: &str, status: &str, message: &str) -> DepProblem {
+        DepProblem::Failed {
+            key: key.to_string(),
+            status: status.to_string(),
+            message: message.to_string(),
+        }
+    }
+
+    #[test]
+    fn install_deps_failures_flags_error_timeout_and_no_command_entries() {
+        let body = serde_json::json!({
+            "results": [
+                {"key": "chromium", "status": "error", "message": "Install failed (exit 100): E: Unable to locate package"},
+                {"key": "ffmpeg", "status": "timeout", "message": "Installation timed out after 5 minutes"},
+                {"key": "yt-dlp", "status": "no_command", "message": "No install command for platform: linux"},
+            ]
+        });
+        assert_eq!(
+            install_deps_failures(&body),
+            vec![
+                failed(
+                    "chromium",
+                    "error",
+                    "Install failed (exit 100): E: Unable to locate package"
+                ),
+                failed(
+                    "ffmpeg",
+                    "timeout",
+                    "Installation timed out after 5 minutes"
+                ),
+                failed(
+                    "yt-dlp",
+                    "no_command",
+                    "No install command for platform: linux"
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn install_deps_failures_accepts_success_statuses() {
+        let body = serde_json::json!({
+            "results": [
+                {"key": "a", "status": "installed", "message": "A installed successfully"},
+                {"key": "b", "status": "already_installed", "message": "B is already available"},
+                {"key": "c", "status": "skipped", "message": "No install instructions available"},
+            ]
+        });
+        assert!(install_deps_failures(&body).is_empty());
+        assert!(install_deps_failures(&serde_json::json!({})).is_empty());
+    }
+
+    #[test]
+    fn install_deps_failures_treats_missing_status_as_failure() {
+        let body = serde_json::json!({"results": [{"key": "x"}]});
+        assert_eq!(
+            install_deps_failures(&body),
+            vec![failed("x", "unknown", "")]
+        );
+    }
+
+    #[test]
+    fn unmet_mandatory_requirements_ignores_optional_and_satisfied() {
+        let readiness = serde_json::json!({
+            "requirements_met": false,
+            "requirements": [
+                {"key": "chromium", "satisfied": false, "optional": false},
+                {"key": "ffmpeg", "satisfied": false, "optional": true},
+                {"key": "python3", "satisfied": true, "optional": false},
+                {"key": "legacy"},
+            ]
+        });
+        assert_eq!(
+            unmet_mandatory_requirements(&readiness),
+            vec!["chromium".to_string(), "legacy".to_string()]
+        );
+    }
+
+    #[test]
+    fn install_deps_outcome_blocks_on_skipped_mandatory_requirement() {
+        let install = serde_json::json!({"results": [
+            {"key": "api_key", "status": "skipped", "message": "No install instructions available"},
+        ]});
+        let readiness = serde_json::json!({"requirements": [
+            {"key": "api_key", "satisfied": false, "optional": false},
+        ]});
+        assert_eq!(
+            install_deps_outcome(&install, &readiness),
+            InstallDepsOutcome {
+                problems: vec![DepProblem::StillMissing {
+                    key: "api_key".to_string()
+                }],
+                blocking: true,
+            }
+        );
+    }
+
+    #[test]
+    fn install_deps_outcome_reports_but_does_not_block_on_failed_optional_install() {
+        let install = serde_json::json!({"results": [
+            {"key": "ffmpeg", "status": "error", "message": "Install failed (exit 1)"},
+        ]});
+        let readiness = serde_json::json!({"requirements": [
+            {"key": "ffmpeg", "satisfied": false, "optional": true},
+        ]});
+        assert_eq!(
+            install_deps_outcome(&install, &readiness),
+            InstallDepsOutcome {
+                problems: vec![failed("ffmpeg", "error", "Install failed (exit 1)")],
+                blocking: false,
+            }
+        );
+    }
+
+    #[test]
+    fn install_deps_outcome_blocks_on_failed_mandatory_install_without_duplicate_line() {
+        let install = serde_json::json!({"results": [
+            {"key": "chromium", "status": "error", "message": "E: Unable to locate package"},
+        ]});
+        let readiness = serde_json::json!({"requirements": [
+            {"key": "chromium", "satisfied": false, "optional": false},
+        ]});
+        assert_eq!(
+            install_deps_outcome(&install, &readiness),
+            InstallDepsOutcome {
+                problems: vec![failed("chromium", "error", "E: Unable to locate package")],
+                blocking: true,
+            }
+        );
+    }
+
+    #[test]
+    fn install_deps_outcome_blocks_when_installed_dependency_still_fails_its_check() {
+        let install = serde_json::json!({"results": [
+            {"key": "yt-dlp", "status": "installed", "message": "yt-dlp installed successfully"},
+        ]});
+        let readiness = serde_json::json!({"requirements": [
+            {"key": "yt-dlp", "satisfied": false, "optional": false},
+        ]});
+        assert_eq!(
+            install_deps_outcome(&install, &readiness),
+            InstallDepsOutcome {
+                problems: vec![DepProblem::StillMissing {
+                    key: "yt-dlp".to_string()
+                }],
+                blocking: true,
+            }
+        );
+    }
+
+    #[test]
+    fn install_deps_outcome_is_clean_when_everything_is_satisfied() {
+        let install = serde_json::json!({"results": [
+            {"key": "a", "status": "already_installed", "message": "A is already available"},
+        ]});
+        let readiness = serde_json::json!({"requirements": [
+            {"key": "a", "satisfied": true, "optional": false},
+        ]});
+        assert_eq!(
+            install_deps_outcome(&install, &readiness),
+            InstallDepsOutcome {
+                problems: vec![],
+                blocking: false,
+            }
+        );
+    }
+
+    #[test]
+    fn dep_problem_renders_through_locale_keys() {
+        let rendered = failed("chromium", "error", "boom").render();
+        assert!(
+            rendered.contains("chromium")
+                && rendered.contains("error")
+                && rendered.contains("boom"),
+            "{rendered}"
+        );
+        let rendered = DepProblem::StillMissing {
+            key: "api_key".to_string(),
+        }
+        .render();
+        // An unresolved key renders as the key name itself, which does not contain the argument.
+        assert!(rendered.contains("api_key"), "{rendered}");
+    }
 }

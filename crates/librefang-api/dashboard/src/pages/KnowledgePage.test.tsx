@@ -68,10 +68,13 @@ describe("KnowledgePage", () => {
     useUIStore.setState({ toasts: [] });
     vi.spyOn(api, "listKnowledgeBases").mockResolvedValue([BASE]);
     vi.spyOn(api, "listKnowledgeDocuments").mockResolvedValue([]);
-    vi.spyOn(api, "listAgents").mockResolvedValue([
-      { id: "11111111-1111-4111-8111-111111111111", name: "reader" },
-      { id: "22222222-2222-4222-8222-222222222222", name: "writer" },
-    ] as never);
+    vi.spyOn(api, "listAgents").mockResolvedValue({
+      items: [
+        { id: "11111111-1111-4111-8111-111111111111", name: "reader" },
+        { id: "22222222-2222-4222-8222-222222222222", name: "writer" },
+      ] as never,
+      truncated: false,
+    });
   });
 
   const errorToasts = () =>

@@ -1,6 +1,6 @@
 import React from "react";
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { act, fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { Plug } from "lucide-react";
 import {
@@ -278,6 +278,120 @@ describe("McpServersPage", () => {
     expect(screen.getByText("GitHub MCP")).toBeInTheDocument();
     // Empty state must not appear when servers exist.
     expect(screen.queryByText("mcp.empty")).not.toBeInTheDocument();
+  });
+
+  it("shows an error with retry instead of the 'no servers' empty state when the list request fails", () => {
+    const refetch = vi.fn();
+    useMcpServersMock.mockReturnValue({
+      data: undefined,
+      isLoading: false,
+      isPending: false,
+      isError: true,
+      isSuccess: false,
+      error: new Error("servers boom"),
+      isFetching: false,
+      refetch,
+    });
+    renderPage();
+
+    expect(screen.queryByText("mcp.empty")).not.toBeInTheDocument();
+    const alert = screen.getByRole("alert");
+    expect(alert).toHaveTextContent("servers boom");
+    fireEvent.click(within(alert).getByRole("button"));
+    expect(refetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows an error instead of 'catalog empty' when the catalog request fails", () => {
+    setServers([makeServer()]);
+    const refetch = vi.fn();
+    useMcpCatalogMock.mockReturnValue({
+      data: undefined,
+      isLoading: false,
+      isError: true,
+      error: new Error("catalog boom"),
+      isFetching: false,
+      refetch,
+    });
+    renderPage();
+    fireEvent.click(screen.getByRole("tab", { name: /mcp\.tab_catalog/ }));
+
+    expect(screen.queryByText("mcp.catalog_empty")).not.toBeInTheDocument();
+    const alert = screen.getByRole("alert");
+    expect(alert).toHaveTextContent("catalog boom");
+    fireEvent.click(within(alert).getByRole("button"));
+    expect(refetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("forces a network read on every OAuth status poll tick", async () => {
+    vi.useFakeTimers();
+    const popup = {
+      closed: false,
+      opener: window,
+      location: { href: "about:blank" },
+      close: vi.fn(),
+    } as unknown as Window;
+    const openSpy = vi.spyOn(window, "open").mockReturnValue(popup);
+    useStartMcpAuthMock.mockReturnValue({
+      mutateAsync: vi.fn().mockResolvedValue({ auth_url: "https://idp.test" }),
+      isPending: false,
+    });
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    const fetchQuery = vi.spyOn(queryClient, "fetchQuery");
+    fetchQuery.mockResolvedValue({ auth: { state: "pending_auth" } } as never);
+    const view = render(
+      <QueryClientProvider client={queryClient}>
+        <AuthBadge
+          server={makeServer({ auth_state: { state: "needs_auth" } })}
+        />
+      </QueryClientProvider>,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "mcp.auth_authorize" }));
+    await act(async () => {
+      await Promise.resolve();
+    });
+    await act(async () => {
+      vi.advanceTimersByTime(2000);
+      await Promise.resolve();
+    });
+
+    expect(fetchQuery).toHaveBeenCalledTimes(1);
+    // The shared authStatus options keep a result fresh for the whole poll interval, so without an explicit zero every other tick is a cache hit.
+    expect(fetchQuery).toHaveBeenCalledWith(
+      expect.objectContaining({ queryKey: ["mcp", "auth", "test-server-1"], staleTime: 0 }),
+    );
+    view.unmount();
+    openSpy.mockRestore();
+    vi.useRealTimers();
+  });
+
+  // Issue #8597 — the view tabs had arrow handling on the container but no
+  // roving tabindex and no link to the panel.
+  it("roves the view tabs and links them to the panel they switch", () => {
+    setServers([makeServer({ id: "srv-1", name: "Brave Search MCP" })]);
+    renderPage();
+
+    const tablist = screen.getByRole("tablist", { name: "Server views" });
+    const tabs = within(tablist).getAllByRole("tab");
+    expect(tabs).toHaveLength(2);
+
+    const panel = screen.getByRole("tabpanel");
+    for (const tab of tabs) {
+      expect(tab).toHaveAttribute("aria-controls", panel.id);
+      expect(tab.id).not.toBe("");
+    }
+    const stops = tabs.filter((tab) => tab.tabIndex === 0);
+    expect(stops).toHaveLength(1);
+    expect(stops[0]).toHaveAttribute("aria-selected", "true");
+    expect(panel).toHaveAttribute("aria-labelledby", stops[0].id);
+
+    fireEvent.keyDown(tabs[0], { key: "End" });
+    expect(tabs[1]).toHaveAttribute("aria-selected", "true");
+    expect(tabs[1].tabIndex).toBe(0);
+    expect(tabs[0].tabIndex).toBe(-1);
+    expect(document.activeElement).toBe(tabs[1]);
   });
 
   it("exposes the Add server and Reload action buttons in the page header", () => {

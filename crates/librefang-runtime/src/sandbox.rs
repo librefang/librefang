@@ -173,6 +173,10 @@ pub struct GuestState {
     /// The guest runs on a blocking-pool thread, where the `crate::network_meter` task-local installed by `tool_runner::dispatch` is not visible, so the counter is carried here by hand and re-installed by `host_net_fetch` around its own `block_on`.
     /// `None` for a guest that no measured tool call started — a plugin hook, a test — whose egress is charged to nothing, the same as any other primitive running outside a tool call.
     pub network_meter: Option<Arc<std::sync::atomic::AtomicU64>>,
+    /// The agent and session locks held by the task that dispatched this guest.
+    ///
+    /// The `crate::held_agent_locks` task-locals do not reach the blocking-pool thread either, so without this a host call that re-enters the kernel (`host_agent_send` back to this agent, or to an agent that sends back) waits on the very lock the dispatching turn holds while it waits for the guest.
+    pub held_locks: crate::held_agent_locks::HeldLocksSnapshot,
     /// Memory limiter enforcing `SandboxConfig::max_memory_bytes`.
     limiter: MemoryLimiter,
     /// Wall-clock instant this guest started executing — used by the
@@ -201,6 +205,7 @@ impl GuestState {
             agent_id,
             tokio_handle,
             network_meter: None,
+            held_locks: Default::default(),
             limiter: MemoryLimiter {
                 max_bytes: usize::MAX,
             },
@@ -406,6 +411,8 @@ impl WasmSandbox {
         // Taken here, on the task the dispatching tool call installed it on: `spawn_blocking` below hands the guest to a thread the task-local cannot reach.
         // The counter is shared with the tool call's own meter, so a guest's reads are charged as they happen and survive a guest that traps or times out afterwards.
         let network_meter = crate::network_meter::current();
+        // Same reason: the turn running this guest holds its agent lock on this task, and the guest's host calls must be able to see that.
+        let held_locks = crate::held_agent_locks::snapshot();
 
         tokio::task::spawn_blocking(move || {
             Self::execute_sync(
@@ -417,6 +424,7 @@ impl WasmSandbox {
                 &agent_id,
                 handle,
                 network_meter,
+                held_locks,
             )
         })
         .await
@@ -434,6 +442,7 @@ impl WasmSandbox {
         agent_id: &str,
         tokio_handle: tokio::runtime::Handle,
         network_meter: Option<Arc<std::sync::atomic::AtomicU64>>,
+        held_locks: crate::held_agent_locks::HeldLocksSnapshot,
     ) -> Result<ExecutionResult, SandboxError> {
         // Compile the module (accepts both .wasm binary and .wat text)
         let module = Module::new(engine, wasm_bytes)
@@ -449,6 +458,7 @@ impl WasmSandbox {
                 agent_id: agent_id.to_string(),
                 tokio_handle,
                 network_meter,
+                held_locks,
                 limiter: MemoryLimiter {
                     max_bytes: config.max_memory_bytes,
                 },
