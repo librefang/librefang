@@ -1,0 +1,3 @@
+The TUI's template version-history overlay now shows a readable label for what produced each stored version (`Raw TOML edit`, `Created`, `Dashboard edit`, `Restored from registry`, `Pre-restore snapshot`, `Restored`, `Unknown source`) where it printed the raw `change_source` token.
+The token is free text on the server, and the dashboard map for the same store had no entry for `registry-restore` or `pre-registry-restore`, so both surfaces showed the wire tag where the agent manifest store already shows labels.
+The labels live in the four shipped Fluent packs and the dashboard's five locale files, the history column truncates by characters rather than bytes, and a token outside the inventory still renders verbatim rather than blank (#8621, #8609) (@DaBlitzStein)
