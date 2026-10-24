@@ -75,6 +75,27 @@ from librefang.sidecar.common import MAX_BACKOFF_SECS
 
 LONGPOLL_SERVER_SECS = 30
 LONGPOLL_CLIENT_SECS = 35
+# Deadline for one whole getUpdates round-trip, response body included.
+# urllib's timeout is per socket operation (connect, each recv), so a server
+# that drips a response — or a 502 whose body is read via HTTPError.read() —
+# can leave the worker thread inside urlopen() well past it. produce() bounds
+# the executor await by this value instead. 15 s of headroom over the client
+# timeout, so a loaded host still finishing a 35 s poll plus batch processing
+# is not mistaken for a wedged thread. A module constant so tests can shorten
+# it.
+POLL_DEADLINE_SECS = LONGPOLL_CLIENT_SECS + 15
+# Consecutive over-deadline polls before the producer crashes on purpose.
+# A worker thread stuck in urlopen() cannot be reclaimed in-process, so the
+# supervisor restart is the only recovery; 3 leaves room for one slow but
+# eventually-completing response.
+MAX_WEDGED_POLLS = 3
+# Minimum gap between two WARN lines for the same recurring condition, so a
+# persistent outage cannot flood the journal.
+RECURRING_WARN_INTERVAL_SECS = 300.0
+# How long without a single successful poll before it is worth a WARN. This
+# alone never restarts the sidecar: a multi-minute outage must not become a
+# restart loop while the network is down.
+NO_SUCCESS_WARN_SECS = 300.0
 SEND_TIMEOUT_SECS = 10
 # Telegram's message limit is 4096 *UTF-16 code units* (not chars).
 TELEGRAM_MSG_LIMIT = 4096
@@ -986,6 +1007,33 @@ def _multipart(url: str, fields: dict, file_field: str, filename: str,
         return parsed
 
 
+class _LongPollExpired(Exception):
+    """The socket timeout ``_poll_once`` raises when the long-poll expires.
+
+    Kept as its own class because on Python 3.11+ ``asyncio.TimeoutError``
+    *is* the builtin ``TimeoutError``: without this marker the deadline
+    enforced by ``asyncio.wait_for`` in ``produce()`` could not be told
+    apart from a healthy long-poll timing out, which must stay silent and
+    must not count as a wedged poll.
+    """
+
+
+def _warn_rate_limited(last_warned: dict, key: str, message: str,
+                       **fields) -> bool:
+    """Emit ``message`` at WARN for ``key`` at most once per interval.
+
+    ``last_warned`` is the producer-loop dict of key → ``time.monotonic()``
+    of the last emitted line. Returns whether the line was emitted.
+    """
+    now = time.monotonic()
+    last = last_warned.get(key)
+    if last is not None and now - last < RECURRING_WARN_INTERVAL_SECS:
+        return False
+    last_warned[key] = now
+    log.warn(message, **fields)
+    return True
+
+
 class TelegramAdapter(SidecarAdapter):
     capabilities = ["typing", "reaction", "interactive", "thread", "streaming"]
 
@@ -1884,6 +1932,18 @@ class TelegramAdapter(SidecarAdapter):
             metadata=self._message_metadata(message, user_id, is_group),
         )
 
+    def _poll_once_guarded(self, emit, state: dict) -> None:
+        """Translate the normal socket timeout into ``_LongPollExpired``.
+
+        Runs in the executor thread, so ``produce()`` can distinguish a
+        healthy long-poll expiry from its own ``asyncio.wait_for`` deadline
+        even on Python versions where both errors are the same class.
+        """
+        try:
+            self._poll_once(emit, state)
+        except TimeoutError as e:
+            raise _LongPollExpired(str(e)) from e
+
     def _poll_once(self, emit, state: dict) -> None:
         data = _api_get(
             f"{self.api_base}/getUpdates",
@@ -1917,6 +1977,13 @@ class TelegramAdapter(SidecarAdapter):
         #   block expiring with no updates) are normal — they reset
         #   backoff and skip the sleep so we re-enter the loop
         #   immediately.
+        # * A poll that exceeds POLL_DEADLINE_SECS is different: urllib's
+        #   35 s timeout only covers a single socket operation, so the
+        #   worker thread can sit in urlopen()/HTTPError.read() after a
+        #   proxy 502 with no bound on the whole response. The coroutine
+        #   would never resume, and no log line would be possible. The
+        #   deadline below turns that into a WARN, and repeated wedges
+        #   into an intentional crash the supervisor restarts.
         # * Successful recovery flips backoff back to 1.0 AND logs an
         #   INFO line if we were in a degraded state, so operators see
         #   the reconnect on their log timeline (the issue's
@@ -1925,21 +1992,63 @@ class TelegramAdapter(SidecarAdapter):
         state = {"offset": 0}
         backoff = 1.0
         retries_in_a_row = 0
+        timeouts_in_a_row = 0
+        wedged_polls_in_a_row = 0
+        last_success = time.monotonic()
+        last_warned: dict[str, float] = {}
         while True:
+            # A successful poll is the only proof the getUpdates path is
+            # alive. Surface a long run without one, but keep polling:
+            # crashing here would turn a network outage into a restart
+            # loop. The wedged-poll escalation below is the crash path.
+            since_success = time.monotonic() - last_success
+            if since_success > NO_SUCCESS_WARN_SECS:
+                _warn_rate_limited(
+                    last_warned, "no_success",
+                    "telegram poll has not succeeded for a long time; "
+                    "still retrying",
+                    seconds_since_success=int(since_success),
+                    retries_in_a_row=retries_in_a_row)
             try:
-                await loop.run_in_executor(None, self._poll_once, emit, state)
-                if retries_in_a_row > 0:
-                    log.info("telegram poll recovered",
-                             retries=retries_in_a_row,
-                             last_backoff=backoff)
+                await asyncio.wait_for(
+                    loop.run_in_executor(
+                        None, self._poll_once_guarded, emit, state),
+                    timeout=POLL_DEADLINE_SECS,
+                )
+            except asyncio.TimeoutError:
+                # The executor thread is still inside urlopen(); it cannot
+                # be reclaimed, so this loop is now polling nothing. Warn
+                # (rate-limited, with the count) and give the thread a
+                # couple of chances to return before exiting for a restart.
+                wedged_polls_in_a_row += 1
+                _warn_rate_limited(
+                    last_warned, "wedged",
+                    "telegram poll exceeded its deadline; worker thread "
+                    "is likely wedged",
+                    deadline_secs=POLL_DEADLINE_SECS,
+                    wedged_polls_in_a_row=wedged_polls_in_a_row)
+                if wedged_polls_in_a_row >= MAX_WEDGED_POLLS:
+                    raise RuntimeError(
+                        "telegram poll wedged "
+                        f"{wedged_polls_in_a_row} times in a row "
+                        f"(deadline {POLL_DEADLINE_SECS}s); "
+                        "restarting to recover the polling thread")
+                continue
+            except _LongPollExpired:
+                # Normal protocol behaviour: reset backoff and re-enter
+                # immediately. Still surface repeated expiries — a proxy
+                # that cuts long-polls early otherwise looks like silence.
+                timeouts_in_a_row += 1
                 backoff = 1.0
                 retries_in_a_row = 0
+                _warn_rate_limited(
+                    last_warned, "client_timeout",
+                    "telegram long-poll client timeout; re-polling",
+                    retries_in_a_row=timeouts_in_a_row,
+                    timeout_secs=LONGPOLL_CLIENT_SECS)
+                continue
             except asyncio.CancelledError:
                 raise
-            except TimeoutError:
-                backoff = 1.0
-                retries_in_a_row = 0
-                continue
             except Exception as e:  # noqa: BLE001 - transport errors vary
                 retries_in_a_row += 1
                 log.warn("telegram poll error; backing off",
@@ -1948,6 +2057,18 @@ class TelegramAdapter(SidecarAdapter):
                          retries=retries_in_a_row)
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2, MAX_BACKOFF_SECS)
+            else:
+                # A completed poll, even one that returned no updates,
+                # resets every consecutive-failure counter.
+                wedged_polls_in_a_row = 0
+                timeouts_in_a_row = 0
+                last_success = time.monotonic()
+                if retries_in_a_row > 0:
+                    log.info("telegram poll recovered",
+                             retries=retries_in_a_row,
+                             last_backoff=backoff)
+                backoff = 1.0
+                retries_in_a_row = 0
 
     # ---- streaming ---------------------------------------------------
 

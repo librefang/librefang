@@ -988,6 +988,136 @@ async def test_produce_treats_longpoll_timeout_as_normal(monkeypatch):
         f"sleeps={sleep_calls}")
 
 
+# ---- produce() deadlines and offset integrity -----------------------
+
+
+@pytest.mark.asyncio
+async def test_produce_raises_when_poll_blocks_past_deadline(monkeypatch):
+    """A worker thread stuck in urlopen()/HTTPError.read() cannot be
+    reclaimed, and the awaiting coroutine used to never resume — the
+    sidecar stayed alive and deaf forever. The per-poll deadline must
+    fire, count the wedge, and after MAX_WEDGED_POLLS raise so the
+    supervisor can restart the sidecar.
+    """
+    import asyncio
+    import threading
+
+    a = _adapter()
+    release = threading.Event()
+    started = threading.Event()
+
+    def blocking_poll(self, emit, state):
+        started.set()
+        release.wait(30)
+
+    monkeypatch.setattr(tg.TelegramAdapter, "_poll_once", blocking_poll)
+    monkeypatch.setattr(tg, "POLL_DEADLINE_SECS", 0.05)
+    monkeypatch.setattr(tg, "MAX_WEDGED_POLLS", 3)
+    monkeypatch.setattr(tg.log, "warn", lambda *_a, **_kw: None)
+    monkeypatch.setattr(tg.log, "info", lambda *_a, **_kw: None)
+
+    started_at = time.monotonic()
+    try:
+        # The outer wait_for only bounds a regression: without the
+        # deadline inside produce() this test would hang instead.
+        with pytest.raises(RuntimeError, match="wedged 3 times"):
+            await asyncio.wait_for(a.produce(lambda _ev: None), timeout=2.0)
+    finally:
+        # Executor threads are non-daemon: let them return before the
+        # event loop is torn down.
+        release.set()
+
+    assert started.is_set(), "_poll_once was never called"
+    assert time.monotonic() - started_at < 3 * 0.05 + 1.0, (
+        "produce() must escalate after about MAX_WEDGED_POLLS deadlines")
+
+
+@pytest.mark.asyncio
+async def test_wedged_poll_counter_resets_after_a_successful_poll(monkeypatch):
+    """Two wedged polls followed by a success must not escalate: the
+    counter is consecutive, so a transport that recovered and later
+    stalls once more has to earn a fresh MAX_WEDGED_POLLS budget."""
+    import asyncio
+    import threading
+
+    real_sleep = asyncio.sleep
+    a = _adapter()
+    release = threading.Event()
+    calls = {"n": 0}
+
+    def block_first_two(self, emit, state):
+        calls["n"] += 1
+        if calls["n"] <= 2:
+            release.wait(10)
+
+    monkeypatch.setattr(tg.TelegramAdapter, "_poll_once", block_first_two)
+    monkeypatch.setattr(tg, "POLL_DEADLINE_SECS", 0.2)
+    monkeypatch.setattr(tg, "MAX_WEDGED_POLLS", 3)
+    monkeypatch.setattr(tg.log, "warn", lambda *_a, **_kw: None)
+    monkeypatch.setattr(tg.log, "info", lambda *_a, **_kw: None)
+
+    task = asyncio.create_task(a.produce(lambda _ev: None))
+    try:
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline and calls["n"] < 4:
+            await real_sleep(0.01)
+        # Polls 1 and 2 wedged, poll 3 succeeded and reset the counter,
+        # poll 4 is in flight. One wedge after the reset must not crash.
+        await real_sleep(tg.POLL_DEADLINE_SECS * 1.5)
+        assert calls["n"] >= 4, f"only saw {calls['n']} polls"
+        assert not task.done(), (
+            "two wedges followed by a success must not escalate; "
+            f"produce() failed with {task.exception()!r}")
+    finally:
+        release.set()
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+
+@pytest.mark.asyncio
+async def test_produce_warns_once_on_repeated_socket_timeouts(monkeypatch):
+    """A client-side TimeoutError is the normal long-poll expiry, but a
+    burst of them used to be completely silent. It must produce one
+    rate-limited WARN carrying the consecutive count."""
+    import asyncio
+
+    real_sleep = asyncio.sleep
+    a = _adapter()
+    calls = {"n": 0}
+
+    def always_timeout(self, emit, state):
+        calls["n"] += 1
+        raise TimeoutError("timed out")
+
+    warns: list[tuple[str, dict]] = []
+
+    monkeypatch.setattr(tg.TelegramAdapter, "_poll_once", always_timeout)
+    monkeypatch.setattr(tg.log, "warn",
+                        lambda msg, **kw: warns.append((msg, kw)))
+    monkeypatch.setattr(tg.log, "info", lambda *_a, **_kw: None)
+
+    task = asyncio.create_task(a.produce(lambda _ev: None))
+    deadline = time.monotonic() + 5.0
+    while time.monotonic() < deadline and calls["n"] < 5:
+        await real_sleep(0)
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+
+    assert calls["n"] >= 5, f"produce() stopped polling; saw {calls['n']}"
+    timeout_warns = [kw for msg, kw in warns if "client timeout" in msg]
+    assert len(timeout_warns) == 1, (
+        f"repeated timeouts must log once per interval, not per poll; "
+        f"got {warns}")
+    assert timeout_warns[0]["retries_in_a_row"] >= 1, (
+        f"WARN must carry the consecutive count; got {timeout_warns[0]}")
+
+
 # ====================================================================
 # Rich Markdown (sendRichMessage) — parity with the Rust sidecar's
 # format::rich_sanitize + dispatcher::send_text tests.
