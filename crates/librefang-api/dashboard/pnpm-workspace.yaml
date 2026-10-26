@@ -9,8 +9,8 @@ overrides:
   "@chevrotain/cst-dts-gen>lodash-es": "^4.18.1"
   "@chevrotain/gast>lodash-es": "^4.18.1"
   "dagre-d3-es>lodash-es": "^4.18.1"
-  # GHSA-p98j-92pf-mc4p: mermaid 12.0.0 pins dompurify 3.4.13-3.4.15; 3.4.16 is the patched release.
-  "dompurify@>=3.4.13 <3.4.16": ">=3.4.16"
+  # GHSA-cg2g-xh64-v4q7 / GHSA-mrv2-3pqr-j5jr / GHSA-c6gr-qvv4-5v3f: 3.4.16 and below are vulnerable; 3.4.17 is the patched release.
+  dompurify: ">=3.4.17"
   "katex@<0.18.2": ">=0.18.2"
 
 auditConfig:
