@@ -2432,6 +2432,47 @@ fn test_normal_text_untouched_by_reply_guard() {
 }
 
 #[test]
+fn test_deepseek_dsml_markup_is_replaced_with_honest_reply() {
+    // DeepSeek writes its native call syntax when the tool channel is gone
+    // (#8652). Doubled fullwidth bars, as observed in production.
+    let text = "<｜｜DSML｜｜ calls>\n<｜｜DSML｜｜ invoke name=\"memory_recall\">\n<｜｜DSML｜｜ parameter name=\"key\" string=\"true\">deal-42</｜｜DSML｜｜ parameter>\n</｜｜DSML｜｜ invoke>\n</｜｜DSML｜｜ calls>";
+    let out = replace_unrecoverable_tool_call_reply(text);
+    assert!(
+        !out.contains("DSML") && !out.contains('｜'),
+        "the markup must never reach the user, got: {out:?}"
+    );
+    assert!(
+        out.contains("could not be parsed"),
+        "the replacement must be the honest sentence, got: {out:?}"
+    );
+}
+
+#[test]
+fn test_deepseek_dsml_single_bar_and_ascii_variants_are_guarded() {
+    for text in [
+        "<｜DSML｜ invoke name=\"x\"></｜DSML｜ invoke>",
+        "<||DSML|| invoke name=\"x\"></||DSML|| invoke>",
+        "<|DSML| invoke name=\"x\"></|DSML| invoke>",
+    ] {
+        let out = replace_unrecoverable_tool_call_reply(text);
+        assert!(
+            out.contains("could not be parsed") && !out.contains("DSML"),
+            "variant must be replaced, got: {out:?}"
+        );
+    }
+}
+
+#[test]
+fn test_a_partial_dsml_opener_still_counts_as_possible_tool_call() {
+    for prefix in ["<", "<｜", "<｜｜", "<｜｜D", "<|DS", "<||DSML"] {
+        assert!(
+            could_be_tool_call_opener(prefix),
+            "{prefix:?} can still grow into DSML markup"
+        );
+    }
+}
+
+#[test]
 fn test_recover_text_tool_calls_no_pattern() {
     let tools = vec![ToolDefinition {
         name: "web_search".into(),

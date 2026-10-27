@@ -6,9 +6,9 @@ use super::message::{
 use super::model::needs_qualified_model_id;
 use super::retry::{BASE_RETRY_DELAY_MS, MAX_RETRIES};
 use super::text_recovery::{
-    looks_like_hallucinated_action, parse_dash_dash_args, parse_json_tool_call_object,
-    replace_unrecoverable_tool_call_reply, should_attempt_text_recovery,
-    user_message_has_action_intent,
+    could_be_tool_call_opener, looks_like_hallucinated_action, parse_dash_dash_args,
+    parse_json_tool_call_object, replace_unrecoverable_tool_call_reply,
+    should_attempt_text_recovery, user_message_has_action_intent,
 };
 use super::tool_call::{
     failure_type_label, finalize_tool_use_results, record_tool_call_metric,
