@@ -587,15 +587,17 @@ mod tests {
     /// (a) spawning children with `process_group(0)` and
     /// (b) gating the negative-PID kill on `is_process_group_leader`
     /// in `subprocess_sandbox::kill_tree_unix`.
+    ///
+    /// On Windows it must not be `timeout /t`: `start` pipes the child's stdin, and `timeout` exits immediately when stdin is redirected, so the natural-exit reaper could evict the entry before the test inspected it.
     fn long_running_proc() -> (&'static str, Vec<String>) {
         if cfg!(windows) {
             (
-                "cmd",
+                "powershell",
                 vec![
-                    "/C".to_string(),
-                    "timeout".to_string(),
-                    "/t".to_string(),
-                    "30".to_string(),
+                    "-NoProfile".to_string(),
+                    "-NonInteractive".to_string(),
+                    "-Command".to_string(),
+                    "Start-Sleep -Seconds 30".to_string(),
                 ],
             )
         } else {
