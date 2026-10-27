@@ -1,6 +1,8 @@
+// Only the unix-gated deadline test uses it; an unconditional import is an unused-import error on Windows.
+#[cfg(unix)]
+use super::install::output_with_deadline;
 use super::install::{
-    output_with_deadline, parse_plugin_i18n_blocks, pip_in_venv, resolve_python_install,
-    scrub_secret_env,
+    parse_plugin_i18n_blocks, pip_in_venv, resolve_python_install, scrub_secret_env,
 };
 use super::registry::{
     fetch_verified_index_with_cache_path, is_valid_registry_pubkey_b64, registry_cache_sig_path,
