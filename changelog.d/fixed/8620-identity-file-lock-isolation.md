@@ -1,0 +1,3 @@
+A flaky pair of `librefang-api` unit tests could interleave their use of the process-global identity-file locks into a cycle and fail the crate's run with 10s timeouts.
+`identity_md_write_waits_for_the_front_matter_lock` holds the kernel's front-matter lock while waiting for a helper that needs the mutation lock, and the sibling delete test's helper takes the mutation lock before waiting for the front-matter lock, so in parallel the two could chain front-matter → mutation → front-matter.
+Both now take a shared test-only serialization lock, so they can no longer overlap; the production lock order and what each test covers are unchanged. (#8620) (@DaBlitzStein)
