@@ -531,7 +531,7 @@ def test_poll_answer_in_allowed_updates_subscription():
     orig = tg_mod._api_get
     tg_mod._api_get = fake_get
     try:
-        a._poll_once(lambda _ev: None, {"offset": 0})
+        a._poll_once(0)
     finally:
         tg_mod._api_get = orig
     import json as _json
@@ -844,10 +844,11 @@ async def test_produce_recovers_after_startup_network_failure(monkeypatch):
     a = _adapter()
     calls = {"n": 0}
 
-    def fake_poll(self, emit, state):
+    def fake_poll(self, offset):
         calls["n"] += 1
         if calls["n"] == 1:
             raise urllib.error.URLError("Name or service not known")
+        return offset, []
 
     async def fake_sleep(_d):
         await real_sleep(0)
@@ -899,7 +900,7 @@ async def test_produce_backoff_is_capped_at_max(monkeypatch):
 
     a = _adapter()
 
-    def always_fail(self, emit, state):
+    def always_fail(self, offset):
         raise urllib.error.URLError("network unreachable")
 
     delays: list[float] = []
@@ -941,7 +942,7 @@ async def test_produce_backoff_is_capped_at_max(monkeypatch):
 async def test_produce_treats_longpoll_timeout_as_normal(monkeypatch):
     """Long-poll timeouts (LONGPOLL_SERVER_SECS expiring with no
     updates) are normal Telegram protocol behaviour, NOT a transport
-    failure. They must reset backoff, skip the sleep, and re-enter
+    failure. They must reset backoff (no backoff-sized sleep) and re-enter
     the loop immediately — otherwise an idle channel would slowly
     push backoff to MAX over a few minutes."""
     import asyncio
@@ -951,10 +952,11 @@ async def test_produce_treats_longpoll_timeout_as_normal(monkeypatch):
     a = _adapter()
     calls = {"n": 0}
 
-    def alternating(self, emit, state):
+    def alternating(self, offset):
         calls["n"] += 1
         if calls["n"] % 2 == 1:
             raise TimeoutError("long-poll expired with no updates")
+        return offset, []
 
     sleep_calls: list[float] = []
 
@@ -983,9 +985,257 @@ async def test_produce_treats_longpoll_timeout_as_normal(monkeypatch):
     assert calls["n"] >= 4, (
         f"produce() must re-poll after a TimeoutError; only saw "
         f"{calls['n']} polls")
-    assert sleep_calls == [], (
+    # A normal long-poll expiry must not trigger the exponential backoff
+    # (which starts at 1 s). A small scheduling yield is allowed and is not
+    # a backoff.
+    assert all(s <= tg.POLL_YIELD_SECS for s in sleep_calls), (
         "TimeoutError must NOT trigger the backoff sleep; got "
         f"sleeps={sleep_calls}")
+
+
+# ---- produce() deadlines and offset integrity -----------------------
+
+
+@pytest.mark.asyncio
+async def test_produce_raises_when_poll_blocks_past_deadline(monkeypatch):
+    """A worker thread stuck in urlopen()/HTTPError.read() cannot be
+    reclaimed, and the awaiting coroutine used to never resume — the
+    sidecar stayed alive and deaf forever. The per-poll deadline must
+    fire, count the wedge, and after MAX_WEDGED_POLLS raise so the
+    supervisor can restart the sidecar.
+    """
+    import asyncio
+    import threading
+
+    a = _adapter()
+    release = threading.Event()
+    started = threading.Event()
+
+    def blocking_poll(self, offset):
+        started.set()
+        release.wait(30)
+
+    monkeypatch.setattr(tg.TelegramAdapter, "_poll_once", blocking_poll)
+    monkeypatch.setattr(tg, "POLL_DEADLINE_SECS", 0.05)
+    monkeypatch.setattr(tg, "MAX_WEDGED_POLLS", 3)
+    monkeypatch.setattr(tg.log, "warn", lambda *_a, **_kw: None)
+    monkeypatch.setattr(tg.log, "info", lambda *_a, **_kw: None)
+
+    started_at = time.monotonic()
+    try:
+        # The outer wait_for only bounds a regression: without the
+        # deadline inside produce() this test would hang instead.
+        with pytest.raises(RuntimeError, match="wedged 3 times"):
+            await asyncio.wait_for(a.produce(lambda _ev: None), timeout=2.0)
+    finally:
+        # Executor threads are non-daemon: let them return before the
+        # event loop is torn down.
+        release.set()
+
+    assert started.is_set(), "_poll_once was never called"
+    assert time.monotonic() - started_at < 3 * 0.05 + 1.0, (
+        "produce() must escalate after about MAX_WEDGED_POLLS deadlines")
+
+
+@pytest.mark.asyncio
+async def test_wedged_poll_counter_resets_after_a_successful_poll(monkeypatch):
+    """Two wedged polls followed by a success must not escalate: the
+    counter is consecutive, so a transport that recovered and later
+    stalls once more has to earn a fresh MAX_WEDGED_POLLS budget."""
+    import asyncio
+    import threading
+
+    real_sleep = asyncio.sleep
+    a = _adapter()
+    release = threading.Event()
+    calls = {"n": 0}
+
+    def block_first_two(self, offset):
+        calls["n"] += 1
+        if calls["n"] <= 2:
+            release.wait(10)
+        return offset, []
+
+    monkeypatch.setattr(tg.TelegramAdapter, "_poll_once", block_first_two)
+    monkeypatch.setattr(tg, "POLL_DEADLINE_SECS", 0.2)
+    monkeypatch.setattr(tg, "MAX_WEDGED_POLLS", 3)
+    monkeypatch.setattr(tg.log, "warn", lambda *_a, **_kw: None)
+    monkeypatch.setattr(tg.log, "info", lambda *_a, **_kw: None)
+
+    task = asyncio.create_task(a.produce(lambda _ev: None))
+    try:
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline and calls["n"] < 4:
+            await real_sleep(0.01)
+        # Polls 1 and 2 wedged, poll 3 succeeded and reset the counter,
+        # poll 4 is in flight. One wedge after the reset must not crash.
+        await real_sleep(tg.POLL_DEADLINE_SECS * 1.5)
+        assert calls["n"] >= 4, f"only saw {calls['n']} polls"
+        assert not task.done(), (
+            "two wedges followed by a success must not escalate; "
+            f"produce() failed with {task.exception()!r}")
+    finally:
+        release.set()
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+
+@pytest.mark.asyncio
+async def test_stale_poll_batch_is_discarded_and_offset_never_decreases(monkeypatch):
+    """A poll abandoned at its deadline can return long after. Its batch
+    must not be emitted and its offset must not be committed once a newer
+    poll has advanced past it."""
+    import asyncio
+    import threading
+
+    real_sleep = asyncio.sleep
+    a = _adapter()
+    release_a = threading.Event()
+    started_a = threading.Event()
+    lock = threading.Lock()
+    offsets: list = []
+    emitted: list = []
+
+    def scripted(self, offset):
+        with lock:
+            offsets.append(offset)
+            n = len(offsets)
+        if n == 1:
+            started_a.set()
+            release_a.wait(10)
+            return 11, ["stale"]
+        if n == 2:
+            return 6, ["fresh"]
+        release_a.wait(10)
+        return offset, []
+
+    monkeypatch.setattr(tg.TelegramAdapter, "_poll_once", scripted)
+    monkeypatch.setattr(tg, "POLL_DEADLINE_SECS", 0.05)
+    monkeypatch.setattr(tg, "MAX_WEDGED_POLLS", 50)
+    monkeypatch.setattr(tg.log, "warn", lambda *_a, **_kw: None)
+    monkeypatch.setattr(tg.log, "info", lambda *_a, **_kw: None)
+
+    task = asyncio.create_task(a.produce(emitted.append))
+    try:
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline and len(offsets) < 3:
+            await real_sleep(0.01)
+        assert started_a.is_set(), "_poll_once was never called"
+        assert len(offsets) >= 3, f"only saw {len(offsets)} polls"
+        release_a.set()
+        # Give the abandoned poll every chance to publish its batch.
+        await real_sleep(0.1)
+        assert emitted == ["fresh"], f"stale batch was emitted; got {emitted}"
+        assert offsets[2] == 6, (
+            "a superseded poll must not move the offset; the next poll must "
+            f"resume from the committed 6, got {offsets}")
+        assert 11 not in offsets, f"offset moved backwards; polls saw {offsets}"
+    finally:
+        release_a.set()
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+
+def test_wedged_poll_exits_the_process(monkeypatch):
+    """A permanently wedged poll must take the whole process down with
+    status 1, not log a crash and then hang on the parked executor thread.
+
+    Runs a real sidecar in a subprocess: the adapter's poll blocks forever,
+    the deadline constants are shortened so the three-wedge escalation fires
+    in well under a second, and the parent asserts the exit.
+    """
+    import subprocess
+    import sys
+
+    package_root = os.path.join(
+        os.path.dirname(tg.__file__), "..", "..", "..")
+    harness = (
+        "import os, threading\n"
+        "os.environ['TELEGRAM_BOT_TOKEN'] = '1:x'\n"
+        "import librefang.sidecar.adapters.telegram as tg\n"
+        "from librefang.sidecar import run_stdio\n"
+        "tg.POLL_DEADLINE_SECS = 0.05\n"
+        "tg.MAX_WEDGED_POLLS = 3\n"
+        "def blocking_poll(self, offset):\n"
+        "    threading.Event().wait()\n"
+        "tg.TelegramAdapter._poll_once = blocking_poll\n"
+        "run_stdio(tg.TelegramAdapter(), ready_interval=0.01,\n"
+        "          ready_max_attempts=1)\n"
+    )
+    env = dict(os.environ, PYTHONPATH=package_root)
+    started = time.monotonic()
+    # stdin must stay open: an EOF is a clean shutdown, which never reaches
+    # the crash path. subprocess.run would close it for us.
+    proc = subprocess.Popen(
+        [sys.executable, "-c", harness],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        env=env,
+    )
+    try:
+        proc.wait(timeout=15)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
+        raise AssertionError(
+            "the wedged producer did not exit within 15 s; the process hung "
+            "instead of exiting for the supervisor")
+    finally:
+        if proc.stdin:
+            proc.stdin.close()
+    elapsed = time.monotonic() - started
+    stderr = proc.stderr.read()
+    assert proc.returncode == 1, (
+        f"expected exit 1, got {proc.returncode}; stderr={stderr!r}")
+    assert elapsed < 15, f"exit took {elapsed:.1f}s"
+    assert b"producer crashed" in stderr, (
+        f"the crash must be logged before exiting; stderr={stderr!r}")
+
+
+@pytest.mark.asyncio
+async def test_produce_warns_once_on_repeated_socket_timeouts(monkeypatch):
+    """A client-side TimeoutError is the normal long-poll expiry, but a
+    burst of them used to be completely silent. It must produce one
+    rate-limited WARN carrying the consecutive count."""
+    import asyncio
+
+    real_sleep = asyncio.sleep
+    a = _adapter()
+    calls = {"n": 0}
+
+    def always_timeout(self, offset):
+        calls["n"] += 1
+        raise TimeoutError("timed out")
+
+    warns: list[tuple[str, dict]] = []
+
+    monkeypatch.setattr(tg.TelegramAdapter, "_poll_once", always_timeout)
+    monkeypatch.setattr(tg.log, "warn",
+                        lambda msg, **kw: warns.append((msg, kw)))
+    monkeypatch.setattr(tg.log, "info", lambda *_a, **_kw: None)
+
+    task = asyncio.create_task(a.produce(lambda _ev: None))
+    deadline = time.monotonic() + 5.0
+    while time.monotonic() < deadline and calls["n"] < 5:
+        await real_sleep(0)
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+
+    assert calls["n"] >= 5, f"produce() stopped polling; saw {calls['n']}"
+    timeout_warns = [kw for msg, kw in warns if "client timeout" in msg]
+    assert len(timeout_warns) == 1, (
+        f"repeated timeouts must log once per interval, not per poll; "
+        f"got {warns}")
+    assert timeout_warns[0]["retries_in_a_row"] >= 1, (
+        f"WARN must carry the consecutive count; got {timeout_warns[0]}")
 
 
 # ====================================================================

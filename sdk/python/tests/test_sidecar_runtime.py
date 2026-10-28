@@ -355,19 +355,23 @@ async def test_stdio_reader_thread_failure_reaches_async_reader(monkeypatch):
     assert adapter.shutdown_called
 
 
-def test_run_stdio_translates_producer_crash_to_nonzero_exit(monkeypatch):
+def test_run_stdio_exits_nonzero_after_producer_crash(monkeypatch):
     # run_stdio is the process entry point: a ProducerCrashed from run()
-    # must become SystemExit(1) so the daemon supervisor sees a nonzero
-    # exit, distinguishable from a clean shutdown/EOF. Exercised
-    # synchronously because run_stdio owns its own event loop.
+    # must exit the process with status 1 so the daemon supervisor sees a
+    # nonzero exit, distinguishable from a clean shutdown/EOF. os._exit is
+    # patched out here because it would take the test process with it;
+    # the subprocess-level proof lives in
+    # test_telegram_adapter.py::test_wedged_poll_exits_the_process.
     from librefang.sidecar import run_stdio
 
     async def crash(*_args, **_kwargs):
         raise ProducerCrashed("producer failed")
 
+    exits: list[int] = []
     monkeypatch.setattr("librefang.sidecar.runtime._run_stdio", crash)
+    monkeypatch.setattr("librefang.sidecar.runtime.os._exit",
+                        lambda code: exits.append(code))
 
-    with pytest.raises(SystemExit) as error:
-        run_stdio(RecordingAdapter(), ready_interval=0.01, ready_max_attempts=1)
+    run_stdio(RecordingAdapter(), ready_interval=0.01, ready_max_attempts=1)
 
-    assert error.value.code == 1
+    assert exits == [1]

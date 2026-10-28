@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import sys
 import threading
 import traceback
@@ -71,7 +72,7 @@ class ProducerCrashed(Exception):
     with an unhandled error.
 
     Cleanup (``on_shutdown``) has already run by the time this is raised.
-    :func:`run_stdio` converts it to ``SystemExit(1)`` so the daemon
+    :func:`run_stdio` exits the process with status 1 so the daemon
     supervisor sees a nonzero exit (distinguishable from a clean
     ``shutdown``/EOF). Library callers using :func:`run` directly can
     catch this to inspect ``__cause__`` (the original transport error)
@@ -82,9 +83,9 @@ class ReaderCrashed(Exception):
     """Raised from :func:`run` when the command reader exits with an
     unexpected error.
 
-    Cleanup has already run. :func:`run_stdio` converts this to a nonzero
-    exit so the daemon supervisor can restart the sidecar instead of leaving
-    a process alive with no command consumer."""
+    Cleanup has already run. :func:`run_stdio` exits with status 1 so the
+    daemon supervisor can restart the sidecar instead of leaving a process
+    alive with no command consumer."""
 
 
 class SidecarAdapter:
@@ -360,16 +361,38 @@ def run_stdio(adapter: SidecarAdapter, *, ready_interval: float = 2.0,
     from your ``__main__`` block instead; this fallback exists only to
     defend direct ``run_stdio(instance)`` callers.
 
-    A fatal reader or producer error from ``run`` becomes ``SystemExit(1)`` so
-    the daemon supervisor (and any non-supervised runner) sees a nonzero
-    exit code, distinguishable from a clean ``shutdown``/EOF."""
+    A fatal reader or producer error from ``run`` exits the process with
+    status 1 so the daemon supervisor (and any non-supervised runner) sees a
+    nonzero exit code, distinguishable from a clean ``shutdown``/EOF. The
+    exit happens before ``asyncio.run`` unwinds — see
+    :func:`_run_stdio_or_exit`."""
     if "--describe" in sys.argv[1:]:
         raise SystemExit(describe_main(adapter))
+    asyncio.run(_run_stdio_or_exit(adapter, ready_interval=ready_interval,
+                                   ready_max_attempts=ready_max_attempts))
+
+
+async def _run_stdio_or_exit(adapter: SidecarAdapter, *,
+                             ready_interval: float,
+                             ready_max_attempts: int) -> None:
+    """Run the stdio loop, exiting the process on a fatal reader or
+    producer crash.
+
+    A poll parked past its deadline owns an executor thread that never
+    returns. ``asyncio.run`` joins the default executor while unwinding
+    (300 s on 3.12+, unbounded on 3.10/3.11), and
+    ``concurrent.futures.thread`` joins every worker at interpreter exit, so
+    raising out of the loop would log the crash and hang instead of exiting.
+    ``os._exit`` is the only exit that does not wait on that thread; flushing
+    first keeps the "producer crashed" log line on stderr.
+    """
     try:
-        asyncio.run(_run_stdio(adapter, ready_interval=ready_interval,
-                               ready_max_attempts=ready_max_attempts))
+        await _run_stdio(adapter, ready_interval=ready_interval,
+                         ready_max_attempts=ready_max_attempts)
     except (ProducerCrashed, ReaderCrashed):
-        raise SystemExit(1)
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os._exit(1)
 
 
 def run_stdio_main(adapter_class):
