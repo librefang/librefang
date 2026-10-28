@@ -763,14 +763,14 @@ describe("AgentManifestForm — compact controls", () => {
     state.mcp_servers = ["filesystem"];
     render(<Harness initialState={state} />);
 
-    const removeButton = screen.getByRole("button", { name: "remove filesystem" });
+    const removeButton = screen.getByRole("button", { name: "common.remove filesystem" });
     const input = removeButton.parentElement?.parentElement?.querySelector("input");
     expect(input).toBeInstanceOf(HTMLInputElement);
     if (!(input instanceof HTMLInputElement)) return;
 
     await user.type(input, "filesystem{Enter}");
     expect(input).toHaveValue("");
-    expect(screen.getAllByRole("button", { name: "remove filesystem" })).toHaveLength(1);
+    expect(screen.getAllByRole("button", { name: "common.remove filesystem" })).toHaveLength(1);
   });
 
   it("gives the stream-thinking checkbox an accessible name", async () => {

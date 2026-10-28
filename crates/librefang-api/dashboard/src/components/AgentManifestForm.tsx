@@ -12,7 +12,7 @@ import {
   type RefObject,
 } from "react";
 import { useTranslation } from "react-i18next";
-import { AlertTriangle, ChevronDown, Plus, RotateCcw, Trash2, X } from "lucide-react";
+import { AlertTriangle, ChevronDown, Plus, RotateCcw, Trash2 } from "lucide-react";
 import {
   AUTO_ROUTE_STRATEGIES,
   CAPABILITY_ROUTING_KEYS,
@@ -39,6 +39,7 @@ import {
   routingTierModel,
   type RoutingEngine,
 } from "../lib/routingEngine";
+import { ListField } from "./ui/ListField";
 
 /// The tri-state caption for a memory capability field (#7749 review):
 /// `null` is the omitted key (unrestricted), `[]` is the declared-empty deny.
@@ -780,7 +781,7 @@ export function AgentManifestForm({
             </Field>
           </div>
             <Field label={t("agents.form.tags")}>
-            <TagInput
+            <ListField
               value={value.tags}
               onChange={(next) => update({ tags: next })}
               placeholder={t("agents.form.tags_placeholder")}
@@ -1122,7 +1123,7 @@ export function AgentManifestForm({
                 allowFreeText
               />
             ) : (
-              <TagInput
+              <ListField
                 value={value.model.router_allowed_profiles}
                 onChange={(next) => updateModel({ router_allowed_profiles: next })}
                 placeholder={t("agents.form.router_allowed_profiles_placeholder")}
@@ -1288,14 +1289,14 @@ export function AgentManifestForm({
           {t("agents.form.capabilities_layers_note")}
         </p>
         <Field label={t("agents.form.network_hosts")} hint={t("agents.form.network_hosts_hint")}>
-          <TagInput
+          <ListField
             value={value.capabilities.network}
             onChange={(next) => updateCapabilities({ network: next })}
             placeholder={t("agents.form.network_hosts_placeholder")}
           />
         </Field>
         <Field label={t("agents.form.shell_commands")} hint={t("agents.form.shell_commands_hint")}>
-          <TagInput
+          <ListField
             value={value.capabilities.shell}
             onChange={(next) => updateCapabilities({ shell: next })}
             placeholder={t("agents.form.shell_commands_placeholder")}
@@ -1322,7 +1323,7 @@ export function AgentManifestForm({
               allowFreeText
             />
           ) : (
-            <TagInput
+            <ListField
               value={value.capabilities.tools}
               onChange={(next) => updateCapabilities({ tools: next })}
               placeholder={t("agents.form.cap_tools_placeholder")}
@@ -1337,7 +1338,7 @@ export function AgentManifestForm({
               typing here; leaving it alone keeps `null` and the key stays off
               disk.
             */}
-            <TagInput
+            <ListField
               value={value.capabilities.memory_read ?? []}
               onChange={(next) => updateCapabilities({ memory_read: next })}
               placeholder={t("agents.form.memory_glob_placeholder")}
@@ -1348,7 +1349,7 @@ export function AgentManifestForm({
             />
           </Field>
           <Field label={t("agents.form.memory_write")}>
-            <TagInput
+            <ListField
               value={value.capabilities.memory_write ?? []}
               onChange={(next) => updateCapabilities({ memory_write: next })}
               placeholder={t("agents.form.memory_glob_placeholder")}
@@ -1359,14 +1360,14 @@ export function AgentManifestForm({
             />
           </Field>
           <Field label={t("agents.form.agent_message")}>
-            <TagInput
+            <ListField
               value={value.capabilities.agent_message}
               onChange={(next) => updateCapabilities({ agent_message: next })}
               placeholder={t("agents.form.agent_message_placeholder")}
             />
           </Field>
           <Field label={t("agents.form.ofp_connect")}>
-            <TagInput
+            <ListField
               value={value.capabilities.ofp_connect}
               onChange={(next) => updateCapabilities({ ofp_connect: next })}
               placeholder={t("agents.form.ofp_connect_placeholder")}
@@ -1576,7 +1577,7 @@ export function AgentManifestForm({
               allowFreeText
             />
           ) : (
-            <TagInput
+            <ListField
               value={value.skills}
               onChange={(next) => update({ skills: next })}
               placeholder={t("agents.form.skills_placeholder")}
@@ -1626,7 +1627,7 @@ export function AgentManifestForm({
               allowFreeText
             />
           ) : (
-            <TagInput
+            <ListField
               value={value.mcp_servers}
               onChange={(next) => update({ mcp_servers: next })}
               placeholder={t("agents.form.mcp_servers_placeholder")}
@@ -1697,10 +1698,11 @@ export function AgentManifestForm({
         )}
         {value.schedule.mode === "proactive" && (
           <Field label={t("agents.form.conditions")}>
-            <TagInput
+            <ListField
               value={value.schedule.conditions}
               onChange={(next) => update({ schedule: { mode: "proactive", conditions: next } })}
               placeholder={t("agents.form.conditions_placeholder")}
+              splitOnComma={false}
             />
           </Field>
         )}
@@ -2132,9 +2134,10 @@ export function AgentManifestForm({
                   </select>
                 </Field></div>
               <div className="col-span-2"><Field label={t("agents.form.channel_overrides_group_trigger_patterns")}>
-                  <TagInput value={value.channel_overrides.group_trigger_patterns}
+                  <ListField value={value.channel_overrides.group_trigger_patterns}
                     onChange={(next) => updateChannelOverrides({ group_trigger_patterns: next })}
-                    placeholder={t("agents.form.inherit_default")} />
+                    placeholder={t("agents.form.inherit_default")}
+                    splitOnComma={false} />
                 </Field></div>
               <div><Toggle label={t("agents.form.channel_overrides_reply_precheck")} checked={value.channel_overrides.reply_precheck}
                   onChange={(checked) => updateChannelOverrides({ reply_precheck: checked })} /></div>
@@ -2220,12 +2223,12 @@ export function AgentManifestForm({
               <div><Toggle label={t("agents.form.channel_overrides_disable_commands")} checked={value.channel_overrides.disable_commands}
                   onChange={(checked) => updateChannelOverrides({ disable_commands: checked })} /></div>
               <div className="col-span-2"><Field label={t("agents.form.channel_overrides_allowed_commands")}>
-                  <TagInput value={value.channel_overrides.allowed_commands}
+                  <ListField value={value.channel_overrides.allowed_commands}
                     onChange={(next) => updateChannelOverrides({ allowed_commands: next })}
                     placeholder={t("agents.form.inherit_default")} />
                 </Field></div>
               <div className="col-span-2"><Field label={t("agents.form.channel_overrides_blocked_commands")}>
-                  <TagInput value={value.channel_overrides.blocked_commands}
+                  <ListField value={value.channel_overrides.blocked_commands}
                     onChange={(next) => updateChannelOverrides({ blocked_commands: next })}
                     placeholder={t("agents.form.inherit_default")} />
                 </Field></div>
@@ -2581,7 +2584,7 @@ export function AgentManifestForm({
             label={t("agents.form.context_engine_plugin_stack")}
             hint={t("agents.form.context_engine_plugin_stack_hint")}
           >
-            <TagInput
+            <ListField
               value={ce.plugin_stack}
               onChange={(next) => updateContextEngine({ plugin_stack: next })}
               placeholder={t("agents.form.context_engine_plugin_stack_placeholder")}
@@ -2734,12 +2737,13 @@ export function AgentManifestForm({
                   label={t("agents.form.context_engine_sidecar_args")}
                   hint={t("agents.form.context_engine_sidecar_args_hint")}
                 >
-                  <TagInput
+                  <ListField
                     value={ce.sidecar.args}
                     onChange={(next) =>
                       updateContextEngine({ sidecar: { ...ce.sidecar, args: next } })
                     }
                     placeholder={t("agents.form.context_engine_sidecar_args_placeholder")}
+                    splitOnComma={false}
                   />
                 </Field>
               </div>
@@ -2953,7 +2957,7 @@ export function AgentManifestForm({
                 label={t("agents.form.context_engine_only_for_agents")}
                 hint={t("agents.form.context_engine_only_for_agents_hint")}
               >
-                <TagInput
+                <ListField
                   value={hook.only_for_agent_ids}
                   onChange={(next) => updateHook({ only_for_agent_ids: next })}
                   placeholder={t("agents.form.context_engine_only_for_agents_placeholder")}
@@ -2963,7 +2967,7 @@ export function AgentManifestForm({
                 label={t("agents.form.context_engine_allowed_secrets")}
                 hint={t("agents.form.context_engine_allowed_secrets_hint")}
               >
-                <TagInput
+                <ListField
                   value={hook.allowed_secrets}
                   onChange={(next) => updateHook({ allowed_secrets: next })}
                   placeholder={t("agents.form.context_engine_allowed_secrets_placeholder")}
@@ -3643,7 +3647,7 @@ export function AgentManifestForm({
             />
           </Field>
           <Field label={t("agents.form.allowed_plugins")}>
-            <TagInput
+            <ListField
               value={value.allowed_plugins}
               onChange={(next) => update({ allowed_plugins: next })}
               placeholder={t("agents.form.allowed_plugins_placeholder")}
@@ -3792,7 +3796,7 @@ export function AgentManifestForm({
                 label={t("agents.form.exec_policy_safe_bins")}
                 hint={t("agents.form.exec_policy_safe_bins_hint")}
               >
-                <TagInput
+                <ListField
                   value={value.exec_policy.safe_bins ?? []}
                   onChange={(next) => updateExecPolicy({ safe_bins: next })}
                   placeholder={t("agents.form.exec_policy_safe_bins_placeholder")}
@@ -3816,7 +3820,7 @@ export function AgentManifestForm({
               label={t("agents.form.exec_policy_allowed_commands")}
               hint={t("agents.form.exec_policy_allowed_commands_hint")}
             >
-              <TagInput
+              <ListField
                 value={value.exec_policy.allowed_commands}
                 onChange={(next) => updateExecPolicy({ allowed_commands: next })}
                 placeholder={t("agents.form.exec_policy_allowed_commands_placeholder")}
@@ -3826,7 +3830,7 @@ export function AgentManifestForm({
               label={t("agents.form.exec_policy_allowed_env_vars")}
               hint={t("agents.form.exec_policy_allowed_env_vars_hint")}
             >
-              <TagInput
+              <ListField
                 value={value.exec_policy.allowed_env_vars}
                 onChange={(next) => updateExecPolicy({ allowed_env_vars: next })}
                 placeholder={t("agents.form.exec_policy_allowed_env_vars_placeholder")}
@@ -4674,66 +4678,6 @@ function PreservedValues({
         </p>
       ))}
       <p className="text-[10px] text-text-dim/70">{hint}</p>
-    </div>
-  );
-}
-
-function TagInput({
-  value,
-  onChange,
-  placeholder,
-}: {
-  value: string[];
-  onChange: (next: string[]) => void;
-  placeholder?: string;
-}) {
-  const [inputValue, setInputValue] = useState("");
-
-  const commit = (raw: string): void => {
-    const cleaned = raw.trim();
-    if (!cleaned) return;
-    setInputValue("");
-    if (value.includes(cleaned)) return;
-    onChange([...value, cleaned]);
-  };
-  return (
-    <div className="flex flex-wrap items-center gap-1.5 rounded-lg border border-border-subtle bg-main px-2 py-1.5 focus-within:border-brand">
-      {value.map((tag) => (
-        <span
-          key={tag}
-          className="inline-flex items-center gap-1 rounded-md bg-surface px-1.5 py-0.5 text-[11px] font-medium text-text"
-        >
-          {tag}
-          <button
-            type="button"
-            onClick={() => onChange(value.filter((t) => t !== tag))}
-            className="text-text-dim hover:text-error"
-            aria-label={`remove ${tag}`}
-          >
-            <X className="h-3 w-3" />
-          </button>
-        </span>
-      ))}
-      <input
-        type="text"
-        value={inputValue}
-        onChange={(e) => setInputValue(e.target.value)}
-        placeholder={value.length === 0 ? placeholder : undefined}
-        onKeyDown={(e) => {
-          if (e.key === "Enter" || e.key === ",") {
-            e.preventDefault();
-            commit(inputValue);
-          } else if (e.key === "Backspace" && !inputValue && value.length > 0) {
-            onChange(value.slice(0, -1));
-          }
-        }}
-        onBlur={() => {
-          if (inputValue) {
-            commit(inputValue);
-          }
-        }}
-        className="flex-1 min-w-[100px] bg-transparent text-xs outline-none placeholder:text-text-dim/40"
-      />
     </div>
   );
 }

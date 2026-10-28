@@ -15,6 +15,7 @@ import { DrawerPanel } from "./ui/DrawerPanel";
 import { Button } from "./ui/Button";
 import { Badge } from "./ui/Badge";
 import { Input } from "./ui/Input";
+import { ListField } from "./ui/ListField";
 import { Select } from "./ui/Select";
 import { useUIStore } from "../lib/store";
 
@@ -304,18 +305,18 @@ function ToolPolicyRow({
   const { t } = useTranslation();
   const [localName, setLocalName] = useState(name);
   useEffect(() => { setLocalName(name); }, [name]);
-  const [ruleSetsText, setRuleSetsText] = useState((policy.rule_sets ?? []).join(", "));
+  // Read straight from the draft, never a second copy: `onChangeRuleSets`
+  // already lands in the parent's `tools` state, and a mirrored `useState`
+  // drifts on the first refresh that bypasses this editor.
+  const ruleSets = useMemo(() => policy.rule_sets ?? [], [policy.rule_sets]);
   // Names typed by the operator that don't match any registered
   // `[[taint_rules]]` set — flagged inline so typos don't sit silent
   // (the scanner treats unknown names as no-ops; see one-shot WARN in
   // librefang_runtime_mcp::warn_unknown_rule_set_once).
   const unknownRuleSetNames = useMemo(() => {
     if (knownRuleSetNames.size === 0) return [] as string[];
-    return ruleSetsText
-      .split(",")
-      .map((s) => s.trim())
-      .filter((s) => s.length > 0 && !knownRuleSetNames.has(s));
-  }, [ruleSetsText, knownRuleSetNames]);
+    return ruleSets.filter((s) => s.length > 0 && !knownRuleSetNames.has(s));
+  }, [ruleSets, knownRuleSetNames]);
   const paths = useMemo(() => policy.paths ?? {}, [policy.paths]);
 
   const addPath = useCallback(() => {
@@ -387,26 +388,20 @@ function ToolPolicyRow({
       <div className="space-y-1">
         <div className="flex items-center gap-2 text-xs">
           <span className="text-text-dim font-bold w-20">rule_sets</span>
-          <Input
-            value={ruleSetsText}
-            onChange={(e) => setRuleSetsText(e.target.value)}
-            onBlur={() =>
-              onChangeRuleSets(
-                ruleSetsText
-                  .split(",")
-                  .map((s) => s.trim())
-                  .filter(Boolean),
-              )
-            }
-            placeholder={t(
-              "mcp.taint_rule_sets_placeholder",
-              "comma-separated names from [[taint_rules]]",
-            )}
-            className="text-xs font-mono"
-            disabled={policy.default === "skip"}
-          />
+          <div className="flex-1">
+            <ListField
+              value={ruleSets}
+              ariaLabel="rule_sets"
+              onChange={onChangeRuleSets}
+              placeholder={t(
+                "mcp.taint_rule_sets_placeholder",
+                "comma-separated names from [[taint_rules]]",
+              )}
+              disabled={policy.default === "skip"}
+            />
+          </div>
         </div>
-        {ruleSetsText.trim().length > 0 && (
+        {ruleSets.length > 0 && (
           <p className="text-[11px] italic text-text-dim pl-22">
             {t(
               "mcp.taint_rule_sets_overlap_hint",
@@ -414,7 +409,7 @@ function ToolPolicyRow({
             )}
           </p>
         )}
-        {policy.default === "skip" && (policy.rule_sets ?? []).length > 0 ? (
+        {policy.default === "skip" && ruleSets.length > 0 ? (
           <p className="text-[11px] italic text-warning pl-22">
             {t(
               "mcp.taint_skip_rule_sets_hint",
