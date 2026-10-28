@@ -111,15 +111,8 @@ async fn resolve_manifest(
     // Resolve template name → manifest text, or take a client-supplied one.
     let mut used_template: Option<String> = None;
     let manifest_toml: String = if req.manifest_toml.trim().is_empty() {
-        // A signature covers the exact bytes the client signed. Main accepted
-        // `signed_manifest` + `template` and verified the signature against
-        // the resolved template's content — a verified flow, not a skipped
-        // one: it only passed for a caller whose signed bytes equalled the
-        // template on disk. This door rejects the pair anyway, so a
-        // signature-pinned spawn can only pin content the client supplied,
-        // not whatever the template store happens to hold at verification
-        // time. Behaviour change against main, recorded in
-        // `changelog.d/added/8360-save-as-agent-type.md`.
+        // A signature covers exactly the bytes the client signed, so `signed_manifest` + `template` is rejected: a template supplies the manifest server-side, and no client-supplied bytes are left to verify against.
+        // A signature-pinned spawn therefore pins only content the client supplied, never whatever the template store holds at verification time.
         if req.signed_manifest.is_some() {
             let t = ErrorTranslator::new(lang);
             return Err(ManifestError {
@@ -195,10 +188,7 @@ async fn resolve_manifest(
         req.manifest_toml.clone()
     };
 
-    // Size guard — bounds the inline `manifest_toml` and the content of a
-    // resolved template file alike. `MAX_MANIFEST_SIZE` no longer covers only
-    // the client-supplied body: a template is still read into memory here, so
-    // the same cap applies before either is parsed or verified.
+    // Size guard — bounds the inline `manifest_toml` and the content of a resolved template file alike: a template is read into memory here, so the same cap applies before either is parsed or verified.
     if manifest_toml.len() > MAX_MANIFEST_SIZE {
         let t = ErrorTranslator::new(lang);
         return Err(ManifestError {
