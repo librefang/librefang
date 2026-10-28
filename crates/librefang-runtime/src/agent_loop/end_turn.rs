@@ -240,6 +240,86 @@ pub(super) fn finalize_end_turn_text(
     }
 }
 
+/// Persist this turn's `[Past exchange]` row, or skip it for a reason worth a log line.
+///
+/// Both arms that end a turn by delivering an answer go through here — the `EndTurn` arm and the iteration-cap exit — so the gates below exist once (#8625).
+/// The cap exit was the arm that did not call it at all: a turn that ran out of iterations delivered its partial answer and saved the session, but left no episodic row, so recall later had no record that the exchange happened and the agent treated "we tried this and it ran out of budget" as "we never tried".
+///
+/// The two remaining exits are out on purpose rather than for want of a call site.
+/// `MaxTokens` returns a truncated answer with no notice of its own, so recording it faithfully would first need a decision on how to mark it — which is also a question about telling the user, not about memory.
+/// `ContentFiltered` returns an error whose partial text is exactly what the provider's safety layer refused to deliver.
+///
+/// `response` is what the turn actually produced *and delivered*, so on a capped turn it carries the cut-off notice the user saw.
+/// That notice is not enough to mark the row: it sits at the end of the response half, and `budget_interaction_halves` cuts the *tail* of an over-long half, so the marker would be the first thing lost exactly when the answer is long enough that "was this finished?" is the open question.
+/// `cut_off_at` therefore drives a marker of the row's own, placed in the header above the halves, where no budget applies — and that placement has to hold on the recall side too, because `prompt_builder::truncate_memory_bullet` cuts a rendered bullet to `MEMORY_BULLET_MAX_CHARS` from the same end.
+/// A marker after the halves would survive the write and be eaten on the way into the prompt.
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn remember_turn_exchange(
+    manifest: &AgentManifest,
+    agent_id: librefang_types::agent::AgentId,
+    memory: &MemorySubstrate,
+    embedding_driver: Option<&(dyn EmbeddingDriver + Send + Sync)>,
+    user_message: &str,
+    response: &str,
+    streaming: bool,
+    sender_user_id: Option<&str>,
+    sender_chat_scope: Option<&str>,
+    session_scope: Option<&str>,
+    cut_off_at: Option<u32>,
+) {
+    // `capabilities.memory_write` gates this row the way it gates `auto_memorize` (#7605): it is an automatic write into the agent's own store, and an operator who declared a list covering nothing is asking for the store to stop growing.
+    // Gating only the extraction half left the larger half — one verbatim exchange per turn — writing regardless.
+    if !manifest.capabilities.allows_own_memory_write() {
+        debug!(
+            agent = %manifest.name,
+            "capabilities.memory_write grants no scope over this agent's own memory; skipping the per-turn episodic write"
+        );
+        return;
+    }
+
+    // Past-exchange shape (not `User asked:/I responded:`) and stripped of channel envelopes so recall does not feed prompt-scaffolding-looking bullets back into the LLM context (see sanitize_for_memory / is_cascade_leak doc-comments).
+    // Skip persistence entirely when either side is empty after sanitise — a half-empty memory row would itself trip the leak guard on recall.
+    let (Some(user_clean), Some(resp_clean)) = (
+        sanitize_for_memory(user_message),
+        sanitize_for_memory(response),
+    ) else {
+        return;
+    };
+
+    // Bound the row before it is composed, so the cap applies to what gets embedded as well as to what gets stored (#7911).
+    // A channel adapter that renders an attachment into the user message used to land here verbatim — the issue reports a single 201 765-character row that had been retrieved 63 times.
+    let (user_clean, resp_clean) =
+        budget_interaction_halves(&user_clean, &resp_clean, memory.max_episodic_chars());
+    // The header carries the unfinished marker when there is one, because the halves are the part a budget can cut and this line is not.
+    let header = match cut_off_at {
+        Some(max) => format!(
+            "[Past exchange]\n[Unfinished — this turn reached the iteration limit ({max}) before finishing.]"
+        ),
+        None => "[Past exchange]".to_string(),
+    };
+    let interaction_text = format!("{header}\nThem: {user_clean}\nYou: {resp_clean}");
+
+    // `sender_user_id` (SenderContext.user_id) is the platform user identity — e.g. a Telegram user ID.
+    // This differs from `sessions.peer_id` in the session-store layer (PR #5286), which uses `chat_id` for session-scope isolation.
+    // The divergence is intentional: memory recall filters on `(agent_id, peer_id)` with `peer_id = sender_user_id` so that each user's episodic memories are isolated within a shared agent (per-user recall).
+    // Session isolation (chat-scoped) is a separate concern and uses chat_id.
+    // If both were collapsed to the same value a group-chat user's memory recall would be scoped to the chat rather than to the individual.
+    //
+    // The same two scopes `auto_memorize` is handed (#5227, #7605).
+    // They are what stops this row — the whole exchange, verbatim — from surfacing in another chat or another visitor's session, and both recall filters read an unstamped row as visible from everywhere.
+    remember_interaction_best_effort(
+        memory,
+        embedding_driver,
+        agent_id,
+        &interaction_text,
+        streaming,
+        sender_user_id,
+        sender_chat_scope,
+        session_scope,
+    )
+    .await;
+}
+
 pub(super) async fn finalize_successful_end_turn(
     ctx: FinalizeEndTurnContext<'_>,
     mut end_turn: FinalizeEndTurnResultData,
@@ -287,59 +367,20 @@ pub(super) async fn finalize_successful_end_turn(
     // already recalled memories before this point), but writes are
     // silently dropped so the private conversation leaves no trace.
     if !ctx.opts.is_fork && !ctx.opts.incognito {
-        // Past-exchange shape (not `User asked:/I responded:`) and stripped of
-        // channel envelopes so recall does not feed prompt-scaffolding-looking
-        // bullets back into the LLM context (see sanitize_for_memory /
-        // is_cascade_leak doc-comments). Skip persistence entirely when
-        // either side is empty after sanitise — a half-empty memory row
-        // would itself trip the leak guard on recall.
-        //
-        // `capabilities.memory_write` gates this row the way it gates `auto_memorize` further down (#7605): it is an automatic write into the agent's own store, and an operator who declared a list covering nothing is asking for the store to stop growing.
-        // Gating only the extraction half left the larger half — one verbatim exchange per turn — writing regardless.
-        if !ctx.manifest.capabilities.allows_own_memory_write() {
-            debug!(
-                agent = %ctx.manifest.name,
-                "capabilities.memory_write grants no scope over this agent's own memory; skipping the per-turn episodic write"
-            );
-        } else if let (Some(user_clean), Some(resp_clean)) = (
-            sanitize_for_memory(ctx.user_message),
-            sanitize_for_memory(&end_turn.final_response),
-        ) {
-            // Bound the row before it is composed, so the cap applies to what gets embedded as well as to what gets stored (#7911).
-            // A channel adapter that renders an attachment into the user message used to land here verbatim — the issue reports a single 201 765-character row that had been retrieved 63 times.
-            let (user_clean, resp_clean) = budget_interaction_halves(
-                &user_clean,
-                &resp_clean,
-                ctx.memory.max_episodic_chars(),
-            );
-            let interaction_text =
-                format!("[Past exchange]\nThem: {user_clean}\nYou: {resp_clean}");
-            // `sender_user_id` (SenderContext.user_id) is the platform user
-            // identity — e.g. a Telegram user ID.  This differs from
-            // `sessions.peer_id` in the session-store layer (PR #5286),
-            // which uses `chat_id` for session-scope isolation.  The
-            // divergence is intentional: memory recall filters on
-            // `(agent_id, peer_id)` with `peer_id = sender_user_id` so that
-            // each user's episodic memories are isolated within a shared
-            // agent (per-user recall).  Session isolation (chat-scoped) is a
-            // separate concern and uses chat_id.  If both were collapsed to
-            // the same value a group-chat user's memory recall would be
-            // scoped to the chat rather than to the individual.
-            //
-            // The same two scopes `auto_memorize` is handed below (#5227, #7605).
-            // They are what stops this row — the whole exchange, verbatim — from surfacing in another chat or another visitor's session, and both recall filters read an unstamped row as visible from everywhere.
-            remember_interaction_best_effort(
-                ctx.memory,
-                ctx.embedding_driver,
-                ctx.session.agent_id,
-                &interaction_text,
-                ctx.streaming,
-                ctx.sender_user_id,
-                ctx.sender_chat_scope,
-                ctx.session_scope,
-            )
-            .await;
-        }
+        remember_turn_exchange(
+            ctx.manifest,
+            ctx.session.agent_id,
+            ctx.memory,
+            ctx.embedding_driver,
+            ctx.user_message,
+            &end_turn.final_response,
+            ctx.streaming,
+            ctx.sender_user_id,
+            ctx.sender_chat_scope,
+            ctx.session_scope,
+            None,
+        )
+        .await;
 
         if let Some(engine) = ctx.context_engine {
             if let Err(e) = engine.after_turn(ctx.session.agent_id, ctx.messages).await {
