@@ -14404,6 +14404,89 @@ async fn resolve_driver_for_owner_canonicalizes_alias_provider_in_fallback_slot(
     kernel.shutdown();
 }
 
+/// #8663: the per-turn path for the DEFAULT provider must read the provider file's `api_key_env`.
+///
+/// The file declares `STRATA1_LAN_KEY`, which differs from the convention `STRATA1_API_KEY`, and both env vars hold different values.
+/// A path that still reads the convention therefore resolves a different credential and a different cached driver.
+/// The agent that pins the file's env var explicitly is the control: it reads `STRATA1_LAN_KEY` by construction, so pointer equality proves the default path read the same variable.
+#[test]
+#[serial_test::serial(librefang_vault_key)]
+fn default_provider_file_resolution_applies_on_the_per_turn_path() {
+    const PROVIDER: &str = "strata1";
+    const FILE_KEY_ENV: &str = "STRATA1_LAN_KEY";
+    // The fixture is only meaningful while the file's name differs from the convention.
+    assert_ne!(FILE_KEY_ENV, "STRATA1_API_KEY");
+
+    let _file_key = set_test_env(FILE_KEY_ENV, "sk-from-provider-file");
+    let _convention_key = set_test_env("STRATA1_API_KEY", "sk-from-convention");
+
+    let dir = tempfile::tempdir().unwrap();
+    let home_dir = dir.path().to_path_buf();
+    let data_dir = home_dir.join("data");
+    std::fs::create_dir_all(&data_dir).unwrap();
+    let registry_dir = home_dir.join("registry");
+    std::fs::create_dir_all(&registry_dir).unwrap();
+    std::fs::write(registry_dir.join(".sync_marker"), "").unwrap();
+    let providers_dir = home_dir.join("providers");
+    std::fs::create_dir_all(&providers_dir).unwrap();
+    std::fs::write(
+        providers_dir.join(format!("{PROVIDER}.toml")),
+        format!(
+            r#"
+[provider]
+id = "{PROVIDER}"
+display_name = "Strata1"
+api_key_env = "{FILE_KEY_ENV}"
+base_url = "http://127.0.0.1:9/v1"
+key_required = true
+"#
+        ),
+    )
+    .unwrap();
+
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: data_dir.clone(),
+        network_enabled: false,
+        memory: librefang_types::config::MemoryConfig {
+            sqlite_path: Some(data_dir.join("test.db")),
+            ..Default::default()
+        },
+        default_model: DefaultModelConfig {
+            provider: PROVIDER.to_string(),
+            model: "m".to_string(),
+            api_key_env: String::new(),
+            base_url: None,
+            ..DefaultModelConfig::default()
+        },
+        ..KernelConfig::default()
+    };
+    let kernel = LibreFangKernel::boot_with_config(config).expect("kernel boot");
+
+    let mut default_agent = librefang_types::agent::AgentManifest::default();
+    default_agent.model.provider = PROVIDER.to_string();
+    default_agent.model.model = "m".to_string();
+
+    let mut pinned = default_agent.clone();
+    pinned.model.api_key_env = Some(FILE_KEY_ENV.to_string());
+
+    let d_default = kernel
+        .resolve_driver_for_owner(&default_agent, None)
+        .expect("default-provider turn must resolve");
+    let d_pinned = kernel
+        .resolve_driver_for_owner(&pinned, None)
+        .expect("explicitly pinned env var must resolve");
+    assert!(
+        Arc::ptr_eq(&d_default, &d_pinned),
+        "the default-provider turn must read the provider file's api_key_env \
+         ({}): identical drivers prove both resolutions read that variable; a \
+         different driver means the turn fell back to STRATA1_API_KEY (#8663)",
+        FILE_KEY_ENV
+    );
+
+    kernel.shutdown();
+}
+
 /// Regression test for the kernel install façade introduced in #3295: the
 /// HTTP install path historically opened `vault.enc` and ran the Argon2id
 /// KDF on every request. After the refactor, `Kernel::install_integration`
