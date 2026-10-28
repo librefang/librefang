@@ -15,7 +15,7 @@ import { useMediaProviders } from "../lib/queries/media";
 import { useModels } from "../lib/queries/models";
 import { usePendingApprovals } from "../lib/queries/approvals";
 import { agentQueries, useAgentAvatarUrl, useAgents, useAgentSessions } from "../lib/queries/agents";
-import { useSessionStream } from "../lib/queries/sessions";
+import { useSessionDetails, useSessionStream } from "../lib/queries/sessions";
 import { useActiveHandsWhen } from "../lib/queries/hands";
 import { useChatCommands, type ChatCommand } from "../lib/queries/commands";
 import { backendCommandNames, commandLabel, menuCommands, shouldHoldSlashSend } from "../lib/chatCommands";
@@ -39,6 +39,8 @@ import { useTtsManager } from "../lib/tts";
 import { MessageCircle, Send, Square, Bot, User, RefreshCw, AlertCircle, Wifi, Sparkles, X, ArrowRight, ArrowLeft, Zap, ShieldAlert, CheckCircle, XCircle, Clock, Plus, Trash2, ChevronDown, Loader2, Copy, Volume2, Pause, Download, Brain, Eye, EyeOff, Mic, MicOff, Globe, Paperclip, FileText, Menu, Minus, CheckSquare } from "lucide-react";
 import { Badge } from "../components/ui/Badge";
 import { MarkdownContent } from "../components/ui/MarkdownContent";
+import { ReasoningEffortMenu } from "../components/ReasoningEffortMenu";
+import { modelReasoningEfforts } from "../lib/reasoningEffort";
 import {
   useUIStore,
   MIN_CHAT_SCALE,
@@ -67,6 +69,7 @@ import {
   useStopAgent,
   useUploadAgentFile,
 } from "../lib/mutations/agents";
+import { useSetSessionReasoning } from "../lib/mutations/sessions";
 
 const isAuthUnavailable = (status?: string) =>
   !!status && status !== "configured" && status !== "validated_key" && status !== "configured_cli" && status !== "not_required" && status !== "auto_detected";
@@ -537,6 +540,11 @@ export function useChatMessages(
   const addSkillOutput = useUIStore((s) => s.addSkillOutput);
   const deepThinking = useUIStore((s) => s.deepThinking);
   const showThinkingProcess = useUIStore((s) => s.showThinkingProcess);
+  // The one-shot reasoning effort armed on the composer control. Read here
+  // rather than passed down, because `sendMessage` is the single point every
+  // caller funnels through (the slash-command completion list included).
+  const nextReasoningEffort = useUIStore((s) => s.nextReasoningEffort);
+  const setNextReasoningEffort = useUIStore((s) => s.setNextReasoningEffort);
 
   // Track the currently-viewed agent in a ref so async handlers registered
   // during a previous render can tell whether their target is still on screen.
@@ -945,6 +953,14 @@ export function useChatMessages(
     // the agent the user is now looking at.
     const sendAgentId = agentId;
 
+    // The one-shot reasoning effort is armed on the composer and spent here:
+    // this turn's frame (WS or HTTP fallback) carries it once as
+    // `reasoning_effort`, then the store clears so the next message falls back
+    // to the session pin / manifest default. `null` is not written to the
+    // frame — an unset override is not a statement about the turn.
+    const turnReasoningEffort = nextReasoningEffort ?? null;
+    if (turnReasoningEffort !== null) setNextReasoningEffort(null);
+
     const userMsg: ChatMessage = {
       id: makeMessageId("user"),
       role: "user",
@@ -974,6 +990,7 @@ export function useChatMessages(
           options: {
             thinking: deepThinking,
             show_thinking: showThinkingProcess,
+            reasoning_effort: turnReasoningEffort,
             session_id: sessionId,
             attachments: hasAttachments ? attachments : undefined,
           },
@@ -1346,6 +1363,9 @@ export function useChatMessages(
           content: trimmed,
           thinking: deepThinking,
           show_thinking: showThinkingProcess,
+          // Per-message reasoning effort, only when the operator armed one
+          // this turn (see `turnReasoningEffort` above).
+          ...(turnReasoningEffort !== null ? { reasoning_effort: turnReasoningEffort } : {}),
           // Turn correlation id (#6390): the daemon echoes it on every terminal frame so late frames bind to this bubble, not the newest one.
           // Reuses the bubble id — no extra mapping needed.
           message_id: botMsg.id,
@@ -1365,7 +1385,7 @@ export function useChatMessages(
 
     // HTTP fallback — direct, no fake streaming
     await sendViaHttp();
-  }, [addSkillOutput, agentId, agents, chatCommands, commandsPending, clearHistory, deepThinking, finishTurnIfCurrent, flushStreamingContent, flushThinkingContent, onAutoPinSession, onDropRef, onModelSwitch, onNewSession, pendingCommandsRef, queryClient, scheduleStreamingFlush, scheduleThinkingFlush, sendAgentMessageMutation, sessionId, setAgentLoading, showThinkingProcess, t, updateAgentMessages, ws, wsConnected]);
+  }, [addSkillOutput, agentId, agents, chatCommands, commandsPending, clearHistory, deepThinking, finishTurnIfCurrent, flushStreamingContent, flushThinkingContent, nextReasoningEffort, onAutoPinSession, onDropRef, onModelSwitch, onNewSession, pendingCommandsRef, queryClient, scheduleStreamingFlush, scheduleThinkingFlush, sendAgentMessageMutation, sessionId, setAgentLoading, setNextReasoningEffort, showThinkingProcess, t, updateAgentMessages, ws, wsConnected]);
 
   // Abort an in-flight agent run. Hits the backend stop endpoint (which aborts
   // the tokio task on the kernel side) and optimistically finalizes any
@@ -1402,6 +1422,60 @@ export function useChatMessages(
   }, [agentId, updateAgentMessages, finishTurnIfCurrent, stopAgentMutation]);
 
   return { messages, isLoading, sendMessage, stopMessage, clearHistory, wsConnected, ariaAnnouncement, ariaNonce, compactedSummary, isCompacting };
+}
+
+/**
+ * The session's pinned reasoning level, with a local override for the window
+ * between a PATCH and the server echoing it back.
+ *
+ * Two sources, one answer:
+ *
+ *   - `serverValue` is the session record's `reasoning_effort`. `undefined`
+ *     means the field is absent — an older daemon that has no such column —
+ *     and reading it as "nothing pinned" would make a successful PATCH look
+ *     like it silently failed.
+ *   - the optimistic value is what this window last PATCHed. It wins until the
+ *     server echo catches up to it, the same "clear when the real value
+ *     arrives" shape the header's model switcher uses. The comparison is
+ *     normalized (trim + case): the route validates and normalizes the token,
+ *     so a request for `" High "` can come back as `"high"`, and the pill must
+ *     not keep showing the spelling it sent. When the server value changes to
+ *     something else — another client pinned a different level — the server is
+ *     the authority and the override is dropped with it.
+ *
+ * `clearOptimistic` is the error path: a failed PATCH must not keep claiming
+ * the level it never wrote.
+ */
+export function useOptimisticPinnedReasoning(
+  activeSessionId: string | null,
+  serverValue: string | null | undefined,
+) {
+  const [optimistic, setOptimistic] = useState<string | null | undefined>(undefined);
+
+  // The override belongs to one session; carrying it across a switch would
+  // paint the previous conversation's pin onto the new one.
+  useEffect(() => {
+    setOptimistic(undefined);
+  }, [activeSessionId]);
+
+  useEffect(() => {
+    const same =
+      optimistic === null
+        ? serverValue === null
+        : typeof optimistic === "string" &&
+          typeof serverValue === "string" &&
+          serverValue.trim().toLowerCase() ===
+            optimistic.trim().toLowerCase();
+    if (same) setOptimistic(undefined);
+  }, [serverValue, optimistic]);
+
+  const clearOptimistic = useCallback(() => setOptimistic(undefined), []);
+
+  return {
+    pinned: optimistic !== undefined ? optimistic : serverValue ?? null,
+    setOptimistic,
+    clearOptimistic,
+  };
 }
 
 // Message bubble component — memoized to skip re-render during streaming of other messages
@@ -2032,7 +2106,7 @@ function LimitReachedBanner({ onNewSession, creating }: { onNewSession: () => vo
 }
 
 // Input box - with shortcut hints
-function ChatInput({ agentId, onSend, onStop, isStreaming, disabled, inputDisabled, placeholder, authMissing, authStatus, providerName, supportsThinking, sttAvailable }: { agentId: string; onSend: (msg: string, attachments?: ChatAttachment[]) => void; onStop?: () => void; isStreaming?: boolean; disabled: boolean; inputDisabled?: boolean; placeholder: string; authMissing?: boolean; authStatus?: string; providerName?: string; supportsThinking?: boolean; sttAvailable?: boolean }) {
+function ChatInput({ agentId, onSend, onStop, isStreaming, disabled, inputDisabled, placeholder, authMissing, authStatus, providerName, supportsThinking, sttAvailable, reasoningEfforts, modelName, sessionReasoningEffort, onPinReasoning, onUnpinReasoning, reasoningPinPending, reasoningPinError, canPinReasoning }: { agentId: string; onSend: (msg: string, attachments?: ChatAttachment[]) => void; onStop?: () => void; isStreaming?: boolean; disabled: boolean; inputDisabled?: boolean; placeholder: string; authMissing?: boolean; authStatus?: string; providerName?: string; supportsThinking?: boolean; sttAvailable?: boolean; reasoningEfforts?: string[]; modelName?: string; sessionReasoningEffort?: string | null; onPinReasoning?: (level: string) => void; onUnpinReasoning?: () => void; reasoningPinPending?: boolean; reasoningPinError?: string | null; canPinReasoning?: boolean }) {
   const { t } = useTranslation();
   const [message, setMessage] = useState("");
   const [activeIndex, setActiveIndex] = useState(-1);
@@ -2059,6 +2133,8 @@ function ChatInput({ agentId, onSend, onStop, isStreaming, disabled, inputDisabl
   const showThinkingProcess = useUIStore((s) => s.showThinkingProcess);
   const setDeepThinking = useUIStore((s) => s.setDeepThinking);
   const setShowThinkingProcess = useUIStore((s) => s.setShowThinkingProcess);
+  const nextReasoningEffort = useUIStore((s) => s.nextReasoningEffort);
+  const setNextReasoningEffort = useUIStore((s) => s.setNextReasoningEffort);
 
   const voiceInput = useVoiceInput(useCallback((text: string) => {
     setMessage((prev) => (prev ? prev + " " + text : text));
@@ -2432,6 +2508,20 @@ function ChatInput({ agentId, onSend, onStop, isStreaming, disabled, inputDisabl
           {showThinkingProcess ? <Eye className="h-3 w-3" /> : <EyeOff className="h-3 w-3" />}
           <span>{t("chat.show_thinking")}</span>
         </button>
+        {/* Reasoning effort — the level the next message uses (one-shot) and the
+            level pinned to the session. Sits with the thinking controls because
+            it is the same decision at a finer grain. */}
+        <ReasoningEffortMenu
+          efforts={reasoningEfforts}
+          modelName={modelName}
+          nextReasoningEffort={nextReasoningEffort}
+          sessionReasoningEffort={sessionReasoningEffort ?? null}
+          onUseOnce={setNextReasoningEffort}
+          onPin={canPinReasoning ? onPinReasoning : undefined}
+          onUnpin={canPinReasoning ? onUnpinReasoning : undefined}
+          pinPending={reasoningPinPending}
+          pinError={reasoningPinError}
+        />
       </div>
       )}
       <div className="flex gap-2 sm:gap-3 items-start">
@@ -3569,6 +3659,117 @@ export function ChatPage() {
   // this becomes non-null and the highlight is correct.
   const activeSessionId = deriveDropdownActiveSessionId(urlSessionId);
 
+  // ── Reasoning effort ─────────────────────────────────────────────────────
+  // The pin control only exists for an explicit session on a thinking-capable
+  // model; that is exactly when the level list and the session record are
+  // worth reading.
+  const canPinReasoning = !!selectedAgentId && !!activeSessionId;
+  // The active model's levels. Same cache entry as the header's model popover
+  // (`available: true`), so opening either warms both.
+  const reasoningModelsQuery = useModels(
+    { available: true },
+    { enabled: !!selectedAgentId && !!selectedAgent?.supports_thinking },
+  );
+  // The session's pinned level — server state, read back from the session
+  // record (the same `GET /api/sessions/{id}` the Sessions page uses). Absent
+  // on a daemon that predates the field, which the merge below reads as "the
+  // echo is silent", not as "nothing is pinned". Requested only while the
+  // composer's control can be shown: the control is hidden otherwise, and this
+  // read duplicates the initial history fetch until #8616 can expose the
+  // scalar on the agent-session payload.
+  const sessionReasoningQuery = useSessionDetails(activeSessionId ?? "", {
+    enabled: canPinReasoning && !!selectedAgent?.supports_thinking,
+  });
+  // A session pinned to another model reasons on THAT model's terms, not the
+  // agent's: `model_override` is stored as `provider/model` (splitn(2, '/') —
+  // a qualified id may itself contain a slash), or as a bare model name when
+  // only the model was pinned.
+  const reasoningModel = useMemo(() => {
+    const override = sessionReasoningQuery.data?.model_override?.trim() ?? "";
+    if (override) {
+      const slash = override.indexOf("/");
+      if (slash > 0 && slash < override.length - 1) {
+        return {
+          provider: override.slice(0, slash),
+          model: override.slice(slash + 1),
+        };
+      }
+      // A bare model name says nothing about the provider, and the catalog
+      // can hold the same id under two of them. Stay on the provider the
+      // agent runs on rather than matching the first catalog entry by id.
+      return { provider: selectedAgent?.model_provider ?? "", model: override };
+    }
+    return {
+      provider: selectedAgent?.model_provider ?? "",
+      model: selectedAgent?.model_name ?? "",
+    };
+  }, [
+    sessionReasoningQuery.data?.model_override,
+    selectedAgent?.model_provider,
+    selectedAgent?.model_name,
+  ]);
+  const reasoningEfforts = useMemo(
+    () =>
+      modelReasoningEfforts(
+        reasoningModelsQuery.data?.models ?? [],
+        reasoningModel.model,
+        reasoningModel.provider,
+      ),
+    [reasoningModelsQuery.data?.models, reasoningModel],
+  );
+  const {
+    pinned: sessionReasoningEffort,
+    setOptimistic: setOptimisticReasoning,
+    clearOptimistic: clearOptimisticReasoning,
+  } = useOptimisticPinnedReasoning(
+    activeSessionId ?? null,
+    sessionReasoningQuery.data?.reasoning_effort,
+  );
+  const setSessionReasoning = useSetSessionReasoning();
+  const { mutate: mutateSessionReasoning, reset: resetSessionReasoning } = setSessionReasoning;
+  // A failed PATCH belongs to the session it was sent for. Reset on every
+  // session change so the error is gone for good — hiding it while another
+  // session is open would only make it reappear on the way back.
+  useEffect(() => {
+    resetSessionReasoning();
+  }, [activeSessionId, resetSessionReasoning]);
+  const handlePinReasoning = useCallback((level: string) => {
+    if (!activeSessionId) return;
+    // Optimistic: the pill and the menu mark the new level immediately, and the
+    // server echo either confirms it (and the override drops) or never speaks
+    // (older daemon — the override stays as the window's record).
+    setOptimisticReasoning(level);
+    mutateSessionReasoning(
+      {
+        sessionId: activeSessionId,
+        reasoningEffort: level,
+        agentId: selectedAgentId ?? null,
+      },
+      { onError: clearOptimisticReasoning },
+    );
+  }, [activeSessionId, selectedAgentId, mutateSessionReasoning, setOptimisticReasoning, clearOptimisticReasoning]);
+  const handleUnpinReasoning = useCallback(() => {
+    if (!activeSessionId) return;
+    setOptimisticReasoning(null);
+    mutateSessionReasoning(
+      {
+        sessionId: activeSessionId,
+        reasoningEffort: null,
+        agentId: selectedAgentId ?? null,
+      },
+      { onError: clearOptimisticReasoning },
+    );
+  }, [activeSessionId, selectedAgentId, mutateSessionReasoning, setOptimisticReasoning, clearOptimisticReasoning]);
+
+  // The pin mutation outlives the session it failed for. Scope the error to
+  // the session that saw the failure: switching away must not leave a red
+  // footer on an unrelated conversation.
+  const reasoningPinError =
+    setSessionReasoning.isError &&
+    setSessionReasoning.variables?.sessionId === activeSessionId
+      ? t("chat.reasoning_pin_failed")
+      : null;
+
   // Switching away abandons the export: the ids belong to the previous
   // agent/session, and keeping them would leave the bar saying "N selected"
   // with no boxes ticked while `runExport` filters against messages that are
@@ -4393,6 +4594,14 @@ export function ChatPage() {
               providerName={selectedAgent?.model_provider}
               supportsThinking={selectedAgent?.supports_thinking}
               sttAvailable={sttAvailable}
+              reasoningEfforts={reasoningEfforts}
+              modelName={selectedAgent?.model_name}
+              sessionReasoningEffort={sessionReasoningEffort}
+              onPinReasoning={handlePinReasoning}
+              onUnpinReasoning={handleUnpinReasoning}
+              reasoningPinPending={setSessionReasoning.isPending}
+              reasoningPinError={reasoningPinError}
+              canPinReasoning={canPinReasoning}
             />
           </div>
         </main>

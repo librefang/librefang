@@ -33,6 +33,10 @@ import type { JsonRowType, ManifestExtras, ManifestFormState } from "../lib/agen
 import type { ModelRoutingInertReason } from "../api";
 import { isToolAdmittedByCapabilities } from "../lib/toolGrants";
 import {
+  reasoningEffortLabel,
+  modelReasoningEfforts,
+} from "../lib/reasoningEffort";
+import {
   applyRoutingEngine,
   ROUTING_TIER_DEFAULTS,
   routingEngineOf,
@@ -206,6 +210,18 @@ interface AgentManifestFormProps {
     context_window?: number;
     max_output_tokens?: number;
     limits_known?: boolean;
+    /**
+     * Reasoning capability metadata (see `lib/reasoningEffort`). All optional:
+     * an older daemon serves none of it, and the editor falls back to the
+     * canonical levels. When present, the model's own set wins and a model
+     * that cannot be switched off loses `none`.
+     */
+    supported_efforts?: string[];
+    /** The backend's prepared offer; wins over `supported_efforts` when present. */
+    offered_efforts?: string[];
+    default_effort?: string | null;
+    off_allowed?: boolean;
+    mandatory?: boolean;
   }[];
   /**
    * State of the query that produced `models`. Without it a catalog that is
@@ -671,6 +687,15 @@ export function AgentManifestForm({
     value.model.context_window,
     selectedModelLimits.contextWindow,
     t,
+  );
+
+  // Levels the chosen model declares for the Thinking section's selector.
+  // Falls back to the canonical set whenever the model is unknown to the
+  // catalog (nothing chosen yet, or the catalog still loading) — the same
+  // "nobody said" reading the composer gives the field.
+  const reasoningEfforts = useMemo(
+    () => modelReasoningEfforts(models, value.model.model, value.model.provider),
+    [models, value.model.model, value.model.provider],
   );
 
   const jsonSchemaFormat =
@@ -1848,28 +1873,46 @@ export function AgentManifestForm({
           onChange={(checked) => updateThinking({ enabled: checked })}
         />
         {value.thinking.enabled && (
-          <div className="grid grid-cols-2 gap-3 mt-2">
-            <StepLadderInput
-              label={t("agents.form.budget_tokens")}
-              value={value.thinking.budget_tokens}
-              onChange={(next) => updateThinking({ budget_tokens: next })}
-              ladder={THINKING_BUDGET_LADDER}
-              formatRung={formatCount}
-              inheritLabel={t("model_param.inherit")}
-              customLabel={t("model_param.custom")}
-              customPlaceholder={t("agents.form.budget_tokens_placeholder")}
-              min={0}
-            />
-
-            <Field label={t("agents.form.stream_thinking")}>
-              <Toggle
-                label=""
-                ariaLabel={t("agents.form.stream_thinking")}
-                checked={value.thinking.stream_thinking}
-                onChange={(checked) => updateThinking({ stream_thinking: checked })}
+          <>
+            {/* The default reasoning effort this agent's turns run with.
+                Leads the section: it is the decision the model needs before it
+                reasons at all (budget and streaming shape the trace once it
+                does), and "inherit" is a real setting rather than a blank. */}
+            <div className="mt-2">
+              <Field
+                label={t("agents.form.reasoning_effort")}
+                hint={t("agents.form.reasoning_effort_hint")}
+              >
+                <ReasoningEffortField
+                  value={value.thinking.reasoning_effort}
+                  options={reasoningEfforts}
+                  onChange={(next) => updateThinking({ reasoning_effort: next })}
+                />
+              </Field>
+            </div>
+            <div className="grid grid-cols-2 gap-3 mt-2">
+              <StepLadderInput
+                label={t("agents.form.budget_tokens")}
+                value={value.thinking.budget_tokens}
+                onChange={(next) => updateThinking({ budget_tokens: next })}
+                ladder={THINKING_BUDGET_LADDER}
+                formatRung={formatCount}
+                inheritLabel={t("model_param.inherit")}
+                customLabel={t("model_param.custom")}
+                customPlaceholder={t("agents.form.budget_tokens_placeholder")}
+                min={0}
               />
-            </Field>
-          </div>
+
+              <Field label={t("agents.form.stream_thinking")}>
+                <Toggle
+                  label=""
+                  ariaLabel={t("agents.form.stream_thinking")}
+                  checked={value.thinking.stream_thinking}
+                  onChange={(checked) => updateThinking({ stream_thinking: checked })}
+                />
+              </Field>
+            </div>
+          </>
         )}
       </FormSection>
 
@@ -4470,6 +4513,69 @@ function OpenStringSelect({
       ))}
       {!known ? <option value={value}>{value}</option> : null}
     </select>
+  );
+}
+
+/**
+ * The agent's default reasoning effort — `[thinking] reasoning_effort`.
+ *
+ * "inherit default" is the absent key: the model (or the global default)
+ * decides. The level list is the chosen model's own when the catalog declares
+ * one, the canonical set otherwise; a stored value the list does not know
+ * stays selectable, so opening and saving an older manifest cannot silently
+ * rewrite it. The clear button is the one-click way back to inherit from any
+ * level, without hunting for the blank option.
+ *
+ * Module scope for the same reason as `FormSection`.
+ */
+function ReasoningEffortField({
+  value,
+  options,
+  onChange,
+}: {
+  value: string;
+  options: readonly string[];
+  onChange: (next: string) => void;
+}) {
+  const { t } = useTranslation();
+  const known = value === "" || options.includes(value);
+  const clearLabel = t("agents.form.reasoning_effort_clear");
+  return (
+    <div className="flex items-center gap-2">
+      <select
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        aria-label={t("agents.form.reasoning_effort")}
+        className={`${inputClass} flex-1`}
+      >
+        <option value="">{t("agents.form.reasoning_effort_inherit")}</option>
+        {options.map((level) => (
+          <option key={level} value={level}>
+            {reasoningEffortLabel(level)}
+          </option>
+        ))}
+        {/* A stored value the model's list does not carry keeps its row so the
+            current setting stays visible, but it is disabled: this model does
+            not declare it, and the selector must not offer what the model
+            cannot take. */}
+        {!known ? (
+          <option value={value} disabled>
+            {reasoningEffortLabel(value)}
+          </option>
+        ) : null}
+      </select>
+      {value !== "" && (
+        <button
+          type="button"
+          onClick={() => onChange("")}
+          title={clearLabel}
+          aria-label={clearLabel}
+          className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-border-subtle text-text-dim transition-colors hover:border-border hover:text-text"
+        >
+          <RotateCcw className="h-3.5 w-3.5" aria-hidden="true" />
+        </button>
+      )}
+    </div>
   );
 }
 

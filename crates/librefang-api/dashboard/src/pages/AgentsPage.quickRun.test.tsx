@@ -27,7 +27,7 @@ import { useDrawerStore } from "../lib/drawerStore";
 // the dialog's "fall back to the first candidate" path answers the same id as
 // "preselect the agent that was clicked", so the wiring could be severed
 // (`initialParent={undefined}`) and every assertion below would still pass.
-const { AGENTS, spawnEphemeralAsync, navigateMock, routerSearch, templatesResult } = vi.hoisted(
+const { AGENTS, spawnEphemeralAsync, navigateMock, routerSearch, templatesResult, modelsResult } = vi.hoisted(
   () => ({
     AGENTS: [
       { id: "agent-a", name: "Alpha", is_hand: false, state: "running" },
@@ -44,6 +44,17 @@ const { AGENTS, spawnEphemeralAsync, navigateMock, routerSearch, templatesResult
         isLoading: false,
         isPending: false,
         isError: false,
+      },
+    },
+    // The model catalog feeds both the picker and the Thinking section's
+    // level list; mutable so a case can serve a declaration.
+    modelsResult: {
+      current: {
+        data: { models: [] as unknown[], total: 0, available: 0 },
+        isLoading: false,
+        isFetching: false,
+        isError: false,
+        refetch: vi.fn(),
       },
     },
   }),
@@ -89,7 +100,7 @@ vi.mock("../lib/queries/providers", () => ({
   useProviders: () => ({ data: [], isLoading: false }),
 }));
 vi.mock("../lib/queries/models", () => ({
-  useModels: () => ({ data: [], isLoading: false }),
+  useModels: () => modelsResult.current,
 }));
 vi.mock("../lib/queries/skills", () => ({
   useSkills: () => ({ data: [], isLoading: false }),
@@ -194,6 +205,13 @@ beforeEach(() => {
   useDrawerStore.setState({ isOpen: false, content: null });
   routerSearch.current = {};
   templatesResult.current = { data: [], isLoading: false, isPending: false, isError: false };
+  modelsResult.current = {
+    data: { models: [], total: 0, available: 0 },
+    isLoading: false,
+    isFetching: false,
+    isError: false,
+    refetch: vi.fn(),
+  };
   // The page auto-selects the first agent only on a wide viewport (the effect
   // bails under the 1000px breakpoint). jsdom has no layout, so this is the
   // switch that decides whether the detail panel — and with it the Run
@@ -352,5 +370,76 @@ describe("AgentsPage create drawer seed from ?template= (#8385)", () => {
     // Without this a second Run press on the same type navigates to a URL that
     // already matches and the seed effect never fires again.
     expect(navigateMock).toHaveBeenCalledWith({ to: "/agents", search: {}, replace: true });
+  });
+});
+
+// The create drawer builds its model options in `formModelOptions`; without
+// the capability fields the Thinking selector falls back to the canonical set
+// and offers levels the model rejects. This is the page-level check that the
+// mapping reaches the form (the form's own suite covers the list once the
+// fields arrive).
+describe("AgentsPage create form model capability", () => {
+  const MANIFEST = `name = "reason-check"
+
+[model]
+provider = "openai"
+model = "gpt-5"
+
+[thinking]
+reasoning_effort = "low"
+`;
+
+  it("offers the levels declared by the mocked models response", async () => {
+    modelsResult.current = {
+      data: {
+        models: [
+          {
+            provider: "openai",
+            id: "gpt-5",
+            supported_efforts: ["none", "low", "high"],
+            off_allowed: false,
+          },
+        ],
+        total: 1,
+        available: 1,
+      },
+      isLoading: false,
+      isFetching: false,
+      isError: false,
+      refetch: vi.fn(),
+    };
+
+    renderPage();
+
+    // The create drawer opens in form mode; the TOML tab is the quickest way
+    // to put a model into the form without driving the picker's drill-down.
+    // The header control also renders its "n" shortcut, so the accessible
+    // name carries that too; match the part the page controls.
+    const [openCreate] = await screen.findAllByRole("button", {
+      name: /agents\.create_agent/,
+    });
+    fireEvent.click(openCreate);
+
+    const drawer = await screen.findByTestId("drawer-slot");
+    fireEvent.click(within(drawer).getByText("agents.from_toml"));
+    fireEvent.change(within(drawer).getByPlaceholderText(/\[agent\]/), {
+      target: { value: MANIFEST },
+    });
+    fireEvent.click(within(drawer).getByText("agents.from_form"));
+
+    fireEvent.click(within(drawer).getByText("agents.form.thinking"));
+
+    const select = within(drawer).getByRole("combobox", {
+      name: "agents.form.reasoning_effort",
+    });
+    if (!(select instanceof HTMLSelectElement)) throw new Error("not a select");
+    expect(Array.from(select.options).map((option) => option.value)).toEqual([
+      "",
+      "low",
+      "high",
+    ]);
+    // `off_allowed: false` arrived through the page; were it dropped, the
+    // model's declared `none` would be offered here.
+    expect(within(drawer).queryByRole("option", { name: "None" })).toBeNull();
   });
 });
