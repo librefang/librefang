@@ -331,8 +331,8 @@ impl StructuredStore {
     /// [`Self::list_keys_with_prefix`] with more than one excluded range.
     ///
     /// The unscoped tool scope hides two disjoint regions — the `peer:` framing and the
-    /// platform's `session_` summaries (#8645) — and a single exclusion slot cannot express
-    /// both. Passing every hidden prefix here keeps `limit` counting only rows the caller can
+    /// platform's `compaction_summary_` mirrors (#8645) — and a single exclusion slot cannot
+    /// express both. Passing every hidden prefix here keeps `limit` counting only rows the caller can
     /// actually address, exactly as the one-prefix form does for the peer framing.
     pub fn list_keys_with_prefix_excluding(
         &self,

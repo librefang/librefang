@@ -233,10 +233,10 @@ pub const COMPACTION_SUMMARY_KEY_PREFIX: &str = "compaction_summary_";
 /// conversation, which is exactly what the mirror exists to prevent. The reset
 /// path already trims to the same order of magnitude (`MAX_SUMMARY_OUTPUT_BYTES`
 /// in `session_ops.rs`).
-const MAX_SUMMARY_MIRROR_BYTES: usize = 16 * 1024;
+pub(crate) const MAX_SUMMARY_MIRROR_BYTES: usize = 16 * 1024;
 
 /// Trim `text` to `max` bytes at a UTF-8 boundary, marking the cut.
-fn truncate_summary_mirror(text: &str, max: usize) -> (String, bool) {
+pub(crate) fn truncate_summary_mirror(text: &str, max: usize) -> (String, bool) {
     if text.len() <= max {
         return (text.to_string(), false);
     }
@@ -2396,6 +2396,61 @@ mod tests {
                 .unwrap()
                 .is_some(),
             "the mirror belongs under `compaction_summary_`"
+        );
+    }
+
+    /// The threshold path is what production turns take, and it has to mirror like the LLM one
+    /// does (#8645 review): two conversations crossing the threshold each keep their own summary,
+    /// even though the canonical row can only ever name one owner.
+    #[test]
+    fn threshold_compaction_keeps_one_mirror_per_session() {
+        let substrate = MemorySubstrate::open_in_memory(0.1).unwrap();
+        let agent = AgentId::new();
+        let session_a = SessionId::new();
+        let session_b = SessionId::new();
+
+        // 60 messages: the `Some(10)` threshold only opens the length gate; the 50-message
+        // canonical window is what actually triggers compaction, so anything up to 50 is a no-op.
+        let feed = |session: SessionId, word: &str| {
+            for i in 0..60 {
+                let message =
+                    librefang_types::message::Message::user(format!("{word} message {i}"));
+                substrate
+                    .append_canonical(
+                        agent,
+                        std::slice::from_ref(&message),
+                        Some(10),
+                        Some(session),
+                    )
+                    .unwrap();
+            }
+        };
+
+        feed(session_a, "alpha");
+        let (summary_a, _) = substrate
+            .canonical_context(agent, Some(session_a), None)
+            .unwrap();
+        assert!(
+            summary_a.as_deref().unwrap_or("").contains("alpha"),
+            "the first conversation must read its own threshold summary, got {summary_a:?}"
+        );
+
+        // A second conversation compacts the same canonical row: A's copy must survive.
+        feed(session_b, "bravo");
+
+        let (summary_a, _) = substrate
+            .canonical_context(agent, Some(session_a), None)
+            .unwrap();
+        assert!(
+            summary_a.as_deref().unwrap_or("").contains("alpha"),
+            "another conversation's compaction must not take A's summary away, got {summary_a:?}"
+        );
+        let (summary_b, _) = substrate
+            .canonical_context(agent, Some(session_b), None)
+            .unwrap();
+        assert!(
+            summary_b.as_deref().unwrap_or("").contains("bravo"),
+            "the second conversation must read its own summary, got {summary_b:?}"
         );
     }
 

@@ -650,6 +650,7 @@ impl LibreFangKernel {
             librefang_runtime::file_read_tracker::forget_session(sid);
         }
     }
+
     /// Delete sessions idle longer than `retention_days` and drop the process-local state keyed on them.
     ///
     /// Every retention caller (the background loop, the boot prune and `POST /api/sessions/cleanup`) goes through this instead of the substrate directly, so none of them can forget the `file_read_tracker` buckets.

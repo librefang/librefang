@@ -1,7 +1,9 @@
 //! Session management — load/save conversation history.
 
 use crate::agent_tables::{execute_agent_deletes, AgentTableGroup};
-use crate::substrate::COMPACTION_SUMMARY_KEY_PREFIX;
+use crate::substrate::{
+    truncate_summary_mirror, COMPACTION_SUMMARY_KEY_PREFIX, MAX_SUMMARY_MIRROR_BYTES,
+};
 use chrono::Utc;
 use librefang_types::agent::{AgentId, SessionId};
 use librefang_types::error::{LibreFangError, LibreFangResult};
@@ -1108,9 +1110,17 @@ impl SessionStore {
         let agent_id_str = agent_id.0.to_string();
         let tx = conn.transaction().map_err(LibreFangError::memory)?;
         execute_session_agent_deletes(&tx, &agent_id_str)?;
+        // A half-open range, not `LIKE '<prefix>%'`: in SQLite `_` matches any character and
+        // LIKE is ASCII-case-insensitive, so it would also sweep agent keys such as
+        // `compaction-summary-notes` or `COMPACTION_SUMMARY_x`, which the tool boundary (a
+        // case-sensitive `starts_with`) never reserved (#8645 review).
         tx.execute(
-            "DELETE FROM kv_store WHERE agent_id = ?1 AND key LIKE ?2",
-            rusqlite::params![agent_id_str, format!("{COMPACTION_SUMMARY_KEY_PREFIX}%")],
+            "DELETE FROM kv_store WHERE agent_id = ?1 AND key >= ?2 AND key < ?3",
+            rusqlite::params![
+                agent_id_str,
+                COMPACTION_SUMMARY_KEY_PREFIX,
+                format!("{COMPACTION_SUMMARY_KEY_PREFIX}\u{10FFFF}")
+            ],
         )
         .map_err(LibreFangError::memory)?;
         // Every session of this agent is gone, so a canonical summary can no longer have a
@@ -2215,6 +2225,25 @@ impl SessionStore {
             }
         }
 
+        // The threshold path compacts without going through `store_llm_summary`, and it is the
+        // path production turns actually take, so the per-session copy belongs here too — in
+        // the same transaction that moves the canonical row (#8645). Only this session's own
+        // mirror is touched: another conversation's copy has to survive its neighbour's
+        // compaction, which is the point of the mirror.
+        //
+        // Unlike `store_llm_summary`'s best-effort mirror, a failure here aborts the append:
+        // both writes share this transaction, and a turn that moved the summary without its
+        // copy is exactly the state this fixes.
+        if let Some(sid) = session_id {
+            if canonical.compacted_summary_session_id == Some(sid) {
+                write_compaction_mirror_in_tx(
+                    &tx,
+                    &agent_id.0.to_string(),
+                    &sid.0.to_string(),
+                    canonical.compacted_summary.as_deref(),
+                )?;
+            }
+        }
         canonical.updated_at = Utc::now().to_rfc3339();
         save_canonical_in_tx(&tx, &canonical)?;
         tx.commit().map_err(LibreFangError::memory)?;
@@ -2299,6 +2328,40 @@ fn delete_session_fts_row(
 /// agent-scoped summary owned by this session. Both outlive the `sessions` row and are read by
 /// the next turn that lands on the same deterministic sid, so every deletion primitive — reset,
 /// delete, retention prune — has to drop them in the same transaction as the row.
+/// Upsert — or clear — the compaction mirror of one session inside a write transaction (#8645).
+///
+/// `append_canonical` writes the canonical summary on the threshold path, which never reaches
+/// `store_llm_summary`; without this the production path would leave the mirror absent (another
+/// session's compaction took the canonical slot) or stale (an older LLM compaction survived).
+/// The value is stored the way `StructuredStore::set` stores it — JSON bytes — so the read path
+/// does not care which writer produced the row.
+fn write_compaction_mirror_in_tx(
+    conn: &Connection,
+    agent_id: &str,
+    session_id: &str,
+    summary: Option<&str>,
+) -> LibreFangResult<()> {
+    let key = format!("{COMPACTION_SUMMARY_KEY_PREFIX}{session_id}");
+    let Some(summary) = summary.filter(|text| !text.trim().is_empty()) else {
+        conn.execute(
+            "DELETE FROM kv_store WHERE agent_id = ?1 AND key = ?2",
+            rusqlite::params![agent_id, key],
+        )
+        .map_err(LibreFangError::memory)?;
+        return Ok(());
+    };
+    let (mirror, _) = truncate_summary_mirror(summary, MAX_SUMMARY_MIRROR_BYTES);
+    let blob = serde_json::to_vec(&serde_json::Value::String(mirror))
+        .map_err(LibreFangError::serialization)?;
+    conn.execute(
+        "INSERT INTO kv_store (agent_id, key, value, version, updated_at) VALUES (?1, ?2, ?3, 1, ?4)
+         ON CONFLICT(agent_id, key) DO UPDATE SET value = ?3, version = version + 1, updated_at = ?4",
+        rusqlite::params![agent_id, key, blob, Utc::now().to_rfc3339()],
+    )
+    .map_err(LibreFangError::memory)?;
+    Ok(())
+}
+
 fn forget_session_summaries_in_tx(
     conn: &Connection,
     agent_id: &str,
@@ -3141,6 +3204,53 @@ mod tests {
         assert_eq!(
             store.session_meta(session.id).unwrap().unwrap().agent_id,
             agent_id
+        );
+    }
+
+    /// Clearing history removes the mirrors of the conversations it deletes — and nothing else.
+    /// `LIKE '<prefix>%'` would have matched `compaction-summary-notes` and
+    /// `COMPACTION_SUMMARY_x` too (#8645 review).
+    #[test]
+    fn clearing_history_keeps_agent_keys_that_only_resemble_the_mirror_prefix() {
+        let store = setup();
+        let agent = AgentId::new();
+        store.create_session(agent).unwrap();
+        {
+            let conn = store.pool.get().unwrap();
+            for key in [
+                "compaction_summary_owned",
+                "compaction-summary-notes",
+                "COMPACTION_SUMMARY_x",
+            ] {
+                conn.execute(
+                    "INSERT INTO kv_store (agent_id, key, value, version, updated_at) \
+                     VALUES (?1, ?2, ?3, 1, ?4)",
+                    rusqlite::params![
+                        agent.0.to_string(),
+                        key,
+                        b"{}".as_slice(),
+                        Utc::now().to_rfc3339()
+                    ],
+                )
+                .unwrap();
+            }
+        }
+
+        store.delete_agent_sessions(agent).unwrap();
+
+        let conn = store.pool.get().unwrap();
+        let mut stmt = conn
+            .prepare("SELECT key FROM kv_store WHERE agent_id = ?1 ORDER BY key")
+            .unwrap();
+        let keys: Vec<String> = stmt
+            .query_map(rusqlite::params![agent.0.to_string()], |row| row.get(0))
+            .unwrap()
+            .flatten()
+            .collect();
+        assert_eq!(
+            keys,
+            vec!["COMPACTION_SUMMARY_x", "compaction-summary-notes"],
+            "only keys inside the reserved prefix may be swept"
         );
     }
 
