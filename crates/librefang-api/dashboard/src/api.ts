@@ -3221,6 +3221,77 @@ export async function evolveRemoveFile(name: string, path: string): Promise<Evol
   return del<EvolutionResult>(`/api/skills/${encodeURIComponent(name)}/evolve/file?path=${encodeURIComponent(path)}`);
 }
 
+// ---------------------------------------------------------------------------
+// Skill version history (#8021)
+// ---------------------------------------------------------------------------
+
+/**
+ * What produced a stored skill version, as the skill version store writes it (#8021).
+ *
+ * Closed inventory of every `skill_versions.change_source` token a writer can record:
+ * `create` / `update` / `evolve` / `patch` / `rollback` / `delete` / `file-write` /
+ * `file-remove` are the versioned evolve writes in
+ * `crates/librefang-api/src/routes/skills/skill.rs` (their dashboard endpoints and the
+ * agent-facing `skill_evolve_*` tools), where `update` marks a rewrite applied without
+ * the evolve editor — a workshop-update approval or a reviewer refinement — and
+ * `evolve` marks one made through it; `install` / `uninstall` are
+ * `POST /api/skills/install` and `POST /api/skills/uninstall`; `restore` is the
+ * history restore route below; `unknown` is the SQLite column default
+ * (`crates/librefang-memory/src/migration.rs`), which no producer writes but an older
+ * row can carry.
+ * Every entry needs a `skills.change_source.<value>` locale key — render through
+ * `skillChangeSourceLabel` in `lib/changeSource.ts`, never the raw token.
+ */
+export const SKILL_CHANGE_SOURCES = [
+  "create",
+  "update",
+  "evolve",
+  "patch",
+  "rollback",
+  "install",
+  "uninstall",
+  "delete",
+  "file-write",
+  "file-remove",
+  "restore",
+  "unknown",
+] as const;
+export type SkillChangeSource = (typeof SKILL_CHANGE_SOURCES)[number];
+
+/** One snapshot in a skill's version history, `skill.toml` + `prompt_context.md` included. */
+export interface SkillHistoryEntry {
+  id: number;
+  skill_name: string;
+  /** Naive UTC, SQLite's `YYYY-MM-DD HH:MM:SS` shape. */
+  timestamp: string;
+  manifest_toml: string;
+  prompt_context: string;
+  author: string;
+  // The column is free text on the server, so a producer this list does not know yet still type-checks and renders verbatim.
+  change_source: SkillChangeSource | (string & {});
+}
+
+export async function getSkillHistory(
+  name: string,
+  limit = 30,
+): Promise<SkillHistoryEntry[]> {
+  const data = await get<{ versions?: SkillHistoryEntry[] }>(
+    `/api/skills/${encodeURIComponent(name)}/history?limit=${limit}`,
+  );
+  return data.versions ?? [];
+}
+
+/** POST /api/skills/{name}/history/{version_id}/restore. */
+export async function restoreSkillVersion(
+  name: string,
+  versionId: number,
+): Promise<{ status: string; skill_name: string; restored_version_id: number }> {
+  return post(
+    `/api/skills/${encodeURIComponent(name)}/history/${versionId}/restore`,
+    {},
+  );
+}
+
 /** Result of proposing an evolved skill to the public registry as a PR. */
 export interface ProposeSkillResult {
   /** HTML URL of the opened pull request. */

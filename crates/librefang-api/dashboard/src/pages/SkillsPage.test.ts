@@ -1,13 +1,14 @@
 import { describe, expect, it } from "vitest";
+import type { SkillHistoryEntry } from "../api";
 import {
   buildInstalledSlugSet,
   canRollbackSkill,
   combinedQueryHealth,
   filterByCategory,
   isInstalledFromMarketplace,
-  isCurrentSkillVersion,
   isRateLimitError,
   marketplaceInstallKey,
+  skillHistoryTimestamp,
   tryStartInstall,
 } from "./SkillsPage";
 
@@ -87,16 +88,15 @@ describe("SkillsPage marketplace state helpers", () => {
     expect(canRollbackSkill({ ...evolution, mutation_count: 1 })).toBe(true);
   });
 
-  it("identifies the current version by value instead of list position", () => {
-    const entry = {
-      version: "0.1.0",
-      timestamp: "2026-08-15T00:00:00Z",
-      changelog: "Initial version",
-      content_hash: "hash",
-    };
+  // The store writes naive UTC in SQLite's `YYYY-MM-DD HH:MM:SS` shape, which
+  // `Date` would read as local time if passed through untouched — so the label
+  // and the restore dialog would name a version hours off from the server's.
+  it("reads the store's naive-UTC timestamp as UTC, not local time", () => {
+    const version = { timestamp: "2026-10-14 22:07:53" } as SkillHistoryEntry;
 
-    expect(isCurrentSkillVersion(entry, "0.2.0")).toBe(false);
-    expect(isCurrentSkillVersion(entry, "0.1.0")).toBe(true);
+    expect(skillHistoryTimestamp(version)).toBe(
+      new Date("2026-10-14T22:07:53Z").toLocaleString(),
+    );
   });
 
   it("rejects install reentry until the active install settles", () => {

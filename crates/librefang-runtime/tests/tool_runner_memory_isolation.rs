@@ -267,6 +267,7 @@ impl HandsControl for IsolationKernel {}
 impl A2ARegistry for IsolationKernel {}
 impl ChannelSender for IsolationKernel {}
 impl PromptStore for IsolationKernel {}
+impl SkillHistory for IsolationKernel {}
 impl WorkflowRunner for IsolationKernel {}
 impl GoalControl for IsolationKernel {}
 impl ToolPolicy for IsolationKernel {}

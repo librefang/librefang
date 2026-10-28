@@ -181,6 +181,7 @@ impl SessionWriter for StubKernel {
 }
 impl AcpFsBridge for StubKernel {}
 impl AcpTerminalBridge for StubKernel {}
+impl SkillHistory for StubKernel {}
 
 #[test]
 fn stub_satisfies_kernel_handle_via_blanket_impl() {
@@ -214,7 +215,18 @@ fn role_traits_are_individually_object_safe() {
     let _tp: Arc<dyn ToolPolicy> = Arc::new(StubKernel);
     let _auth: Arc<dyn ApiAuth> = Arc::new(StubKernel);
     let _sw: Arc<dyn SessionWriter> = Arc::new(StubKernel);
+    let _sh: Arc<dyn SkillHistory> = Arc::new(StubKernel);
     let _cq: Arc<dyn CatalogQuery> = Arc::new(StubKernel);
+}
+
+/// The defaulted history method must accept a snapshot and report success
+/// without a store — non-kernel embedders and stubs keep compiling and a
+/// tool call that has no kernel wired loses the history row, never the write.
+#[test]
+fn skill_history_default_is_a_noop_success() {
+    let stub = StubKernel;
+    stub.record_skill_version("alpha", "toml", "prompt", "agent", "create")
+        .expect("the default impl must not fail");
 }
 
 #[test]

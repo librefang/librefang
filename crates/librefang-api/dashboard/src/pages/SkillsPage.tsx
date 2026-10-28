@@ -2,18 +2,20 @@ import { useQuery } from "@tanstack/react-query";
 import { formatDate } from "../lib/datetime";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
+import type { TFunction } from "i18next";
 import {
   type ClawHubBrowseItem,
   type FangHubSkill,
   type HandDefinitionItem,
   type SkillEvolutionMeta,
+  type SkillHistoryEntry,
   type SkillItem,
-  type SkillVersionEntry,
 } from "../api";
 import {
   useSkills,
   skillQueries,
   useSkillDetail,
+  useSkillHistory,
   useSupportingFile,
 } from "../lib/queries/skills";
 import { useHands } from "../lib/queries/hands";
@@ -31,10 +33,12 @@ import {
   useEvolveDeleteSkill,
   useEvolveWriteFile,
   useEvolveRemoveFile,
+  useRestoreSkillVersion,
   useProposeSkillToRegistry,
 } from "../lib/mutations/skills";
-import { CardSkeleton } from "../components/ui/Skeleton";
+import { CardSkeleton, ListSkeleton } from "../components/ui/Skeleton";
 import { EmptyState } from "../components/ui/EmptyState";
+import { ErrorState } from "../components/ui/ErrorState";
 import { Card } from "../components/ui/Card";
 import { Button } from "../components/ui/Button";
 import { Badge } from "../components/ui/Badge";
@@ -94,6 +98,7 @@ import {
   ExternalLink,
 } from "lucide-react";
 import { formatNumber } from "../lib/format";
+import { skillChangeSourceLabel } from "../lib/changeSource";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -207,11 +212,14 @@ export function canRollbackSkill(evolution: SkillEvolutionMeta): boolean {
   return evolution.mutation_count > 0;
 }
 
-export function isCurrentSkillVersion(
-  entry: SkillVersionEntry,
-  currentVersion: string,
-): boolean {
-  return entry.version === currentVersion;
+/**
+ * The store's timestamp is naive UTC in SQLite's `YYYY-MM-DD HH:MM:SS` shape,
+ * which `Date` only parses as local time — normalize to ISO before reading it
+ * as UTC. The history row label and the restore confirmation both read from
+ * this, so the dialog names the version the operator is looking at.
+ */
+export function skillHistoryTimestamp(version: SkillHistoryEntry): string {
+  return new Date(`${version.timestamp.replace(" ", "T")}Z`).toLocaleString();
 }
 
 export function tryStartInstall(
@@ -1201,7 +1209,7 @@ function SkillDetailModal({
   skillName: string | null;
   isOpen: boolean;
   onClose: () => void;
-  t: (key: string, opts?: Record<string, unknown>) => string;
+  t: TFunction;
 }) {
   const { addToast } = useUIStore();
   const { data: detail, isLoading, refetch } = useSkillDetail(skillName ?? "", {
@@ -1215,9 +1223,20 @@ function SkillDetailModal({
   const patchSkillMutation = useEvolvePatchSkill();
   const writeFileMutation = useEvolveWriteFile();
   const proposeMutation = useProposeSkillToRegistry();
+  const restoreVersionMutation = useRestoreSkillVersion();
+  const historyQuery = useSkillHistory(skillName ?? "", {
+    enabled: isOpen && !!skillName,
+  });
+  const historyVersions = historyQuery.data ?? [];
+  // Skills evolved before the version store shipped only have the legacy
+  // `.evolution.json` list in the detail payload. Fall back to it when the
+  // store has no rows, so pre-upgrade history does not disappear.
+  const legacyVersions = detail?.evolution?.versions ?? [];
+  const useLegacyHistory = historyVersions.length === 0 && legacyVersions.length > 0;
 
   const [pane, setPane] = useState<EvolvePane>("none");
   const [viewingFile, setViewingFile] = useState<string | null>(null);
+  const [expandedVersion, setExpandedVersion] = useState<number | null>(null);
   const [busy, setBusy] = useState(false);
   const [confirmAction, setConfirmAction] = useState<{
     title: string;
@@ -1229,6 +1248,7 @@ function SkillDetailModal({
     if (!isOpen) {
       setPane("none");
       setViewingFile(null);
+      setExpandedVersion(null);
       setConfirmAction(null);
     }
   }, [isOpen, skillName]);
@@ -1262,6 +1282,48 @@ function SkillDetailModal({
           () => rollbackMutation.mutateAsync({ name: skillName }),
           t("skills.evo_rolled_back", { defaultValue: "Skill rolled back" }),
         );
+      },
+    });
+  };
+
+  // Restoring a store version overwrites the skill's skill.toml and
+  // prompt_context.md on disk, and the snapshot the server records afterwards
+  // holds the restored content rather than what it replaced — so the click
+  // gets the same destructive confirmation step as Delete and Rollback, and
+  // the dialog names the version (timestamp + source) it is about to write.
+  const handleRestoreVersion = (version: SkillHistoryEntry) => {
+    if (!skillName) return;
+    setConfirmAction({
+      title: t("skills.evo_restore_title", { defaultValue: "Restore this version" }),
+      message: t("skills.evo_restore_confirm", {
+        defaultValue:
+          "Restore '{{name}}' to the version saved {{timestamp}} ({{source}})? This overwrites the skill's current skill.toml and prompt context; the restore itself is recorded as a new history entry.",
+        name: skillName,
+        timestamp: skillHistoryTimestamp(version),
+        source: skillChangeSourceLabel(t, version.change_source),
+      }),
+      onConfirm: () => {
+        const name = skillName;
+        setConfirmAction(null);
+        (async () => {
+          setBusy(true);
+          try {
+            await restoreVersionMutation.mutateAsync({ name, versionId: version.id });
+            addToast(
+              t("skills.evo_version_restored", { defaultValue: "Version restored" }),
+              "success",
+            );
+          } catch (e: unknown) {
+            addToast(
+              e instanceof Error
+                ? e.message
+                : t("skills.evo_restore_failed", { defaultValue: "Restore failed" }),
+              "error",
+            );
+          } finally {
+            setBusy(false);
+          }
+        })();
       },
     });
   };
@@ -1600,40 +1662,144 @@ function SkillDetailModal({
             </div>
           )}
 
-          {/* Version history */}
-          {detail.evolution.versions.length > 0 && (
-            <div>
-              <h3 className="text-xs font-bold uppercase text-text-dim mb-2">
-                <History className="w-3 h-3 inline mr-1" />
-                {t("skills.evo_history", { defaultValue: "Version History" })}
-              </h3>
-              <div className="space-y-2 max-h-48 overflow-y-auto">
-                {[...detail.evolution.versions].reverse().map((v) => (
+          {/* Version history (#8021) — the skill version store: every write
+              that changed this skill, newest first, each expandable to the
+              stored skill.toml + prompt context and restorable in place.
+              When the store has no rows (a skill last evolved before it
+              shipped), the legacy file-based `.evolution.json` list renders
+              instead — contentless but better than an empty drawer. Once the
+              store has rows it wins: two near-identical time-ordered lists
+              would only duplicate each other, and only the store's rows are
+              restorable. */}
+          <div>
+            <h3 className="text-xs font-bold uppercase text-text-dim mb-2">
+              <History className="w-3 h-3 inline mr-1" />
+              {t("skills.evo_history", { defaultValue: "Version History" })}
+            </h3>
+            {historyQuery.isLoading ? (
+              <ListSkeleton rows={3} />
+            ) : historyQuery.isError ? (
+              <ErrorState
+                message={t("skills.evo_history_load_err", {
+                  defaultValue: "Failed to load version history.",
+                })}
+                onRetry={() => void historyQuery.refetch()}
+              />
+            ) : useLegacyHistory ? (
+              <div className="space-y-2 max-h-72 overflow-y-auto">
+                {legacyVersions.map((v) => (
                   <div
-                    key={`${v.version}:${v.timestamp}`}
-                    className="flex items-start gap-3 px-3 py-2 rounded bg-surface-2 text-xs"
+                    key={`${v.version}-${v.timestamp}`}
+                    className="rounded-lg border border-border-subtle bg-surface-2 px-3 py-2 text-xs"
                   >
-                    <Badge
-                      variant={
-                        isCurrentSkillVersion(v, detail.version) ? "success" : "default"
-                      }
-                    >
-                      v{v.version}
-                    </Badge>
-                    <div className="flex-1 min-w-0">
-                      <p className="text-text-main">{v.changelog}</p>
-                      <p className="text-[10px] text-text-dim mt-0.5">
-                        {new Date(v.timestamp).toLocaleString()}
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="min-w-0">
+                        <span className="font-medium text-text-main">
+                          {new Date(v.timestamp).toLocaleString()}
+                        </span>
+                        <Badge variant="default" className="ml-2" title={v.version}>
+                          v{v.version}
+                        </Badge>
                         {v.author && (
-                          <span className="ml-2 font-mono">· {v.author}</span>
+                          <span className="ml-2 font-mono text-[10px] text-text-dim">
+                            {v.author}
+                          </span>
                         )}
-                      </p>
+                      </div>
                     </div>
+                    {v.changelog && (
+                      <p className="mt-1 text-[11px] text-text-dim">{v.changelog}</p>
+                    )}
                   </div>
                 ))}
               </div>
-            </div>
-          )}
+            ) : historyVersions.length === 0 ? (
+              <p className="text-xs text-text-dim py-2">
+                {t("skills.evo_history_empty", { defaultValue: "No version history yet" })}
+                {" — "}
+                {t("skills.evo_history_empty_desc", {
+                  defaultValue:
+                    "Snapshots are recorded whenever this skill is created, imported, or edited.",
+                })}
+              </p>
+            ) : (
+              <div className="space-y-2 max-h-72 overflow-y-auto">
+                {historyVersions.map((v) => (
+                  <div
+                    key={v.id}
+                    className="rounded-lg border border-border-subtle bg-surface-2 px-3 py-2 text-xs"
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="min-w-0">
+                        <span className="font-medium text-text-main">
+                          {skillHistoryTimestamp(v)}
+                        </span>
+                        <Badge variant="default" className="ml-2" title={v.change_source}>
+                          {skillChangeSourceLabel(t, v.change_source)}
+                        </Badge>
+                        {v.author && (
+                          <span className="ml-2 font-mono text-[10px] text-text-dim">
+                            {v.author}
+                          </span>
+                        )}
+                      </div>
+                      <div className="flex shrink-0 items-center gap-1">
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setExpandedVersion(expandedVersion === v.id ? null : v.id)
+                          }
+                          className="rounded-lg px-2 py-1 text-[11px] text-text-dim hover:bg-main/50 hover:text-text-main"
+                        >
+                          {expandedVersion === v.id
+                            ? t("common.collapse", { defaultValue: "Collapse" })
+                            : t("common.expand", { defaultValue: "Expand" })}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handleRestoreVersion(v)}
+                          disabled={busy}
+                          className="flex items-center gap-1 rounded-lg px-2 py-1 text-[11px] text-text-dim hover:bg-brand/10 hover:text-brand"
+                          title={t("skills.evo_restore_title", {
+                            defaultValue: "Restore this version",
+                          })}
+                        >
+                          <RotateCcw className="w-3 h-3" />
+                          {t("skills.evo_restore_btn", { defaultValue: "Restore" })}
+                        </button>
+                      </div>
+                    </div>
+                    {expandedVersion === v.id && (
+                      <div className="mt-2 space-y-2">
+                        <div>
+                          <p className="text-[10px] font-bold uppercase text-text-dim mb-1">
+                            {t("skills.evo_manifest", {
+                              defaultValue: "Manifest (skill.toml)",
+                            })}
+                          </p>
+                          <pre className="max-h-64 overflow-auto rounded border border-border-subtle bg-surface p-2 text-[11px] text-text-dim">
+                            {v.manifest_toml}
+                          </pre>
+                        </div>
+                        {v.prompt_context && (
+                          <div>
+                            <p className="text-[10px] font-bold uppercase text-text-dim mb-1">
+                              {t("skills.evo_prompt_context", {
+                                defaultValue: "Prompt Context (Markdown)",
+                              })}
+                            </p>
+                            <pre className="max-h-64 overflow-auto rounded border border-border-subtle bg-surface p-2 text-[11px] text-text-dim">
+                              {v.prompt_context}
+                            </pre>
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
 
           {/* Footer meta */}
           <div className="text-[10px] text-text-dim space-y-0.5 pt-2 border-t border-border">

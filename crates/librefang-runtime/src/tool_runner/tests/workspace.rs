@@ -413,6 +413,19 @@ pub(super) struct NamedWsKernel {
     pub(super) dedup_enabled: bool,
     /// ACP filesystem client returned for every test session.
     pub(super) acp_client: Option<Arc<dyn AcpFsClient>>,
+    /// When set, every `SkillHistory::record_skill_version` call is appended
+    /// here so a test can assert *what* crossed the trait boundary (#8021).
+    pub(super) skill_history: Option<Arc<std::sync::Mutex<Vec<SkillHistoryRecord>>>>,
+}
+
+/// One snapshot captured through [`NamedWsKernel::skill_history`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct SkillHistoryRecord {
+    pub skill_name: String,
+    pub manifest_toml: String,
+    pub prompt_context: String,
+    pub author: String,
+    pub source: String,
 }
 
 // ---- BEGIN role-trait impls (split from former `impl KernelHandle for NamedWsKernel`, #3746) ----
@@ -623,6 +636,30 @@ impl ApprovalGate for NamedWsKernel {}
 impl A2ARegistry for NamedWsKernel {}
 impl ChannelSender for NamedWsKernel {}
 impl PromptStore for NamedWsKernel {}
+impl SkillHistory for NamedWsKernel {
+    fn record_skill_version(
+        &self,
+        skill_name: &str,
+        manifest_toml: &str,
+        prompt_context: &str,
+        author: &str,
+        source: &str,
+    ) -> librefang_kernel_handle::KernelResult<()> {
+        if let Some(capture) = &self.skill_history {
+            capture
+                .lock()
+                .expect("skill history capture poisoned")
+                .push(SkillHistoryRecord {
+                    skill_name: skill_name.to_string(),
+                    manifest_toml: manifest_toml.to_string(),
+                    prompt_context: prompt_context.to_string(),
+                    author: author.to_string(),
+                    source: source.to_string(),
+                });
+        }
+        Ok(())
+    }
+}
 impl WorkflowRunner for NamedWsKernel {}
 impl GoalControl for NamedWsKernel {}
 impl librefang_kernel_handle::CatalogQuery for NamedWsKernel {}
@@ -685,6 +722,7 @@ pub(super) fn make_aliased_ws_kernel(
         download_dir: None,
         dedup_enabled: false,
         acp_client: None,
+        skill_history: None,
     })
 }
 
@@ -694,6 +732,7 @@ fn make_download_dir_kernel(download_dir: std::path::PathBuf) -> Arc<dyn KernelH
         download_dir: Some(download_dir),
         dedup_enabled: false,
         acp_client: None,
+        skill_history: None,
     })
 }
 
@@ -746,6 +785,7 @@ fn make_failing_acp_kernel(failure: AcpFsFailure) -> Arc<dyn KernelHandle> {
         download_dir: None,
         dedup_enabled: false,
         acp_client: Some(Arc::new(FailingAcpFsClient { failure })),
+        skill_history: None,
     })
 }
 

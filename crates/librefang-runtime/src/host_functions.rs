@@ -1773,6 +1773,7 @@ mod tests {
     impl librefang_kernel_handle::A2ARegistry for RecordingKernel {}
     impl librefang_kernel_handle::ChannelSender for RecordingKernel {}
     impl librefang_kernel_handle::PromptStore for RecordingKernel {}
+    impl librefang_kernel_handle::SkillHistory for RecordingKernel {}
     impl librefang_kernel_handle::WorkflowRunner for RecordingKernel {}
     impl librefang_kernel_handle::GoalControl for RecordingKernel {}
     impl librefang_kernel_handle::ToolPolicy for RecordingKernel {
