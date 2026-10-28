@@ -1660,8 +1660,10 @@ fn persist_session_summary(
 
     // Collision-free key: session id is unique per session. Pre-#4869
     // this was `session_{date}_{slug}` which silently overwrote across
-    // sessions ending with the same slugified user message.
-    let key = format!("session_{}", session_id.0);
+    // sessions ending with the same slugified user message. The compaction
+    // mirror has its own `compaction_summary_` namespace (#8645 review), so
+    // the two writers cannot overwrite or impersonate each other.
+    let key = librefang_memory::session_summary_key(&session_id);
     if let Err(e) =
         memory.structured_set(agent_id, &key, serde_json::Value::String(summary.clone()))
     {
@@ -2223,6 +2225,93 @@ mod reset_lock_and_tracker_tests {
             .get_session(session.id)
             .unwrap()
             .is_none());
+        kernel.shutdown();
+    }
+
+    /// A reset, a clear and a delete all reuse or remove the deterministic sid, and none of them
+    /// may leave the summaries of the cleared conversation behind (#8645 review).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn forgetting_a_conversation_also_forgets_its_summaries() {
+        let dir = tempfile::tempdir().unwrap();
+        let kernel = boot(&dir);
+
+        let seed = |agent_id: AgentId, sid: SessionId| {
+            kernel
+                .memory
+                .substrate
+                .store_llm_summary(
+                    agent_id,
+                    "summary of the cleared history",
+                    vec![Message::user("old")],
+                    Some(sid),
+                )
+                .unwrap();
+        };
+        let mirror = |agent_id: AgentId, sid: SessionId| {
+            kernel
+                .memory
+                .substrate
+                .structured_get(agent_id, &librefang_memory::compaction_summary_key(&sid))
+                .unwrap()
+        };
+        let summary = |agent_id: AgentId, sid: SessionId| {
+            kernel
+                .memory
+                .substrate
+                .canonical_context(agent_id, Some(sid), None)
+                .unwrap()
+                .0
+        };
+
+        // 1. `reset_one_session` recreates the SAME sid, so both the mirror and an owned
+        //    canonical summary would be read back as the fresh conversation's own.
+        let agent = spawn(&kernel, "forget-summaries-reset");
+        let sid = override_session(&kernel, agent).id;
+        seed(agent, sid);
+        assert_eq!(
+            summary(agent, sid).as_deref(),
+            Some("summary of the cleared history")
+        );
+        let entry = kernel.agents.registry.get(agent).expect("agent must exist");
+        kernel
+            .reset_one_session(agent, sid, &entry, false)
+            .await
+            .unwrap();
+        assert_eq!(
+            summary(agent, sid),
+            None,
+            "a reset must not leave the cleared conversation's canonical summary in the prompt"
+        );
+        assert_eq!(
+            mirror(agent, sid),
+            None,
+            "a reset must remove the compaction mirror"
+        );
+
+        // 2. `clear_agent_history` deletes the canonical row wholesale; the kv mirror has to
+        //    follow, or the dashboard listing still serves the wiped conversation.
+        let agent = spawn(&kernel, "forget-summaries-clear");
+        let sid = override_session(&kernel, agent).id;
+        seed(agent, sid);
+        kernel.clear_agent_history(agent).await.unwrap();
+        assert_eq!(
+            mirror(agent, sid),
+            None,
+            "clearing history must remove the compaction mirror"
+        );
+
+        // 3. `delete_session` removes the cascade rows; a reader of `kv_store` must not be able
+        //    to recover what #3548/#7991 removed from the session tables.
+        let agent = spawn(&kernel, "forget-summaries-delete");
+        let sid = override_session(&kernel, agent).id;
+        seed(agent, sid);
+        kernel.delete_session(sid).await.unwrap();
+        assert_eq!(
+            mirror(agent, sid),
+            None,
+            "deleting a session must remove the compaction mirror"
+        );
+
         kernel.shutdown();
     }
 

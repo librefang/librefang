@@ -48,7 +48,10 @@ pub use manifest_version_store::{ManifestVersionRow, ManifestVersionStore};
 pub use mcp_config_store::McpConfigStore;
 pub use passkey_store::{PasskeyRecord, PasskeyStore, PasskeyStoreError, SqlitePasskeyStore};
 pub use session_store::SessionStore;
-pub use substrate::{MemorySubstrate, TaskQueueCaps};
+pub use substrate::{
+    compaction_summary_key, session_summary_key, MemorySubstrate, TaskQueueCaps,
+    COMPACTION_SUMMARY_KEY_PREFIX, SESSION_SUMMARY_KEY_PREFIX,
+};
 pub use template_version_store::{TemplateVersionRow, TemplateVersionStore};
 pub use workflow_store::{WorkflowRunRow, WorkflowStore};
 

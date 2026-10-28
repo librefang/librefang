@@ -1,0 +1,4 @@
+Compaction summaries are now kept per session as well as per agent.
+A conversation keeps reading its own summary after another conversation on the same agent compacts — before, the agent-scoped `canonical_sessions` row held a single summary, so only the session that compacted last could read one and every other session lost its compressed history to the next compaction.
+The per-session copy lives in its own reserved key namespace, separate from the `session_` summaries the reset path writes, so a reset summary cannot be served to the next conversation as if it were a compaction summary.
+It is written by both compaction paths — the LLM one and the threshold-driven canonical one that normal turns take — and a reset, a clear or a delete removes it together with any canonical summary the removed conversation owned, while the `session_` keys agents already use are left untouched (#8646) (@nevgenov)
