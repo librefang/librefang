@@ -4,6 +4,7 @@
 //! moves to the next driver in the chain.
 
 use crate::drivers::fallback_chain::{exhaustion_reason_for, exhaustion_until_for};
+use crate::drivers::fallback_reasoning::{realign_reasoning, ReasoningResolver};
 use crate::llm_driver::{
     CompletionRequest, CompletionResponse, LlmDriver, LlmError, ProviderExhaustionDetail,
     StreamEvent,
@@ -39,6 +40,10 @@ pub struct FallbackDriver {
     /// and post-failure-mark logic runs alongside the EWMA reordering;
     /// `None` preserves the historical un-gated behaviour.
     exhaustion_store: Option<ProviderExhaustionStore>,
+    /// Catalog lookup used to re-resolve a fallback slot's reasoning policy
+    /// when `req.model` is rewritten (#8616 review). `None` keeps the
+    /// undeclared-policy behaviour of [`realign_reasoning`].
+    reasoning_resolver: Option<ReasoningResolver>,
 }
 
 struct DriverEntry {
@@ -101,6 +106,7 @@ impl FallbackDriver {
                 })
                 .collect(),
             exhaustion_store: None,
+            reasoning_resolver: None,
         }
     }
 
@@ -127,6 +133,7 @@ impl FallbackDriver {
                 })
                 .collect(),
             exhaustion_store: None,
+            reasoning_resolver: None,
         }
     }
 
@@ -157,6 +164,7 @@ impl FallbackDriver {
                 })
                 .collect(),
             exhaustion_store: None,
+            reasoning_resolver: None,
         }
     }
 
@@ -168,6 +176,18 @@ impl FallbackDriver {
     /// [`Self::set_provider_names`] are gated.
     pub fn with_exhaustion_store(mut self, store: ProviderExhaustionStore) -> Self {
         self.exhaustion_store = Some(store);
+        self
+    }
+
+    /// Attach a catalog lookup so a failover re-resolves the reasoning policy
+    /// (and echo policy) for the model the slot will actually call (#8616
+    /// review).
+    ///
+    /// Without it, [`realign_reasoning`] applies the undeclared policy: the
+    /// pre-#8591 rungs survive, and a rung only the primary model declared is
+    /// dropped instead of being forwarded to a different provider/model.
+    pub fn with_reasoning_resolver(mut self, resolver: ReasoningResolver) -> Self {
+        self.reasoning_resolver = Some(resolver);
         self
     }
 
@@ -377,6 +397,14 @@ impl LlmDriver for FallbackDriver {
             let mut req = request.clone();
             if !entry.model_name.is_empty() {
                 req.model = entry.model_name.clone();
+                // The primary model's reasoning policy/token describe a
+                // different model (#8616 review) — re-resolve them for this
+                // slot before the request leaves the wrapper.
+                realign_reasoning(
+                    &mut req,
+                    &entry.provider_name,
+                    self.reasoning_resolver.as_ref(),
+                );
             }
             if let Some(cap) = entry.max_tokens_cap {
                 req.max_tokens = req.max_tokens.min(cap);
@@ -465,6 +493,14 @@ impl LlmDriver for FallbackDriver {
             let mut req = request.clone();
             if !entry.model_name.is_empty() {
                 req.model = entry.model_name.clone();
+                // The primary model's reasoning policy/token describe a
+                // different model (#8616 review) — re-resolve them for this
+                // slot before the request leaves the wrapper.
+                realign_reasoning(
+                    &mut req,
+                    &entry.provider_name,
+                    self.reasoning_resolver.as_ref(),
+                );
             }
             if let Some(cap) = entry.max_tokens_cap {
                 req.max_tokens = req.max_tokens.min(cap);
@@ -1631,5 +1667,161 @@ mod tests {
 
         let err = fb.complete(test_request()).await.unwrap_err();
         assert!(matches!(err, LlmError::Api { status: 500, .. }));
+    }
+
+    /// #8616 review: a failover rewrites `req.model`, so a rung that only the
+    /// primary model declared must not travel to a different provider/model.
+    /// Without a catalog resolver the undeclared policy applies: the four
+    /// pre-#8591 rungs survive, `xhigh` is dropped so the fallback keeps its
+    /// provider default, and the primary's echo policy is reset.
+    #[tokio::test]
+    async fn failover_drops_a_rung_only_the_primary_model_declared() {
+        use librefang_types::config::{ReasoningEffortPolicy, ReasoningMode, ThinkingConfig};
+        use librefang_types::model_catalog::ReasoningEchoPolicy;
+
+        let fallback = Arc::new(RecordingOkDriver::default());
+        let fb = FallbackDriver::with_models_and_providers(vec![
+            (
+                Arc::new(FailDriver) as Arc<dyn LlmDriver>,
+                String::new(),
+                "primary".to_string(),
+            ),
+            (
+                fallback.clone() as Arc<dyn LlmDriver>,
+                "fallback-model".to_string(),
+                "fallback".to_string(),
+            ),
+        ]);
+
+        let primary_policy = ReasoningEffortPolicy {
+            supported_efforts: ["minimal", "low", "medium", "high", "xhigh"]
+                .iter()
+                .map(|t| (*t).to_string())
+                .collect(),
+            ..Default::default()
+        };
+        let mut req = CompletionRequest {
+            model: "primary-model".to_string(),
+            thinking: Some(ThinkingConfig {
+                reasoning_effort: Some(ReasoningMode::new("xhigh").unwrap()),
+                ..Default::default()
+            }),
+            reasoning_policy: primary_policy.clone(),
+            reasoning_echo_policy: ReasoningEchoPolicy::Echo,
+            ..Default::default()
+        };
+        req.model = "primary-model".to_string();
+
+        fb.complete(req).await.expect("the fallback slot serves");
+
+        let seen = fallback.seen();
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0].model, "fallback-model");
+        assert_eq!(
+            seen[0]
+                .thinking
+                .as_ref()
+                .and_then(|t| t.reasoning_effort.as_ref())
+                .map(|m| m.as_str()),
+            None,
+            "xhigh must not be forwarded to a model that never declared it",
+        );
+        assert_eq!(
+            seen[0].reasoning_policy,
+            ReasoningEffortPolicy::default(),
+            "the primary's declared set must not leak to the fallback",
+        );
+        assert_eq!(
+            seen[0].reasoning_echo_policy,
+            ReasoningEchoPolicy::None,
+            "the primary's echo policy describes another wire format",
+        );
+
+        // A pre-#8591 rung is safe everywhere and survives the switch.
+        let mut req = CompletionRequest {
+            model: "primary-model".to_string(),
+            thinking: Some(ThinkingConfig {
+                reasoning_effort: Some(ReasoningMode::high()),
+                ..Default::default()
+            }),
+            reasoning_policy: primary_policy.clone(),
+            ..Default::default()
+        };
+        req.model = "primary-model".to_string();
+        fb.complete(req).await.expect("the fallback slot serves");
+        let seen = fallback.seen();
+        assert_eq!(
+            seen.last()
+                .unwrap()
+                .thinking
+                .as_ref()
+                .and_then(|t| t.reasoning_effort.as_ref())
+                .map(|m| m.as_str()),
+            Some("high"),
+            "a legacy rung every driver can spell keeps travelling",
+        );
+    }
+
+    /// With a catalog resolver attached, the fallback slot's own declared set
+    /// coerces the token instead of dropping it, and its echo policy replaces
+    /// the primary's.
+    #[tokio::test]
+    async fn failover_reresolves_the_policy_from_the_catalog() {
+        use librefang_types::config::{ReasoningEffortPolicy, ReasoningMode, ThinkingConfig};
+        use librefang_types::model_catalog::ReasoningEchoPolicy;
+
+        let fallback = Arc::new(RecordingOkDriver::default());
+        let resolver: ReasoningResolver = Arc::new(|provider: &str, model: &str| {
+            assert_eq!(provider, "fallback");
+            assert_eq!(model, "fallback-model");
+            (
+                ReasoningEffortPolicy {
+                    supported_efforts: vec!["low".to_string(), "high".to_string()],
+                    ..Default::default()
+                },
+                ReasoningEchoPolicy::Strip,
+            )
+        });
+        let fb = FallbackDriver::with_models_and_providers(vec![
+            (
+                Arc::new(FailDriver) as Arc<dyn LlmDriver>,
+                String::new(),
+                "primary".to_string(),
+            ),
+            (
+                fallback.clone() as Arc<dyn LlmDriver>,
+                "fallback-model".to_string(),
+                "fallback".to_string(),
+            ),
+        ])
+        .with_reasoning_resolver(resolver);
+
+        let req = CompletionRequest {
+            model: "primary-model".to_string(),
+            thinking: Some(ThinkingConfig {
+                reasoning_effort: Some(ReasoningMode::new("xhigh").unwrap()),
+                ..Default::default()
+            }),
+            reasoning_echo_policy: ReasoningEchoPolicy::Echo,
+            ..Default::default()
+        };
+
+        fb.complete(req).await.expect("the fallback slot serves");
+
+        let seen = fallback.seen();
+        assert_eq!(
+            seen[0]
+                .thinking
+                .as_ref()
+                .and_then(|t| t.reasoning_effort.as_ref())
+                .map(|m| m.as_str()),
+            Some("high"),
+            "xhigh must be coerced to the fallback model's nearest rung",
+        );
+        assert_eq!(seen[0].reasoning_echo_policy, ReasoningEchoPolicy::Strip);
+        assert_eq!(
+            seen[0].reasoning_policy.supported_efforts,
+            vec!["low".to_string(), "high".to_string()],
+        );
     }
 }

@@ -1,11 +1,17 @@
 //! Model catalog types — shared data structures for the model registry.
 
+use crate::config::{ReasoningEffortPolicy, ReasoningMode};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
 
 fn default_true() -> bool {
     true
+}
+
+/// Serde helper: skip a boolean field when it holds the `true` default.
+fn is_true(v: &bool) -> bool {
+    *v
 }
 
 /// A model's capability tier.
@@ -264,6 +270,44 @@ pub struct ModelCatalogEntry {
     /// See [`ReasoningEchoPolicy`] for the four cases.
     #[serde(default)]
     pub reasoning_echo_policy: ReasoningEchoPolicy,
+    /// The reasoning-effort tokens this model accepts, verbatim (#8591).
+    ///
+    /// The level an operator pins (`thinking.reasoning_effort` / the per-session
+    /// and per-message overrides) travels as an open token, and this list is
+    /// the per-model vocabulary that makes the open set meaningful: **it is
+    /// authoritative** — a UI offers only these (plus `none` when
+    /// [`Self::off_allowed`]) and a driver never sends a token outside it.
+    /// A request outside it is coerced to the nearest supported rung with a
+    /// warning, not 400-ed.
+    ///
+    /// Absent (`[]`) means "the model published nothing", and the identifier
+    /// keeps its pre-#8591 behaviour: the four legacy tokens translate through
+    /// the family's old spelling (including the `max` → `high` / `xhigh`
+    /// folds), because every pin written before #8591 was written against
+    /// those. It is *not* an offer of `xhigh` or `minimal` — an undeclared
+    /// model is an unknown model.
+    ///
+    /// Budget-based families (Gemini 2.5, older Anthropic, Qwen's budget
+    /// control) declare nothing and keep `budget_tokens` as their control; the
+    /// enum and a budget are never emitted in parallel.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub supported_efforts: Vec<String>,
+    /// The model's own default effort rung, when the provider publishes one
+    /// (#8591). Informational for selection surfaces; absence at request time
+    /// still means "provider default", and this value is not injected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_effort: Option<String>,
+    /// Whether reasoning may be turned off (`none`) on this model (#8591).
+    /// `false` removes `none` from the offer and coerces a requested `none` to
+    /// the lowest supported rung.
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub off_allowed: bool,
+    /// Whether reasoning is mandatory on this model (#8591) — the model always
+    /// reasons, so `none` is not offered. Same effect as `off_allowed = false`
+    /// on the offer and the coercion; kept distinct because the wire reasons
+    /// differ (no off toggle at all vs. an always-on model).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub mandatory: bool,
     /// Aliases for this model (e.g. ["sonnet", "claude-sonnet"]).
     #[serde(default)]
     pub aliases: Vec<String>,
@@ -349,6 +393,23 @@ impl ModelCatalogEntry {
         )
     }
 
+    /// The reasoning-effort policy this model advertises (#8591).
+    ///
+    /// A value type carrying the four declaration fields, so callers hand one
+    /// thing around instead of four. An empty `supported_efforts` (and no
+    /// `default_effort`) is the **undeclared** state: selection surfaces load
+    /// nothing for it and drivers keep the legacy wire spelling. The operator's
+    /// `model_overrides.json` layer is applied by
+    /// `ModelCatalog::effective_reasoning_policy`, not here.
+    pub fn reasoning_policy(&self) -> ReasoningEffortPolicy {
+        ReasoningEffortPolicy {
+            supported_efforts: self.supported_efforts.clone(),
+            default_effort: self.default_effort.clone(),
+            off_allowed: self.off_allowed,
+            mandatory: self.mandatory,
+        }
+    }
+
     /// Modality-aware schema check applied after TOML deserialization.
     ///
     /// `context_window` and `max_output_tokens` use `#[serde(default)]` so
@@ -357,6 +418,11 @@ impl ModelCatalogEntry {
     /// missing those fields would silently load with `0` and propagate that
     /// `0` into compaction thresholds and budget math downstream. Catalog
     /// loaders MUST call this and reject entries that fail.
+    ///
+    /// The reasoning-effort declaration is validated here too (#8616 review):
+    /// every `supported_efforts` entry and `default_effort` must be a
+    /// structurally valid [`ReasoningMode`] token, because both are written to
+    /// the provider wire verbatim.
     pub fn validate(&self) -> Result<(), String> {
         if self.modality == Modality::Text {
             if self.context_window == 0 {
@@ -371,6 +437,27 @@ impl ModelCatalogEntry {
                     self.provider, self.id
                 ));
             }
+        }
+        // The reasoning-effort declaration is operator/catalog data that ends
+        // up on the wire verbatim (#8591). A token that cannot be carried —
+        // `"high effort"`, `"high low"`, an empty string — must be rejected at
+        // ingress rather than surfacing later as a malformed provider request
+        // (#8616 review).
+        for token in &self.supported_efforts {
+            ReasoningMode::new(token.clone()).map_err(|e| {
+                format!(
+                    "model {}/{} declares an invalid supported_efforts entry {token:?}: {e}",
+                    self.provider, self.id
+                )
+            })?;
+        }
+        if let Some(token) = &self.default_effort {
+            ReasoningMode::new(token.clone()).map_err(|e| {
+                format!(
+                    "model {}/{} declares an invalid default_effort {token:?}: {e}",
+                    self.provider, self.id
+                )
+            })?;
         }
         Ok(())
     }
@@ -398,6 +485,10 @@ impl Default for ModelCatalogEntry {
             supports_streaming: false,
             supports_thinking: false,
             reasoning_echo_policy: ReasoningEchoPolicy::default(),
+            supported_efforts: Vec::new(),
+            default_effort: None,
+            off_allowed: true,
+            mandatory: false,
             aliases: Vec::new(),
         }
     }
@@ -517,6 +608,31 @@ pub struct ModelOverrides {
     /// `None` defers to the catalog entry; `Some(n)` with `n > 0` wins over it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_output_tokens: Option<u64>,
+    /// Operator override for the model's declared reasoning-effort policy
+    /// (#8591), field by field.
+    ///
+    /// `supported_efforts` replaces the entry's set wherever the *effective*
+    /// policy is read — the kernel's coercion and any selection surface — so an
+    /// operator can teach LibreFang a gateway model's rungs
+    /// (`["minimal", "low", "medium", "high", "xhigh"]`) without waiting for a
+    /// release. `Some(vec![])` is a declaration too: "no effort enum", which
+    /// keeps the model on `budget_tokens`. `None` defers to the entry.
+    /// `default_effort`, `off_allowed` and `mandatory` override their entry
+    /// counterparts individually.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub supported_efforts: Option<Vec<String>>,
+    /// Operator override for the model's default effort rung. See
+    /// [`ModelCatalogEntry::default_effort`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_effort: Option<String>,
+    /// Operator override for whether reasoning may be turned off. See
+    /// [`ModelCatalogEntry::off_allowed`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub off_allowed: Option<bool>,
+    /// Operator override for whether reasoning is mandatory. See
+    /// [`ModelCatalogEntry::mandatory`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mandatory: Option<bool>,
 }
 
 impl ModelOverrides {
@@ -541,6 +657,62 @@ impl ModelOverrides {
             && self.supports_thinking.is_none()
             && self.context_window.is_none()
             && self.max_output_tokens.is_none()
+            // Present-but-empty is a declaration (`Some(vec![])`), not an
+            // absence, so this checks the Options and not the Vectors (#8591).
+            && self.supported_efforts.is_none()
+            && self.default_effort.is_none()
+            && self.off_allowed.is_none()
+            && self.mandatory.is_none()
+    }
+
+    /// Validate the four reasoning-policy overrides (#8616 review).
+    ///
+    /// `supported_efforts` and `default_effort` travel to the provider wire
+    /// verbatim, so a structurally invalid token (`"high effort"`, an empty
+    /// string) has no possible wire spelling. Callers that own an HTTP request
+    /// turn this into a 400; the `model_overrides.json` loader sanitizes
+    /// instead of failing the whole file.
+    pub fn validate_reasoning(&self) -> Result<(), String> {
+        if let Some(efforts) = &self.supported_efforts {
+            for token in efforts {
+                ReasoningMode::new(token.clone()).map_err(|e| {
+                    format!("supported_efforts entry {token:?} is not a valid reasoning token: {e}")
+                })?;
+            }
+        }
+        if let Some(token) = &self.default_effort {
+            ReasoningMode::new(token.clone()).map_err(|e| {
+                format!("default_effort {token:?} is not a valid reasoning token: {e}")
+            })?;
+        }
+        Ok(())
+    }
+
+    /// Drop structurally invalid reasoning tokens in place, returning what was
+    /// dropped so the caller can warn (#8616 review).
+    ///
+    /// Used by the `model_overrides.json` loader: the file is hand-editable, so
+    /// one bad token must not discard the operator's unrelated tuning (and
+    /// must not fail the whole catalog load). An invalid `default_effort`
+    /// clears the field, deferring to the entry's own default.
+    pub fn sanitize_reasoning(&mut self) -> Vec<String> {
+        let mut dropped = Vec::new();
+        if let Some(efforts) = self.supported_efforts.as_mut() {
+            efforts.retain(|token| {
+                let valid = ReasoningMode::new(token.clone()).is_ok();
+                if !valid {
+                    dropped.push(token.clone());
+                }
+                valid
+            });
+        }
+        if let Some(token) = self.default_effort.as_ref() {
+            if ReasoningMode::new(token.clone()).is_err() {
+                dropped.push(token.clone());
+                self.default_effort = None;
+            }
+        }
+        dropped
     }
 }
 
@@ -1675,6 +1847,68 @@ aliases = []
         assert_eq!(entry.reasoning_echo_policy, ReasoningEchoPolicy::None);
     }
 
+    /// Refs #8591. The per-model reasoning policy is catalog data: an entry
+    /// that declares it parses all four fields, an entry that omits them stays
+    /// undeclared (empty set, no default, `off_allowed = true`), and none of
+    /// the fields is serialized when undeclared so a discovery round trip does
+    /// not invent a declaration.
+    #[test]
+    fn test_model_catalog_entry_parses_reasoning_policy_from_toml() {
+        let toml_str = r#"
+            id = "qwen3.8-gateway"
+            display_name = "Qwen3.8 via gateway"
+            tier = "balanced"
+            context_window = 131072
+            max_output_tokens = 16384
+            input_cost_per_m = 0.0
+            output_cost_per_m = 0.0
+            supported_efforts = ["low", "medium", "high", "xhigh"]
+            default_effort = "medium"
+            off_allowed = false
+        "#;
+        let entry: ModelCatalogEntry = toml::from_str(toml_str).expect("valid toml");
+        assert_eq!(
+            entry.supported_efforts,
+            vec!["low", "medium", "high", "xhigh"],
+        );
+        assert_eq!(entry.default_effort.as_deref(), Some("medium"));
+        assert!(!entry.off_allowed);
+        assert!(!entry.mandatory);
+        let policy = entry.reasoning_policy();
+        assert!(policy.is_declared());
+        assert!(!policy.none_allowed());
+
+        // An entry that declares nothing keeps an empty policy, and none of
+        // the policy fields survives serialization.
+        let bare: ModelCatalogEntry = toml::from_str(
+            r#"
+            id = "plain"
+            display_name = "Plain"
+            tier = "balanced"
+            context_window = 8192
+            max_output_tokens = 2048
+            input_cost_per_m = 0.0
+            output_cost_per_m = 0.0
+        "#,
+        )
+        .expect("valid toml");
+        let policy = bare.reasoning_policy();
+        assert!(!policy.is_declared());
+        assert!(policy.off_allowed, "off defaults to allowed");
+        let json = serde_json::to_string(&bare).expect("serialize");
+        for key in [
+            "supported_efforts",
+            "default_effort",
+            "off_allowed",
+            "mandatory",
+        ] {
+            assert!(
+                !json.contains(key),
+                "{key} must not serialize when unset: {json}"
+            );
+        }
+    }
+
     /// Refs #7774. A `model_overrides.json` written before the capacity-limit
     /// fields existed must keep parsing, and must not acquire a limit override
     /// it never asked for — the whole backward-compatibility contract of this
@@ -1705,6 +1939,51 @@ aliases = []
         };
         assert!(!max_out_only.is_empty());
         assert!(ModelOverrides::default().is_empty());
+    }
+
+    /// Refs #8591. A reasoning-policy override is an override even when the
+    /// set is empty — `Some(vec![])` declares "no effort enum" and must
+    /// survive `set_overrides`'s `is_empty` pruning — and none of the policy
+    /// keys may serialize for a document that did not set them.
+    #[test]
+    fn a_supported_efforts_override_alone_is_not_an_empty_override_set() {
+        let declared = ModelOverrides {
+            supported_efforts: Some(vec!["minimal".to_string(), "xhigh".to_string()]),
+            ..Default::default()
+        };
+        assert!(!declared.is_empty());
+
+        let declared_none = ModelOverrides {
+            supported_efforts: Some(Vec::new()),
+            ..Default::default()
+        };
+        assert!(
+            !declared_none.is_empty(),
+            "Some([]) is a declaration, not an absence",
+        );
+
+        let flags_only = ModelOverrides {
+            off_allowed: Some(false),
+            ..Default::default()
+        };
+        assert!(!flags_only.is_empty());
+        let mandatory_only = ModelOverrides {
+            mandatory: Some(true),
+            ..Default::default()
+        };
+        assert!(!mandatory_only.is_empty());
+
+        let absent = ModelOverrides::default();
+        assert!(absent.is_empty());
+        let json = serde_json::to_string(&absent).expect("serialize");
+        for key in [
+            "supported_efforts",
+            "default_effort",
+            "off_allowed",
+            "mandatory",
+        ] {
+            assert!(!json.contains(key), "{key} must not serialize: {json}");
+        }
     }
 
     /// Refs #7774. Absent limits stay absent on the wire: the dashboard reads

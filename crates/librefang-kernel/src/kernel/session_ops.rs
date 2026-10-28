@@ -579,7 +579,7 @@ impl LibreFangKernel {
             context_window_tokens: 0,
             label: None,
             model_override: None,
-
+            reasoning_effort: None,
             messages_generation: 0,
             last_repaired_generation: None,
             peer_id: None,
@@ -1016,7 +1016,7 @@ impl LibreFangKernel {
             context_window_tokens: export.context_window_tokens,
             label: export.label,
             model_override: None,
-
+            reasoning_effort: None,
             messages_generation: 0,
             last_repaired_generation: None,
             peer_id: None,

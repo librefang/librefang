@@ -218,6 +218,80 @@ fn test_find_model_for_provider_alias_is_scoped() {
     );
 }
 
+/// #8616 review (R1): a failover must not borrow a same-id entry from another
+/// provider. The catalog has only `openai:m`; `find_model_for_manifest`'s
+/// provider-blind tail returns it for `customgw:m`, which is why the failover
+/// resolver uses the strict lookup instead.
+#[test]
+fn test_find_model_for_failover_is_strictly_provider_scoped() {
+    let catalog = ModelCatalog::from_entries(
+        vec![ModelCatalogEntry {
+            id: "m".to_string(),
+            display_name: "M".to_string(),
+            provider: "openai".to_string(),
+            tier: ModelTier::Smart,
+            context_window: 128_000,
+            max_output_tokens: 8_192,
+            supported_efforts: vec!["low".to_string(), "xhigh".to_string()],
+            ..Default::default()
+        }],
+        vec![],
+    );
+
+    // Documents the leak the strict lookup exists to prevent.
+    assert_eq!(
+        catalog
+            .find_model_for_manifest("customgw", "m")
+            .map(|e| e.provider.as_str()),
+        Some("openai"),
+        "the manifest lookup is provider-blind by design; do not use it for failover"
+    );
+
+    // Strict: exact provider+model resolves, a provider miss is undeclared.
+    assert_eq!(
+        catalog
+            .find_model_for_failover("openai", "m")
+            .map(|e| e.id.as_str()),
+        Some("m")
+    );
+    assert!(
+        catalog.find_model_for_failover("customgw", "m").is_none(),
+        "a provider miss must not borrow another provider's entry"
+    );
+    // An empty provider cannot be scoped and keeps the legacy match.
+    assert!(catalog.find_model_for_failover("", "m").is_some());
+}
+
+/// The `{provider}/{model}` id form is still reconciled, so catalogs that key
+/// prefixed ids (OpenRouter) resolve under the strict lookup too.
+#[test]
+fn test_find_model_for_failover_reconciles_a_prefixed_catalog_id() {
+    let catalog = ModelCatalog::from_entries(
+        vec![ModelCatalogEntry {
+            id: "openrouter/tencent/hy3:free".to_string(),
+            display_name: "Tencent HY3 (free)".to_string(),
+            provider: "openrouter".to_string(),
+            tier: ModelTier::Smart,
+            context_window: 262_144,
+            ..Default::default()
+        }],
+        vec![],
+    );
+
+    assert_eq!(
+        catalog
+            .find_model_for_failover("openrouter", "tencent/hy3:free")
+            .map(|e| e.context_window),
+        Some(262_144)
+    );
+    assert!(catalog
+        .find_model_for_failover("openrouter", "openrouter/tencent/hy3:free")
+        .is_some());
+    assert!(catalog
+        .find_model_for_failover("othergw", "tencent/hy3:free")
+        .is_none());
+}
+
 /// #6423: OpenRouter live catalog entries are keyed `openrouter/{raw_id}`, but
 /// the dashboard model-picker (`set_agent_model`) strips the `{provider}/`
 /// prefix before persisting the manifest model. `find_model_for_manifest` must
@@ -2531,6 +2605,63 @@ fn test_alibaba_coding_plan_all_models_support_tools() {
     }
 }
 
+/// Refs #8591. The operator's `model_overrides.json` policy wins field by
+/// field over the entry's declaration — including an explicit empty set, which
+/// declares "no effort enum" — and absent fields defer to the entry.
+#[test]
+fn effective_reasoning_policy_override_wins_field_by_field() {
+    let mut catalog = test_catalog();
+    let mut entry = catalog.find_model("claude-sonnet-4-6").unwrap().clone();
+    entry.supported_efforts = vec!["low".to_string(), "high".to_string()];
+    entry.default_effort = Some("low".to_string());
+    let key = format!("{}:{}", entry.provider, entry.id);
+
+    // No override: the entry's own declaration, untouched.
+    let policy = catalog.effective_reasoning_policy(&entry);
+    assert_eq!(policy.supported_efforts, vec!["low", "high"]);
+    assert_eq!(policy.default_effort.as_deref(), Some("low"));
+    assert!(policy.off_allowed && !policy.mandatory);
+
+    // An override replaces the set wholesale (widening a gateway model's
+    // rungs) and can flip the off flags without touching the set.
+    catalog.set_overrides(
+        key.clone(),
+        ModelOverrides {
+            supported_efforts: Some(vec!["minimal".to_string(), "xhigh".to_string()]),
+            off_allowed: Some(false),
+            mandatory: Some(true),
+            ..Default::default()
+        },
+    );
+    let policy = catalog.effective_reasoning_policy(&entry);
+    assert_eq!(policy.supported_efforts, vec!["minimal", "xhigh"]);
+    assert_eq!(
+        policy.default_effort.as_deref(),
+        Some("low"),
+        "an untouched field still defers to the entry",
+    );
+    assert!(!policy.off_allowed);
+    assert!(policy.mandatory);
+
+    // `Some(vec![])` declares "budget-controlled", not "inherit".
+    catalog.set_overrides(
+        key,
+        ModelOverrides {
+            supported_efforts: Some(Vec::new()),
+            ..Default::default()
+        },
+    );
+    let policy = catalog.effective_reasoning_policy(&entry);
+    assert!(
+        policy.supported_efforts.is_empty(),
+        "an explicit empty declaration must win over the entry",
+    );
+    assert!(
+        !policy.is_declared(),
+        "the empty override is itself the declaration that this model has no enum",
+    );
+}
+
 /// Refs #4745. With no override, effective capabilities equal the catalog
 /// entry's declared values byte-for-byte.
 #[test]
@@ -3009,6 +3140,81 @@ fn load_overrides_keeps_existing_on_parse_failure() {
         catalog.get_overrides(&key).is_some(),
         "a malformed overrides.json must not silently drop existing overrides (#5137)"
     );
+}
+
+/// #8616 review: the reasoning tokens in a hand-edited `model_overrides.json`
+/// go to the provider wire verbatim, so an unspellable one is dropped with a
+/// warning instead of panicking or failing the whole file. The operator's
+/// unrelated tuning in the same entry survives.
+#[test]
+fn load_overrides_drops_invalid_reasoning_tokens_without_panicking() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("overrides.json");
+    std::fs::write(
+        &path,
+        serde_json::json!({
+            "openai:gpt-4o-mini": {
+                "temperature": 0.3,
+                "supported_efforts": ["low", "extra high", "high low"],
+                "default_effort": "high low"
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let mut catalog = test_catalog();
+    catalog.load_overrides(&path);
+
+    let overrides = catalog
+        .get_overrides("openai:gpt-4o-mini")
+        .expect("the entry, and the fields around the bad token, survive");
+    assert_eq!(overrides.temperature, Some(0.3));
+    assert_eq!(
+        overrides.supported_efforts,
+        Some(vec!["low".to_string()]),
+        "only the structurally invalid tokens are dropped"
+    );
+    assert_eq!(
+        overrides.default_effort, None,
+        "an invalid default defers to the catalog entry"
+    );
+}
+
+/// A catalog entry carries the same declaration, so it is rejected at load
+/// time rather than skipped silently: the error names the offending token.
+#[test]
+fn a_catalog_entry_with_an_invalid_reasoning_token_is_rejected() {
+    let base = ModelCatalogEntry {
+        id: "gateway-model".to_string(),
+        display_name: "Gateway model".to_string(),
+        provider: "openai".to_string(),
+        context_window: 64_000,
+        max_output_tokens: 8_192,
+        ..Default::default()
+    };
+    assert!(base.clone().validate().is_ok());
+
+    let wide = ModelCatalogEntry {
+        supported_efforts: vec!["low".to_string(), "high".to_string()],
+        default_effort: Some("low".to_string()),
+        ..base.clone()
+    };
+    assert!(wide.validate().is_ok());
+
+    let bad_set = ModelCatalogEntry {
+        supported_efforts: vec!["extra high".to_string()],
+        ..base.clone()
+    };
+    let err = bad_set.validate().expect_err("must be rejected");
+    assert!(err.contains("extra high"), "{err}");
+
+    let bad_default = ModelCatalogEntry {
+        default_effort: Some("high low".to_string()),
+        ..base
+    };
+    let err = bad_default.validate().expect_err("must be rejected");
+    assert!(err.contains("high low"), "{err}");
 }
 
 #[test]

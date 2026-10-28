@@ -704,6 +704,57 @@ describe("ModelsPage", () => {
     );
   });
 
+  // Refs #8616: `PUT /api/models/overrides/{id}` replaces the whole document,
+  // so a save that edits an unrelated field must write the four reasoning
+  // policy fields back instead of clearing them.
+  it("preserves the reasoning-policy overrides when saving an unrelated field", async () => {
+    useModelOverridesMock.mockReturnValue(
+      makeQuery({
+        supported_efforts: ["minimal", "low", "high", "xhigh"],
+        default_effort: "low",
+        off_allowed: false,
+        mandatory: true,
+      }),
+    );
+    setLoaded();
+    const { update } = setMutationDefaults();
+    renderPage();
+    fireEvent.click(screen.getAllByTitle("models.settings_title")[0]);
+
+    fireEvent.click(within(ladderFor("model_param.top_k")).getByRole("button", { name: "40" }));
+    fireEvent.click(screen.getByRole("button", { name: "common.save" }));
+
+    await waitFor(() => expect(update.mutateAsync).toHaveBeenCalled());
+    expect(update.mutateAsync.mock.calls[0][0].overrides).toEqual(
+      expect.objectContaining({
+        top_k: 40,
+        supported_efforts: ["minimal", "low", "high", "xhigh"],
+        default_effort: "low",
+        off_allowed: false,
+        mandatory: true,
+      }),
+    );
+  });
+
+  // An empty `supported_efforts` is a declaration ("no effort enum"), not the
+  // same thing as inheriting the catalog entry; the save must keep it.
+  it("preserves an explicit empty supported_efforts declaration", async () => {
+    useModelOverridesMock.mockReturnValue(
+      makeQuery({ supported_efforts: [] as string[] }),
+    );
+    setLoaded();
+    const { update } = setMutationDefaults();
+    renderPage();
+    fireEvent.click(screen.getAllByTitle("models.settings_title")[0]);
+    fireEvent.click(screen.getByRole("button", { name: "common.save" }));
+
+    await waitFor(() => expect(update.mutateAsync).toHaveBeenCalled());
+    expect(update.mutateAsync.mock.calls[0][0].overrides).toHaveProperty(
+      "supported_efforts",
+      [],
+    );
+  });
+
   // Entering custom from inherit used to emit the smallest rung, which flipped
   // the override on and armed Save with a number nobody picked.
   it("does not enable an override merely by opening the custom field", async () => {

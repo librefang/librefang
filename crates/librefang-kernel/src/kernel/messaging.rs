@@ -723,6 +723,7 @@ impl LibreFangKernel {
             context_window_tokens: 0,
             label: Some("ephemeral /btw".to_string()),
             model_override: None,
+            reasoning_effort: None,
             messages_generation: 0,
             last_repaired_generation: None,
             peer_id: None,
@@ -1943,6 +1944,42 @@ impl LibreFangKernel {
         .await
     }
 
+    /// Streaming entry point for the WebSocket chat (#8591): the sibling of
+    /// [`Self::send_message_streaming_with_sender_context_routing_thinking_and_session`]
+    /// that also carries the frame's open-vocabulary `reasoning_effort` token.
+    ///
+    /// Kept as a separate entry point rather than widening the existing
+    /// signature so callers that only know the boolean toggle (the channel
+    /// bridge's `/think` preference, #7140) are untouched. The two per-call
+    /// keys collapse through [`librefang_types::config::ThinkingOverride::resolve`],
+    /// so `reasoning_effort` wins over `thinking` exactly as it does on the HTTP
+    /// message routes.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn send_message_streaming_with_reasoning_effort(
+        self: &Arc<Self>,
+        agent_id: AgentId,
+        message: &str,
+        kernel_handle: Option<Arc<dyn KernelHandle>>,
+        sender: &SenderContext,
+        thinking_override: Option<bool>,
+        reasoning_effort: Option<librefang_types::config::ReasoningMode>,
+        session_id_override: Option<SessionId>,
+    ) -> KernelResult<(
+        tokio::sync::mpsc::Receiver<StreamEvent>,
+        tokio::task::JoinHandle<KernelResult<AgentLoopResult>>,
+    )> {
+        let handle = kernel_handle.unwrap_or_else(|| self.kernel_handle());
+        self.send_message_streaming_resolved(
+            agent_id,
+            message,
+            handle,
+            Some(sender),
+            librefang_types::config::ThinkingOverride::resolve(thinking_override, reasoning_effort),
+            session_id_override,
+        )
+        .await
+    }
+
     /// Send a message to an agent with streaming responses.
     ///
     /// Returns a receiver for incremental `StreamEvent`s and a `JoinHandle`
@@ -2523,6 +2560,7 @@ impl LibreFangKernel {
                 context_window_tokens: meta.context_window_tokens,
                 label: None,
                 model_override: meta.model_override,
+                reasoning_effort: meta.reasoning_effort,
                 messages_generation: 0,
                 last_repaired_generation: None,
                 peer_id: meta.peer_id,
@@ -2535,6 +2573,7 @@ impl LibreFangKernel {
                 context_window_tokens: 0,
                 label: None,
                 model_override: None,
+                reasoning_effort: None,
                 messages_generation: 0,
                 last_repaired_generation: None,
                 peer_id: peer_id_for_new_session.clone(),
@@ -2686,8 +2725,27 @@ impl LibreFangKernel {
             manifest.thinking = cfg.thinking.clone();
         }
 
-        // Apply per-call thinking override (from API request).
+        // Apply the per-session reasoning override (#8591): the rung between
+        // agent/global and per-call. After the backfill so it beats the agent
+        // or global level, before `apply_thinking_override` so a per-message
+        // token still wins — frame > session > agent > global > compiled.
+        if let Some(token) = session.reasoning_effort.as_deref() {
+            super::manifest_helpers::apply_session_reasoning_effort(&mut manifest, token);
+        }
+
+        // Apply per-call thinking override (from API request). The frame is
+        // the top rung, so an explicit `thinking: false` clears a session pin
+        // set above; an untouched frame resolves to `Inherit` and keeps it.
         apply_thinking_override(&mut manifest, thinking_override);
+
+        // Coercion (#8591): the catalog's declared policy is authoritative, and
+        // this is the last point before the request is built — so it sees the
+        // effective token after every override. A token outside the set is
+        // mapped to the nearest supported rung with a warning, never forwarded
+        // and never 400-ed.
+        let reasoning_policy =
+            self.lookup_reasoning_policy(&manifest.model.provider, &manifest.model.model);
+        super::manifest_helpers::coerce_reasoning_effort_to_model(&mut manifest, &reasoning_policy);
 
         // Lazy backfill: create workspace for existing agents spawned before workspaces
         if manifest.workspace.is_none() {

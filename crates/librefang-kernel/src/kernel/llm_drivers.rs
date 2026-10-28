@@ -28,6 +28,27 @@ fn should_use_managed_everyapi(
         && managed_available
 }
 
+/// Build the boot-level `FallbackDriver` with its reasoning resolver attached
+/// (#8616 review).
+///
+/// Split out of `boot` so the wiring is testable without booting a kernel:
+/// the resolver is the same strictly provider-scoped one `resolve_driver`
+/// uses, and the catalog snapshot is the one boot loaded. The chain lives for
+/// the process, so a later catalog hot-reload reaches the per-agent chains
+/// (`resolve_driver` snapshots per turn) but not this one — the same lifecycle
+/// as the drivers it wraps.
+pub(super) fn boot_fallback_driver(
+    triples: Vec<(Arc<dyn LlmDriver>, String, String)>,
+    exhaustion_store: librefang_llm_driver::exhaustion::ProviderExhaustionStore,
+    catalog: std::sync::Arc<librefang_runtime::model_catalog::ModelCatalog>,
+) -> librefang_runtime::drivers::fallback::FallbackDriver {
+    librefang_runtime::drivers::fallback::FallbackDriver::with_models_and_providers(triples)
+        .with_exhaustion_store(exhaustion_store)
+        .with_reasoning_resolver(
+            librefang_runtime::model_catalog::ModelCatalog::failover_reasoning_resolver(catalog),
+        )
+}
+
 impl LibreFangKernel {
     /// Resolve the LLM driver for an agent.
     ///
@@ -556,6 +577,16 @@ impl LibreFangKernel {
                     Some(store) => fb.with_exhaustion_store(store),
                     None => fb,
                 };
+                // A failover rewrites `req.model`, so the fallback slot must
+                // re-resolve the reasoning policy and echo policy for the model
+                // it will actually call (#8616 review). The snapshot is taken
+                // per `resolve_driver` call, i.e. per turn, so a catalog or
+                // override edit is picked up on the next turn.
+                let fb = fb.with_reasoning_resolver(
+                    librefang_runtime::model_catalog::ModelCatalog::failover_reasoning_resolver(
+                        self.llm.model_catalog.load_full(),
+                    ),
+                );
                 return Ok(Arc::new(fb));
             }
         }

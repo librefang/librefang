@@ -11,7 +11,7 @@ use crate::llm_driver::{
 use crate::rate_limit_tracker::RateLimitSnapshot;
 use async_trait::async_trait;
 use futures::StreamExt;
-use librefang_types::config::{PromptCacheStrategy, ReasoningMode, ResponseFormat, ThinkingConfig};
+use librefang_types::config::{PromptCacheStrategy, ResponseFormat, ThinkingConfig};
 use librefang_types::message::{
     ContentBlock, Message, MessageContent, Role, StopReason, TokenUsage,
 };
@@ -131,7 +131,7 @@ struct ApiRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     thinking: Option<serde_json::Value>,
     /// `{"effort": …}` — the depth control that replaced `thinking.budget_tokens`.
-    /// The API's rungs are `low` / `medium` / `high` / `xhigh` / `max`, but `xhigh` only from Opus 4.7 onwards; this driver emits `low` / `high` / `max` alone, because those are the graded `ReasoningMode` spells and every adaptive-generation model accepts all three.
+    /// The token is the resolved `reasoning_effort` (#8591): the API's rungs are `low` / `medium` / `high` / `xhigh` / `max`, and which of them a *generation* accepts (`xhigh` only from Opus 4.7 onwards) is declared per model in the catalog (`ModelCatalogEntry::supported_efforts`). The driver emits a declared token verbatim and coerces one outside the set to the nearest declared rung — never a driver-side fold into a different rung, and never a silent drop.
     /// Only ever populated alongside the adaptive thinking form, and only when a mode was actually named; the models that take the budgeted form have no such field.
     #[serde(skip_serializing_if = "Option::is_none")]
     output_config: Option<serde_json::Value>,
@@ -449,12 +449,12 @@ fn build_anthropic_request(request: &CompletionRequest) -> ApiRequest {
     // On the budgeted form that is the API's own floor for `budget_tokens`.
     // The adaptive form has no budget field at all, and the sub-1024 reading is kept there as this driver's convention — the same one `openai.rs::reasoning_effort_for_budget` applies to every other wire — so that an operator who used a token floor as an off-switch is not silently switched back on and billed for it.
     //
-    // `reasoning_mode = "none"` (#7946) is an explicit request NOT to reason, so it suppresses extended thinking here.
-    // Without this the kernel's `ThinkingOverride::Mode(ReasoningMode::None)` — which has to materialise a `ThinkingConfig` so the OpenAI-compatible drivers can send their explicit non-think toggle — would arrive here as a default 10_000 token budget and turn extended thinking *on* for an agent that asked for the opposite, also inflating `max_tokens` below.
+    // `reasoning_effort = "none"` (#7946) is an explicit request NOT to reason, so it suppresses extended thinking here.
+    // Without this the kernel's `ThinkingOverride::Mode(ReasoningMode::none())` — which has to materialise a `ThinkingConfig` so the OpenAI-compatible drivers can send their explicit non-think toggle — would arrive here as a default 10_000 token budget and turn extended thinking *on* for an agent that asked for the opposite, also inflating `max_tokens` below.
     let requested_thinking = request
         .thinking
         .as_ref()
-        .filter(|tc| tc.reasoning_mode != Some(ReasoningMode::None))
+        .filter(|tc| !tc.reasoning_effort.as_ref().is_some_and(|m| m.is_none()))
         .filter(|tc| tc.budget_tokens >= 1024);
 
     let generation = anthropic_models::wire_generation(&request.model);
@@ -468,7 +468,8 @@ fn build_anthropic_request(request: &CompletionRequest) -> ApiRequest {
         ),
         Some(tc) => (
             Some(serde_json::json!({"type": "adaptive"})),
-            adaptive_effort(tc).map(|effort| serde_json::json!({"effort": effort})),
+            adaptive_effort(tc, &request.reasoning_policy)
+                .map(|effort| serde_json::json!({"effort": effort})),
         ),
         // Nothing was asked for.
         // Omitting the field is the portable way to say so — `{"type": "disabled"}` is itself a 400 on Fable 5 / 5.1 — and it is only the wrong answer on the models that both reason unasked and accept that spelling, which get it instead.
@@ -549,20 +550,44 @@ fn build_anthropic_request(request: &CompletionRequest) -> ApiRequest {
 
 /// The `output_config.effort` rung an adaptive-thinking request should carry, or `None` to leave the field off entirely.
 ///
-/// Only an explicit `reasoning_mode` names a rung.
+/// Only an explicit `reasoning_effort` names a rung.
 /// `budget_tokens` deliberately does not: the adaptive wire has no budget field, `effort` defaults to `high` when the field is absent, and the bucket `openai.rs::reasoning_effort_for_budget` applies would map the compiled-in default budget of 10_000 to `medium` — quietly making every agent that configured nothing reason *less* than an unconfigured request does, which is the outcome `docs/architecture/reasoning-mode-resolution.md` set out to avoid when it declined to remap Claude budgets into rungs.
-/// So an operator who wants a depth other than the API default names it with `reasoning_mode`, and a budget keeps the one job it can still do on this wire: saying, below 1024, not to reason at all.
+/// So an operator who wants a depth other than the API default names it with `reasoning_effort`, and a budget keeps the one job it can still do on this wire: saying, below 1024, not to reason at all.
 ///
-/// The rungs are the three graded `ReasoningMode` spells and no more.
-/// `xhigh` exists on the API from Opus 4.7 onwards but not on the 4.6 pair, and no mode asks for it, so nothing here can emit a rung one half of the adaptive generation would reject.
-fn adaptive_effort(thinking: &ThinkingConfig) -> Option<&'static str> {
-    match thinking.reasoning_mode {
-        Some(ReasoningMode::Low) => Some("low"),
-        Some(ReasoningMode::High) => Some("high"),
-        Some(ReasoningMode::Max) => Some("max"),
-        // `ReasoningMode::None` is filtered out as an opt-out before the form is chosen, so it can only arrive here if that filter is removed; it names no rung either way.
-        Some(ReasoningMode::None) | None => None,
+/// The token goes through **verbatim** (#8591) when the model's catalog entry
+/// declares a policy: the API's rungs are `low` / `medium` / `high` / `xhigh` /
+/// `max`, and which of them a *generation* accepts (`xhigh` only from Opus 4.7
+/// onwards) is catalog data (`ModelCatalogEntry::supported_efforts`).
+/// A token outside the declared set is coerced to the nearest supported rung —
+/// the same rule the OpenAI-compatible driver and the kernel apply, so the two
+/// wires cannot disagree about what a request meant.
+/// An entry that declares nothing constrains the token to the four pre-#8591
+/// rungs (`none` / `low` / `high` / `max`) with that same nearest-rung rule, so
+/// `medium` / `xhigh` / `minimal` reach this wire as `low` / `high` / `low`
+/// instead of being dropped (#8616 review).
+/// `none` is filtered out as an opt-out before the form is chosen, so it cannot
+/// arrive here; when the model forbids off, the kernel has already coerced it
+/// to the lowest graded rung, which arrives here as an ordinary token.
+fn adaptive_effort(
+    thinking: &ThinkingConfig,
+    policy: &librefang_types::config::ReasoningEffortPolicy,
+) -> Option<String> {
+    let mode = thinking.reasoning_effort.as_ref()?;
+    if mode.is_none() {
+        return None;
     }
+    let coerced = policy.coerce(mode);
+    if let Some(from) = coerced.coerced_from.as_deref() {
+        tracing::warn!(
+            from = %from,
+            to = %coerced.effective.as_str(),
+            "reasoning effort coerced to the nearest supported rung"
+        );
+    }
+    if coerced.effective.is_none() {
+        return None;
+    }
+    Some(coerced.effective.as_str().to_string())
 }
 
 #[async_trait]
@@ -1689,6 +1714,7 @@ fn convert_response(api: ApiResponse, model: &str) -> CompletionResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use librefang_types::config::ReasoningMode;
     use librefang_types::tool::ToolDefinition;
 
     #[test]
@@ -2090,7 +2116,7 @@ mod tests {
         assert!(api_request.tools[0].cache_control.is_none());
     }
 
-    /// `reasoning_mode = "none"` (#7946) must not turn extended thinking *on*.
+    /// `reasoning_effort = "none"` (#7946) must not turn extended thinking *on*.
     ///
     /// The kernel materialises a `ThinkingConfig` to carry that mode — it has
     /// to, so the OpenAI-compatible drivers can send their explicit non-think
@@ -2098,13 +2124,13 @@ mod tests {
     /// budget, that enables extended thinking and inflates `max_tokens` by
     /// `budget + 1024`, i.e. the exact opposite of what was asked for, billed.
     #[test]
-    fn reasoning_mode_none_does_not_enable_extended_thinking() {
+    fn reasoning_effort_none_does_not_enable_extended_thinking() {
         let request = CompletionRequest {
             model: "claude-sonnet-4-5".to_string(),
             messages: std::sync::Arc::new(vec![Message::user("hi")]),
             max_tokens: 4096,
             thinking: Some(librefang_types::config::ThinkingConfig {
-                reasoning_mode: Some(ReasoningMode::None),
+                reasoning_effort: Some(ReasoningMode::none()),
                 ..Default::default()
             }),
             ..Default::default()
@@ -2112,7 +2138,7 @@ mod tests {
         let api_request = build_anthropic_request(&request);
         assert!(
             api_request.thinking.is_none(),
-            "reasoning_mode=none must suppress the thinking block, got {:?}",
+            "reasoning_effort=none must suppress the thinking block, got {:?}",
             api_request.thinking,
         );
         assert_eq!(
@@ -2124,15 +2150,15 @@ mod tests {
     /// Positive control for the test above: a graded mode (or none at all)
     /// leaves the pre-#7946 budget behaviour intact.
     #[test]
-    fn a_non_none_reasoning_mode_still_enables_extended_thinking() {
-        for mode in [None, Some(ReasoningMode::Low), Some(ReasoningMode::Max)] {
+    fn a_non_none_reasoning_effort_still_enables_extended_thinking() {
+        for mode in [None, Some(ReasoningMode::low()), Some(ReasoningMode::max())] {
             let request = CompletionRequest {
                 model: "claude-sonnet-4-5".to_string(),
                 messages: std::sync::Arc::new(vec![Message::user("hi")]),
                 max_tokens: 4096,
                 thinking: Some(librefang_types::config::ThinkingConfig {
                     budget_tokens: 8192,
-                    reasoning_mode: mode,
+                    reasoning_effort: mode.clone(),
                     ..Default::default()
                 }),
                 ..Default::default()
@@ -2302,7 +2328,7 @@ mod tests {
     }
 
     /// On Opus 4.6 and newer, `thinking: {"type": "enabled", "budget_tokens": N}` is either deprecated or removed; the current form is `{"type": "adaptive"}`.
-    /// The budget must not leak into `max_tokens` either — there is no budget for the ceiling to clear — and with no `reasoning_mode` set there is no rung to pin, so `output_config` stays off and the API's own default effort applies.
+    /// The budget must not leak into `max_tokens` either — there is no budget for the ceiling to clear — and with no `reasoning_effort` set there is no rung to pin, so `output_config` stays off and the API's own default effort applies.
     #[test]
     fn modern_models_get_adaptive_thinking_and_no_invented_depth() {
         for model in [
@@ -2330,7 +2356,7 @@ mod tests {
             );
             assert!(
                 api_request.output_config.is_none(),
-                "{model} was given no reasoning_mode, so its depth must be left at the API default, got {:?}",
+                "{model} was given no reasoning_effort, so its depth must be left at the API default, got {:?}",
                 api_request.output_config,
             );
             assert_eq!(
@@ -2406,14 +2432,22 @@ mod tests {
         }
     }
 
-    /// `reasoning_mode` is the only thing that names an effort rung.
+    /// `reasoning_effort` is the only thing that names an effort rung.
     /// A budget must not be bucketed into one: `output_config` defaults to `high` when absent, so deriving `medium` from the compiled-in default budget of 10_000 would make every agent that configured nothing reason less than an unconfigured request does.
+    ///
+    /// #8591: with no catalog declaration the driver constrains the token to
+    /// the four legacy rungs with the same nearest-rung rule a declared set
+    /// gets, so `medium` / `xhigh` / `minimal` arrive as `low` / `high` / `low`
+    /// rather than reaching a generation that may reject them (#8616 review).
     #[test]
     fn only_an_explicit_mode_pins_an_effort_rung() {
-        for (reasoning_mode, expected) in [
-            (Some(ReasoningMode::Low), Some("low")),
-            (Some(ReasoningMode::High), Some("high")),
-            (Some(ReasoningMode::Max), Some("max")),
+        for (reasoning_effort, expected) in [
+            (Some(ReasoningMode::low()), Some("low")),
+            (Some(ReasoningMode::high()), Some("high")),
+            (Some(ReasoningMode::max()), Some("max")),
+            (Some(ReasoningMode::new("medium").unwrap()), Some("low")),
+            (Some(ReasoningMode::new("xhigh").unwrap()), Some("high")),
+            (Some(ReasoningMode::new("minimal").unwrap()), Some("low")),
             (None, None),
         ] {
             // The budgets straddle every bucket boundary the OpenAI-compatible driver uses, so a reintroduced budget bucket shows up as a rung appearing where `None` is expected or moving where a mode was named.
@@ -2422,7 +2456,7 @@ mod tests {
                     "claude-opus-5",
                     Some(ThinkingConfig {
                         budget_tokens,
-                        reasoning_mode,
+                        reasoning_effort: reasoning_effort.clone(),
                         ..Default::default()
                     }),
                 ));
@@ -2435,10 +2469,49 @@ mod tests {
                 assert_eq!(
                     effort.as_deref(),
                     expected,
-                    "mode {reasoning_mode:?} with budget {budget_tokens}",
+                    "mode {reasoning_effort:?} with budget {budget_tokens}",
                 );
             }
         }
+    }
+
+    /// #8591 coercion: a declared vocabulary is authoritative — tokens inside
+    /// it travel verbatim (including `xhigh`, the rung only newer generations
+    /// accept), and one outside it is mapped to the **nearest** supported rung
+    /// rather than dropped or 400-ed.
+    #[test]
+    fn declared_vocabulary_coerces_the_adaptive_effort_rung() {
+        let mut request = wire_request(
+            "claude-opus-5",
+            Some(ThinkingConfig {
+                reasoning_effort: Some(ReasoningMode::new("xhigh").unwrap()),
+                ..Default::default()
+            }),
+        );
+        request.reasoning_policy.supported_efforts = vec!["low".to_string(), "xhigh".to_string()];
+        let api_request = build_anthropic_request(&request);
+        assert_eq!(
+            api_request.output_config,
+            Some(serde_json::json!({"effort": "xhigh"})),
+            "a declared xhigh must be sent verbatim",
+        );
+
+        let mut request = wire_request(
+            "claude-sonnet-4-6",
+            Some(ThinkingConfig {
+                reasoning_effort: Some(ReasoningMode::new("xhigh").unwrap()),
+                ..Default::default()
+            }),
+        );
+        request.reasoning_policy.supported_efforts =
+            vec!["low".to_string(), "high".to_string(), "max".to_string()];
+        let api_request = build_anthropic_request(&request);
+        assert_eq!(
+            api_request.output_config,
+            Some(serde_json::json!({"effort": "high"})),
+            "xhigh is not declared for this generation and must be coerced \
+             to the nearest rung (high beats max on the tie, resolving down)",
+        );
     }
 
     /// Opus 5 and Sonnet 5 reason when the request carries no `thinking` field, so an agent that asked not to reason has to be told explicitly.
@@ -2446,7 +2519,7 @@ mod tests {
     #[test]
     fn thinking_is_turned_off_explicitly_only_where_that_is_both_needed_and_accepted() {
         let off = ThinkingConfig {
-            reasoning_mode: Some(ReasoningMode::None),
+            reasoning_effort: Some(ReasoningMode::none()),
             ..Default::default()
         };
 

@@ -26,6 +26,29 @@ pub trait CatalogQuery: Send + Sync {
         librefang_types::model_catalog::ReasoningEchoPolicy::None
     }
 
+    /// The reasoning-effort policy `provider`/`model` advertises (#8591),
+    /// from the catalog entry plus any operator override.
+    ///
+    /// Provider-scoped on purpose (#8616 review): the catalog may hold
+    /// `openai:m` and nothing for `customgw:m`, and a provider-blind lookup
+    /// would let the latter inherit a declaration it never published — the
+    /// same leak the failover resolver prevents. A provider miss is therefore
+    /// undeclared, not "borrow the same id from another provider".
+    ///
+    /// An undeclared policy (empty set, no default) means the entry published
+    /// nothing: drivers then constrain the request to the four pre-#8591 rungs,
+    /// which every driver can carry. The kernel uses the same value to coerce a
+    /// request outside the declared set to the nearest supported rung. Default
+    /// impl returns the undeclared policy so existing mocks and stubs keep
+    /// compiling and behave exactly as before the field existed.
+    fn reasoning_policy_for(
+        &self,
+        _provider: &str,
+        _model: &str,
+    ) -> librefang_types::config::ReasoningEffortPolicy {
+        librefang_types::config::ReasoningEffortPolicy::default()
+    }
+
     /// What is known about the given model's vision (image) input support, resolved from the model catalog (#6010, refs #7957).
     /// Consulted at request-build time to decide whether image content blocks may be sent to the model or must be redacted to a text placeholder first — text-only OpenAI-compatible models reject image content parts with HTTP 400 (`unknown variant image_url, expected text`).
     ///

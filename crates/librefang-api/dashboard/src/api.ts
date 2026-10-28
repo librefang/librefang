@@ -2888,6 +2888,15 @@ export interface ModelOverrides {
   // produce at most.
   context_window?: number;
   max_output_tokens?: number;
+  // Refs #8591/#8616: reasoning-effort policy overrides. `supported_efforts`
+  // is the model's declared rung set (`[]` = explicitly no enum, `undefined` =
+  // inherit the catalog entry), `default_effort` its own default rung. The PUT
+  // body is a whole document — an omitted field is cleared — so every saved
+  // override must carry these through.
+  supported_efforts?: string[];
+  default_effort?: string;
+  off_allowed?: boolean;
+  mandatory?: boolean;
 }
 
 export async function getModelOverrides(modelKey: string): Promise<ModelOverrides> {

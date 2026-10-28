@@ -20,6 +20,7 @@
 //! `FallbackChain` can span heterogeneous providers that expose different model
 //! slugs.
 
+use crate::drivers::fallback_reasoning::{realign_reasoning, ReasoningResolver};
 use crate::llm_driver::{CompletionRequest, CompletionResponse, LlmDriver, LlmError, StreamEvent};
 use async_trait::async_trait;
 use librefang_llm_driver::exhaustion::{
@@ -95,6 +96,10 @@ pub struct FallbackChain {
     /// `None` preserves the historical un-gated behaviour for callers
     /// that have not opted in (tests, ad-hoc one-shot chains).
     exhaustion_store: Option<ProviderExhaustionStore>,
+    /// Catalog lookup used to re-resolve a chain entry's reasoning policy when
+    /// `req.model` is rewritten (#8616 review). `None` applies the undeclared
+    /// policy (see [`realign_reasoning`]).
+    reasoning_resolver: Option<ReasoningResolver>,
 }
 
 /// Whether the provider has already decided about *this* request.
@@ -126,6 +131,7 @@ impl FallbackChain {
             entries,
             rate_limit_sleep_ms: DEFAULT_RATE_LIMIT_SLEEP_MS,
             exhaustion_store: None,
+            reasoning_resolver: None,
         }
     }
 
@@ -146,6 +152,13 @@ impl FallbackChain {
     /// coherent exhaustion view.
     pub fn with_exhaustion_store(mut self, store: ProviderExhaustionStore) -> Self {
         self.exhaustion_store = Some(store);
+        self
+    }
+
+    /// Attach a catalog lookup so an entry's reasoning policy and echo policy
+    /// are re-resolved when `req.model` is rewritten (#8616 review).
+    pub fn with_reasoning_resolver(mut self, resolver: ReasoningResolver) -> Self {
+        self.reasoning_resolver = Some(resolver);
         self
     }
 
@@ -179,6 +192,14 @@ impl FallbackChain {
             let mut req = request.clone();
             if !entry.model_override.is_empty() {
                 req.model = entry.model_override.clone();
+                // Re-resolve the reasoning metadata for the model this entry
+                // actually calls; the primary's declaration must not leak
+                // across the failover (#8616 review).
+                realign_reasoning(
+                    &mut req,
+                    &entry.provider_name,
+                    self.reasoning_resolver.as_ref(),
+                );
             }
 
             match entry.driver.complete(req).await {
@@ -421,6 +442,14 @@ impl LlmDriver for FallbackChain {
             let mut req = request.clone();
             if !entry.model_override.is_empty() {
                 req.model = entry.model_override.clone();
+                // Re-resolve the reasoning metadata for the model this entry
+                // actually calls; the primary's declaration must not leak
+                // across the failover (#8616 review).
+                realign_reasoning(
+                    &mut req,
+                    &entry.provider_name,
+                    self.reasoning_resolver.as_ref(),
+                );
             }
 
             // Intercept the event stream so we can detect whether any content
@@ -1764,5 +1793,76 @@ mod tests {
             delta >= Duration::from_secs(30 * 60),
             "auth failure should use long backoff, got {delta:?}"
         );
+    }
+
+    /// #8616 review: `try_entry` rewrites `req.model`, so the primary model's
+    /// declared rung must be re-resolved against the entry's own model. With
+    /// no resolver attached the undeclared policy drops `xhigh` rather than
+    /// forwarding it to a model that never declared it.
+    #[tokio::test]
+    async fn failover_drops_a_rung_only_the_primary_model_declared() {
+        use librefang_types::config::{ReasoningEffortPolicy, ReasoningMode, ThinkingConfig};
+        use librefang_types::model_catalog::ReasoningEchoPolicy;
+
+        struct Recording(Arc<tokio::sync::Mutex<Vec<CompletionRequest>>>);
+
+        #[async_trait]
+        impl LlmDriver for Recording {
+            async fn complete(
+                &self,
+                req: CompletionRequest,
+            ) -> Result<CompletionResponse, LlmError> {
+                self.0.lock().await.push(req);
+                Ok(ok_response("ok"))
+            }
+        }
+
+        let seen = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let chain = FallbackChain::new(vec![
+            entry(Arc::new(CreditExhaustedDriver), "primary"),
+            ChainEntry {
+                driver: Arc::new(Recording(seen.clone())),
+                model_override: "fallback-model".to_string(),
+                provider_name: "fallback".to_string(),
+            },
+        ]);
+
+        let req = CompletionRequest {
+            model: "primary-model".to_string(),
+            thinking: Some(ThinkingConfig {
+                reasoning_effort: Some(ReasoningMode::new("xhigh").unwrap()),
+                ..Default::default()
+            }),
+            reasoning_policy: ReasoningEffortPolicy {
+                supported_efforts: ["minimal", "low", "medium", "high", "xhigh"]
+                    .iter()
+                    .map(|t| (*t).to_string())
+                    .collect(),
+                ..Default::default()
+            },
+            reasoning_echo_policy: ReasoningEchoPolicy::Echo,
+            ..Default::default()
+        };
+
+        chain.complete(req).await.expect("the second entry serves");
+
+        let seen = seen.lock().await;
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0].model, "fallback-model");
+        assert_eq!(
+            seen[0]
+                .thinking
+                .as_ref()
+                .and_then(|t| t.reasoning_effort.as_ref())
+                .map(|m| m.as_str()),
+            None,
+            "xhigh must not be forwarded to a model that never declared it",
+        );
+        assert_eq!(
+            seen[0].reasoning_policy,
+            ReasoningEffortPolicy::default(),
+            "the primary's declared set must not leak to the fallback",
+        );
+        assert_eq!(seen[0].reasoning_echo_policy, ReasoningEchoPolicy::None);
     }
 }
