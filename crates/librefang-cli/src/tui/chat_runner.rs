@@ -401,6 +401,54 @@ impl StandaloneChat {
                     );
                 }
             }
+            "think" => {
+                // Same vocabulary and semantics as the channel arm, through
+                // the shared parser (`commands::parse_think_argument`): a level
+                // pins the session effort, `on` / bare clears the pin back to
+                // the agent default, `off` pins the explicit non-think token.
+                let arg = parts.get(1).map(|s| s.trim()).filter(|s| !s.is_empty());
+                let effort = match commands::parse_think_argument(arg) {
+                    Ok(effort) => effort,
+                    Err(other) => {
+                        let usage = commands::lookup("think")
+                            .map(|def| def.usage())
+                            .unwrap_or_default();
+                        self.chat.push_message(
+                            Role::System,
+                            crate::i18n::t_args(
+                                "chat-runner-thinking-invalid",
+                                &[("argument", &other), ("usage", &usage)],
+                            ),
+                        );
+                        return;
+                    }
+                };
+                if matches!(self.backend, Backend::None) {
+                    // Same plain disconnected message the other commands
+                    // show; a "failed to pin" wrapper would be noise when
+                    // there is no backend to pin on.
+                    self.chat.push_message(
+                        Role::System,
+                        crate::i18n::t("chat-runner-no-backend-connected"),
+                    );
+                    return;
+                }
+                match self.apply_reasoning_effort(effort) {
+                    Ok(()) => {
+                        let message = match effort {
+                            Some(level) => {
+                                crate::i18n::t_args("chat-runner-thinking-set", &[("level", level)])
+                            }
+                            None => crate::i18n::t("chat-runner-thinking-cleared"),
+                        };
+                        self.chat.push_message(Role::System, message);
+                    }
+                    Err(e) => self.chat.push_message(
+                        Role::System,
+                        crate::i18n::t_args("chat-runner-thinking-failed", &[("error", &e)]),
+                    ),
+                }
+            }
             "kill" => {
                 let name = self.agent_name.clone();
                 match &self.backend {
@@ -522,6 +570,77 @@ impl StandaloneChat {
             // The pre-flight `commands::lookup` guarantees `canonical` is one
             // of the names matched above.
             other => unreachable!("unhandled CLI command `{other}`"),
+        }
+    }
+
+    /// Pin (or clear) the active conversation's session reasoning-effort
+    /// override — the `/think` backend half.
+    ///
+    /// The session the pin lands on is the one the chat's turns resolve to: on
+    /// the daemon the message stream carries no session override, so that is
+    /// the agent's canonical-active session — read from
+    /// `GET /agents/{id}/session?materialize=true`, which creates the row before answering
+    /// (#8591), so the `PATCH /api/sessions/{id}/reasoning` below always has a
+    /// row to update; in-process it is the registry entry's session id,
+    /// created-if-missing through the same `ensure_session` helper. `None`
+    /// clears the pin, `Some(token)` writes it.
+    fn apply_reasoning_effort(&self, effort: Option<&str>) -> Result<(), String> {
+        match &self.backend {
+            Backend::Daemon { base_url } => {
+                let Some(agent) = self.agent_id_daemon.clone() else {
+                    return Err(crate::i18n::t("chat-runner-no-active-connection"));
+                };
+                let client = crate::daemon_client();
+                let session = client
+                    .get(format!(
+                        "{base_url}/api/agents/{agent}/session?materialize=true"
+                    ))
+                    .send()
+                    .and_then(|r| r.error_for_status())
+                    .and_then(|r| r.json::<serde_json::Value>())
+                    .map_err(|e| e.to_string())?;
+                let session_id = session["session_id"]
+                    .as_str()
+                    .ok_or_else(|| crate::i18n::t("chat-runner-thinking-no-session"))?;
+                let resp = client
+                    .patch(format!("{base_url}/api/sessions/{session_id}/reasoning"))
+                    .json(&serde_json::json!({"reasoning_effort": effort}))
+                    .send()
+                    .map_err(|e| e.to_string())?;
+                let status = resp.status();
+                if status.is_success() {
+                    Ok(())
+                } else {
+                    // Surface the daemon's own error text when it has one;
+                    // the bare status is the honest fallback (a 404 here means
+                    // the session row was never materialized).
+                    let body: serde_json::Value = resp.json().unwrap_or_default();
+                    Err(body["error"]
+                        .as_str()
+                        .filter(|e| !e.is_empty())
+                        .map(str::to_string)
+                        .unwrap_or_else(|| status.to_string()))
+                }
+            }
+            Backend::InProcess { kernel } => {
+                let Some(agent_id) = self.agent_id_inprocess else {
+                    return Err(crate::i18n::t("chat-runner-no-active-connection"));
+                };
+                let session_id = kernel
+                    .agent_registry_ref()
+                    .get(agent_id)
+                    .map(|entry| entry.session_id)
+                    .ok_or_else(|| crate::i18n::t("chat-runner-no-active-connection"))?;
+                let substrate = librefang_kernel::KernelApi::memory_substrate(kernel.as_ref());
+                // Materialize the row when the agent has never had a turn: the
+                // first turn would create it with `reasoning_effort = None` and
+                // the pin would vanish (#8591).
+                substrate
+                    .ensure_session(agent_id, session_id)
+                    .and_then(|()| substrate.set_session_reasoning_effort(session_id, effort))
+                    .map_err(|e| e.to_string())
+            }
+            Backend::None => Err(crate::i18n::t("chat-runner-no-backend-connected")),
         }
     }
 
@@ -1054,6 +1173,45 @@ mod tests {
         assert!(
             !chat.chat.messages.is_empty(),
             "expected a system message, got none"
+        );
+    }
+
+    /// `/think banana` is a typo, not a level: the command answers with the
+    /// usage line (levels included) and changes nothing. A malformed argument
+    /// must not fall through to the agent as text or pin a level nobody asked
+    /// for (#7140's confirmation-without-action class, #8591's vocabulary).
+    #[test]
+    fn think_command_rejects_an_unknown_argument() {
+        let (tx, _rx) = mpsc::channel();
+        let mut chat = StandaloneChat::new(tx);
+        chat.handle_slash_command("/think banana");
+        let last = chat.chat.messages.last().expect("a system message");
+        assert!(matches!(last.role, Role::System));
+        assert!(
+            last.text
+                .contains("Usage: /think [none|minimal|low|medium|high|xhigh|max|off]"),
+            "got: {}",
+            last.text
+        );
+        assert!(
+            last.text.contains("banana"),
+            "the offending argument must be quoted back: {}",
+            last.text
+        );
+    }
+
+    /// A well-formed `/think` without a backend reports the disconnected state
+    /// instead of panicking or silently pinning nothing.
+    #[test]
+    fn think_command_without_a_backend_reports_disconnected() {
+        let (tx, _rx) = mpsc::channel();
+        let mut chat = StandaloneChat::new(tx);
+        chat.handle_slash_command("/think high");
+        let last = chat.chat.messages.last().expect("a system message");
+        assert!(matches!(last.role, Role::System));
+        assert_eq!(
+            last.text,
+            crate::i18n::t("chat-runner-no-backend-connected")
         );
     }
 
