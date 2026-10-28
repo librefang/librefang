@@ -62,8 +62,9 @@ pub use self::types::{AgentLoopResult, ExperimentContext, LoopOptions, LoopPhase
 use self::end_turn::{
     build_silent_agent_loop_result, classify_end_turn_retry, finalize_end_turn_text,
     finalize_iteration_cap_text, finalize_successful_end_turn, gated_proactive_memory_for_memorize,
-    gated_proactive_memory_for_retrieve, maybe_fold_stale_tool_results, session_recall_scope,
-    EndTurnRetry, EndTurnRetryContext, FinalizeEndTurnContext, FinalizeEndTurnResultData,
+    gated_proactive_memory_for_retrieve, maybe_fold_stale_tool_results, remember_turn_exchange,
+    session_recall_scope, EndTurnRetry, EndTurnRetryContext, FinalizeEndTurnContext,
+    FinalizeEndTurnResultData,
 };
 use self::history::resolve_max_history;
 use self::message::{
@@ -2407,6 +2408,23 @@ async fn run_agent_loop_inner(
         if let Err(e) = memory.save_session_async(session).await {
             warn!("Failed to save session on max iterations: {e}");
         }
+        // A capped turn is still a turn that happened (#8625).
+        // It records the delivered text, cut-off notice included, so a later recall can tell this attempt from a finished answer instead of finding no trace of it at all.
+        remember_turn_exchange(
+            manifest,
+            session.agent_id,
+            memory,
+            embedding_driver,
+            user_message,
+            &text,
+            false,
+            sender_user_id.as_deref(),
+            sender_chat_scope.as_deref(),
+            session_scope.as_deref(),
+            Some(max_iterations),
+        )
+        .await;
+        // Deliberately not `auto_memorize` / `context_engine.after_turn` here: a cut-off answer is the least trustworthy text in the store to distil facts from, and whether a partial turn may advance context state is a separate lifecycle question rather than part of recording that the attempt happened.
     }
 
     // Fire AgentLoopEnd hook on max iterations reached — with delivery.
