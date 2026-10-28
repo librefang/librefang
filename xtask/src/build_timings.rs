@@ -461,9 +461,13 @@ mod tests {
     }
 
     fn tempdir() -> PathBuf {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        // Every call must own a distinct directory: tests run in parallel in one process, and the previous PID-only suffix made this helper delete a sibling test's files (`warn_only_softens...` lost its baseline when `snapshot_roundtrip...` reset the shared tree).
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
         let p = std::env::temp_dir().join(format!(
-            "librefang-build-timings-test-{}",
-            std::process::id()
+            "librefang-build-timings-test-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
         ));
         let _ = fs::remove_dir_all(&p);
         fs::create_dir_all(&p).unwrap();
