@@ -982,9 +982,10 @@ fn is_likely_i18n_key_literal(
 ) -> bool {
     // Not i18n keys: literals whose leading segment collides with a real key prefix.
     // `agent-types` is the operator agent-type directory name (`~/.librefang/agent-types`), not a message id.
-    // `mcp-servers` is a `manifest_versions.change_source` token in `MANIFEST_CHANGE_SOURCES`
-    // (`screens/agents.rs`, #8604); its label lives at `tui-agents-manifest-source-mcp-servers`.
-    const TECHNICAL_FALSE_POSITIVES: &[&str] = &["daemon-reload", "agent-types", "mcp-servers"];
+    // `mcp-servers` is a `manifest_versions.change_source` token in `MANIFEST_CHANGE_SOURCES` (`screens/agents.rs`, #8604); its label lives at `tui-agents-manifest-source-mcp-servers`.
+    // `agent-tool` is the same kind of token in `TEMPLATE_CHANGE_SOURCES` (`screens/templates.rs`, #8609); its label lives at `tui-templates-source-agent-tool`.
+    const TECHNICAL_FALSE_POSITIVES: &[&str] =
+        &["daemon-reload", "agent-types", "mcp-servers", "agent-tool"];
 
     let Some((prefix, _)) = literal.split_once('-') else {
         return false;
@@ -1010,10 +1011,11 @@ fn is_dynamic_i18n_key(key: &str) -> bool {
         || (key.starts_with("tui-triggers-type-")
             && (key.ends_with("-name") || key.ends_with("-desc")))
         || key.starts_with("tui-skills-sort-")
-        // The manifest-source labels are one key per token in the store's closed inventory, built
-        // from `MANIFEST_CHANGE_SOURCES` in `screens/agents.rs` (#8604) rather than spelled out in
-        // callers, so no single literal carries these names. `collect_dynamic_required_locale_keys`
-        // derives the exact 16 from that const and requires them in every locale.
+        // The template-source labels are one key per token in the template store's closed inventory, built from `TEMPLATE_CHANGE_SOURCES` in `screens/templates.rs` (#8609) rather than spelled out in callers, so no single literal carries these names.
+        // `collect_dynamic_required_locale_keys` derives the exact keys from that const and requires them in every locale.
+        || key.starts_with("tui-templates-source-")
+        // The manifest-source labels are one key per token in the store's closed inventory, built from `MANIFEST_CHANGE_SOURCES` in `screens/agents.rs` (#8604) rather than spelled out in callers, so no single literal carries these names.
+        // `collect_dynamic_required_locale_keys` derives the exact 16 from that const and requires them in every locale.
         || key.starts_with("tui-agents-manifest-source-")
 }
 
@@ -1047,6 +1049,12 @@ fn collect_dynamic_required_locale_keys(manifest_dir: &Path) -> std::collections
         let slug = template_slug(name);
         keys.insert(format!("tui-templates-name-{slug}"));
         keys.insert(format!("tui-templates-desc-{slug}"));
+    }
+
+    // The template-source labels (#8609) are built as `tui-templates-source-<token>` from this const, so the exact key set follows the token inventory.
+    // Adding a token without adding its key in a locale fails `test_locales_cover_used_i18n_keys` instead of rendering `[key]`.
+    for token in extract_const_array_string_literals(&templates_rs, "TEMPLATE_CHANGE_SOURCES") {
+        keys.insert(format!("tui-templates-source-{token}"));
     }
 
     let triggers_rs = fs::read_to_string(manifest_dir.join("src/tui/screens/triggers.rs")).unwrap();
