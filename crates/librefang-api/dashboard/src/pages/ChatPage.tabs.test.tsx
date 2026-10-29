@@ -1,7 +1,8 @@
-import { act, render, screen, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ChatPage } from "./ChatPage";
+import { clearChatSessionCacheForAgent } from "../lib/chatSessionCache";
 import { useUIStore } from "../lib/store";
 import type { ReactNode } from "react";
 import type { AgentItem, SessionListItem } from "../api";
@@ -19,17 +20,79 @@ vi.mock("react-i18next", async () => {
 
 // Pinned to s2 so the tab strip, the dropdown and the active highlight all
 // agree on which conversation is being viewed.
-const router = vi.hoisted(() => ({
-  navigate: vi.fn(),
-  search: { agentId: "agent-a", sessionId: "s2" } as {
-    agentId?: string;
-    sessionId?: string;
-  },
-}));
-vi.mock("@tanstack/react-router", () => ({
-  useNavigate: () => router.navigate,
-  useSearch: () => router.search,
-}));
+const router = vi.hoisted(() => {
+  type Search = { agentId?: string; sessionId?: string };
+  let snapshot: Search = { agentId: "agent-a", sessionId: "s2" };
+  const listeners = new Set<() => void>();
+  const notify = () => {
+    for (const listener of listeners) listener();
+  };
+  const commit = (next: Search) => {
+    snapshot = { ...next };
+    notify();
+  };
+  // A real router commits its search params after the event handler returns,
+  // so the render immediately after a close still carries the closed session
+  // in the URL. `hold()` parks commits until `release()`, making that window
+  // observable; a synchronous mock hides it and the race with it.
+  let holding = false;
+  const pending: Array<() => void> = [];
+  // `search` stays writable for the #8596 tests, which move the mocked search
+  // params between renders; the proxy routes those writes through the same
+  // snapshot the page subscribes to, so the a11y keyboard tests and the prune
+  // tests share one source of truth.
+  const search = new Proxy({} as Search, {
+    get: (_target, prop) => snapshot[prop as keyof Search],
+    set: (_target, prop, value) => {
+      snapshot = { ...snapshot, [prop as keyof Search]: value };
+      notify();
+      return true;
+    },
+  });
+  return {
+    navigate: vi.fn((options: { search?: Search }) => {
+      const next = options?.search;
+      if (!next) return;
+      if (holding) {
+        pending.push(() => commit(next));
+        return;
+      }
+      commit(next);
+    }),
+    hold: () => {
+      holding = true;
+    },
+    release: async () => {
+      holding = false;
+      while (pending.length > 0) pending.shift()!();
+      // Let effects from the committed navigation render before the caller
+      // asserts on the settled strip.
+      await Promise.resolve();
+    },
+    subscribe: (listener: () => void) => {
+      listeners.add(listener);
+      return () => {
+        listeners.delete(listener);
+      };
+    },
+    getSnapshot: () => snapshot,
+    search,
+    reset: () => {
+      holding = false;
+      pending.length = 0;
+      snapshot = { agentId: "agent-a", sessionId: "s2" };
+      notify();
+    },
+  };
+});
+vi.mock("@tanstack/react-router", async () => {
+  const React = await vi.importActual<typeof import("react")>("react");
+  return {
+    useNavigate: () => router.navigate,
+    useSearch: () =>
+      React.useSyncExternalStore(router.subscribe, router.getSnapshot, router.getSnapshot),
+  };
+});
 
 vi.mock("../lib/queries/commands", () => ({
   useChatCommands: () => ({ data: [], isPending: false }),
@@ -230,8 +293,12 @@ describe("chat session tab strip order", () => {
     agentList.data = AGENTS;
     agentList.truncated = false;
     whoami.data = { name: "root", role: "owner", principal: null };
-    router.search.agentId = "agent-a";
-    router.search.sessionId = "s2";
+    router.reset();
+    // The session cache is module-level and survives tests. Keyboard tests
+    // switch sessions faster than the mocked fetch resolves, so a test can
+    // unmount with an empty array stored for s2 — which the hook then serves
+    // as a cache hit, hiding the transcript for every later test.
+    clearChatSessionCacheForAgent("agent-a");
     localStorage.removeItem("librefang.chat.show_hand_agents");
     // The real store: this test is about the order the component renders from
     // `openChatTabs`, which is exactly the array the page subscribes to.
@@ -479,5 +546,286 @@ describe("chat tab session prune (#8596)", () => {
     await vi.waitFor(() =>
       expect(useUIStore.getState().openChatTabs["agent-a"]).toEqual(["s1", "s2"]),
     );
+  });
+});
+
+// Issue #8597 — the strip carries `role="tablist"` but none of the tab
+// semantics behind it: no panel linkage, no roving tabindex, no arrow keys,
+// the new-session button inside the list, and a close target under 24 px.
+describe("chat session tab strip semantics and keyboard model", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.stubGlobal("WebSocket", MockWebSocket);
+    sessionList.data = SESSIONS;
+    sessionList.dataUpdatedAt = 0;
+    agentList.data = AGENTS;
+    agentList.truncated = false;
+    whoami.data = { name: "root", role: "owner", principal: null };
+    router.reset();
+    // The session cache is module-level and survives tests. Keyboard tests
+    // switch sessions faster than the mocked fetch resolves, so a test can
+    // unmount with an empty array stored for s2 — which the hook then serves
+    // as a cache hit, hiding the transcript for every later test.
+    clearChatSessionCacheForAgent("agent-a");
+    useUIStore.setState({
+      openChatTabs: { "agent-a": ["s1", "s2", "s3"] },
+      chatTabRecency: {},
+    });
+  });
+
+  async function renderStrip() {
+    renderPage();
+    await screen.findByText("hello there");
+    return screen.getByRole("tablist", { name: "Open conversations" });
+  }
+
+  const tabs = (tablist: HTMLElement) => within(tablist).getAllByRole("tab");
+
+  it("links every tab to the message-area tabpanel", async () => {
+    const tablist = await renderStrip();
+    const all = tabs(tablist);
+    expect(all).toHaveLength(3);
+
+    const panel = screen.getByRole("tabpanel");
+    expect(panel).toBe(screen.getByTestId("chat-message-area"));
+    expect(panel.id).not.toBe("");
+    for (const tab of all) {
+      expect(tab).toHaveAttribute("aria-controls", panel.id);
+      expect(tab.id).not.toBe("");
+    }
+
+    // The panel is labelled by the tab that is actually selected, so a screen
+    // reader reading the message area names the conversation it belongs to.
+    const selected = all.find((tab) => tab.getAttribute("aria-selected") === "true");
+    expect(selected).toBeDefined();
+    expect(panel).toHaveAttribute("aria-labelledby", selected!.id);
+  });
+
+  it("labels the panel by the active session's tab", async () => {
+    const tablist = await renderStrip();
+    const all = tabs(tablist); // One, Two (active), Three
+    const selected = all.find((tab) => tab.getAttribute("aria-selected") === "true");
+    expect(selected).toBeDefined();
+    expect(selected!.textContent).toBe("Two");
+    expect(screen.getByRole("tabpanel")).toHaveAttribute("aria-labelledby", selected!.id);
+  });
+
+  it("labels the panel by the roving tab when the active session is outside the strip", async () => {
+    // A prune can drop the active session's tab for a render before the open
+    // effect adds it back. Hold that window open by neutering the effect's
+    // `openChatTab`: the strip still has tabs, but none of them is selected.
+    const realOpenChatTab = useUIStore.getState().openChatTab;
+    useUIStore.setState({
+      openChatTab: vi.fn(),
+      openChatTabs: { "agent-a": ["s1", "s3"] },
+      chatTabRecency: {},
+    });
+    try {
+      const tablist = await renderStrip();
+      const all = tabs(tablist);
+      expect(all).toHaveLength(2);
+      expect(all.every((tab) => tab.getAttribute("aria-selected") !== "true")).toBe(true);
+      // The panel cannot name a selected tab when there is none; it falls
+      // back to the tab that owns the roving tab stop.
+      expect(all[0].tabIndex).toBe(0);
+      expect(screen.getByRole("tabpanel")).toHaveAttribute("aria-labelledby", all[0].id);
+    } finally {
+      useUIStore.setState({ openChatTab: realOpenChatTab });
+    }
+  });
+
+  it("keeps the tablist's direct children tabs and the new-session control outside it", async () => {
+    const tablist = await renderStrip();
+    for (const child of Array.from(tablist.children)) {
+      expect(child).toHaveAttribute("role", "tab");
+    }
+    const newSession = screen.getByRole("button", { name: "New session" });
+    expect(newSession.closest('[role="tablist"]')).toBeNull();
+  });
+
+  it("roves the tabindex so only the selected tab is in the tab order", async () => {
+    const tablist = await renderStrip();
+    const all = tabs(tablist);
+    const ordered = all.filter((tab) => tab.tabIndex === 0);
+    expect(ordered).toHaveLength(1);
+    expect(ordered[0]).toHaveAttribute("aria-selected", "true");
+    for (const tab of all) {
+      if (tab !== ordered[0]) expect(tab.tabIndex).toBe(-1);
+    }
+  });
+
+  it("activates the neighbour with ArrowRight and ArrowLeft in one step", async () => {
+    const tablist = await renderStrip();
+    const all = tabs(tablist); // One, Two (active), Three
+    all[1].focus();
+    expect(document.activeElement).toBe(all[1]);
+
+    fireEvent.keyDown(all[1], { key: "ArrowRight" });
+    await vi.waitFor(() => {
+      expect(tabs(tablist)[2]).toHaveAttribute("aria-selected", "true");
+    });
+    expect(document.activeElement).toBe(tabs(tablist)[2]);
+    expect(tabs(tablist)[2].tabIndex).toBe(0);
+    expect(tabs(tablist)[1].tabIndex).toBe(-1);
+    expect(router.navigate).toHaveBeenCalledWith(
+      expect.objectContaining({ search: expect.objectContaining({ sessionId: "s3" }) }),
+    );
+
+    fireEvent.keyDown(document.activeElement!, { key: "ArrowLeft" });
+    await vi.waitFor(() => {
+      expect(tabs(tablist)[1]).toHaveAttribute("aria-selected", "true");
+    });
+    expect(document.activeElement).toBe(tabs(tablist)[1]);
+  });
+
+  it("jumps to the edges with Home and End", async () => {
+    const tablist = await renderStrip();
+    const all = tabs(tablist);
+    all[1].focus();
+
+    fireEvent.keyDown(all[1], { key: "End" });
+    await vi.waitFor(() => {
+      expect(tabs(tablist)[2]).toHaveAttribute("aria-selected", "true");
+    });
+    expect(document.activeElement).toBe(tabs(tablist)[2]);
+
+    fireEvent.keyDown(document.activeElement!, { key: "Home" });
+    await vi.waitFor(() => {
+      expect(tabs(tablist)[0]).toHaveAttribute("aria-selected", "true");
+    });
+    expect(document.activeElement).toBe(tabs(tablist)[0]);
+  });
+
+  it("gives the close button a 24x24 hit target and keeps it out of the tab order", async () => {
+    const tablist = await renderStrip();
+    const closes = within(tablist).getAllByRole("button", { name: "Close this tab" });
+    expect(closes).toHaveLength(3);
+    for (const close of closes) {
+      expect(close.tabIndex).toBe(-1);
+      // h-6/w-6 = 1.5rem = 24px, the WCAG 2.5.8 minimum. The icon stays 10 px.
+      expect(close).toHaveClass("h-6", "w-6");
+    }
+  });
+
+  it("keeps the message area a plain region when a lone conversation has no strip", async () => {
+    useUIStore.setState({ openChatTabs: { "agent-a": ["s2"] }, chatTabRecency: {} });
+    renderPage();
+    await screen.findByText("hello there");
+    // A tabpanel without a tablist would be a dangling reference; the panel
+    // semantics only switch on with the strip.
+    expect(screen.queryByRole("tablist")).toBeNull();
+    expect(screen.queryByRole("tabpanel")).toBeNull();
+    expect(screen.getByTestId("chat-message-area")).not.toHaveAttribute("role");
+  });
+
+  it("activates the focused tab with Enter and Space", async () => {
+    const tablist = await renderStrip();
+    const all = tabs(tablist); // One, Two (active), Three
+    all[0].focus();
+    expect(document.activeElement).toBe(all[0]);
+
+    fireEvent.keyDown(all[0], { key: "Enter" });
+    await vi.waitFor(() => {
+      expect(tabs(tablist)[0]).toHaveAttribute("aria-selected", "true");
+    });
+    expect(document.activeElement).toBe(tabs(tablist)[0]);
+    expect(router.navigate).toHaveBeenCalledWith(
+      expect.objectContaining({ search: expect.objectContaining({ sessionId: "s1" }) }),
+    );
+
+    tabs(tablist)[2].focus();
+    fireEvent.keyDown(tabs(tablist)[2], { key: " " });
+    await vi.waitFor(() => {
+      expect(tabs(tablist)[2]).toHaveAttribute("aria-selected", "true");
+    });
+    expect(document.activeElement).toBe(tabs(tablist)[2]);
+    expect(router.navigate).toHaveBeenCalledWith(
+      expect.objectContaining({ search: expect.objectContaining({ sessionId: "s3" }) }),
+    );
+  });
+
+  it("closes a non-selected tab with Delete and lands focus on the neighbour", async () => {
+    const tablist = await renderStrip();
+    const all = tabs(tablist); // One, Two (active), Three
+    for (const tab of all) {
+      // The close control inside a tab is presentational to AT, so the tab
+      // must announce Delete as the keyboard path that replaces it.
+      expect(tab).toHaveAttribute("aria-keyshortcuts", "Delete");
+    }
+    all[0].focus();
+
+    fireEvent.keyDown(all[0], { key: "Delete" });
+    await vi.waitFor(() => expect(tabLabels(tablist)).toEqual(["Two", "Three"]));
+    // Closing a tab the user is not looking at does not switch sessions: the
+    // active tab stays selected and receives focus from the removed tab.
+    expect(tabs(tablist)[0]).toHaveAttribute("aria-selected", "true");
+    expect(document.activeElement).toBe(tabs(tablist)[0]);
+  });
+
+  it("closes the selected tab with Delete and hands focus to the neighbour", async () => {
+    const tablist = await renderStrip();
+    const all = tabs(tablist);
+    all[1].focus();
+
+    fireEvent.keyDown(all[1], { key: "Delete" });
+    await vi.waitFor(() => expect(tabLabels(tablist)).toEqual(["One", "Three"]));
+    // Closing from the keyboard lands on the neighbour that took the tab's
+    // place, so the tab key path never drops the user on <body>.
+    expect(tabs(tablist)[1]).toHaveAttribute("aria-selected", "true");
+    expect(document.activeElement).toBe(tabs(tablist)[1]);
+  });
+
+  it("moves focus to the composer when the last two tabs collapse to one", async () => {
+    // With two tabs the strip unmounts on close (a single tab is a label, not
+    // a control), so focusing the surviving tab would target a node that is
+    // removed in the same render and drop the user on <body> (#8606 review).
+    useUIStore.setState({
+      openChatTabs: { "agent-a": ["s1", "s2"] },
+      chatTabRecency: {},
+    });
+    const tablist = await renderStrip();
+    expect(tabLabels(tablist)).toEqual(["One", "Two"]);
+    const all = tabs(tablist);
+    all[1].focus(); // Two, the selected tab
+
+    fireEvent.keyDown(all[1], { key: "Delete" });
+
+    await vi.waitFor(() =>
+      expect(screen.queryByRole("tablist", { name: "Open conversations" })).toBeNull(),
+    );
+    const composer = document.getElementById("chat-composer");
+    expect(composer).not.toBeNull();
+    expect(document.activeElement).toBe(composer);
+  });
+
+  it("does not reopen the selected tab while its close is still navigating", async () => {
+    const tablist = await renderStrip();
+    expect(tabLabels(tablist)).toEqual(["One", "Two", "Three"]);
+
+    // A real router commits its search params after the click handler returns,
+    // so the first render after the close still carries ?sessionId=s2 — the
+    // id the store just dropped. Parking the commit reproduces that window
+    // instead of hiding it behind a synchronous mock.
+    router.hold();
+    fireEvent.click(
+      within(tablist).getAllByRole("button", { name: "Close this tab" })[1],
+    );
+
+    // The open effect must not read the stale URL as "user opened this" and
+    // append the closed conversation back at the end of the strip.
+    expect(tabLabels(tablist)).toEqual(["One", "Three"]);
+
+    await act(async () => {
+      await router.release();
+    });
+
+    // Exactly one navigation, to the neighbour at the closed index — never a
+    // destination that is the closed tab itself.
+    expect(router.navigate).toHaveBeenCalledTimes(1);
+    expect(router.navigate).toHaveBeenCalledWith(
+      expect.objectContaining({ search: { agentId: "agent-a", sessionId: "s3" } }),
+    );
+    expect(tabLabels(tablist)).toEqual(["One", "Three"]);
+    expect(tabs(tablist)[1]).toHaveAttribute("aria-selected", "true");
   });
 });
