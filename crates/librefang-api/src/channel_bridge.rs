@@ -2599,7 +2599,7 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
             size_bytes,
         };
 
-        match self.kernel.media().describe_image(&attachment).await {
+        match self.kernel.media().describe_image(&attachment, None).await {
             Ok(result) => Ok(Some(result.description)),
             Err(reason) => Err(reason),
         }

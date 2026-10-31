@@ -17,6 +17,17 @@ use tokio::io::AsyncWriteExt;
 use tokio::sync::Semaphore;
 use tracing::info;
 
+/// The instruction to send: the caller's prompt when it carries any text,
+/// otherwise the default (#8637).
+fn image_prompt(prompt: Option<&str>) -> &str {
+    prompt
+        .filter(|p| !p.trim().is_empty())
+        .unwrap_or(DEFAULT_IMAGE_PROMPT)
+}
+
+/// Instruction used when the caller does not supply a prompt.
+pub const DEFAULT_IMAGE_PROMPT: &str = "Describe this image in detail. Focus on what is shown, any text visible, and the overall context.";
+
 /// Record a media-understanding failure so operators can alert on a provider /
 /// model that has silently stopped working — e.g. a hosted model retired by the
 /// provider (`model_decommissioned`), which previously degraded to a raw
@@ -107,6 +118,7 @@ impl MediaEngine {
     pub async fn describe_image(
         &self,
         attachment: &MediaAttachment,
+        prompt: Option<&str>,
     ) -> Result<MediaUnderstanding, String> {
         attachment.validate()?;
         if attachment.media_type != MediaType::Image {
@@ -182,16 +194,34 @@ impl MediaEngine {
         // propagates — this is the "hosted model silently retired" signal (#6538).
         let dispatch_result: Result<String, String> = async {
             match provider {
-                "anthropic" => anthropic_describe_image(model, &image_bytes, mime_type).await,
+                "anthropic" => {
+                    anthropic_describe_image(model, &image_bytes, mime_type, prompt).await
+                }
                 "openai" | "groq" => {
                     let (api_url, api_key) = openai_vision_provider_config(provider)?;
-                    openai_describe_image(&api_url, &api_key, model, &image_bytes, mime_type).await
+                    openai_describe_image(
+                        &api_url,
+                        &api_key,
+                        model,
+                        &image_bytes,
+                        mime_type,
+                        prompt,
+                    )
+                    .await
                 }
-                "gemini" => gemini_describe_image(model, &image_bytes, mime_type).await,
+                "gemini" => gemini_describe_image(model, &image_bytes, mime_type, prompt).await,
                 _custom => {
                     let (api_url, api_key) =
                         custom_image_config(_custom, &self.config.custom_image)?;
-                    openai_describe_image(&api_url, &api_key, model, &image_bytes, mime_type).await
+                    openai_describe_image(
+                        &api_url,
+                        &api_key,
+                        model,
+                        &image_bytes,
+                        mime_type,
+                        prompt,
+                    )
+                    .await
                 }
             }
         }
@@ -660,7 +690,7 @@ impl MediaEngine {
                     semaphore: Arc::new(Semaphore::new(1)), // inner engine, no extra semaphore
                 };
                 match attachment.media_type {
-                    MediaType::Image => engine.describe_image(&attachment).await,
+                    MediaType::Image => engine.describe_image(&attachment, None).await,
                     MediaType::Audio => engine.transcribe_audio(&attachment, None, None).await,
                     MediaType::Video => engine.describe_video(&attachment).await,
                     other => Err(format!("Unsupported media type: {}", other)),
@@ -729,6 +759,7 @@ async fn anthropic_describe_image(
     model: &str,
     image_bytes: &[u8],
     mime_type: &str,
+    prompt: Option<&str>,
 ) -> Result<String, String> {
     use base64::Engine;
 
@@ -752,8 +783,7 @@ async fn anthropic_describe_image(
                 },
                 {
                     "type": "text",
-                    "text": "Describe this image in detail. Focus on what is shown, \
-                             any text visible, and the overall context."
+                    "text": image_prompt(prompt)
                 }
             ]
         }]
@@ -807,6 +837,7 @@ async fn openai_describe_image(
     model: &str,
     image_bytes: &[u8],
     mime_type: &str,
+    prompt: Option<&str>,
 ) -> Result<String, String> {
     use base64::Engine;
 
@@ -825,8 +856,7 @@ async fn openai_describe_image(
                 },
                 {
                     "type": "text",
-                    "text": "Describe this image in detail. Focus on what is shown, \
-                             any text visible, and the overall context."
+                    "text": image_prompt(prompt)
                 }
             ]
         }]
@@ -870,6 +900,7 @@ async fn gemini_describe_image(
     model: &str,
     image_bytes: &[u8],
     mime_type: &str,
+    prompt: Option<&str>,
 ) -> Result<String, String> {
     use base64::Engine;
 
@@ -889,8 +920,7 @@ async fn gemini_describe_image(
                     }
                 },
                 {
-                    "text": "Describe this image in detail. Focus on what is shown, \
-                             any text visible, and the overall context."
+                    "text": image_prompt(prompt)
                 }
             ]
         }],
@@ -2551,7 +2581,7 @@ mod tests {
             },
             size_bytes: 1024,
         };
-        let result = engine.describe_image(&attachment).await;
+        let result = engine.describe_image(&attachment, None).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("Expected image"));
     }
@@ -2629,7 +2659,7 @@ mod tests {
             },
             size_bytes: 1024,
         };
-        let result = engine.describe_image(&attachment).await;
+        let result = engine.describe_image(&attachment, None).await;
         assert!(result.is_err());
     }
 
@@ -2644,7 +2674,7 @@ mod tests {
             },
             size_bytes: MAX_IMAGE_BYTES + 1,
         };
-        let result = engine.describe_image(&attachment).await;
+        let result = engine.describe_image(&attachment, None).await;
         assert!(result.is_err());
     }
 
@@ -2785,7 +2815,7 @@ mod tests {
             },
             size_bytes: 1024,
         };
-        let result = engine.describe_image(&attachment).await;
+        let result = engine.describe_image(&attachment, None).await;
         // Fails at provider detection (no API keys in test env) or file read.
         // Either way, must be an error — never a placeholder string.
         assert!(result.is_err());
@@ -2813,7 +2843,7 @@ mod tests {
             },
             size_bytes: 1024,
         };
-        let result = engine.describe_image(&attachment).await;
+        let result = engine.describe_image(&attachment, None).await;
         assert!(result.is_err());
         assert!(
             result
@@ -2839,7 +2869,7 @@ mod tests {
             },
             size_bytes: 1024,
         };
-        let result = engine.describe_image(&attachment).await;
+        let result = engine.describe_image(&attachment, None).await;
         assert!(result.is_err());
         assert!(
             result.unwrap_err().contains("Failed to read image file"),
@@ -3563,5 +3593,21 @@ mod tests {
             err.contains("max_secs"),
             "the remedy for an over-budget window is a shorter one, got: {err}"
         );
+    }
+}
+
+#[cfg(test)]
+mod prompt_tests {
+    use super::*;
+
+    #[test]
+    fn a_custom_prompt_reaches_the_provider() {
+        assert_eq!(image_prompt(Some("¿Qué texto ves?")), "¿Qué texto ves?");
+    }
+
+    #[test]
+    fn an_absent_or_blank_prompt_falls_back_to_the_default() {
+        assert_eq!(image_prompt(None), DEFAULT_IMAGE_PROMPT);
+        assert_eq!(image_prompt(Some("   ")), DEFAULT_IMAGE_PROMPT);
     }
 }
