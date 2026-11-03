@@ -193,6 +193,9 @@ fn redacted_web(web: &librefang_types::config::WebConfig) -> serde_json::Value {
             "use_eu_endpoint": web.jina.use_eu_endpoint,
             "no_cache": web.jina.no_cache,
         },
+        "keenable": {
+            "api_key_env": web.keenable.api_key_env,
+        },
         "searxng": {
             "url": web.searxng.url,
         },
@@ -548,7 +551,7 @@ pub fn ui_options_overlay(
         "/auto_dream/timeout_secs": {"min": 30, "max": 3600, "step": 30},
 
         // ── web ──
-        "/web/search_provider": {"select": ["brave", "tavily", "perplexity", "jina", "searxng", "duck_duck_go", "auto"]},
+        "/web/search_provider": {"select": ["brave", "tavily", "perplexity", "jina", "keenable", "searxng", "duck_duck_go", "auto"]},
         "/web/cache_ttl_minutes": {"min": 0, "max": 10_080, "step": 1},
 
         // ── browser ──
@@ -1586,7 +1589,15 @@ mod redacted_web_tests {
     fn redacted_web_lists_all_provider_subtables() {
         let v = redacted_web(&WebConfig::default());
         // `duck_duck_go` and `auto` are stateless — no fields to surface.
-        for key in &["brave", "tavily", "perplexity", "jina", "searxng", "fetch"] {
+        for key in &[
+            "brave",
+            "tavily",
+            "perplexity",
+            "jina",
+            "keenable",
+            "searxng",
+            "fetch",
+        ] {
             assert!(
                 v.get(key).is_some(),
                 "redacted_web is missing the `{key}` sub-table; adding a new SearchProvider without surfacing its config here silently breaks the dashboard save flow (see #4016)",
