@@ -1156,12 +1156,53 @@ static TELEGRAM_BOT_TOKEN_IN_URL: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(^|/)bot(\d+):[A-Za-z0-9_-]{20,}").expect("TELEGRAM_BOT_TOKEN_IN_URL is valid")
 });
 
+/// Discord's CDN signs attachment URLs with an `hm` query parameter.
+///
+/// `ex` and `is` are only the expiry and issue timestamps and stay readable, the same way the Telegram bot id does; `hm` is the HMAC and is the counterpart of the bot secret.
+static DISCORD_SIGNATURE_IN_URL: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"([?&]hm=)[^&\s\]]+").expect("DISCORD_SIGNATURE_IN_URL is valid"));
+
+/// True for the hosts Discord actually serves attachments from.
+///
+/// Scoping matters: `hm=` is a generic query parameter, so masking it on every URL would rewrite unrelated links that never carried a credential.
+fn is_discord_cdn_url(url: &str) -> bool {
+    let Some(host) = url::Url::parse(url)
+        .ok()
+        .and_then(|parsed| parsed.host_str().map(str::to_ascii_lowercase))
+    else {
+        return false;
+    };
+    ["discordapp.com", "discord.com", "discordapp.net"]
+        .iter()
+        .any(|domain| host == *domain || host.ends_with(&format!(".{domain}")))
+}
+
 /// Mask the credential in a media URL that is about to be rendered into agent-facing text.
 ///
-/// This is the sanitizing counterpart of [`content_to_text`]: the `url` field on [`ChannelContent`] deliberately keeps the real URL, because the bridge downloads the attachment with it, while every prompt-bound rendering goes through here and renders `bot<id>:<redacted>` instead.
-/// The bot id stays visible — it identifies which bot delivered the attachment and is not the secret — and the rest of the URL is preserved so a transcript still says which file arrived.
+/// This is the sanitizing counterpart of [`content_to_text`]: the `url` field on [`ChannelContent`] deliberately keeps the real URL, because the bridge downloads the attachment with it, while every prompt-bound rendering goes through here.
+/// Two adapters hand over a URL that carries a credential: Telegram puts the bot token in the path, Discord signs the query string. Both are masked down to their shape — the bot id, the expiry and the issue timestamp stay, only the secret does not.
 fn redact_media_url_for_text(url: &str) -> Cow<'_, str> {
-    TELEGRAM_BOT_TOKEN_IN_URL.replace_all(url, "${1}bot${2}:<redacted>")
+    let masked = TELEGRAM_BOT_TOKEN_IN_URL.replace_all(url, "${1}bot${2}:<redacted>");
+    if !is_discord_cdn_url(url) {
+        return masked;
+    }
+    match DISCORD_SIGNATURE_IN_URL.replace_all(masked.as_ref(), "${1}<redacted>") {
+        Cow::Borrowed(_) => masked,
+        Cow::Owned(owned) => Cow::Owned(owned),
+    }
+}
+
+/// The two log fields of the non-2xx download branch, built here so a test can hold them to the
+/// same rule as prompt text.
+///
+/// The body needs the mask as much as the URL does: a proxy or a Bot API error path can echo the
+/// request URL back into the response body, and the sidecar documents exactly that before
+/// redacting it in `api/client.rs`.
+fn download_failure_log_fields(url: &str, body_preview: &str) -> (String, String) {
+    (
+        redact_media_url_for_text(url).into_owned(),
+        redact_media_url_for_text(body_preview).into_owned(),
+    )
 }
 
 fn content_to_text(content: &ChannelContent) -> String {
@@ -6741,7 +6782,12 @@ async fn download_file_to_blocks(
         Err(e) => {
             // `reqwest::Error`'s Display appends the full request URL, and a Telegram file URL carries the bot token in its path. The sidecar strips it for the same reason (`sdk/rust/librefang-sidecar-telegram/src/api/error.rs`); both the log line and the failure block below derive from this error, so strip once here.
             let e = e.without_url();
-            warn!("Failed to download file from channel: {e}");
+            // The URL is stripped from the error (its Display appends it verbatim), so it goes back in the one form that is safe to log — otherwise every channel's transport failure reads "error sending request" with no host and no file.
+            warn!(
+                url = %redact_media_url_for_text(url),
+                filename = %filename,
+                "Failed to download file from channel: {e}"
+            );
             return DownloadedFile::failed(vec![ContentBlock::Text {
                 text: format!("[File download failed: {e}]"),
                 provider_metadata: None,
@@ -6757,10 +6803,11 @@ async fn download_file_to_blocks(
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
         let preview: String = body.chars().take(200).collect();
+        let (logged_url, logged_preview) = download_failure_log_fields(url, &preview);
         warn!(
             status = %status,
-            body_preview = %preview,
-            url = %redact_media_url_for_text(url),
+            body_preview = %logged_preview,
+            url = %logged_url,
             "File download returned non-success status"
         );
         return DownloadedFile::failed(vec![ContentBlock::Text {
@@ -7052,7 +7099,10 @@ async fn download_image_to_blocks(
                 }];
             }
             Err(crate::http_client::FetchError::Failed(reason)) => {
-                warn!("Image download failed: {reason}");
+                warn!(
+                    url = %redact_media_url_for_text(url),
+                    "Image download failed: {reason}"
+                );
                 return vec![ContentBlock::Text {
                     text: format!("[Image download failed: {reason}]"),
                     provider_metadata: None,
@@ -11050,42 +11100,6 @@ mod tests {
         );
     }
 
-    /// Classifies every [`ChannelContent`] variant by whether `content_to_text` or the
-    /// `dispatch_message` fallback interpolates a URL from it into prompt text.
-    ///
-    /// The two renderers are independent exhaustive matches, so a new url-carrying variant
-    /// would render un-redacted in one of them (or in both) without breaking compilation.
-    /// This match has no `_` arm on purpose: adding a variant fails the test build until the
-    /// author states whether it carries a prompt-bound URL, and the tests below then hold the
-    /// renderers to that answer.
-    ///
-    /// `MediaGroup` carries URLs inside `MediaGroupItem`, but neither renderer interpolates
-    /// them — both emit a count (`[Media group: N items]` / `[User sent media group: N items]`).
-    /// It is listed as url-free for that reason; rendering those items would have to route the
-    /// item URL through the same mask.
-    fn prompt_bound_url(content: &ChannelContent) -> Option<&str> {
-        match content {
-            ChannelContent::Image { url, .. }
-            | ChannelContent::File { url, .. }
-            | ChannelContent::Voice { url, .. }
-            | ChannelContent::Video { url, .. }
-            | ChannelContent::Audio { url, .. }
-            | ChannelContent::Animation { url, .. } => Some(url),
-            ChannelContent::Text(_)
-            | ChannelContent::Command { .. }
-            | ChannelContent::FileData { .. }
-            | ChannelContent::Location { .. }
-            | ChannelContent::Interactive { .. }
-            | ChannelContent::ButtonCallback { .. }
-            | ChannelContent::DeleteMessage { .. }
-            | ChannelContent::EditInteractive { .. }
-            | ChannelContent::Sticker { .. }
-            | ChannelContent::MediaGroup { .. }
-            | ChannelContent::Poll { .. }
-            | ChannelContent::PollAnswer { .. } => None,
-        }
-    }
-
     /// Every url-bearing variant renders through the same mask — `Image`, `File`, `Video`, `Audio` and `Animation` are all fed by the Telegram sidecar's `file_url()`.
     #[test]
     fn test_content_to_text_redacts_bot_token_for_every_media_variant() {
@@ -11104,7 +11118,7 @@ mod tests {
             ChannelContent::Voice {
                 url: url.clone(),
                 duration_seconds: 4,
-                caption: Some("listen".to_string()),
+                caption: None,
             },
             ChannelContent::Video {
                 url: url.clone(),
@@ -11156,10 +11170,6 @@ mod tests {
         ];
 
         for content in cases {
-            assert!(
-                prompt_bound_url(&content).is_some(),
-                "{content:?} must stay classified as url-bearing by `prompt_bound_url`"
-            );
             let text = content_to_text(&content);
             assert!(
                 !text.contains(SECRET),
@@ -11240,6 +11250,65 @@ mod tests {
         assert!(
             !image_text.contains(SECRET),
             "the image-download failure text leaked the token: {image_text}"
+        );
+    }
+
+    /// The non-2xx log line carries both the URL and the first 200 characters of the response body, and a proxy or a Bot API error path can echo the request URL into that body.
+    /// Both fields have to be masked, and this is the only place that holds them: the download paths have no seam a test can drive into a real 4xx.
+    #[test]
+    fn test_download_failure_log_fields_mask_the_url_and_the_echoed_body() {
+        const SECRET: &str = "AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw";
+        let url = format!("https://api.telegram.org/file/bot123456:{SECRET}/voice/file_7.oga");
+        let body = format!(
+            r#"{{"ok":false,"description":"Bad Request: wrong file_path /file/bot123456:{SECRET}/voice/file_7.oga"}}"#
+        );
+
+        let (logged_url, logged_body) = download_failure_log_fields(&url, &body);
+
+        assert!(
+            !logged_url.contains(SECRET),
+            "the logged url leaked the token: {logged_url}"
+        );
+        assert_eq!(
+            logged_url,
+            "https://api.telegram.org/file/bot123456:<redacted>/voice/file_7.oga"
+        );
+        assert!(
+            !logged_body.contains(SECRET),
+            "the logged body preview leaked the token: {logged_body}"
+        );
+        assert!(
+            logged_body.contains("bot123456:<redacted>/voice/file_7.oga"),
+            "the body keeps its shape apart from the secret: {logged_body}"
+        );
+    }
+
+    /// Discord signs the query string instead of the path; only `hm` is the signature, so `ex` / `is` stay readable.
+    /// The mask is host-scoped, because `hm=` on an unrelated host is not a credential and rewriting it would corrupt an ordinary link.
+    #[test]
+    fn test_redact_media_url_for_text_masks_discord_signature_on_discord_hosts_only() {
+        const HMAC: &str = "9d1e2f3a4b5c6d7e8f90a1b2c3d4e5f6a7b8c9d0";
+        for host in ["cdn.discordapp.com", "media.discordapp.net", "discord.com"] {
+            let url = format!(
+                "https://{host}/attachments/1/2/screenshot.png?ex=67abcdef&is=67abcd00&hm={HMAC}"
+            );
+            let masked = redact_media_url_for_text(&url);
+            assert!(
+                !masked.contains(HMAC),
+                "the Discord signature survived on {host}: {masked}"
+            );
+            assert_eq!(
+                masked,
+                format!("https://{host}/attachments/1/2/screenshot.png?ex=67abcdef&is=67abcd00&hm=<redacted>"),
+                "only `hm` should be masked on {host}"
+            );
+        }
+
+        let ordinary = format!("https://example.com/report.pdf?hm={HMAC}");
+        assert_eq!(
+            redact_media_url_for_text(&ordinary),
+            ordinary,
+            "a non-Discord host must keep its query string"
         );
     }
 
