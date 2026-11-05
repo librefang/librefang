@@ -11048,6 +11048,42 @@ mod tests {
         );
     }
 
+    /// Classifies every [`ChannelContent`] variant by whether `content_to_text` or the
+    /// `dispatch_message` fallback interpolates a URL from it into prompt text.
+    ///
+    /// The two renderers are independent exhaustive matches, so a new url-carrying variant
+    /// would render un-redacted in one of them (or in both) without breaking compilation.
+    /// This match has no `_` arm on purpose: adding a variant fails the test build until the
+    /// author states whether it carries a prompt-bound URL, and the tests below then hold the
+    /// renderers to that answer.
+    ///
+    /// `MediaGroup` carries URLs inside `MediaGroupItem`, but neither renderer interpolates
+    /// them — both emit a count (`[Media group: N items]` / `[User sent media group: N items]`).
+    /// It is listed as url-free for that reason; rendering those items would have to route the
+    /// item URL through the same mask.
+    fn prompt_bound_url(content: &ChannelContent) -> Option<&str> {
+        match content {
+            ChannelContent::Image { url, .. }
+            | ChannelContent::File { url, .. }
+            | ChannelContent::Voice { url, .. }
+            | ChannelContent::Video { url, .. }
+            | ChannelContent::Audio { url, .. }
+            | ChannelContent::Animation { url, .. } => Some(url),
+            ChannelContent::Text(_)
+            | ChannelContent::Command { .. }
+            | ChannelContent::FileData { .. }
+            | ChannelContent::Location { .. }
+            | ChannelContent::Interactive { .. }
+            | ChannelContent::ButtonCallback { .. }
+            | ChannelContent::DeleteMessage { .. }
+            | ChannelContent::EditInteractive { .. }
+            | ChannelContent::Sticker { .. }
+            | ChannelContent::MediaGroup { .. }
+            | ChannelContent::Poll { .. }
+            | ChannelContent::PollAnswer { .. } => None,
+        }
+    }
+
     /// Every url-bearing variant renders through the same mask — `Image`, `File`, `Video`, `Audio` and `Animation` are all fed by the Telegram sidecar's `file_url()`.
     #[test]
     fn test_content_to_text_redacts_bot_token_for_every_media_variant() {
@@ -11089,6 +11125,10 @@ mod tests {
         ];
 
         for content in cases {
+            assert!(
+                prompt_bound_url(&content).is_some(),
+                "{content:?} must stay classified as url-bearing by `prompt_bound_url`"
+            );
             let text = content_to_text(&content);
             assert!(
                 !text.contains(SECRET),

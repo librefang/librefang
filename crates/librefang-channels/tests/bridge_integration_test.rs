@@ -4840,3 +4840,122 @@ async fn test_agent_command_sticks_and_commands_follow_chat_routing() {
 
     manager.stop().await;
 }
+
+// ---------------------------------------------------------------------------
+// #8704 — attachment fallback text must not carry the Telegram bot token
+// ---------------------------------------------------------------------------
+
+fn make_content_msg(
+    channel: ChannelType,
+    user_id: &str,
+    id: &str,
+    content: ChannelContent,
+) -> ChannelMessage {
+    ChannelMessage {
+        channel,
+        platform_message_id: id.to_string(),
+        sender: ChannelUser {
+            platform_id: user_id.to_string(),
+            display_name: "TestUser".to_string(),
+            librefang_user: None,
+        },
+        content,
+        target_agent: None,
+        timestamp: chrono::Utc::now(),
+        is_group: false,
+        thread_id: None,
+        metadata: HashMap::new(),
+    }
+}
+
+/// The Telegram sidecars hand the daemon `…/file/bot<id>:<secret>/<path>` URLs, because the Bot API carries the credential in the path rather than an auth header.
+///
+/// With `message_debounce_ms` at its default of `0` — the fast path in
+/// `BridgeManager::start_adapter` — the agent never sees `content_to_text`'s
+/// placeholder: it sees the fallback string built inline in `dispatch_message`,
+/// which is also what `message_journal.jsonl` records (`content: text.clone()`).
+/// That is the site the incident went through, so it needs its own test rather
+/// than the helper's unit tests.
+///
+/// The loopback URL is refused by the SSRF guard before a socket is opened, so
+/// the download fails deterministically and dispatch falls back to the text.
+#[tokio::test]
+async fn attachment_fallback_does_not_leak_the_telegram_bot_token() {
+    const SECRET: &str = "AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw";
+    let url = format!("http://127.0.0.1:9/file/bot123456:{SECRET}/voice/file_7.oga");
+
+    let cases = vec![
+        ChannelContent::Image {
+            url: url.clone(),
+            caption: None,
+            mime_type: None,
+        },
+        ChannelContent::File {
+            url: url.clone(),
+            filename: "report.pdf".to_string(),
+        },
+        ChannelContent::Voice {
+            url: url.clone(),
+            duration_seconds: 4,
+            caption: None,
+        },
+        ChannelContent::Video {
+            url: url.clone(),
+            caption: None,
+            duration_seconds: 9,
+            filename: None,
+        },
+        ChannelContent::Audio {
+            url: url.clone(),
+            caption: None,
+            duration_seconds: 9,
+            title: None,
+            performer: None,
+        },
+        ChannelContent::Animation {
+            url: url.clone(),
+            caption: None,
+            duration_seconds: 3,
+        },
+    ];
+
+    for content in cases {
+        let label = format!("{content:?}");
+        let agent_id = AgentId::new();
+        let handle = Arc::new(MockHandle::new(vec![(agent_id, "coder".to_string())]));
+        let router = Arc::new(AgentRouter::new());
+        router.set_user_default("user1".to_string(), agent_id);
+
+        let (adapter, tx) = MockAdapter::new("test-adapter", ChannelType::Telegram);
+        let mut manager = BridgeManager::new(handle.clone(), router);
+        manager.start_adapter(adapter.clone()).await.unwrap();
+
+        tx.send(make_content_msg(
+            ChannelType::Telegram,
+            "user1",
+            "msg-1",
+            content,
+        ))
+        .await
+        .unwrap();
+
+        wait_until("attachment fallback dispatch", || {
+            !handle.received.lock().unwrap().is_empty()
+        })
+        .await;
+
+        let received = handle.received.lock().unwrap().clone();
+        assert_eq!(received.len(), 1, "expected one turn for {label}");
+        let prompt = &received[0].1;
+        assert!(
+            !prompt.contains(SECRET),
+            "the bot token reached the agent through the attachment fallback for {label}: {prompt}"
+        );
+        assert!(
+            prompt.contains("bot123456:<redacted>"),
+            "the fallback must keep the masked URL shape for {label}, got: {prompt}"
+        );
+
+        manager.stop().await;
+    }
+}
