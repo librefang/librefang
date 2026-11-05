@@ -4868,17 +4868,63 @@ fn make_content_msg(
     }
 }
 
+/// A failing download logs a `WARN` that used to carry `reqwest`'s error text verbatim, and that text appends the request URL.
+///
+/// The loopback URL the other test uses is refused by the SSRF guard before any request is made, so this drives the transport branch instead: `example.invalid` is guaranteed not to resolve, which fails at `send()`.
+#[tokio::test]
+async fn download_failure_warning_keeps_the_url_masked() {
+    const SECRET: &str = "AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw";
+    let url = format!("https://example.invalid/file/bot123456:{SECRET}/voice/file_7.oga");
+
+    let spy = WarnSpy::install();
+    let agent_id = AgentId::new();
+    let handle = Arc::new(MockHandle::new(vec![(agent_id, "coder".to_string())]));
+    let router = Arc::new(AgentRouter::new());
+    router.set_user_default("user1".to_string(), agent_id);
+
+    let (adapter, tx) = MockAdapter::new("test-adapter", ChannelType::Telegram);
+    let mut manager = BridgeManager::new(handle.clone(), router);
+    manager.start_adapter(adapter.clone()).await.unwrap();
+
+    tx.send(make_content_msg(
+        ChannelType::Telegram,
+        "user1",
+        "msg-1",
+        ChannelContent::File {
+            url,
+            filename: "voice.oga".to_string(),
+        },
+    ))
+    .await
+    .unwrap();
+
+    wait_until("download failure warning", || {
+        spy.seen()
+            .iter()
+            .any(|line| line.contains("Failed to download file from channel"))
+    })
+    .await;
+
+    let warns = spy.seen().join("\n");
+    assert!(
+        !warns.contains(SECRET),
+        "the transport-failure warning leaked the token: {warns}"
+    );
+    assert!(
+        warns.contains("bot123456:<redacted>") && warns.contains("filename"),
+        "the warning must keep the masked URL and the filename, got: {warns}"
+    );
+
+    manager.stop().await;
+}
+
 /// The Telegram sidecars hand the daemon `…/file/bot<id>:<secret>/<path>` URLs, because the Bot API carries the credential in the path rather than an auth header.
 ///
-/// With `message_debounce_ms` at its default of `0` — the fast path in
-/// `BridgeManager::start_adapter` — the agent never sees `content_to_text`'s
-/// placeholder: it sees the fallback string built inline in `dispatch_message`,
-/// which is also what `message_journal.jsonl` records (`content: text.clone()`).
-/// That is the site the incident went through, so it needs its own test rather
-/// than the helper's unit tests.
+/// With `message_debounce_ms` at its default of `0` — the fast path in `BridgeManager::start_adapter` — the agent never sees `content_to_text`'s placeholder: it sees the fallback string built inline in `dispatch_message`, which is also what `message_journal.jsonl` records (`content: text.clone()`).
+/// That is the site the incident went through, so it needs its own test rather than the helper's unit tests.
 ///
-/// The loopback URL is refused by the SSRF guard before a socket is opened, so
-/// the download fails deterministically and dispatch falls back to the text.
+/// The loopback URL is refused by the SSRF guard before a socket is opened, so the download fails deterministically and dispatch falls back to the text.
+/// The warnings that failure produces are captured too: the download paths log through `redact_media_url_for_text`, and this is the only test that drives them.
 #[tokio::test]
 async fn attachment_fallback_does_not_leak_the_telegram_bot_token() {
     const SECRET: &str = "AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw";
@@ -4949,6 +4995,8 @@ async fn attachment_fallback_does_not_leak_the_telegram_bot_token() {
         },
     ];
 
+    let spy = WarnSpy::install();
+
     for content in cases {
         let label = format!("{content:?}");
         let agent_id = AgentId::new();
@@ -4984,6 +5032,12 @@ async fn attachment_fallback_does_not_leak_the_telegram_bot_token() {
         assert!(
             prompt.contains("bot123456:<redacted>"),
             "the fallback must keep the masked URL shape for {label}, got: {prompt}"
+        );
+
+        let warns = spy.seen().join("\n");
+        assert!(
+            !warns.contains(SECRET),
+            "a warning emitted while handling {label} leaked the token: {warns}"
         );
 
         manager.stop().await;

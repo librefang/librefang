@@ -1162,19 +1162,30 @@ static TELEGRAM_BOT_TOKEN_IN_URL: LazyLock<Regex> = LazyLock::new(|| {
 static DISCORD_SIGNATURE_IN_URL: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"([?&]hm=)[^&\s\]]+").expect("DISCORD_SIGNATURE_IN_URL is valid"));
 
-/// True for the hosts Discord actually serves attachments from.
+/// The hosts Discord serves attachments from, as bare domains.
 ///
 /// Scoping matters: `hm=` is a generic query parameter, so masking it on every URL would rewrite unrelated links that never carried a credential.
-fn is_discord_cdn_url(url: &str) -> bool {
+const DISCORD_CDN_DOMAINS: [&str; 3] = ["discordapp.com", "discord.com", "discordapp.net"];
+
+/// True for a Discord attachment URL, and only for one that actually carries the signature.
+///
+/// The `hm=` gate comes first because this runs on every rendered placeholder: it is a byte scan, whereas parsing the URL allocates.
+fn is_signed_discord_url(url: &str) -> bool {
+    if !url.contains("hm=") {
+        return false;
+    }
     let Some(host) = url::Url::parse(url)
         .ok()
         .and_then(|parsed| parsed.host_str().map(str::to_ascii_lowercase))
     else {
         return false;
     };
-    ["discordapp.com", "discord.com", "discordapp.net"]
-        .iter()
-        .any(|domain| host == *domain || host.ends_with(&format!(".{domain}")))
+    DISCORD_CDN_DOMAINS.iter().any(|domain| {
+        host == *domain
+            || host
+                .strip_suffix(domain)
+                .is_some_and(|prefix| prefix.ends_with('.'))
+    })
 }
 
 /// Mask the credential in a media URL that is about to be rendered into agent-facing text.
@@ -1183,7 +1194,7 @@ fn is_discord_cdn_url(url: &str) -> bool {
 /// Two adapters hand over a URL that carries a credential: Telegram puts the bot token in the path, Discord signs the query string. Both are masked down to their shape — the bot id, the expiry and the issue timestamp stay, only the secret does not.
 fn redact_media_url_for_text(url: &str) -> Cow<'_, str> {
     let masked = TELEGRAM_BOT_TOKEN_IN_URL.replace_all(url, "${1}bot${2}:<redacted>");
-    if !is_discord_cdn_url(url) {
+    if !is_signed_discord_url(url) {
         return masked;
     }
     match DISCORD_SIGNATURE_IN_URL.replace_all(masked.as_ref(), "${1}<redacted>") {
@@ -1192,17 +1203,30 @@ fn redact_media_url_for_text(url: &str) -> Cow<'_, str> {
     }
 }
 
-/// The two log fields of the non-2xx download branch, built here so a test can hold them to the
-/// same rule as prompt text.
+/// Mask both credential shapes in free-form text.
 ///
-/// The body needs the mask as much as the URL does: a proxy or a Bot API error path can echo the
-/// request URL back into the response body, and the sidecar documents exactly that before
-/// redacting it in `api/client.rs`.
-fn download_failure_log_fields(url: &str, body_preview: &str) -> (String, String) {
-    (
-        redact_media_url_for_text(url).into_owned(),
-        redact_media_url_for_text(body_preview).into_owned(),
-    )
+/// A response body is not a URL — it is JSON, an HTML error page, a proxy's message — so the Discord host check cannot apply there: `hm=` only shows up in a body when a Discord URL was echoed into it, which is exactly the case this exists for.
+fn redact_credentials_in_text(text: &str) -> String {
+    let telegram = TELEGRAM_BOT_TOKEN_IN_URL.replace_all(text, "${1}bot${2}:<redacted>");
+    DISCORD_SIGNATURE_IN_URL
+        .replace_all(telegram.as_ref(), "${1}<redacted>")
+        .into_owned()
+}
+
+/// Emit the non-2xx download warning with both credential-bearing fields masked.
+///
+/// The body needs the mask as much as the URL does: a proxy or a Bot API error path can echo the request URL back into the response body, and the sidecar documents exactly that before redacting it in `api/client.rs`.
+/// Logging lives here rather than at the call site so the warning a test can capture is the warning production emits.
+fn warn_download_status_failure(status: impl std::fmt::Display, url: &str, body: &str) {
+    let preview: String = body.chars().take(200).collect();
+    let logged_url = redact_media_url_for_text(url).into_owned();
+    let logged_preview = redact_credentials_in_text(&preview);
+    warn!(
+        status = %status,
+        body_preview = %logged_preview,
+        url = %logged_url,
+        "File download returned non-success status"
+    );
 }
 
 fn content_to_text(content: &ChannelContent) -> String {
@@ -6802,14 +6826,7 @@ async fn download_file_to_blocks(
     if !resp.status().is_success() {
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
-        let preview: String = body.chars().take(200).collect();
-        let (logged_url, logged_preview) = download_failure_log_fields(url, &preview);
-        warn!(
-            status = %status,
-            body_preview = %logged_preview,
-            url = %logged_url,
-            "File download returned non-success status"
-        );
+        warn_download_status_failure(status, url, &body);
         return DownloadedFile::failed(vec![ContentBlock::Text {
             text: format!("[File download failed: HTTP {status} ({filename})]"),
             provider_metadata: None,
@@ -11213,7 +11230,7 @@ mod tests {
             assert_eq!(redacted, url, "ordinary URL was rewritten: {url}");
             assert!(
                 matches!(redacted, Cow::Borrowed(_)),
-                "a non-matching URL must not allocate: {url}"
+                "a non-matching URL must be returned without copying: {url}"
             );
         }
     }
@@ -11253,33 +11270,63 @@ mod tests {
         );
     }
 
-    /// The non-2xx log line carries both the URL and the first 200 characters of the response body, and a proxy or a Bot API error path can echo the request URL into that body.
-    /// Both fields have to be masked, and this is the only place that holds them: the download paths have no seam a test can drive into a real 4xx.
+    /// Collects `WARN` events emitted on this thread, so a test can assert on the line production logs rather than on the helper that feeds it.
+    struct WarnCollector(std::sync::Arc<std::sync::Mutex<Vec<String>>>);
+
+    struct FieldVisitor(String);
+
+    impl tracing::field::Visit for FieldVisitor {
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            self.0.push_str(&format!(" {}={:?}", field.name(), value));
+        }
+    }
+
+    impl tracing::Subscriber for WarnCollector {
+        fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
+            *metadata.level() <= tracing::Level::WARN
+        }
+        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+        fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+        fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+        fn event(&self, event: &tracing::Event<'_>) {
+            let mut visitor = FieldVisitor(String::new());
+            event.record(&mut visitor);
+            self.0.lock().unwrap().push(visitor.0);
+        }
+        fn enter(&self, _: &tracing::span::Id) {}
+        fn exit(&self, _: &tracing::span::Id) {}
+    }
+
+    /// The non-2xx line carries the URL and the first 200 characters of the response body, and a proxy or a Bot API error path can echo the request URL into that body.
+    /// A real 4xx cannot be driven from a test — the SSRF guard refuses loopback before the socket — so the assertion is on the warning itself, which is emitted by the function under test.
     #[test]
-    fn test_download_failure_log_fields_mask_the_url_and_the_echoed_body() {
+    fn test_download_status_failure_warn_masks_the_url_and_the_echoed_body() {
         const SECRET: &str = "AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw";
+        const HMAC: &str = "9d1e2f3a4b5c6d7e8f90a1b2c3d4e5f6a7b8c9d0";
         let url = format!("https://api.telegram.org/file/bot123456:{SECRET}/voice/file_7.oga");
         let body = format!(
-            r#"{{"ok":false,"description":"Bad Request: wrong file_path /file/bot123456:{SECRET}/voice/file_7.oga"}}"#
+            r#"{{"message":"403 Forbidden","request":"https://cdn.discordapp.com/attachments/1/2/x.png?ex=1&is=2&hm={HMAC}"}}"#
         );
 
-        let (logged_url, logged_body) = download_failure_log_fields(&url, &body);
+        let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        tracing::subscriber::with_default(WarnCollector(events.clone()), || {
+            warn_download_status_failure("403 Forbidden", &url, &body);
+        });
 
+        let captured = events.lock().unwrap().join("\n");
         assert!(
-            !logged_url.contains(SECRET),
-            "the logged url leaked the token: {logged_url}"
-        );
-        assert_eq!(
-            logged_url,
-            "https://api.telegram.org/file/bot123456:<redacted>/voice/file_7.oga"
+            !captured.contains(SECRET),
+            "the logged url leaked the token: {captured}"
         );
         assert!(
-            !logged_body.contains(SECRET),
-            "the logged body preview leaked the token: {logged_body}"
+            !captured.contains(HMAC),
+            "the logged body preview leaked the Discord signature: {captured}"
         );
         assert!(
-            logged_body.contains("bot123456:<redacted>/voice/file_7.oga"),
-            "the body keeps its shape apart from the secret: {logged_body}"
+            captured.contains("bot123456:<redacted>/voice/file_7.oga"),
+            "the url keeps its shape apart from the secret: {captured}"
         );
     }
 
