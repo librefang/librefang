@@ -6739,6 +6739,8 @@ async fn download_file_to_blocks(
     let resp = match req.send().await {
         Ok(r) => r,
         Err(e) => {
+            // `reqwest::Error`'s Display appends the full request URL, and a Telegram file URL carries the bot token in its path. The sidecar strips it for the same reason (`sdk/rust/librefang-sidecar-telegram/src/api/error.rs`); both the log line and the failure block below derive from this error, so strip once here.
+            let e = e.without_url();
             warn!("Failed to download file from channel: {e}");
             return DownloadedFile::failed(vec![ContentBlock::Text {
                 text: format!("[File download failed: {e}]"),
@@ -6758,7 +6760,7 @@ async fn download_file_to_blocks(
         warn!(
             status = %status,
             body_preview = %preview,
-            url = %url,
+            url = %redact_media_url_for_text(url),
             "File download returned non-success status"
         );
         return DownloadedFile::failed(vec![ContentBlock::Text {
@@ -11122,6 +11124,35 @@ mod tests {
                 caption: None,
                 duration_seconds: 3,
             },
+            // The same arms with a caption: each renders the URL in both the `Some(_)` and the `None` branch, so a mask applied to only one branch has to fail here.
+            ChannelContent::Image {
+                url: url.clone(),
+                caption: Some("a cat".to_string()),
+                mime_type: None,
+            },
+            ChannelContent::Voice {
+                url: url.clone(),
+                duration_seconds: 4,
+                caption: Some("listen".to_string()),
+            },
+            ChannelContent::Video {
+                url: url.clone(),
+                caption: Some("watch".to_string()),
+                duration_seconds: 9,
+                filename: None,
+            },
+            ChannelContent::Audio {
+                url: url.clone(),
+                caption: Some("track".to_string()),
+                duration_seconds: 9,
+                title: None,
+                performer: None,
+            },
+            ChannelContent::Animation {
+                url: url.clone(),
+                caption: Some("lol".to_string()),
+                duration_seconds: 3,
+            },
         ];
 
         for content in cases {
@@ -11185,6 +11216,30 @@ mod tests {
                 "https://api.telegram.org/bot123456:{SECRET}/getMe"
             )),
             "https://api.telegram.org/bot123456:<redacted>/getMe"
+        );
+    }
+
+    /// A failed media fetch must not put the token into the text that is logged.
+    ///
+    /// `reqwest::Error`'s Display appends the request URL, so both download paths strip it before formatting; the `warn!` lines and these failure blocks carry the same string.
+    #[tokio::test]
+    async fn download_failure_text_does_not_carry_the_bot_token() {
+        const SECRET: &str = "AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw";
+        let url = format!("https://example.invalid/file/bot123456:{SECRET}/voice/file_7.oga");
+        let dir = tempfile::TempDir::new().unwrap();
+
+        let file = download_file_to_blocks(&url, "voice.oga", 1024 * 1024, dir.path(), &[]).await;
+        let file_text = format!("{:?}", file.blocks);
+        assert!(
+            !file_text.contains(SECRET),
+            "the file-download failure text leaked the token: {file_text}"
+        );
+
+        let blocks = download_image_to_blocks(&url, None, None, dir.path(), &[]).await;
+        let image_text = format!("{blocks:?}");
+        assert!(
+            !image_text.contains(SECRET),
+            "the image-download failure text leaked the token: {image_text}"
         );
     }
 

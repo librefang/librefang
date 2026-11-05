@@ -4917,6 +4917,36 @@ async fn attachment_fallback_does_not_leak_the_telegram_bot_token() {
             caption: None,
             duration_seconds: 3,
         },
+        // Both branches of every `match caption` render the URL, so the same six run with a
+        // caption: a mask lost in only the `Some(_)` branch has to fail here.
+        ChannelContent::Image {
+            url: url.clone(),
+            caption: Some("a cat".to_string()),
+            mime_type: None,
+        },
+        ChannelContent::Voice {
+            url: url.clone(),
+            duration_seconds: 4,
+            caption: Some("listen".to_string()),
+        },
+        ChannelContent::Video {
+            url: url.clone(),
+            caption: Some("watch".to_string()),
+            duration_seconds: 9,
+            filename: None,
+        },
+        ChannelContent::Audio {
+            url: url.clone(),
+            caption: Some("track".to_string()),
+            duration_seconds: 9,
+            title: None,
+            performer: None,
+        },
+        ChannelContent::Animation {
+            url: url.clone(),
+            caption: Some("lol".to_string()),
+            duration_seconds: 3,
+        },
     ];
 
     for content in cases {
