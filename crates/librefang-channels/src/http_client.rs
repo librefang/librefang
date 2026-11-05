@@ -419,7 +419,8 @@ async fn fetch_url_bytes_after_validation(
     let resp = req
         .send()
         .await
-        .map_err(|e| FetchError::Failed(format!("fetch failed: {e}")))?;
+        // `reqwest::Error`'s Display appends the request URL, and a channel attachment URL can carry a credential in its path (Telegram's `bot<id>:<secret>`). This reason string reaches a `warn!` and an image-failure block, so drop the URL the way the sidecar does.
+        .map_err(|e| FetchError::Failed(format!("fetch failed: {}", e.without_url())))?;
     if !resp.status().is_success() {
         return Err(FetchError::Failed(format!(
             "fetch returned status {}",
