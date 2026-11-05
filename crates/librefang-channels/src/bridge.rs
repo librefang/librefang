@@ -11363,6 +11363,21 @@ mod tests {
             captured.contains("bot123456:<redacted>/voice/file_7.oga"),
             "the url keeps its shape apart from the secret: {captured}"
         );
+
+        // The same echo, positioned so that the 200-character cut lands inside the secret: truncating before masking leaves a fragment too short for the pattern to match.
+        let padded = format!(
+            "{}https://api.telegram.org/file/bot123456:{SECRET}/voice/file_7.oga",
+            "x".repeat(141)
+        );
+        let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        tracing::subscriber::with_default(WarnCollector(events.clone()), || {
+            warn_download_status_failure("403 Forbidden", &url, &padded);
+        });
+        let captured = events.lock().unwrap().join("\n");
+        assert!(
+            !captured.contains("AAHdqTcvCH1vGWJx"),
+            "a secret cut by the 200-character window leaked a fragment: {captured}"
+        );
     }
 
     /// Discord signs the query string instead of the path; only `hm` is the signature, so `ex` / `is` stay readable.
