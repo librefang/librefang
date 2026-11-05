@@ -1151,7 +1151,8 @@ fn suppress_button_command_ack(content: &ChannelContent, command: &str) -> bool 
 /// `bot<id>:<secret>` as it appears in the path of a Telegram Bot API file URL.
 ///
 /// The Bot API puts the bot credential in the path (`…/file/bot<id>:<secret>/<file_path>`) instead of an auth header, so the URL cannot be handed to the daemon without it — see `sdk/rust/librefang-sidecar-telegram/src/adapter.rs` for the media-fetch contract that depends on this shape.
-/// Only the secret is matched, and only when it follows a path-segment boundary, so ordinary links (`…/robot123:…`, opaque ids) are left alone.
+/// The pattern is deliberately not host-scoped, unlike the Discord one: the sidecar accepts a custom `api_root` for a self-hosted Bot API server, so pinning the mask to `api.telegram.org` would let a self-hosted deployment leak.
+/// The cost of that choice is the opposite failure: a link on any host whose path happens to look like `/bot<digits>:<20+ chars>` is masked too. That is over-masking of text the agent reads, never a wrong download, and it is the direction this should fail in.
 static TELEGRAM_BOT_TOKEN_IN_URL: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(^|/)bot(\d+):[A-Za-z0-9_-]{20,}").expect("TELEGRAM_BOT_TOKEN_IN_URL is valid")
 });
@@ -1159,8 +1160,9 @@ static TELEGRAM_BOT_TOKEN_IN_URL: LazyLock<Regex> = LazyLock::new(|| {
 /// Discord's CDN signs attachment URLs with an `hm` query parameter.
 ///
 /// `ex` and `is` are only the expiry and issue timestamps and stay readable, the same way the Telegram bot id does; `hm` is the HMAC and is the counterpart of the bot secret.
-static DISCORD_SIGNATURE_IN_URL: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"([?&]hm=)[^&\s\]]+").expect("DISCORD_SIGNATURE_IN_URL is valid"));
+static DISCORD_SIGNATURE_IN_URL: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"([?&]hm=)[^&\s"<>]+"#).expect("DISCORD_SIGNATURE_IN_URL is valid")
+});
 
 /// The hosts Discord serves attachments from, as bare domains.
 ///
@@ -11342,7 +11344,7 @@ mod tests {
         const HMAC: &str = "9d1e2f3a4b5c6d7e8f90a1b2c3d4e5f6a7b8c9d0";
         let url = format!("https://api.telegram.org/file/bot123456:{SECRET}/voice/file_7.oga");
         let body = format!(
-            r#"{{"message":"403 Forbidden","request":"https://cdn.discordapp.com/attachments/1/2/x.png?ex=1&is=2&hm={HMAC}"}}"#
+            r#"{{"message":"403 Forbidden","request":"https://cdn.discordapp.com/attachments/1/2/x.png?ex=1&is=2&hm={HMAC}","other":"diag"}}"#
         );
 
         let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -11358,6 +11360,10 @@ mod tests {
         assert!(
             !captured.contains(HMAC),
             "the logged body preview leaked the Discord signature: {captured}"
+        );
+        assert!(
+            captured.contains(r#""other":"diag"}"#),
+            "the mask must stop at the JSON value boundary, not eat the rest of the body: {captured}"
         );
         assert!(
             captured.contains("bot123456:<redacted>/voice/file_7.oga"),
@@ -11382,6 +11388,18 @@ mod tests {
 
     /// Discord signs the query string instead of the path; only `hm` is the signature, so `ex` / `is` stay readable.
     /// The mask is host-scoped, because `hm=` on an unrelated host is not a credential and rewriting it would corrupt an ordinary link.
+    /// The Telegram mask is host-agnostic on purpose, because the sidecar can point at a self-hosted Bot API server.
+    /// The price is that a bot-shaped path on an unrelated host is masked too; this pins that as intended rather than leaving it to be rediscovered as a bug.
+    #[test]
+    fn test_redact_media_url_for_text_masks_bot_shaped_path_on_any_host() {
+        let url = "https://example.com/files/bot123:abcdefghijklmnopqrstuvwxyz0/data.pdf";
+        assert_eq!(
+            redact_media_url_for_text(url),
+            "https://example.com/files/bot123:<redacted>/data.pdf",
+            "a bot-shaped path is masked on any host, by design"
+        );
+    }
+
     #[test]
     fn test_redact_media_url_for_text_masks_discord_signature_on_discord_hosts_only() {
         const HMAC: &str = "9d1e2f3a4b5c6d7e8f90a1b2c3d4e5f6a7b8c9d0";
