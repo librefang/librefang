@@ -21,8 +21,9 @@ use librefang_types::config::{
 use librefang_types::message::ContentBlock;
 use regex::{Regex, RegexSet};
 use serde::{Deserialize, Serialize};
+use std::borrow::Cow;
 use std::collections::HashMap;
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, LazyLock, OnceLock};
 use std::time::Instant;
 use tokio::sync::{mpsc, watch};
 use tracing::{debug, error, info, warn};
@@ -1147,6 +1148,22 @@ fn suppress_button_command_ack(content: &ChannelContent, command: &str) -> bool 
         && matches!(command, "approve" | "reject")
 }
 
+/// `bot<id>:<secret>` as it appears in the path of a Telegram Bot API file URL.
+///
+/// The Bot API puts the bot credential in the path (`…/file/bot<id>:<secret>/<file_path>`) instead of an auth header, so the URL cannot be handed to the daemon without it — see `sdk/rust/librefang-sidecar-telegram/src/adapter.rs` for the media-fetch contract that depends on this shape.
+/// Only the secret is matched, and only when it follows a path-segment boundary, so ordinary links (`…/robot123:…`, opaque ids) are left alone.
+static TELEGRAM_BOT_TOKEN_IN_URL: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(^|/)bot(\d+):[A-Za-z0-9_-]{20,}").expect("TELEGRAM_BOT_TOKEN_IN_URL is valid")
+});
+
+/// Mask the credential in a media URL that is about to be rendered into agent-facing text.
+///
+/// This is the sanitizing counterpart of [`content_to_text`]: the `url` field on [`ChannelContent`] deliberately keeps the real URL, because the bridge downloads the attachment with it, while every prompt-bound rendering goes through here and renders `bot<id>:<redacted>` instead.
+/// The bot id stays visible — it identifies which bot delivered the attachment and is not the secret — and the rest of the URL is preserved so a transcript still says which file arrived.
+fn redact_media_url_for_text(url: &str) -> Cow<'_, str> {
+    TELEGRAM_BOT_TOKEN_IN_URL.replace_all(url, "${1}bot${2}:<redacted>")
+}
+
 fn content_to_text(content: &ChannelContent) -> String {
     match content {
         ChannelContent::Text(t) => t.clone(),
@@ -1157,16 +1174,22 @@ fn content_to_text(content: &ChannelContent) -> String {
                 format!("/{name} {}", args.join(" "))
             }
         }
-        ChannelContent::Image { url, caption, .. } => match caption {
-            Some(c) => format!("[Photo: {url}]\n{c}"),
-            None => format!("[Photo: {url}]"),
-        },
-        ChannelContent::File { url, filename } => format!("[File ({filename}): {url}]"),
+        ChannelContent::Image { url, caption, .. } => {
+            let url = redact_media_url_for_text(url);
+            match caption {
+                Some(c) => format!("[Photo: {url}]\n{c}"),
+                None => format!("[Photo: {url}]"),
+            }
+        }
+        ChannelContent::File { url, filename } => {
+            format!("[File ({filename}): {}]", redact_media_url_for_text(url))
+        }
         ChannelContent::Voice {
             url,
             duration_seconds,
             caption,
         } => {
+            let url = redact_media_url_for_text(url);
             let cap = caption.as_deref().unwrap_or("");
             if cap.is_empty() {
                 format!("[Voice message ({duration_seconds}s): {url}]")
@@ -1179,10 +1202,13 @@ fn content_to_text(content: &ChannelContent) -> String {
             caption,
             duration_seconds,
             ..
-        } => match caption {
-            Some(c) => format!("[Video ({duration_seconds}s): {url}]\n{c}"),
-            None => format!("[Video ({duration_seconds}s): {url}]"),
-        },
+        } => {
+            let url = redact_media_url_for_text(url);
+            match caption {
+                Some(c) => format!("[Video ({duration_seconds}s): {url}]\n{c}"),
+                None => format!("[Video ({duration_seconds}s): {url}]"),
+            }
+        }
         ChannelContent::Location { lat, lon } => format!("[Location: {lat}, {lon}]"),
         ChannelContent::FileData { filename, .. } => format!("[File: {filename}]"),
         ChannelContent::Interactive { text, .. } => text.clone(),
@@ -1205,18 +1231,24 @@ fn content_to_text(content: &ChannelContent) -> String {
             caption,
             duration_seconds,
             ..
-        } => match caption {
-            Some(c) => format!("[Audio ({duration_seconds}s): {url}]\n{c}"),
-            None => format!("[Audio ({duration_seconds}s): {url}]"),
-        },
+        } => {
+            let url = redact_media_url_for_text(url);
+            match caption {
+                Some(c) => format!("[Audio ({duration_seconds}s): {url}]\n{c}"),
+                None => format!("[Audio ({duration_seconds}s): {url}]"),
+            }
+        }
         ChannelContent::Animation {
             url,
             caption,
             duration_seconds,
-        } => match caption {
-            Some(c) => format!("[Animation ({duration_seconds}s): {url}]\n{c}"),
-            None => format!("[Animation ({duration_seconds}s): {url}]"),
-        },
+        } => {
+            let url = redact_media_url_for_text(url);
+            match caption {
+                Some(c) => format!("[Animation ({duration_seconds}s): {url}]\n{c}"),
+                None => format!("[Animation ({duration_seconds}s): {url}]"),
+            }
+        }
         ChannelContent::Sticker { file_id } => format!("[Sticker: {file_id}]"),
         ChannelContent::MediaGroup { items } => format!("[Media group: {} items]", items.len()),
         ChannelContent::Poll { question, .. } => format!("[Poll: {question}]"),
@@ -4938,6 +4970,7 @@ async fn dispatch_message(
             ..
         } => {
             // Fallback when image download failed
+            let url = redact_media_url_for_text(url);
             match caption {
                 Some(c) => format!("[User sent a photo: {url}]\nCaption: {c}"),
                 None => format!("[User sent a photo: {url}]"),
@@ -4947,29 +4980,40 @@ async fn dispatch_message(
             ref url,
             ref filename,
         } => {
-            format!("[User sent a file ({filename}): {url}]")
+            format!(
+                "[User sent a file ({filename}): {}]",
+                redact_media_url_for_text(url)
+            )
         }
         ChannelContent::Voice {
             ref url,
             ref caption,
             duration_seconds,
-        } => match caption {
-            Some(c) => {
-                format!("[User sent a voice message ({duration_seconds}s): {url}]\nCaption: {c}")
+        } => {
+            let url = redact_media_url_for_text(url);
+            match caption {
+                Some(c) => {
+                    format!(
+                        "[User sent a voice message ({duration_seconds}s): {url}]\nCaption: {c}"
+                    )
+                }
+                None => format!("[User sent a voice message ({duration_seconds}s): {url}]"),
             }
-            None => format!("[User sent a voice message ({duration_seconds}s): {url}]"),
-        },
+        }
         ChannelContent::Video {
             ref url,
             ref caption,
             duration_seconds,
             ..
-        } => match caption {
-            Some(c) => {
-                format!("[User sent a video ({duration_seconds}s): {url}]\nCaption: {c}")
+        } => {
+            let url = redact_media_url_for_text(url);
+            match caption {
+                Some(c) => {
+                    format!("[User sent a video ({duration_seconds}s): {url}]\nCaption: {c}")
+                }
+                None => format!("[User sent a video ({duration_seconds}s): {url}]"),
             }
-            None => format!("[User sent a video ({duration_seconds}s): {url}]"),
-        },
+        }
         ChannelContent::Location { lat, lon } => {
             format!("[User shared location: {lat}, {lon}]")
         }
@@ -5006,20 +5050,26 @@ async fn dispatch_message(
             ref caption,
             duration_seconds,
             ..
-        } => match caption {
-            Some(c) => format!("[User sent audio ({duration_seconds}s): {url}]\nCaption: {c}"),
-            None => format!("[User sent audio ({duration_seconds}s): {url}]"),
-        },
+        } => {
+            let url = redact_media_url_for_text(url);
+            match caption {
+                Some(c) => format!("[User sent audio ({duration_seconds}s): {url}]\nCaption: {c}"),
+                None => format!("[User sent audio ({duration_seconds}s): {url}]"),
+            }
+        }
         ChannelContent::Animation {
             ref url,
             ref caption,
             duration_seconds,
-        } => match caption {
-            Some(c) => {
-                format!("[User sent animation ({duration_seconds}s): {url}]\nCaption: {c}")
+        } => {
+            let url = redact_media_url_for_text(url);
+            match caption {
+                Some(c) => {
+                    format!("[User sent animation ({duration_seconds}s): {url}]\nCaption: {c}")
+                }
+                None => format!("[User sent animation ({duration_seconds}s): {url}]"),
             }
-            None => format!("[User sent animation ({duration_seconds}s): {url}]"),
-        },
+        }
         ChannelContent::Sticker { ref file_id } => format!("[User sent sticker: {file_id}]"),
         ChannelContent::MediaGroup { ref items } => {
             format!("[User sent media group: {} items]", items.len())
@@ -10971,6 +11021,130 @@ mod tests {
         assert_eq!(
             content_to_text(&voice),
             "[Voice message (30s): https://example.com/voice.ogg]"
+        );
+    }
+
+    /// The secret half of a Telegram Bot API file URL is a live credential: the sidecar hands the daemon `…/file/bot<id>:<secret>/<path>`, and that URL is rendered into the prompt by `content_to_text`.
+    /// Pinned end to end so a future arm rewrite cannot quietly drop the mask.
+    #[test]
+    fn test_content_to_text_voice_redacts_telegram_bot_token() {
+        const SECRET: &str = "AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw";
+        let voice = ChannelContent::Voice {
+            url: format!("https://api.telegram.org/file/bot123456:{SECRET}/voice/file_7.oga"),
+            duration_seconds: 4,
+            caption: None,
+        };
+
+        let text = content_to_text(&voice);
+
+        assert!(
+            !text.contains(SECRET),
+            "the bot token must never reach prompt text, got: {text}"
+        );
+        assert_eq!(
+            text,
+            "[Voice message (4s): https://api.telegram.org/file/bot123456:<redacted>/voice/file_7.oga]",
+            "the URL must keep its shape with only the secret masked"
+        );
+    }
+
+    /// Every url-bearing variant renders through the same mask — `Image`, `File`, `Video`, `Audio` and `Animation` are all fed by the Telegram sidecar's `file_url()`.
+    #[test]
+    fn test_content_to_text_redacts_bot_token_for_every_media_variant() {
+        const SECRET: &str = "AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw";
+        let url = format!("https://api.telegram.org/file/bot123456:{SECRET}/photos/file_42.jpg");
+        let cases = vec![
+            ChannelContent::Image {
+                url: url.clone(),
+                caption: Some("A cat".to_string()),
+                mime_type: None,
+            },
+            ChannelContent::File {
+                url: url.clone(),
+                filename: "report.pdf".to_string(),
+            },
+            ChannelContent::Voice {
+                url: url.clone(),
+                duration_seconds: 4,
+                caption: Some("listen".to_string()),
+            },
+            ChannelContent::Video {
+                url: url.clone(),
+                caption: None,
+                duration_seconds: 9,
+                filename: None,
+            },
+            ChannelContent::Audio {
+                url: url.clone(),
+                caption: None,
+                duration_seconds: 9,
+                title: None,
+                performer: None,
+            },
+            ChannelContent::Animation {
+                url: url.clone(),
+                caption: None,
+                duration_seconds: 3,
+            },
+        ];
+
+        for content in cases {
+            let text = content_to_text(&content);
+            assert!(
+                !text.contains(SECRET),
+                "{content:?} leaked the bot token: {text}"
+            );
+            assert!(
+                text.contains("bot123456:<redacted>/"),
+                "{content:?} must keep the masked URL shape, got: {text}"
+            );
+        }
+    }
+
+    /// Captions are user text and must survive the mask untouched.
+    #[test]
+    fn test_content_to_text_redaction_preserves_caption() {
+        const SECRET: &str = "AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw";
+        let image = ChannelContent::Image {
+            url: format!("https://api.telegram.org/file/bot123456:{SECRET}/photos/file_42.jpg"),
+            caption: Some("see bot123456: not a token here".to_string()),
+            mime_type: None,
+        };
+
+        let text = content_to_text(&image);
+
+        assert!(text.ends_with("\nsee bot123456: not a token here"));
+        assert!(!text.contains(SECRET));
+    }
+
+    #[test]
+    fn test_redact_media_url_for_text_leaves_ordinary_urls_alone() {
+        for url in [
+            "https://example.com/photo.jpg",
+            "https://example.com:8443/files/a:b/c.pdf",
+            "https://example.com/download?token=abc",
+            // No path-segment boundary before `bot`: an ordinary slug is not a bot URL.
+            "https://example.com/robot123:abcdefghijklmnopqrstuvwxyz0/a.jpg",
+            // Too short to be a Bot API secret (35 chars in practice).
+            "https://api.telegram.org/file/bot123:short/file_1.jpg",
+        ] {
+            let redacted = redact_media_url_for_text(url);
+            assert_eq!(redacted, url, "ordinary URL was rewritten: {url}");
+            assert!(
+                matches!(redacted, Cow::Borrowed(_)),
+                "a non-matching URL must not allocate: {url}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_redact_media_url_for_text_masks_api_root_form() {
+        const SECRET: &str = "AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw";
+        assert_eq!(
+            redact_media_url_for_text(&format!(
+                "https://api.telegram.org/bot123456:{SECRET}/getMe"
+            )),
+            "https://api.telegram.org/bot123456:<redacted>/getMe"
         );
     }
 
