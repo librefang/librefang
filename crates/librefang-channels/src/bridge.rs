@@ -1218,9 +1218,11 @@ fn redact_credentials_in_text(text: &str) -> String {
 /// The body needs the mask as much as the URL does: a proxy or a Bot API error path can echo the request URL back into the response body, and the sidecar documents exactly that before redacting it in `api/client.rs`.
 /// Logging lives here rather than at the call site so the warning a test can capture is the warning production emits.
 fn warn_download_status_failure(status: impl std::fmt::Display, url: &str, body: &str) {
-    let preview: String = body.chars().take(200).collect();
+    // Mask first, then cut to 200 characters: the other order leaves a fragment of the secret in the log whenever the cut lands inside it, because a fragment shorter than the pattern's 20-character minimum never matches.
+    let masked_body = redact_credentials_in_text(body);
+    let preview: String = masked_body.chars().take(200).collect();
     let logged_url = redact_media_url_for_text(url).into_owned();
-    let logged_preview = redact_credentials_in_text(&preview);
+    let logged_preview = preview;
     warn!(
         status = %status,
         body_preview = %logged_preview,
@@ -11246,30 +11248,6 @@ mod tests {
         );
     }
 
-    /// A failed media fetch must not put the token into the text that is logged.
-    ///
-    /// `reqwest::Error`'s Display appends the request URL, so both download paths strip it before formatting; the `warn!` lines and these failure blocks carry the same string.
-    #[tokio::test]
-    async fn download_failure_text_does_not_carry_the_bot_token() {
-        const SECRET: &str = "AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw";
-        let url = format!("https://example.invalid/file/bot123456:{SECRET}/voice/file_7.oga");
-        let dir = tempfile::TempDir::new().unwrap();
-
-        let file = download_file_to_blocks(&url, "voice.oga", 1024 * 1024, dir.path(), &[]).await;
-        let file_text = format!("{:?}", file.blocks);
-        assert!(
-            !file_text.contains(SECRET),
-            "the file-download failure text leaked the token: {file_text}"
-        );
-
-        let blocks = download_image_to_blocks(&url, None, None, dir.path(), &[]).await;
-        let image_text = format!("{blocks:?}");
-        assert!(
-            !image_text.contains(SECRET),
-            "the image-download failure text leaked the token: {image_text}"
-        );
-    }
-
     /// Collects `WARN` events emitted on this thread, so a test can assert on the line production logs rather than on the helper that feeds it.
     struct WarnCollector(std::sync::Arc<std::sync::Mutex<Vec<String>>>);
 
@@ -11299,8 +11277,65 @@ mod tests {
         fn exit(&self, _: &tracing::span::Id) {}
     }
 
-    /// The non-2xx line carries the URL and the first 200 characters of the response body, and a proxy or a Bot API error path can echo the request URL into that body.
-    /// A real 4xx cannot be driven from a test — the SSRF guard refuses loopback before the socket — so the assertion is on the warning itself, which is emitted by the function under test.
+    /// A failed media fetch must not put the token into the failure text, nor into the warning written to the daemon log.
+    ///
+    /// `reqwest::Error`'s Display appends the request URL, so both download paths strip it before formatting and put it back masked in the `warn!` fields.
+    /// This drives both paths and captures the events: a `warn!` that stops masking is invisible to the returned blocks.
+    #[tokio::test]
+    async fn download_failure_text_and_warning_do_not_carry_the_bot_token() {
+        const SECRET: &str = "AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw";
+        let url = format!("https://example.invalid/file/bot123456:{SECRET}/voice/file_7.oga");
+        let dir = tempfile::TempDir::new().unwrap();
+
+        let file_events = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let file = {
+            let _guard = tracing::subscriber::set_default(WarnCollector(file_events.clone()));
+            download_file_to_blocks(&url, "voice.oga", 1024 * 1024, dir.path(), &[]).await
+        };
+        let file_text = format!("{:?}", file.blocks);
+        assert!(
+            !file_text.contains(SECRET),
+            "the file-download failure text leaked the token: {file_text}"
+        );
+        let captured = file_events.lock().unwrap().join("\n");
+        assert!(
+            captured.contains("Failed to download file from channel"),
+            "the transport failure must still log something: {captured}"
+        );
+        assert!(
+            !captured.contains(SECRET),
+            "the transport-failure warning leaked the token: {captured}"
+        );
+        assert!(
+            captured.contains("bot123456:<redacted>") && captured.contains("filename"),
+            "the warning must keep the masked URL and the filename: {captured}"
+        );
+
+        let image_events = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let blocks = {
+            let _guard = tracing::subscriber::set_default(WarnCollector(image_events.clone()));
+            download_image_to_blocks(&url, None, None, dir.path(), &[]).await
+        };
+        let image_text = format!("{blocks:?}");
+        assert!(
+            !image_text.contains(SECRET),
+            "the image-download failure text leaked the token: {image_text}"
+        );
+        let captured = image_events.lock().unwrap().join("\n");
+        assert!(
+            captured.contains("Image download failed"),
+            "the image failure must still log something: {captured}"
+        );
+        assert!(
+            !captured.contains(SECRET),
+            "the image-failure warning leaked the token: {captured}"
+        );
+        assert!(
+            captured.contains("bot123456:<redacted>"),
+            "the image warning must keep the masked URL: {captured}"
+        );
+    }
+
     #[test]
     fn test_download_status_failure_warn_masks_the_url_and_the_echoed_body() {
         const SECRET: &str = "AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw";
