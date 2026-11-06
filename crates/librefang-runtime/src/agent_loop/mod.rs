@@ -1320,6 +1320,7 @@ async fn run_agent_loop_inner(
             driver.clone(),
             false,
             fold_echo_policy,
+            new_messages_start,
         )
         .await;
 

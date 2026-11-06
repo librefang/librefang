@@ -496,6 +496,7 @@ pub(super) async fn maybe_fold_stale_tool_results(
     driver: Arc<dyn LlmDriver>,
     streaming: bool,
     reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy,
+    current_turn_start: usize,
 ) -> Vec<Message> {
     // Fast-path: a fold pass needs at least `fold_after_turns` *recent*
     // assistant turns plus one stale turn — i.e. more than
@@ -507,13 +508,15 @@ pub(super) async fn maybe_fold_stale_tool_results(
     {
         return messages;
     }
-    let (folded, fold_result) = crate::history_fold::fold_stale_tool_results(
+    let preserve_from = current_turn_start.min(messages.len());
+    let (folded, fold_result) = crate::history_fold::fold_stale_tool_results_preserving_turn(
         messages,
         fold_cfg,
         model,
         aux_client,
         driver,
         reasoning_echo_policy,
+        preserve_from,
     )
     .await;
     // Replay the fold onto `session.messages` so the rewrite is persisted

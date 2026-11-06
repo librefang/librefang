@@ -59,9 +59,13 @@
 //!
 //! # Fallback
 //!
-//! When the aux-LLM call fails (no key configured, network error, empty
-//! response) the fold falls back to a static stub:
-//! `[history-fold: summarisation unavailable]`.  When the call succeeds but
+//! The fold never touches the running turn: only messages before the last
+//! real user prompt are candidates, because a turn's own tool results are
+//! the model's working set and folding them makes it re-fetch the same data
+//! until the iteration cap (#8653).  When the aux-LLM call fails (no key
+//! configured, network error, empty response) each block keeps a
+//! preview-truncated copy of its own result, never a content-free stub —
+//! a stub gives the model nothing to act on.  When the call succeeds but
 //! the response is not valid JSON the raw response text is applied to every
 //! stale block instead (degrading to Option-1 bulk-summary semantics rather
 //! than wasting the round-trip).  Either way the stale payload is removed
@@ -81,18 +85,6 @@ const FOLD_PREFIX: &str = "[history-fold]";
 
 /// Number of characters shown in the per-tool preview inside the fold prompt.
 const FOLD_PREVIEW_CHARS: usize = 500;
-
-/// Static-stub text used when the aux-LLM summarisation call fails outright.
-///
-/// Explicitly tells the model the call genuinely failed so it does NOT
-/// re-issue the identical tool call.  Only applied when the whole batched
-/// summariser call failed (network/empty) — see `bulk_fallback`.  For the
-/// narrower case where the model simply *omitted* one id from an otherwise
-/// successful batch, the original tool result is preserved instead (see the
-/// `[result preserved — summarisation omitted]` branch in the apply loop) so
-/// the model never reads a folded block as "result not available yet" and
-/// retries (issue #5978).
-const FALLBACK_SUMMARY: &str = "[summarisation unavailable — do not retry this tool call]";
 
 /// Marker prefixing a fold block whose id the summariser omitted from an
 /// otherwise-successful batch.  The original tool result is preserved
@@ -140,7 +132,7 @@ pub struct FoldResult {
     /// Total tool-result messages that were replaced.
     pub messages_replaced: usize,
     /// `1` when the aux-LLM batched call failed (network/empty) and the
-    /// pass fell back to [`FALLBACK_SUMMARY`]; `0` otherwise.  Kept as a
+    /// pass fell back to the static stub; `0` otherwise.  Kept as a
     /// counter (rather than a bool) so future per-chunk batching can
     /// surface partial failures.
     pub groups_used_fallback: usize,
@@ -189,12 +181,59 @@ pub struct FoldConfig {
 /// is performed again from scratch on the next turn.  See
 /// [`apply_fold_rewrites`] for the recommended replay helper.
 pub async fn fold_stale_tool_results(
+    messages: Vec<Message>,
+    cfg: FoldConfig,
+    model: &str,
+    aux_client: Option<&AuxClient>,
+    driver: Arc<dyn LlmDriver>,
+    reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy,
+) -> (Vec<Message>, FoldResult) {
+    fold_stale_tool_results_inner(
+        messages,
+        cfg,
+        model,
+        aux_client,
+        driver,
+        reasoning_echo_policy,
+        usize::MAX,
+    )
+    .await
+}
+
+/// Fold everything before the running turn.  `current_turn_start` is the
+/// index (in `messages`) of the turn's first message; nothing at or after it
+/// is eligible, so the model keeps the results it is still working over.
+#[allow(clippy::too_many_arguments)]
+pub async fn fold_stale_tool_results_preserving_turn(
+    messages: Vec<Message>,
+    cfg: FoldConfig,
+    model: &str,
+    aux_client: Option<&AuxClient>,
+    driver: Arc<dyn LlmDriver>,
+    reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy,
+    current_turn_start: usize,
+) -> (Vec<Message>, FoldResult) {
+    fold_stale_tool_results_inner(
+        messages,
+        cfg,
+        model,
+        aux_client,
+        driver,
+        reasoning_echo_policy,
+        current_turn_start,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn fold_stale_tool_results_inner(
     mut messages: Vec<Message>,
     cfg: FoldConfig,
     model: &str,
     aux_client: Option<&AuxClient>,
     driver: Arc<dyn LlmDriver>,
     reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy,
+    preserve_from: usize,
 ) -> (Vec<Message>, FoldResult) {
     let FoldConfig {
         fold_after_turns,
@@ -207,7 +246,8 @@ pub async fn fold_stale_tool_results(
     // Walk backwards to find the stale boundary.  Count assistant turns from
     // the end; tool-result messages whose assistant-turn distance exceeds
     // `fold_after_turns` are stale.
-    let stale_indices = collect_stale_indices(&messages, fold_after_turns as usize);
+    let stale_indices =
+        collect_stale_indices_from(&messages, fold_after_turns as usize, preserve_from);
 
     if stale_indices.is_empty() {
         return (messages, FoldResult::default());
@@ -239,7 +279,7 @@ pub async fn fold_stale_tool_results(
     // `summarise_batch` below is called with `model` — the *agent's* model — so the driver it is paired with must be the one that can serve it.
     // `AuxClient::primary` is the kernel's process-wide `default_driver`, not the triggering agent's chain, so for any agent that overrides `provider` / `model` in its manifest the two disagree: the request goes to the default provider carrying a model only the agent's provider has.
     // Reported as a LiteLLM `403 team_model_access_denied` — "Tried to access deepseek-v4-pro" — on an agent configured to reach DeepSeek directly.
-    // The fold then silently degrades to `FALLBACK_SUMMARY` on every turn.
+    // The fold then silently degrades to the static stub on every turn.
     //
     // `used_primary` is exactly this signal, and `ContextCompressor` already branches on it the same way (`context_compressor.rs`, the `AuxTask::Compression` resolution) — this brings the fold path in line.
     let summary_driver = match aux_client {
@@ -271,7 +311,7 @@ pub async fn fold_stale_tool_results(
     //     we still apply `raw` as a bulk summary to every block (Option-1
     //     fallback) rather than waste the round-trip,
     //   - `Err(Call|Empty)` when the aux-LLM is unreachable / returned
-    //     nothing — we apply [`FALLBACK_SUMMARY`] to every block.
+    //     nothing — we apply the static stub to every block.
     let stale_count = stale_blocks.len();
     let (summaries_by_id, bulk_fallback) = match summarise_batch(
         &stale_blocks,
@@ -292,7 +332,7 @@ pub async fn fold_stale_tool_results(
             // (`"\"tid_3\""`), Unicode-normalised dash variants, model
             // under-delivery (returns summaries for K of N stale blocks).
             // Without these warns the affected blocks silently fall back
-            // to `FALLBACK_SUMMARY` and operators have no way to spot
+            // to the static stub and operators have no way to spot
             // the drift.
             let stale_id_set: std::collections::BTreeSet<&str> = stale_blocks
                 .iter()
@@ -346,8 +386,11 @@ pub async fn fold_stale_tool_results(
                 error = %err,
                 "history_fold: aux-LLM batched call failed — using fallback stub"
             );
+            // A content-free stub tells the model nothing, so it re-issues
+            // the call; the preview keeps enough of the payload to decide
+            // (#8653, same degradation as #5978).
             result.groups_used_fallback = 1;
-            (BTreeMap::new(), Some(FALLBACK_SUMMARY.to_string()))
+            (BTreeMap::new(), None::<String>)
         }
     };
 
@@ -498,7 +541,20 @@ fn collect_stale_blocks(messages: &[Message], stale_indices: &[usize]) -> Vec<St
 /// A message is a "tool-result message" when its content is a `Blocks` vec
 /// that contains at least one `ContentBlock::ToolResult` block AND it has the
 /// `User` role.  Pinned messages are never stale.
+#[cfg(test)]
 fn collect_stale_indices(messages: &[Message], fold_after_turns: usize) -> Vec<usize> {
+    collect_stale_indices_from(messages, fold_after_turns, usize::MAX)
+}
+
+/// Same as [`collect_stale_indices`], but never marks a message at or after
+/// `preserve_from`.  Production passes the start of the running turn: a
+/// turn's own tool results are the model's working set, and folding them
+/// makes it re-fetch the same data until the iteration cap (#8653).
+fn collect_stale_indices_from(
+    messages: &[Message],
+    fold_after_turns: usize,
+    preserve_from: usize,
+) -> Vec<usize> {
     // Walk backwards, count assistant messages, mark the boundary index.
     let mut assistant_turns_seen = 0usize;
     let mut boundary_idx = messages.len(); // exclusive upper bound for "recent" turns
@@ -527,6 +583,7 @@ fn collect_stale_indices(messages: &[Message], fold_after_turns: usize) -> Vec<u
         .enumerate()
         .filter(|(i, msg)| {
             *i < boundary_idx
+                && *i < preserve_from
                 && !msg.pinned
                 && msg.role == Role::User
                 && is_tool_result_message(msg)
@@ -1069,7 +1126,7 @@ mod tests {
     ///
     /// `summarise_batch` is called with the *agent's* `model`, while `AuxClient::primary` is the kernel's process-wide `default_driver`.
     /// For any agent overriding `provider` / `model` those disagree, and the request goes to the default provider carrying a model only the agent's provider can serve.
-    /// Live symptom: LiteLLM `403 team_model_access_denied` naming the agent's model, after which every fold silently degrades to `FALLBACK_SUMMARY`.
+    /// Live symptom: LiteLLM `403 team_model_access_denied` naming the agent's model, after which every fold silently degrades to the static stub.
     #[tokio::test]
     async fn fold_without_aux_chain_uses_the_callers_driver_not_aux_primary() {
         let (agent_driver, agent_calls) =
@@ -1115,7 +1172,7 @@ mod tests {
         );
         assert_eq!(
             result.groups_used_fallback, 0,
-            "a working summariser must not degrade to FALLBACK_SUMMARY"
+            "a working summariser must not degrade to the static stub"
         );
     }
 
@@ -1191,6 +1248,78 @@ mod tests {
         assert_eq!(out.len(), original_len, "history unchanged");
     }
 
+    /// #8653: a turn's own tool results are the model's working set.  They
+    /// must survive the fold even when the turn looks like many "turns" to
+    /// the assistant-message counter, or the agent re-fetches the same data
+    /// until the iteration cap.
+    #[tokio::test]
+    async fn running_turn_tool_results_are_never_folded() {
+        let messages = build_history(10); // tid_0 .. tid_9
+        let last_tool_result = messages.len() - 1; // tid_9
+        let stale = collect_stale_indices_from(&messages, 2, last_tool_result);
+        assert!(
+            !stale.contains(&last_tool_result),
+            "the running turn's result must not be stale: {stale:?}"
+        );
+        assert!(
+            stale.contains(&2),
+            "an earlier turn's result must still fold: {stale:?}"
+        );
+
+        let json = format!(
+            "[{}]",
+            (0..9)
+                .map(|i| format!(r#"{{"id":"tid_{i}","summary":"summary {i}"}}"#))
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+        let driver: Arc<dyn LlmDriver> = Arc::new(OkDriver(json));
+        let (out, result) = fold_stale_tool_results_preserving_turn(
+            messages,
+            FoldConfig {
+                fold_after_turns: 2,
+                min_batch_size: 1,
+            },
+            "test-model",
+            None,
+            driver,
+            librefang_types::model_catalog::ReasoningEchoPolicy::None,
+            last_tool_result,
+        )
+        .await;
+
+        assert_eq!(result.groups_folded, 1);
+        let by_id: BTreeMap<String, String> = out
+            .iter()
+            .flat_map(|m| match &m.content {
+                MessageContent::Blocks(blocks) => blocks
+                    .iter()
+                    .filter_map(|b| match b {
+                        ContentBlock::ToolResult {
+                            tool_use_id,
+                            content,
+                            ..
+                        } => Some((tool_use_id.clone(), content.clone())),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>(),
+                _ => Vec::new(),
+            })
+            .collect();
+        assert_eq!(
+            by_id.get("tid_9").map(String::as_str),
+            Some("output of turn 9"),
+            "the running turn's payload must be byte-identical after the fold"
+        );
+        assert!(
+            by_id
+                .get("tid_0")
+                .is_some_and(|c| c.starts_with(FOLD_PREFIX)),
+            "an earlier turn's result must be folded, got {:?}",
+            by_id.get("tid_0")
+        );
+    }
+
     #[tokio::test]
     async fn fallback_stub_when_llm_unavailable() {
         // 10 turns, fold_after=8, but the LLM driver always fails.
@@ -1210,7 +1339,7 @@ mod tests {
         )
         .await;
 
-        // Should still fold (with fallback stubs).
+        // Should still fold, keeping a preview of each payload (#8653).
         assert_eq!(
             result.groups_used_fallback, 1,
             "single batched call → exactly one fallback recorded"
@@ -1219,8 +1348,7 @@ mod tests {
         let fallback_present = out.iter().any(|m| match &m.content {
             MessageContent::Blocks(blocks) => blocks.iter().any(|b| match b {
                 ContentBlock::ToolResult { content, .. } => {
-                    content.starts_with(FOLD_PREFIX)
-                        && content.contains("summarisation unavailable")
+                    content.starts_with(FOLD_PREFIX) && content.contains(OMITTED_SUMMARY_PREFIX)
                 }
                 _ => false,
             }),
@@ -1228,7 +1356,7 @@ mod tests {
         });
         assert!(
             fallback_present,
-            "expected fallback summary in a folded ToolResult.content"
+            "expected a preview-preserving fold when the summariser is down"
         );
     }
 
@@ -1438,7 +1566,7 @@ mod tests {
     async fn json_response_assigns_per_tool_use_id_summary() {
         let messages = build_history(10); // tid_0..tid_9
                                           // Hand-craft a JSON response that names a subset of stale ids.
-                                          // Anything not named falls back to FALLBACK_SUMMARY because
+                                          // Anything not named falls back to the static stub because
                                           // `bulk_fallback` is None on the happy path.
         let json = r#"[
             {"id":"tid_0","summary":"listed files"},
@@ -1771,7 +1899,7 @@ mod tests {
         );
         assert!(
             !content.contains("summarisation unavailable"),
-            "omitted id must NOT carry the static FALLBACK_SUMMARY stub, got: {content:?}"
+            "omitted id must NOT carry the static the static stub stub, got: {content:?}"
         );
         assert!(
             content.contains(OMITTED_SUMMARY_PREFIX),
@@ -1797,7 +1925,7 @@ mod tests {
         );
     }
 
-    /// Issue #5978 regression (negative assertion): the FALLBACK_SUMMARY
+    /// Issue #5978 regression (negative assertion): the the static stub
     /// text must NOT appear in any block whose id was merely omitted from
     /// an otherwise-successful batch.  Belt-and-suspenders companion to
     /// `omitted_ids_preserve_original_content`.
@@ -1834,7 +1962,7 @@ mod tests {
         });
         assert!(
             !any_fallback,
-            "no omitted-id block may carry the FALLBACK_SUMMARY stub (issue #5978)"
+            "no omitted-id block may carry the the static stub stub (issue #5978)"
         );
 
         // And the omitted blocks must preserve their original results.
@@ -1931,7 +2059,7 @@ mod tests {
             // Must NOT carry the static call-failure stub either.
             assert!(
                 !content.contains("summarisation unavailable"),
-                "{id} must NOT carry the FALLBACK_SUMMARY stub on a parse failure, got: {content:?}"
+                "{id} must NOT carry the the static stub stub on a parse failure, got: {content:?}"
             );
             // Must carry the preservation marker.
             assert!(

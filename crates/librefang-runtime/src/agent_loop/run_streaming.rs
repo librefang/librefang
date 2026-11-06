@@ -683,6 +683,7 @@ async fn run_agent_loop_streaming_inner(
             driver.clone(),
             true,
             fold_echo_policy,
+            new_messages_start,
         )
         .await;
 
