@@ -516,6 +516,75 @@ mod tests {
         );
     }
 
+    /// Text an operator would see, row by row, rendered to an in-memory buffer.
+    fn rendered_rows(list: &CheckboxList, height: u16) -> Vec<String> {
+        let backend = ratatui::backend::TestBackend::new(40, height);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| list.render(f, f.area(), "Pick one", "hints go here"))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        (0..height)
+            .map(|y| (0..40).map(|x| buffer[(x, y)].symbol()).collect::<String>())
+            .collect()
+    }
+
+    #[test]
+    fn checkbox_list_render_shows_prompt_markers_and_hints() {
+        let mut list = three_items();
+        list.toggle(); // zulu is checked, the rest are not
+        let rows = rendered_rows(&list, 8);
+        assert!(rows[0].contains("Pick one"), "prompt row: {:?}", rows[0]);
+        // The prompt block is two rows tall, so the first item lands on row 2.
+        assert!(
+            rows[2].contains("\u{25c9} zulu"),
+            "checked row: {:?}",
+            rows[2]
+        );
+        assert!(
+            rows[3].contains("\u{25cb} alpha"),
+            "unchecked row: {:?}",
+            rows[3]
+        );
+        assert!(rows[7].contains("hints go here"), "hint row: {:?}", rows[7]);
+    }
+
+    #[test]
+    fn checkbox_list_render_highlights_only_the_cursor_row() {
+        let list = three_items();
+        let backend = ratatui::backend::TestBackend::new(40, 8);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| list.render(f, f.area(), "Pick one", "hints"))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let cyan_rows: Vec<u16> = (0..8)
+            .filter(|&y| {
+                (0..40).any(|x| {
+                    let cell = &buffer[(x, y)];
+                    cell.fg == theme::CYAN && cell.modifier.contains(Modifier::BOLD)
+                })
+            })
+            .collect();
+        assert_eq!(cyan_rows, vec![2], "only the first item row is highlighted");
+    }
+
+    #[test]
+    fn checkbox_list_render_shows_the_empty_state() {
+        let list = CheckboxList::new(Vec::new());
+        let rows = rendered_rows(&list, 8);
+        assert!(
+            !rows[2].contains("\u{25c9}") && !rows[2].contains("\u{25cb}"),
+            "no checkbox rows on an empty list: {:?}",
+            rows[2]
+        );
+        assert!(
+            rows.join("")
+                .contains(crate::i18n::t("tui-agents-label-none-available").as_str()),
+            "the empty-state text is drawn"
+        );
+    }
+
     #[test]
     fn checkbox_list_empty_tolerates_navigation_and_toggle() {
         let mut list = CheckboxList::new(Vec::new());
