@@ -39,7 +39,7 @@ async fn overlay_replaces_effective_mcp_servers_from_db() {
     let storage = StorageConfig::embedded_default(tmp.path().join("operational"));
 
     // 1. Seed the config store with an mcp_servers entry via the SHARED pool —
-    //    the same pool the overlay uses, so the embedded RocksDB transport is
+    //    the same pool the overlay uses, so the embedded SurrealKV transport is
     //    reused (a fresh pool would deadlock on the per-path lock).
     {
         let session = shared_pool().open(&storage).await.expect("open session");

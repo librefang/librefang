@@ -415,7 +415,7 @@ pub async fn post_storage_migrate(
 
         let result = tokio::task::spawn_blocking(move || {
             // Open SurrealDB synchronously from within the blocking task.
-            // Shared process-global pool — embedded RocksDB holds one lock per
+            // Shared process-global pool — embedded SurrealKV holds one lock per
             // path per process, so reuse the same cached transport the
             // boot-time config-store overlay opened (see shared_pool docs).
             let pool = librefang_storage::shared_pool();

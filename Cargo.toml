@@ -115,11 +115,12 @@ r2d2_sqlite = "0.34"
 # Without this pin, `cargo generate-lockfile` / `cargo update` can drift
 # surrealdb-core onto a newer minor whose internal API surface breaks the
 # surrealdb client we pin. This pin makes the alignment structural.
-surrealdb = { version = "=3.3.0", default-features = false, features = ["kv-rocksdb", "protocol-ws", "protocol-http"] }
-surrealdb-core = { version = "=3.3.0", default-features = false }
+# SurrealDB 4.0 removed `kv-rocksdb`; the embedded engine is `kv-surrealkv` (`surrealkv://` URLs).
+surrealdb = { version = "=4.0.0", default-features = false, features = ["kv-surrealkv", "protocol-ws", "protocol-http"] }
+surrealdb-core = { version = "=4.0.0", default-features = false }
 # surrealdb-types is the value/derive crate the client re-exports; surreal-memory depends on it directly at
-# `=3.3.0`, so pin it alongside to keep the three surrealdb crates on one version by construction.
-surrealdb-types = { version = "=3.3.0", default-features = false }
+# `=4.0.0`, so pin it alongside to keep the three surrealdb crates on one version by construction.
+surrealdb-types = { version = "=4.0.0", default-features = false }
 # surreal-memory — pinned by `rev`, and the URL/rev form is kept BYTE-IDENTICAL to
 # the one UAR declares. Cargo keys a git source on the literal URL + ref, so
 # `…/surreal-memory-server?branch=main` and `…/surreal-memory-server.git?rev=<sha>`
@@ -127,8 +128,8 @@ surrealdb-types = { version = "=3.3.0", default-features = false }
 # compiles surreal-memory twice and the two copies' types don't interoperate.
 # If you bump this rev, bump UAR's to match (or vice versa).
 # UAR is no longer linked in-process (`uar-driver` is an empty feature; UAR runs as a sidecar), so today the
-# rev only has to agree with surreal-memory's own `surrealdb = "=3.3.0"` pin.
-surreal-memory = { git = "https://github.com/Prometheus-AGS/surreal-memory-server.git", rev = "b7e2093a267ca8655fbe85693c0ddfc52711ab6b", default-features = false, features = ["embedded"] }
+# rev only has to agree with surreal-memory's own `surrealdb = "=4.0.0"` pin (surreal-memory-server 1.11.0).
+surreal-memory = { git = "https://github.com/Prometheus-AGS/surreal-memory-server.git", rev = "c220263e0a5a1fb520f22acc0d36fb806c03c51b", default-features = false, features = ["embedded"] }
 
 # CLI
 clap = { version = "4", features = ["derive", "env"] }
@@ -222,7 +223,7 @@ wasmtime = { version = "48", features = [
 
 # WASI Preview 2 host implementation — paired in lockstep with wasmtime.
 # Pinned `=` so a `cargo update` can't drift the WasiView trait signature
-# under us between minor releases (same reasoning as the surrealdb = "=3.3.0"
+# under us between minor releases (same reasoning as the surrealdb = "=4.0.0"
 # workspace pin). Phase-7 C-001 wires this into the Component plugin host so
 # language runtimes (CPython, StarlingMonkey, Go, cargo-component's wasi-rt)
 # find their `wasi:*` init imports satisfied. The WasiCtx is deny-by-default
@@ -343,6 +344,15 @@ split-debuginfo = "unpacked" # Speeds up incremental linking on macOS
 # (#1805, #1807, #2117). Panics and backtraces still carry file:line; only
 # interactive debugger (lldb/gdb) variable inspection is lost.
 debug = "line-tables-only"
+
+# SurrealDB 4.0's query executor walks its operator tree with large frames; at
+# opt-level 0 it overflows small test-thread stacks and runs ~25x slower, which
+# trips per-query timeouts when several embedded stores open at once.
+[profile.dev.package.surrealdb-core]
+opt-level = 1
+
+[profile.dev.package.surrealdb-expr]
+opt-level = 1
 
 [profile.release]
 lto = "fat"

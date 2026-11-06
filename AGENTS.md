@@ -279,16 +279,16 @@ migration files in `crates/librefang-storage/src/migrations/sql/`. Feature: `sur
 (default). After upstream merge, map any new upstream SQLite schema changes to new `.surql`
 migration files and register them in `src/migrations/mod.rs`.
 
-**Version pin**: `surrealdb`, `surrealdb-core` **and** `surrealdb-types`, all `=3.3.0`, in workspace `Cargo.toml` — the three move together, since `=` on the client does not constrain the other two.
-Do NOT upgrade without moving the `surreal-memory` rev in step (currently `b7e2093`, which pins `=3.3.0` itself) — version drift breaks the build.
+**Version pin**: `surrealdb`, `surrealdb-core` **and** `surrealdb-types`, all `=4.0.0`, in workspace `Cargo.toml` — the three move together, since `=` on the client does not constrain the other two.
+Do NOT upgrade without moving the `surreal-memory` rev in step (currently `c220263`, which pins `=4.0.0` itself) — version drift breaks the build.
 UAR is an independently owned remote service; its storage dependencies are not linked into BossFang.
 
 ### surreal-memory Integration (`librefang-memory` surreal backends)
 
 BossFang memory uses `surreal-memory` from `https://github.com/Prometheus-AGS/surreal-memory-server`.
 Implementation in `crates/librefang-memory/src/backends/surreal*.rs` (9 backend files).
-The dependency is pinned by `rev` (currently `b7e2093`), not a branch, so a bump is a deliberate edit of the workspace `Cargo.toml` followed by `cargo update -p surreal-memory`.
-Its `surrealdb = "=3.3.0"` pin is exact, so the rev and our SurrealDB pins move together.
+The dependency is pinned by `rev` (currently `c220263`), not a branch, so a bump is a deliberate edit of the workspace `Cargo.toml` followed by `cargo update -p surreal-memory`.
+Its `surrealdb = "=4.0.0"` pin is exact, so the rev and our SurrealDB pins move together.
 
 Never remove; never switch to upstream's SQLite memory backend. The `embedded` feature must
 remain active (no external SurrealDB service required).

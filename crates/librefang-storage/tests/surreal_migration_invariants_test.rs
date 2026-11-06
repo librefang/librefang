@@ -22,7 +22,7 @@ fn memory_storage_config_separates_embedded_operational_and_memory_paths() {
 
     assert_ne!(
         op_path, memory_path,
-        "embedded operational and memory stores must not share a RocksDB lock path"
+        "embedded operational and memory stores must not share a SurrealKV lock path"
     );
     assert_eq!(memory_path.file_name().unwrap(), "librefang-memory.surreal");
     assert_eq!(memory_cfg.database, DEFAULT_MEMORY_DATABASE_NAME);

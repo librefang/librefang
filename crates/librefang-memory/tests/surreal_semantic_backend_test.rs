@@ -1,13 +1,11 @@
 //! Behaviour of the SurrealDB memory backends against a real store.
 //!
-//! Every body runs embedded (RocksDB in a temp dir), and again over `ws://` and `http://` when `BOSSFANG_TEST_SURREAL_URL` is set (an explicit SKIP line is printed when it is not).
+//! Every body runs embedded (SurrealKV in a temp dir), and again over `ws://` and `http://` when `BOSSFANG_TEST_SURREAL_URL` is set (an explicit SKIP line is printed when it is not).
 //! Remote configuration follows `surreal_session_roundtrip_test.rs`:
 //! - `BOSSFANG_TEST_SURREAL_URL` — `ws://host:port` or `http://host:port`; the other scheme is derived from it.
 //! - `BOSSFANG_TEST_SURREAL_USER` — defaults to `root`.
 //! - `BOSSFANG_TEST_SURREAL_PASS_ENV` — the *name* of the env var that holds the password (defaults to `BOSSFANG_TEST_SURREAL_PASS`).
 //!
-//! The `SemanticBackend` tests are `#[ignore]`d: on the pinned surreal-memory (`b7e2093`) `memory.metadata` is not FLEXIBLE, so SurrealDB rejects the nested `metadata.librefang` object every `remember` writes.
-//! Run them with `-- --ignored` once the pin carries the schema fix; they need no other change.
 
 #![cfg(feature = "surreal-backend")]
 
@@ -373,12 +371,15 @@ async fn exercise_proactive(backend: &SurrealSemanticBackend) {
     assert_eq!(proactive.run_decay(&disabled).expect("disabled decay"), 0);
 
     let mut expiring = Memory::new("expired fact", None, None, None, Vec::new());
-    expiring.valid_until = Some((chrono::Utc::now() - chrono::Duration::hours(1)).into());
+    // surreal-memory hides expired rows at read time (since #52), so a row that is
+    // already expired at write time cannot be stored. Expire it shortly after instead.
+    expiring.valid_until = Some((chrono::Utc::now() + chrono::Duration::milliseconds(500)).into());
     let expiring_key = uuid::Uuid::new_v4().to_string();
     storage
         .store_indexed_memory(&expiring_key, expiring, axis("delta"), None)
         .await
         .expect("store expiring row");
+    tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
     let report = proactive.consolidate().await.expect("consolidate");
     assert_eq!(report.memories_decayed, 1, "{report:?}");
     assert!(storage
@@ -518,7 +519,6 @@ async fn exercise_semantic_backend(backend: &SurrealSemanticBackend, embedder: &
 }
 
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "surreal-memory b7e2093 rejects metadata.librefang (memory.metadata is not FLEXIBLE); run with --ignored once the pin carries the schema fix"]
 async fn semantic_backend_remember_recall_count_forget() {
     let tmp = tempfile::tempdir().expect("tempdir");
     for (cfg, remote) in configs(tmp.path(), "semantic backend") {

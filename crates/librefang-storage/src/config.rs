@@ -18,14 +18,14 @@ pub const DEFAULT_DATABASE_NAME: &str = "main";
 /// SurrealDB database name for the AI memory store.
 ///
 /// Kept separate from [`DEFAULT_DATABASE_NAME`] so the memory subsystem
-/// (`SurrealStorage` from `surreal-memory`) can own its own RocksDB file in
+/// (`SurrealStorage` from `surreal-memory`) can own its own SurrealKV file in
 /// embedded mode and its own logical database in remote mode, eliminating all
 /// cross-subsystem lock contention.
 pub const DEFAULT_MEMORY_DATABASE_NAME: &str = "memory";
 
 /// Where the storage backend lives.
 ///
-/// `Embedded` uses the bundled RocksDB engine and is the default chosen by
+/// `Embedded` uses the bundled SurrealKV engine and is the default chosen by
 /// the wizard. `Remote` connects to an external SurrealDB 3.0 instance and
 /// can be shared with the Universal Agent Runtime via separate namespaces.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
@@ -34,7 +34,7 @@ pub enum StorageBackendKind {
     /// Single-process embedded SurrealDB. Cannot be shared between
     /// processes — see surreal-memory-server's CLAUDE.md.
     Embedded {
-        /// Filesystem path of the RocksDB directory.
+        /// Filesystem path of the SurrealKV directory.
         path: PathBuf,
     },
     /// Remote SurrealDB 3.0 instance reachable over WebSocket or HTTP.
@@ -48,7 +48,7 @@ impl StorageBackendKind {
         Self::Embedded { path: path.into() }
     }
 
-    /// `true` when the backend is the embedded RocksDB engine.
+    /// `true` when the backend is the embedded SurrealKV engine.
     #[must_use]
     pub fn is_embedded(&self) -> bool {
         matches!(self, Self::Embedded { .. })
@@ -159,7 +159,7 @@ impl StorageConfig {
     ///
     /// **Embedded mode**: places a sibling `librefang-memory.surreal` directory
     /// next to the operational `librefang.surreal` directory. Each directory
-    /// gets its own exclusive RocksDB lock, eliminating all embedded lock
+    /// gets its own exclusive SurrealKV lock, eliminating all embedded lock
     /// contention between `SurrealConnectionPool` and `SurrealStorage`.
     ///
     /// **Remote mode**: same server and namespace as the operational store but

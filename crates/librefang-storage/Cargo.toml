@@ -28,8 +28,8 @@ chrono = { workspace = true }
 uuid = { workspace = true }
 
 surrealdb = { workspace = true, optional = true }
-# Explicit transitive pin: forces the workspace =3.3.0 constraint to apply so
-# `cargo update -p surrealdb-core` can never silently bump past 3.3.0.
+# Explicit transitive pin: forces the workspace =4.0.0 constraint to apply so
+# `cargo update -p surrealdb-core` can never silently bump past 4.0.0.
 # Without this explicit dep, workspace.dependencies pins only take effect when
 # a crate lists the dep with { workspace = true } — putting it here (where
 # surrealdb-core is already a transitive dep of surrealdb) makes the pin load-bearing.

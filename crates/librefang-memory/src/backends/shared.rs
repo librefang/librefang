@@ -4,14 +4,14 @@
 //! ## Why this exists
 //!
 //! `SurrealStorage::new()` internally invokes `surrealdb::engine::any::connect`,
-//! which (in embedded RocksDB mode) acquires an **exclusive** OS-level file
-//! lock on the underlying RocksDB directory.  RocksDB only permits one opener
+//! which (in embedded SurrealKV mode) acquires an **exclusive** OS-level file
+//! lock on the underlying SurrealKV directory.  SurrealKV only permits one opener
 //! per process per path.
 //!
 //! Prior to this module the kernel boot sequence built two independent
 //! `SurrealStorage` instances back-to-back — one for the proactive memory
 //! backend and one for the semantic backend — each issuing its own
-//! `connect("rocksdb://librefang-memory.surreal")` call.  The second call lost
+//! `connect("surrealkv://librefang-memory.surreal")` call.  The second call lost
 //! the lock race and the kernel failed to boot.
 //!
 //! All `SurrealStorage::new()` calls in the workspace are now funnelled
@@ -93,7 +93,7 @@ impl surreal_memory::EmbeddingService for EmbeddingBridge {
 /// Build a single shared [`surreal_memory::SurrealStorage`] for use by both
 /// the proactive and semantic memory backends.
 ///
-/// The returned `Arc<SurrealStorage>` owns the embedded RocksDB file lock for
+/// The returned `Arc<SurrealStorage>` owns the embedded SurrealKV file lock for
 /// `librefang-memory.surreal` (in embedded mode) or the WebSocket session to
 /// the `memory` database (in remote mode).  Callers must keep the `Arc` alive
 /// for the lifetime of any backend that uses it.

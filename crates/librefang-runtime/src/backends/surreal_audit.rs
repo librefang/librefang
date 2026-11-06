@@ -716,7 +716,7 @@ mod tests {
     async fn reload_picks_up_persisted_entries() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("audit.surreal");
-        // Share one pool across both opens so the embedded RocksDB lock is
+        // Share one pool across both opens so the embedded SurrealKV lock is
         // held by a single transport (the pool caches embedded URLs).
         let pool = SurrealConnectionPool::new();
 

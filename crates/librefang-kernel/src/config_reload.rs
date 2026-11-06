@@ -356,7 +356,7 @@ pub fn build_reload_plan_with_caps(
             .push("memory config changed".to_string());
     }
 
-    // BossFang: storage backend (SurrealDB). The pool / embedded RocksDB handle is
+    // BossFang: storage backend (SurrealDB). The pool / embedded SurrealKV handle is
     // opened once at boot and held for the process lifetime — repointing it at a
     // different namespace or endpoint cannot be picked up without a rebuild.
     if field_changed(&old.storage, &new.storage) {

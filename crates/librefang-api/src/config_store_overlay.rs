@@ -9,7 +9,7 @@
 //! `start_background_agents()` in [`crate::server::run_daemon`], so the kernel's
 //! `effective_mcp_servers` already reflects the database before the MCP-connect
 //! background task spawns. It opens an on-demand session, reads, and drops it —
-//! never holding the embedded RocksDB lock, matching the existing on-demand
+//! never holding the embedded SurrealKV lock, matching the existing on-demand
 //! pattern (assessment R-2).
 //!
 //! Boot order in [`crate::server::run_daemon`] is **seed → overlay → connect**:
@@ -418,7 +418,7 @@ pub async fn write_default_model(
 pub async fn overlay_mcp_servers(kernel: &dyn KernelApi) {
     let storage_cfg = kernel.config_ref().storage.clone();
 
-    // Shared process-global pool — embedded RocksDB holds one lock per path per
+    // Shared process-global pool — embedded SurrealKV holds one lock per path per
     // process, so the overlay, the storage routes, and config writes must all
     // reuse the same cached transport (see librefang_storage::shared_pool).
     let pool = shared_pool();
@@ -490,7 +490,7 @@ pub async fn overlay_mcp_servers(kernel: &dyn KernelApi) {
             );
         }
     }
-    // `session` / `pool` drop here → embedded RocksDB lock released.
+    // `session` / `pool` drop here → embedded SurrealKV lock released.
 }
 
 /// Overlay the database config store's default-model selection onto the

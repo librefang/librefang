@@ -1,7 +1,7 @@
 //! Round-trip tests for the operational SurrealDB backends against the real schema: usage, paired devices, prompt versions and experiments, the kv store and the agent registry.
 //!
 //! Each test applies every operational migration first, so a schema/backend mismatch (an unset optional sent as JSON `null`, a JSON value the column type rejects, a removed SurrealQL function) fails here rather than in a running daemon.
-//! The embedded variant runs on `kv-rocksdb` in a temp dir; the remote variant runs the same body over `ws://` and `http://` when `BOSSFANG_TEST_SURREAL_URL` is set, and prints an explicit SKIP line when it is not.
+//! The embedded variant runs on `kv-surrealkv` in a temp dir; the remote variant runs the same body over `ws://` and `http://` when `BOSSFANG_TEST_SURREAL_URL` is set, and prints an explicit SKIP line when it is not.
 
 #![cfg(feature = "surreal-backend")]
 
