@@ -538,7 +538,7 @@ mod tests {
                 .unwrap();
         }
 
-        // `ORDER BY key` makes this independent of RocksDB iteration order:
+        // `ORDER BY key` makes this independent of SurrealKV iteration order:
         // drop the ORDER BY and the rows would come back in insertion order
         // (z, a, m), failing this assertion.
         let keys: Vec<String> = store

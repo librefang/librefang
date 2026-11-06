@@ -23,7 +23,7 @@ namespace, resource sizing, and GKE StorageClass mapping.
 ## Topology
 
 - **Namespace**: `bossfang`
-- **SurrealDB**: dedicated `surrealdb/surrealdb:v3.3.0` StatefulSet, one
+- **SurrealDB**: dedicated `surrealdb/surrealdb:v4.0.0` StatefulSet, one
   replica, RocksDB on a 20 GiB PVC. Service on port `8000` (WebSocket +
   HTTP). Both `librefang-storage` (database `main`) and `surreal-memory`
   (database `memory`) connect remotely to this single instance — they

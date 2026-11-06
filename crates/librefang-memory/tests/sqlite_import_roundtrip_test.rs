@@ -2,7 +2,7 @@
 //!
 //! The SQLite side is written through `MemorySubstrate`, so every BLOB is encoded exactly as a live daemon encodes it: MessagePack session histories (named), canonical histories (positional), agent manifests (named) and JSON kv values.
 //! The SurrealDB side is read back through the Surreal backends the kernel uses, so the test fails if the importer writes a shape those backends cannot read.
-//! The embedded variant runs on `kv-rocksdb` in a temp dir; the remote variant runs the same body over `ws://` and `http://` when `BOSSFANG_TEST_SURREAL_URL` is set, and prints an explicit SKIP line when it is not.
+//! The embedded variant runs on `kv-surrealkv` in a temp dir; the remote variant runs the same body over `ws://` and `http://` when `BOSSFANG_TEST_SURREAL_URL` is set, and prints an explicit SKIP line when it is not.
 //!
 //! Run with `cargo test -p librefang-memory --features sqlite-backend --test sqlite_import_roundtrip_test`.
 

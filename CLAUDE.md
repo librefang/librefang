@@ -403,7 +403,7 @@ as the default persistent storage, with SQLite retained only as a legacy opt-in 
 **Crate**: `librefang-storage` (`crates/librefang-storage/`)
 **Migration files**: `crates/librefang-storage/src/migrations/sql/*.surql` (24+ migrations)
 **Feature flags**: `surreal-backend` (default), `sqlite-backend` (opt-in legacy)
-**Version pin**: `surrealdb`, `surrealdb-core` **and** `surrealdb-types`, all `=3.3.0`, in workspace `Cargo.toml` — the three lines move together.
+**Version pin**: `surrealdb`, `surrealdb-core` **and** `surrealdb-types`, all `=4.0.0`, in workspace `Cargo.toml` — the three lines move together.
   `=` on `surrealdb` does NOT transitively constrain `surrealdb-core` or `surrealdb-types`, so `librefang-storage` lists both as direct optional deps to make the pins load-bearing.
   Coordinate with surreal-memory before changing.
 
@@ -423,7 +423,7 @@ SurrealDB-native memory substrate with semantic search, knowledge graphs, and ta
 
 **Crate**: `librefang-memory` (`crates/librefang-memory/`)
 **Backends**: `crates/librefang-memory/src/backends/surreal*.rs` (9 backend files)
-**Dependency**: `surreal-memory = { git = "https://github.com/Prometheus-AGS/surreal-memory-server.git", rev = "b7e2093a267ca8655fbe85693c0ddfc52711ab6b", default-features = false, features = ["embedded"] }` — pinned by `rev`; keep the URL/rev form byte-identical (see the comment in `Cargo.toml`).
+**Dependency**: `surreal-memory = { git = "https://github.com/Prometheus-AGS/surreal-memory-server.git", rev = "c220263e0a5a1fb520f22acc0d36fb806c03c51b", default-features = false, features = ["embedded"] }` — pinned by `rev`; keep the URL/rev form byte-identical (see the comment in `Cargo.toml`).
 
 **After every upstream merge:**
 1. If upstream changes the `librefang-memory` API surface (e.g., `Arc<Mutex<Connection>>`
@@ -493,20 +493,20 @@ paper over a missing feature declaration — declare the feature and forward it.
 librefang-storage and surreal-memory link the same in-process surrealdb client.
 The workspace `Cargo.toml` pins:
 ```toml
-surrealdb = { version = "=3.3.0", default-features = false, features = ["kv-rocksdb", "protocol-ws", "protocol-http"] }
-surrealdb-core = { version = "=3.3.0", default-features = false }
-surrealdb-types = { version = "=3.3.0", default-features = false }
+surrealdb = { version = "=4.0.0", default-features = false, features = ["kv-surrealkv", "protocol-ws", "protocol-http"] }
+surrealdb-core = { version = "=4.0.0", default-features = false }
+surrealdb-types = { version = "=4.0.0", default-features = false }
 ```
 Upgrade the three lines together, and check surreal-memory first.
 Version drift causes duplicate dep link errors that break the entire build.
 Verify with `cargo tree -i surrealdb`, `-i surrealdb-core`, `-i surrealdb-types` and `-i surreal-memory`: each must show exactly one version.
 
-What each system demands, as of the 3.3.0 bump:
+What each system demands, as of the 4.0.0 bump:
 
-- `surreal-memory` (rev `b7e2093`) pins an **exact** `surrealdb = "=3.3.0"` and `surrealdb-types = "=3.3.0"` — rigid, so its rev and our pin must move in step.
+- `surreal-memory` (rev `c220263`) pins an **exact** `surrealdb = "=4.0.0"` and `surrealdb-types = "=4.0.0"` — rigid, so its rev and our pin must move in step.
 - `universal-agent-runtime` is not linked in-process: the terminal `uar-driver` feature is empty and BossFang connects to an independently owned UAR service, so UAR dependency/storage pins do not bind this workspace.
-- The remote SurrealDB server (`k8s/base/surrealdb-statefulset.yaml`) runs `surrealdb/surrealdb:v3.3.0`, the same minor as the client.
-- Embedded (RocksDB) datastores are migrated in place, one way, the first time a 3.3.0 client opens them; take a copy of the embedded `librefang.surreal` / `librefang-memory.surreal` directories under the configured storage data dir before the first 3.3.0 boot if a rollback to 3.2.x must stay possible.
+- The remote SurrealDB server (`k8s/base/surrealdb-statefulset.yaml`) runs `surrealdb/surrealdb:v4.0.0`, the same minor as the client.
+- SurrealDB 4.0 removed RocksDB: the embedded engine is SurrealKV (`kv-surrealkv`, `surrealkv://` URLs). A pre-4.0 RocksDB datastore is migrated in place, one way, the first time a 4.0 client opens it; take a copy of the embedded `librefang.surreal` / `librefang-memory.surreal` directories under the configured storage data dir before the first 4.0 boot if a rollback to 3.x must stay possible.
 
 ### 4. Env-var aliases (BOSSFANG_* preferred, LIBREFANG_* fallback)
 

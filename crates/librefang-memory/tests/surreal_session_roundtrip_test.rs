@@ -1,7 +1,7 @@
 //! Round-trip tests for [`SurrealSessionBackend`] against the real operational schema.
 //!
 //! Every test applies the full `OPERATIONAL_MIGRATIONS` set (twice, to prove idempotence) before exercising the backend, so a schema/backend type mismatch fails here rather than at runtime.
-//! The embedded variant runs on `kv-rocksdb` in a temp dir.
+//! The embedded variant runs on `kv-surrealkv` in a temp dir.
 //! The remote variant runs the same body over `ws://` and `http://` when `BOSSFANG_TEST_SURREAL_URL` is set, and prints an explicit SKIP line when it is not.
 //!
 //! Remote knobs:

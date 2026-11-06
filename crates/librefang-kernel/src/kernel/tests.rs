@@ -15,7 +15,7 @@ use std::collections::HashMap;
 use std::pin::Pin;
 
 /// Boot a kernel from `config`, retrying up to 10 times if the embedded
-/// SurrealDB/RocksDB lock is still held by a previous kernel's background
+/// SurrealDB embedded-store lock is still held by a previous kernel's background
 /// threads.  Each retry waits 500 ms longer than the previous one.
 fn boot_with_retry(config: KernelConfig) -> LibreFangKernel {
     let mut delay_ms = 500u64;
@@ -7881,7 +7881,7 @@ system_prompt = "WORKER PROMPT"
 /// through a dedicated tokio runtime lives below this one and is `#[ignore]`d
 /// — see the comment there for why.
 #[test]
-#[ignore = "two-boot test: tokio::spawn'd kernel background tasks hold the embedded SurrealDB/RocksDB lock across boots; run manually against a remote SurrealDB"]
+#[ignore = "two-boot test: tokio::spawn'd kernel background tasks hold the embedded SurrealDB embedded-store lock across boots; run manually against a remote SurrealDB"]
 fn hand_runtime_override_survives_restart_via_activate_hand_with_id() {
     let tmp = tempfile::tempdir().unwrap();
     let home_dir = tmp.path().join("librefang-kernel-hand-override-restart");
@@ -7944,7 +7944,7 @@ fn hand_runtime_override_survives_restart_via_activate_hand_with_id() {
         let result = (agent_id, instance.instance_id);
         kernel.shutdown();
         drop(kernel);
-        // Give the embedded RocksDB time to release the exclusive lock before
+        // Give the embedded SurrealKV time to release the exclusive lock before
         // the second boot opens the same path.
         std::thread::sleep(std::time::Duration::from_millis(1500));
         result
@@ -8232,7 +8232,7 @@ fn deactivate_hand_removes_hand_agent_rows_from_sqlite() {
 /// references it, so nothing restores it. Without GC the row would linger
 /// forever because `load_all_agents` skips `is_hand` entries.
 #[test]
-#[ignore = "two-boot test: tokio::spawn'd kernel background tasks hold the embedded SurrealDB/RocksDB lock across boots; run manually against a remote SurrealDB"]
+#[ignore = "two-boot test: tokio::spawn'd kernel background tasks hold the embedded SurrealDB embedded-store lock across boots; run manually against a remote SurrealDB"]
 fn boot_gc_removes_orphaned_hand_agent_rows() {
     use librefang_types::agent::{AgentEntry, AgentId, AgentMode, AgentState};
 
@@ -8331,7 +8331,7 @@ fn boot_gc_removes_orphaned_hand_agent_rows() {
 }
 
 #[test]
-#[ignore = "two-boot test: tokio::spawn'd kernel background tasks hold the embedded SurrealDB/RocksDB lock across boots; run manually against a remote SurrealDB"]
+#[ignore = "two-boot test: tokio::spawn'd kernel background tasks hold the embedded SurrealDB embedded-store lock across boots; run manually against a remote SurrealDB"]
 fn boot_gc_skips_orphan_cleanup_when_hand_state_is_corrupt() {
     use librefang_types::agent::{AgentEntry, AgentId, AgentMode, AgentState};
 

@@ -114,7 +114,7 @@ impl SurrealSemanticBackend {
         embedding: Arc<dyn EmbeddingFn>,
         dimensions: usize,
     ) -> Result<Self, String> {
-        // Delegate to the single-source factory, which owns the memory store's RocksDB lock; standalone callers get a fresh `SurrealStorage` here because no other opener exists in their process.
+        // Delegate to the single-source factory, which owns the memory store's SurrealKV lock; standalone callers get a fresh `SurrealStorage` here because no other opener exists in their process.
         let storage =
             super::shared::open_shared_memory_storage(storage_cfg, embedding.clone(), dimensions)
                 .await

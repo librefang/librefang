@@ -20,7 +20,7 @@ pub(crate) fn cmd_audit_explore_surreal(config: Option<PathBuf>, limit: u32, jso
     };
     let storage_cfg: StorageConfig = kernel_config.storage.clone();
 
-    // Refuse if the daemon is running — RocksDB holds an exclusive lock.
+    // Refuse if the daemon is running — the embedded store holds an exclusive lock.
     let daemon = daemon_config_context(config.as_deref());
     if let Some(base) = find_daemon_in_home(&daemon.home_dir) {
         ui::error_with_fix(
@@ -163,7 +163,7 @@ pub(crate) fn cmd_storage_config_import(
     let mcp = kernel_config.mcp_servers.clone();
     let default_model = kernel_config.default_model.clone();
 
-    // Refuse if the daemon is running — embedded RocksDB holds an exclusive lock.
+    // Refuse if the daemon is running — embedded SurrealKV holds an exclusive lock.
     let daemon = daemon_config_context(config.as_deref());
     if let Some(base) = find_daemon_in_home(&daemon.home_dir) {
         ui::error_with_fix(

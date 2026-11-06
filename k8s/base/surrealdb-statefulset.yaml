@@ -1,14 +1,14 @@
-# SurrealDB 3.3.0 — single-instance StatefulSet backing BossFang.
+# SurrealDB 4.0.0 — single-instance StatefulSet backing BossFang.
 #
 # Image kept on the same version as the workspace `Cargo.toml` pin
-# (`surrealdb = "=3.3.0"`) and pinned by digest. Floating to :v3 risks
+# (`surrealdb = "=4.0.0"`) and pinned by digest. Floating to :v4 risks
 # server/client minor drift. When you bump the workspace pin's minor,
 # bump this image to match; patch-level bumps of the image are safe
 # within the minor.
-# The 3.3.0 server migrates a 3.2.x data directory in place, one way,
+# The 4.0.0 server migrates a RocksDB (3.x) data directory in place, one way,
 # on first start; snapshot the PVC before rolling this out.
 #
-# RocksDB on a PVC. Single replica because RocksDB takes an exclusive
+# SurrealKV on a PVC. Single replica because the embedded engine takes an exclusive
 # OS lock on its data directory.
 #
 # Root credentials are bootstrapped from the bossfang-secrets Secret.
@@ -42,12 +42,12 @@ spec:
         fsGroup: 1000
       containers:
         - name: surrealdb
-          image: surrealdb/surrealdb:v3.3.0@sha256:681c6c22c287421b5c7d99e0fde79b6e0d32c36c1ddeaab2762a1661cb04cd20
+          image: surrealdb/surrealdb:v4.0.0@sha256:c35893410644e65fa90aa1bef446ac9cb0a0c2733b9d405ce3eb56754b85c330
           args:
             - start
             - --log
             - info
-            - "rocksdb:/data/surreal.db"
+            - "surrealkv:/data/surreal.db"
           ports:
             - name: http
               containerPort: 8000

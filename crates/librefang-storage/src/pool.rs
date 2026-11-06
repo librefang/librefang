@@ -103,7 +103,7 @@ impl SurrealConnectionPool {
 
     /// Open or reuse a session for the given [`StorageConfig`].
     ///
-    /// For embedded backends this opens a fresh RocksDB-backed connection.
+    /// For embedded backends this opens a fresh SurrealKV-backed connection.
     /// For remote backends, the underlying transport is cached by URL and
     /// cloned to produce per-session ns/db state, per the SurrealDB 3.0
     /// multi-tenancy pattern.
@@ -119,11 +119,13 @@ impl SurrealConnectionPool {
     pub async fn open(&self, cfg: &StorageConfig) -> StorageResult<SurrealSession> {
         match &cfg.backend {
             StorageBackendKind::Embedded { path } => {
-                // RocksDB only allows a single OS-level lock per directory at
-                // a time. Cache the underlying transport keyed by URL so that
-                // repeated opens against the same embedded path within one
-                // process reuse the connection (and therefore the lock).
-                let url = format!("rocksdb://{}", path.display());
+                // The embedded engine only allows a single OS-level lock per
+                // directory at a time. Cache the underlying transport keyed by
+                // URL so that repeated opens against the same embedded path
+                // within one process reuse the connection (and therefore the
+                // lock). SurrealDB 4.0 dropped RocksDB; a pre-4.0 RocksDB
+                // directory is migrated in place on first open.
+                let url = format!("surrealkv://{}", path.display());
                 let transport = match self.transports.get(&url) {
                     Some(existing) => existing.clone(),
                     None => {
@@ -281,7 +283,7 @@ impl std::fmt::Debug for SurrealConnectionPool {
 
 /// Process-global shared connection pool.
 ///
-/// Embedded RocksDB allows only **one lock per directory per process**, and the
+/// Embedded SurrealKV allows only **one lock per directory per process**, and the
 /// lock is **not** released when an individual [`SurrealConnectionPool`] is
 /// dropped (the embedded engine keeps the connection alive process-globally).
 /// So every daemon-side consumer of the operational store — the boot-time

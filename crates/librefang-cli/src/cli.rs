@@ -1959,7 +1959,7 @@ pub(crate) enum StorageMigrateTarget {
 pub(crate) enum StorageCommands {
     /// Read-only inspection of the embedded SurrealDB store.
     #[command(
-        long_about = "Read-only inspection of the embedded SurrealDB store.\n\nRefuses to run while the daemon is up (RocksDB holds an exclusive\nfile lock). Currently surfaces the `audit_entries` table.\n\nExamples:\n  librefang storage explore\n  librefang storage explore --limit 100 --json"
+        long_about = "Read-only inspection of the embedded SurrealDB store.\n\nRefuses to run while the daemon is up (the embedded store holds an exclusive\nfile lock). Currently surfaces the `audit_entries` table.\n\nExamples:\n  librefang storage explore\n  librefang storage explore --limit 100 --json"
     )]
     Explore {
         #[arg(long, default_value = "20")]
