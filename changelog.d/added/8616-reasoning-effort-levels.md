@@ -1,0 +1,7 @@
+Reasoning effort is now an open, per-model vocabulary instead of a four-value enum: `[thinking] reasoning_effort` — with `reasoning_mode` kept as a deprecated alias on TOML, REST bodies, the WebSocket frame, and the session route — accepts `none` / `minimal` / `low` / `medium` / `high` / `xhigh` / `max` and any token a model declares, and drivers put the chosen token on the wire verbatim.
+`provider-default` is the absence of a value, not a level, so an unset effort still sends nothing.
+Each catalog entry now declares a policy — `supported_efforts`, `default_effort`, `off_allowed`, `mandatory` — settable field by field from `model_overrides.json` and the custom-model route.
+A request outside the set is coerced to the nearest supported rung with a warning (ties resolve downward, `xhigh` → `high`), and `none` on a model that forbids off becomes the lowest graded rung.
+Undeclared entries keep the pre-#8591 wire spellings, and budget-based families (Ollama, older Anthropic, Gemini 2.5, Qwen's budget control) keep `budget_tokens` as their control — the enum and a budget never ride the same request.
+A session can pin its effort with `PATCH /api/sessions/{id}/reasoning` (`null` clears it, stored in the nullable `sessions.reasoning_effort` column added by schema v65, exposed in the session JSON and the model views), and the WebSocket chat frame accepts `reasoning_effort` per message, so the resolution order is now message > session > agent > global > compiled default.
+(#8616) (@DaBlitzStein)

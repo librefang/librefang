@@ -1197,6 +1197,9 @@ class _SessionsResource(_Resource):
     def patch_session_model(self, id: str, **data):
         return self._c._request("PATCH", f"/api/sessions/{quote(str(id), safe='')}/model", data)
 
+    def patch_session_reasoning(self, id: str, **data):
+        return self._c._request("PATCH", f"/api/sessions/{quote(str(id), safe='')}/reasoning", data)
+
 
 # ── Skills Resource ────────────────────────────────────────────
 

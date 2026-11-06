@@ -426,6 +426,189 @@ async fn add_custom_model_rejects_missing_id() {
     assert_eq!(status, StatusCode::BAD_REQUEST);
 }
 
+/// Refs #8591: the custom-model route carries the four policy fields straight
+/// into the catalog entry, and the GET echoes them back — this is the
+/// no-release path for teaching LibreFang a gateway model's rungs.
+#[tokio::test(flavor = "multi_thread")]
+async fn add_custom_model_carries_the_reasoning_policy() {
+    let h = boot();
+
+    let (status, body) = json_request(
+        &h,
+        Method::POST,
+        "/api/models/custom",
+        Some(serde_json::json!({
+            "id": "test-custom-reasoning-8591",
+            "provider": "openai",
+            "display_name": "Gateway reasoning model",
+            "context_window": 64_000,
+            "max_output_tokens": 4_096,
+            "supported_efforts": ["minimal", "low", "medium", "high", "xhigh"],
+            "default_effort": "medium",
+            "off_allowed": false,
+            "mandatory": true,
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body:?}");
+
+    let (status, body) = json_request(
+        &h,
+        Method::GET,
+        "/api/models/test-custom-reasoning-8591",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body["supported_efforts"],
+        serde_json::json!(["minimal", "low", "medium", "high", "xhigh"]),
+        "{body:?}"
+    );
+    assert_eq!(body["default_effort"], "medium");
+    assert_eq!(body["off_allowed"], false);
+    assert_eq!(body["mandatory"], true);
+
+    let (status, _body) = json_request(
+        &h,
+        Method::DELETE,
+        "/api/models/custom/test-custom-reasoning-8591",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+}
+
+/// #8616 review: `supported_efforts` / `default_effort` are written to the
+/// provider wire verbatim, so a structurally invalid token must be refused at
+/// the ingress instead of entering the catalog. Shape mismatches are rejected
+/// too: `["high", 5]` must not silently become `["high"]`, and the wrong JSON
+/// type must not silently become "no declaration" (finding 1 was about silent
+/// acceptance).
+#[tokio::test(flavor = "multi_thread")]
+async fn add_custom_model_rejects_invalid_reasoning_tokens() {
+    let h = boot();
+
+    for bad in [
+        serde_json::json!(["extra high"]),
+        serde_json::json!(["high low"]),
+        serde_json::json!(["high", 5]),
+        serde_json::json!("extra high"),
+    ] {
+        let (status, body) = json_request(
+            &h,
+            Method::POST,
+            "/api/models/custom",
+            Some(serde_json::json!({
+                "id": "test-custom-invalid-effort-8616",
+                "provider": "openai",
+                "context_window": 64_000,
+                "max_output_tokens": 4_096,
+                "supported_efforts": bad,
+            })),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "supported_efforts {bad:?} must be rejected: {body:?}"
+        );
+        assert!(
+            body.to_string().contains("supported_efforts"),
+            "the 400 must name the offending field: {body:?}"
+        );
+    }
+
+    // `default_effort` has the same shape gate.
+    let (status, body) = json_request(
+        &h,
+        Method::POST,
+        "/api/models/custom",
+        Some(serde_json::json!({
+            "id": "test-custom-invalid-effort-8616",
+            "provider": "openai",
+            "context_window": 64_000,
+            "max_output_tokens": 4_096,
+            "default_effort": 5,
+        })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "a non-string default_effort must be rejected: {body:?}"
+    );
+    assert!(
+        body.to_string().contains("default_effort"),
+        "the 400 must name the offending field: {body:?}"
+    );
+
+    // The rejected id never entered the catalog.
+    let (status, _body) = json_request(
+        &h,
+        Method::GET,
+        "/api/models/test-custom-invalid-effort-8616",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+/// Same gate on the overrides path: the PUT body is persisted and then read by
+/// the kernel's coercion, so an unspellable token is a 400.
+#[tokio::test(flavor = "multi_thread")]
+async fn set_model_overrides_rejects_invalid_reasoning_tokens() {
+    let h = boot();
+
+    for body in [
+        serde_json::json!({ "supported_efforts": ["extra high"] }),
+        serde_json::json!({ "supported_efforts": ["high low"] }),
+        serde_json::json!({ "default_effort": "high low" }),
+    ] {
+        let (status, response) = json_request(
+            &h,
+            Method::PUT,
+            "/api/models/overrides/openai:gpt-4o-mini",
+            Some(body.clone()),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "override {body:?} must be rejected: {response:?}"
+        );
+    }
+
+    // Nothing was persisted by the rejected attempts.
+    let (status, body) = json_request(
+        &h,
+        Method::GET,
+        "/api/models/overrides/openai:gpt-4o-mini",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body,
+        serde_json::json!({}),
+        "a rejected PUT must persist nothing"
+    );
+
+    // A structurally valid declaration still round-trips.
+    let (status, _body) = json_request(
+        &h,
+        Method::PUT,
+        "/api/models/overrides/openai:gpt-4o-mini",
+        Some(serde_json::json!({
+            "supported_efforts": ["minimal", "low", "high", "xhigh"],
+            "default_effort": "low",
+            "off_allowed": false,
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn add_custom_model_then_get_then_delete_round_trips() {
     let h = boot();
@@ -1905,6 +2088,10 @@ fn boot_with_provider(provider: ProviderInfo) -> Harness {
         supports_thinking: false,
         aliases: Vec::new(),
         reasoning_echo_policy: ReasoningEchoPolicy::default(),
+        supported_efforts: Vec::new(),
+        default_effort: None,
+        off_allowed: true,
+        mandatory: false,
     };
     let test = TestAppState::with_builder(
         MockKernelBuilder::new()

@@ -683,6 +683,7 @@ system_prompt = "s"
             context_window_tokens: 0,
             label: None,
             model_override: None,
+            reasoning_effort: None,
             messages_generation: 0,
             last_repaired_generation: None,
             peer_id: None,

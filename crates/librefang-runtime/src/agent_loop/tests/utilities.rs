@@ -244,7 +244,7 @@ async fn test_tool_failure_allows_retry_on_next_iteration() {
         context_window_tokens: 0,
         label: None,
         model_override: None,
-
+        reasoning_effort: None,
         messages_generation: 0,
         last_repaired_generation: None,
         peer_id: None,
@@ -309,7 +309,7 @@ async fn test_repeated_tool_failures_cap_exits_loop() {
         context_window_tokens: 0,
         label: None,
         model_override: None,
-
+        reasoning_effort: None,
         messages_generation: 0,
         last_repaired_generation: None,
         peer_id: None,
@@ -373,7 +373,7 @@ async fn test_streaming_tool_failure_allows_retry() {
         context_window_tokens: 0,
         label: None,
         model_override: None,
-
+        reasoning_effort: None,
         messages_generation: 0,
         last_repaired_generation: None,
         peer_id: None,
@@ -440,7 +440,7 @@ async fn test_streaming_repeated_tool_failures_cap_exits() {
         context_window_tokens: 0,
         label: None,
         model_override: None,
-
+        reasoning_effort: None,
         messages_generation: 0,
         last_repaired_generation: None,
         peer_id: None,
@@ -777,7 +777,7 @@ fn fresh_session() -> librefang_memory::session::Session {
         context_window_tokens: 0,
         label: None,
         model_override: None,
-
+        reasoning_effort: None,
         messages_generation: 0,
         last_repaired_generation: None,
         peer_id: None,
@@ -2169,7 +2169,7 @@ async fn test_normal_turn_persists_session_as_incognito_control() {
         context_window_tokens: 0,
         label: None,
         model_override: None,
-
+        reasoning_effort: None,
         messages_generation: 0,
         last_repaired_generation: None,
         peer_id: None,
@@ -2244,6 +2244,7 @@ async fn test_heartbeat_pruning_keeps_new_messages_start_on_current_turn() {
         context_window_tokens: 0,
         label: None,
         model_override: None,
+        reasoning_effort: None,
         messages_generation: 0,
         last_repaired_generation: None,
         peer_id: None,
@@ -2320,7 +2321,7 @@ async fn test_incognito_skips_session_save_on_end_turn() {
         context_window_tokens: 0,
         label: None,
         model_override: None,
-
+        reasoning_effort: None,
         messages_generation: 0,
         last_repaired_generation: None,
         peer_id: None,
@@ -2402,7 +2403,7 @@ async fn test_incognito_skips_proactive_memory_auto_memorize() {
         context_window_tokens: 0,
         label: None,
         model_override: None,
-
+        reasoning_effort: None,
         messages_generation: 0,
         last_repaired_generation: None,
         peer_id: None,
@@ -2485,7 +2486,7 @@ async fn test_normal_turn_auto_memorizes_proactive_memory_control() {
         context_window_tokens: 0,
         label: None,
         model_override: None,
-
+        reasoning_effort: None,
         messages_generation: 0,
         last_repaired_generation: None,
         peer_id: None,

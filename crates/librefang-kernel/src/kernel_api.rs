@@ -812,6 +812,27 @@ pub trait KernelApi: KernelHandle + Send + Sync {
         tokio::sync::mpsc::Receiver<librefang_runtime::llm_driver::StreamEvent>,
         tokio::task::JoinHandle<KernelResult<librefang_runtime::agent_loop::AgentLoopResult>>,
     )>;
+    /// Streaming WebSocket entry point carrying the frame's open-vocabulary
+    /// `reasoning_effort` token (#8591), alongside the legacy `thinking` boolean.
+    ///
+    /// A separate method rather than a wider signature on the sibling above:
+    /// the channel bridge's per-conversation `/think` toggle knows only the
+    /// boolean, and widening would have forced it (and every other existing
+    /// caller) through a mechanical change for no behavioural reason.
+    #[allow(clippy::too_many_arguments)]
+    async fn send_message_streaming_with_reasoning_effort(
+        self: Arc<Self>,
+        agent_id: AgentId,
+        message: &str,
+        kernel_handle: Option<Arc<dyn crate::kernel_handle::KernelHandle>>,
+        sender: librefang_channels::types::SenderContext,
+        thinking_override: Option<bool>,
+        reasoning_effort: Option<librefang_types::config::ReasoningMode>,
+        session_id_override: Option<SessionId>,
+    ) -> KernelResult<(
+        tokio::sync::mpsc::Receiver<librefang_runtime::llm_driver::StreamEvent>,
+        tokio::task::JoinHandle<KernelResult<librefang_runtime::agent_loop::AgentLoopResult>>,
+    )>;
 
     // ====================================================================
     // Spawn-tasks / probe — Arc<Self> receivers.
@@ -1851,6 +1872,33 @@ impl KernelApi for LibreFangKernel {
             kernel_handle,
             &sender,
             thinking_override,
+            session_id_override,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn send_message_streaming_with_reasoning_effort(
+        self: Arc<Self>,
+        agent_id: AgentId,
+        message: &str,
+        kernel_handle: Option<Arc<dyn crate::kernel_handle::KernelHandle>>,
+        sender: librefang_channels::types::SenderContext,
+        thinking_override: Option<bool>,
+        reasoning_effort: Option<librefang_types::config::ReasoningMode>,
+        session_id_override: Option<SessionId>,
+    ) -> KernelResult<(
+        tokio::sync::mpsc::Receiver<librefang_runtime::llm_driver::StreamEvent>,
+        tokio::task::JoinHandle<KernelResult<librefang_runtime::agent_loop::AgentLoopResult>>,
+    )> {
+        LibreFangKernel::send_message_streaming_with_reasoning_effort(
+            &self,
+            agent_id,
+            message,
+            kernel_handle,
+            &sender,
+            thinking_override,
+            reasoning_effort,
             session_id_override,
         )
         .await

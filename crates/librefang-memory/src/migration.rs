@@ -5,7 +5,7 @@
 use rusqlite::Connection;
 
 /// Current schema version.
-const SCHEMA_VERSION: u32 = 64;
+const SCHEMA_VERSION: u32 = 65;
 
 /// Run all migrations to bring the database up to date.
 pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
@@ -328,9 +328,32 @@ pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
     // This wanted to be 62 but #7974 took that number first, so it renumbers
     // to 63 rather than skipping past it — same rule as the note above.
     run_step!(63, migrate_v63);
-
     // v64: indexes for the dashboard's polled listings (sessions by `created_at`, memories by `created_at`) and the `sessions_fts_map` rowid map that lets `save_session` replace its FTS row without scanning the whole index.
     run_step!(64, migrate_v64);
+
+    // v65 (#8591): per-session reasoning-mode override. Mirrors v39's
+    // `model_override` exactly — a nullable TEXT token, NULL meaning
+    // "inherit the agent/global level", which is what every pre-v65 row
+    // means, so no backfill is needed. The value is the open-vocabulary
+    // effort token (e.g. "xhigh", "medium", "minimal"); it is validated at
+    // the API boundary and stored as given.
+    run_step!(65, migrate_v65);
+
+    // Reconcile the pre-renumber reasoning footprint (#8616). A build of this
+    // branch that carried the reasoning-effort step as v64 stamped databases
+    // at 64 (without main's v64 indexes/`sessions_fts_map`), and the deployed
+    // integration fold (`8b7bc4c22`) stamped them at 65 with reasoning at 64
+    // and skill versions at 65. `run_step!` only runs steps above the stamp,
+    // so neither database will ever execute the real v64 — and `reconcile_fts_index`
+    // cannot repair it because it only logs a missing map. Run the same
+    // idempotent v64 here, outside the ladder, so those databases converge.
+    //
+    // Not a numbered step on purpose: a v66 step would renumber the skill
+    // version migration the fold is about to land as v66, and would still be
+    // too late for a database already stamped at 65. This is the v62→v61
+    // repair shape, moved to boot because the footprint's stamp is above the
+    // step it skipped.
+    reconcile_pre_renumber_reasoning_footprint(conn)?;
 
     // Audit-trail consistency (#3538): user_version must match the count
     // of distinct rows in `migrations`. Drift means an earlier migration
@@ -1627,7 +1650,6 @@ fn migrate_v63(conn: &Connection) -> Result<(), rusqlite::Error> {
     )?;
     Ok(())
 }
-
 /// v64: indexes and an FTS rowid map for hot read and write paths.
 ///
 /// `sessions(created_at)` serves `list_sessions_paginated`'s `ORDER BY created_at DESC LIMIT`, which `GET /api/sessions` runs on every dashboard poll, and the 24h window of `agents_stats_24h_bulk`.
@@ -1680,6 +1702,95 @@ fn migrate_v64(conn: &Connection) -> Result<(), rusqlite::Error> {
          VALUES (64, datetime('now'), 'sessions/memories created_at indexes + sessions_fts_map rowid map')",
         [],
     )?;
+    Ok(())
+}
+
+/// Version 65: add a nullable `reasoning_effort` TEXT column to `sessions`
+/// (#8591).
+///
+/// The per-session rung of the reasoning resolution order
+/// (frame > session > agent > global > compiled default), shaped exactly like
+/// v39's `model_override`: a nullable token read back into
+/// [`Session::reasoning_effort`](crate::session::Session::reasoning_effort) and
+/// applied per turn by the kernel dispatchers. It is **not** written by
+/// `save_session`, for the same reason `model_override` is not — a routine
+/// history save must not clear a pin; only
+/// `set_session_reasoning_effort` writes it.
+///
+/// `NULL` means "inherit", which is exactly what every pre-v65 row means, so
+/// the column needs no backfill. The text is the provider's own effort token
+/// (`none` / `low` / `medium` / `high` / `xhigh` / `max` / `minimal`, or
+/// whatever the model's catalog entry declares), validated at the API
+/// boundary rather than here so an existing row can never fail to load.
+fn migrate_v65(conn: &Connection) -> Result<(), rusqlite::Error> {
+    // `sessions` is created by `migrate_v1`, so it exists on every database
+    // that reaches this step; `try_column_exists` is the SQLite `ADD COLUMN
+    // IF NOT EXISTS` stand-in.
+    if !try_column_exists(conn, "sessions", "reasoning_effort")? {
+        conn.execute(
+            "ALTER TABLE sessions ADD COLUMN reasoning_effort TEXT DEFAULT NULL",
+            [],
+        )?;
+    }
+    conn.execute(
+        "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
+         VALUES (65, datetime('now'), 'Add sessions.reasoning_effort for per-session reasoning-effort pin (#8591)')",
+        [],
+    )?;
+    Ok(())
+}
+
+/// Reconcile databases a pre-renumber reasoning-effort build stamped at 64 or
+/// 65 without main's v64 indexes / `sessions_fts_map` (#8616).
+///
+/// Two real footprints exist in the field:
+///
+/// * a head build of this branch before the main merge (`5c11a777c`) ran the
+///   reasoning step as **v64**, so the database is stamped at 64 and never
+///   ran main's v64 (indexes + `sessions_fts_map`);
+/// * the deployed integration fold (`8b7bc4c22`) ran reasoning at **v64** and
+///   skill versions at **v65**, so the database is stamped at 65 and the
+///   ladder will never revisit 64.
+///
+/// `run_step!` gates on `current_version < N`, so a numbered step cannot
+/// repair either stamp: the first still skips 64, the second skips both. The
+/// repair therefore runs once per boot as a single table-existence check on
+/// converged databases and calls the idempotent [`migrate_v64`] when the map
+/// is missing. [`migrate_v65`] is also applied, for the same reason, so a
+/// database stamped above 64 by a build that skipped the column still gets it.
+///
+/// The audit row at 64 must move with the repair: on both footprints it
+/// describes the reasoning step, but after renumbering 64 is main's index /
+/// FTS-map step. Rewriting it is what makes `SELECT * FROM migrations` tell
+/// the truth about which DDL owns the number; `migrate_v64` cannot fix it
+/// because the row already exists and its insert is `OR IGNORE`.
+///
+/// This is deliberately *not* numbered 66: skill version history lands as v66
+/// in the fold, and it is already `CREATE TABLE IF NOT EXISTS`-idempotent so
+/// the deployed database (which has `skill_versions` at 65) survives it
+/// unchanged.
+fn reconcile_pre_renumber_reasoning_footprint(conn: &Connection) -> Result<(), rusqlite::Error> {
+    if try_table_exists(conn, "sessions_fts_map")? {
+        return Ok(());
+    }
+
+    let tx = conn.unchecked_transaction()?;
+    // Idempotent on a database that has some of the pieces already: every
+    // index is `IF NOT EXISTS`, the FTS dedupe/map insert converges, and the
+    // audit row is `INSERT OR IGNORE`.
+    migrate_v64(&tx)?;
+    // Keep the reasoning column/audit row idempotent too: on the production
+    // footprint (`8b7bc4c22`) the column exists and row 65 belongs to skill
+    // versions, so this is a no-op; on a partially repaired or hand-edited
+    // database it is the only remaining route to the column.
+    migrate_v65(&tx)?;
+    tx.execute(
+        "UPDATE migrations SET description = \
+         'sessions/memories created_at indexes + sessions_fts_map rowid map' \
+         WHERE version = 64 AND description LIKE '%reasoning_effort%'",
+        [],
+    )?;
+    tx.commit()?;
     Ok(())
 }
 
@@ -4638,6 +4749,83 @@ mod tests {
         assert!(cleared.is_none(), "clearing model_override to NULL failed");
     }
 
+    /// Regression for #8591: v65 adds `reasoning_effort TEXT` to `sessions`
+    /// (nullable, so pre-v65 rows inherit), round-trips an open-vocabulary
+    /// token, and is idempotent on rerun.
+    #[test]
+    fn migrate_v65_adds_reasoning_effort_column_nullable_and_round_trips() {
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+
+        assert!(
+            column_exists(&conn, "sessions", "reasoning_effort"),
+            "sessions.reasoning_effort column missing after migrate_v65"
+        );
+
+        // Minimal row: reasoning_effort must default to NULL.
+        let sid = uuid::Uuid::new_v4().to_string();
+        let aid = uuid::Uuid::new_v4().to_string();
+        conn.execute(
+            "INSERT INTO sessions (id, agent_id, messages, created_at, updated_at) \
+             VALUES (?1, ?2, ?3, datetime('now'), datetime('now'))",
+            rusqlite::params![sid, aid, b"[]" as &[u8]],
+        )
+        .unwrap();
+        let stored: Option<String> = conn
+            .query_row(
+                "SELECT reasoning_effort FROM sessions WHERE id = ?1",
+                [&sid],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(
+            stored.is_none(),
+            "reasoning_effort must default to NULL for pre-migration rows: got {stored:?}"
+        );
+
+        // Open-vocabulary token round trip — `xhigh` is exactly the kind of
+        // rung the four-value enum could not store.
+        conn.execute(
+            "UPDATE sessions SET reasoning_effort = ?1 WHERE id = ?2",
+            rusqlite::params!["xhigh", sid],
+        )
+        .unwrap();
+        let stored: Option<String> = conn
+            .query_row(
+                "SELECT reasoning_effort FROM sessions WHERE id = ?1",
+                [&sid],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            stored.as_deref(),
+            Some("xhigh"),
+            "reasoning_effort round-trip failed"
+        );
+
+        // Clear back to NULL.
+        conn.execute(
+            "UPDATE sessions SET reasoning_effort = NULL WHERE id = ?1",
+            [&sid],
+        )
+        .unwrap();
+        let cleared: Option<String> = conn
+            .query_row(
+                "SELECT reasoning_effort FROM sessions WHERE id = ?1",
+                [&sid],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(
+            cleared.is_none(),
+            "clearing reasoning_effort to NULL failed"
+        );
+
+        // Rerun the step directly: `try_column_exists` must make it a no-op
+        // rather than a duplicate-column error.
+        migrate_v65(&conn).expect("migrate_v65 must be idempotent");
+    }
+
     /// Audit: sessions-missing-index. After v41 both
     /// `idx_sessions_agent_updated` (composite on sessions) and
     /// `idx_audit_agent_timestamp` (composite on audit_entries) must
@@ -5247,5 +5435,234 @@ mod tests {
                 .unwrap();
             assert_eq!(n, 1, "{index} must exist after v64");
         }
+    }
+
+    /// Pool-backed fixture so `save_session` can run against the same database
+    /// the reconciliation just opened, instead of a bare rusqlite `Connection`
+    /// that `SessionStore` cannot take.
+    fn memory_pool() -> r2d2::Pool<r2d2_sqlite::SqliteConnectionManager> {
+        let manager = r2d2_sqlite::SqliteConnectionManager::memory();
+        r2d2::Pool::builder().max_size(1).build(manager).unwrap()
+    }
+
+    /// Remove the artifacts of main's real v64 and describe row 64 the way the
+    /// pre-renumber reasoning build did. `indices` controls whether the v64
+    /// indexes go too (the deployed integration build never created them; a
+    /// main v64 database already has them).
+    fn simulate_pre_renumber_footprint(conn: &Connection, drop_indexes: bool) {
+        conn.execute_batch(
+            "DROP TRIGGER IF EXISTS sessions_fts_map_ad;
+             DROP TABLE IF EXISTS sessions_fts_map;",
+        )
+        .unwrap();
+        if drop_indexes {
+            conn.execute_batch(
+                "DROP INDEX IF EXISTS idx_sessions_created;
+                 DROP INDEX IF EXISTS idx_sessions_agent_created;
+                 DROP INDEX IF EXISTS idx_memories_agent_created;
+                 DROP INDEX IF EXISTS idx_memories_created;",
+            )
+            .unwrap();
+        }
+        conn.execute(
+            "UPDATE migrations SET description = \
+             'Add sessions.reasoning_effort for per-session reasoning-effort pin (#8591)' \
+             WHERE version = 64",
+            [],
+        )
+        .unwrap();
+    }
+
+    fn assert_reconciled(conn: &Connection) {
+        assert!(
+            try_table_exists(conn, "sessions_fts_map").unwrap(),
+            "reconciliation must create sessions_fts_map"
+        );
+        for index in [
+            "idx_sessions_created",
+            "idx_sessions_agent_created",
+            "idx_memories_agent_created",
+            "idx_memories_created",
+        ] {
+            let n: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = ?1",
+                    [index],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(n, 1, "{index} must exist after reconciliation");
+        }
+        let description: String = conn
+            .query_row(
+                "SELECT description FROM migrations WHERE version = 64",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(
+            !description.contains("reasoning_effort"),
+            "row 64 must describe this branch's v64 after renumbering, got: {description}"
+        );
+        assert!(
+            description.contains("sessions_fts_map"),
+            "row 64 must describe the index/FTS-map step, got: {description}"
+        );
+    }
+
+    fn assert_save_session_works(pool: &r2d2::Pool<r2d2_sqlite::SqliteConnectionManager>) {
+        use crate::session::SessionStore;
+        use librefang_types::agent::AgentId;
+        use librefang_types::message::Message;
+
+        let store = SessionStore::new(pool.clone());
+        let agent_id = AgentId::new();
+        let mut session = store.create_session(agent_id).unwrap();
+        session.messages.push(Message::user("post-reconcile turn"));
+        store
+            .save_session(&session)
+            .expect("save_session must work after reconciliation");
+        let loaded = store.get_session(session.id).unwrap().unwrap();
+        assert_eq!(loaded.messages.len(), 1);
+    }
+
+    /// Footprint (a): a clean main database stamped at v64 already has the FTS
+    /// map; the ladder only owes it v65. The reconciliation must not disturb
+    /// it and `save_session` must keep working.
+    #[test]
+    fn pre_renumber_reconcile_leaves_a_main_v64_database_intact() {
+        let pool = memory_pool();
+        {
+            let conn = pool.get().unwrap();
+            run_migrations(&conn).unwrap();
+            conn.execute("DELETE FROM migrations WHERE version = 65", [])
+                .unwrap();
+            conn.execute("ALTER TABLE sessions DROP COLUMN reasoning_effort", [])
+                .unwrap();
+            conn.pragma_update(None, "user_version", 64i64).unwrap();
+        }
+
+        run_migrations(&pool.get().unwrap()).expect("a main v64 database must still open");
+
+        let conn = pool.get().unwrap();
+        assert_reconciled(&conn);
+        assert!(
+            try_column_exists(&conn, "sessions", "reasoning_effort").unwrap(),
+            "v65 must still add the reasoning column"
+        );
+        assert_eq!(get_schema_version(&conn).unwrap(), SCHEMA_VERSION);
+        drop(conn);
+        assert_save_session_works(&pool);
+    }
+
+    /// Footprint (b): the head of this branch before the main merge
+    /// (`5c11a777c`) stamped the reasoning step at v64 and never ran main's
+    /// v64. On the next boot the ladder skips 64; the reconciliation is the
+    /// only repair.
+    #[test]
+    fn pre_renumber_reconcile_repairs_the_v64_reasoning_footprint() {
+        let pool = memory_pool();
+        {
+            let conn = pool.get().unwrap();
+            run_migrations(&conn).unwrap();
+            simulate_pre_renumber_footprint(&conn, true);
+            // The pre-renumber build had no v65 audit row.
+            conn.execute("DELETE FROM migrations WHERE version = 65", [])
+                .unwrap();
+            conn.pragma_update(None, "user_version", 64i64).unwrap();
+            assert!(
+                !try_table_exists(&conn, "sessions_fts_map").unwrap(),
+                "fixture must actually be missing the map"
+            );
+        }
+
+        run_migrations(&pool.get().unwrap())
+            .expect("the pre-renumber v64 database must still open");
+
+        let conn = pool.get().unwrap();
+        assert_reconciled(&conn);
+        assert!(
+            try_column_exists(&conn, "sessions", "reasoning_effort").unwrap(),
+            "a rerun of v65 must not drop or duplicate the column"
+        );
+        assert_eq!(get_schema_version(&conn).unwrap(), SCHEMA_VERSION);
+        drop(conn);
+        assert_save_session_works(&pool);
+    }
+
+    /// Footprint (c): the deployed integration build (`8b7bc4c22`) stamped
+    /// reasoning at v64 and skill versions at v65, so the ladder skips both on
+    /// next boot. This is the production shape of proteo/rodela/rebeca.
+    #[test]
+    fn pre_renumber_reconcile_repairs_the_deployed_v65_footprint() {
+        let pool = memory_pool();
+        {
+            let conn = pool.get().unwrap();
+            run_migrations(&conn).unwrap();
+            simulate_pre_renumber_footprint(&conn, true);
+            // The integration build's v65 was skill version history, not
+            // reasoning; the table is present and must survive untouched.
+            conn.execute_batch(
+                "CREATE TABLE IF NOT EXISTS skill_versions (
+                    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                    skill_name      TEXT NOT NULL,
+                    timestamp       TEXT NOT NULL DEFAULT (datetime('now')),
+                    manifest_toml   TEXT NOT NULL,
+                    prompt_context  TEXT NOT NULL DEFAULT '',
+                    author          TEXT NOT NULL DEFAULT '',
+                    change_source   TEXT NOT NULL DEFAULT 'unknown'
+                );
+                CREATE INDEX IF NOT EXISTS idx_skill_versions_name
+                    ON skill_versions(skill_name, timestamp DESC);",
+            )
+            .unwrap();
+            conn.execute(
+                "UPDATE migrations SET description = 'Skill version history table (#8021)' \
+                 WHERE version = 65",
+                [],
+            )
+            .unwrap();
+            // A real deployed row, so the trigger/map rebuild has something to
+            // map and `save_session` has a row to update.
+            conn.execute(
+                "INSERT INTO sessions (id, agent_id, messages, created_at, updated_at) \
+                 VALUES ('deployed-session', 'deployed-agent', x'90', '2026-01-01', '2026-01-01')",
+                [],
+            )
+            .unwrap();
+            conn.pragma_update(None, "user_version", 65i64).unwrap();
+            assert_eq!(get_schema_version(&conn).unwrap(), 65);
+            assert!(!try_table_exists(&conn, "sessions_fts_map").unwrap());
+            assert!(try_column_exists(&conn, "sessions", "reasoning_effort").unwrap());
+            assert!(try_table_exists(&conn, "skill_versions").unwrap());
+        }
+
+        run_migrations(&pool.get().unwrap())
+            .expect("the deployed integration database must still open");
+
+        let conn = pool.get().unwrap();
+        assert_reconciled(&conn);
+        assert_eq!(
+            get_schema_version(&conn).unwrap(),
+            SCHEMA_VERSION,
+            "reconciliation must not move the version backwards"
+        );
+        assert!(
+            try_table_exists(&conn, "skill_versions").unwrap(),
+            "the skill version table at 65 must survive"
+        );
+        let d65: String = conn
+            .query_row(
+                "SELECT description FROM migrations WHERE version = 65",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            d65, "Skill version history table (#8021)",
+            "row 65 belongs to the deployed skill migration and must not be rewritten"
+        );
+        drop(conn);
+        assert_save_session_works(&pool);
     }
 }

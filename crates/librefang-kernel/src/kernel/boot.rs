@@ -1089,31 +1089,6 @@ impl LibreFangKernel {
         // Cheap-clone (internal Arc).
         let exhaustion_store = ProviderExhaustionStore::new();
 
-        // Use the chain, or create a stub driver if everything failed
-        let driver: Arc<dyn LlmDriver> = if driver_chain.len() > 1 {
-            // Zip model_chain with provider_chain so each slot's
-            // provider name lands in `FallbackDriver`'s exhaustion-store
-            // keys. The two vectors are built in lock-step above.
-            let triples: Vec<(Arc<dyn LlmDriver>, String, String)> = model_chain
-                .into_iter()
-                .zip(provider_chain.iter())
-                .map(|((d, m), p)| (d, m, p.clone()))
-                .collect();
-            let fb =
-                librefang_runtime::drivers::fallback::FallbackDriver::with_models_and_providers(
-                    triples,
-                )
-                .with_exhaustion_store(exhaustion_store.clone());
-            Arc::new(fb)
-        } else if let Some(single) = driver_chain.into_iter().next() {
-            single
-        } else {
-            // All drivers failed — use a stub that returns a helpful error.
-            // The kernel boots, dashboard is accessible, users can fix their config.
-            warn!("No LLM drivers available — agents will return errors until a provider is configured");
-            Arc::new(StubDriver) as Arc<dyn LlmDriver>
-        };
-
         // Initialize metering engine (shares the same SQLite connection as the memory substrate).
         // The metering engine carries the same exhaustion store so a
         // per-provider budget gate trip records a skip the LLM
@@ -1356,6 +1331,37 @@ impl LibreFangKernel {
         info!(
             "Model catalog: {total_count} models, {available_count} available from configured providers ({local_count} local)"
         );
+
+        // Use the chain, or create a stub driver if everything failed.
+        //
+        // Built after the catalog load so the boot-level fallback chain can
+        // re-resolve its reasoning metadata per slot (#8616 review): the
+        // catalog is what tells a slot whether it declared `xhigh` or nothing
+        // at all. Everything the block consumes is ready before the catalog
+        // block and `driver` is not read until `AuxClient::new` below.
+        let driver: Arc<dyn LlmDriver> = if driver_chain.len() > 1 {
+            // Zip model_chain with provider_chain so each slot's
+            // provider name lands in `FallbackDriver`'s exhaustion-store
+            // keys. The two vectors are built in lock-step above.
+            let triples: Vec<(Arc<dyn LlmDriver>, String, String)> = model_chain
+                .into_iter()
+                .zip(provider_chain.iter())
+                .map(|((d, m), p)| (d, m, p.clone()))
+                .collect();
+            let fb = super::llm_drivers::boot_fallback_driver(
+                triples,
+                exhaustion_store.clone(),
+                Arc::new(model_catalog.clone()),
+            );
+            Arc::new(fb)
+        } else if let Some(single) = driver_chain.into_iter().next() {
+            single
+        } else {
+            // All drivers failed — use a stub that returns a helpful error.
+            // The kernel boots, dashboard is accessible, users can fix their config.
+            warn!("No LLM drivers available — agents will return errors until a provider is configured");
+            Arc::new(StubDriver) as Arc<dyn LlmDriver>
+        };
 
         // Initialize skill registry. Before `load_all()` we set the
         // operator-supplied disabled list so the loader can skip those

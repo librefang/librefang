@@ -717,6 +717,16 @@ impl MemorySubstrate {
             .set_session_model_override(session_id, model_override)
     }
 
+    /// Set (or clear) the per-session reasoning-mode override (#8591).
+    pub fn set_session_reasoning_effort(
+        &self,
+        session_id: SessionId,
+        reasoning_effort: Option<&str>,
+    ) -> LibreFangResult<()> {
+        self.sessions
+            .set_session_reasoning_effort(session_id, reasoning_effort)
+    }
+
     /// Find a session by label for a given agent.
     pub fn find_session_by_label(
         &self,

@@ -53,6 +53,16 @@ interface UIState {
   terminalEnabled: boolean | null;
   modelsAvailableOnly: boolean;
   deepThinking: boolean;
+  /**
+   * Whether the user has ever moved the deep-thinking toggle.
+   *
+   * Refs #8616: the legacy `thinking` boolean is only meaningful when it is
+   * deliberate. Sending `thinking: false` on every frame — which the chat page
+   * did — erased a per-session reasoning pin set elsewhere in the UI. While
+   * this is false the request omits the key so the kernel inherits; once the
+   * user toggles, the boolean is theirs to send.
+   */
+  deepThinkingTouched: boolean;
   showThinkingProcess: boolean;
   /**
    * Scale applied to the chat transcript, as a multiplier.
@@ -115,6 +125,7 @@ type PersistedUIState = Pick<
   | "hiddenModelKeys"
   | "modelsAvailableOnly"
   | "deepThinking"
+  | "deepThinkingTouched"
   | "showThinkingProcess"
   | "chatScale"
   | "openChatTabs"
@@ -175,6 +186,7 @@ export function migratePersistedUIState(
     hiddenModelKeys: [],
     modelsAvailableOnly: true,
     deepThinking: false,
+    deepThinkingTouched: false,
     showThinkingProcess: true,
     chatScale: DEFAULT_CHAT_SCALE,
     openChatTabs: {},
@@ -212,11 +224,19 @@ export function migratePersistedUIState(
   for (const key of [
     "modelsAvailableOnly",
     "deepThinking",
+    "deepThinkingTouched",
     "showThinkingProcess",
   ] as const) {
     if (typeof persistedState[key] === "boolean") {
       migrated[key] = persistedState[key];
     }
+  }
+  // A persisted `true` can only have come from a deliberate toggle, and the
+  // flag that records "this was deliberate" did not exist before #8616: mark
+  // it so an existing "deep thinking on" preference keeps reaching the server
+  // instead of silently reverting to "inherit".
+  if (migrated.deepThinking) {
+    migrated.deepThinkingTouched = true;
   }
   if (persistedState.chatScale !== undefined) {
     migrated.chatScale = clampChatScale(persistedState.chatScale);
@@ -269,6 +289,7 @@ export const useUIStore = create<UIState>()(
       terminalEnabled: null,
       modelsAvailableOnly: true,
       deepThinking: false,
+      deepThinkingTouched: false,
       showThinkingProcess: true,
       chatScale: DEFAULT_CHAT_SCALE,
       setChatScale: (value) => set({ chatScale: clampChatScale(value) }),
@@ -364,7 +385,10 @@ export const useUIStore = create<UIState>()(
           return { openChatTabs, chatTabRecency };
         }),
       setModelsAvailableOnly: (value) => set({ modelsAvailableOnly: value }),
-      setDeepThinking: (value) => set({ deepThinking: value }),
+      // A user toggle is explicit from now on: the frame may carry the
+      // legacy boolean (#8616).
+      setDeepThinking: (value) =>
+        set({ deepThinking: value, deepThinkingTouched: true }),
       setShowThinkingProcess: (value) => set({ showThinkingProcess: value }),
       toggleTheme: () =>
         set((state) => ({ theme: state.theme === "light" ? "dark" : "light" })),
@@ -458,6 +482,7 @@ export const useUIStore = create<UIState>()(
         hiddenModelKeys: state.hiddenModelKeys,
         modelsAvailableOnly: state.modelsAvailableOnly,
         deepThinking: state.deepThinking,
+        deepThinkingTouched: state.deepThinkingTouched,
         showThinkingProcess: state.showThinkingProcess,
         chatScale: state.chatScale,
         openChatTabs: state.openChatTabs,

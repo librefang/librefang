@@ -4071,6 +4071,7 @@ async fn session_model_override_beats_model_selection_on_both_paths() {
             context_window_tokens: 0,
             label: None,
             model_override: None,
+            reasoning_effort: None,
             messages_generation: 0,
             last_repaired_generation: None,
             peer_id: None,
@@ -4109,6 +4110,116 @@ async fn session_model_override_beats_model_selection_on_both_paths() {
             "the {path} path must run the session /model override over Stable pinning: {body}"
         );
     }
+
+    kernel.shutdown();
+}
+
+/// A per-session reasoning pin (#8591) must reach the wire on the streaming
+/// dispatch path, not just the blocking one. Mirrors
+/// [`session_model_override_beats_model_selection_on_both_paths`]: the session
+/// row is seeded, the pin is written through the same substrate update the
+/// `PATCH /api/sessions/{id}/reasoning` route uses, and the streamed turn must
+/// carry the pin — not the agent-level `[thinking]` default it overrides.
+#[tokio::test(flavor = "multi_thread")]
+async fn session_reasoning_effort_pin_reaches_the_streaming_path() {
+    use librefang_memory::session::Session as MemSession;
+    use librefang_types::config::{ReasoningMode, ThinkingConfig};
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let backend = MockServer::start().await;
+    // OpenAI-compatible SSE: one content delta, a finish frame, then [DONE].
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\
+             data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1}}\n\
+             data: [DONE]\n",
+            "text/event-stream",
+        ))
+        .mount(&backend)
+        .await;
+
+    let dir = tempfile::tempdir().unwrap();
+    let home_dir = dir.path().to_path_buf();
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        default_model: DefaultModelConfig::driverless(),
+        ..KernelConfig::default()
+    };
+    let kernel = Arc::new(LibreFangKernel::boot_with_config(config).expect("kernel should boot"));
+    kernel.set_self_handle();
+
+    // An unrecognised provider plus a custom `base_url` builds the
+    // OpenAI-compatible driver against the mock without a credential. The
+    // agent level pins `low`; the session pin must win.
+    let mut manifest = test_manifest("reasoning-pin", "session reasoning precedence", vec![]);
+    manifest.model.provider = "reasoning-test".to_string();
+    manifest.model.model = "mock-reasoning-model".to_string();
+    manifest.model.base_url = Some(backend.uri());
+    manifest.thinking = Some(ThinkingConfig {
+        reasoning_effort: Some(ReasoningMode::low()),
+        ..Default::default()
+    });
+    let agent_id = kernel.spawn_agent(manifest).expect("spawn should succeed");
+    let session_id = kernel
+        .agents
+        .registry
+        .get(agent_id)
+        .expect("agent entry")
+        .session_id;
+    kernel
+        .memory
+        .substrate
+        .save_session(&MemSession {
+            id: session_id,
+            agent_id,
+            parent_session_id: None,
+            messages: Vec::new(),
+            context_window_tokens: 0,
+            label: None,
+            model_override: None,
+            reasoning_effort: None,
+            messages_generation: 0,
+            last_repaired_generation: None,
+            peer_id: None,
+        })
+        .expect("seeding the session should succeed");
+    // `save_session` deliberately does not write the pin; the reasoning route
+    // sets it through this dedicated update. `high` is a legacy rung, so the
+    // assertion below observes the pin itself — an undeclared model coerces
+    // `xhigh` to `high`, which would hide whether the pin won (#8616 review).
+    kernel
+        .memory
+        .substrate
+        .set_session_reasoning_effort(session_id, Some("high"))
+        .expect("setting the session reasoning pin should succeed");
+
+    let (mut rx, join) = kernel
+        .send_message_streaming(agent_id, "streamed turn", None)
+        .expect("the streaming turn must start");
+    let drain = tokio::spawn(async move { while rx.recv().await.is_some() {} });
+    join.await
+        .expect("the streaming task joins")
+        .expect("the streamed turn must not error");
+    drain.await.expect("the drain task joins");
+
+    let requests = backend
+        .received_requests()
+        .await
+        .expect("requests recorded");
+    assert_eq!(
+        requests.len(),
+        1,
+        "the streamed turn must reach the backend"
+    );
+    let body: serde_json::Value = requests[0].body_json().expect("valid JSON body");
+    assert_eq!(
+        body["reasoning_effort"], "high",
+        "the streamed turn must run the session reasoning pin over the agent-level low: {body}"
+    );
 
     kernel.shutdown();
 }
@@ -4546,6 +4657,76 @@ fn test_apply_thinking_override_force_off_clears_thinking() {
     assert!(manifest.thinking.is_none());
 }
 
+/// #8616 review: the documented order is frame > session > agent > global, so
+/// an explicit per-call `thinking: false` must clear a per-session reasoning
+/// pin — it is the top rung, not a transport artifact. The dashboard now sends
+/// the boolean only when the user touched the control (`thinkingFrameField`),
+/// so a frame that carries no override resolves to `Inherit` and leaves the
+/// pin alone; that split is what makes frame-wins safe.
+#[test]
+fn test_frame_thinking_false_beats_the_session_pin_but_an_untouched_frame_keeps_it() {
+    use librefang_types::config::{ReasoningMode, ThinkingConfig, ThinkingOverride};
+
+    // Explicit per-call `false` → the frame wins.
+    let mut manifest = librefang_types::agent::AgentManifest {
+        source_template: None,
+        thinking: None,
+        ..Default::default()
+    };
+    apply_session_reasoning_effort(&mut manifest, "xhigh");
+    apply_thinking_override(&mut manifest, ThinkingOverride::Disable);
+    assert!(
+        manifest.thinking.is_none(),
+        "an explicit thinking:false must clear the session pin"
+    );
+
+    // No override on the frame → the session pin survives untouched.
+    let mut manifest = librefang_types::agent::AgentManifest {
+        source_template: None,
+        thinking: None,
+        ..Default::default()
+    };
+    apply_session_reasoning_effort(&mut manifest, "xhigh");
+    apply_thinking_override(&mut manifest, ThinkingOverride::Inherit);
+    let cfg = manifest
+        .thinking
+        .as_ref()
+        .expect("an untouched frame keeps the thinking config alive");
+    assert_eq!(
+        cfg.reasoning_effort,
+        Some(ReasoningMode::new("xhigh").unwrap()),
+        "an untouched frame must not erase an explicit session pin"
+    );
+    assert_eq!(
+        cfg.budget_tokens,
+        ThinkingConfig::default().budget_tokens,
+        "the surviving config carries the default budget, not a cleared one"
+    );
+
+    // An explicit per-frame token beats the pin.
+    let mut manifest = librefang_types::agent::AgentManifest {
+        source_template: None,
+        thinking: None,
+        ..Default::default()
+    };
+    apply_session_reasoning_effort(&mut manifest, "xhigh");
+    apply_thinking_override(&mut manifest, ThinkingOverride::Mode(ReasoningMode::low()));
+    assert_eq!(
+        manifest.thinking.expect("kept").reasoning_effort,
+        Some(ReasoningMode::low()),
+        "frame > session must hold when the frame carries a token"
+    );
+
+    // Without a pin the legacy boolean keeps its clearing semantics.
+    let mut manifest = librefang_types::agent::AgentManifest {
+        source_template: None,
+        thinking: Some(ThinkingConfig::default()),
+        ..Default::default()
+    };
+    apply_thinking_override(&mut manifest, ThinkingOverride::Disable);
+    assert!(manifest.thinking.is_none());
+}
+
 #[test]
 fn test_apply_thinking_override_force_on_inserts_default() {
     let mut manifest = librefang_types::agent::AgentManifest::default();
@@ -4590,12 +4771,12 @@ fn test_apply_thinking_override_force_on_keeps_existing_budget() {
 // direction shows up here rather than in production.
 
 /// Rung 3: an agent that declares no `[thinking]` table inherits the global
-/// `reasoning_mode`.
+/// `reasoning_effort`.
 #[test]
-fn test_reasoning_mode_global_reaches_an_agent_that_declares_nothing() {
+fn test_reasoning_effort_global_reaches_an_agent_that_declares_nothing() {
     use librefang_types::config::{ReasoningMode, ThinkingConfig, ThinkingOverride};
     let global = ThinkingConfig {
-        reasoning_mode: Some(ReasoningMode::High),
+        reasoning_effort: Some(ReasoningMode::high()),
         ..Default::default()
     };
     let mut manifest = librefang_types::agent::AgentManifest::default();
@@ -4608,24 +4789,24 @@ fn test_reasoning_mode_global_reaches_an_agent_that_declares_nothing() {
     apply_thinking_override(&mut manifest, ThinkingOverride::Inherit);
 
     assert_eq!(
-        manifest.thinking.expect("backfilled").reasoning_mode,
-        Some(ReasoningMode::High),
+        manifest.thinking.expect("backfilled").reasoning_effort,
+        Some(ReasoningMode::high()),
     );
 }
 
 /// Rung 2 beats rung 3: a per-agent `[thinking]` table suppresses the global
-/// backfill entirely, so its `reasoning_mode` wins.
+/// backfill entirely, so its `reasoning_effort` wins.
 #[test]
-fn test_reasoning_mode_per_agent_beats_global() {
+fn test_reasoning_effort_per_agent_beats_global() {
     use librefang_types::config::{ReasoningMode, ThinkingConfig, ThinkingOverride};
     let global = ThinkingConfig {
-        reasoning_mode: Some(ReasoningMode::High),
+        reasoning_effort: Some(ReasoningMode::high()),
         ..Default::default()
     };
     let mut manifest = librefang_types::agent::AgentManifest {
         source_template: None,
         thinking: Some(ThinkingConfig {
-            reasoning_mode: Some(ReasoningMode::Low),
+            reasoning_effort: Some(ReasoningMode::low()),
             ..Default::default()
         }),
         ..Default::default()
@@ -4637,25 +4818,25 @@ fn test_reasoning_mode_per_agent_beats_global() {
     apply_thinking_override(&mut manifest, ThinkingOverride::Inherit);
 
     assert_eq!(
-        manifest.thinking.expect("per-agent kept").reasoning_mode,
-        Some(ReasoningMode::Low),
+        manifest.thinking.expect("per-agent kept").reasoning_effort,
+        Some(ReasoningMode::low()),
         "the per-agent table must not be overwritten by the global backfill",
     );
 }
 
 /// Rung 1 beats both: the per-call override is stamped on last.
 #[test]
-fn test_reasoning_mode_per_call_beats_per_agent_beats_global() {
+fn test_reasoning_effort_per_call_beats_per_agent_beats_global() {
     use librefang_types::config::{ReasoningMode, ThinkingConfig, ThinkingOverride};
     let global = ThinkingConfig {
-        reasoning_mode: Some(ReasoningMode::High),
+        reasoning_effort: Some(ReasoningMode::high()),
         ..Default::default()
     };
     let mut manifest = librefang_types::agent::AgentManifest {
         source_template: None,
         thinking: Some(ThinkingConfig {
             budget_tokens: 7777,
-            reasoning_mode: Some(ReasoningMode::Low),
+            reasoning_effort: Some(ReasoningMode::low()),
             ..Default::default()
         }),
         ..Default::default()
@@ -4664,38 +4845,314 @@ fn test_reasoning_mode_per_call_beats_per_agent_beats_global() {
     if manifest.thinking.is_none() {
         manifest.thinking = Some(global.clone());
     }
-    apply_thinking_override(&mut manifest, ThinkingOverride::Mode(ReasoningMode::Max));
+    apply_thinking_override(&mut manifest, ThinkingOverride::Mode(ReasoningMode::max()));
 
     let cfg = manifest.thinking.expect("thinking present");
-    assert_eq!(cfg.reasoning_mode, Some(ReasoningMode::Max));
+    assert_eq!(cfg.reasoning_effort, Some(ReasoningMode::max()));
     assert_eq!(
         cfg.budget_tokens, 7777,
         "a mode override must not disturb the agent's configured budget",
     );
 }
 
+/// Rung 2.5 (#8591): the per-session override beats the agent and global
+/// levels and loses to the per-call one — `frame > session > agent > global`.
+/// The kernel composes exactly these three calls in this order.
+#[test]
+fn test_session_reasoning_effort_resolution_order() {
+    use librefang_types::config::{ReasoningMode, ThinkingConfig, ThinkingOverride};
+
+    let global = ThinkingConfig {
+        reasoning_effort: Some(ReasoningMode::high()),
+        ..Default::default()
+    };
+    let agent = ThinkingConfig {
+        budget_tokens: 7777,
+        reasoning_effort: Some(ReasoningMode::low()),
+        ..Default::default()
+    };
+
+    // Session beats agent+global when no per-call override is present.
+    let mut manifest = librefang_types::agent::AgentManifest {
+        thinking: Some(agent.clone()),
+        ..Default::default()
+    };
+    if manifest.thinking.is_none() {
+        manifest.thinking = Some(global.clone());
+    }
+    apply_session_reasoning_effort(&mut manifest, "xhigh");
+    apply_thinking_override(&mut manifest, ThinkingOverride::Inherit);
+    let cfg = manifest.thinking.clone().expect("thinking present");
+    assert_eq!(
+        cfg.reasoning_effort,
+        Some(ReasoningMode::new("xhigh").unwrap())
+    );
+    assert_eq!(
+        cfg.budget_tokens, 7777,
+        "a session mode pin must not disturb the agent's configured budget",
+    );
+
+    // Per-call beats the session override.
+    let mut manifest = librefang_types::agent::AgentManifest {
+        thinking: Some(agent.clone()),
+        ..Default::default()
+    };
+    apply_session_reasoning_effort(&mut manifest, "xhigh");
+    apply_thinking_override(&mut manifest, ThinkingOverride::Mode(ReasoningMode::max()));
+    assert_eq!(
+        manifest
+            .thinking
+            .expect("thinking present")
+            .reasoning_effort,
+        Some(ReasoningMode::max()),
+        "the per-message frame is the top rung",
+    );
+
+    // The full chain, one rung at a time: agent absent → global high; then a
+    // session pin beats it; then the per-message frame beats the session.
+    let global = ThinkingConfig {
+        reasoning_effort: Some(ReasoningMode::high()),
+        ..Default::default()
+    };
+    let mut manifest = librefang_types::agent::AgentManifest::default();
+    if manifest.thinking.is_none() {
+        manifest.thinking = Some(global.clone());
+    }
+    apply_session_reasoning_effort(&mut manifest, "medium");
+    apply_thinking_override(&mut manifest, ThinkingOverride::Inherit);
+    assert_eq!(
+        manifest
+            .thinking
+            .clone()
+            .expect("present")
+            .reasoning_effort
+            .as_ref()
+            .map(|m| m.as_str()),
+        Some("medium"),
+        "session beats the global backfill",
+    );
+
+    apply_thinking_override(&mut manifest, ThinkingOverride::Mode(ReasoningMode::low()));
+    assert_eq!(
+        manifest
+            .thinking
+            .expect("present")
+            .reasoning_effort
+            .as_ref()
+            .map(|m| m.as_str()),
+        Some("low"),
+        "the per-message frame beats the session pin",
+    );
+
+    // The legacy boolean clears an inherited session `none`, matching its
+    // documented "force thinking on even if the manifest has it off".
+    let mut manifest = librefang_types::agent::AgentManifest {
+        thinking: Some(agent.clone()),
+        ..Default::default()
+    };
+    apply_session_reasoning_effort(&mut manifest, "none");
+    apply_thinking_override(&mut manifest, ThinkingOverride::Enable);
+    assert_eq!(
+        manifest
+            .thinking
+            .expect("Enable keeps a config")
+            .reasoning_effort,
+        None,
+        "`thinking: true` must clear a session-pinned non-think mode",
+    );
+}
+
+/// The session field carries the open vocabulary (#8591): a token the old
+/// four-rung enum could not express is stamped verbatim, and clearing the
+/// override falls back to the agent's own level.
+#[test]
+fn test_session_reasoning_effort_open_token_and_clearing() {
+    use librefang_types::config::{ReasoningMode, ThinkingConfig, ThinkingOverride};
+
+    let mut manifest = librefang_types::agent::AgentManifest {
+        thinking: Some(ThinkingConfig {
+            reasoning_effort: Some(ReasoningMode::low()),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+
+    apply_session_reasoning_effort(&mut manifest, "minimal");
+    assert_eq!(
+        manifest
+            .thinking
+            .clone()
+            .expect("present")
+            .reasoning_effort
+            .as_ref()
+            .map(|m| m.as_str()),
+        Some("minimal"),
+    );
+
+    // No session pin → the agent's level is untouched.
+    let mut manifest = librefang_types::agent::AgentManifest {
+        thinking: Some(ThinkingConfig {
+            reasoning_effort: Some(ReasoningMode::low()),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    apply_thinking_override(&mut manifest, ThinkingOverride::Inherit);
+    assert_eq!(
+        manifest.thinking.expect("present").reasoning_effort,
+        Some(ReasoningMode::low()),
+    );
+}
+
+/// A malformed session value — reachable only through a hand-edited database —
+/// is ignored with a warning rather than failing the turn or silently pinning
+/// nonsense.
+#[test]
+fn test_session_reasoning_effort_malformed_is_ignored() {
+    use librefang_types::config::{ReasoningMode, ThinkingConfig};
+
+    let mut manifest = librefang_types::agent::AgentManifest {
+        thinking: Some(ThinkingConfig {
+            reasoning_effort: Some(ReasoningMode::low()),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    apply_session_reasoning_effort(&mut manifest, "not a token");
+    assert_eq!(
+        manifest.thinking.expect("present").reasoning_effort,
+        Some(ReasoningMode::low()),
+        "the agent level must survive a malformed session pin",
+    );
+}
+
+/// The catalog coercion (#8591): a token outside the model's declared set is
+/// mapped to the nearest supported rung (with a warning) before the request is
+/// built; `none` on a model that cannot be switched off falls to the floor;
+/// an undeclared model is constrained to the four legacy rungs so pre-#8591
+/// configs keep their wire spellings (#8616 review).
+#[test]
+fn test_declared_reasoning_policy_coerces_the_manifest() {
+    use librefang_types::config::{ReasoningEffortPolicy, ReasoningMode, ThinkingConfig};
+
+    let manifest_with = |mode: &str| librefang_types::agent::AgentManifest {
+        thinking: Some(ThinkingConfig {
+            reasoning_effort: Some(ReasoningMode::new(mode).unwrap()),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let policy = |efforts: &[&str]| ReasoningEffortPolicy {
+        supported_efforts: efforts.iter().map(|s| (*s).to_string()).collect(),
+        ..Default::default()
+    };
+
+    // Outside the declared set → coerced to the nearest, never forwarded.
+    let mut manifest = manifest_with("xhigh");
+    coerce_reasoning_effort_to_model(&mut manifest, &policy(&["low", "high"]));
+    assert_eq!(
+        manifest.thinking.expect("kept").reasoning_effort,
+        Some(ReasoningMode::high()),
+        "xhigh must be coerced to high, the nearer of low/high",
+    );
+
+    // Inside the declared set → untouched.
+    let mut manifest = manifest_with("high");
+    coerce_reasoning_effort_to_model(&mut manifest, &policy(&["low", "high"]));
+    assert_eq!(
+        manifest.thinking.expect("kept").reasoning_effort,
+        Some(ReasoningMode::high()),
+    );
+
+    // `none` on a model that forbids off → the lowest graded rung.
+    let mut manifest = manifest_with("none");
+    let no_off = ReasoningEffortPolicy {
+        off_allowed: false,
+        ..policy(&["low", "high"])
+    };
+    coerce_reasoning_effort_to_model(&mut manifest, &no_off);
+    assert_eq!(
+        manifest.thinking.expect("kept").reasoning_effort,
+        Some(ReasoningMode::low()),
+    );
+
+    let mut manifest = manifest_with("none");
+    let mandatory = ReasoningEffortPolicy {
+        mandatory: true,
+        ..policy(&["low", "high"])
+    };
+    coerce_reasoning_effort_to_model(&mut manifest, &mandatory);
+    assert_eq!(
+        manifest.thinking.expect("kept").reasoning_effort,
+        Some(ReasoningMode::low()),
+    );
+
+    // `none` where the model allows it → untouched.
+    let mut manifest = manifest_with("none");
+    coerce_reasoning_effort_to_model(&mut manifest, &policy(&["low", "high"]));
+    assert_eq!(
+        manifest.thinking.expect("kept").reasoning_effort,
+        Some(ReasoningMode::none()),
+    );
+
+    // Undeclared model → constrained to the legacy rungs (#8616 review), so a
+    // rung only a declaring model offers never reaches the wire.
+    let mut manifest = manifest_with("xhigh");
+    coerce_reasoning_effort_to_model(&mut manifest, &ReasoningEffortPolicy::default());
+    assert_eq!(
+        manifest
+            .thinking
+            .expect("kept")
+            .reasoning_effort
+            .as_ref()
+            .map(|m| m.as_str()),
+        Some("high"),
+        "an undeclared model gets the nearest legacy rung, not xhigh",
+    );
+
+    // Legacy rungs survive an undeclared model untouched.
+    for legacy in ["none", "low", "high", "max"] {
+        let mut manifest = manifest_with(legacy);
+        coerce_reasoning_effort_to_model(&mut manifest, &ReasoningEffortPolicy::default());
+        assert_eq!(
+            manifest
+                .thinking
+                .expect("kept")
+                .reasoning_effort
+                .as_ref()
+                .map(|m| m.as_str()),
+            Some(legacy),
+        );
+    }
+
+    // No thinking config at all → no panic, nothing created.
+    let mut manifest = librefang_types::agent::AgentManifest::default();
+    coerce_reasoning_effort_to_model(&mut manifest, &policy(&["low"]));
+    assert!(manifest.thinking.is_none());
+}
+
 /// A per-call mode on an agent with no `[thinking]` table at all must still
 /// land. Creating the config lazily is the difference between the feature
 /// working and silently doing nothing.
 #[test]
-fn test_reasoning_mode_per_call_creates_thinking_config_when_absent() {
+fn test_reasoning_effort_per_call_creates_thinking_config_when_absent() {
     use librefang_types::config::{ReasoningMode, ThinkingOverride};
     let mut manifest = librefang_types::agent::AgentManifest::default();
     assert!(manifest.thinking.is_none());
 
-    apply_thinking_override(&mut manifest, ThinkingOverride::Mode(ReasoningMode::None));
+    apply_thinking_override(&mut manifest, ThinkingOverride::Mode(ReasoningMode::none()));
 
     assert_eq!(
         manifest
             .thinking
             .expect("thinking config created for the mode")
-            .reasoning_mode,
-        Some(ReasoningMode::None),
+            .reasoning_effort,
+        Some(ReasoningMode::none()),
     );
 }
 
 /// The legacy boolean documents itself as "force thinking on even if the
-/// manifest has it off". A manifest (or backfilled global) `reasoning_mode =
+/// manifest has it off". A manifest (or backfilled global) `reasoning_effort =
 /// "none"` is exactly that off-state, so `thinking: true` has to clear it —
 /// otherwise the override deserializes, resolves to `Enable`, reaches the
 /// manifest, and the driver still sends the provider's non-think toggle.
@@ -4706,7 +5163,7 @@ fn test_enable_clears_an_inherited_non_think_mode() {
     let mut manifest = librefang_types::agent::AgentManifest {
         thinking: Some(ThinkingConfig {
             budget_tokens: 7777,
-            reasoning_mode: Some(ReasoningMode::None),
+            reasoning_effort: Some(ReasoningMode::none()),
             ..Default::default()
         }),
         ..Default::default()
@@ -4718,7 +5175,7 @@ fn test_enable_clears_an_inherited_non_think_mode() {
         .thinking
         .expect("Enable must keep a thinking config");
     assert_eq!(
-        cfg.reasoning_mode, None,
+        cfg.reasoning_effort, None,
         "`thinking: true` must not be silently overruled by an inherited non-think mode",
     );
     assert_eq!(
@@ -4734,17 +5191,21 @@ fn test_enable_clears_an_inherited_non_think_mode() {
 fn test_enable_leaves_a_graded_mode_alone() {
     use librefang_types::config::{ReasoningMode, ThinkingConfig, ThinkingOverride};
 
-    for mode in [ReasoningMode::Low, ReasoningMode::High, ReasoningMode::Max] {
+    for mode in [
+        ReasoningMode::low(),
+        ReasoningMode::high(),
+        ReasoningMode::max(),
+    ] {
         let mut manifest = librefang_types::agent::AgentManifest {
             thinking: Some(ThinkingConfig {
-                reasoning_mode: Some(mode),
+                reasoning_effort: Some(mode.clone()),
                 ..Default::default()
             }),
             ..Default::default()
         };
         apply_thinking_override(&mut manifest, ThinkingOverride::Enable);
         assert_eq!(
-            manifest.thinking.expect("kept").reasoning_mode,
+            manifest.thinking.expect("kept").reasoning_effort,
             Some(mode),
             "Enable must not downgrade a graded mode",
         );
@@ -4774,13 +5235,16 @@ fn test_disable_and_mode_none_are_not_the_same_thing() {
     );
 
     let mut non_think = base.clone();
-    apply_thinking_override(&mut non_think, ThinkingOverride::Mode(ReasoningMode::None));
+    apply_thinking_override(
+        &mut non_think,
+        ThinkingOverride::Mode(ReasoningMode::none()),
+    );
     assert_eq!(
         non_think
             .thinking
             .expect("Mode(None) must keep a thinking config to carry the mode")
-            .reasoning_mode,
-        Some(ReasoningMode::None),
+            .reasoning_effort,
+        Some(ReasoningMode::none()),
     );
 }
 
@@ -16192,6 +16656,7 @@ fn boot_canonical_recovery_advances_pointer_to_most_recently_active_session_5198
         context_window_tokens: 0,
         label: None,
         model_override: None,
+        reasoning_effort: None,
         messages_generation: 0,
         last_repaired_generation: None,
         peer_id: None,
@@ -16219,6 +16684,7 @@ fn boot_canonical_recovery_advances_pointer_to_most_recently_active_session_5198
         context_window_tokens: 0,
         label: None,
         model_override: None,
+        reasoning_effort: None,
         messages_generation: 0,
         last_repaired_generation: None,
         peer_id: None,
@@ -16478,6 +16944,7 @@ async fn streaming_turn_on_non_canonical_session_survives_in_turn_auto_compactio
             context_window_tokens: 0,
             label: None,
             model_override: None,
+            reasoning_effort: None,
             messages_generation: 0,
             last_repaired_generation: None,
             peer_id: None,
@@ -16580,6 +17047,7 @@ async fn kernel_with_seeded_session(
             context_window_tokens: 0,
             label: None,
             model_override: None,
+            reasoning_effort: None,
             messages_generation: 0,
             last_repaired_generation: None,
             peer_id: None,
@@ -16720,6 +17188,7 @@ async fn kernel_with_small_window_session(
             context_window_tokens: 0,
             label: None,
             model_override: None,
+            reasoning_effort: None,
             messages_generation: 0,
             last_repaired_generation: None,
             peer_id: None,
@@ -16965,6 +17434,7 @@ async fn test_compact_gate_passes_when_tokens_above_threshold_but_messages_below
         context_window_tokens: 0,
         label: None,
         model_override: None,
+        reasoning_effort: None,
         messages_generation: 0,
         last_repaired_generation: None,
         peer_id: None,
@@ -21351,6 +21821,7 @@ async fn resetting_a_session_does_not_cascade_delete_its_children() {
         context_window_tokens: 0,
         label: None,
         model_override: None,
+        reasoning_effort: None,
         messages_generation: 0,
         last_repaired_generation: None,
         peer_id: None,
@@ -21870,6 +22341,7 @@ async fn manual_compact_passes_per_agent_compaction_overrides_to_engine() {
             context_window_tokens: 0,
             label: None,
             model_override: None,
+            reasoning_effort: None,
             messages_generation: 0,
             last_repaired_generation: None,
             peer_id: None,
@@ -22106,4 +22578,278 @@ fn shutdown_publishes_kernel_stopping() {
         );
     }
     assert!(stopping, "shutdown must publish KernelStopping");
+}
+
+/// #8616 review (R1): the catalog contains only `openai:m`, which declares
+/// `["low", "xhigh"]`. A failover to the uncatalogued `customgw:m` must not
+/// inherit that declaration merely because the model ids collide.
+///
+/// The resolver under test is the exact one the kernel attaches to a
+/// `FallbackDriver` (`ModelCatalog::failover_reasoning_resolver`), reached
+/// through the boot-level wrapper, so this covers the kernel wiring and not
+/// just `realign_reasoning`.
+#[tokio::test(flavor = "multi_thread")]
+async fn failover_to_an_uncatalogued_provider_drops_the_primary_rung() {
+    use librefang_runtime::llm_driver::{
+        CompletionRequest, CompletionResponse, LlmDriver, LlmError,
+    };
+    use librefang_runtime::model_catalog::ModelCatalog;
+    use librefang_types::config::{ReasoningEffortPolicy, ReasoningMode, ThinkingConfig};
+    use librefang_types::message::{ContentBlock, StopReason, TokenUsage};
+    use librefang_types::model_catalog::{ModelCatalogEntry, ModelTier, ReasoningEchoPolicy};
+
+    struct FailPrimary;
+    #[async_trait]
+    impl LlmDriver for FailPrimary {
+        async fn complete(&self, _req: CompletionRequest) -> Result<CompletionResponse, LlmError> {
+            Err(LlmError::Api {
+                status: 500,
+                message: "primary down".to_string(),
+                code: None,
+            })
+        }
+    }
+
+    struct RecordingFallback(Arc<std::sync::Mutex<Vec<CompletionRequest>>>);
+    #[async_trait]
+    impl LlmDriver for RecordingFallback {
+        async fn complete(&self, req: CompletionRequest) -> Result<CompletionResponse, LlmError> {
+            self.0.lock().unwrap().push(req);
+            Ok(CompletionResponse {
+                text_synthesized_from_thinking: false,
+                content: vec![ContentBlock::Text {
+                    text: "fallback served".to_string(),
+                    provider_metadata: None,
+                }],
+                stop_reason: StopReason::EndTurn,
+                tool_calls: vec![],
+                usage: TokenUsage::default(),
+                actual_provider: None,
+                actual_model: None,
+            })
+        }
+    }
+
+    let catalog = Arc::new(ModelCatalog::from_entries(
+        vec![ModelCatalogEntry {
+            id: "m".to_string(),
+            display_name: "M".to_string(),
+            provider: "openai".to_string(),
+            tier: ModelTier::Smart,
+            context_window: 128_000,
+            max_output_tokens: 8_192,
+            supported_efforts: vec!["low".to_string(), "xhigh".to_string()],
+            ..Default::default()
+        }],
+        vec![],
+    ));
+    let resolver = ModelCatalog::failover_reasoning_resolver(catalog.clone());
+
+    // The manifest's own provider keeps its declaration …
+    let (primary_policy, _) = resolver("openai", "m");
+    assert_eq!(
+        primary_policy.supported_efforts,
+        vec!["low".to_string(), "xhigh".to_string()],
+        "the primary provider's own entry must still resolve"
+    );
+
+    // … and a same-id model under a provider the catalog never heard of is
+    // undeclared, not `openai:m`.
+    let (fallback_policy, echo) = resolver("customgw", "m");
+    assert_eq!(
+        fallback_policy,
+        ReasoningEffortPolicy::default(),
+        "customgw:m must not borrow openai:m's declaration"
+    );
+    assert_eq!(echo, ReasoningEchoPolicy::default());
+
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let fb = super::llm_drivers::boot_fallback_driver(
+        vec![
+            (
+                Arc::new(FailPrimary) as Arc<dyn LlmDriver>,
+                String::new(),
+                "openai".to_string(),
+            ),
+            (
+                Arc::new(RecordingFallback(seen.clone())) as Arc<dyn LlmDriver>,
+                "m".to_string(),
+                "customgw".to_string(),
+            ),
+        ],
+        librefang_llm_driver::ProviderExhaustionStore::new(),
+        catalog,
+    );
+
+    let req = CompletionRequest {
+        model: "m".to_string(),
+        thinking: Some(ThinkingConfig {
+            reasoning_effort: Some(ReasoningMode::new("xhigh").unwrap()),
+            ..Default::default()
+        }),
+        reasoning_policy: primary_policy,
+        ..Default::default()
+    };
+    fb.complete(req).await.expect("the fallback slot serves");
+
+    let seen = seen.lock().unwrap();
+    assert_eq!(seen.len(), 1);
+    assert_eq!(seen[0].model, "m");
+    assert_eq!(
+        seen[0]
+            .thinking
+            .as_ref()
+            .and_then(|t| t.reasoning_effort.as_ref())
+            .map(|m| m.as_str()),
+        None,
+        "xhigh must not be forwarded to uncatalogued customgw:m"
+    );
+    assert_eq!(seen[0].reasoning_policy, ReasoningEffortPolicy::default());
+}
+
+/// #8616 review: the boot-level `[[fallback_providers]]` chain must carry the
+/// same resolver as the per-agent one. A slot the catalog declares keeps the
+/// rung it declared; a slot it does not know is constrained to the legacy
+/// rungs, exactly like the per-agent chain.
+#[tokio::test(flavor = "multi_thread")]
+async fn boot_fallback_chain_keeps_a_declared_slots_rungs() {
+    use librefang_runtime::llm_driver::{
+        CompletionRequest, CompletionResponse, LlmDriver, LlmError,
+    };
+    use librefang_runtime::model_catalog::ModelCatalog;
+    use librefang_types::config::{ReasoningMode, ThinkingConfig};
+    use librefang_types::message::{ContentBlock, StopReason, TokenUsage};
+    use librefang_types::model_catalog::{ModelCatalogEntry, ModelTier};
+
+    struct FailPrimary;
+    #[async_trait]
+    impl LlmDriver for FailPrimary {
+        async fn complete(&self, _req: CompletionRequest) -> Result<CompletionResponse, LlmError> {
+            Err(LlmError::Api {
+                status: 500,
+                message: "primary down".to_string(),
+                code: None,
+            })
+        }
+    }
+
+    struct RecordingFallback(Arc<std::sync::Mutex<Vec<CompletionRequest>>>);
+    #[async_trait]
+    impl LlmDriver for RecordingFallback {
+        async fn complete(&self, req: CompletionRequest) -> Result<CompletionResponse, LlmError> {
+            self.0.lock().unwrap().push(req);
+            Ok(CompletionResponse {
+                text_synthesized_from_thinking: false,
+                content: vec![ContentBlock::Text {
+                    text: "fallback served".to_string(),
+                    provider_metadata: None,
+                }],
+                stop_reason: StopReason::EndTurn,
+                tool_calls: vec![],
+                usage: TokenUsage::default(),
+                actual_provider: None,
+                actual_model: None,
+            })
+        }
+    }
+
+    let catalog = Arc::new(ModelCatalog::from_entries(
+        vec![ModelCatalogEntry {
+            id: "m".to_string(),
+            display_name: "M".to_string(),
+            provider: "openai".to_string(),
+            tier: ModelTier::Smart,
+            context_window: 128_000,
+            max_output_tokens: 8_192,
+            supported_efforts: vec!["low".to_string(), "xhigh".to_string()],
+            ..Default::default()
+        }],
+        vec![],
+    ));
+
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let fb = super::llm_drivers::boot_fallback_driver(
+        vec![
+            (
+                Arc::new(FailPrimary) as Arc<dyn LlmDriver>,
+                String::new(),
+                "customgw".to_string(),
+            ),
+            (
+                Arc::new(RecordingFallback(seen.clone())) as Arc<dyn LlmDriver>,
+                "m".to_string(),
+                "openai".to_string(),
+            ),
+        ],
+        librefang_llm_driver::ProviderExhaustionStore::new(),
+        catalog,
+    );
+
+    let req = CompletionRequest {
+        model: "m".to_string(),
+        thinking: Some(ThinkingConfig {
+            reasoning_effort: Some(ReasoningMode::new("xhigh").unwrap()),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    fb.complete(req).await.expect("the fallback slot serves");
+
+    let seen = seen.lock().unwrap();
+    assert_eq!(seen.len(), 1);
+    assert_eq!(
+        seen[0]
+            .thinking
+            .as_ref()
+            .and_then(|t| t.reasoning_effort.as_ref())
+            .map(|m| m.as_str()),
+        Some("xhigh"),
+        "a declared slot keeps the rung it declared"
+    );
+    assert_eq!(
+        seen[0].reasoning_policy.supported_efforts,
+        vec!["low".to_string(), "xhigh".to_string()],
+        "the slot's own declaration must replace the primary's"
+    );
+}
+
+/// #8616 review: the primary-path policy lookup is provider-scoped, so a
+/// gateway model that shares `openai:m`'s id cannot inherit the declaration
+/// only `openai` published.
+#[test]
+fn reasoning_policy_lookup_is_provider_scoped() {
+    use librefang_runtime::model_catalog::ModelCatalog;
+    use librefang_types::config::ReasoningEffortPolicy;
+    use librefang_types::model_catalog::{ModelCatalogEntry, ModelTier};
+
+    let (kernel, _dir) = minimal_kernel("reasoning-policy-provider-scoped");
+    kernel
+        .llm
+        .model_catalog
+        .store(std::sync::Arc::new(ModelCatalog::from_entries(
+            vec![ModelCatalogEntry {
+                id: "m".to_string(),
+                display_name: "M".to_string(),
+                provider: "openai".to_string(),
+                tier: ModelTier::Smart,
+                context_window: 128_000,
+                max_output_tokens: 8_192,
+                supported_efforts: vec!["low".to_string(), "xhigh".to_string()],
+                ..Default::default()
+            }],
+            vec![],
+        )));
+
+    assert_eq!(
+        kernel
+            .lookup_reasoning_policy("openai", "m")
+            .supported_efforts,
+        vec!["low".to_string(), "xhigh".to_string()],
+        "the declaring provider keeps its own set"
+    );
+    assert_eq!(
+        kernel.lookup_reasoning_policy("customgw", "m"),
+        ReasoningEffortPolicy::default(),
+        "customgw:m must resolve to undeclared, not borrow openai:m"
+    );
 }
