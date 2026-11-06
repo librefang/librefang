@@ -164,6 +164,124 @@ pub fn themed_list(items: Vec<ListItem<'_>>) -> List<'_> {
         .highlight_symbol("\u{25b8} ")
 }
 
+// ── Checkbox list ─────────────────────────────────────────────────────────
+
+/// A cursor-driven list of named checkboxes.
+///
+/// One source of truth for the selectable-set screens: cursor movement saturates at both ends, `Space` toggles only the row under the cursor, and the checked names keep the list's order.
+pub struct CheckboxList {
+    pub items: Vec<(String, bool)>,
+    pub cursor: usize,
+}
+
+impl CheckboxList {
+    pub fn new(items: Vec<(String, bool)>) -> Self {
+        Self { items, cursor: 0 }
+    }
+
+    /// Build a list from `names`, checking the ones `selected` accepts.
+    pub fn from_names(
+        names: impl IntoIterator<Item = String>,
+        selected: impl Fn(&str) -> bool,
+    ) -> Self {
+        Self::new(
+            names
+                .into_iter()
+                .map(|name| {
+                    let checked = selected(&name);
+                    (name, checked)
+                })
+                .collect(),
+        )
+    }
+
+    /// Flip the checkbox under the cursor; a no-op on an empty list.
+    pub fn toggle(&mut self) {
+        if let Some((_, checked)) = self.items.get_mut(self.cursor) {
+            *checked = !*checked;
+        }
+    }
+
+    /// Move the cursor up, stopping at the first row.
+    pub fn up(&mut self) {
+        if self.cursor > 0 {
+            self.cursor -= 1;
+        }
+    }
+
+    /// Move the cursor down, stopping at the last row.
+    pub fn down(&mut self) {
+        if self.cursor + 1 < self.len() {
+            self.cursor += 1;
+        }
+    }
+
+    /// The checked names, in item order.
+    pub fn selected_names(&self) -> Vec<String> {
+        self.items
+            .iter()
+            .filter(|(_, checked)| *checked)
+            .map(|(name, _)| name.clone())
+            .collect()
+    }
+
+    /// How many items are checked.
+    pub fn selected_count(&self) -> usize {
+        self.items.iter().filter(|(_, checked)| *checked).count()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.items.is_empty()
+    }
+
+    pub fn len(&self) -> usize {
+        self.items.len()
+    }
+
+    /// Prompt line, checkbox rows or the shared empty state, and a hint bar.
+    pub fn render(&self, f: &mut Frame, area: Rect, prompt: &str, hints: &str) {
+        let chunks = Layout::vertical([
+            Constraint::Length(2),
+            Constraint::Min(3),
+            Constraint::Length(1),
+        ])
+        .split(area);
+
+        f.render_widget(Paragraph::new(format!("  {prompt}")), chunks[0]);
+
+        if self.items.is_empty() {
+            f.render_widget(
+                empty_state(&crate::i18n::t("tui-agents-label-none-available")),
+                chunks[1],
+            );
+        } else {
+            let list_items: Vec<ListItem> = self
+                .items
+                .iter()
+                .enumerate()
+                .map(|(i, (name, checked))| {
+                    let check = if *checked { "\u{25c9}" } else { "\u{25cb}" };
+                    let highlight = if i == self.cursor {
+                        Style::default()
+                            .fg(theme::CYAN)
+                            .add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default()
+                    };
+                    ListItem::new(Line::from(vec![Span::styled(
+                        format!("  {check} {name}"),
+                        highlight,
+                    )]))
+                })
+                .collect();
+
+            f.render_widget(List::new(list_items), chunks[1]);
+        }
+
+        f.render_widget(hint_bar(hints), chunks[2]);
+    }
+}
+
 // ── Search input ──────────────────────────────────────────────────────────
 
 /// Search mode input line: `  / query█`
@@ -325,5 +443,78 @@ mod tests {
         let rect = toast_rect(area, "hi");
         assert_eq!(rect.y, 0);
         assert_eq!(rect.height, 1);
+    }
+
+    // ── CheckboxList ──────────────────────────────────────────────────────
+
+    fn three_items() -> CheckboxList {
+        CheckboxList::new(vec![
+            ("alpha".to_string(), false),
+            ("beta".to_string(), false),
+            ("gamma".to_string(), false),
+        ])
+    }
+
+    #[test]
+    fn checkbox_list_toggle_flips_only_the_cursor_item() {
+        let mut list = three_items();
+        list.toggle();
+        list.down();
+        list.toggle();
+        assert_eq!(
+            list.items,
+            vec![
+                ("alpha".to_string(), true),
+                ("beta".to_string(), true),
+                ("gamma".to_string(), false),
+            ]
+        );
+        assert_eq!(list.selected_count(), 2);
+    }
+
+    #[test]
+    fn checkbox_list_cursor_saturates_at_both_ends() {
+        let mut list = three_items();
+        list.up();
+        assert_eq!(list.cursor, 0);
+        for _ in 0..10 {
+            list.down();
+        }
+        assert_eq!(list.cursor, 2);
+        list.up();
+        assert_eq!(list.cursor, 1);
+    }
+
+    #[test]
+    fn checkbox_list_selected_names_keep_item_order() {
+        let mut list = three_items();
+        list.items[2].1 = true;
+        list.items[0].1 = true;
+        assert_eq!(list.selected_names(), vec!["alpha", "gamma"]);
+    }
+
+    #[test]
+    fn checkbox_list_from_names_seeds_from_the_predicate() {
+        let list =
+            CheckboxList::from_names(vec!["alpha".to_string(), "beta".to_string()], |name| {
+                name.starts_with('b')
+            });
+        assert_eq!(
+            list.items,
+            vec![("alpha".to_string(), false), ("beta".to_string(), true),]
+        );
+    }
+
+    #[test]
+    fn checkbox_list_empty_tolerates_navigation_and_toggle() {
+        let mut list = CheckboxList::new(Vec::new());
+        list.up();
+        list.down();
+        list.toggle();
+        assert_eq!(list.cursor, 0);
+        assert!(list.is_empty());
+        assert_eq!(list.len(), 0);
+        assert!(list.selected_names().is_empty());
+        assert_eq!(list.selected_count(), 0);
     }
 }

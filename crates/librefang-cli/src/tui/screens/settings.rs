@@ -253,6 +253,7 @@ pub struct SettingsState {
     pub loading: bool,
     pub tick: usize,
     pub status_msg: String,
+    /// An ordered priority chain, not a set — deliberately not a `CheckboxList`.
     pub auxiliary: BTreeMap<String, Vec<String>>,
     pub aux_tasks: Vec<String>,
     pub aux_list: ListState,
