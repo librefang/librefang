@@ -6,7 +6,7 @@ import { tabContent } from "../lib/motion";
 import { useRovingTabs } from "../lib/useRovingTabs";
 import { safeUrl } from "../lib/safeUrl";
 import {
-  type McpServerConfigured, type McpServerConnected, type McpTransport,
+  type McpServerConfigured, type McpServerConnected, type McpServerOAuth, type McpTransport,
   type McpCatalogEntry,
 } from "../api";
 import { useMcpServers, useMcpCatalog, useMcpHealth, mcpQueries } from "../lib/queries/mcp";
@@ -122,7 +122,7 @@ interface LabeledItem {
   value: string;
 }
 
-interface ServerFormState {
+export interface ServerFormState {
   name: string;
   transportType: TransportType;
   command: string;
@@ -131,6 +131,17 @@ interface ServerFormState {
   timeout: number;
   env: LabeledItem[];
   headers: string;
+  /** Manual OAuth fallback fields (issue #8670). */
+  oauthAuthUrl: string;
+  oauthTokenUrl: string;
+  oauthClientId: string;
+  oauthClientSecretEnv: string;
+  /** Space- or comma-separated; split into `scopes` on submit. */
+  oauthScopes: string;
+  /** Carried through unchanged: no form control, but an edit must not drop them. */
+  oauthUserScopes: string[];
+  /** The server already had an `oauth` block, so emptying every field means "clear it". */
+  hadOauth: boolean;
 }
 
 function makeLocalId() {
@@ -152,6 +163,13 @@ const defaultForm: ServerFormState = {
   timeout: 30,
   env: [],
   headers: "",
+  oauthAuthUrl: "",
+  oauthTokenUrl: "",
+  oauthClientId: "",
+  oauthClientSecretEnv: "",
+  oauthScopes: "",
+  oauthUserScopes: [],
+  hadOauth: false,
 };
 
 // Prefer the backend-assigned id, fall back to the user-facing name.
@@ -200,7 +218,32 @@ export function shouldShowAuthBanner(authState: string | undefined): boolean {
   );
 }
 
-function formToPayload(form: ServerFormState): McpServerConfigured {
+function splitScopes(value: string): string[] {
+  return value.split(/[\s,]+/).filter(Boolean);
+}
+
+function formOauthToPayload(form: ServerFormState): McpServerOAuth | null | undefined {
+  const authUrl = form.oauthAuthUrl.trim();
+  const tokenUrl = form.oauthTokenUrl.trim();
+  const clientId = form.oauthClientId.trim();
+  const clientSecretEnv = form.oauthClientSecretEnv.trim();
+  const scopes = splitScopes(form.oauthScopes);
+  const empty = !authUrl && !tokenUrl && !clientId && !clientSecretEnv && scopes.length === 0;
+  if (empty) {
+    // Nothing entered: leave the key out (server keeps whatever it has), unless the
+    // operator emptied a block that existed, which is an explicit request to clear it.
+    return form.hadOauth ? null : undefined;
+  }
+  const oauth: McpServerOAuth = { scopes };
+  if (authUrl) oauth.auth_url = authUrl;
+  if (tokenUrl) oauth.token_url = tokenUrl;
+  if (clientId) oauth.client_id = clientId;
+  if (clientSecretEnv) oauth.client_secret_env = clientSecretEnv;
+  if (form.oauthUserScopes.length > 0) oauth.user_scopes = form.oauthUserScopes;
+  return oauth;
+}
+
+export function formToPayload(form: ServerFormState): McpServerConfigured {
   let transport: McpTransport;
   if (form.transportType === "stdio") {
     transport = {
@@ -224,10 +267,14 @@ function formToPayload(form: ServerFormState): McpServerConfigured {
   if (headers.length > 0) {
     result.headers = headers;
   }
+  const oauth = formOauthToPayload(form);
+  if (oauth !== undefined) {
+    result.oauth = oauth;
+  }
   return result;
 }
 
-function configuredToForm(server: McpServerConfigured): ServerFormState {
+export function configuredToForm(server: McpServerConfigured): ServerFormState {
   const transport = server.transport ?? { type: "stdio" as const };
   return {
     name: server.name,
@@ -238,6 +285,13 @@ function configuredToForm(server: McpServerConfigured): ServerFormState {
     timeout: server.timeout_secs ?? 30,
     env: (server.env ?? []).map(v => ({ id: makeLocalId(), value: v })),
     headers: (server.headers ?? []).join("\n"),
+    oauthAuthUrl: server.oauth?.auth_url ?? "",
+    oauthTokenUrl: server.oauth?.token_url ?? "",
+    oauthClientId: server.oauth?.client_id ?? "",
+    oauthClientSecretEnv: server.oauth?.client_secret_env ?? "",
+    oauthScopes: (server.oauth?.scopes ?? []).join(" "),
+    oauthUserScopes: server.oauth?.user_scopes ?? [],
+    hadOauth: !!server.oauth,
   };
 }
 
@@ -1959,6 +2013,45 @@ export function McpServersPage() {
                   className="w-full rounded-xl border border-border-subtle bg-surface px-4 py-2.5 text-sm font-mono text-text-main placeholder:text-text-dim/40 focus:border-brand focus:outline-none focus:ring-2 focus:ring-brand/10 hover:border-brand/20 transition-colors duration-200 shadow-sm resize-none"
                 />
               </div>
+            </div>
+          )}
+
+          {/* Manual OAuth fallback — only for servers whose metadata cannot be discovered (#8670) */}
+          {(form.transportType === "sse" || form.transportType === "http") && (
+            <div className="rounded-xl border border-border-subtle p-4 space-y-4 bg-main/30">
+              <div className="flex items-center gap-1.5 text-[10px] font-black uppercase tracking-widest text-text-dim">
+                {t("mcp.oauth_title")}
+              </div>
+              <p className="text-[11px] text-text-dim">{t("mcp.oauth_hint")}</p>
+              <Input
+                label={t("mcp.oauth_auth_url")}
+                value={form.oauthAuthUrl}
+                onChange={(e) => updateField("oauthAuthUrl", e.target.value)}
+                placeholder={t("mcp.oauth_auth_url_placeholder")}
+              />
+              <Input
+                label={t("mcp.oauth_token_url")}
+                value={form.oauthTokenUrl}
+                onChange={(e) => updateField("oauthTokenUrl", e.target.value)}
+                placeholder={t("mcp.oauth_token_url_placeholder")}
+              />
+              <Input
+                label={t("mcp.oauth_client_id")}
+                value={form.oauthClientId}
+                onChange={(e) => updateField("oauthClientId", e.target.value)}
+              />
+              <Input
+                label={t("mcp.oauth_client_secret_env")}
+                value={form.oauthClientSecretEnv}
+                onChange={(e) => updateField("oauthClientSecretEnv", e.target.value)}
+                placeholder={t("mcp.oauth_client_secret_env_placeholder")}
+              />
+              <Input
+                label={t("mcp.oauth_scopes")}
+                value={form.oauthScopes}
+                onChange={(e) => updateField("oauthScopes", e.target.value)}
+                placeholder={t("mcp.oauth_scopes_placeholder")}
+              />
             </div>
           )}
 
