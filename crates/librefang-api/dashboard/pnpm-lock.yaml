@@ -175,6 +175,7 @@ overrides:
   dagre-d3-es>lodash-es: ^4.18.1
   dompurify: '>=3.4.17'
   katex@<0.18.2: '>=0.18.2'
+  seroval@<1.6.11: 1.6.11
 
 importers:
 
@@ -3103,10 +3104,10 @@ packages:
     resolution: {integrity: sha512-4Nk35ttD3DTDJW4hgw5StsVAPeU6qnDFnULAouw6tQ7oLTV/ICXrWpsXo2EE52eSP2joUMazbVf52mFEcADqRw==}
     engines: {node: '>=10'}
     peerDependencies:
-      seroval: ^1.0
+      seroval: 1.6.11
 
-  seroval@1.6.7:
-    resolution: {integrity: sha512-AeDcLh0yO2SFm9W71essgnSzLV9DI8ZH0x0knXn2DMnUZj728mpLbxjlbB6IqKCmqh8JA3cEqRyGoNkt584JcQ==}
+  seroval@1.6.11:
+    resolution: {integrity: sha512-hpb6XnMCGN/A+79Uf8V7/iTGkyyyazNn5X0CoCAp7Uy9vT3RT8jZ9GLcnxGoVjg3P8AArbe4ZVHq6C8oT2a0kA==}
     engines: {node: '>=10'}
 
   set-blocking@2.0.0:
@@ -4159,8 +4160,8 @@ snapshots:
     dependencies:
       '@tanstack/history': 1.162.5
       cookie-es: 3.1.1
-      seroval: 1.6.7
-      seroval-plugins: 1.6.7(seroval@1.6.7)
+      seroval: 1.6.11
+      seroval-plugins: 1.6.7(seroval@1.6.11)
 
   '@tanstack/store@0.11.2': {}
 
@@ -6746,11 +6747,11 @@ snapshots:
 
   semver@7.8.5: {}
 
-  seroval-plugins@1.6.7(seroval@1.6.7):
+  seroval-plugins@1.6.7(seroval@1.6.11):
     dependencies:
-      seroval: 1.6.7
+      seroval: 1.6.11
 
-  seroval@1.6.7: {}
+  seroval@1.6.11: {}
 
   set-blocking@2.0.0: {}
 
