@@ -2235,17 +2235,12 @@ fn draw_tool_select(f: &mut Frame, area: Rect, state: &AgentSelectState) {
         .iter()
         .zip(TOOL_OPTIONS.iter())
         .enumerate()
-        .map(|(i, ((name, checked), (_, desc)))| {
-            let check = if *checked { "\u{25c9}" } else { "\u{25cb}" };
-            let highlight = if i == state.tool_list.cursor {
-                Style::default()
-                    .fg(theme::CYAN)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default()
-            };
+        .map(|(i, ((name, _), (_, desc)))| {
             ListItem::new(Line::from(vec![
-                Span::styled(format!("  {}{:<16}", check, name), highlight),
+                Span::styled(
+                    format!("  {}{:<16}", state.tool_list.marker(i), name),
+                    state.tool_list.row_style(i),
+                ),
                 Span::styled(crate::i18n::t(desc), theme::dim_style()),
             ]))
         })
@@ -2549,16 +2544,9 @@ fn draw_edit_model_routing(f: &mut Frame, area: Rect, state: &AgentSelectState) 
             .items
             .iter()
             .enumerate()
-            .map(|(i, (name, checked))| {
-                let check = if *checked { "\u{25c9}" } else { "\u{25cb}" };
-                let style = if i == state.router_profiles.cursor {
-                    Style::default()
-                        .fg(theme::CYAN)
-                        .add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default()
-                };
-                ListItem::new(format!("  {check} {name}")).style(style)
+            .map(|(i, (name, _))| {
+                ListItem::new(format!("  {} {name}", state.router_profiles.marker(i)))
+                    .style(state.router_profiles.row_style(i))
             })
             .collect();
         f.render_widget(List::new(items), chunks[2]);

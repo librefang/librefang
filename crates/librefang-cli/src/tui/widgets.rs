@@ -238,6 +238,25 @@ impl CheckboxList {
         self.items.len()
     }
 
+    /// The filled or empty circle a row shows, shared so every checkbox list draws the same glyphs.
+    pub fn marker(&self, index: usize) -> &'static str {
+        match self.items.get(index) {
+            Some((_, true)) => "\u{25c9}",
+            _ => "\u{25cb}",
+        }
+    }
+
+    /// The highlight a row gets when the cursor sits on it, shared so the styles cannot drift.
+    pub fn row_style(&self, index: usize) -> Style {
+        if index == self.cursor {
+            Style::default()
+                .fg(theme::CYAN)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+        }
+    }
+
     /// Prompt line, checkbox rows or the shared empty state, and a hint bar.
     pub fn render(&self, f: &mut Frame, area: Rect, prompt: &str, hints: &str) {
         let chunks = Layout::vertical([
@@ -259,18 +278,10 @@ impl CheckboxList {
                 .items
                 .iter()
                 .enumerate()
-                .map(|(i, (name, checked))| {
-                    let check = if *checked { "\u{25c9}" } else { "\u{25cb}" };
-                    let highlight = if i == self.cursor {
-                        Style::default()
-                            .fg(theme::CYAN)
-                            .add_modifier(Modifier::BOLD)
-                    } else {
-                        Style::default()
-                    };
+                .map(|(i, (name, _))| {
                     ListItem::new(Line::from(vec![Span::styled(
-                        format!("  {check} {name}"),
-                        highlight,
+                        format!("  {} {name}", self.marker(i)),
+                        self.row_style(i),
                     )]))
                 })
                 .collect();
