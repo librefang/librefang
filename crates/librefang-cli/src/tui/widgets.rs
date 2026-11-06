@@ -449,9 +449,9 @@ mod tests {
 
     fn three_items() -> CheckboxList {
         CheckboxList::new(vec![
+            ("zulu".to_string(), false),
             ("alpha".to_string(), false),
-            ("beta".to_string(), false),
-            ("gamma".to_string(), false),
+            ("mike".to_string(), false),
         ])
     }
 
@@ -464,9 +464,9 @@ mod tests {
         assert_eq!(
             list.items,
             vec![
+                ("zulu".to_string(), true),
                 ("alpha".to_string(), true),
-                ("beta".to_string(), true),
-                ("gamma".to_string(), false),
+                ("mike".to_string(), false),
             ]
         );
         assert_eq!(list.selected_count(), 2);
@@ -490,18 +490,18 @@ mod tests {
         let mut list = three_items();
         list.items[2].1 = true;
         list.items[0].1 = true;
-        assert_eq!(list.selected_names(), vec!["alpha", "gamma"]);
+        assert_eq!(list.selected_names(), vec!["zulu", "mike"]);
     }
 
     #[test]
     fn checkbox_list_from_names_seeds_from_the_predicate() {
         let list =
-            CheckboxList::from_names(vec!["alpha".to_string(), "beta".to_string()], |name| {
+            CheckboxList::from_names(vec!["zulu".to_string(), "bravo".to_string()], |name| {
                 name.starts_with('b')
             });
         assert_eq!(
             list.items,
-            vec![("alpha".to_string(), false), ("beta".to_string(), true),]
+            vec![("zulu".to_string(), false), ("bravo".to_string(), true),]
         );
     }
 
