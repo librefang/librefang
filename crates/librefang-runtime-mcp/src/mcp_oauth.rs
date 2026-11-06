@@ -390,6 +390,58 @@ fn is_ssrf_blocked_url_with(
     Ok(())
 }
 
+/// `authorization_servers` from an RFC 9728 protected-resource metadata body.
+///
+/// The document is *not* authorization-server metadata: it only names the
+/// issuers that can mint tokens for the resource.  Parsing it as RFC 8414
+/// metadata fails (no endpoints), which used to end discovery there (#8670).
+pub fn parse_protected_resource_metadata(body: &str) -> Vec<String> {
+    #[derive(Deserialize)]
+    struct ProtectedResource {
+        #[serde(default)]
+        authorization_servers: Vec<String>,
+    }
+    serde_json::from_str::<ProtectedResource>(body)
+        .map(|p| p.authorization_servers)
+        .unwrap_or_default()
+}
+
+/// Candidate RFC 8414 / OIDC metadata URLs for an authorization-server issuer.
+///
+/// RFC 8414 §3.1 inserts the issuer's path *after* the well-known segment
+/// (`/.well-known/oauth-authorization-server/<path>`), so an issuer served
+/// under a path prefix — the common reverse-proxy deployment — is not
+/// reachable at the origin root.  The in-path variant some deployments serve
+/// and OIDC discovery are tried afterwards.  Returns an empty list when the
+/// issuer is not an http(s) URL or its host is SSRF-blocked.
+pub fn authorization_server_metadata_urls(issuer: &str) -> Vec<String> {
+    let Ok(parsed) = Url::parse(issuer) else {
+        return Vec::new();
+    };
+    let Some(host) = parsed.host_str() else {
+        return Vec::new();
+    };
+    if is_ssrf_blocked_host(host) {
+        return Vec::new();
+    }
+    let origin = parsed.origin().unicode_serialization();
+    let trimmed = issuer.trim_end_matches('/');
+    let path = parsed.path().trim_end_matches('/');
+    if path.is_empty() {
+        vec![
+            format!("{origin}/.well-known/oauth-authorization-server"),
+            format!("{origin}/.well-known/openid-configuration"),
+        ]
+    } else {
+        vec![
+            format!("{origin}/.well-known/oauth-authorization-server{path}"),
+            format!("{trimmed}/.well-known/oauth-authorization-server"),
+            format!("{origin}/.well-known/openid-configuration{path}"),
+            format!("{trimmed}/.well-known/openid-configuration"),
+        ]
+    }
+}
+
 /// Construct the `.well-known/oauth-authorization-server` URL for a given server URL.
 ///
 /// Parses the URL, extracts the origin, and appends the well-known path.
@@ -768,9 +820,54 @@ pub fn parse_authorization_server_metadata(
     })
 }
 
+/// Fetch a URL body, logging (not propagating) transport and status errors.
+async fn fetch_body(client: &reqwest::Client, url: &str) -> Option<String> {
+    match client.get(url).send().await {
+        Ok(resp) if resp.status().is_success() => match resp.text().await {
+            Ok(body) => Some(body),
+            Err(e) => {
+                warn!(error = %e, url = %url, "metadata body could not be read");
+                None
+            }
+        },
+        Ok(resp) => {
+            warn!(status = %resp.status(), url = %url, "metadata fetch returned non-success");
+            None
+        }
+        Err(e) => {
+            warn!(error = %e, url = %url, "metadata fetch failed");
+            None
+        }
+    }
+}
+
+/// Parse a metadata body and reject endpoints that leave the server's domain.
+fn parse_and_validate(body: &str, server_url: &str, tier: &str) -> Option<OAuthMetadata> {
+    match parse_authorization_server_metadata(body, server_url) {
+        Ok(meta) => match validate_metadata_endpoints(&meta, server_url) {
+            Ok(()) => Some(meta),
+            Err(e) => {
+                warn!(error = %e, tier, "endpoint domain mismatch — rejecting metadata");
+                None
+            }
+        },
+        Err(e) => {
+            warn!(error = %e, tier, "failed to parse authorization-server metadata");
+            None
+        }
+    }
+}
+
+fn merge_with_config(meta: OAuthMetadata, config: Option<&McpOAuthConfig>) -> OAuthMetadata {
+    match config {
+        Some(cfg) => merge_metadata_with_config(meta, cfg),
+        None => meta,
+    }
+}
+
 /// Discover OAuth metadata for an MCP server using three-tier resolution.
 ///
-/// 1. **Tier 1**: Parse `www_authenticate` header -> extract `resource_metadata` URL -> fetch -> parse.
+/// 1. **Tier 1**: Parse `www_authenticate` header -> extract `resource_metadata` URL -> fetch.  The body is accepted as authorization-server metadata (legacy) or, per RFC 9728, as a protected-resource document whose `authorization_servers` are followed to their own metadata (RFC 8414 path insertion, in-path and OIDC variants).
 /// 2. **Tier 2**: Construct `.well-known/oauth-authorization-server` URL from server_url -> fetch -> parse.
 /// 3. **Tier 3**: Fall back to config (requires both `auth_url` and `token_url`).
 ///
@@ -789,76 +886,52 @@ pub async fn discover_oauth_metadata(
         .build()
         .map_err(|e| format!("Failed to build HTTP client: {e}"))?;
 
-    // Tier 1: WWW-Authenticate header -> resource_metadata URL
+    // Tier 1: WWW-Authenticate header -> resource_metadata URL.
+    //
+    // The document can be either authorization-server metadata (legacy
+    // behaviour) or an RFC 9728 protected-resource document naming the
+    // issuers (`authorization_servers`).  The latter is the spec-compliant
+    // shape and used to end discovery here because its body has no endpoints
+    // (#8670), so follow each issuer to its own metadata.
     if let Some(header) = www_authenticate {
         let params = parse_www_authenticate(header);
         if let Some(metadata_url) = extract_metadata_url(&params, server_url) {
             debug!(url = %metadata_url, "Tier 1: fetching metadata from WWW-Authenticate resource_metadata");
-            match client.get(&metadata_url).send().await {
-                Ok(resp) if resp.status().is_success() => {
-                    if let Ok(body) = resp.text().await {
-                        match parse_authorization_server_metadata(&body, server_url) {
-                            Ok(meta) => {
-                                // #3713: Verify discovered endpoints share the server's origin.
-                                if let Err(e) = validate_metadata_endpoints(&meta, server_url) {
-                                    warn!(error = %e, "Tier 1: endpoint domain mismatch — rejecting metadata");
-                                } else {
-                                    let meta = if let Some(cfg) = config {
-                                        merge_metadata_with_config(meta, cfg)
-                                    } else {
-                                        meta
-                                    };
-                                    return Ok(meta);
-                                }
-                            }
-                            Err(e) => {
-                                warn!(error = %e, "Tier 1: failed to parse metadata");
+            if let Some(body) = fetch_body(&client, &metadata_url).await {
+                if let Some(meta) = parse_and_validate(&body, server_url, "Tier 1") {
+                    return Ok(merge_with_config(meta, config));
+                }
+                for issuer in parse_protected_resource_metadata(&body).into_iter().take(3) {
+                    debug!(issuer = %issuer, "Tier 1: following protected-resource authorization server");
+                    for candidate in authorization_server_metadata_urls(&issuer) {
+                        debug!(url = %candidate, "Tier 1: fetching authorization-server metadata");
+                        if let Some(body) = fetch_body(&client, &candidate).await {
+                            if let Some(meta) = parse_and_validate(&body, server_url, "Tier 1") {
+                                return Ok(merge_with_config(meta, config));
                             }
                         }
                     }
-                }
-                Ok(resp) => {
-                    warn!(status = %resp.status(), "Tier 1: metadata fetch returned non-success");
-                }
-                Err(e) => {
-                    warn!(error = %e, "Tier 1: metadata fetch failed");
                 }
             }
         }
     }
 
-    // Tier 2: .well-known URL
-    // well_known_url() already guards against SSRF (private/loopback hosts) — #3592.
+    // Tier 2: .well-known URL at the origin, then the RFC 8414 path-inserted
+    // variants and OIDC discovery for a server served under a path prefix.
+    let mut candidates: Vec<String> = Vec::new();
     if let Some(wk_url) = well_known_url(server_url) {
+        candidates.push(wk_url);
+    }
+    for url in authorization_server_metadata_urls(server_url) {
+        if !candidates.contains(&url) {
+            candidates.push(url);
+        }
+    }
+    for wk_url in candidates {
         debug!(url = %wk_url, "Tier 2: fetching .well-known metadata");
-        match client.get(&wk_url).send().await {
-            Ok(resp) if resp.status().is_success() => {
-                if let Ok(body) = resp.text().await {
-                    match parse_authorization_server_metadata(&body, server_url) {
-                        Ok(meta) => {
-                            // #3713: Verify discovered endpoints share the server's origin.
-                            if let Err(e) = validate_metadata_endpoints(&meta, server_url) {
-                                warn!(error = %e, "Tier 2: endpoint domain mismatch — rejecting metadata");
-                            } else {
-                                let meta = if let Some(cfg) = config {
-                                    merge_metadata_with_config(meta, cfg)
-                                } else {
-                                    meta
-                                };
-                                return Ok(meta);
-                            }
-                        }
-                        Err(e) => {
-                            warn!(error = %e, "Tier 2: failed to parse .well-known metadata");
-                        }
-                    }
-                }
-            }
-            Ok(resp) => {
-                warn!(status = %resp.status(), "Tier 2: .well-known fetch returned non-success");
-            }
-            Err(e) => {
-                warn!(error = %e, "Tier 2: .well-known fetch failed");
+        if let Some(body) = fetch_body(&client, &wk_url).await {
+            if let Some(meta) = parse_and_validate(&body, server_url, "Tier 2") {
+                return Ok(merge_with_config(meta, config));
             }
         }
     }
@@ -1647,5 +1720,68 @@ mod tests {
             result.is_err(),
             "registration_endpoint pointing at IMDS must be rejected"
         );
+    }
+}
+
+#[cfg(test)]
+mod rfc9728_tests {
+    use super::*;
+
+    #[test]
+    fn a_path_prefixed_issuer_gets_the_rfc8414_inserted_url_first() {
+        let urls = authorization_server_metadata_urls("https://host.example/plane-mcp");
+        assert_eq!(
+            urls.first().map(String::as_str),
+            Some("https://host.example/.well-known/oauth-authorization-server/plane-mcp")
+        );
+        assert!(
+            urls.contains(
+                &"https://host.example/plane-mcp/.well-known/oauth-authorization-server"
+                    .to_string()
+            ),
+            "the in-path variant must be tried too: {urls:?}"
+        );
+        assert!(
+            urls.iter()
+                .any(|u| u.ends_with("/.well-known/openid-configuration/plane-mcp")),
+            "OIDC discovery is the last resort: {urls:?}"
+        );
+    }
+
+    #[test]
+    fn a_root_issuer_keeps_the_two_origin_urls() {
+        let urls = authorization_server_metadata_urls("https://host.example");
+        assert_eq!(
+            urls,
+            vec![
+                "https://host.example/.well-known/oauth-authorization-server".to_string(),
+                "https://host.example/.well-known/openid-configuration".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_private_host_is_not_probed() {
+        assert!(authorization_server_metadata_urls("http://127.0.0.1:8080/plane").is_empty());
+        assert!(authorization_server_metadata_urls("not a url").is_empty());
+    }
+
+    #[test]
+    fn a_protected_resource_document_names_its_issuers() {
+        let body = r#"{
+            "resource": "https://host.example/plane-mcp/mcp",
+            "authorization_servers": ["https://host.example/plane-mcp"],
+            "scopes_supported": ["read"]
+        }"#;
+        assert_eq!(
+            parse_protected_resource_metadata(body),
+            vec!["https://host.example/plane-mcp".to_string()]
+        );
+    }
+
+    #[test]
+    fn a_document_without_issuers_yields_none() {
+        assert!(parse_protected_resource_metadata(r#"{"resource":"x"}"#).is_empty());
+        assert!(parse_protected_resource_metadata("not json").is_empty());
     }
 }
