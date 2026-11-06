@@ -7613,7 +7613,7 @@
           "minimum": 0.0
         },
         "reasoning_effort": {
-          "description": "Explicit reasoning effort (#7946).\n\nWhen set it wins over the [`Self::budget_tokens`] bucket mapping for drivers that honour it; when `None` the budget bucket is used, which is the pre-#7946 behaviour.\n\nThe value is the provider-facing effort token (`#8591`): the four pre-existing spellings plus whatever the model's catalog entry declares (`xhigh`, `medium`, `minimal`, …), passed to the wire verbatim.\n\nThe TOML key is `reasoning_effort`; `reasoning_mode` — the key this field shipped under during #7946 — is accepted as a deprecated alias so existing manifests keep loading unchanged (#8591).",
+          "description": "Explicit reasoning effort (#7946).\n\nWhen set it wins over the [`Self::budget_tokens`] bucket mapping for drivers that honour it; when `None` the budget bucket is used, which is the pre-#7946 behaviour.\n\nThe value is the provider-facing effort token (`#8591`): the four pre-existing spellings plus whatever the model's catalog entry declares (`xhigh`, `medium`, `minimal`, …), passed to the wire verbatim.\n\nThe TOML key is `reasoning_effort`; `reasoning_mode` — the key this field shipped under during #7946 — is accepted as a deprecated alias so existing manifests keep loading unchanged (#8591). A table carrying both keys fails to deserialize as a duplicate field rather than silently choosing one.",
           "default": null,
           "type": [
             "string",
