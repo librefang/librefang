@@ -28,6 +28,39 @@ fn should_use_managed_everyapi(
         && managed_available
 }
 
+/// Resolve the env-var name for the default provider's API key.
+///
+/// Precedence, same as boot (`boot::resolve_default_provider_endpoint`):
+///   1. Explicit `[default_model].api_key_env`.
+///   2. Operator-explicit `[provider_api_keys]` / `[auth_profiles]`.
+///   3. Provider catalog `api_key_env` (`~/.librefang/providers/<id>.toml`).
+///   4. Convention via [`KernelConfig::resolve_api_key_env`].
+///
+/// `default_model` is the effective (hot-reloadable) default snapshot, so a dashboard override wins over the boot-time config here too.
+/// Shared with boot so a provider file whose `api_key_env` deviates from `{PROVIDER}_API_KEY` is read the same way at boot and on every turn (#8663).
+pub(super) fn resolve_default_provider_api_key_env(
+    cfg: &librefang_types::config::KernelConfig,
+    default_model: &librefang_types::config::DefaultModelConfig,
+    catalog: &librefang_runtime::model_catalog::ModelCatalog,
+) -> String {
+    let provider = default_model.provider.as_str();
+    if !default_model.api_key_env.is_empty() {
+        default_model.api_key_env.clone()
+    } else if cfg.provider_api_keys.contains_key(provider)
+        || cfg.auth_profiles.contains_key(provider)
+    {
+        // Operator-explicit config wins over the provider file (#5807).
+        cfg.resolve_api_key_env(provider)
+    } else {
+        catalog
+            .get_provider(provider)
+            .map(|entry| entry.api_key_env.as_str())
+            .filter(|env| !env.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| cfg.resolve_api_key_env(provider))
+    }
+}
+
 impl LibreFangKernel {
     /// Resolve the LLM driver for an agent.
     ///
@@ -335,12 +368,12 @@ impl LibreFangKernel {
                     .as_ref()
                     .and_then(|env| std::env::var(env).ok())
             } else if agent_provider == default_provider {
-                if !effective_default.api_key_env.is_empty() {
-                    std::env::var(&effective_default.api_key_env).ok()
-                } else {
-                    let env_var = cfg.resolve_api_key_env(agent_provider);
-                    std::env::var(&env_var).ok()
-                }
+                // Same precedence as boot, provider file included.
+                // Reading only the convention env var here left a provider declared in `~/.librefang/providers/<id>.toml` keyless every turn, so the custom driver was built without a key and 401'd (#8663).
+                let catalog = self.llm.model_catalog.load();
+                let env_var =
+                    resolve_default_provider_api_key_env(&cfg, effective_default, &catalog);
+                std::env::var(&env_var).ok()
             } else {
                 // See `resolve_non_default_api_key_env` for the precedence
                 // contract (operator-explicit > catalog > convention).
