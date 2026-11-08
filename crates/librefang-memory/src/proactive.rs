@@ -3039,6 +3039,12 @@ impl ProactiveMemoryHooks for ProactiveMemoryStore {
         let filter = Some({
             let mut f = MemoryFilter::agent(agent_id);
             f.peer_id = peer_id.map(String::from);
+            // #7808: the deployment-wide similarity floor is documented as the
+            // guard for automatic recall as well, but only `search()` read it, so
+            // `[proactive_memory] min_similarity` was a silent no-op here and every
+            // turn injected `max_retrieve` fragments regardless of how weakly they
+            // matched the user's message.
+            f.min_similarity = cfg.min_similarity;
             f
         });
 
@@ -3284,6 +3290,67 @@ mod tests {
             .await
             .unwrap();
         assert!(!results.is_empty());
+    }
+
+    /// #7808 — the deployment-wide `min_similarity` floor must reach automatic
+    /// recall, not just the explicit search tool.
+    ///
+    /// `search()` has read `[proactive_memory] min_similarity` since #7808, and the
+    /// doc comment there promises automatic recall "the same nothing-rather-than-noise
+    /// guarantee". `auto_retrieve` never passed the floor into its filter, so the
+    /// setting did nothing for the path that runs on every turn.
+    ///
+    /// The mock embedder returns one fixed vector for every text, so every cosine is
+    /// 1.0: a floor above 1.0 must empty the result, and its absence must not. That
+    /// isolates the wiring from the embedder's own behaviour.
+    #[tokio::test]
+    async fn test_auto_retrieve_honours_min_similarity_7808() {
+        struct MockEmbedding;
+
+        #[async_trait]
+        impl EmbeddingFn for MockEmbedding {
+            async fn embed_one(
+                &self,
+                _text: &str,
+            ) -> librefang_types::error::LibreFangResult<Vec<f32>> {
+                Ok(vec![0.1, 0.2, 0.3, 0.4])
+            }
+        }
+
+        async fn recalled_with_floor(floor: Option<f32>) -> usize {
+            let substrate = MemorySubstrate::open_in_memory(0.1).unwrap();
+            let config = ProactiveMemoryConfig {
+                min_similarity: floor,
+                ..ProactiveMemoryConfig::default()
+            };
+            let store = ProactiveMemoryStore::new(Arc::new(substrate), config)
+                .with_embedding(Arc::new(MockEmbedding));
+            let agent_id = AgentId::new().to_string();
+
+            store
+                .add(
+                    &[serde_json::json!({"role": "user", "content": "I prefer dark mode"})],
+                    &agent_id,
+                )
+                .await
+                .unwrap();
+
+            store
+                .auto_retrieve(&agent_id, "dark mode", None, None, None)
+                .await
+                .unwrap()
+                .len()
+        }
+
+        assert_eq!(
+            recalled_with_floor(Some(1.5)).await,
+            0,
+            "min_similarity must reach auto_retrieve"
+        );
+        assert!(
+            recalled_with_floor(None).await > 0,
+            "without a floor the same recall must still return the row"
+        );
     }
 
     /// #5227 — `auto_retrieve` must hide memories tagged with a
