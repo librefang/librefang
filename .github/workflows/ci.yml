@@ -864,6 +864,8 @@ jobs:
           # - GTK/webkit: transitive from Tauri 2.x
           # - lexical-core: transitive through imap (imap 3.x is alpha, nom 8+ required)
           # - rsa: Marvin Attack timing side-channel, no fix available (transitive from librefang-channels)
+          # - glib 0.18 (2024-0429): soundness fix needs glib >=0.20 (GTK4); the GTK3 Tauri stack pins 0.18.
+          # - ttf-parser, zvariant, zvariant_derive, zbus_names: unmaintained, transitive via pdf-extract and zbus.
           cargo xtask deps --audit \
             --ignore RUSTSEC-2024-0384 \
             --ignore RUSTSEC-2024-0385 \
@@ -880,13 +882,11 @@ jobs:
             --ignore RUSTSEC-2024-0370 \
             --ignore RUSTSEC-2023-0071 \
             --ignore RUSTSEC-2024-0449 \
-            --ignore RUSTSEC-2026-0367 \
-            --ignore RUSTSEC-2026-0368 \
-            --ignore RUSTSEC-2026-0369 \
-            --ignore RUSTSEC-2026-0391 \
-            --ignore RUSTSEC-2026-0398 \
-            --ignore RUSTSEC-2026-0403 \
-            --ignore RUSTSEC-2026-0410 \
+            --ignore RUSTSEC-2024-0429 \
+            --ignore RUSTSEC-2026-0192 \
+            --ignore RUSTSEC-2026-0370 \
+            --ignore RUSTSEC-2026-0371 \
+            --ignore RUSTSEC-2026-0372 \
             --web
 
   # ── Secrets scanning (independent) ─────────────────────────────────────────────

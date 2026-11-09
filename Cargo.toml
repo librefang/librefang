@@ -103,11 +103,11 @@ uuid = { version = "1", features = ["v4", "v5", "serde"] }
 webauthn-rs = "0.5.5"
 
 # Database
-# r2d2_sqlite 0.34 is coupled to rusqlite 0.39. Bump them together to avoid
+# r2d2_sqlite 0.36 is coupled to rusqlite 0.41. Bump them together to avoid
 # compiling two rusqlite/libsqlite3-sys versions and two bundled SQLite copies.
-rusqlite = { version = "0.39.0", features = ["bundled", "serde_json"] }
+rusqlite = { version = "0.41.1", features = ["bundled", "serde_json"] }
 r2d2 = "0.8"
-r2d2_sqlite = "0.34"
+r2d2_sqlite = "0.36"
 
 # CLI
 clap = { version = "4", features = ["derive"] }
