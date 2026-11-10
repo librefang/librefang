@@ -15,9 +15,9 @@ homepage = "https://librefang.ai"
 keywords = ["librefang", "sidecar", "channel", "agent", "ai"]
 categories = ["api-bindings", "asynchronous"]
 readme = "README.md"
-# Measured against the committed Cargo.lock (#8124): `cargo +1.71 check --locked --all-targets` passes and 1.70 fails inside tokio 1.53 (`build_hasher_simple_hash_one`).
+# Measured against the committed Cargo.lock (#8695): `cargo +1.85 check --locked --all-targets` passes and 1.84 is rejected because tokio 1.54 declares rust-version 1.85.
 # CI re-checks this exact version with `--locked`, so a dependency bump that raises the floor has to raise this number in the same PR.
-rust-version = "1.71"
+rust-version = "1.85"
 include = [
     "src/**",
     "examples/**",
@@ -33,11 +33,11 @@ serde_json = "1.0.151"
 # io-std + io-util: stdin/stdout reader + write_all. rt + macros: spawn +
 # tokio::select!. sync: mpsc + watch + Mutex. time: backoff and ready
 # re-announcement. The runtime does not require work-stealing or signals.
-tokio = { version = "1.53.1", features = ["io-std", "io-util", "rt", "macros", "sync", "time"] }
+tokio = { version = "1.54.1", features = ["io-std", "io-util", "rt", "macros", "sync", "time"] }
 async-trait = "0.1"
 
 [dev-dependencies]
-tokio = { version = "1.53.1", features = ["full", "test-util"] }
+tokio = { version = "1.54.1", features = ["full", "test-util"] }
 
 [[example]]
 name = "echo"

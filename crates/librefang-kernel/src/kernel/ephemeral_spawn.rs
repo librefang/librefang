@@ -101,6 +101,7 @@ fn new_ephemeral_session(agent_id: AgentId, label: String) -> librefang_memory::
         context_window_tokens: 0,
         label: Some(label),
         model_override: None,
+        reasoning_effort: None,
         messages_generation: 0,
         last_repaired_generation: None,
         peer_id: None,

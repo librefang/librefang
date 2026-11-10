@@ -103,6 +103,12 @@ async fn materialize_history_image(
 #[derive(serde::Deserialize)]
 pub struct GetAgentSessionQuery {
     pub session_id: Option<uuid::Uuid>,
+    /// Create the canonical empty row when it does not exist (default off).
+    /// A read must not write: callers that are about to PATCH the session by
+    /// id (the TUI's `/think`) opt in, because that route addresses the row
+    /// and has no agent context to create it from (#8618 review).
+    #[serde(default)]
+    pub materialize: bool,
 }
 
 /// GET /api/agents/:id/session — Get agent session (conversation history).
@@ -113,6 +119,7 @@ pub struct GetAgentSessionQuery {
     params(
         ("id" = String, Path, description = "Agent ID"),
         ("session_id" = Option<String>, Query, description = "Optional session id to load instead of the canonical active session"),
+        ("materialize" = Option<bool>, Query, description = "Create the empty canonical row when absent (default false)"),
     ),
     responses(
         (status = 200, description = "Get agent conversation session history", body = crate::types::JsonObject)
@@ -381,6 +388,11 @@ pub async fn get_agent_session(
                             "context_window_tokens": session.context_window_tokens,
                             "label": session.label,
                             "messages": messages,
+                            // Same key as the materializing branch below, so
+                            // the field does not appear only while a session
+                            // is unmaterialized. An existing row reports its
+                            // pin, or null when it inherits.
+                            "reasoning_effort": session.reasoning_effort,
                             "compacted_summary": compacted_summary,
                         })),
                     ),
@@ -403,12 +415,35 @@ pub async fn get_agent_session(
                         .into_response();
                 }
             }
-            // Expose the LLM-generated compaction summary even when the
-            // session row itself is not yet materialised (e.g. agent just
-            // spawned but store_llm_summary was called directly, as in
-            // tests), but only when this active session is the one that
-            // actually owns the summary (#6225) — never a freshly created
-            // session that inherited the agent-scoped row.
+            // Materialize the canonical row only when the caller asks
+            // (`?materialize=true`). A plain GET is a read and must not create
+            // state (#8618 review). The opt-in exists for the TUI's
+            // daemon-backed `/think`: it resolves the id here and then PATCHes
+            // `/api/sessions/{id}/reasoning`, which addresses the row by id
+            // alone and has no agent context to create it from, so on a
+            // never-used agent the follow-up would 404. `ensure_session` never
+            // touches an existing row, and the first inbound turn adopts the
+            // same row, so nothing downstream observes an earlier creation.
+            if params.materialize {
+                if let Err(e) = state
+                    .kernel
+                    .memory_substrate()
+                    .ensure_session(agent_id, entry.session_id)
+                {
+                    tracing::warn!("Session materialization failed for agent {id}: {e}");
+                    return ApiErrorResponse::internal(err_session_load_failed)
+                        .with_code("session_load_failed")
+                        .into_response();
+                }
+            }
+            // Expose the LLM-generated compaction summary even with no
+            // persisted messages yet (e.g. agent just spawned but
+            // store_llm_summary was called directly, as in tests) — the
+            // summary lives in the agent-scoped `canonical_sessions` row, not
+            // in the session's message blob — but only when this active
+            // session is the one that actually owns the summary (#6225) —
+            // never a freshly created session that inherited the
+            // agent-scoped row.
             let compacted_summary: Option<String> = state
                 .kernel
                 .memory_substrate()
@@ -430,6 +465,13 @@ pub async fn get_agent_session(
                             "context_window_tokens": 0,
                             "label": null,
                             "messages": [],
+                            // Shape parity with the materialized branch: a
+                            // client that reads `reasoning_effort` on the
+                            // first GET (right after the agent spawns and
+                            // before any turn writes the row) must not see
+                            // the field disappear. An unmaterialized row owns
+                            // no pin, so the value is null.
+                            "reasoning_effort": serde_json::Value::Null,
                             "compacted_summary": compacted_summary,
                         })),
                     ),

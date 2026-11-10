@@ -61,6 +61,41 @@ fn reject_peer_prefix_in_key(key: &str) -> Result<(), kernel_handle::KernelOpErr
     Ok(())
 }
 
+/// Reject an LLM-supplied key that starts with the reserved compaction-mirror
+/// prefix (#8645).
+///
+/// `compaction_summary_<id>` entries are the platform's per-conversation
+/// summaries. They are conversation-scoped state, and the prompt path already
+/// gates them by owning session (#6493); leaving the key/value tools open to
+/// that prefix re-opens the same leak through another door. An unattributed
+/// turn (cron, trigger, `agent_send`, REST, dashboard — `peer_id = None`) reads
+/// the unscoped namespace, so `memory_recall` would surface another
+/// conversation's summary into its prompt, and `memory_store` could plant one
+/// that a later compaction read path trusts.
+///
+/// The prefix is the platform's own and was introduced together with the
+/// mirror, so reserving it breaks no existing key. `session_` is **not**
+/// reserved: that namespace predates the mirror, agents keep keys of that shape,
+/// and #4869 writes the reset summaries there on purpose (#8645 review).
+///
+/// Only the unscoped namespace is reserved: a key on an attributed turn is
+/// stored under `peer:{peer_id}:{key}`, which cannot collide with the
+/// platform's `compaction_summary_{uuid}` entries, and refusing it there would
+/// break legitimate peer-scoped keys of the same shape.
+fn reject_compaction_prefix_in_key(
+    key: &str,
+    peer_id: Option<&str>,
+) -> Result<(), kernel_handle::KernelOpError> {
+    use kernel_handle::KernelOpError;
+    if peer_id.is_none() && key.starts_with(librefang_memory::COMPACTION_SUMMARY_KEY_PREFIX) {
+        return Err(KernelOpError::InvalidInput(format!(
+            "memory key '{key}' must not start with reserved '{}' prefix",
+            librefang_memory::COMPACTION_SUMMARY_KEY_PREFIX
+        )));
+    }
+    Ok(())
+}
+
 /// Reject an empty memory key at the kernel-handle boundary (#5138).
 ///
 /// `memory_store(key="", ...)` would otherwise land a row at
@@ -124,6 +159,21 @@ fn unrestricted_acl() -> UserMemoryAccess {
 /// Rows carrying it belong to that peer's namespace, never to the no-peer scope, so every read path that enumerates keys has to treat the range it covers as reserved.
 const PEER_KEY_PREFIX: &str = "peer:";
 
+/// Prefixes that are never addressable — and therefore never enumerable — from an unscoped call.
+///
+/// `peer:` covers every peer's namespace. `compaction_summary_` covers the platform's
+/// per-conversation compaction mirrors (#8645): they live in the same unscoped namespace as
+/// ordinary keys, but they belong to one conversation, so a tool call without peer attribution
+/// must not see them. `session_` is *not* hidden — those keys are agent-visible, and #4869
+/// writes the reset summaries there for the agent to recall (#8645 review).
+///
+/// Both the visibility predicate and the query-level exclusion are built from this list, so a
+/// hidden range added here reaches the enumerating paths without a second edit to keep in step.
+const UNSCOPED_HIDDEN_PREFIXES: [&str; 2] = [
+    PEER_KEY_PREFIX,
+    librefang_memory::COMPACTION_SUMMARY_KEY_PREFIX,
+];
+
 /// Map a stored key to the key the caller is allowed to see under `peer_id`, or `None` when the row belongs to a namespace the caller is not addressing.
 ///
 /// Every key-enumerating read path (`memory_list`, `memory_keys_with_prefix`) resolves visibility through here, so the round-trip predicate itself exists once.
@@ -149,7 +199,13 @@ fn peer_visible_key(stored: &str, peer_id: Option<&str>) -> Option<String> {
                 _ => None,
             }
         }
-        None => (!stored.starts_with(PEER_KEY_PREFIX)).then(|| stored.to_string()),
+        // With no peer scope, every hidden prefix is excluded outright: the `peer:` framing of
+        // other namespaces and the platform's `compaction_summary_<uuid>` mirrors (#8645), which
+        // live in this very namespace but belong to one conversation.
+        None => (!UNSCOPED_HIDDEN_PREFIXES
+            .iter()
+            .any(|prefix| stored.starts_with(prefix)))
+        .then(|| stored.to_string()),
     }
 }
 
@@ -165,6 +221,7 @@ impl kernel_handle::MemoryAccess for LibreFangKernel {
         use kernel_handle::KernelOpError;
         reject_empty_key(key)?;
         reject_peer_prefix_in_key(key)?;
+        reject_compaction_prefix_in_key(key, peer_id)?;
         reject_bad_peer_id(peer_id)?;
         let agent_id = resolve_agent_id(agent_id)?;
         let scoped = peer_scoped_key(key, peer_id)?;
@@ -237,6 +294,7 @@ impl kernel_handle::MemoryAccess for LibreFangKernel {
         use kernel_handle::KernelOpError;
         reject_empty_key(key)?;
         reject_peer_prefix_in_key(key)?;
+        reject_compaction_prefix_in_key(key, peer_id)?;
         reject_bad_peer_id(peer_id)?;
         let agent_id = resolve_agent_id(agent_id)?;
         let scoped = peer_scoped_key(key, peer_id)?;
@@ -299,18 +357,25 @@ impl kernel_handle::MemoryAccess for LibreFangKernel {
             Some(pid) => format!("{PEER_KEY_PREFIX}{}:{prefix}", escape_peer_id(pid)),
             None => prefix.to_string(),
         };
-        // `peer_visible_key` drops two kinds of row, and both have to be excluded *inside* the query rather than after it: `limit` is applied by the store, so a dropped row would otherwise take a slot and hide a key this caller can address (#8625 review).
-        // Keep this in step with `peer_visible_key` — an exclusion wider than that predicate loses visible keys outright, and no downstream filter can bring them back.
-        // With no peer scope the whole reserved framing is invisible; with a peer scope every framed row is the caller's own, except the pre-fix nested plants (#5120) whose inner key is itself `peer:`-prefixed — exactly the rows covered by the second framing.
+        // Every row `peer_visible_key` drops has to be excluded *inside* the query rather than after it: `limit` is applied by the store, so a dropped row would otherwise take a slot and hide a key this caller can address (#8625 review).
+        // The no-peer scope hides exactly `UNSCOPED_HIDDEN_PREFIXES` — the `peer:` framing and the platform's `compaction_summary_` mirrors — and both ranges go into the same statement.
+        // With a peer scope every framed row is the caller's own, except the pre-fix nested plants (#5120) whose inner key is itself `peer:`-prefixed — exactly the rows covered by the second framing.
         // `test_memory_keys_with_prefix_agrees_with_memory_list_on_visibility` checks the agreement in both scopes.
-        let invisible = match peer_id {
-            Some(pid) => format!("{PEER_KEY_PREFIX}{}:{PEER_KEY_PREFIX}", escape_peer_id(pid)),
-            None => PEER_KEY_PREFIX.to_string(),
+        let invisible: Vec<String> = match peer_id {
+            Some(pid) => vec![format!(
+                "{PEER_KEY_PREFIX}{}:{PEER_KEY_PREFIX}",
+                escape_peer_id(pid)
+            )],
+            None => UNSCOPED_HIDDEN_PREFIXES
+                .iter()
+                .map(|prefix| (*prefix).to_string())
+                .collect(),
         };
+        let invisible: Vec<&str> = invisible.iter().map(String::as_str).collect();
         let stored = self
             .memory
             .substrate
-            .list_keys_with_prefix(agent_id, &scoped_prefix, Some(&invisible), limit)
+            .list_keys_with_prefix_excluding(agent_id, &scoped_prefix, &invisible, limit)
             .map_err(|e| KernelOpError::Internal(format!("Memory key lookup failed: {e}")))?;
         Ok(stored
             .into_iter()
@@ -547,5 +612,40 @@ impl LibreFangKernel {
             self.memory_acl_for_sender(sender_id, channel)
                 .unwrap_or_else(unrestricted_acl),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// #8645: the compaction-mirror namespace is platform-owned, so the
+    /// key/value tools must not read or write it — an unattributed turn would
+    /// otherwise surface another conversation's summary (the leak #6493 closed
+    /// on the prompt path) or plant one.
+    #[test]
+    fn the_reserved_compaction_prefix_is_refused() {
+        assert!(reject_compaction_prefix_in_key("compaction_summary_abc", None).is_err());
+        assert!(reject_compaction_prefix_in_key(
+            &format!(
+                "{}{}",
+                librefang_memory::COMPACTION_SUMMARY_KEY_PREFIX,
+                "0192-uuid"
+            ),
+            None
+        )
+        .is_err());
+        // Ordinary keys stay allowed, including ones that merely contain the
+        // reserved word and the agent-visible `session_` namespace (#4869).
+        assert!(reject_compaction_prefix_in_key("user_name", None).is_ok());
+        assert!(reject_compaction_prefix_in_key("my_session_note", None).is_ok());
+        assert!(reject_compaction_prefix_in_key("session_notes", None).is_ok());
+        assert!(reject_compaction_prefix_in_key("session_count", None).is_ok());
+        // An attributed turn writes under `peer:...:` and cannot collide with
+        // the platform's unscoped mirrors, so its keys are none of our
+        // business — refusing them here broke legitimate peer-scoped keys.
+        assert!(
+            reject_compaction_prefix_in_key("compaction_summary_notes", Some("@alice")).is_ok()
+        );
     }
 }

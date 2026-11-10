@@ -306,3 +306,31 @@ describe("cross-window persistence", () => {
     expect(useUIStore.getState().theme).toBe("light");
   });
 });
+
+// The one-shot reasoning effort is an intent about a single send, so it lives
+// in memory only: a persisted value would ride the first message after a
+// reload — a send the operator never armed. `deepThinking`, a standing
+// preference kept across reloads, is the contrast that makes this a decision
+// rather than an omission.
+describe("reasoning effort one-shot", () => {
+  it("arms, clears, and is never written to localStorage", async () => {
+    const { useUIStore } = await import("./store");
+    expect(useUIStore.getState().nextReasoningEffort).toBeNull();
+
+    useUIStore.getState().setNextReasoningEffort("xhigh");
+    expect(useUIStore.getState().nextReasoningEffort).toBe("xhigh");
+
+    useUIStore.getState().setNextReasoningEffort(null);
+    expect(useUIStore.getState().nextReasoningEffort).toBeNull();
+
+    useUIStore.getState().setNextReasoningEffort("max");
+    const raw = localStorage.getItem("librefang-ui-storage");
+    expect(raw).not.toBeNull();
+    const persisted = JSON.parse(raw ?? "{}") as { state?: Record<string, unknown> };
+    // Positive control: the write did happen, and it carried the standing
+    // preference — so the absence below is the one-shot being excluded, not
+    // persistence failing to run.
+    expect(persisted.state).toHaveProperty("deepThinking");
+    expect(persisted.state).not.toHaveProperty("nextReasoningEffort");
+  });
+});

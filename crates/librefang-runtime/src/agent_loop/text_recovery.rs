@@ -697,6 +697,12 @@ const HONEST_UNRECOVERABLE_REPLY: &str = "I tried to call a tool, but the call c
 /// through untouched, even when it contains markup further in.
 pub(super) fn replace_unrecoverable_tool_call_reply(text: &str) -> std::borrow::Cow<'_, str> {
     let trimmed = text.trim_start();
+    if DSML_OPENERS.iter().any(|o| trimmed.starts_with(o)) {
+        // A DSML block carries its arguments inside tags, so stripping it
+        // leaves fragments that would read as prose. No legitimate reply
+        // starts with this marker: replace it whole (#8652).
+        return std::borrow::Cow::Owned(HONEST_UNRECOVERABLE_REPLY.to_string());
+    }
     if !TOOL_CALL_OPENERS.iter().any(|o| trimmed.starts_with(o)) {
         return std::borrow::Cow::Borrowed(text);
     }
@@ -720,6 +726,11 @@ pub(super) const TOOL_CALL_OPENERS: &[&str] = &[
     "<|tool_call|>",
 ];
 
+/// DeepSeek's native tool-call markup, written as text after the runtime
+/// strips the tool channel (#8652). The bars are fullwidth (U+FF5C) and
+/// models emit the single-bar, double-bar and ASCII spellings.
+pub(super) const DSML_OPENERS: &[&str] = &["<｜｜DSML｜｜", "<｜DSML｜", "<||DSML||", "<|DSML|"];
+
 /// Whether `text` (assumed already left-trimmed) either already is, or with
 /// more characters still to arrive could become, one of [`TOOL_CALL_OPENERS`].
 /// Used by the streaming buffer to decide whether a delta whose opener is
@@ -731,6 +742,7 @@ pub(super) fn could_be_tool_call_opener(text: &str) -> bool {
     }
     TOOL_CALL_OPENERS
         .iter()
+        .chain(DSML_OPENERS.iter())
         .any(|o| o.starts_with(text) || text.starts_with(o))
 }
 

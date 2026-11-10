@@ -1,0 +1,1 @@
+Bump `lru` 0.18.0 → 0.18.2 (RUSTSEC-2026-0253: unsound, potential use-after-free on the `LruCache::pop()` eviction path; `lru` reaches the binary through `ratatui-core` → `librefang-cli`). (#8610) (@DaBlitzStein)
