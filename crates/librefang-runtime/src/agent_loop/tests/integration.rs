@@ -1661,6 +1661,171 @@ async fn test_streaming_inline_compression_keeps_new_messages_start_on_running_t
     );
 }
 
+const INJECTED_TIME_MARKER: &str = "[Current date/time: INJECTED-TIME-MARKER]";
+const INJECTED_CANONICAL_MARKER: &str = "[Canonical context] INJECTED-CANONICAL-MARKER";
+
+/// A manifest whose turns carry a per-turn time message and a head injection (canonical context), both of which session repair merges into adjacent user messages of the working copy.
+fn manifest_with_turn_injections() -> AgentManifest {
+    let mut manifest = test_manifest();
+    manifest.metadata.insert(
+        "current_time_msg".to_string(),
+        serde_json::json!(INJECTED_TIME_MARKER),
+    );
+    manifest.metadata.insert(
+        "canonical_context_msg".to_string(),
+        serde_json::json!(INJECTED_CANONICAL_MARKER),
+    );
+    manifest
+}
+
+/// Asserts that the session persisted by inline compression holds no per-turn injection text, still holds the compression summary, and that `new_messages_start` names exactly the turn that ran.
+fn assert_compressed_session_holds_no_turn_injections(
+    session: &librefang_memory::session::Session,
+    new_messages_start: usize,
+    tool_cycles: u32,
+) {
+    let texts: Vec<String> = session
+        .messages
+        .iter()
+        .map(|m| m.content.text_content())
+        .collect();
+    for marker in ["INJECTED-TIME-MARKER", "INJECTED-CANONICAL-MARKER"] {
+        assert!(
+            texts.iter().all(|text| !text.contains(marker)),
+            "per-turn injection {marker} was persisted into the session: {texts:#?}"
+        );
+    }
+    assert!(
+        texts
+            .iter()
+            .any(|text| text.contains("[CONTEXT COMPRESSION SUMMARY]")),
+        "the compression summary must still be persisted: {texts:#?}"
+    );
+    assert!(
+        texts.iter().any(|text| text.starts_with("earlier question 0:")),
+        "the protected head message the canonical context was merged into must survive without it: {texts:#?}"
+    );
+    assert_turn_slice_is_exactly_this_turn(
+        session,
+        new_messages_start,
+        INLINE_COMPRESSION_PROMPT,
+        tool_cycles,
+        "Finished after compression.",
+    );
+}
+
+/// Inline soft compression persists its working copy after session repair, which has merged the time message into the prompt and the canonical context into the first history message; neither may reach the session.
+#[tokio::test]
+async fn test_inline_compression_persists_no_turn_injections() {
+    let memory = librefang_memory::MemorySubstrate::open_in_memory(0.01).unwrap();
+    let mut session = session_needing_inline_compression();
+    let manifest = manifest_with_turn_injections();
+    let tool_cycles = 2;
+    let primary = Arc::new(CompressingTurnDriver::new(tool_cycles));
+    let driver: Arc<dyn LlmDriver> = Arc::clone(&primary) as Arc<dyn LlmDriver>;
+    let tool_search_def = fake_tool("tool_search");
+
+    let result = run_agent_loop(
+        &manifest,
+        INLINE_COMPRESSION_PROMPT,
+        &mut session,
+        &memory,
+        driver,
+        std::slice::from_ref(&tool_search_def),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None, // on_phase
+        None, // media_engine
+        None, // media_drivers
+        None, // tts_engine
+        None, // docker_config
+        None, // hooks
+        Some(INLINE_COMPRESSION_CTX_WINDOW),
+        None, // process_manager
+        None, // checkpoint_manager
+        None, // process_registry
+        None, // user_content_blocks
+        None, // proactive_memory
+        None, // context_engine
+        None, // pending_messages
+        &LoopOptions::default(),
+    )
+    .await
+    .expect("Loop should complete without error");
+
+    assert!(
+        primary.summaries.load(Ordering::Relaxed) > 0,
+        "the inline compressor never summarised, so the test did not exercise the compression path"
+    );
+    assert_compressed_session_holds_no_turn_injections(
+        &session,
+        result.new_messages_start,
+        tool_cycles,
+    );
+}
+
+/// Streaming twin of `test_inline_compression_persists_no_turn_injections`.
+#[tokio::test]
+async fn test_streaming_inline_compression_persists_no_turn_injections() {
+    let memory = librefang_memory::MemorySubstrate::open_in_memory(0.01).unwrap();
+    let mut session = session_needing_inline_compression();
+    let manifest = manifest_with_turn_injections();
+    let tool_cycles = 2;
+    let primary = Arc::new(CompressingTurnDriver::new(tool_cycles));
+    let driver: Arc<dyn LlmDriver> = Arc::clone(&primary) as Arc<dyn LlmDriver>;
+    let tool_search_def = fake_tool("tool_search");
+    let (tx, _rx) = mpsc::channel(1024);
+
+    let result = run_agent_loop_streaming(
+        &manifest,
+        INLINE_COMPRESSION_PROMPT,
+        &mut session,
+        &memory,
+        driver,
+        std::slice::from_ref(&tool_search_def),
+        None,
+        tx,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        Some(INLINE_COMPRESSION_CTX_WINDOW),
+        None,
+        None, // checkpoint_manager
+        None, // process_registry
+        None,
+        None,
+        None,
+        None,
+        &LoopOptions::default(),
+    )
+    .await
+    .expect("Streaming loop should complete without error");
+
+    assert!(
+        primary.summaries.load(Ordering::Relaxed) > 0,
+        "the inline compressor never summarised, so the test did not exercise the compression path"
+    );
+    assert_compressed_session_holds_no_turn_injections(
+        &session,
+        result.new_messages_start,
+        tool_cycles,
+    );
+}
+
 /// A session whose history before the next turn holds an orphaned tool result, which `repair_session_before_save` drops when a capped turn is persisted.
 fn session_with_orphaned_history_result() -> librefang_memory::session::Session {
     let mut session = fresh_session();
