@@ -39,6 +39,7 @@ import { Card } from "../components/ui/Card";
 import { Button } from "../components/ui/Button";
 import { Badge } from "../components/ui/Badge";
 import { Input } from "../components/ui/Input";
+import { ListField } from "../components/ui/ListField";
 import { DrawerPanel } from "../components/ui/DrawerPanel";
 import { ConfirmDialog } from "../components/ui/ConfirmDialog";
 import { PageHeader } from "../components/ui/PageHeader";
@@ -654,7 +655,7 @@ function CreateSkillModal({
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const [promptContext, setPromptContext] = useState("");
-  const [tags, setTags] = useState("");
+  const [tags, setTags] = useState<string[]>([]);
   const [error, setError] = useState("");
   const [creating, setCreating] = useState(false);
   const mountedRef = useRef(true);
@@ -728,10 +729,7 @@ function CreateSkillModal({
         name: name.trim(),
         description: description.trim(),
         prompt_context: promptContext.trim(),
-        tags: tags
-          .split(",")
-          .map((s) => s.trim())
-          .filter(Boolean),
+        tags,
         // Propagate unmount aborts down to the underlying fetch.
         signal: controller.signal,
       });
@@ -741,7 +739,7 @@ function CreateSkillModal({
         setName("");
         setDescription("");
         setPromptContext("");
-        setTags("");
+        setTags([]);
       }
     } catch (e: unknown) {
       if (e instanceof DOMException && e.name === "AbortError") return;
@@ -810,12 +808,16 @@ function CreateSkillModal({
           </p>
         </div>
         <div>
-          <label className="block text-xs font-bold uppercase text-text-dim mb-1">
+          <label
+            htmlFor="skill-tags"
+            className="block text-xs font-bold uppercase text-text-dim mb-1"
+          >
             {t("skills.evo_tags", { defaultValue: "Tags (comma-separated)" })}
           </label>
-          <Input
+          <ListField
+            id="skill-tags"
             value={tags}
-            onChange={(e) => setTags(e.target.value)}
+            onChange={setTags}
             placeholder="data, csv, analysis"
           />
         </div>
