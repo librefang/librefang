@@ -1361,6 +1361,15 @@ export function AgentsPage() {
         context_window: m.context_window,
         max_output_tokens: m.max_output_tokens,
         limits_known: m.limits_known,
+        // Reasoning capability, so the editor's Thinking section offers what
+        // this model actually accepts instead of the canonical set (#8591).
+        supported_efforts: m.supported_efforts,
+        offered_efforts: m.offered_efforts,
+        // Carried for the editor's future "inherit resolves to" hint; no
+        // surface reads it yet.
+        default_effort: m.default_effort,
+        off_allowed: m.off_allowed,
+        mandatory: m.mandatory,
       })),
     [formModelsQuery.data?.models],
   );

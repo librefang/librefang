@@ -1,4 +1,5 @@
 use super::*;
+use std::sync::atomic::AtomicBool;
 
 // --- Integration tests for empty response guards ---
 
@@ -384,6 +385,7 @@ fn fresh_session() -> librefang_memory::session::Session {
         context_window_tokens: 0,
         label: None,
         model_override: None,
+        reasoning_effort: None,
         messages_generation: 0,
         last_repaired_generation: None,
         peer_id: None,
@@ -496,7 +498,7 @@ async fn test_empty_response_after_tool_use_returns_fallback() {
         context_window_tokens: 0,
         label: None,
         model_override: None,
-
+        reasoning_effort: None,
         messages_generation: 0,
         last_repaired_generation: None,
         peer_id: None,
@@ -562,7 +564,7 @@ async fn test_empty_response_max_tokens_returns_fallback() {
         context_window_tokens: 0,
         label: None,
         model_override: None,
-
+        reasoning_effort: None,
         messages_generation: 0,
         last_repaired_generation: None,
         peer_id: None,
@@ -628,7 +630,7 @@ async fn test_normal_response_not_replaced_by_fallback() {
         context_window_tokens: 0,
         label: None,
         model_override: None,
-
+        reasoning_effort: None,
         messages_generation: 0,
         last_repaired_generation: None,
         peer_id: None,
@@ -685,7 +687,7 @@ async fn test_success_response_preserves_reply_directives() {
         context_window_tokens: 0,
         label: None,
         model_override: None,
-
+        reasoning_effort: None,
         messages_generation: 0,
         last_repaired_generation: None,
         peer_id: None,
@@ -747,7 +749,7 @@ async fn test_max_tokens_partial_response_preserves_reply_directives() {
         context_window_tokens: 0,
         label: None,
         model_override: None,
-
+        reasoning_effort: None,
         messages_generation: 0,
         last_repaired_generation: None,
         peer_id: None,
@@ -1064,7 +1066,7 @@ async fn test_history_fold_stub_appears_in_llm_request_after_enough_tool_cycles(
         context_window_tokens: 0,
         label: None,
         model_override: None,
-
+        reasoning_effort: None,
         messages_generation: 0,
         last_repaired_generation: None,
         peer_id: None,
@@ -1165,10 +1167,15 @@ async fn test_history_fold_stub_appears_in_llm_request_after_enough_tool_cycles(
         }),
         _ => false,
     });
+    // #8653: the fold never touches the running turn.  Every tool result in
+    // this single turn is the model's working set, so none may be replaced —
+    // folding them is what made the agent re-read the same pages until the
+    // iteration cap.  (Foldable history is covered by the history_fold unit
+    // tests, which drive messages from earlier turns.)
     assert!(
-        fold_stub_found,
-        "expected at least one [history-fold] ToolResult stub in a CompletionRequest after 10 \
-         tool cycles with fold_after_turns=3; messages seen by primary driver: {:#?}",
+        !fold_stub_found,
+        "the running turn's tool results must never be folded (#8653); \
+         messages seen by primary driver: {:#?}",
         seen.iter()
             .map(|m| format!("{:?}: {:?}", m.role, m.content))
             .collect::<Vec<_>>()
@@ -1196,7 +1203,7 @@ async fn maybe_fold_stale_tool_results_persists_rewrites_to_session_messages() {
         context_window_tokens: 0,
         label: None,
         model_override: None,
-
+        reasoning_effort: None,
         messages_generation: 0,
         last_repaired_generation: None,
         peer_id: None,
@@ -1250,6 +1257,7 @@ async fn maybe_fold_stale_tool_results_persists_rewrites_to_session_messages() {
         aux_driver,
         false,
         librefang_types::model_catalog::ReasoningEchoPolicy::None,
+        usize::MAX,
     )
     .await;
 
@@ -1353,6 +1361,7 @@ async fn maybe_fold_stale_tool_results_persists_rewrites_to_session_messages() {
         aux_driver_2,
         false,
         librefang_types::model_catalog::ReasoningEchoPolicy::None,
+        usize::MAX,
     )
     .await;
     assert_eq!(
@@ -1381,6 +1390,7 @@ async fn maybe_fold_stale_tool_results_resets_file_read_dedup_tracker() {
         context_window_tokens: 0,
         label: None,
         model_override: None,
+        reasoning_effort: None,
         messages_generation: 0,
         last_repaired_generation: None,
         peer_id: None,
@@ -1425,6 +1435,7 @@ async fn maybe_fold_stale_tool_results_resets_file_read_dedup_tracker() {
         aux_driver,
         false,
         librefang_types::model_catalog::ReasoningEchoPolicy::None,
+        usize::MAX,
     )
     .await;
     assert!(
@@ -1451,7 +1462,7 @@ async fn test_streaming_max_continuations_return_preserves_reply_directives() {
         context_window_tokens: 0,
         label: None,
         model_override: None,
-
+        reasoning_effort: None,
         messages_generation: 0,
         last_repaired_generation: None,
         peer_id: None,
@@ -1659,7 +1670,7 @@ fn cascade_leak_fixture() -> (
         context_window_tokens: 0,
         label: None,
         model_override: None,
-
+        reasoning_effort: None,
         messages_generation: 0,
         last_repaired_generation: None,
         peer_id: None,
@@ -1775,6 +1786,7 @@ async fn cascade_leak_guard_aborts_tool_use_stop_reason_in_streaming_path() {
         context_window_tokens: 0,
         label: None,
         model_override: None,
+        reasoning_effort: None,
         messages_generation: 0,
         last_repaired_generation: None,
         peer_id: None,
@@ -1868,7 +1880,7 @@ async fn test_streaming_max_continuations_with_directives_preserves_reply_direct
         context_window_tokens: 0,
         label: None,
         model_override: None,
-
+        reasoning_effort: None,
         messages_generation: 0,
         last_repaired_generation: None,
         peer_id: None,
@@ -1934,7 +1946,7 @@ async fn test_streaming_empty_response_after_tool_use_returns_fallback() {
         context_window_tokens: 0,
         label: None,
         model_override: None,
-
+        reasoning_effort: None,
         messages_generation: 0,
         last_repaired_generation: None,
         peer_id: None,
@@ -2079,7 +2091,7 @@ async fn test_empty_first_response_retries_and_recovers() {
         context_window_tokens: 0,
         label: None,
         model_override: None,
-
+        reasoning_effort: None,
         messages_generation: 0,
         last_repaired_generation: None,
         peer_id: None,
@@ -2139,7 +2151,7 @@ async fn test_empty_first_response_fallback_when_retry_also_empty() {
         context_window_tokens: 0,
         label: None,
         model_override: None,
-
+        reasoning_effort: None,
         messages_generation: 0,
         last_repaired_generation: None,
         peer_id: None,
@@ -2205,7 +2217,7 @@ async fn test_streaming_empty_response_max_tokens_returns_fallback() {
         context_window_tokens: 0,
         label: None,
         model_override: None,
-
+        reasoning_effort: None,
         messages_generation: 0,
         last_repaired_generation: None,
         peer_id: None,
@@ -2432,6 +2444,47 @@ fn test_normal_text_untouched_by_reply_guard() {
 }
 
 #[test]
+fn test_deepseek_dsml_markup_is_replaced_with_honest_reply() {
+    // DeepSeek writes its native call syntax when the tool channel is gone
+    // (#8652). Doubled fullwidth bars, as observed in production.
+    let text = "<｜｜DSML｜｜ calls>\n<｜｜DSML｜｜ invoke name=\"memory_recall\">\n<｜｜DSML｜｜ parameter name=\"key\" string=\"true\">deal-42</｜｜DSML｜｜ parameter>\n</｜｜DSML｜｜ invoke>\n</｜｜DSML｜｜ calls>";
+    let out = replace_unrecoverable_tool_call_reply(text);
+    assert!(
+        !out.contains("DSML") && !out.contains('｜'),
+        "the markup must never reach the user, got: {out:?}"
+    );
+    assert!(
+        out.contains("could not be parsed"),
+        "the replacement must be the honest sentence, got: {out:?}"
+    );
+}
+
+#[test]
+fn test_deepseek_dsml_single_bar_and_ascii_variants_are_guarded() {
+    for text in [
+        "<｜DSML｜ invoke name=\"x\"></｜DSML｜ invoke>",
+        "<||DSML|| invoke name=\"x\"></||DSML|| invoke>",
+        "<|DSML| invoke name=\"x\"></|DSML| invoke>",
+    ] {
+        let out = replace_unrecoverable_tool_call_reply(text);
+        assert!(
+            out.contains("could not be parsed") && !out.contains("DSML"),
+            "variant must be replaced, got: {out:?}"
+        );
+    }
+}
+
+#[test]
+fn test_a_partial_dsml_opener_still_counts_as_possible_tool_call() {
+    for prefix in ["<", "<｜", "<｜｜", "<｜｜D", "<|DS", "<||DSML"] {
+        assert!(
+            could_be_tool_call_opener(prefix),
+            "{prefix:?} can still grow into DSML markup"
+        );
+    }
+}
+
+#[test]
 fn test_recover_text_tool_calls_no_pattern() {
     let tools = vec![ToolDefinition {
         name: "web_search".into(),
@@ -2587,7 +2640,7 @@ async fn test_max_tokens_pure_markup_overflow_replaced_with_honest_reply() {
         context_window_tokens: 0,
         label: None,
         model_override: None,
-
+        reasoning_effort: None,
         messages_generation: 0,
         last_repaired_generation: None,
         peer_id: None,
@@ -3417,6 +3470,7 @@ fn run_agent_loop_future_size_stays_within_its_order_of_magnitude() {
         context_window_tokens: 0,
         label: None,
         model_override: None,
+        reasoning_effort: None,
         messages_generation: 0,
         last_repaired_generation: None,
         peer_id: None,
@@ -4001,4 +4055,531 @@ async fn synthesized_thinking_text_is_delivered_not_recovered() {
     );
     assert!(!result.silent);
     assert_eq!(result.iterations, 2);
+}
+
+/// Read the agent's episodic rows, newest first.
+async fn episodic_rows(
+    memory: &librefang_memory::MemorySubstrate,
+    agent_id: librefang_types::agent::AgentId,
+    query: &str,
+) -> Vec<librefang_types::memory::MemoryFragment> {
+    memory
+        .recall(
+            query,
+            10,
+            Some(librefang_types::memory::MemoryFilter {
+                agent_id: Some(agent_id),
+                scope: Some(librefang_types::memory::EPISODIC_SCOPE.to_string()),
+                ..Default::default()
+            }),
+        )
+        .await
+        .expect("episodic recall must succeed")
+}
+
+/// #8625: a turn that runs out of iterations is still a turn that happened.
+///
+/// Before this, the cap exit delivered the partial answer, saved the session and left no episodic row at all — so a later recall had no record that the exchange was ever attempted, and the agent re-derived "we never tried this" from an empty key space.
+/// The row must carry the delivered text, cut-off notice included: that notice is what tells a later reader the answer is unfinished rather than a conclusion.
+#[tokio::test]
+async fn iteration_cap_exhaustion_records_the_exchange_in_memory() {
+    let memory = librefang_memory::MemorySubstrate::open_in_memory(0.01).unwrap();
+    let mut session = fresh_session();
+    let agent_id = session.agent_id;
+    let manifest = test_manifest();
+    let driver: Arc<dyn LlmDriver> = Arc::new(AlwaysToolUseWithTextDriver);
+    let opts = LoopOptions {
+        max_iterations: Some(2),
+        ..LoopOptions::default()
+    };
+
+    let result = run_agent_loop(
+        &manifest,
+        "Please send the report",
+        &mut session,
+        &memory,
+        driver,
+        &[],
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        &opts,
+    )
+    .await
+    .expect("cap exhaustion must deliver a response, not fail");
+
+    assert!(
+        result.hit_iteration_cap,
+        "precondition: the turn hit the cap"
+    );
+
+    let rows = episodic_rows(&memory, agent_id, "report").await;
+    assert_eq!(
+        rows.len(),
+        1,
+        "a capped turn must leave exactly one episodic row, got {rows:?}"
+    );
+    let row = &rows[0].content;
+    assert!(
+        row.starts_with("[Past exchange]"),
+        "the row must keep the per-turn shape, got {row:?}"
+    );
+    assert!(
+        row.contains("Them: Please send the report"),
+        "the row must record what was asked, got {row:?}"
+    );
+    assert!(
+        row.contains("Working on it"),
+        "the row must record what was delivered, got {row:?}"
+    );
+    assert!(
+        row.contains("iteration limit"),
+        "the row must say the answer was cut off, not present it as finished, got {row:?}"
+    );
+}
+
+/// The streaming twin of the test above, on the case that left the least trace: a tool-only cap turn streams no prose at all.
+#[tokio::test]
+async fn streaming_iteration_cap_records_the_exchange_in_memory() {
+    let memory = librefang_memory::MemorySubstrate::open_in_memory(0.01).unwrap();
+    let mut session = fresh_session();
+    let agent_id = session.agent_id;
+    let manifest = test_manifest();
+    let driver: Arc<dyn LlmDriver> = Arc::new(AlwaysToolUseToolOnlyDriver);
+    let (tx, _rx) = mpsc::channel(256);
+    let opts = LoopOptions {
+        max_iterations: Some(2),
+        ..LoopOptions::default()
+    };
+
+    let result = run_agent_loop_streaming(
+        &manifest,
+        "Please send the report",
+        &mut session,
+        &memory,
+        driver,
+        &[],
+        None,
+        tx,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None, // pending_messages
+        &opts,
+    )
+    .await
+    .expect("streaming cap exhaustion must deliver, not fail");
+
+    assert!(
+        result.hit_iteration_cap,
+        "precondition: the turn hit the cap"
+    );
+
+    let rows = episodic_rows(&memory, agent_id, "report").await;
+    assert_eq!(
+        rows.len(),
+        1,
+        "a capped streaming turn must leave exactly one episodic row, got {rows:?}"
+    );
+    let row = &rows[0].content;
+    assert!(
+        row.contains("Them: Please send the report"),
+        "a tool-only capped turn must still record the attempt, got {row:?}"
+    );
+    // The marker, not the notice: `iteration limit` alone is satisfied by the cut-off sentence the delivered text carries, so an assertion on that substring stays green if the streaming exit forgets to pass `cut_off_at`.
+    assert!(
+        row.contains("[Unfinished — this turn reached the iteration limit (2) before finishing.]"),
+        "the streaming cap exit must write the unfinished marker, got {row:?}"
+    );
+}
+
+/// The gate has to hold on the new path too: an agent whose `memory_write` list covers nothing does not accumulate the row, whether the turn finished or not (#7605).
+#[tokio::test]
+async fn iteration_cap_exhaustion_skips_the_row_when_memory_write_is_empty() {
+    let memory = librefang_memory::MemorySubstrate::open_in_memory(0.01).unwrap();
+    let mut session = fresh_session();
+    let agent_id = session.agent_id;
+    let mut manifest = test_manifest();
+    manifest.capabilities.memory_write = Some(Vec::new());
+    let driver: Arc<dyn LlmDriver> = Arc::new(AlwaysToolUseWithTextDriver);
+    let opts = LoopOptions {
+        max_iterations: Some(2),
+        ..LoopOptions::default()
+    };
+
+    let result = run_agent_loop(
+        &manifest,
+        "Please send the report",
+        &mut session,
+        &memory,
+        driver,
+        &[],
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        &opts,
+    )
+    .await
+    .expect("cap exhaustion must deliver a response even with memory writes disabled");
+
+    assert!(result.hit_iteration_cap);
+    assert!(
+        episodic_rows(&memory, agent_id, "report").await.is_empty(),
+        "a declared-empty memory_write list must stop the capped-turn row too"
+    );
+}
+
+/// Guard for the extraction above: the successful path still writes exactly one row, unchanged.
+#[tokio::test]
+async fn successful_turn_still_records_exactly_one_exchange_row() {
+    let memory = librefang_memory::MemorySubstrate::open_in_memory(0.01).unwrap();
+    let mut session = fresh_session();
+    let agent_id = session.agent_id;
+    let manifest = test_manifest();
+    let driver: Arc<dyn LlmDriver> = Arc::new(NormalDriver);
+    let opts = LoopOptions::default();
+
+    let result = run_agent_loop(
+        &manifest,
+        "Please send the report",
+        &mut session,
+        &memory,
+        driver,
+        &[],
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        &opts,
+    )
+    .await
+    .expect("a normal turn must succeed");
+
+    assert!(!result.hit_iteration_cap, "precondition: the turn finished");
+
+    let rows = episodic_rows(&memory, agent_id, "report").await;
+    assert_eq!(
+        rows.len(),
+        1,
+        "a finished turn must still write exactly one row, got {rows:?}"
+    );
+    let row = &rows[0].content;
+    assert!(
+        row.contains("Them: Please send the report") && row.contains("Hello from the agent!"),
+        "the row must hold both halves of the exchange, got {row:?}"
+    );
+    assert!(
+        !row.contains("iteration limit"),
+        "a finished turn must not be marked as cut off, got {row:?}"
+    );
+}
+
+/// An embedding driver that records whether the *exchange row* was embedded before or after the stream's terminal phase.
+///
+/// The loop also embeds the recall query at turn start, so keying on call order would be ambiguous; only the `[Past exchange]` row is what this test is about.
+/// On the correct ordering that row is reached only after the signal, so the wait is already satisfied.
+/// On the wrong ordering the writer runs while the turn is still inside the loop, the wait times out, and `signal_seen` stays false — a deadlock turned into an assertion instead of a hung test.
+struct PhaseWatchingEmbeddingDriver {
+    exchange_seen: Arc<AtomicBool>,
+    signal_seen: Arc<AtomicBool>,
+    complete: Arc<tokio::sync::Notify>,
+}
+
+#[async_trait]
+impl crate::embedding::EmbeddingDriver for PhaseWatchingEmbeddingDriver {
+    async fn embed(
+        &self,
+        texts: &[&str],
+    ) -> Result<Vec<Vec<f32>>, crate::embedding::EmbeddingError> {
+        if texts.iter().any(|t| t.starts_with("[Past exchange]")) {
+            self.exchange_seen.store(true, Ordering::SeqCst);
+            // `notify_one`, not `notify_waiters`: the permit has to survive being signalled before the writer gets around to waiting, or the assertion below would race the scheduler instead of the ordering.
+            let seen =
+                tokio::time::timeout(std::time::Duration::from_secs(1), self.complete.notified())
+                    .await
+                    .is_ok();
+            self.signal_seen.store(seen, Ordering::SeqCst);
+        }
+        Ok(texts.iter().map(|_| vec![0.0_f32; 4]).collect())
+    }
+
+    fn dimensions(&self) -> usize {
+        4
+    }
+}
+
+/// #8625 review: the cap-exit write must land *after* `signal_response_complete`.
+///
+/// That helper exists so the consumer unblocks before the loop's remaining post-processing (session persistence, proactive memory extraction), and this write can reach an embedding endpoint.
+/// A capped turn whose memory write ran first would hold the terminal stream event behind a network call.
+#[tokio::test]
+async fn streaming_cap_exit_signals_completion_before_writing_memory() {
+    let memory = librefang_memory::MemorySubstrate::open_in_memory(0.01).unwrap();
+    let mut session = fresh_session();
+    let agent_id = session.agent_id;
+    let manifest = test_manifest();
+    let driver: Arc<dyn LlmDriver> = Arc::new(AlwaysToolUseWithTextDriver);
+    let (tx, mut rx) = mpsc::channel(256);
+    let opts = LoopOptions {
+        max_iterations: Some(2),
+        ..LoopOptions::default()
+    };
+
+    let exchange_seen = Arc::new(AtomicBool::new(false));
+    let signal_seen = Arc::new(AtomicBool::new(false));
+    let complete = Arc::new(tokio::sync::Notify::new());
+    let embed = PhaseWatchingEmbeddingDriver {
+        exchange_seen: Arc::clone(&exchange_seen),
+        signal_seen: Arc::clone(&signal_seen),
+        complete: Arc::clone(&complete),
+    };
+
+    // Drain the pipe concurrently: the terminal phase has to be observed by a consumer, not just sent.
+    let drain = tokio::spawn(async move {
+        while let Some(event) = rx.recv().await {
+            if let StreamEvent::PhaseChange { phase, .. } = &event {
+                if phase == PHASE_RESPONSE_COMPLETE {
+                    // `notify_one`, not `notify_waiters`: the permit has to survive being signalled before the writer gets around to waiting, or the assertion below would race the scheduler instead of the ordering.
+                    complete.notify_one();
+                }
+            }
+        }
+    });
+
+    let result = run_agent_loop_streaming(
+        &manifest,
+        "Please send the report",
+        &mut session,
+        &memory,
+        driver,
+        &[],
+        None, // kernel
+        tx,
+        None,         // skill_registry
+        None,         // mcp_connections
+        None,         // web_ctx
+        None,         // browser_ctx
+        Some(&embed), // embedding_driver
+        None,         // workspace_root
+        None,         // on_phase
+        None,         // media_engine
+        None,         // media_drivers
+        None,         // tts_engine
+        None,         // docker_config
+        None,         // hooks
+        None,         // context_window_tokens
+        None,         // process_manager
+        None,         // checkpoint_manager
+        None,         // process_registry
+        None,         // user_content_blocks
+        None,         // proactive_memory
+        None,         // context_engine
+        None,         // pending_messages
+        &opts,
+    )
+    .await
+    .expect("streaming cap exhaustion must deliver, not fail");
+
+    drain.await.expect("stream drain task");
+    assert!(
+        result.hit_iteration_cap,
+        "precondition: the turn hit the cap"
+    );
+    assert!(
+        exchange_seen.load(Ordering::SeqCst),
+        "precondition: the exchange row must have been embedded, or this test proves nothing"
+    );
+    assert!(
+        signal_seen.load(Ordering::SeqCst),
+        "the cap-exit memory write ran before the response-complete phase, so an embedding call would hold the terminal stream event"
+    );
+    assert_eq!(
+        episodic_rows(&memory, agent_id, "report").await.len(),
+        1,
+        "the row must still be written after the signal"
+    );
+}
+
+/// A driver that produces prose long enough to exceed `max_episodic_chars`, plus a tool call so the loop keeps going until the cap.
+struct LongProseToolUseDriver;
+
+#[async_trait]
+impl LlmDriver for LongProseToolUseDriver {
+    async fn complete(&self, _request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
+        let prose = "working on the report, still working on the report. ".repeat(400);
+        Ok(CompletionResponse {
+            text_synthesized_from_thinking: false,
+            content: vec![
+                ContentBlock::Text {
+                    text: prose,
+                    provider_metadata: None,
+                },
+                ContentBlock::ToolUse {
+                    id: "tool_cap_long".to_string(),
+                    name: "nonexistent_tool".to_string(),
+                    input: serde_json::json!({}),
+                    provider_metadata: None,
+                },
+            ],
+            stop_reason: StopReason::ToolUse,
+            tool_calls: vec![ToolCall {
+                id: "tool_cap_long".to_string(),
+                name: "nonexistent_tool".to_string(),
+                input: serde_json::json!({}),
+            }],
+            usage: TokenUsage {
+                input_tokens: 5,
+                output_tokens: 5,
+                ..Default::default()
+            },
+            actual_provider: None,
+            actual_model: None,
+        })
+    }
+}
+
+/// #8625 review: the unfinished marker has to survive the episodic budget, which cuts the *tail* of an over-long half.
+///
+/// A capped turn delivers its cut-off notice at the end of the response, so a row that leaned on that notice would lose it exactly when the answer is long enough for "was this finished?" to be the open question — the one case where the marker matters most.
+#[tokio::test]
+async fn iteration_cap_marker_survives_a_truncated_exchange() {
+    // Bound the row well below the prose this driver produces, so the response half is definitely cut.
+    let mut memory = librefang_memory::MemorySubstrate::open_in_memory(0.01).unwrap();
+    memory.set_max_episodic_chars(2000);
+    let mut session = fresh_session();
+    let agent_id = session.agent_id;
+    let manifest = test_manifest();
+    let driver: Arc<dyn LlmDriver> = Arc::new(LongProseToolUseDriver);
+    let opts = LoopOptions {
+        max_iterations: Some(2),
+        ..LoopOptions::default()
+    };
+
+    let result = run_agent_loop(
+        &manifest,
+        "Please send the report",
+        &mut session,
+        &memory,
+        driver,
+        &[],
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        &opts,
+    )
+    .await
+    .expect("cap exhaustion must deliver a response, not fail");
+
+    assert!(
+        result.hit_iteration_cap,
+        "precondition: the turn hit the cap"
+    );
+
+    let rows = episodic_rows(&memory, agent_id, "report").await;
+    assert_eq!(rows.len(), 1, "expected exactly one row, got {rows:?}");
+    let row = &rows[0].content;
+    assert!(
+        row.contains("… [truncated]"),
+        "precondition: the response half must actually have been cut, got {row:?}"
+    );
+    assert!(
+        row.contains("[Unfinished — this turn reached the iteration limit (2) before finishing.]"),
+        "the unfinished marker must survive the budget cut, got {row:?}"
+    );
+    assert!(
+        row.starts_with("[Past exchange]"),
+        "the row must keep the structural frame recall expects, got {row:?}"
+    );
+    // Position, not just presence: recall renders the row through `truncate_memory_bullet` (`MEMORY_BULLET_MAX_CHARS`, 500), which also cuts the tail — so a marker placed after the halves would disappear from what the model sees, exactly as the write-time budget used to swallow the notice in the text.
+    assert!(
+        row.find("[Unfinished").unwrap() < row.find("Them:").unwrap(),
+        "the marker must sit above the halves, or recall-time truncation eats it too, got {row:?}"
+    );
 }

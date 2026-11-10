@@ -6,9 +6,9 @@ use super::message::{
 use super::model::needs_qualified_model_id;
 use super::retry::{BASE_RETRY_DELAY_MS, MAX_RETRIES};
 use super::text_recovery::{
-    looks_like_hallucinated_action, parse_dash_dash_args, parse_json_tool_call_object,
-    replace_unrecoverable_tool_call_reply, should_attempt_text_recovery,
-    user_message_has_action_intent,
+    could_be_tool_call_opener, looks_like_hallucinated_action, parse_dash_dash_args,
+    parse_json_tool_call_object, replace_unrecoverable_tool_call_reply,
+    should_attempt_text_recovery, user_message_has_action_intent,
 };
 use super::tool_call::{
     failure_type_label, finalize_tool_use_results, record_tool_call_metric,
@@ -112,6 +112,7 @@ fn context_compaction_updates_working_and_persistent_messages() {
         context_window_tokens: 0,
         label: None,
         model_override: None,
+        reasoning_effort: None,
         messages_generation: 7,
         last_repaired_generation: Some(7),
         peer_id: None,
@@ -169,6 +170,7 @@ fn context_compaction_preserves_current_turn_when_engine_omits_it() {
         context_window_tokens: 0,
         label: None,
         model_override: None,
+        reasoning_effort: None,
         messages_generation: 0,
         last_repaired_generation: None,
         peer_id: None,
@@ -208,6 +210,7 @@ fn context_compaction_uses_last_duplicate_as_current_turn_boundary() {
         context_window_tokens: 0,
         label: None,
         model_override: None,
+        reasoning_effort: None,
         messages_generation: 0,
         last_repaired_generation: None,
         peer_id: None,
@@ -245,6 +248,7 @@ fn context_compaction_keeps_full_current_turn_when_first_message_repeats() {
         context_window_tokens: 0,
         label: None,
         model_override: None,
+        reasoning_effort: None,
         messages_generation: 0,
         last_repaired_generation: None,
         peer_id: None,
@@ -282,6 +286,7 @@ fn compaction_test_session(messages: Vec<Message>) -> Session {
         context_window_tokens: 0,
         label: None,
         model_override: None,
+        reasoning_effort: None,
         messages_generation: 0,
         last_repaired_generation: None,
         peer_id: None,
@@ -585,6 +590,7 @@ fn context_compaction_repairs_a_kept_window_opening_with_an_orphaned_tool_result
         context_window_tokens: 0,
         label: None,
         model_override: None,
+        reasoning_effort: None,
         messages_generation: 0,
         last_repaired_generation: None,
         peer_id: None,

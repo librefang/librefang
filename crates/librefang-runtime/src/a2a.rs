@@ -2062,7 +2062,7 @@ mod tests {
     /// upfront Content-Length check.
     #[tokio::test]
     async fn discover_rejects_oversized_streamed_body() {
-        use tokio::io::AsyncWriteExt;
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
         use tokio::net::TcpListener;
 
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -2070,6 +2070,19 @@ mod tests {
 
         let server = tokio::spawn(async move {
             if let Ok((mut stream, _)) = listener.accept().await {
+                // Drain the request head before responding. Closing a socket whose receive buffer still holds unread request bytes makes the kernel send RST instead of FIN, and depending on scheduling the client then surfaces "error sending request" rather than the body-read / cap error this test asserts on.
+                {
+                    let mut reader = BufReader::new(&mut stream);
+                    let mut line = String::new();
+                    loop {
+                        line.clear();
+                        match reader.read_line(&mut line).await {
+                            Ok(0) | Err(_) => break,
+                            Ok(_) if line == "\r\n" || line == "\n" => break,
+                            Ok(_) => {}
+                        }
+                    }
+                }
                 let header = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n";
                 let _ = stream.write_all(header.as_bytes()).await;
                 // 64 KiB of garbage per chunk; loop until we definitely
