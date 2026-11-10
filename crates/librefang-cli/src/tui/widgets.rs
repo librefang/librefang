@@ -497,6 +497,21 @@ mod tests {
     }
 
     #[test]
+    fn checkbox_list_tolerates_a_stale_cursor_past_the_end() {
+        let mut list = three_items();
+        // A cursor left over from a longer list (or a constructed state) must
+        // not index past the end when the list shrinks and space is pressed.
+        list.cursor = 3;
+        list.toggle();
+        assert!(
+            list.items.iter().all(|(_, checked)| !checked),
+            "an out-of-range cursor must toggle nothing"
+        );
+        list.down();
+        list.up();
+    }
+
+    #[test]
     fn checkbox_list_selected_names_keep_item_order() {
         let mut list = three_items();
         list.items[2].1 = true;
