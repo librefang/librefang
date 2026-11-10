@@ -69,6 +69,7 @@ interface QueryShape<T> {
   isLoading: boolean;
   isFetching: boolean;
   isError: boolean;
+  error?: unknown;
   refetch: ReturnType<typeof vi.fn>;
 }
 
@@ -197,6 +198,39 @@ describe("AnalyticsPage", () => {
     expect(noData.length).toBeGreaterThanOrEqual(2);
     expect(screen.getByText("analytics.no_agent_data")).toBeInTheDocument();
     expect(screen.getByText("analytics.no_model_data")).toBeInTheDocument();
+  });
+
+  it("shows an error with retry instead of $0 KPIs and 'no data' when a usage query fails", () => {
+    setLoadedEmptyState();
+    const refetch = vi.fn().mockResolvedValue(undefined);
+    useUsageSummaryMock.mockReturnValue(
+      makeQuery(undefined, { isError: true, error: new Error("summary boom"), refetch }),
+    );
+    renderPage();
+
+    expect(screen.getByRole("alert")).toHaveTextContent("summary boom");
+    expect(screen.queryByText("analytics.total_calls")).not.toBeInTheDocument();
+    expect(screen.queryByText("analytics.total_cost")).not.toBeInTheDocument();
+    expect(screen.queryByText("common.no_data")).not.toBeInTheDocument();
+    // The budget editor does not depend on usage data and stays usable.
+    expect(screen.getByText("analytics.budget_title")).toBeInTheDocument();
+
+    fireEvent.click(within(screen.getByRole("alert")).getByRole("button"));
+    expect(refetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the last good numbers when a background refetch fails", () => {
+    setLoadedEmptyState();
+    useUsageSummaryMock.mockReturnValue(
+      makeQuery(
+        { call_count: 3, total_input_tokens: 0, total_output_tokens: 0, total_cost_usd: 0 },
+        { isError: true, error: new Error("refetch boom") },
+      ),
+    );
+    renderPage();
+
+    expect(screen.queryByText("refetch boom")).not.toBeInTheDocument();
+    expect(screen.getByText("analytics.total_calls")).toBeInTheDocument();
   });
 
   it("hides the CSV export button when there are no agent or model rows", () => {

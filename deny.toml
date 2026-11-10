@@ -55,6 +55,17 @@ ignore = [
     { id = "RUSTSEC-2024-0419", reason = "gdkwayland-sys unmaintained; transitive via tauri on Linux. https://rustsec.org/advisories/RUSTSEC-2024-0419" },
     { id = "RUSTSEC-2024-0420", reason = "gdk-pixbuf unmaintained; transitive via tauri on Linux. https://rustsec.org/advisories/RUSTSEC-2024-0420" },
 
+    # ── wasmtime compilation cache: zstd advisories with no reachable path ──
+    # zstd 0.13.3, zstd-safe 7.2.4 and zstd-sys 2.0.16 arrive only through
+    # wasmtime-internal-cache, which is inert unless a `wasmtime::Cache` is
+    # configured — Librefang never builds one. wasmtime 48-50 all require
+    # zstd ^0.13, while the fix needs >=0.14.3 (semver-incompatible), so there
+    # is no upgrade path yet. Re-review when wasmtime raises the zstd floor.
+    { id = "RUSTSEC-2026-0391", reason = "zstd stream-context leak; only reached through wasmtime-internal-cache, which needs a configured Cache. https://rustsec.org/advisories/RUSTSEC-2026-0391" },
+    { id = "RUSTSEC-2026-0398", reason = "zstd-safe Seekable decompress over-length; only reached through wasmtime-internal-cache, which needs a configured Cache. https://rustsec.org/advisories/RUSTSEC-2026-0398" },
+    { id = "RUSTSEC-2026-0403", reason = "zstd-safe uninitialised memory on failed legacy-frame stream; only reached through wasmtime-internal-cache. https://rustsec.org/advisories/RUSTSEC-2026-0403" },
+    { id = "RUSTSEC-2026-0410", reason = "zstd-sys wasm allocator shim; only reached through wasmtime-internal-cache, which needs a configured Cache. https://rustsec.org/advisories/RUSTSEC-2026-0410" },
+
     # ── Other unmaintained transitive crates ───────────────────────────────
     { id = "RUSTSEC-2023-0071", reason = "rsa Marvin attack; reviewed 2026-08-14, RustSec still lists patched = []. https://rustsec.org/advisories/RUSTSEC-2023-0071" },
     { id = "RUSTSEC-2024-0370", reason = "proc-macro-error unmaintained; transitive. https://rustsec.org/advisories/RUSTSEC-2024-0370" },

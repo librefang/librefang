@@ -251,3 +251,53 @@ export function applyForeignTerminalFrame<M extends TerminalRoutableMessage>(
       : m,
   );
 }
+
+/** An HTML canvas an agent presented with the `canvas_present` tool, as carried by the chat WS `canvas` frame. */
+export interface ChatCanvas {
+  id: string;
+  title: string;
+  html: string;
+}
+
+/**
+ * Read a chat WS `canvas` frame (`{type:"canvas", canvas_id, html, title}`, emitted by `map_stream_event` in `ws.rs`).
+ *
+ * Returns `null` for a frame without HTML, so an empty presentation does not render an empty frame.
+ */
+export function parseCanvasFrame(data: {
+  canvas_id?: unknown;
+  html?: unknown;
+  title?: unknown;
+}): ChatCanvas | null {
+  if (typeof data.html !== "string" || data.html.length === 0) return null;
+  return {
+    id: typeof data.canvas_id === "string" && data.canvas_id ? data.canvas_id : `canvas-${Date.now()}`,
+    title: typeof data.title === "string" && data.title ? data.title : "Canvas",
+    html: data.html,
+  };
+}
+
+/** Attach a canvas to the bubble that owns the turn, leaving every other bubble untouched. */
+export function appendCanvas<M extends { id: string; canvases?: ChatCanvas[] }>(
+  messages: M[],
+  ownerId: string,
+  canvas: ChatCanvas,
+): M[] {
+  return messages.map((m): M =>
+    m.id === ownerId ? { ...m, canvases: [...(m.canvases ?? []), canvas] } : m,
+  );
+}
+
+/**
+ * Content-Security-Policy prepended to every canvas document.
+ *
+ * The frame's HTML is model output, so it is rendered in an `<iframe sandbox="">` (no scripts, no same-origin, no forms, no popups).
+ * The sandbox does not stop subresource loads, so this policy also blocks remote images, fonts, and stylesheets that would otherwise beacon to a third party; inline styles and `data:` images still render.
+ * A CSP delivered by `<meta>` only adds restrictions, so a policy inside the model's own HTML cannot loosen it.
+ */
+export const CANVAS_CSP = "default-src 'none'; style-src 'unsafe-inline'; img-src data:; font-src data:";
+
+/** The `srcdoc` for a canvas iframe: the model's HTML behind the restrictive policy above. */
+export function canvasSrcDoc(html: string): string {
+  return `<meta http-equiv="Content-Security-Policy" content="${CANVAS_CSP}">${html}`;
+}

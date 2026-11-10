@@ -199,6 +199,7 @@ async fn start_harness() -> Harness {
         require_auth_for_reads: false,
         allow_no_auth: false,
         audit_log: Some(state.kernel.audit().clone()),
+        a2a_agents_path: None,
     };
 
     let app = Router::new()

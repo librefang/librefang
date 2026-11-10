@@ -573,11 +573,12 @@ async fn install_from_git(
     }
     // Use `--` to separate options from positional args
     cmd.arg("--").arg(url).arg(temp_dir.path());
+    // A credential prompt has nobody to answer it, so make it fail instead of waiting, and abort a transfer that has effectively stalled (mirrors `registry_sync::git_network`).
+    cmd.env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_HTTP_LOW_SPEED_LIMIT", "1000")
+        .env("GIT_HTTP_LOW_SPEED_TIME", "30");
 
-    let output = cmd
-        .output()
-        .await
-        .map_err(|e| format!("Failed to run git clone: {e}"))?;
+    let output = output_with_deadline(&mut cmd, GIT_CLONE_TIMEOUT, "git clone").await?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -641,6 +642,47 @@ pub fn remove_plugin(name: &str) -> Result<(), String> {
 
     info!(plugin = name, "Removed plugin");
     Ok(())
+}
+
+/// Deadline for `git clone` of a plugin repository.
+pub(super) const GIT_CLONE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// Deadline for a plugin's dependency install (`pip install`, `npm install`, `bundle install`, ...).
+pub(super) const DEPENDENCY_INSTALL_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(600);
+
+/// Remove every inherited variable named in `inherited` that the sandbox classifies as a secret from `cmd`'s environment.
+///
+/// Package managers run author-controlled code during an install (npm `preinstall` / `postinstall`, an sdist's `setup.py`, a gem's extconf), so the install step must not hand the plugin author the vault key, provider keys or channel tokens the runtime already withholds from the plugin's hooks.
+/// PATH, HOME and proxy variables are kept because package managers need them.
+/// `inherited` is the daemon's environment in production (`std::env::vars_os()`), injectable so tests need not mutate process-global state.
+pub(super) fn scrub_secret_env<I>(cmd: &mut tokio::process::Command, inherited: I)
+where
+    I: IntoIterator<Item = std::ffi::OsString>,
+{
+    for name in inherited {
+        if crate::subprocess_sandbox::is_blocked_env_var(&name.to_string_lossy()) {
+            cmd.env_remove(&name);
+        }
+    }
+}
+
+/// Run `cmd` to completion with stdin closed, killing it when `deadline` passes or the caller's future is dropped.
+///
+/// Without `kill_on_drop` a request that gave up (client disconnect, handler timeout) left the child running, and without a deadline a stalled network transfer or a prompt waiting on the terminal held the request open forever.
+pub(super) async fn output_with_deadline(
+    cmd: &mut tokio::process::Command,
+    deadline: std::time::Duration,
+    what: &str,
+) -> Result<std::process::Output, String> {
+    cmd.stdin(std::process::Stdio::null()).kill_on_drop(true);
+    match tokio::time::timeout(deadline, cmd.output()).await {
+        Ok(result) => result.map_err(|e| format!("Failed to run {what}: {e}")),
+        Err(_) => Err(format!(
+            "{what} did not finish within {}s and was killed",
+            deadline.as_secs()
+        )),
+    }
 }
 
 /// Whether the daemon itself runs inside a virtualenv or Conda environment.
@@ -728,12 +770,15 @@ pub async fn install_requirements(plugin_name: &str) -> Result<String, String> {
         "Installing Python requirements"
     );
 
-    let output = tokio::process::Command::new(interpreter)
-        .args(&args)
-        .arg(&requirements)
-        .output()
-        .await
-        .map_err(|e| format!("Failed to run {interpreter} -m pip: {e}"))?;
+    let mut cmd = tokio::process::Command::new(interpreter);
+    cmd.args(&args).arg(&requirements);
+    scrub_secret_env(&mut cmd, std::env::vars_os().map(|(k, _)| k));
+    let output = output_with_deadline(
+        &mut cmd,
+        DEPENDENCY_INSTALL_TIMEOUT,
+        &format!("{interpreter} -m pip"),
+    )
+    .await?;
 
     if output.status.success() {
         let stdout = String::from_utf8_lossy(&output.stdout);

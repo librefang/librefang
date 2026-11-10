@@ -299,6 +299,24 @@ impl PromptStore {
                         .to_string(),
             });
         }
+        // Guard: a version an experiment variant still points at cannot be deleted (enforced foreign key); report it as a state conflict instead of an internal error.
+        let referenced: bool = conn
+            .query_row(
+                "SELECT 1 FROM experiment_variants WHERE prompt_version_id = ?1 LIMIT 1",
+                [id.to_string()],
+                |_| Ok(()),
+            )
+            .optional()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?
+            .is_some();
+        if referenced {
+            return Err(LibreFangError::InvalidState {
+                current: "prompt version used by an experiment".to_string(),
+                operation:
+                    "delete a prompt version that an experiment variant still references; delete the experiment first"
+                        .to_string(),
+            });
+        }
         conn.execute(
             "DELETE FROM prompt_versions WHERE id = ?1",
             [id.to_string()],
@@ -308,6 +326,8 @@ impl PromptStore {
     }
 
     /// Delete oldest inactive versions if the agent exceeds the max count.
+    ///
+    /// Versions referenced by an experiment variant are skipped: `experiment_variants.prompt_version_id` is an enforced foreign key, so including one made the whole DELETE fail and the agent's version history grew without bound.
     pub fn prune_old_versions(&self, agent_id: AgentId, max_versions: u32) -> LibreFangResult<()> {
         let conn = self.pool.get().map_err(LibreFangError::memory)?;
         // Get total count for this agent
@@ -325,6 +345,7 @@ impl PromptStore {
                 "DELETE FROM prompt_versions WHERE id IN (
                     SELECT id FROM prompt_versions
                     WHERE agent_id = ?1 AND is_active = 0
+                      AND id NOT IN (SELECT prompt_version_id FROM experiment_variants)
                     ORDER BY version ASC
                     LIMIT ?2
                 )",
@@ -394,9 +415,34 @@ impl PromptStore {
     }
 
     pub fn create_experiment(&self, experiment: PromptExperiment) -> LibreFangResult<()> {
-        let conn = self.pool.get().map_err(LibreFangError::memory)?;
+        let mut conn = self.pool.get().map_err(LibreFangError::memory)?;
+        // The experiment, its variants and their metrics rows are one unit: a failure on any variant must leave none of them behind.
+        // Without the transaction a bad second variant committed the experiment and the first variant, so the list showed a half-built experiment and a retry created a duplicate.
+        // BEGIN IMMEDIATE because the variant checks read before the first write: a deferred transaction would fail its upgrade with SQLITE_BUSY_SNAPSHOT, which the busy timeout does not retry, whenever another connection committed in between.
+        let tx = conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
 
-        conn.execute(
+        // Check each variant's prompt version up front so a mistyped id surfaces as a typed not-found (404) rather than an opaque foreign-key failure (500).
+        for variant in &experiment.variants {
+            let exists: bool = tx
+                .query_row(
+                    "SELECT 1 FROM prompt_versions WHERE id = ?1",
+                    [variant.prompt_version_id.to_string()],
+                    |_| Ok(()),
+                )
+                .optional()
+                .map_err(|e| LibreFangError::Internal(e.to_string()))?
+                .is_some();
+            if !exists {
+                return Err(LibreFangError::ResourceNotFound {
+                    kind: "prompt_version".to_string(),
+                    id: variant.prompt_version_id.to_string(),
+                });
+            }
+        }
+
+        tx.execute(
             "INSERT INTO prompt_experiments (id, name, agent_id, status, traffic_split, success_criteria, started_at, ended_at, created_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             rusqlite::params![
@@ -414,7 +460,7 @@ impl PromptStore {
         .map_err(|e| LibreFangError::Internal(e.to_string()))?;
 
         for variant in &experiment.variants {
-            conn.execute(
+            tx.execute(
                 "INSERT INTO experiment_variants (id, experiment_id, name, prompt_version_id, description)
                  VALUES (?1, ?2, ?3, ?4, ?5)",
                 rusqlite::params![
@@ -427,7 +473,7 @@ impl PromptStore {
             )
             .map_err(|e| LibreFangError::Internal(e.to_string()))?;
 
-            conn.execute(
+            tx.execute(
                 "INSERT INTO experiment_metrics (id, experiment_id, variant_id, total_requests, successful_requests, failed_requests, total_latency_ms, total_cost_usd, last_updated)
                  VALUES (?1, ?2, ?3, 0, 0, 0, 0, 0, ?4)",
                 rusqlite::params![
@@ -440,6 +486,8 @@ impl PromptStore {
             .map_err(|e| LibreFangError::Internal(e.to_string()))?;
         }
 
+        tx.commit()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
         Ok(())
     }
 
@@ -760,6 +808,184 @@ mod tests {
         PromptStore::new(pool)
     }
 
+    fn test_version(id: Uuid, agent_id: AgentId, version: u32) -> PromptVersion {
+        PromptVersion {
+            id,
+            agent_id,
+            version,
+            content_hash: format!("h{version}"),
+            system_prompt: format!("Version {version}"),
+            tools: vec![],
+            variables: vec![],
+            created_at: Utc::now(),
+            created_by: "test".to_string(),
+            is_active: false,
+            description: None,
+        }
+    }
+
+    fn test_experiment(agent_id: AgentId, variants: Vec<ExperimentVariant>) -> PromptExperiment {
+        PromptExperiment {
+            id: Uuid::new_v4(),
+            name: "Experiment".to_string(),
+            agent_id,
+            status: ExperimentStatus::Draft,
+            traffic_split: vec![50, 50],
+            success_criteria: SuccessCriteria::default(),
+            started_at: None,
+            ended_at: None,
+            created_at: Utc::now(),
+            variants,
+        }
+    }
+
+    fn test_variant(name: &str, prompt_version_id: Uuid) -> ExperimentVariant {
+        ExperimentVariant {
+            id: Uuid::new_v4(),
+            name: name.to_string(),
+            prompt_version_id,
+            description: None,
+        }
+    }
+
+    fn count_rows(store: &PromptStore, table: &str) -> i64 {
+        store
+            .pool
+            .get()
+            .unwrap()
+            .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))
+            .unwrap()
+    }
+
+    /// A store over the real migrated schema with `foreign_keys=ON`, so the `experiment_variants.prompt_version_id` foreign key is enforced exactly as it is in production.
+    /// The experiment rows that reference an `agents` row are seeded with enforcement briefly off; deletes are still checked against them once it is back on.
+    fn create_fk_test_store() -> PromptStore {
+        let manager = r2d2_sqlite::SqliteConnectionManager::memory();
+        let pool = r2d2::Pool::builder().max_size(1).build(manager).unwrap();
+        crate::migration::run_migrations(&pool.get().unwrap()).unwrap();
+        pool.get()
+            .unwrap()
+            .execute_batch("PRAGMA foreign_keys=ON;")
+            .unwrap();
+        PromptStore::new(pool)
+    }
+
+    fn seed_experiment_referencing(store: &PromptStore, agent_id: AgentId, version_id: Uuid) {
+        let conn = store.pool.get().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys=OFF;").unwrap();
+        let exp_id = Uuid::new_v4().to_string();
+        conn.execute(
+            "INSERT INTO prompt_experiments (id, name, agent_id, status, traffic_split, success_criteria, created_at)
+             VALUES (?1, 'exp', ?2, '\"draft\"', '[]', '{}', ?3)",
+            rusqlite::params![exp_id, agent_id.to_string(), Utc::now().to_rfc3339()],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO experiment_variants (id, experiment_id, name, prompt_version_id)
+             VALUES (?1, ?2, 'control', ?3)",
+            rusqlite::params![Uuid::new_v4().to_string(), exp_id, version_id.to_string()],
+        )
+        .unwrap();
+        conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+    }
+
+    /// A failure on a later variant must roll back the experiment row and every earlier variant and metrics row.
+    /// Before the transaction, the experiment and its first variant were committed and a retry produced a duplicate.
+    #[test]
+    fn create_experiment_failure_on_second_variant_leaves_no_rows() {
+        let store = create_test_store();
+        let agent_id = AgentId::new();
+        let version_id = Uuid::new_v4();
+        store
+            .create_version(test_version(version_id, agent_id, 1))
+            .unwrap();
+        let first = test_variant("control", version_id);
+        // Reusing the first variant's id makes the second variant INSERT fail on the primary key, after the experiment, the first variant and its metrics row were written.
+        let mut second = test_variant("treatment", version_id);
+        second.id = first.id;
+        let experiment = test_experiment(agent_id, vec![first, second]);
+
+        assert!(store.create_experiment(experiment).is_err());
+        assert_eq!(count_rows(&store, "prompt_experiments"), 0);
+        assert_eq!(count_rows(&store, "experiment_variants"), 0);
+        assert_eq!(count_rows(&store, "experiment_metrics"), 0);
+    }
+
+    /// A variant naming a prompt version that does not exist is a typed not-found, and nothing is written.
+    #[test]
+    fn create_experiment_unknown_prompt_version_is_not_found() {
+        let store = create_test_store();
+        let agent_id = AgentId::new();
+        let version_id = Uuid::new_v4();
+        store
+            .create_version(test_version(version_id, agent_id, 1))
+            .unwrap();
+        let missing = Uuid::new_v4();
+        let experiment = test_experiment(
+            agent_id,
+            vec![
+                test_variant("control", version_id),
+                test_variant("treatment", missing),
+            ],
+        );
+
+        let err = store.create_experiment(experiment).unwrap_err();
+        assert!(
+            matches!(&err, LibreFangError::ResourceNotFound { kind, id } if kind == "prompt_version" && id == &missing.to_string()),
+            "expected ResourceNotFound for the missing version, got: {err:?}"
+        );
+        assert_eq!(count_rows(&store, "prompt_experiments"), 0);
+        assert_eq!(count_rows(&store, "experiment_variants"), 0);
+    }
+
+    /// Pruning skips versions an experiment variant references instead of failing the whole DELETE on the foreign key, and still prunes the rest.
+    #[test]
+    fn prune_old_versions_skips_versions_used_by_experiments() {
+        let store = create_fk_test_store();
+        let agent_id = AgentId::new();
+        let ids: Vec<Uuid> = (0..4).map(|_| Uuid::new_v4()).collect();
+        for (i, id) in ids.iter().enumerate() {
+            store
+                .create_version(test_version(*id, agent_id, i as u32 + 1))
+                .unwrap();
+        }
+        store.set_active_version(ids[3], agent_id).unwrap();
+        // v1 is the oldest, so it is the first candidate for pruning.
+        seed_experiment_referencing(&store, agent_id, ids[0]);
+
+        store.prune_old_versions(agent_id, 2).unwrap();
+
+        let mut remaining: Vec<u32> = store
+            .list_versions(agent_id)
+            .unwrap()
+            .into_iter()
+            .map(|v| v.version)
+            .collect();
+        remaining.sort_unstable();
+        assert_eq!(
+            remaining,
+            vec![1, 4],
+            "v1 is kept because an experiment uses it; v2 and v3 are pruned"
+        );
+    }
+
+    /// Deleting a version an experiment still references is a state conflict, not an internal foreign-key error.
+    #[test]
+    fn delete_version_used_by_experiment_is_invalid_state() {
+        let store = create_fk_test_store();
+        let agent_id = AgentId::new();
+        let id = Uuid::new_v4();
+        store.create_version(test_version(id, agent_id, 1)).unwrap();
+        seed_experiment_referencing(&store, agent_id, id);
+
+        let err = store.delete_version(id).unwrap_err();
+        assert!(
+            matches!(err, LibreFangError::InvalidState { .. }),
+            "expected InvalidState, got: {err:?}"
+        );
+        assert!(store.get_version(id).unwrap().is_some());
+    }
+
     #[test]
     fn test_create_and_list_versions() {
         let store = create_test_store();
@@ -959,6 +1185,10 @@ mod tests {
     fn test_create_and_list_experiments() {
         let store = create_test_store();
         let agent_id = AgentId::new();
+        let version_id = Uuid::new_v4();
+        store
+            .create_version(test_version(version_id, agent_id, 1))
+            .unwrap();
 
         let experiment = PromptExperiment {
             id: Uuid::new_v4(),
@@ -978,7 +1208,7 @@ mod tests {
             variants: vec![ExperimentVariant {
                 id: Uuid::new_v4(),
                 name: "Control".to_string(),
-                prompt_version_id: Uuid::new_v4(),
+                prompt_version_id: version_id,
                 description: None,
             }],
         };

@@ -60,6 +60,7 @@ pub async fn tool_web_fetch_to_file(
         .ok_or("Workspace sandbox not configured: web_fetch_to_file requires a workspace_root")?;
     let resolved =
         crate::workspace_sandbox::resolve_sandbox_path_ext(dest_path, root, additional_roots)?;
+    crate::workspace_sandbox::deny_own_manifest_write(&resolved, root)?;
 
     // SSRF check + DNS pinning. Same pipeline as web_fetch: redirects are
     // followed manually with a fresh SSRF check + DNS pin on every hop

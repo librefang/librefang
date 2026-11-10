@@ -784,6 +784,17 @@ impl LibreFangKernel {
     /// In Stable mode the registry is frozen at boot and never gains new skills without an operator-initiated restart; rather than silently skipping the whole reload, this refreshes the on-disk content of already-loaded skills (the freeze-safe `reload_skill` path) and reports any brand-new skill directories it is deliberately not loading (#6540).
     /// Most callers invoke this for its side effect and ignore the return value.
     pub fn reload_skills(&self) -> SkillReloadOutcome {
+        let skills_cfg = self.config.load().skills.clone();
+        self.reload_skills_with(&skills_cfg)
+    }
+
+    /// [`Self::reload_skills`] with the `[skills]` policy passed explicitly.
+    ///
+    /// The `HotAction::ReloadSkills` arm runs before `reload_config` stores the new config, so it must hand the incoming `[skills]` in; reading `self.config` there rebuilds the registry from the previous `disabled` / `extra_dirs` / `load_user`.
+    pub fn reload_skills_with(
+        &self,
+        skills_cfg: &librefang_types::config::SkillsConfig,
+    ) -> SkillReloadOutcome {
         let mut registry = write_kernel_state(&self.skills.skill_registry, "skill_registry");
         if registry.is_frozen() {
             // Frozen (Stable mode): do NOT add new skills — that boundary is intentional.
@@ -830,12 +841,16 @@ impl LibreFangKernel {
         // list and extra_dirs overlay would silently vanish every time
         // the kernel hot-reloads (e.g., after `skill_evolve_create`),
         // re-enabling skills the operator had explicitly turned off.
-        let cfg = self.config.load();
-        fresh.set_disabled_skills(cfg.skills.disabled.clone());
-        let user = fresh.load_all().unwrap_or(0);
-        let external = if !cfg.skills.extra_dirs.is_empty() {
+        fresh.set_disabled_skills(skills_cfg.disabled.clone());
+        // `load_user = false` restricts the registry to the curated `extra_dirs` overlay.
+        let user = if skills_cfg.load_user {
+            fresh.load_all().unwrap_or(0)
+        } else {
+            0
+        };
+        let external = if !skills_cfg.extra_dirs.is_empty() {
             fresh
-                .load_external_dirs(&cfg.skills.extra_dirs)
+                .load_external_dirs(&skills_cfg.extra_dirs)
                 .unwrap_or(0)
         } else {
             0

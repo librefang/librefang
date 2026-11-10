@@ -188,6 +188,47 @@ pub fn held_sessions_snapshot() -> Vec<SessionId> {
     v
 }
 
+/// The held agent and session locks of one task, captured so they can be re-established on a thread the task-locals do not reach.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct HeldLocksSnapshot {
+    /// Agents whose `agent_msg_locks` entry the captured task held.
+    pub agents: Vec<AgentId>,
+    /// Sessions whose `session_msg_locks` entry the captured task held.
+    pub sessions: Vec<SessionId>,
+}
+
+/// Capture the current task's held locks.
+///
+/// A WASM guest runs on a `spawn_blocking` thread, where neither task-local is visible, while the turn that dispatched it still holds the agent's lock.
+/// The sandbox takes this snapshot before handing the guest off so a host call that re-enters the kernel (`host_agent_send`) can carry it back with [`scope_with`].
+/// Empty when called outside a [`scope`].
+pub fn snapshot() -> HeldLocksSnapshot {
+    HeldLocksSnapshot {
+        agents: held_snapshot(),
+        sessions: held_sessions_snapshot(),
+    }
+}
+
+/// Run `fut` inside a registry seeded with `held`, so a nested `send_message_full` sees the locks the dispatching task holds and rejects the cycle instead of parking on a mutex its own caller holds.
+///
+/// Used where the future runs on a thread that is not part of the holding task, such as the `block_on` inside a WASM host call.
+/// When a registry is already established on the current task it is shared as in [`scope`], and `held` is ignored, because the seeds only describe what such a registry would already contain.
+pub async fn scope_with<F>(held: HeldLocksSnapshot, fut: F) -> F::Output
+where
+    F: std::future::Future,
+{
+    let fut = Box::pin(fut);
+    if HELD_AGENT_LOCKS.try_with(|_| ()).is_ok() || HELD_SESSION_LOCKS.try_with(|_| ()).is_ok() {
+        return scope(fut).await;
+    }
+    HELD_AGENT_LOCKS
+        .scope(
+            Mutex::new(held.agents.into_iter().collect()),
+            HELD_SESSION_LOCKS.scope(Mutex::new(held.sessions.into_iter().collect()), fut),
+        )
+        .await
+}
+
 /// RAII guard: records that the current task holds `agent_msg_locks[agent_id]`
 /// for its lifetime, and removes the entry on drop.
 ///
@@ -460,5 +501,36 @@ mod tests {
             !other_task_saw_held,
             "a different task must never observe the holder task's held set"
         );
+    }
+
+    /// A WASM guest's host call runs off the holding task, so the snapshot taken on the task must make the nested turn see the outer turn's lock (#5125 for WASM agents).
+    #[test]
+    fn scope_with_reestablishes_a_snapshot_off_task() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let agent = AgentId::new();
+        let session = SessionId::new();
+        let snap = rt.block_on(scope(async move {
+            let _a = HeldLockGuard::register(agent);
+            let _s = HeldSessionLockGuard::register(session);
+            snapshot()
+        }));
+        assert_eq!(snap.agents, vec![agent]);
+        assert_eq!(snap.sessions, vec![session]);
+        // A fresh thread has no registry of its own, exactly like the blocking thread a guest runs on.
+        let seen = std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .build()
+                .unwrap();
+            let without = rt.block_on(async { is_held(agent) });
+            let with = rt.block_on(scope_with(snap, async move {
+                (is_held(agent), is_session_held(session))
+            }));
+            (without, with)
+        })
+        .join()
+        .unwrap();
+        assert_eq!(seen, (false, (true, true)));
     }
 }

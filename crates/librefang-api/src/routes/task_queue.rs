@@ -165,15 +165,17 @@ pub async fn task_queue_delete(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
     lang: Option<axum::Extension<RequestLanguage>>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
     let err_task_not_found = {
         let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
         t.t("api-error-task-not-found")
     };
     match state.kernel.task_delete(&id).await {
-        Ok(true) => (StatusCode::NO_CONTENT, Json(serde_json::json!(null))),
-        Ok(false) => ApiErrorResponse::not_found(err_task_not_found).into_json_tuple(),
-        Err(e) => map_kernel_op_err(e).into_json_tuple(),
+        Ok(true) => StatusCode::NO_CONTENT.into_response(),
+        Ok(false) => ApiErrorResponse::not_found(err_task_not_found)
+            .into_json_tuple()
+            .into_response(),
+        Err(e) => map_kernel_op_err(e).into_json_tuple().into_response(),
     }
 }
 

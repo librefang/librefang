@@ -225,6 +225,7 @@ async fn start_harness_with(users: Vec<HarnessUser<'_>>, script: ProviderScript)
         require_auth_for_reads: false,
         allow_no_auth: false,
         audit_log: Some(state.kernel.audit().clone()),
+        a2a_agents_path: None,
     };
 
     let app = Router::new()

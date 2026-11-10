@@ -517,6 +517,124 @@ impl LibreFangKernel {
                 .is_empty()
     }
 
+    /// Choose the model for one turn: the Stable-mode `pinned_model`, a `[model_router]` profile, or tier routing on the agent's `routing` / `[default_routing]`.
+    ///
+    /// Shared by `execute_llm_agent` and the streaming dispatch path so both run the same selection; the streaming path once skipped it entirely, so every dashboard chat and channel message ran on the manifest's base model.
+    pub(crate) fn apply_model_selection(
+        &self,
+        manifest: &mut librefang_types::agent::AgentManifest,
+        message: &str,
+        tools: &[librefang_types::tool::ToolDefinition],
+        cfg: &librefang_types::config::KernelConfig,
+    ) {
+        let is_stable = cfg.mode == librefang_types::config::KernelMode::Stable;
+
+        // Resolve both routers' candidates before choosing between them, so the precedence decision is a single explicit call rather than the shape of an if/else chain.
+        // Neither resolution makes an LLM call: the profile router scores heuristically against a cached catalog, and the tier config is a plain struct clone.
+        let routed_profile = if is_stable {
+            None
+        } else {
+            self.route_to_profile(manifest, message, cfg)
+        };
+        // Cloned rather than borrowed because the branches below mutate
+        // `manifest`, which `manifest.routing.as_ref()` would keep borrowed.
+        let tier_routing_config = if is_stable {
+            None
+        } else {
+            manifest
+                .routing
+                .clone()
+                .or_else(|| cfg.default_routing.clone())
+        };
+
+        let selection_path = model_selection_path(
+            is_stable,
+            routed_profile.is_some(),
+            tier_routing_config.is_some(),
+        );
+
+        if selection_path == ModelSelectionPath::Stable {
+            // In Stable mode: use pinned_model if set, otherwise default model
+            if let Some(ref pinned) = manifest.pinned_model {
+                info!(
+                    agent = %manifest.name,
+                    pinned_model = %pinned,
+                    "Stable mode: using pinned model"
+                );
+                manifest.model.model = pinned.clone();
+            }
+        } else if let (ModelSelectionPath::Profile, Some(profile)) =
+            (selection_path, routed_profile)
+        {
+            apply_routed_profile(&mut manifest.model, profile);
+        } else if let (ModelSelectionPath::Tier, Some(routing_config)) =
+            (selection_path, tier_routing_config)
+        {
+            let mut router = ModelRouter::new(routing_config.clone());
+            // Resolve aliases (e.g. "sonnet" -> "claude-sonnet-4-20250514") before scoring
+            router.resolve_aliases(&self.llm.model_catalog.load());
+            // Build a probe request to score complexity
+            let probe_model =
+                strip_provider_prefix(&manifest.model.model, &manifest.model.provider);
+            let echo_policy = self.lookup_reasoning_echo_policy(&probe_model);
+            let probe = CompletionRequest {
+                model: probe_model,
+                messages: std::sync::Arc::new(vec![librefang_types::message::Message::user(
+                    message,
+                )]),
+                tools: std::sync::Arc::new(tools.to_vec()),
+                max_tokens: manifest.model.effective_max_tokens(),
+                temperature: manifest.model.effective_temperature(),
+                system: Some(manifest.model.system_prompt.clone()),
+                thinking: None,
+                prompt_caching: false,
+                cache_ttl: None,
+                prompt_cache_strategy: None,
+                response_format: None,
+                timeout_secs: None,
+                extra_body: None,
+                agent_id: None,
+                session_id: None,
+                step_id: None,
+                reasoning_echo_policy: echo_policy,
+
+                ..Default::default()
+            };
+            let (complexity, routed_model) = router.select_model(&probe);
+            // Check if the routed model's provider has a valid API key.
+            // If not, keep the current (default) provider instead of switching to one the user hasn't configured.
+            let mut use_routed = true;
+            let cat = self.llm.model_catalog.load();
+            {
+                if let Some(entry) = cat.find_model(&routed_model) {
+                    if entry.provider != manifest.model.provider {
+                        let key_env = cfg.resolve_api_key_env(&entry.provider);
+                        if std::env::var(&key_env).is_err() {
+                            warn!(
+                                agent = %manifest.name,
+                                routed_model = %routed_model,
+                                provider = %entry.provider,
+                                "Model routing skipped — provider API key not configured, using default"
+                            );
+                            use_routed = false;
+                        }
+                    }
+                }
+            }
+            if use_routed {
+                info!(
+                    agent = %manifest.name,
+                    complexity = %complexity,
+                    routed_model = %routed_model,
+                    "Model routing applied"
+                );
+                let cat = self.llm.model_catalog.load();
+                let new_provider = cat.find_model(&routed_model).map(|e| e.provider.as_str());
+                apply_tier_routed_model(&mut manifest.model, &routed_model, new_provider);
+            }
+        }
+    }
+
     /// Pick a [`ModelProfile`](librefang_types::model_profile::ModelProfile)
     /// for this turn, or `None` to leave the agent's own model in place.
     ///
@@ -611,6 +729,38 @@ impl LibreFangKernel {
         Some(profile)
     }
 
+    /// Reject a turn when the agent is at or over a per-agent cost quota, announcing the enforcement as `SystemEvent::QuotaEnforced`.
+    ///
+    /// Every pre-dispatch per-agent quota check goes through here so the event cannot be forgotten at one site: the desktop app turns it into an OS notification, and `quota` system-keyword triggers match on it.
+    /// Sync because the streaming entry point is sync; the event goes to the bus and the trigger evaluator directly rather than through `publish_event`.
+    pub(crate) fn enforce_agent_cost_quota(
+        &self,
+        agent_id: AgentId,
+        quota: &librefang_types::agent::ResourceQuota,
+    ) -> KernelResult<()> {
+        let Some(breach) = self
+            .metering
+            .engine
+            .quota_breach(agent_id, quota)
+            .map_err(KernelError::LibreFang)?
+        else {
+            return Ok(());
+        };
+        use librefang_types::event::{Event, EventPayload, EventTarget, SystemEvent};
+        let event = Event::new(
+            agent_id,
+            EventTarget::System,
+            EventPayload::System(SystemEvent::QuotaEnforced {
+                agent_id,
+                spent: breach.spent,
+                limit: breach.limit,
+            }),
+        );
+        self.evaluate_lifecycle_triggers_sync(&event);
+        self.events.event_bus.publish_sync(event);
+        Err(KernelError::LibreFang(breach.into_error(agent_id)))
+    }
+
     /// Execute the default LLM-based agent loop.
     #[instrument(
         skip_all,
@@ -645,10 +795,7 @@ impl LibreFangKernel {
     ) -> KernelResult<AgentLoopResult> {
         let cfg = self.config.load_full();
         // Check metering quota before starting
-        self.metering
-            .engine
-            .check_quota(agent_id, &entry.manifest.resources)
-            .map_err(KernelError::LibreFang)?;
+        self.enforce_agent_cost_quota(agent_id, &entry.manifest.resources)?;
 
         // Sticky-flip: this is the single chokepoint for "agent processed a
         // real message" — any inbound message, channel event, autonomous
@@ -679,10 +826,11 @@ impl LibreFangKernel {
         // session_mode) yet was silently excluded from the reset policy.
         let (effective_session_id, session_freshly_minted) = if let Some(sid) = session_id_override
         {
+            // Column-only read: the ownership check needs the owner, not the decoded history, which is loaded once below.
             if let Some(existing) = self
                 .memory
                 .substrate
-                .get_session(sid)
+                .session_meta(sid)
                 .map_err(KernelError::LibreFang)?
             {
                 if existing.agent_id != agent_id {
@@ -1190,115 +1338,17 @@ impl LibreFangKernel {
             }
         }
 
-        let is_stable = cfg.mode == librefang_types::config::KernelMode::Stable;
+        // Stable-mode pinning, profile routing and tier routing, shared with the streaming path.
+        self.apply_model_selection(&mut manifest, message, &tools, &cfg);
 
-        // Resolve both routers' candidates before choosing between them, so
-        // the precedence decision is a single explicit call rather than the
-        // shape of an if/else chain. Neither resolution makes an LLM call:
-        // the profile router scores heuristically against a cached catalog,
-        // and the tier config is a plain struct clone.
-        let routed_profile = if is_stable {
-            None
-        } else {
-            self.route_to_profile(&manifest, message, &cfg)
-        };
-        // Cloned rather than borrowed because the branches below mutate
-        // `manifest`, which `manifest.routing.as_ref()` would keep borrowed.
-        let tier_routing_config = if is_stable {
-            None
-        } else {
-            manifest
-                .routing
-                .clone()
-                .or_else(|| cfg.default_routing.clone())
-        };
-
-        let selection_path = model_selection_path(
-            is_stable,
-            routed_profile.is_some(),
-            tier_routing_config.is_some(),
-        );
-
-        if selection_path == ModelSelectionPath::Stable {
-            // In Stable mode: use pinned_model if set, otherwise default model
-            if let Some(ref pinned) = manifest.pinned_model {
-                info!(
-                    agent = %manifest.name,
-                    pinned_model = %pinned,
-                    "Stable mode: using pinned model"
-                );
-                manifest.model.model = pinned.clone();
-            }
-        } else if let (ModelSelectionPath::Profile, Some(profile)) =
-            (selection_path, routed_profile)
-        {
-            apply_routed_profile(&mut manifest.model, profile);
-        } else if let (ModelSelectionPath::Tier, Some(routing_config)) =
-            (selection_path, tier_routing_config)
-        {
-            let mut router = ModelRouter::new(routing_config.clone());
-            // Resolve aliases (e.g. "sonnet" -> "claude-sonnet-4-20250514") before scoring
-            router.resolve_aliases(&self.llm.model_catalog.load());
-            // Build a probe request to score complexity
-            let probe_model =
-                strip_provider_prefix(&manifest.model.model, &manifest.model.provider);
-            let echo_policy = self.lookup_reasoning_echo_policy(&probe_model);
-            let probe = CompletionRequest {
-                model: probe_model,
-                messages: std::sync::Arc::new(vec![librefang_types::message::Message::user(
-                    message,
-                )]),
-                tools: std::sync::Arc::new(tools.clone()),
-                max_tokens: manifest.model.effective_max_tokens(),
-                temperature: manifest.model.effective_temperature(),
-                system: Some(manifest.model.system_prompt.clone()),
-                thinking: None,
-                prompt_caching: false,
-                cache_ttl: None,
-                prompt_cache_strategy: None,
-                response_format: None,
-                timeout_secs: None,
-                extra_body: None,
-                agent_id: None,
-                session_id: None,
-                step_id: None,
-                reasoning_echo_policy: echo_policy,
-
-                ..Default::default()
-            };
-            let (complexity, routed_model) = router.select_model(&probe);
-            // Check if the routed model's provider has a valid API key.
-            // If not, keep the current (default) provider instead of switching
-            // to one the user hasn't configured.
-            let mut use_routed = true;
-            let cat = self.llm.model_catalog.load();
-            {
-                if let Some(entry) = cat.find_model(&routed_model) {
-                    if entry.provider != manifest.model.provider {
-                        let key_env = cfg.resolve_api_key_env(&entry.provider);
-                        if std::env::var(&key_env).is_err() {
-                            warn!(
-                                agent = %manifest.name,
-                                routed_model = %routed_model,
-                                provider = %entry.provider,
-                                "Model routing skipped — provider API key not configured, using default"
-                            );
-                            use_routed = false;
-                        }
-                    }
-                }
-            }
-            if use_routed {
-                info!(
-                    agent = %manifest.name,
-                    complexity = %complexity,
-                    routed_model = %routed_model,
-                    "Model routing applied"
-                );
-                let cat = self.llm.model_catalog.load();
-                let new_provider = cat.find_model(&routed_model).map(|e| e.provider.as_str());
-                apply_tier_routed_model(&mut manifest.model, &routed_model, new_provider);
-            }
+        // An explicit session `/model` pick (#4898) wins over that selection, as on the streaming path; without this re-application, routing or a Stable `pinned_model` overwrote it here, so one session ran on different models depending on whether the turn came from the dashboard or from a channel, trigger, cron or `agent_send`.
+        // The application above stays so the thinking backfill reads the overridden model; applying it twice is idempotent.
+        if let Some(override_str) = session.model_override.as_deref() {
+            librefang_runtime::agent_loop::apply_session_model_override_to_manifest(
+                &mut manifest,
+                override_str,
+            )
+            .map_err(KernelError::LibreFang)?;
         }
 
         // Resolve this turn's inference parameters from the agent manifest and
@@ -1797,7 +1847,8 @@ impl LibreFangKernel {
             if let Err(e) = self
                 .memory
                 .substrate
-                .write_jsonl_mirror(&session, &workspace.join("sessions"))
+                .write_jsonl_mirror_async(session.clone(), workspace.join("sessions"))
+                .await
             {
                 warn!("Failed to write JSONL session mirror: {e}");
             }

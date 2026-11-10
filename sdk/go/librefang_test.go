@@ -2,6 +2,7 @@ package librefang
 
 import (
 	"errors"
+	"io"
 	"net/http"
 	"strings"
 	"testing"
@@ -60,5 +61,28 @@ func TestStreamReportsRequestConstructionError(t *testing.T) {
 	}
 	if _, ok := <-events; ok {
 		t.Fatal("stream emitted more than one request construction error")
+	}
+}
+
+func TestPathParametersArePercentEncodedAsOneSegment(t *testing.T) {
+	var gotPath string
+	client := New("http://daemon.invalid")
+	client.HTTP.Transport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		gotPath = req.URL.EscapedPath()
+		if req.URL.RawQuery != "" {
+			t.Fatalf("a path parameter leaked into the query string: %q", req.URL.RawQuery)
+		}
+		return &http.Response{
+			StatusCode: 200,
+			Body:       io.NopCloser(strings.NewReader("{}")),
+			Header:     make(http.Header),
+		}, nil
+	})
+
+	if _, err := client.Memory.GetAgentKvKey("agent 1", "prefs?v=2/../x"); err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	if want := "/api/memory/agents/agent%201/kv/prefs%3Fv=2%2F..%2Fx"; gotPath != want {
+		t.Fatalf("path = %q, want %q", gotPath, want)
 	}
 }

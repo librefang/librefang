@@ -1051,6 +1051,48 @@ fn test_record_soft_caps_in_memory_between_trims() {
 }
 
 #[test]
+fn test_record_soft_cap_drains_to_a_low_water_mark() {
+    // Draining to exactly the cap shifted the whole in-memory window on every append once the log was full, under the `entries` lock.
+    // The drain must leave headroom so the next appends do not touch the prefix at all.
+    let log = AuditLog::new();
+    log.set_max_in_memory_entries(200); // soft cap 300, low-water mark 270
+    for i in 0..301 {
+        log.record(
+            "agent-1",
+            AuditAction::RoleChange,
+            format!("event #{i}"),
+            "ok",
+        );
+    }
+    assert_eq!(
+        log.len(),
+        270,
+        "the first overflow drains to the low-water mark"
+    );
+    let anchor_after_drain = log.chain_anchor.lock().unwrap().clone();
+
+    for i in 301..331 {
+        log.record(
+            "agent-1",
+            AuditAction::RoleChange,
+            format!("event #{i}"),
+            "ok",
+        );
+    }
+    assert_eq!(log.len(), 300, "appends up to the cap evict nothing");
+    assert_eq!(
+        *log.chain_anchor.lock().unwrap(),
+        anchor_after_drain,
+        "no drain may run until the cap is exceeded again"
+    );
+
+    log.record("agent-1", AuditAction::RoleChange, "event #331", "ok");
+    assert_eq!(log.len(), 270);
+    assert!(log.verify_integrity().is_ok());
+    assert_eq!(log.recent(1)[0].detail, "event #331");
+}
+
+#[test]
 fn test_record_soft_cap_default_falls_back_to_hard_cap() {
     // When `max_in_memory_entries` is left unset (the `0` sentinel),
     // the record path falls back to `MAX_AUDIT_ENTRIES = 10_000`.

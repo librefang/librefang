@@ -75,17 +75,20 @@ def _raw_body_ct(op: dict, method: str) -> str:
         return ""
     return sorted(content)[0]
 
+# Every path parameter is percent-encoded as one path segment, the contract the Rust SDK (`path_segments_mut`) and the dashboard (`encodeURIComponent`) already follow.
+# A raw value containing `/`, `?`, `#`, `%` or a space — memory KV keys, model ids like `openrouter/deepseek/deepseek-chat`, backup filenames — would otherwise address a different route or leak into the query string.
+
 def _py_path(path: str) -> str:
-    """'/api/agents/{id}' → f-string body '/api/agents/{id}'"""
-    return path  # same syntax for Python f-strings
+    """'/api/agents/{id}' → f-string body '/api/agents/{quote(str(id), safe="")}'"""
+    return re.sub(r"\{(\w+)\}", r"{quote(str(\1), safe='')}", path)
 
 def _go_path(path: str) -> str:
-    """'/api/agents/{id}/sessions/{session_id}' → '/api/agents/%s/sessions/%s'"""
+    """'/api/agents/{id}/sessions/{session_id}' → '/api/agents/%s/sessions/%s' (arguments are wrapped in `url.PathEscape` by the caller)"""
     return re.sub(r"\{[^}]+\}", "%s", path)
 
 def _js_path(path: str) -> str:
-    """'/api/agents/{id}' → template literal body '/api/agents/${id}'"""
-    return re.sub(r"\{(\w+)\}", r"${\1}", path)
+    """'/api/agents/{id}' → template literal body '/api/agents/${encodeURIComponent(String(id))}'"""
+    return re.sub(r"\{(\w+)\}", r"${encodeURIComponent(String(\1))}", path)
 
 # Reserved identifiers by language — append trailing underscore to avoid collisions.
 _PY_RESERVED = {"class", "from", "import", "return", "lambda", "global", "None", "True", "False",
@@ -168,7 +171,7 @@ import sys
 from typing import Any, Dict, Generator, Optional
 from urllib.request import urlopen, Request
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlencode
+from urllib.parse import quote, urlencode
 
 DEFAULT_TIMEOUT = 30.0
 
@@ -199,7 +202,8 @@ class LibreFang:
         """Send a request. `content_type` sends `body` as raw bytes instead of JSON."""
         url = self.base_url + path
         if query:
-            filtered = {k: v for k, v in query.items() if v is not None}
+            # serde on the server accepts only `true` / `false`; `urlencode` would send Python's `True` / `False`.
+            filtered = {k: (("true" if v else "false") if isinstance(v, bool) else v) for k, v in query.items() if v is not None}
             if filtered:
                 url += ("&" if "?" in url else "?") + urlencode(filtered, doseq=True)
         headers = self._headers
@@ -229,7 +233,8 @@ class LibreFang:
         """SSE streaming — yields parsed JSON events."""
         url = self.base_url + path
         if query:
-            filtered = {k: v for k, v in query.items() if v is not None}
+            # serde on the server accepts only `true` / `false`; `urlencode` would send Python's `True` / `False`.
+            filtered = {k: (("true" if v else "false") if isinstance(v, bool) else v) for k, v in query.items() if v is not None}
             if filtered:
                 url += ("&" if "?" in url else "?") + urlencode(filtered, doseq=True)
         data = json.dumps(body).encode() if body is not None else None
@@ -818,7 +823,7 @@ def gen_go(tag_ops: dict) -> str:
             sig_args = ", ".join(go_params)
 
             go_path_fmt_str = _go_path(path)
-            fmt_args = "".join(f", {p}" for p in params)
+            fmt_args = "".join(f", url.PathEscape({p})" for p in params)
             path_expr = f'fmt.Sprintf("{go_path_fmt_str}"{fmt_args})' if params else f'"{path}"'
             body_arg = "data" if has_body else "nil"
             query_arg = "query" if query_params else "nil"

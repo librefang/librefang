@@ -201,10 +201,7 @@ impl LibreFangKernel {
         // attribution was right for reporting and absent for enforcement.
         // The parent's quota is the only one that means anything here.
         let parent_resources = parent.manifest.resources.clone();
-        self.metering
-            .engine
-            .check_quota(parent_id, &parent_resources)
-            .map_err(KernelError::LibreFang)?;
+        self.enforce_agent_cost_quota(parent_id, &parent_resources)?;
         self.metering
             .engine
             .check_global_budget(&self.current_budget())

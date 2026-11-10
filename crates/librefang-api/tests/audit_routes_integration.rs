@@ -112,6 +112,7 @@ fn build_audit_harness(api_key: &str, users: Vec<(&str, &str, &str)>) -> AuditHa
         // is what the tests assert).
         allow_no_auth: true,
         audit_log: Some(state.kernel.audit().clone()),
+        a2a_agents_path: None,
     };
 
     let app = Router::new()

@@ -99,6 +99,13 @@ impl EventBus {
     /// the payload (#3380). The bounded history ring stores the same
     /// `Arc<Event>`, so retention is also a refcount bump (#3385).
     pub async fn publish(&self, event: Event) {
+        self.publish_sync(event);
+    }
+
+    /// [`Self::publish`] for synchronous call sites such as `LibreFangKernel::shutdown`.
+    ///
+    /// Publishing never awaits: the history lock is a sync `parking_lot` mutex and every send is a non-blocking broadcast / unbounded send, so the async wrapper only exists for its callers' convenience.
+    pub fn publish_sync(&self, event: Event) {
         debug!(
             event_id = %event.id,
             source = %event.source,

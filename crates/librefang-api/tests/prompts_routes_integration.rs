@@ -398,13 +398,8 @@ async fn list_experiments_rejects_non_uuid_agent_id() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn create_experiment_with_unknown_agent_surfaces_store_error() {
-    // The experiments table has FK constraints on the agent. Posting an
-    // experiment for an agent_id that has no rows in the agents/prompt
-    // store yields a 500 with the FK violation surfaced through the
-    // structured error envelope. This pins the contract that the route
-    // does NOT panic on store failure and that the bad_request path is
-    // distinguishable (4xx) from the store-failure path (5xx).
+async fn create_experiment_with_unversioned_variants_is_rejected() {
+    // Variants posted without a `prompt_version_id` default to the nil UUID; completing such an experiment would deactivate the agent's prompt and activate nothing, so the route rejects it as a 400 with the structured error envelope before the store is touched.
     let h = boot().await;
     let path = format!("/api/agents/{AGENT_UUID}/prompts/experiments");
     let (status, body) = json_request(
@@ -420,7 +415,6 @@ async fn create_experiment_with_unknown_agent_surfaces_store_error() {
         })),
     )
     .await;
-    // Variants without a `prompt_version_id` default to the nil UUID; completing such an experiment would deactivate the agent's prompt and activate nothing, so the route rejects it before the store is touched.
     assert_eq!(status, StatusCode::BAD_REQUEST, "body={body:?}");
     assert!(body.get("error").is_some(), "error envelope: {body:?}");
 }

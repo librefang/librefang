@@ -1027,10 +1027,12 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
     }
 
     async fn list_agents(&self) -> Result<Vec<(AgentId, String)>, String> {
+        // The bridge calls this on per-message paths (unbound-message routing fallback, `prefix_agent_name` reply resolution), and only projects `(id, name)`.
+        // `list_arcs` hands back pointer clones in the same name order, where `list` deep-cloned every manifest first.
         Ok(self
             .kernel
             .agent_registry()
-            .list()
+            .list_arcs()
             .iter()
             .filter(|e| !e.is_hand)
             .map(|e| (e.id, e.name.clone()))

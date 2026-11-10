@@ -757,6 +757,50 @@ async fn config_set_writes_allowlisted_path_to_tempdir_toml() {
     assert_eq!(audit.outcome, response_status);
 }
 
+/// A channel edit through `POST /api/config/set` must rebuild the channel bridge, exactly as `POST /api/config/reload` and the file watcher do.
+///
+/// The kernel's `ReloadChannels` arm clears every registered adapter, and only `reload_channels_from_disk` starts them again.
+/// `config_set` used to skip that call, and the file watcher then saw an already-applied file, got an empty plan, and never rebuilt either, so channels stayed down until restart.
+/// `AppState::channels_config` is written only by that rebuild, so it is the observable trace of the bridge restart here.
+#[tokio::test(flavor = "multi_thread")]
+async fn config_set_on_a_channel_field_rebuilds_the_channel_bridge() {
+    let h = boot_router_with_api_key(API_KEY).await;
+    let before = h.state.channels_config.read().await.file_download_max_bytes;
+    let target = before + 4096;
+
+    let (status, body) = send(
+        h.app.clone(),
+        auth_post_json(
+            "/api/config/set",
+            serde_json::json!({"path": "channels.file_download_max_bytes", "value": target}),
+        ),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "body: {}",
+        String::from_utf8_lossy(&body)
+    );
+    let response: serde_json::Value = serde_json::from_slice(&body).expect("response is JSON");
+    assert_eq!(response["status"], "applied", "response: {response}");
+    assert!(
+        response.get("warnings").is_none(),
+        "the bridge rebuild must succeed: {response}"
+    );
+
+    assert_eq!(
+        h.state.kernel.config_ref().channels.file_download_max_bytes,
+        target,
+        "the kernel must have swapped the channel edit in"
+    );
+    assert_eq!(
+        h.state.channels_config.read().await.file_download_max_bytes,
+        target,
+        "config_set must restart the channel bridge from the new config, not leave the adapters the kernel cleared down"
+    );
+}
+
 /// `POST /api/config/set` with `value: null` on a single-segment path must
 /// state the field's compiled default, not drop the key.
 ///

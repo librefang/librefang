@@ -883,6 +883,10 @@ jobs:
             --ignore RUSTSEC-2026-0367 \
             --ignore RUSTSEC-2026-0368 \
             --ignore RUSTSEC-2026-0369 \
+            --ignore RUSTSEC-2026-0391 \
+            --ignore RUSTSEC-2026-0398 \
+            --ignore RUSTSEC-2026-0403 \
+            --ignore RUSTSEC-2026-0410 \
             --web
 
   # ── Secrets scanning (independent) ─────────────────────────────────────────────

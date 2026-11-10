@@ -230,16 +230,39 @@ impl ContextEngine for SidecarContextEngine {
         context_window_tokens: usize,
         reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy,
     ) -> LibreFangResult<CompactionResult> {
+        self.compact_with_config(
+            agent_id,
+            messages,
+            driver,
+            model,
+            context_window_tokens,
+            reasoning_echo_policy,
+            None,
+        )
+        .await
+    }
+
+    async fn compact_with_config(
+        &self,
+        agent_id: AgentId,
+        messages: &[Message],
+        driver: Arc<dyn LlmDriver>,
+        model: &str,
+        context_window_tokens: usize,
+        reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy,
+        compaction: Option<&crate::compactor::CompactionConfig>,
+    ) -> LibreFangResult<CompactionResult> {
         // LLM-bearing: the driver cannot cross the process boundary, so
         // compaction stays in Rust.
         self.inner
-            .compact(
+            .compact_with_config(
                 agent_id,
                 messages,
                 driver,
                 model,
                 context_window_tokens,
                 reasoning_echo_policy,
+                compaction,
             )
             .await
     }

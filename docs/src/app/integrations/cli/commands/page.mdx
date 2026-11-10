@@ -378,6 +378,10 @@ librefang hand check-deps <NAME>
 librefang hand check-deps clip
 ```
 
+**Exit code:** prints the daemon's readiness report as JSON, then exits `1` when any required (non-optional) dependency is missing, so the command can gate a script.
+An unmet optional dependency does not block activation and still exits `0`.
+It also exits `1` when the daemon is unreachable or the check request itself fails.
+
 ---
 
 ### librefang hand install-deps \<name\>
@@ -399,6 +403,10 @@ librefang hand install-deps <NAME>
 ```bash
 librefang hand install-deps clip
 ```
+
+**Exit code:** after the install pass the command re-checks readiness, reports every dependency that failed to install or is still missing, and exits `1` only when a required (non-optional) dependency is still missing.
+A failed install of an optional dependency is reported but exits `0`, since the hand can still be activated.
+It also exits `1` when the daemon is unreachable or the install request itself fails.
 
 ---
 

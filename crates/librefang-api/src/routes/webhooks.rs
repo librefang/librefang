@@ -33,6 +33,120 @@ fn webhook_internal_error(error: impl std::fmt::Display) -> ApiErrorResponse {
     ApiErrorResponse::internal_scrub(error)
 }
 
+/// Per-IP GCRA limiters for the external-trigger endpoints, one per configured `webhook_triggers.rate_limit_per_minute` value.
+///
+/// The handlers read the rate from the live config on every request, so a reloaded rate selects (or builds) its own limiter on the next request instead of waiting for a restart.
+/// Keying by rate rather than holding a single slot also keeps two kernels with different rates in one process (the integration-test binaries) from resetting each other's buckets.
+static TRIGGER_RATE_LIMITERS: std::sync::LazyLock<
+    dashmap::DashMap<u32, Arc<crate::rate_limiter::KeyedRateLimiter>>,
+> = std::sync::LazyLock::new(dashmap::DashMap::new);
+
+/// Tracked source addresses beyond which a limiter drops idle keys, so a scan from many addresses cannot grow it without bound.
+const TRIGGER_LIMITER_SWEEP_THRESHOLD: usize = 10_000;
+
+/// Has `ip` exhausted the documented per-IP budget of `per_minute` trigger requests?
+///
+/// `0` means no per-IP cap; the global GCRA budget still applies.
+fn trigger_rate_limited(per_minute: u32, ip: std::net::IpAddr) -> bool {
+    if per_minute == 0 {
+        return false;
+    }
+    let limiter = TRIGGER_RATE_LIMITERS
+        .entry(per_minute)
+        .or_insert_with(|| crate::rate_limiter::create_rate_limiter(per_minute))
+        .clone();
+    if limiter.len() > TRIGGER_LIMITER_SWEEP_THRESHOLD {
+        limiter.retain_recent();
+    }
+    limiter.check_key(&ip).is_err()
+}
+
+/// Resolve the caller's IP the same way the global rate limiter does: the TCP peer, or the forwarded client address when the peer is an allow-listed proxy.
+fn trigger_client_ip(
+    state: &AppState,
+    peer: Option<&axum::Extension<axum::extract::ConnectInfo<std::net::SocketAddr>>>,
+    headers: &axum::http::HeaderMap,
+) -> std::net::IpAddr {
+    let peer_ip = peer
+        .map(|ci| ci.0 .0.ip())
+        .unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED));
+    crate::client_ip::resolve_real_client_ip(
+        peer_ip,
+        headers,
+        &state.trusted_proxies,
+        state.trust_forwarded_for,
+    )
+}
+
+/// `429 Too Many Requests` for a caller over the per-IP trigger budget, with a `Retry-After` of one quota window.
+fn trigger_rate_limited_response() -> axum::response::Response {
+    let mut resp = ApiErrorResponse {
+        error: "Webhook trigger rate limit exceeded".to_string(),
+        code: Some("rate_limited".to_string()),
+        r#type: Some("rate_limited".to_string()),
+        details: None,
+        request_id: None,
+        status: StatusCode::TOO_MANY_REQUESTS,
+    }
+    .into_response();
+    resp.headers_mut().insert(
+        axum::http::header::RETRY_AFTER,
+        axum::http::HeaderValue::from_static("60"),
+    );
+    resp
+}
+
+/// `Json<T>` for the external-trigger endpoints, capped at the live `webhook_triggers.max_payload_bytes`.
+///
+/// The wire-level `RequestBodyLimitLayer` in [`router`] is sized once, when the router is built, so a reloaded smaller cap would otherwise keep accepting bodies up to the boot-time value while the reload reported the change as applied.
+/// This extractor reads the cap from the live config on every request and answers 413 for a body over it, before deserializing.
+/// The boot-time layer still bounds the read (so buffering the body here costs no more memory than it did before), which also means a cap raised above the value the router was built with takes effect only after a restart.
+pub struct TriggerJson<T>(pub T);
+
+impl<T> axum::extract::FromRequest<Arc<AppState>> for TriggerJson<T>
+where
+    T: serde::de::DeserializeOwned + 'static,
+{
+    type Rejection = axum::response::Response;
+
+    async fn from_request(
+        req: axum::extract::Request,
+        state: &Arc<AppState>,
+    ) -> Result<Self, Self::Rejection> {
+        let cap = state
+            .kernel
+            .config_ref()
+            .webhook_triggers
+            .as_ref()
+            .map(|c| c.max_payload_bytes)
+            .unwrap_or(64 * 1024);
+        let (parts, body) = req.into_parts();
+        let mut body_req = axum::extract::Request::new(body);
+        *body_req.extensions_mut() = parts.extensions;
+        let bytes = axum::body::Bytes::from_request(body_req, state)
+            .await
+            .map_err(IntoResponse::into_response)?;
+        if bytes.len() > cap {
+            return Err(ApiErrorResponse {
+                error: format!("Webhook payload exceeds max_payload_bytes ({cap})"),
+                code: Some("payload_too_large".to_string()),
+                r#type: Some("payload_too_large".to_string()),
+                details: None,
+                request_id: None,
+                status: StatusCode::PAYLOAD_TOO_LARGE,
+            }
+            .into_response());
+        }
+        // `Json` reads only the headers (content-type) and the body, so the rebuilt request keeps its rejection semantics.
+        let mut json_req = axum::extract::Request::new(axum::body::Body::from(bytes));
+        *json_req.headers_mut() = parts.headers;
+        match Json::<T>::from_request(json_req, state).await {
+            Ok(Json(value)) => Ok(Self(value)),
+            Err(rejection) => Err(rejection.into_response()),
+        }
+    }
+}
+
 /// Build webhook subscription routes.
 ///
 /// `trigger_body_limit` sizes a wire-level `RequestBodyLimitLayer` on the
@@ -107,7 +221,8 @@ pub async fn webhook_wake(
     State(state): State<Arc<AppState>>,
     headers: axum::http::HeaderMap,
     lang: Option<axum::Extension<RequestLanguage>>,
-    Json(body): Json<librefang_types::webhook::WakePayload>,
+    peer: Option<axum::Extension<axum::extract::ConnectInfo<std::net::SocketAddr>>>,
+    TriggerJson(body): TriggerJson<librefang_types::webhook::WakePayload>,
 ) -> axum::response::Response {
     let (err_webhook_not_enabled, err_invalid_token) = {
         let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
@@ -125,6 +240,14 @@ pub async fn webhook_wake(
             return ApiErrorResponse::not_found(err_webhook_not_enabled).into_response();
         }
     };
+
+    // The documented per-IP cap runs before the token check, so it also bounds token guessing.
+    if trigger_rate_limited(
+        wh_config.rate_limit_per_minute,
+        trigger_client_ip(&state, peer.as_ref(), &headers),
+    ) {
+        return trigger_rate_limited_response();
+    }
 
     // Validate bearer token (constant-time comparison). Invalid token is
     // an authentication failure, not a malformed request — return 401 with
@@ -204,7 +327,8 @@ pub async fn webhook_agent(
     State(state): State<Arc<AppState>>,
     headers: axum::http::HeaderMap,
     lang: Option<axum::Extension<RequestLanguage>>,
-    Json(body): Json<librefang_types::webhook::AgentHookPayload>,
+    peer: Option<axum::Extension<axum::extract::ConnectInfo<std::net::SocketAddr>>>,
+    TriggerJson(body): TriggerJson<librefang_types::webhook::AgentHookPayload>,
 ) -> axum::response::Response {
     let (err_webhook_not_enabled, err_invalid_token, err_no_agents) = {
         let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
@@ -223,6 +347,14 @@ pub async fn webhook_agent(
             return ApiErrorResponse::not_found(err_webhook_not_enabled).into_response();
         }
     };
+
+    // The documented per-IP cap runs before the token check, so it also bounds token guessing.
+    if trigger_rate_limited(
+        wh_config.rate_limit_per_minute,
+        trigger_client_ip(&state, peer.as_ref(), &headers),
+    ) {
+        return trigger_rate_limited_response();
+    }
 
     // Validate bearer token (#3509: 401 + WWW-Authenticate, not 400).
     if !validate_webhook_token(&headers, &wh_config.token_env) {
@@ -527,16 +659,18 @@ pub async fn update_event_webhook(
 pub async fn delete_event_webhook(
     Path(id): Path<String>,
     lang: Option<axum::Extension<RequestLanguage>>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
     let err_webhook_not_found = {
         let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
         t.t("api-error-webhook-not-found")
     };
     let mut store = EVENT_WEBHOOKS.write().await;
     if store.remove(&id).is_some() {
-        (StatusCode::NO_CONTENT, Json(serde_json::json!(null)))
+        StatusCode::NO_CONTENT.into_response()
     } else {
-        ApiErrorResponse::not_found(err_webhook_not_found).into_json_tuple()
+        ApiErrorResponse::not_found(err_webhook_not_found)
+            .into_json_tuple()
+            .into_response()
     }
 }
 
@@ -716,7 +850,7 @@ pub async fn delete_webhook(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
     lang: Option<axum::Extension<RequestLanguage>>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
     // Resolve translated messages before the `.await`; `ErrorTranslator` is
     // `!Send` and must be dropped first (see CLAUDE.md).
     let (err_invalid_id, err_not_found) = {
@@ -730,12 +864,16 @@ pub async fn delete_webhook(
         Ok(uuid) => {
             let wh_id = crate::webhook_store::WebhookId(uuid);
             if state.webhook_store.delete(wh_id).await {
-                (StatusCode::NO_CONTENT, Json(serde_json::json!(null)))
+                StatusCode::NO_CONTENT.into_response()
             } else {
-                ApiErrorResponse::not_found(err_not_found).into_json_tuple()
+                ApiErrorResponse::not_found(err_not_found)
+                    .into_json_tuple()
+                    .into_response()
             }
         }
-        Err(_) => ApiErrorResponse::bad_request(err_invalid_id).into_json_tuple(),
+        Err(_) => ApiErrorResponse::bad_request(err_invalid_id)
+            .into_json_tuple()
+            .into_response(),
     }
 }
 

@@ -386,6 +386,10 @@ pub trait KernelApi: KernelHandle + Send + Sync {
     /// directly so the side-state map does not leak across the daemon's
     /// lifetime. Returns every session id actually removed.
     async fn delete_session(&self, session_id: SessionId) -> KernelResult<Vec<SessionId>>;
+    /// Run the `[session] retention_days` policy, dropping process-local state for every session removed. Returns the count removed.
+    fn prune_expired_sessions(&self, retention_days: u32) -> KernelResult<u64>;
+    /// Run the `[session] max_sessions_per_agent` policy, dropping process-local state for every session removed. Returns the count removed.
+    fn prune_excess_sessions(&self, max_per_agent: u32) -> KernelResult<u64>;
     fn list_agent_sessions(&self, agent_id: AgentId) -> KernelResult<Vec<serde_json::Value>>;
     fn create_agent_session(
         &self,
@@ -1300,6 +1304,12 @@ impl KernelApi for LibreFangKernel {
     }
     async fn delete_session(&self, session_id: SessionId) -> KernelResult<Vec<SessionId>> {
         Self::delete_session(self, session_id).await
+    }
+    fn prune_expired_sessions(&self, retention_days: u32) -> KernelResult<u64> {
+        Self::prune_expired_sessions(self, retention_days)
+    }
+    fn prune_excess_sessions(&self, max_per_agent: u32) -> KernelResult<u64> {
+        Self::prune_excess_sessions(self, max_per_agent)
     }
     fn list_agent_sessions(&self, agent_id: AgentId) -> KernelResult<Vec<serde_json::Value>> {
         Self::list_agent_sessions(self, agent_id)

@@ -466,6 +466,14 @@ pub(super) async fn tool_file_write(
         .as_str()
         .ok_or(ToolError::MissingParameter("path"))?;
     let resolved = resolve_path(raw_path, workspace_root, additional_roots)?;
+    if let Some(root) = workspace_root {
+        crate::workspace_sandbox::deny_own_manifest_write(&resolved, root).map_err(|reason| {
+            ToolError::InvalidParameter {
+                name: "path",
+                reason,
+            }
+        })?;
+    }
     let content = input["content"]
         .as_str()
         .ok_or(ToolError::MissingParameter("content"))?;
@@ -921,5 +929,35 @@ mod toolerror_tests {
             .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
             .collect();
         assert_eq!(names, ["sub"]);
+    }
+
+    // The workspace root holds the agent's persisted manifest, which boot adopts when it differs from the database, so file_write must not reach it under any spelling.
+    #[tokio::test]
+    async fn file_write_refuses_own_manifest() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("agent.toml"), "name = \"a\"\n").unwrap();
+        for path in ["agent.toml", "./AGENT.toml"] {
+            let r = tool_file_write(
+                &json!({"path": path, "content": "[capabilities]\nshell = [\"*\"]\n"}),
+                Some(dir.path()),
+                &[],
+            )
+            .await;
+            assert!(
+                matches!(r, Err(ToolError::InvalidParameter { name: "path", .. })),
+                "{path}: {r:?}"
+            );
+        }
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("agent.toml")).unwrap(),
+            "name = \"a\"\n"
+        );
+        tool_file_write(
+            &json!({"path": "sub/agent.toml", "content": "name = \"b\"\n"}),
+            Some(dir.path()),
+            &[],
+        )
+        .await
+        .unwrap();
     }
 }

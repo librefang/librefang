@@ -198,6 +198,41 @@ impl ChannelBindingStore {
         Ok(n as usize)
     }
 
+    // --- agent rename -------------------------------------------------------
+
+    /// Move every binding that names `old_name` over to `new_name`, returning `(conversation_bindings, instance_defaults)` rows moved.
+    ///
+    /// Both tables store the agent's name, so without this a rename strands every `/agent` binding on a name that resolves to nothing, or later to an unrelated agent created under the old name.
+    /// Config-seeded instance defaults (`bound_by = 'config'`) are left alone: config is their source of truth and re-seeds them at boot, so the operator renames those in config.
+    /// Both UPDATEs run in one transaction so a dispatch never observes half a rename.
+    pub fn rename_agent(&self, old_name: &str, new_name: &str) -> LibreFangResult<(usize, usize)> {
+        let c = self.pool.get().map_err(LibreFangError::memory)?;
+        let tx = c.unchecked_transaction().map_err(|e| {
+            LibreFangError::memory_msg(format!("channel binding rename failed: {e}"))
+        })?;
+        let conversations = tx
+            .execute(
+                "UPDATE conversation_bindings SET agent_name = ?2 WHERE agent_name = ?1",
+                rusqlite::params![old_name, new_name],
+            )
+            .map_err(|e| {
+                LibreFangError::memory_msg(format!("conversation binding rename failed: {e}"))
+            })?;
+        let defaults = tx
+            .execute(
+                "UPDATE channel_instance_defaults SET agent_name = ?2
+                 WHERE agent_name = ?1 AND bound_by != 'config'",
+                rusqlite::params![old_name, new_name],
+            )
+            .map_err(|e| {
+                LibreFangError::memory_msg(format!("channel instance default rename failed: {e}"))
+            })?;
+        tx.commit().map_err(|e| {
+            LibreFangError::memory_msg(format!("channel binding rename failed: {e}"))
+        })?;
+        Ok((conversations, defaults))
+    }
+
     // --- the two-level dispatch lookup --------------------------------------
 
     /// Resolve the agent name bound to `(instance, conversation_id)`: the per-conversation override wins, falling back to the instance default, then `None` (the bridge falls through to its legacy chain).
@@ -236,6 +271,42 @@ mod tests {
             crate::migration::run_migrations(&conn).unwrap();
         }
         ChannelBindingStore::new(pool)
+    }
+
+    /// A rename must carry `/agent` bindings and runtime-set defaults to the new name, but leave config-seeded defaults for config to own (persistence-4).
+    #[test]
+    fn rename_agent_moves_bindings_but_not_config_defaults() {
+        let store = in_memory_store();
+        store
+            .set_conversation_binding("tg-bot", "chat-1", "support", "user:1")
+            .unwrap();
+        store
+            .set_conversation_binding("tg-bot", "chat-2", "other", "user:2")
+            .unwrap();
+        store
+            .set_instance_default("slack-bot", "support", "api")
+            .unwrap();
+        store.seed_instance_default("tg-bot", "support").unwrap();
+
+        assert_eq!(store.rename_agent("support", "helpdesk").unwrap(), (1, 1));
+
+        assert_eq!(
+            store.resolve("tg-bot", "chat-1").unwrap().as_deref(),
+            Some("helpdesk")
+        );
+        assert_eq!(
+            store.resolve("tg-bot", "chat-2").unwrap().as_deref(),
+            Some("other")
+        );
+        assert_eq!(
+            store.instance_default("slack-bot").unwrap().as_deref(),
+            Some("helpdesk")
+        );
+        assert_eq!(
+            store.instance_default("tg-bot").unwrap().as_deref(),
+            Some("support"),
+            "config-seeded defaults are re-seeded from config, so the rename must not touch them"
+        );
     }
 
     #[test]

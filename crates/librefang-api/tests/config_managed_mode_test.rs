@@ -667,3 +667,40 @@ async fn add_mcp_server_stays_writable_in_managed_mode_under_the_db_store() {
         "and it must not have written config.toml either — that is what makes the exemption sound"
     );
 }
+
+/// `POST /api/restore` writes the archive's `config.toml` unless the caller keeps its own config or restores only other components, so in managed mode it is refused before the archive is even looked up.
+#[tokio::test(flavor = "multi_thread")]
+async fn restore_that_touches_config_is_locked_in_managed_mode() {
+    let _guard = ManagedModeGuard::set().await;
+
+    let h = boot_router_with_api_key(API_KEY).await;
+    let config_path = h.home.join("config.toml");
+    let seed = format!("api_key = \"{API_KEY}\"\n");
+    std::fs::write(&config_path, &seed).expect("seed config.toml");
+
+    for body in [
+        serde_json::json!({"filename": "librefang_backup_missing.zip"}),
+        serde_json::json!({"filename": "librefang_backup_missing.zip", "components": ["config", "agents"]}),
+    ] {
+        let (status, resp) = send(h.app.clone(), auth_post_json("/api/restore", body)).await;
+        assert_managed_refusal(status, &resp);
+    }
+    assert_eq!(
+        std::fs::read_to_string(&config_path).expect("config.toml still readable"),
+        seed
+    );
+
+    // A restore that leaves config.toml alone is not a config write, so it reaches the archive lookup (404 for the missing file) instead of the managed-mode refusal.
+    for body in [
+        serde_json::json!({"filename": "librefang_backup_missing.zip", "keep_config": true}),
+        serde_json::json!({"filename": "librefang_backup_missing.zip", "components": ["agents"]}),
+    ] {
+        let (status, resp) = send(h.app.clone(), auth_post_json("/api/restore", body)).await;
+        assert_eq!(
+            status,
+            StatusCode::NOT_FOUND,
+            "{}",
+            String::from_utf8_lossy(&resp)
+        );
+    }
+}
