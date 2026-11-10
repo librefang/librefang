@@ -77,6 +77,11 @@ max_retrieve = 10               # Max memories per retrieval
 # duplicate_threshold = 0.5
 # max_memories_per_agent = 1000
 
+# ── Artifacts (file delivery) ────────────────────────────────
+# [artifacts]
+# retention_days = 90              # Days a delivered file version is kept (0 = unlimited)
+# blob_dir = "/home/me/.librefang/artifacts"  # Defaults to <home>/artifacts
+
 # ── Web Tools ────────────────────────────────────────────────
 [web]
 search_provider = "auto"        # Tavily → Brave → Jina → Perplexity → DuckDuckGo (auto-detect)
