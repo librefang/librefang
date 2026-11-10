@@ -434,6 +434,8 @@ config-test-unverified = 검증할 수 없음 (정상 동작할 수도 있음)
 
 # --- Hand commands ---
 hand-install-deps-success = 핸드 '{ $id }'의 의존성이 설치되었습니다.
+hand-install-deps-dep-failed = { $key } (상태: { $status }): { $message }
+hand-install-deps-dep-still-missing = { $key }: 필수 의존성이 아직 없습니다
 hand-paused = 핸드 인스턴스 '{ $label } (instance: { $instance_id })'가 일시 중지되었습니다.
 hand-resumed = 핸드 인스턴스 '{ $label } (instance: { $instance_id })'가 재개되었습니다.
 

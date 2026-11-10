@@ -447,6 +447,8 @@ config-test-unverified = не вдалося підтвердити (може в
 
 # --- Hand commands ---
 hand-install-deps-success = Залежності для Hands '{ $id }' встановлено.
+hand-install-deps-dep-failed = { $key } (статус: { $status }): { $message }
+hand-install-deps-dep-still-missing = { $key }: обов'язкова залежність досі відсутня
 hand-paused = Екземпляр Hands '{ $label } (екземпляр: { $instance_id })' призупинено.
 hand-resumed = Екземпляр Hands '{ $label } (екземпляр: { $instance_id })' відновлено.
 

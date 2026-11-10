@@ -95,6 +95,32 @@ describe("PromptsExperimentsPanel", () => {
     expect(tabs).toHaveLength(2);
   });
 
+  // Issue #8597 — the nested tablist had a roving tabindex but no arrow keys,
+  // so the second tab was keyboard-unreachable.
+  it("moves selection, tab stop and focus between the tabs with the arrow keys", () => {
+    render(<PromptsExperimentsPanel agentId="agent-1" />);
+
+    const tabs = screen.getAllByRole("tab");
+    expect(tabs[0]).toHaveAttribute("aria-selected", "true");
+    expect(tabs[0].tabIndex).toBe(0);
+    expect(tabs[1].tabIndex).toBe(-1);
+    tabs[0].focus();
+
+    fireEvent.keyDown(tabs[0], { key: "ArrowRight" });
+
+    const after = screen.getAllByRole("tab");
+    expect(after[1]).toHaveAttribute("aria-selected", "true");
+    expect(after[1].tabIndex).toBe(0);
+    expect(after[0].tabIndex).toBe(-1);
+    expect(document.activeElement).toBe(after[1]);
+
+    fireEvent.keyDown(after[1], { key: "ArrowLeft" });
+
+    const back = screen.getAllByRole("tab");
+    expect(back[0]).toHaveAttribute("aria-selected", "true");
+    expect(document.activeElement).toBe(back[0]);
+  });
+
   it("requires confirmation before deleting a prompt version", async () => {
     const user = userEvent.setup();
     const mutateAsync = vi.fn().mockResolvedValue(undefined);

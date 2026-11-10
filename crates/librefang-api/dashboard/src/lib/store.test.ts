@@ -42,6 +42,39 @@ describe("UI store persistence", () => {
     expect(state.hiddenModelKeys).toEqual(["valid"]);
   });
 
+  it("sanitizes a malformed current-version record on rehydrate too", async () => {
+    const { useUIStore } = await import("./store");
+
+    // `migrate` is only called when the stored version differs from
+    // `UI_STORE_VERSION`, so without `merge` a record claiming the current
+    // version is shallow-merged in as-is. Both shapes below reach the Chat
+    // page: `null` is indexed for the selected agent, and a string value
+    // reaches the tab strip's `.map`.
+    localStorage.setItem(
+      "librefang-ui-storage",
+      JSON.stringify({ version: 1, state: { theme: "light", openChatTabs: null } }),
+    );
+    await useUIStore.persist.rehydrate();
+    expect(useUIStore.getState().openChatTabs).toEqual({});
+    // The sanitizer keeps everything it can still read.
+    expect(useUIStore.getState().theme).toBe("light");
+
+    localStorage.setItem(
+      "librefang-ui-storage",
+      JSON.stringify({
+        version: 1,
+        state: {
+          openChatTabs: { "agent-a": "not-an-array", "agent-b": ["ok", 42] },
+          chatTabRecency: { "agent-b": ["stale", "ok"] },
+        },
+      }),
+    );
+    await useUIStore.persist.rehydrate();
+    expect(useUIStore.getState().openChatTabs).toEqual({ "agent-b": ["ok"] });
+    // Recency drops the ids no longer open for that agent, as on migration.
+    expect(useUIStore.getState().chatTabRecency).toEqual({ "agent-b": ["ok"] });
+  });
+
   it("syncs i18n after persisted language rehydration", async () => {
     localStorage.setItem(
       "librefang-ui-storage",

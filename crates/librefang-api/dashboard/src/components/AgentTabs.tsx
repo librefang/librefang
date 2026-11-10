@@ -1,4 +1,12 @@
+import { useMemo } from "react";
 import type { LucideIcon } from "lucide-react";
+import { useRovingTabs } from "../lib/useRovingTabs";
+
+/**
+ * DOM id of one tab in a bar wired to `panelId`; the panel's
+ * `aria-labelledby` points at the id of whichever tab is selected (#8597).
+ */
+export const agentTabDomId = (panelId: string, id: string) => `${panelId}-tab-${id}`;
 
 /**
  * One tab of an agent surface: an id to switch on, the label to show, and the
@@ -37,6 +45,7 @@ export function AgentTabBar<Id extends string>({
   ariaLabel,
   variant = "underline",
   className = "",
+  panelId,
 }: {
   tabs: ReadonlyArray<AgentTabDef<Id>>;
   active: Id;
@@ -45,8 +54,16 @@ export function AgentTabBar<Id extends string>({
   ariaLabel: string;
   variant?: "underline" | "pill";
   className?: string;
+  /**
+   * DOM id of the panel this bar switches. When set, each tab links to it
+   * with `aria-controls` and carries the id the panel's `aria-labelledby`
+   * reads (#8597).
+   */
+  panelId?: string;
 }) {
   const isUnderline = variant === "underline";
+  const ids = useMemo(() => tabs.map((tab) => tab.id), [tabs]);
+  const tabNav = useRovingTabs({ ids, activeId: active, onSelect });
   return (
     <div
       role="tablist"
@@ -69,8 +86,12 @@ export function AgentTabBar<Id extends string>({
             key={tab.id}
             type="button"
             role="tab"
+            id={panelId ? agentTabDomId(panelId, tab.id) : undefined}
             aria-selected={selected}
+            aria-controls={panelId}
+            tabIndex={tabNav.tabIndexFor(tab.id)}
             onClick={() => onSelect(tab.id)}
+            onKeyDown={(event) => tabNav.onKeyDown(event, tab.id)}
             className={
               isUnderline
                 ? `px-3 py-2 text-[12.5px] flex items-center gap-1.5 border-b-2 -mb-px shrink-0 transition-colors cursor-pointer ${

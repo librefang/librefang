@@ -105,7 +105,7 @@ vi.mock("../lib/queries/agents", () => ({
       queryFn: () => Promise.resolve(AGENTS.find((a) => a.id === id) ?? AGENTS[0]),
     }),
   },
-  // The dialog's own candidate list — an array, as `listAgents` returns.
+  // The dialog's own candidate list — an array, as `useAgents().data` returns.
   useAgents: () => ({ data: AGENTS, isLoading: false, isError: false }),
   useAgentEvents: () => ({ data: [], isLoading: false }),
   useAgentSessions: () => ({ data: [], isLoading: false }),

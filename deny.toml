@@ -55,6 +55,17 @@ ignore = [
     { id = "RUSTSEC-2024-0419", reason = "gdkwayland-sys unmaintained; transitive via tauri on Linux. https://rustsec.org/advisories/RUSTSEC-2024-0419" },
     { id = "RUSTSEC-2024-0420", reason = "gdk-pixbuf unmaintained; transitive via tauri on Linux. https://rustsec.org/advisories/RUSTSEC-2024-0420" },
 
+    # ── wasmtime compilation cache: zstd advisories with no reachable path ──
+    # zstd 0.13.3, zstd-safe 7.2.4 and zstd-sys 2.0.16 arrive only through
+    # wasmtime-internal-cache, which is inert unless a `wasmtime::Cache` is
+    # configured — Librefang never builds one. wasmtime 48-50 all require
+    # zstd ^0.13, while the fix needs >=0.14.3 (semver-incompatible), so there
+    # is no upgrade path yet. Re-review when wasmtime raises the zstd floor.
+    { id = "RUSTSEC-2026-0391", reason = "zstd stream-context leak; only reached through wasmtime-internal-cache, which needs a configured Cache. https://rustsec.org/advisories/RUSTSEC-2026-0391" },
+    { id = "RUSTSEC-2026-0398", reason = "zstd-safe Seekable decompress over-length; only reached through wasmtime-internal-cache, which needs a configured Cache. https://rustsec.org/advisories/RUSTSEC-2026-0398" },
+    { id = "RUSTSEC-2026-0403", reason = "zstd-safe uninitialised memory on failed legacy-frame stream; only reached through wasmtime-internal-cache. https://rustsec.org/advisories/RUSTSEC-2026-0403" },
+    { id = "RUSTSEC-2026-0410", reason = "zstd-sys wasm allocator shim; only reached through wasmtime-internal-cache, which needs a configured Cache. https://rustsec.org/advisories/RUSTSEC-2026-0410" },
+
     # ── Other unmaintained transitive crates ───────────────────────────────
     { id = "RUSTSEC-2023-0071", reason = "rsa Marvin attack; reviewed 2026-08-14, RustSec still lists patched = []. https://rustsec.org/advisories/RUSTSEC-2023-0071" },
     { id = "RUSTSEC-2024-0370", reason = "proc-macro-error unmaintained; transitive. https://rustsec.org/advisories/RUSTSEC-2024-0370" },
@@ -66,6 +77,12 @@ ignore = [
     { id = "RUSTSEC-2025-0100", reason = "unic-* unmaintained (kuchikiki/selectors chain). https://rustsec.org/advisories/RUSTSEC-2025-0100" },
     { id = "RUSTSEC-2026-0192", reason = "ttf-parser unmaintained; transitive via pdf-extract -> lopdf, no safe upgrade available. https://rustsec.org/advisories/RUSTSEC-2026-0192" },
     { id = "RUSTSEC-2024-0449", reason = "unsafe-libyaml is unmaintained; transitive via serde_yaml_ng, which has no safe upgrade available. https://rustsec.org/advisories/RUSTSEC-2024-0449" },
+    { id = "RUSTSEC-2026-0367", reason = "zip 4.6.1 is reached only through tauri-plugin-updater (2.x and the 3.0 alphas all require zip ^4), whose sole extract() call runs on Windows, after the minisign check against the pubkey pinned in tauri.conf.json; the advisory concerns Unix symlinks and permission bits. The workspace's own zip is 9.x. https://rustsec.org/advisories/RUSTSEC-2026-0367" },
+    { id = "RUSTSEC-2026-0368", reason = "zip 4.6.1 is reached only through tauri-plugin-updater (2.x and the 3.0 alphas all require zip ^4), whose sole extract() call runs on Windows, after the minisign check against the pubkey pinned in tauri.conf.json; the advisory concerns Unix symlinks and permission bits. The workspace's own zip is 9.x. https://rustsec.org/advisories/RUSTSEC-2026-0368" },
+    { id = "RUSTSEC-2026-0369", reason = "zip 4.6.1 is reached only through tauri-plugin-updater (2.x and the 3.0 alphas all require zip ^4), whose sole extract() call runs on Windows, after the minisign check against the pubkey pinned in tauri.conf.json; the advisory concerns Unix symlinks and permission bits. The workspace's own zip is 9.x. https://rustsec.org/advisories/RUSTSEC-2026-0369" },
+    { id = "RUSTSEC-2026-0370", reason = "zvariant unmaintained, merged into zbus 6; transitive via zbus 5 (ksni, notify-rust, tauri-plugin-single-instance), none of which has moved to zbus 6. https://rustsec.org/advisories/RUSTSEC-2026-0370" },
+    { id = "RUSTSEC-2026-0371", reason = "zbus_names unmaintained, merged into zbus 6; transitive via zbus 5 (ksni, notify-rust, tauri-plugin-single-instance), none of which has moved to zbus 6. https://rustsec.org/advisories/RUSTSEC-2026-0371" },
+    { id = "RUSTSEC-2026-0372", reason = "zvariant_derive unmaintained, merged into zbus 6; transitive via zbus 5 (ksni, notify-rust, tauri-plugin-single-instance), none of which has moved to zbus 6. https://rustsec.org/advisories/RUSTSEC-2026-0372" },
 ]
 
 # ─────────────────────────────────────────────────────────────────────────────

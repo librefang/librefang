@@ -20,7 +20,10 @@ import {
   useRegisterPasskey,
   useRevokePasskey,
 } from "../lib/mutations/passkeys";
-import { getRawConfigToml, isPasskeySupported } from "../api";
+import { isPasskeySupported } from "../api";
+import { useQueryClient } from "@tanstack/react-query";
+import { configQueries } from "../lib/queries/config";
+import { downloadBlob } from "../lib/download";
 import { ApiError } from "../lib/http/client";
 import { VaultKeysSection } from "../components/VaultKeysSection";
 
@@ -760,6 +763,7 @@ function TotpSection() {
 
 function ConfigBackupSection() {
   const { t } = useTranslation();
+  const queryClient = useQueryClient();
   const [exporting, setExporting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -768,15 +772,9 @@ function ConfigBackupSection() {
     setExporting(true);
     setError(null);
     try {
-      const toml = await getRawConfigToml();
-      const objectUrl = URL.createObjectURL(
-        new Blob([toml], { type: "application/toml" }),
-      );
-      const link = document.createElement("a");
-      link.href = objectUrl;
-      link.download = "librefang-config.toml";
-      link.click();
-      URL.revokeObjectURL(objectUrl);
+      // A backup must reflect the file as it is now, so bypass the cache the TOML viewer shares.
+      const toml = await queryClient.fetchQuery({ ...configQueries.rawToml(), staleTime: 0 });
+      downloadBlob(new Blob([toml], { type: "application/toml" }), "librefang-config.toml");
     } catch (exportError) {
       setError(
         exportError instanceof Error

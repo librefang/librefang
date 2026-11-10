@@ -150,7 +150,7 @@ test.beforeEach(async ({ page }) => {
   await mockBackend(page);
 });
 
-test("the agent view opens on logs & info with the brief and its three sub-tabs", async ({ page }) => {
+test("the agent view opens on logs & info with the brief and its four sub-tabs", async ({ page }) => {
   await openAgent(page);
 
   // The brief: state, model, last activity and the footprint, all above the
@@ -160,14 +160,14 @@ test("the agent view opens on logs & info with the brief and its three sub-tabs"
   await expect(page.getByText(/Last activity/)).toBeVisible();
   await expect(page.getByText("Live conversation")).toBeVisible();
 
-  // Two main tabs plus the three sub-tabs.
+  // Two main tabs plus the four sub-tabs.
   await expect(page.getByRole("tab", { name: "config" })).toBeVisible();
   // `exact` throughout: "Logs" is a prefix of "logs & info", and Playwright's
   // default substring match resolves both.
-  for (const label of ["Logs", "Memory", "Prompts & experiments"]) {
+  for (const label of ["Logs", "Memory", "Prompts & experiments", "History"]) {
     await expect(page.getByRole("tab", { name: label, exact: true })).toBeVisible();
   }
-  await expect(page.getByRole("tab")).toHaveCount(5);
+  await expect(page.getByRole("tab")).toHaveCount(6);
 
   await page.screenshot({ path: join(SHOTS, "01-info-brief.png"), fullPage: true });
 });

@@ -1377,6 +1377,73 @@ pub async fn patch_agent_config(
         }
     }
 
+    // Sampling range checks depend only on the request, so they run before the first mutation: a 400 here must not leave a rename, prompt or model change already applied.
+    // They run only on a supplied value; `null` is always valid because it stores nothing.
+    for (value, range, message) in [
+        (
+            req.temperature.flatten(),
+            0.0..=2.0,
+            "temperature must be between 0.0 and 2.0",
+        ),
+        (
+            req.top_p.flatten(),
+            0.0..=1.0,
+            "top_p must be between 0.0 and 1.0",
+        ),
+        (
+            req.frequency_penalty.flatten(),
+            -2.0..=2.0,
+            "frequency_penalty must be between -2.0 and 2.0",
+        ),
+        (
+            req.presence_penalty.flatten(),
+            -2.0..=2.0,
+            "presence_penalty must be between -2.0 and 2.0",
+        ),
+        (
+            req.min_p.flatten(),
+            0.0..=1.0,
+            "min_p must be between 0.0 and 1.0",
+        ),
+        // `0` would divide every logit by zero in llama.cpp and vLLM rejects it; `1.0` is "off".
+        (
+            req.repeat_penalty.flatten(),
+            0.01..=2.0,
+            "repeat_penalty must be between 0.01 and 2.0",
+        ),
+    ] {
+        if value.is_some_and(|v| !range.contains(&v)) {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": message })),
+            );
+        }
+    }
+    if let Some(Some(0)) = req.top_k {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "top_k must be greater than 0"})),
+        );
+    }
+    if let Some(Some(0)) = req.max_tokens {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "max_tokens must be greater than 0"})),
+        );
+    }
+    if let Some(Some(0)) = req.context_window {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "context_window must be greater than 0"})),
+        );
+    }
+    if let Some(Some(0)) = req.max_output_tokens {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "max_output_tokens must be greater than 0"})),
+        );
+    }
+
     let personality = AgentPersonality {
         archetype: req.archetype,
         vibe: req.vibe,
@@ -1593,73 +1660,6 @@ pub async fn patch_agent_config(
     // alone, `null` hands the field back to inherit, a value pins it for this
     // agent — and a pinned value now wins over the per-model override rather
     // than losing to it.
-    //
-    // Range checks run only on a supplied value; `null` is always valid
-    // because it stores nothing.
-    for (value, range, message) in [
-        (
-            req.temperature.flatten(),
-            0.0..=2.0,
-            "temperature must be between 0.0 and 2.0",
-        ),
-        (
-            req.top_p.flatten(),
-            0.0..=1.0,
-            "top_p must be between 0.0 and 1.0",
-        ),
-        (
-            req.frequency_penalty.flatten(),
-            -2.0..=2.0,
-            "frequency_penalty must be between -2.0 and 2.0",
-        ),
-        (
-            req.presence_penalty.flatten(),
-            -2.0..=2.0,
-            "presence_penalty must be between -2.0 and 2.0",
-        ),
-        (
-            req.min_p.flatten(),
-            0.0..=1.0,
-            "min_p must be between 0.0 and 1.0",
-        ),
-        // `0` would divide every logit by zero in llama.cpp and vLLM rejects it; `1.0` is "off".
-        (
-            req.repeat_penalty.flatten(),
-            0.01..=2.0,
-            "repeat_penalty must be between 0.01 and 2.0",
-        ),
-    ] {
-        if value.is_some_and(|v| !range.contains(&v)) {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({ "error": message })),
-            );
-        }
-    }
-    if let Some(Some(0)) = req.top_k {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": "top_k must be greater than 0"})),
-        );
-    }
-    if let Some(Some(0)) = req.max_tokens {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": "max_tokens must be greater than 0"})),
-        );
-    }
-    if let Some(Some(0)) = req.context_window {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": "context_window must be greater than 0"})),
-        );
-    }
-    if let Some(Some(0)) = req.max_output_tokens {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": "max_output_tokens must be greater than 0"})),
-        );
-    }
 
     let registry = state.kernel.agent_registry();
     let model_writes = [

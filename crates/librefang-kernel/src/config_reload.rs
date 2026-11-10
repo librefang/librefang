@@ -1,8 +1,8 @@
 //! Config hot-reload — diffs two `KernelConfig` instances and produces a `ReloadPlan`.
 //!
-//! **Hot-reload safe**: channels, skills, usage footer, web config, approval policy, cron settings, webhook triggers, trigger cooldown / per-event budget, extensions, tool policy, api_key, dashboard credentials, stable_prefix_mode, proxy, provider_api_keys, sanitize, default model, language, mode, log_level (when a [`crate::log_reload::LogLevelReloader`] is installed by the binary).
+//! **Hot-reload safe**: channels, skills, usage footer, approval policy, cron settings, webhook triggers, trigger cooldown / per-event budget, extensions, tool policy, api_key, dashboard credentials, proxy, provider_api_keys, sanitize (rebuilds the channel bridge), default model, language, log_level (when a [`crate::log_reload::LogLevelReloader`] is installed by the binary).
 //!
-//! **Restart required**: api_listen, network, memory, home_dir, data_dir, vault, browser.
+//! **Restart required**: api_listen, network, memory, home_dir, data_dir, vault, browser, web, stable_prefix_mode, mode.
 
 use librefang_types::config::{KernelConfig, ReloadMode};
 use tracing::{info, warn};
@@ -20,8 +20,6 @@ pub enum HotAction {
     ReloadSkills,
     /// Usage footer mode changed.
     UpdateUsageFooter,
-    /// Web config changed — rebuild web tools context.
-    ReloadWebConfig,
     /// Approval policy changed.
     UpdateApprovalPolicy,
     /// Cron max jobs changed.
@@ -396,10 +394,12 @@ pub fn build_reload_plan_with_caps(
         ));
     }
 
-    // Stable prefix mode — hot-reloaded via ArcSwap config, effective on next message.
+    // Stable prefix mode is read live by the kernel's own prompt paths, but `DefaultContextEngine` copies it into its `ContextEngineConfig` at boot and gates its per-turn memory recall on that copy.
+    // Reporting it as a live read let a reload claim success while the engine kept injecting recalled memories into the prompt (or kept recall off), so the honest classification is restart-required.
     if old.stable_prefix_mode != new.stable_prefix_mode {
-        plan.noop_changes.push(format!(
-            "stable_prefix_mode: {} -> {} (effective on next message)",
+        plan.restart_required = true;
+        plan.restart_reasons.push(format!(
+            "stable_prefix_mode: {} -> {} (the context engine captures it at boot; restart required)",
             old.stable_prefix_mode, new.stable_prefix_mode
         ));
     }
@@ -435,7 +435,13 @@ pub fn build_reload_plan_with_caps(
     }
 
     if field_changed(&old.web, &new.web) {
-        plan.hot_actions.push(HotAction::ReloadWebConfig);
+        // `WebToolsContext` is built once at boot, and `WebSearchEngine` / `WebFetchEngine` keep their own copies of `WebConfig` / `WebFetchConfig` (search provider, SSRF allowlist, size cap, timeout, cache TTL) with no rebuild path.
+        // The old `ReloadWebConfig` hot action only logged, so a reload reported success while every web tool kept its boot-time settings; same shape as `browser` below.
+        plan.restart_required = true;
+        plan.restart_reasons.push(
+            "web config changed (web search / fetch engines are boot-captured; restart required)"
+                .to_string(),
+        );
     }
 
     if field_changed(&old.browser, &new.browser) {
@@ -507,6 +513,15 @@ pub fn build_reload_plan_with_caps(
 
     if field_changed(&old.a2a, &new.a2a) {
         plan.hot_actions.push(HotAction::ReloadA2aConfig);
+    }
+    // The HTTP router mounts the A2A protocol endpoints under `listen_path` once at boot, so the hot A2A reload cannot move them.
+    let old_listen_path = old.a2a.as_ref().map(|a| a.listen_path.as_str());
+    let new_listen_path = new.a2a.as_ref().map(|a| a.listen_path.as_str());
+    if old_listen_path != new_listen_path {
+        plan.restart_required = true;
+        plan.restart_reasons.push(format!(
+            "a2a.listen_path changed ({old_listen_path:?} -> {new_listen_path:?}): the A2A endpoints are mounted at boot"
+        ));
     }
 
     if field_changed(&old.fallback_providers, &new.fallback_providers) {
@@ -588,9 +603,8 @@ pub fn build_reload_plan_with_caps(
     // `max_depth_per_agent` / `max_depth_global` / `task_ttl_secs` are reported straight off the live config by `GET /api/queue/status` and `GET /api/config`, so the swap itself is the whole of applying them; `task_queue_retention_days` is captured once by the retention sweep at boot (`kernel/background_lifecycle.rs`) and genuinely needs a restart.
     // Classifying neither left a queue-only edit matching no branch at all, so the plan carried no change, `should_store_config` discarded the whole reloaded config and `POST /api/config/reload` answered "no changes detected" — the same defect the `registry` split further down fixes.
     if old.queue.task_queue_retention_days != new.queue.task_queue_retention_days {
-        plan.restart_required = true;
-        plan.restart_reasons.push(
-            "queue.task_queue_retention_days changed (the task-queue retention sweep captures it at boot; restart required)"
+        plan.noop_changes.push(
+            "queue.task_queue_retention_days changed (the retention sweep re-reads it from the live config on its next tick)"
                 .to_string(),
         );
     }
@@ -658,10 +672,12 @@ pub fn build_reload_plan_with_caps(
         );
     }
 
-    if field_changed(&old.sanitize, &new.sanitize) {
-        plan.noop_changes.push(
-            "sanitize config changed (effective on next message via config swap)".to_string(),
-        );
+    // The channel bridge builds its `InputSanitizer` by value when it is constructed, so a config swap alone leaves every channel message checked by the old sanitizer.
+    // `ReloadChannels` rebuilds the bridge from the swapped config, which is the only path that picks the new `[sanitize]` up.
+    if field_changed(&old.sanitize, &new.sanitize)
+        && !plan.hot_actions.contains(&HotAction::ReloadChannels)
+    {
+        plan.hot_actions.push(HotAction::ReloadChannels);
     }
 
     // `[task_board]` was classified restart-required, but no consumer has
@@ -716,9 +732,11 @@ pub fn build_reload_plan_with_caps(
         ));
     }
 
+    // Stable mode freezes the skill registry at boot and `SkillRegistry` has no unfreeze, so a reload could only half-apply a mode switch: model pinning would follow the new mode while skill installs followed the old one.
     if old.mode != new.mode {
-        plan.noop_changes.push(format!(
-            "mode: {:?} -> {:?} (effective on next message)",
+        plan.restart_required = true;
+        plan.restart_reasons.push(format!(
+            "mode: {:?} -> {:?} (Stable-mode skill-registry freeze is applied at boot; restart required)",
             old.mode, new.mode
         ));
     }
@@ -1114,7 +1132,7 @@ pub const KERNEL_CONFIG_FIELD_ALIASES: &[&str] = &[
 /// Every `KernelConfig` field name [`build_reload_plan`] inspects, mapped to the class it is documented under.
 ///
 /// `R` — restart required. `H` — hot-reloaded through a `HotAction`. `N` — no-op, the config swap is the whole of applying it.
-/// A `/`-joined value is a section that splits across classes by sub-field, as `queue` (`H/N/R`) and `external_auth` (`H/N`) do; the doc row's Meaning column says which sub-field falls where.
+/// A `/`-joined value is a section that splits across classes by sub-field, as `queue` (`H/N`), `registry` (`R/N`) and `external_auth` (`H/N`) do; the doc row's Meaning column says which sub-field falls where.
 /// `H*` is a class conditional on runtime state, which only `log_level` has.
 ///
 /// A key may also be listed as `section.sub_key`, for a sub-field `build_reload_plan` classifies apart from the rest of its section and names that way in its reason string (`tts.enabled`, `registry.auto_sync`).
@@ -1150,13 +1168,13 @@ pub fn classified_reload_fields() -> std::collections::BTreeMap<&'static str, &'
         ("default_model", "H"),
         ("home_dir", "R"),
         ("data_dir", "R"),
-        ("stable_prefix_mode", "N"),
+        ("stable_prefix_mode", "R"),
         ("vault", "R"),
         ("channels", "H"),
         ("sidecar_channels", "H"),
         ("skills", "H"),
         ("usage_footer", "H"),
-        ("web", "H"),
+        ("web", "R"),
         ("browser", "R"),
         ("approval", "H"),
         ("max_cron_jobs", "H"),
@@ -1175,14 +1193,14 @@ pub fn classified_reload_fields() -> std::collections::BTreeMap<&'static str, &'
         ("groups", "N"),
         ("default_owner", "N"),
         ("proactive_memory", "H"),
-        ("queue", "H/N/R"),
+        ("queue", "H/N"),
         ("usage", "N"),
         ("budget", "H"),
-        ("sanitize", "N"),
+        ("sanitize", "H"),
         ("provider_api_keys", "H"),
         ("log_level", "H*"),
         ("language", "N"),
-        ("mode", "N"),
+        ("mode", "R"),
         // hot-reloadable: ReloadExternalAuth on IdP-identity change, noop
         // (live-read) otherwise — see the hand-tuned branch above.
         ("external_auth", "H/N"),
@@ -1300,6 +1318,17 @@ pub fn classified_reload_fields() -> std::collections::BTreeMap<&'static str, &'
 /// Returns `Ok(())` if the config passes basic sanity checks, or `Err` with
 /// a list of human-readable error messages.
 pub fn validate_config_for_reload(config: &KernelConfig) -> Result<(), Vec<String>> {
+    validate_config_for_reload_with_state_secret(
+        config,
+        std::env::var("LIBREFANG_STATE_SECRET").ok().as_deref(),
+    )
+}
+
+/// [`validate_config_for_reload`] with the `LIBREFANG_STATE_SECRET` value passed in, so the check is testable without mutating process-global env.
+fn validate_config_for_reload_with_state_secret(
+    config: &KernelConfig,
+    state_secret: Option<&str>,
+) -> Result<(), Vec<String>> {
     let mut errors = Vec::new();
 
     if config.api_listen.is_empty() {
@@ -1355,6 +1384,31 @@ pub fn validate_config_for_reload(config: &KernelConfig) -> Result<(), Vec<Strin
                  editing config.toml."
             );
         }
+    }
+
+    // Boot refuses to start with `[external_auth] enabled = true` and no valid `LIBREFANG_STATE_SECRET`, for the same reason as `[tool_exec]` above it belongs here too.
+    // It is worse than a restart-classified field, because `[external_auth]` hot-applies: accepting the write would put SSO live on a per-process random state key, and the next restart would then refuse to boot with no API left to undo the edit.
+    if config.external_auth.enabled {
+        if let Err(e) = crate::kernel::validate_state_secret_value(state_secret) {
+            errors.push(format!(
+                "external_auth.enabled requires LIBREFANG_STATE_SECRET to be a base64-encoded 32-byte key, but it is {e}"
+            ));
+        }
+    }
+
+    // Mirrors the boot-time vector backend check: an unknown backend or `http` without a URL makes the next boot fail.
+    match config.memory.vector_backend.as_deref() {
+        None | Some("sqlite") | Some("") => {}
+        Some("http") => {
+            if config.memory.vector_store_url.is_none() {
+                errors.push(
+                    "memory.vector_backend = \"http\" requires memory.vector_store_url".to_string(),
+                );
+            }
+        }
+        Some(other) => errors.push(format!(
+            "memory.vector_backend: unknown backend {other:?} (expected \"http\" or \"sqlite\")"
+        )),
     }
 
     // Network config: if network is enabled, shared_secret must be set
@@ -1505,6 +1559,29 @@ mod tests {
         assert!(!plan.restart_required);
         assert!(plan.hot_actions.is_empty());
         assert!(plan.noop_changes.is_empty());
+    }
+
+    #[test]
+    fn test_a2a_listen_path_requires_restart_but_other_a2a_fields_stay_hot() {
+        let mut a = default_cfg();
+        a.a2a = Some(librefang_types::config::A2aConfig::default());
+        let mut b = a.clone();
+        b.a2a.as_mut().unwrap().listen_path = "/agents-a2a".to_string();
+        let plan = build_reload_plan(&a, &b);
+        assert!(plan.restart_required);
+        assert!(plan
+            .restart_reasons
+            .iter()
+            .any(|r| r.contains("a2a.listen_path")));
+
+        let mut c = a.clone();
+        c.a2a.as_mut().unwrap().description = "changed".to_string();
+        let plan = build_reload_plan(&a, &c);
+        assert!(!plan.restart_required);
+        assert!(plan
+            .hot_actions
+            .iter()
+            .any(|h| matches!(h, HotAction::ReloadA2aConfig)));
     }
 
     #[test]
@@ -1769,20 +1846,63 @@ mod tests {
         assert!(plan.hot_actions.contains(&HotAction::UpdateDefaultModel));
     }
 
+    /// `DefaultContextEngine` gates its per-turn memory recall on the `stable_prefix_mode` copied into its boot-time `ContextEngineConfig`, so a reload must not report the flip as already effective.
     #[test]
-    fn test_stable_prefix_mode_hot_reloaded() {
+    fn test_stable_prefix_mode_requires_restart() {
         let a = default_cfg();
         let mut b = default_cfg();
         b.stable_prefix_mode = true;
         let plan = build_reload_plan(&a, &b);
         assert!(
-            !plan.restart_required,
-            "stable_prefix_mode should be hot-reloaded via config swap"
+            plan.restart_required,
+            "stable_prefix_mode is boot-captured by the context engine"
         );
         assert!(plan
-            .noop_changes
+            .restart_reasons
             .iter()
             .any(|r| r.contains("stable_prefix_mode")));
+        assert!(plan.noop_changes.is_empty());
+    }
+
+    /// The web search / fetch engines keep owned copies of `[web]` from boot, so a provider or SSRF-allowlist edit must report restart-required instead of a hot action that only logs.
+    #[test]
+    fn web_config_change_requires_restart() {
+        let a = default_cfg();
+        let mut b = default_cfg();
+        b.web.fetch.max_response_bytes = a.web.fetch.max_response_bytes + 1;
+        let plan = build_reload_plan(&a, &b);
+        assert!(plan.restart_required);
+        assert!(plan.restart_reasons.iter().any(|r| r.contains("web")));
+        assert!(plan.hot_actions.is_empty());
+        assert!(plan.noop_changes.is_empty());
+    }
+
+    /// The channel bridge's `InputSanitizer` is built by value with the bridge, so a `[sanitize]` edit must rebuild the bridge through `ReloadChannels` or the old sanitizer keeps checking every message.
+    #[test]
+    fn sanitize_change_rebuilds_channel_bridge() {
+        let a = default_cfg();
+        let mut b = default_cfg();
+        b.sanitize.mode = match a.sanitize.mode {
+            librefang_types::config::SanitizeMode::Block => {
+                librefang_types::config::SanitizeMode::Warn
+            }
+            _ => librefang_types::config::SanitizeMode::Block,
+        };
+        let plan = build_reload_plan(&a, &b);
+        assert!(!plan.restart_required);
+        assert_eq!(plan.hot_actions, vec![HotAction::ReloadChannels]);
+
+        // A plan that changes channels and sanitize together must carry `ReloadChannels` once.
+        let mut c = b.clone();
+        c.channels.file_download_max_bytes = a.channels.file_download_max_bytes + 1;
+        let plan = build_reload_plan(&a, &c);
+        assert_eq!(
+            plan.hot_actions
+                .iter()
+                .filter(|h| **h == HotAction::ReloadChannels)
+                .count(),
+            1
+        );
     }
 
     /// Regression test for the #8059 hot-reload fix: an `[llm.auxiliary]`-only
@@ -1975,22 +2095,23 @@ mod tests {
         }
     }
 
-    /// `task_queue_retention_days` is captured by the retention sweep at boot, so the operator has to be told a restart is needed rather than told nothing at all.
+    /// The DB retention sweep re-reads `task_queue_retention_days` from the live config on every tick, so the edit is a live read that must be stored rather than parked behind a restart.
     #[test]
-    fn queue_retention_days_requires_restart() {
+    fn queue_retention_days_is_live_read() {
         let a = default_cfg();
         let mut b = default_cfg();
         b.queue.task_queue_retention_days = a.queue.task_queue_retention_days + 30;
         let plan = build_reload_plan(&a, &b);
 
-        assert!(plan.restart_required);
+        assert!(!plan.restart_required);
         assert!(
-            plan.restart_reasons
+            plan.noop_changes
                 .iter()
                 .any(|r| r.contains("queue.task_queue_retention_days")),
-            "the reason must name the field: {:?}",
-            plan.restart_reasons
+            "the change must name the field: {:?}",
+            plan.noop_changes
         );
+        assert!(should_store_config(ReloadMode::Hybrid, &plan));
     }
 
     /// `[triggers] cooldown_secs` / `max_per_event` are copied into `TriggerEngine`'s own fields at boot, so classifying the whole section as a live read told the operator the edit was already effective while triggers kept firing on the boot-time values.
@@ -2342,14 +2463,20 @@ mod tests {
         let a = default_cfg();
         let mut b = default_cfg();
         b.language = "de".to_string();
-        b.mode = KernelMode::Dev;
 
         let plan = build_reload_plan(&a, &b);
         assert!(!plan.restart_required);
         assert!(plan.hot_actions.is_empty());
-        assert_eq!(plan.noop_changes.len(), 2);
+        assert_eq!(plan.noop_changes.len(), 1);
         assert!(plan.noop_changes.iter().any(|c| c.contains("language")));
-        assert!(plan.noop_changes.iter().any(|c| c.contains("mode")));
+
+        // Stable mode freezes the skill registry at boot with no unfreeze, so a mode switch cannot be half-applied by a reload.
+        let mut c = default_cfg();
+        c.mode = KernelMode::Dev;
+        let plan = build_reload_plan(&a, &c);
+        assert!(plan.restart_required);
+        assert!(plan.restart_reasons.iter().any(|r| r.contains("mode")));
+        assert!(plan.noop_changes.is_empty());
     }
 
     #[test]
@@ -2555,6 +2682,50 @@ mod tests {
         config.network.shared_secret = String::new();
         let err = validate_config_for_reload(&config).unwrap_err();
         assert!(err.iter().any(|e| e.contains("shared_secret")));
+    }
+
+    /// Boot refuses `[external_auth] enabled = true` without a valid `LIBREFANG_STATE_SECRET`, so the reload/write gate must refuse it too or the next restart cannot come back up.
+    #[test]
+    fn test_validate_external_auth_requires_state_secret() {
+        let mut config = default_cfg();
+        config.external_auth.enabled = true;
+
+        let err = validate_config_for_reload_with_state_secret(&config, None).unwrap_err();
+        assert!(err.iter().any(|e| e.contains("LIBREFANG_STATE_SECRET")));
+
+        let err = validate_config_for_reload_with_state_secret(&config, Some("dG9vLXNob3J0"))
+            .unwrap_err();
+        assert!(err.iter().any(|e| e.contains("LIBREFANG_STATE_SECRET")));
+
+        // `openssl rand -base64 32` shape: 32 bytes of payload.
+        let good = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=";
+        assert!(validate_config_for_reload_with_state_secret(&config, Some(good)).is_ok());
+
+        // Disabled external auth needs no secret.
+        config.external_auth.enabled = false;
+        assert!(validate_config_for_reload_with_state_secret(&config, None).is_ok());
+    }
+
+    /// Boot refuses an unknown `memory.vector_backend`, and `http` without `vector_store_url`.
+    #[test]
+    fn test_validate_vector_backend_matches_boot() {
+        let mut config = default_cfg();
+        config.memory.vector_backend = Some("http".to_string());
+        config.memory.vector_store_url = None;
+        let err = validate_config_for_reload_with_state_secret(&config, None).unwrap_err();
+        assert!(err.iter().any(|e| e.contains("vector_store_url")));
+
+        config.memory.vector_store_url = Some("http://127.0.0.1:6333".to_string());
+        assert!(validate_config_for_reload_with_state_secret(&config, None).is_ok());
+
+        config.memory.vector_backend = Some("qdrantt".to_string());
+        let err = validate_config_for_reload_with_state_secret(&config, None).unwrap_err();
+        assert!(err.iter().any(|e| e.contains("vector_backend")));
+
+        for ok in ["sqlite", ""] {
+            config.memory.vector_backend = Some(ok.to_string());
+            assert!(validate_config_for_reload_with_state_secret(&config, None).is_ok());
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -2795,7 +2966,7 @@ mod tests {
     /// Misdescribed is the direction that harms an operator, because a row reading `N` for a restart-required field turns `POST /api/config/reload` into a call that reports success and changes nothing. #8059 is the prior instance of that class.
     ///
     /// Each field is the first column of a markdown table row, `| `field_name` | R | … |`.
-    /// The class is column 2 verbatim, so a section split across classes (`queue` is `H/N/R`) has to match on the whole string rather than on a set of letters — the ordering in the doc is the ordering here, which keeps the comparison total instead of letting `R/N` and `N/R` both pass.
+    /// The class is column 2 verbatim, so a section split across classes (`registry` is `R/N`) has to match on the whole string rather than on a set of letters — the ordering in the doc is the ordering here, which keeps the comparison total instead of letting `R/N` and `N/R` both pass.
     #[test]
     fn doc_reload_table_matches_classified_reload_fields() {
         // CARGO_MANIFEST_DIR = <repo>/crates/librefang-kernel

@@ -10,6 +10,8 @@ import { useTranslation } from "react-i18next";
 import { Plus, X, HelpCircle, ChevronLeft, ChevronRight } from "lucide-react";
 import { useUIStore } from "../lib/store";
 import { useTerminalWindows } from "../lib/queries/terminal";
+import { useRovingTabs } from "../lib/useRovingTabs";
+import { terminalTabId } from "./terminalTabIds";
 import {
   useCreateTerminalWindow,
   useRenameTerminalWindow,
@@ -42,6 +44,8 @@ interface TerminalTabsProps {
   onSwitchWindow: (windowId: string | null) => void;
   terminalRef: RefObject<Terminal | null>;
   fitAddonRef: RefObject<FitAddon | null>;
+  /** DOM id of the terminal surface these tabs control (`role="tabpanel"`). */
+  panelId: string;
 }
 
 // Match backend validate_window_name: any Unicode except control chars and '|', 1–64 chars.
@@ -77,6 +81,7 @@ export function TerminalTabs({
   onSwitchWindow,
   terminalRef,
   fitAddonRef,
+  panelId,
 }: TerminalTabsProps) {
   const { t } = useTranslation();
   const { data: windows = [] } = useTerminalWindows({ enabled: tmuxAvailable });
@@ -301,6 +306,15 @@ export function TerminalTabs({
     });
   }, [windows, tabOrder]);
 
+  // Keyboard model of the strip (#8597): roving tabindex with automatic
+  // activation on the arrow keys, like the chat session strip.
+  const sortedWindowIds = useMemo(() => sortedWindows.map((w) => w.id), [sortedWindows]);
+  const tabNav = useRovingTabs({
+    ids: sortedWindowIds,
+    activeId: displayedActiveWindowId ?? "",
+    onSelect: handleTabClick,
+  });
+
   // Re-check arrows when the windows list changes (tabs added/removed).
   useEffect(() => {
     updateOverflowArrows();
@@ -324,7 +338,8 @@ export function TerminalTabs({
             <ChevronRight className="h-3 w-3 text-gray-500" />
           </div>
         )}
-      <div ref={tabScrollRef} role="tablist" className="flex items-end gap-0.5 px-2 pt-1.5 overflow-x-auto flex-1 scrollbar-thin">
+      <div ref={tabScrollRef} className="flex items-end gap-0.5 px-2 pt-1.5 overflow-x-auto flex-1 scrollbar-thin">
+      <div role="tablist" aria-label={t("nav.terminal")} className="flex items-end gap-0.5">
       {sortedWindows.map((w) => {
         const isActive = w.id === displayedActiveWindowId;
         const isEditing = editingId === w.id;
@@ -332,13 +347,32 @@ export function TerminalTabs({
         return (
           <div
             key={w.id}
+            id={terminalTabId(w.id)}
             role="tab"
-            tabIndex={0}
             aria-selected={isActive}
             aria-disabled={!socketReady}
+            aria-controls={panelId}
+            tabIndex={tabNav.tabIndexFor(w.id)}
             onClick={() => handleTabClick(w.id)}
             onKeyDown={(e) => {
-              if (e.key === "Enter" || e.key === " ") { e.preventDefault(); handleTabClick(w.id); }
+              // Delete/Backspace replace the close control that left the tab
+              // order (#8597); focus follows the tab that takes its place.
+              if (e.key === "Delete" || e.key === "Backspace") {
+                e.preventDefault();
+                if (windowsRef.current.length <= 1) return;
+                const rest = windowsRef.current.filter(
+                  (x) => x.id !== w.id && !deletingIdsRef.current.has(x.id),
+                );
+                const next =
+                  (displayedActiveWindowId === w.id
+                    ? rest[0]
+                    : rest.find((x) => x.id === displayedActiveWindowId)) ?? rest[0];
+                void handleCloseTab(w.id, e);
+                if (next) document.getElementById(terminalTabId(next.id))?.focus();
+                return;
+              }
+              if (e.key === "Enter" || e.key === " ") { e.preventDefault(); handleTabClick(w.id); return; }
+              tabNav.onKeyDown(e, w.id);
             }}
             onDoubleClick={(e) => {
               e.stopPropagation();
@@ -369,7 +403,7 @@ export function TerminalTabs({
             }}
             onDragEnd={() => setDragId(null)}
             title={isEditing ? undefined : t("terminal.tabs.rename_hint")}
-            className={`group flex items-center gap-1.5 px-3 py-1.5 text-xs whitespace-nowrap transition-colors select-none rounded-t-md border-t border-x ${
+            className={`group flex items-center gap-1.5 px-3 py-1.5 text-xs whitespace-nowrap transition-colors select-none rounded-t-md border-t border-x focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/70 focus-visible:ring-inset ${
               isActive
                 ? "bg-[#0d1117] text-gray-200 border-gray-700/70 -mb-px pb-[7px]"
                 : "text-gray-500 border-transparent hover:text-gray-300 hover:bg-gray-800/40 mb-0"
@@ -405,25 +439,32 @@ export function TerminalTabs({
               </span>
             )}
             {!isEditing && windows.length > 1 && (
-              <span
-                role="button"
-                tabIndex={0}
+              <button
+                type="button"
+                // Out of the tab order on purpose (#8597): the tab is the tab
+                // stop and the close control must not interleave with the
+                // roving tabindex. Delete/Backspace on the tab is the
+                // keyboard path. The 24x24 box meets WCAG 2.5.8 while the
+                // icon stays 12 px; the negative margins keep the strip's
+                // height unchanged.
+                tabIndex={-1}
                 aria-label={t("terminal.tabs.close")}
                 onClick={(e) => void handleCloseTab(w.id, e)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter" || e.key === " ") void handleCloseTab(w.id, e);
-                }}
-                className={`text-gray-600 hover:text-red-400 cursor-pointer transition-colors rounded ${
+                className={`-my-1 inline-flex h-6 w-6 shrink-0 items-center justify-center rounded text-gray-600 hover:text-red-400 cursor-pointer transition-colors ${
                   isActive ? "opacity-100" : "opacity-0 group-hover:opacity-100"
                 }`}
               >
                 <X className="h-3 w-3" />
-              </span>
+              </button>
             )}
           </div>
         );
       })}
 
+      </div>
+
+      {/* New-tab lives beside the tablist, not inside it: a tablist's children
+          are tabs, and a plain button there reads as one (#8597). */}
       <button
         onClick={() => void handleCreate()}
         disabled={atLimit || createMutation.isPending}

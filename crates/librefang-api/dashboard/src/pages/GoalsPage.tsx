@@ -21,6 +21,7 @@ import { Button } from "../components/ui/Button";
 import { Badge, type BadgeVariant } from "../components/ui/Badge";
 import { useUIStore } from "../lib/store";
 import { useCreateShortcut } from "../lib/useCreateShortcut";
+import { useRovingTabs } from "../lib/useRovingTabs";
 import { toastErr } from "../lib/errors";
 import {
   DEFAULT_GOAL_TICK_INTERVAL_SECS,
@@ -336,6 +337,8 @@ function GoalRunControl({ goal }: { goal: GoalItem }) {
   );
 }
 
+const GOAL_TABS = ["goals", "templates"] as const;
+
 export function GoalsPage() {
   const { t } = useTranslation();
   const addToast = useUIStore((s) => s.addToast);
@@ -349,6 +352,11 @@ export function GoalsPage() {
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
   const [showClearConfirm, setShowClearConfirm] = useState(false);
   const [activeTab, setActiveTab] = useState<"goals" | "templates">("goals");
+  const tabNav = useRovingTabs({
+    ids: GOAL_TABS,
+    activeId: activeTab,
+    onSelect: setActiveTab,
+  });
   const createTitleRef = useRef<HTMLInputElement>(null);
   const [focusCreateNonce, setFocusCreateNonce] = useState(0);
 
@@ -598,8 +606,9 @@ export function GoalsPage() {
               role="tab"
               aria-selected={activeTab === "goals"}
               aria-controls="goals-panel-goals"
-              tabIndex={activeTab === "goals" ? 0 : -1}
+              tabIndex={tabNav.tabIndexFor("goals")}
               onClick={() => setActiveTab("goals")}
+              onKeyDown={(event) => tabNav.onKeyDown(event, "goals")}
               className={`px-4 py-2.5 text-sm font-bold transition-colors border-b-2 -mb-px ${
                 activeTab === "goals"
                   ? "border-brand text-brand"
@@ -614,8 +623,9 @@ export function GoalsPage() {
               role="tab"
               aria-selected={activeTab === "templates"}
               aria-controls="goals-panel-templates"
-              tabIndex={activeTab === "templates" ? 0 : -1}
+              tabIndex={tabNav.tabIndexFor("templates")}
               onClick={() => setActiveTab("templates")}
+              onKeyDown={(event) => tabNav.onKeyDown(event, "templates")}
               className={`px-4 py-2.5 text-sm font-bold transition-colors border-b-2 -mb-px ${
                 activeTab === "templates"
                   ? "border-brand text-brand"

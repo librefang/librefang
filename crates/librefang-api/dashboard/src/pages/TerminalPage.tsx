@@ -20,6 +20,7 @@ import { useUIStore } from "../lib/store";
 import { buildAuthenticatedWebSocket } from "../api";
 import { Button } from "../components/ui/Button";
 import { TerminalTabs } from "../components/TerminalTabs";
+import { TERMINAL_PANEL_ID, terminalTabId } from "../components/terminalTabIds";
 import { useTerminalHealth } from "../lib/queries/terminal";
 
 interface ServerMessage {
@@ -717,6 +718,7 @@ export function TerminalPage() {
         onSwitchWindow={handleSwitchWindow}
         terminalRef={terminalRef}
         fitAddonRef={fitAddonRef}
+        panelId={TERMINAL_PANEL_ID}
       />
       {searchVisible && (
         <div className="shrink-0 flex items-center gap-2 px-3 py-1.5 bg-[#1c2128] border-b border-gray-700/50">
@@ -759,7 +761,19 @@ export function TerminalPage() {
           ><X className="h-3.5 w-3.5" /></button>
         </div>
       )}
-      <div ref={containerRef} className="flex-1 min-h-0 overflow-hidden" />
+      {/* The xterm surface is the panel the window tabs control (#8597);
+          without tmux there is no strip, so the panel role stays off. */}
+      <div
+        ref={containerRef}
+        id={tmuxAvailable ? TERMINAL_PANEL_ID : undefined}
+        role={tmuxAvailable ? "tabpanel" : undefined}
+        aria-labelledby={
+          tmuxAvailable && displayedActiveWindowId
+            ? terminalTabId(displayedActiveWindowId)
+            : undefined
+        }
+        className="flex-1 min-h-0 overflow-hidden"
+      />
     </div>
   );
 

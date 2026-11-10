@@ -3923,11 +3923,11 @@
       "help": "키보드 단축키",
       "help_title": "탭 단축키",
       "help_switch": "탭 전환",
-      "help_switch_key": "클릭",
+      "help_switch_key": "클릭 / ← →",
       "help_rename": "탭 이름 바꾸기",
       "help_rename_key": "두 번 클릭",
       "help_close": "탭 닫기",
-      "help_close_key": "마우스 가운데 버튼 클릭 / ✕",
+      "help_close_key": "마우스 가운데 버튼 / ✕ / Del",
       "help_new": "새 탭",
       "help_new_key": "＋"
     },
@@ -4316,7 +4316,10 @@
     "save_failed": "그룹을 저장하지 못했습니다",
     "delete_failed": "그룹을 삭제하지 못했습니다",
     "member_add_failed": "구성원을 추가하지 못했습니다",
-    "member_remove_failed": "구성원을 제거하지 못했습니다"
+    "member_remove_failed": "구성원을 제거하지 못했습니다",
+    "load_failed": "그룹을 불러올 수 없습니다",
+    "no_match_title": "일치하는 그룹 없음",
+    "no_match_desc": "이름, 설명, 멤버 또는 역할이 검색어와 일치하는 그룹이 없습니다."
   },
   "userBudget": {
     "fields": {

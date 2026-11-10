@@ -1,0 +1,2 @@
+The dashboard's remaining tab strips now carry the tab semantics their `role="tablist"` promised: a roving tabindex with Arrow/Home/End keys (automatic activation), `aria-controls` links to the panel each strip switches and `aria-labelledby` back to the selected tab, the terminal strip's new-tab button moved outside the tablist, and its close control kept out of the tab order at a 24 px hit target. A shared `useRovingTabs` hook backs every strip so the keyboard model cannot drift between dialogs, pages and the terminal.
+(#8608, #8597) (@DaBlitzStein)

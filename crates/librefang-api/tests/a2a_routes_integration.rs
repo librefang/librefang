@@ -44,12 +44,17 @@ impl Drop for Harness {
 }
 
 async fn boot(api_key: &str) -> Harness {
+    boot_with(api_key, |_| {}).await
+}
+
+/// Same harness, with a hook to set config fields the default does not exercise.
+async fn boot_with(api_key: &str, customize: impl FnOnce(&mut KernelConfig)) -> Harness {
     let tmp = tempfile::tempdir().expect("tempdir");
 
     // Seed the pinned registry fixture so the kernel boots with content, offline.
     librefang_kernel::registry_sync::seed_registry_fixture_for_tests(tmp.path());
 
-    let config = KernelConfig {
+    let mut config = KernelConfig {
         home_dir: tmp.path().to_path_buf(),
         data_dir: tmp.path().join("data"),
         api_key: api_key.to_string(),
@@ -64,6 +69,7 @@ async fn boot(api_key: &str) -> Harness {
         },
         ..KernelConfig::default()
     };
+    customize(&mut config);
 
     let kernel = LibreFangKernel::boot_with_config(config).expect("kernel boot");
     let kernel = Arc::new(kernel);
@@ -228,6 +234,99 @@ async fn federation_list_agents_returns_canonical_envelope() {
         body.get("agents").is_none(),
         "legacy `agents` field must not coexist with canonical envelope"
     );
+}
+
+/// `[a2a] listen_path` used to be read by nothing, so an operator who moved the A2A endpoints behind a reverse proxy got 404s at the configured path.
+/// The protocol routes must be served under the configured path, the default `/a2a` mount must be gone, and both the well-known card and the per-agent cards must advertise the path that actually serves them.
+#[tokio::test(flavor = "multi_thread")]
+async fn protocol_routes_mount_under_configured_listen_path() {
+    let h = boot_with("secret-key", |config| {
+        config.a2a = Some(librefang_types::config::A2aConfig {
+            enabled: true,
+            listen_path: "/agents/a2a/".to_string(),
+            ..Default::default()
+        });
+    })
+    .await;
+
+    let (status, body) = send(&h, Method::GET, "/agents/a2a/agents", None, true).await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert!(body["items"].is_array(), "body: {body}");
+
+    let (status, _) = send(&h, Method::GET, "/a2a/agents", None, true).await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "the default mount must not also serve a relocated A2A endpoint"
+    );
+
+    let (status, body) = send(
+        &h,
+        Method::GET,
+        "/agents/a2a/tasks/no-such-task",
+        None,
+        true,
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "task lookup must route to the handler under the configured path; body: {body}"
+    );
+    assert!(
+        body.is_object(),
+        "the handler's JSON 404, not an empty router miss: {body}"
+    );
+
+    let (status, card) = send(&h, Method::GET, "/.well-known/agent.json", None, false).await;
+    assert_eq!(status, StatusCode::OK, "card: {card}");
+    let url = card["url"].as_str().expect("card url");
+    assert!(
+        url.ends_with("/agents/a2a"),
+        "the well-known card must advertise the configured mount, got {url}"
+    );
+}
+
+/// An unset `listen_path` keeps the historical `/a2a` mount, and the card keeps advertising it.
+#[tokio::test(flavor = "multi_thread")]
+async fn protocol_routes_default_to_a2a_mount() {
+    let h = boot("secret-key").await;
+    let (status, _) = send(&h, Method::GET, "/a2a/agents", None, false).await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, card) = send(&h, Method::GET, "/.well-known/agent.json", None, false).await;
+    assert_eq!(status, StatusCode::OK, "card: {card}");
+    let url = card["url"].as_str().expect("card url");
+    assert!(url.ends_with("/a2a"), "got {url}");
+}
+
+/// A `listen_path` that would collide with another top-level route, or cannot be a literal route, falls back to the default instead of panicking the router build.
+#[test]
+fn unusable_listen_paths_fall_back_to_the_default() {
+    use librefang_api::routes::network::{resolve_a2a_listen_path, DEFAULT_A2A_LISTEN_PATH};
+    assert_eq!(resolve_a2a_listen_path(None), DEFAULT_A2A_LISTEN_PATH);
+    assert_eq!(resolve_a2a_listen_path(Some("a2a/")), "/a2a");
+    assert_eq!(
+        resolve_a2a_listen_path(Some("//proxy//a2a//")),
+        "/proxy/a2a"
+    );
+    for bad in [
+        "",
+        "/",
+        "/api",
+        "/api/x",
+        "/v1",
+        "/.well-known/a2a",
+        "/a/{id}",
+        "/a/*rest",
+        "/a/../b",
+        "/a b",
+    ] {
+        assert_eq!(
+            resolve_a2a_listen_path(Some(bad)),
+            DEFAULT_A2A_LISTEN_PATH,
+            "{bad:?} must fall back"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------

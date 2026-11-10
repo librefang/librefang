@@ -36,6 +36,7 @@ import { Badge } from "./ui/Badge";
 import { EmptyState } from "./ui/EmptyState";
 import { CardSkeleton } from "./ui/Skeleton";
 import { ConfirmDialog } from "./ui/ConfirmDialog";
+import { useRovingTabs } from "../lib/useRovingTabs";
 import {
   buildEvenTrafficSplit,
   MAX_TRAFFIC_VARIANTS,
@@ -48,6 +49,8 @@ function metricBadgeVariant(
   if (successRate >= 50) return "warning";
   return "default";
 }
+
+const PROMPT_PANEL_TABS = ["versions", "experiments"] as const;
 
 /**
  * An agent's prompt versions and A/B experiments, as a surface rather than a
@@ -73,6 +76,11 @@ export function PromptsExperimentsPanel({
   const [activeTab, setActiveTab] = useState<"versions" | "experiments">(
     "versions",
   );
+  const tabNav = useRovingTabs({
+    ids: PROMPT_PANEL_TABS,
+    activeId: activeTab,
+    onSelect: setActiveTab,
+  });
   const [showCreateVersion, setShowCreateVersion] = useState(false);
   const [showCreateExperiment, setShowCreateExperiment] = useState(false);
   const [newPromptSystemPrompt, setNewPromptSystemPrompt] = useState("");
@@ -114,8 +122,9 @@ export function PromptsExperimentsPanel({
             role="tab"
             aria-selected={activeTab === "versions"}
             aria-controls="agents-panel-versions"
-            tabIndex={activeTab === "versions" ? 0 : -1}
+            tabIndex={tabNav.tabIndexFor("versions")}
             onClick={() => setActiveTab("versions")}
+            onKeyDown={(event) => tabNav.onKeyDown(event, "versions")}
             className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-colors ${activeTab === "versions" ? "bg-brand text-white" : "bg-main text-text-dim"}`}
           >
             <FlaskConical className="w-3 h-3 inline mr-1" /> {t("agents.prompts_experiments.versions_tab")}
@@ -125,8 +134,9 @@ export function PromptsExperimentsPanel({
             role="tab"
             aria-selected={activeTab === "experiments"}
             aria-controls="agents-panel-experiments"
-            tabIndex={activeTab === "experiments" ? 0 : -1}
+            tabIndex={tabNav.tabIndexFor("experiments")}
             onClick={() => setActiveTab("experiments")}
+            onKeyDown={(event) => tabNav.onKeyDown(event, "experiments")}
             className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-colors ${activeTab === "experiments" ? "bg-brand text-white" : "bg-main text-text-dim"}`}
           >
             <GitBranch className="w-3 h-3 inline mr-1" /> {t("agents.prompts_experiments.experiments_tab")}

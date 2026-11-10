@@ -83,3 +83,100 @@ describe("AgentTabBar", () => {
     expect(screen.getAllByRole("tab")).toHaveLength(CONFIG_GROUP_IDS.length);
   });
 });
+
+// Issue #8597 — the bar announces `role="tablist"` but no roving tabindex,
+// no arrow keys and no link to the panel it switches.
+describe("AgentTabBar tab semantics and keyboard model", () => {
+  const tabs = [
+    { id: "general", label: "General", Icon: Bot },
+    { id: "memory", label: "Memory", Icon: Database },
+    { id: "planning", label: "Planning", Icon: Clock },
+  ] as const;
+
+  it("wires every tab to the panel it controls", () => {
+    render(
+      <AgentTabBar
+        tabs={tabs}
+        active="general"
+        onSelect={() => {}}
+        ariaLabel="Groups"
+        panelId="agent-panel"
+      />,
+    );
+
+    for (const tab of screen.getAllByRole("tab")) {
+      expect(tab).toHaveAttribute("aria-controls", "agent-panel");
+      expect(tab.id).not.toBe("");
+    }
+    expect(screen.getByRole("tab", { name: "Memory" })).toHaveAttribute(
+      "id",
+      "agent-panel-tab-memory",
+    );
+  });
+
+  it("roves the tabindex so only the active tab is in the tab order", () => {
+    render(
+      <AgentTabBar
+        tabs={tabs}
+        active="memory"
+        onSelect={() => {}}
+        ariaLabel="Groups"
+        panelId="agent-panel"
+      />,
+    );
+
+    const rendered = screen.getAllByRole("tab");
+    const stops = rendered.filter((tab) => tab.tabIndex === 0);
+    expect(stops).toHaveLength(1);
+    expect(stops[0]).toHaveTextContent("Memory");
+    for (const tab of rendered) {
+      if (tab !== stops[0]) expect(tab.tabIndex).toBe(-1);
+    }
+  });
+
+  it("moves selection and focus with the arrow keys, wrapping at the edges", () => {
+    const onSelect = vi.fn();
+    render(
+      <AgentTabBar
+        tabs={tabs}
+        active="general"
+        onSelect={onSelect}
+        ariaLabel="Groups"
+        panelId="agent-panel"
+      />,
+    );
+
+    const rendered = screen.getAllByRole("tab");
+    rendered[0].focus();
+    fireEvent.keyDown(rendered[0], { key: "ArrowRight" });
+    expect(onSelect).toHaveBeenLastCalledWith("memory");
+    expect(document.activeElement).toBe(rendered[1]);
+
+    fireEvent.keyDown(rendered[0], { key: "ArrowLeft" });
+    expect(onSelect).toHaveBeenLastCalledWith("planning");
+    expect(document.activeElement).toBe(rendered[2]);
+  });
+
+  it("jumps to the edges with Home and End", () => {
+    const onSelect = vi.fn();
+    render(
+      <AgentTabBar
+        tabs={tabs}
+        active="memory"
+        onSelect={onSelect}
+        ariaLabel="Groups"
+        panelId="agent-panel"
+      />,
+    );
+
+    const rendered = screen.getAllByRole("tab");
+    rendered[1].focus();
+    fireEvent.keyDown(rendered[1], { key: "End" });
+    expect(onSelect).toHaveBeenLastCalledWith("planning");
+    expect(document.activeElement).toBe(rendered[2]);
+
+    fireEvent.keyDown(rendered[2], { key: "Home" });
+    expect(onSelect).toHaveBeenLastCalledWith("general");
+    expect(document.activeElement).toBe(rendered[0]);
+  });
+});

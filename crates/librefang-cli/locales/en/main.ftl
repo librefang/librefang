@@ -434,6 +434,8 @@ config-test-unverified = could not verify (may still work)
 
 # --- Hand commands ---
 hand-install-deps-success = Dependencies installed for hand '{ $id }'.
+hand-install-deps-dep-failed = { $key } ({ $status }): { $message }
+hand-install-deps-dep-still-missing = { $key }: required dependency is still missing
 hand-paused = Hand instance '{ $label } (instance: { $instance_id })' paused.
 hand-resumed = Hand instance '{ $label } (instance: { $instance_id })' resumed.
 

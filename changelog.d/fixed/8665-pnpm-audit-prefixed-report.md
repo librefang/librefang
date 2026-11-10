@@ -1,0 +1,1 @@
+The dependency audit counted an ignored-only pnpm report as a vulnerability when pnpm wrote its human `Error: …` line ahead of the JSON report on exit 1. The audit now extracts the JSON object from the output and still fails on any non-empty advisory map; a real advisory cannot be turned into a pass. (#8665) (@DaBlitzStein)

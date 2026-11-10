@@ -999,7 +999,12 @@ impl TriggerEngine {
                 }
             }
 
-            let owner_name = resolve_name(trigger.agent_id);
+            // Only the task-board patterns compare against the owner's name, so the resolver (a registry lookup, run under this shard's write-lock) is skipped for every other pattern.
+            let owner_name = if pattern_compares_owner_name(&trigger.pattern) {
+                resolve_name(trigger.agent_id)
+            } else {
+                None
+            };
             let owner = Some((trigger.agent_id, owner_name));
             if matches_pattern(&trigger.pattern, event, &event_description, owner) {
                 // Enforce per-event trigger budget (storm prevention).
@@ -1509,6 +1514,18 @@ pub fn normalize_manifest_pattern_json(value: serde_json::Value) -> serde_json::
         }
         _ => value,
     }
+}
+
+/// Whether [`matches_pattern`] reads the owner's display name for `pattern`.
+///
+/// Must list every arm that passes `owner` to [`agent_identity_filter_matches`]; any other pattern ignores the name, so resolving it would be wasted work.
+fn pattern_compares_owner_name(pattern: &TriggerPattern) -> bool {
+    matches!(
+        pattern,
+        TriggerPattern::TaskPosted { .. }
+            | TriggerPattern::TaskClaimed { .. }
+            | TriggerPattern::TaskCompleted { .. }
+    )
 }
 
 /// Check if an event matches a trigger pattern.
@@ -2688,6 +2705,79 @@ mod tests {
             entry.cooldown_secs = Some(0);
         }
         assert_eq!(engine.evaluate(&event2).0.len(), 0);
+    }
+
+    /// The owner-name resolver deep-clones a registry entry in production, and only the task-board patterns read the name, so it must not run for every other pattern on every event.
+    #[test]
+    fn owner_name_resolver_runs_only_for_patterns_that_compare_names() {
+        let engine = TriggerEngine::new();
+        let owner = AgentId::new();
+        engine
+            .register(owner, TriggerPattern::Lifecycle, "x".to_string(), 0)
+            .unwrap();
+        engine
+            .register(owner, TriggerPattern::All, "x".to_string(), 0)
+            .unwrap();
+
+        let calls = std::cell::Cell::new(0usize);
+        let other = AgentId::new();
+        let event = Event::new(
+            other,
+            EventTarget::Broadcast,
+            EventPayload::Lifecycle(LifecycleEvent::Terminated {
+                agent_id: other,
+                reason: "test".to_string(),
+            }),
+        );
+        let (matches, _) = engine.evaluate_with_resolver(&event, |_| {
+            calls.set(calls.get() + 1);
+            Some("owner".to_string())
+        });
+        assert_eq!(matches.len(), 2);
+        assert_eq!(
+            calls.get(),
+            0,
+            "no matched pattern compares the owner name, so the resolver must not run"
+        );
+
+        engine
+            .register(
+                owner,
+                TriggerPattern::TaskPosted {
+                    assignee_match: Some("self".to_string()),
+                },
+                "x".to_string(),
+                0,
+            )
+            .unwrap();
+        let posted = Event::new(
+            other,
+            EventTarget::Broadcast,
+            EventPayload::System(SystemEvent::TaskPosted {
+                task_id: "t-1".to_string(),
+                title: "t".to_string(),
+                assigned_to: Some("owner".to_string()),
+                created_by: None,
+            }),
+        );
+        for mut entry in engine.triggers.iter_mut() {
+            entry.cooldown_secs = Some(0);
+        }
+        let (matches, _) = engine.evaluate_with_resolver(&posted, |_| {
+            calls.set(calls.get() + 1);
+            Some("owner".to_string())
+        });
+        assert_eq!(
+            calls.get(),
+            1,
+            "only the task-board trigger resolves the name"
+        );
+        assert!(
+            matches
+                .iter()
+                .any(|m| m.message == "x" && m.agent_id == owner),
+            "assignee_match:self still matches by name"
+        );
     }
 
     #[test]

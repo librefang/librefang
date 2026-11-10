@@ -595,26 +595,45 @@ impl LibreFangKernel {
                 name: name.clone(),
             }),
         );
-        // Evaluate triggers synchronously (we can't await in a sync fn, so just evaluate)
+        self.evaluate_lifecycle_triggers_sync(&event);
+
+        Ok(agent_id)
+    }
+
+    /// Evaluate and dispatch triggers for a lifecycle event from a sync call site.
+    ///
+    /// Spawn, kill and the per-agent quota check are synchronous, so they cannot await `publish_event`; this runs the same evaluation and dispatch pair it does, including its `PUBLISH_EVENT_DEPTH` cycle guard.
+    /// The guard matters most for `QuotaEnforced`: a trigger on an over-quota agent's own quota event dispatches a turn that is refused by the same quota check and emits the event again, so without the depth step that chain re-fired at the same depth for as long as the agent stayed over quota.
+    pub(crate) fn evaluate_lifecycle_triggers_sync(&self, event: &Event) {
+        let depth = PUBLISH_EVENT_DEPTH.try_with(|c| c.get()).unwrap_or(0);
+        let max_trigger_depth = self.config.load().triggers.max_depth as u32;
+        // Checked before evaluation, as `publish_event_inner` does, so a suppressed fire is not charged to the trigger's cooldown or `max_fires` budget.
+        if depth >= max_trigger_depth {
+            warn!(
+                depth,
+                "Trigger depth limit reached, skipping lifecycle trigger evaluation to prevent circular chain"
+            );
+            return;
+        }
         let event_timestamp = event.timestamp;
-        let (triggered, trigger_state_mutated) = self
-            .workflows
-            .triggers
-            .evaluate_with_resolver(&event, |id| {
-                self.agents.registry.get(id).map(|e| e.name.clone())
+        let (triggered, trigger_state_mutated) =
+            self.workflows.triggers.evaluate_with_resolver(event, |id| {
+                self.agents.registry.get_arc(id).map(|e| e.name.clone())
             });
         if !triggered.is_empty() || trigger_state_mutated {
             if let Err(e) = self.workflows.triggers.persist() {
-                warn!("Failed to persist trigger jobs after spawn event: {e}");
+                warn!("Failed to persist trigger jobs after lifecycle event: {e}");
             }
         }
         // Evaluation already charged each match its `fire_count`, its cooldown stamp and a step towards `max_fires`, so dropping the matches here would spend a trigger's budget on a fire that delivered nothing.
-        // Dispatch through the same path the event bus uses so an `agent_spawned` trigger reaches its agent or starts its workflow under the same concurrency, ordering and timeout guarantees.
+        // Dispatch through the same path the event bus uses so an `agent_spawned` / `agent_terminated` trigger reaches its agent or starts its workflow under the same concurrency, ordering and timeout guarantees.
+        // `dispatch_trigger_matches` hands its spawned tasks the depth it reads from the current scope, so dispatch one level deeper than this event, exactly as `publish_event_inner` does while its depth guard is held.
+        // `sync_scope` also covers callers outside any scope (a spawn from an HTTP handler), where the depth would otherwise read as 0 on every link of the chain.
         if !triggered.is_empty() {
-            self.dispatch_trigger_matches(&triggered, event_timestamp);
+            PUBLISH_EVENT_DEPTH.sync_scope(std::cell::Cell::new(depth + 1), || {
+                self.dispatch_trigger_matches(&triggered, event_timestamp);
+            });
         }
-
-        Ok(agent_id)
     }
 
     /// Verify a signed manifest envelope (Ed25519 + SHA-256).

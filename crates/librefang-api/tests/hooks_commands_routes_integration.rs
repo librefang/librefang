@@ -646,3 +646,95 @@ async fn hooks_wake_rejects_body_over_max_payload_bytes() {
         "an over-cap webhook body must be rejected with 413"
     );
 }
+
+/// `webhook_triggers.rate_limit_per_minute` is the documented per-IP cap on the unauthenticated-token trigger endpoints.
+/// It used to have no consumer, so a client could make as many token guesses as the global budget allowed.
+/// The cap runs before the token check (so it bounds guessing), is keyed per source IP, and answers 429 with `Retry-After`.
+#[tokio::test(flavor = "multi_thread")]
+async fn hooks_trigger_rate_limit_is_enforced_per_ip() {
+    let h = boot_with_webhook(Some(WebhookTriggerConfig {
+        enabled: true,
+        token_env: "LIBREFANG_TEST_WEBHOOK_TOKEN_RATE_LIMIT_UNSET".to_string(),
+        max_payload_bytes: 65536,
+        // A rate no other test in this binary uses, so the per-rate limiter bucket is this test's alone.
+        rate_limit_per_minute: 2,
+    }))
+    .await;
+
+    async fn hit(h: &Harness, path: &str, ip: [u8; 4]) -> (StatusCode, axum::http::HeaderMap) {
+        let mut req = Request::builder()
+            .method(Method::POST)
+            .uri(path)
+            .header("content-type", "application/json")
+            .header(
+                "authorization",
+                "Bearer wrong-token-wrong-token-wrong-token",
+            )
+            .body(Body::from(if path.ends_with("/agent") {
+                r#"{"message":"hi"}"#
+            } else {
+                r#"{"text":"hi"}"#
+            }))
+            .unwrap();
+        req.extensions_mut()
+            .insert(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+                ip, 40000,
+            ))));
+        let resp = h.app.clone().oneshot(req).await.unwrap();
+        (resp.status(), resp.headers().clone())
+    }
+
+    let attacker = [203, 0, 113, 7];
+    for _ in 0..2 {
+        let (status, _) = hit(&h, "/api/hooks/wake", attacker).await;
+        assert_eq!(
+            status,
+            StatusCode::UNAUTHORIZED,
+            "within budget: token check runs"
+        );
+    }
+    let (status, headers) = hit(&h, "/api/hooks/agent", attacker).await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    assert!(headers.get(axum::http::header::RETRY_AFTER).is_some());
+
+    // A different source address has its own budget.
+    let (status, _) = hit(&h, "/api/hooks/wake", [203, 0, 113, 8]).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+}
+
+/// `[webhook_triggers]` is classified hot, so a `max_payload_bytes` lowered by a reload must bind on the next request even though the wire-level layer was sized at router build.
+/// The router here is built with the 64 KiB boot value while the live config carries a 50-byte cap, which is the state a reload leaves behind.
+#[tokio::test(flavor = "multi_thread")]
+async fn hooks_trigger_body_cap_follows_the_live_config() {
+    let test = TestAppState::with_builder(MockKernelBuilder::new().with_config(|cfg| {
+        cfg.webhook_triggers = Some(WebhookTriggerConfig {
+            enabled: true,
+            token_env: "LIBREFANG_TEST_WEBHOOK_TOKEN_LIVE_CAP_UNSET".to_string(),
+            max_payload_bytes: 50,
+            // A rate no other test in this binary uses, so the per-rate limiter bucket is this test's alone.
+            rate_limit_per_minute: 1000,
+        });
+    }));
+    let state = test.state.clone();
+    let app = Router::new()
+        .nest("/api", routes::webhooks::router(64 * 1024))
+        .with_state(state.clone());
+    let h = Harness {
+        app,
+        _state: state,
+        _test: test,
+    };
+
+    let big = serde_json::json!({ "message": "x".repeat(500) });
+    let (status, _) = send(&h, Method::POST, "/api/hooks/agent", Some(big), None).await;
+    assert_eq!(
+        status,
+        StatusCode::PAYLOAD_TOO_LARGE,
+        "a body over the live cap must be a 413 even though the boot-time layer would admit it"
+    );
+
+    // A body under the live cap reaches the handler, whose token check answers.
+    let small = serde_json::json!({ "message": "hi" });
+    let (status, _) = send(&h, Method::POST, "/api/hooks/agent", Some(small), None).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+}

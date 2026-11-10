@@ -170,6 +170,27 @@ describe("CommsPage channel tiles", () => {
       within(container).getByText("Out-of-process sidecar"),
     ).toBeInTheDocument();
   });
+
+  // Issue #8597 — the comms tab strip had a roving tabindex but no arrow
+  // keys, so every tab but the selected one was keyboard-unreachable.
+  it("moves selection and focus across the tabs with the arrow keys", () => {
+    renderPage([]);
+    const tabs = within(screen.getByRole("tablist")).getAllByRole("tab");
+    expect(tabs).toHaveLength(3);
+    tabs[0].focus();
+
+    fireEvent.keyDown(tabs[0], { key: "ArrowRight" });
+
+    expect(tabs[1]).toHaveAttribute("aria-selected", "true");
+    expect(tabs[1].tabIndex).toBe(0);
+    expect(tabs[0].tabIndex).toBe(-1);
+    expect(document.activeElement).toBe(tabs[1]);
+
+    fireEvent.keyDown(tabs[1], { key: "End" });
+
+    expect(tabs[2]).toHaveAttribute("aria-selected", "true");
+    expect(document.activeElement).toBe(tabs[2]);
+  });
 });
 
 describe("CommsPage degraded data", () => {

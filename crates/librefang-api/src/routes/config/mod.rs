@@ -296,6 +296,22 @@ fn redact_url_credentials(url: &str) -> String {
     url.to_string()
 }
 
+/// Redact every part of a URL that conventionally carries a credential: `user:pass@` userinfo, the query string and the fragment.
+///
+/// Used for MCP endpoint URLs in `GET /api/config`, where a remote server's token normally sits in the query string (`?token=...`).
+/// The query and fragment are replaced by a `***` marker rather than dropped, so a reader can still tell that the configured URL carries one.
+/// Provider `base_url`s keep their query (`api-version=` on Azure is configuration, not a secret) and go through [`redact_url_credentials`] only.
+fn redact_url_secrets(url: &str) -> String {
+    let redacted = redact_url_credentials(url);
+    if let Some(pos) = redacted.find('?') {
+        format!("{}?***", &redacted[..pos])
+    } else if let Some(pos) = redacted.find('#') {
+        format!("{}#***", &redacted[..pos])
+    } else {
+        redacted
+    }
+}
+
 /// Known framework source directories under the user's OS home, used as the
 /// migration source allow-list. Legacy OpenClaw aliases are included so the
 /// existing `~/.clawdbot` / `~/.moldbot` / `~/.moltbot` layouts still import.

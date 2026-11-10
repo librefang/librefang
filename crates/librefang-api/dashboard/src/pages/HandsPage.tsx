@@ -4,6 +4,7 @@ import { useTranslation } from "react-i18next";
 import { useNavigate } from "@tanstack/react-router";
 import { AnimatePresence, motion } from "motion/react";
 import { tabContent } from "../lib/motion";
+import { useRovingTabs } from "../lib/useRovingTabs";
 import { router } from "../router";
 import {
   type HandDefinitionItem,
@@ -812,6 +813,11 @@ function DetailTabs({ hand, instance, isActive, settings, settingsQuery }: {
   ];
   const visibleTabs = tabs.filter(t => t.show);
   const [activeTab, setActiveTab] = useState<Tab>(visibleTabs[0]?.id ?? "settings");
+  const tabNav = useRovingTabs({
+    ids: visibleTabs.map((tab) => tab.id),
+    activeId: activeTab,
+    onSelect: setActiveTab,
+  });
 
   return (
     <div>
@@ -826,8 +832,9 @@ function DetailTabs({ hand, instance, isActive, settings, settingsQuery }: {
               role="tab"
               aria-selected={isActive}
               aria-controls={`hands-panel-${tab.id}`}
-              tabIndex={isActive ? 0 : -1}
+              tabIndex={tabNav.tabIndexFor(tab.id)}
               onClick={() => setActiveTab(tab.id)}
+              onKeyDown={(event) => tabNav.onKeyDown(event, tab.id)}
               className={`shrink-0 flex items-baseline gap-1.5 px-3 py-3 -mb-px border-b-2 text-xs font-bold leading-none whitespace-nowrap transition-colors ${
                 isActive
                   ? "border-brand text-brand"

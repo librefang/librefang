@@ -137,11 +137,11 @@ class A2AResource {
   }
 
   async a2aGetExternalAgent(id) {
-    return this._c._request("GET", `/api/a2a/agents/${id}`);
+    return this._c._request("GET", `/api/a2a/agents/${encodeURIComponent(String(id))}`);
   }
 
   async a2aApproveExternal(id) {
-    return this._c._request("POST", `/api/a2a/agents/${id}/approve`);
+    return this._c._request("POST", `/api/a2a/agents/${encodeURIComponent(String(id))}/approve`);
   }
 
   async a2aDiscoverExternal(data) {
@@ -153,7 +153,7 @@ class A2AResource {
   }
 
   async a2aExternalTaskStatus(id, query) {
-    return this._c._request("GET", `/api/a2a/tasks/${id}/status`, undefined, query);
+    return this._c._request("GET", `/api/a2a/tasks/${encodeURIComponent(String(id))}/status`, undefined, query);
   }
 }
 
@@ -191,7 +191,7 @@ class AgentsResource {
   }
 
   async resetAgentIdentity(name, query) {
-    return this._c._request("POST", `/api/agents/identities/${name}/reset`, undefined, query);
+    return this._c._request("POST", `/api/agents/identities/${encodeURIComponent(String(name))}/reset`, undefined, query);
   }
 
   async spawnEphemeralAgent(data) {
@@ -199,255 +199,255 @@ class AgentsResource {
   }
 
   async getAgent(id) {
-    return this._c._request("GET", `/api/agents/${id}`);
+    return this._c._request("GET", `/api/agents/${encodeURIComponent(String(id))}`);
   }
 
   async killAgent(id, query) {
-    return this._c._request("DELETE", `/api/agents/${id}`, undefined, query);
+    return this._c._request("DELETE", `/api/agents/${encodeURIComponent(String(id))}`, undefined, query);
   }
 
   async patchAgent(id, data) {
-    return this._c._request("PATCH", `/api/agents/${id}`, data, undefined);
+    return this._c._request("PATCH", `/api/agents/${encodeURIComponent(String(id))}`, data, undefined);
   }
 
   async serveAgentAvatar(id) {
-    return this._c._request("GET", `/api/agents/${id}/avatar`);
+    return this._c._request("GET", `/api/agents/${encodeURIComponent(String(id))}/avatar`);
   }
 
   async uploadAgentAvatar(id, body, contentType) {
-    return this._c._request("POST", `/api/agents/${id}/avatar`, body, undefined, contentType || "application/octet-stream");
+    return this._c._request("POST", `/api/agents/${encodeURIComponent(String(id))}/avatar`, body, undefined, contentType || "application/octet-stream");
   }
 
   async deleteAgentAvatar(id) {
-    return this._c._request("DELETE", `/api/agents/${id}/avatar`);
+    return this._c._request("DELETE", `/api/agents/${encodeURIComponent(String(id))}/avatar`);
   }
 
   async getAgentChannels(id) {
-    return this._c._request("GET", `/api/agents/${id}/channels`);
+    return this._c._request("GET", `/api/agents/${encodeURIComponent(String(id))}/channels`);
   }
 
   async setAgentChannels(id, data) {
-    return this._c._request("PUT", `/api/agents/${id}/channels`, data, undefined);
+    return this._c._request("PUT", `/api/agents/${encodeURIComponent(String(id))}/channels`, data, undefined);
   }
 
   async cloneAgent(id, data) {
-    return this._c._request("POST", `/api/agents/${id}/clone`, data, undefined);
+    return this._c._request("POST", `/api/agents/${encodeURIComponent(String(id))}/clone`, data, undefined);
   }
 
   async patchAgentConfig(id, data) {
-    return this._c._request("PATCH", `/api/agents/${id}/config`, data, undefined);
+    return this._c._request("PATCH", `/api/agents/${encodeURIComponent(String(id))}/config`, data, undefined);
   }
 
   async getAgentDeliveries(id) {
-    return this._c._request("GET", `/api/agents/${id}/deliveries`);
+    return this._c._request("GET", `/api/agents/${encodeURIComponent(String(id))}/deliveries`);
   }
 
   async listAgentEphemeralRuns(id, query) {
-    return this._c._request("GET", `/api/agents/${id}/ephemeral-runs`, undefined, query);
+    return this._c._request("GET", `/api/agents/${encodeURIComponent(String(id))}/ephemeral-runs`, undefined, query);
   }
 
   async listAgentEvents(id, query) {
-    return this._c._request("GET", `/api/agents/${id}/events`, undefined, query);
+    return this._c._request("GET", `/api/agents/${encodeURIComponent(String(id))}/events`, undefined, query);
   }
 
   async listAgentFiles(id) {
-    return this._c._request("GET", `/api/agents/${id}/files`);
+    return this._c._request("GET", `/api/agents/${encodeURIComponent(String(id))}/files`);
   }
 
   async getAgentFile(id, filename) {
-    return this._c._request("GET", `/api/agents/${id}/files/${filename}`);
+    return this._c._request("GET", `/api/agents/${encodeURIComponent(String(id))}/files/${encodeURIComponent(String(filename))}`);
   }
 
   async setAgentFile(id, filename, data) {
-    return this._c._request("PUT", `/api/agents/${id}/files/${filename}`, data, undefined);
+    return this._c._request("PUT", `/api/agents/${encodeURIComponent(String(id))}/files/${encodeURIComponent(String(filename))}`, data, undefined);
   }
 
   async deleteAgentFile(id, filename) {
-    return this._c._request("DELETE", `/api/agents/${id}/files/${filename}`);
+    return this._c._request("DELETE", `/api/agents/${encodeURIComponent(String(id))}/files/${encodeURIComponent(String(filename))}`);
   }
 
   async deleteHandAgentRuntimeConfig(id) {
-    return this._c._request("DELETE", `/api/agents/${id}/hand-runtime-config`);
+    return this._c._request("DELETE", `/api/agents/${encodeURIComponent(String(id))}/hand-runtime-config`);
   }
 
   async patchHandAgentRuntimeConfig(id, data) {
-    return this._c._request("PATCH", `/api/agents/${id}/hand-runtime-config`, data, undefined);
+    return this._c._request("PATCH", `/api/agents/${encodeURIComponent(String(id))}/hand-runtime-config`, data, undefined);
   }
 
   async clearAgentHistory(id) {
-    return this._c._request("DELETE", `/api/agents/${id}/history`);
+    return this._c._request("DELETE", `/api/agents/${encodeURIComponent(String(id))}/history`);
   }
 
   async updateAgentIdentity(id, data) {
-    return this._c._request("PATCH", `/api/agents/${id}/identity`, data, undefined);
+    return this._c._request("PATCH", `/api/agents/${encodeURIComponent(String(id))}/identity`, data, undefined);
   }
 
   async injectMessage(id, data) {
-    return this._c._request("POST", `/api/agents/${id}/inject`, data, undefined);
+    return this._c._request("POST", `/api/agents/${encodeURIComponent(String(id))}/inject`, data, undefined);
   }
 
   async agentLogs(id, query) {
-    return this._c._request("GET", `/api/agents/${id}/logs`, undefined, query);
+    return this._c._request("GET", `/api/agents/${encodeURIComponent(String(id))}/logs`, undefined, query);
   }
 
   async getAgentManifestToml(id) {
-    return this._c._request("GET", `/api/agents/${id}/manifest`);
+    return this._c._request("GET", `/api/agents/${encodeURIComponent(String(id))}/manifest`);
   }
 
   async listAgentManifestHistory(id, query) {
-    return this._c._request("GET", `/api/agents/${id}/manifest-history`, undefined, query);
+    return this._c._request("GET", `/api/agents/${encodeURIComponent(String(id))}/manifest-history`, undefined, query);
   }
 
   async restoreAgentManifestVersion(id, version_id) {
-    return this._c._request("POST", `/api/agents/${id}/manifest-history/${version_id}/restore`);
+    return this._c._request("POST", `/api/agents/${encodeURIComponent(String(id))}/manifest-history/${encodeURIComponent(String(version_id))}/restore`);
   }
 
   async getAgentMcpServers(id) {
-    return this._c._request("GET", `/api/agents/${id}/mcp_servers`);
+    return this._c._request("GET", `/api/agents/${encodeURIComponent(String(id))}/mcp_servers`);
   }
 
   async setAgentMcpServers(id, data) {
-    return this._c._request("PUT", `/api/agents/${id}/mcp_servers`, data, undefined);
+    return this._c._request("PUT", `/api/agents/${encodeURIComponent(String(id))}/mcp_servers`, data, undefined);
   }
 
   async sendMessage(id, data) {
-    return this._c._request("POST", `/api/agents/${id}/message`, data, undefined);
+    return this._c._request("POST", `/api/agents/${encodeURIComponent(String(id))}/message`, data, undefined);
   }
 
   async *sendMessageStream(id, data) {
-    yield* this._c._stream("POST", `/api/agents/${id}/message/stream`, data, undefined);
+    yield* this._c._stream("POST", `/api/agents/${encodeURIComponent(String(id))}/message/stream`, data, undefined);
   }
 
   async agentMetrics(id) {
-    return this._c._request("GET", `/api/agents/${id}/metrics`);
+    return this._c._request("GET", `/api/agents/${encodeURIComponent(String(id))}/metrics`);
   }
 
   async setAgentMode(id, data) {
-    return this._c._request("PUT", `/api/agents/${id}/mode`, data, undefined);
+    return this._c._request("PUT", `/api/agents/${encodeURIComponent(String(id))}/mode`, data, undefined);
   }
 
   async setModel(id, data) {
-    return this._c._request("PUT", `/api/agents/${id}/model`, data, undefined);
+    return this._c._request("PUT", `/api/agents/${encodeURIComponent(String(id))}/model`, data, undefined);
   }
 
   async getAgentModelRouting(id) {
-    return this._c._request("GET", `/api/agents/${id}/model_routing`);
+    return this._c._request("GET", `/api/agents/${encodeURIComponent(String(id))}/model_routing`);
   }
 
   async setAgentModelRouting(id, data) {
-    return this._c._request("PUT", `/api/agents/${id}/model_routing`, data, undefined);
+    return this._c._request("PUT", `/api/agents/${encodeURIComponent(String(id))}/model_routing`, data, undefined);
   }
 
   async pushMessage(id, data) {
-    return this._c._request("POST", `/api/agents/${id}/push`, data, undefined);
+    return this._c._request("POST", `/api/agents/${encodeURIComponent(String(id))}/push`, data, undefined);
   }
 
   async reloadAgentManifest(id) {
-    return this._c._request("POST", `/api/agents/${id}/reload`);
+    return this._c._request("POST", `/api/agents/${encodeURIComponent(String(id))}/reload`);
   }
 
   async resumeAgent(id) {
-    return this._c._request("PUT", `/api/agents/${id}/resume`);
+    return this._c._request("PUT", `/api/agents/${encodeURIComponent(String(id))}/resume`);
   }
 
   async listAgentRuntime(id) {
-    return this._c._request("GET", `/api/agents/${id}/runtime`);
+    return this._c._request("GET", `/api/agents/${encodeURIComponent(String(id))}/runtime`);
   }
 
   async saveAgentAsAgentType(id, data) {
-    return this._c._request("POST", `/api/agents/${id}/save-as-agent-type`, data, undefined);
+    return this._c._request("POST", `/api/agents/${encodeURIComponent(String(id))}/save-as-agent-type`, data, undefined);
   }
 
   async getAgentSession(id, query) {
-    return this._c._request("GET", `/api/agents/${id}/session`, undefined, query);
+    return this._c._request("GET", `/api/agents/${encodeURIComponent(String(id))}/session`, undefined, query);
   }
 
   async compactSession(id) {
-    return this._c._request("POST", `/api/agents/${id}/session/compact`);
+    return this._c._request("POST", `/api/agents/${encodeURIComponent(String(id))}/session/compact`);
   }
 
   async getAgentSessionContext(id, query) {
-    return this._c._request("GET", `/api/agents/${id}/session/context`, undefined, query);
+    return this._c._request("GET", `/api/agents/${encodeURIComponent(String(id))}/session/context`, undefined, query);
   }
 
   async rebootSession(id) {
-    return this._c._request("POST", `/api/agents/${id}/session/reboot`);
+    return this._c._request("POST", `/api/agents/${encodeURIComponent(String(id))}/session/reboot`);
   }
 
   async resetSession(id) {
-    return this._c._request("POST", `/api/agents/${id}/session/reset`);
+    return this._c._request("POST", `/api/agents/${encodeURIComponent(String(id))}/session/reset`);
   }
 
   async listAgentSessions(id) {
-    return this._c._request("GET", `/api/agents/${id}/sessions`);
+    return this._c._request("GET", `/api/agents/${encodeURIComponent(String(id))}/sessions`);
   }
 
   async createAgentSession(id, data) {
-    return this._c._request("POST", `/api/agents/${id}/sessions`, data, undefined);
+    return this._c._request("POST", `/api/agents/${encodeURIComponent(String(id))}/sessions`, data, undefined);
   }
 
   async importSession(id, data) {
-    return this._c._request("POST", `/api/agents/${id}/sessions/import`, data, undefined);
+    return this._c._request("POST", `/api/agents/${encodeURIComponent(String(id))}/sessions/import`, data, undefined);
   }
 
   async exportSession(id, session_id) {
-    return this._c._request("GET", `/api/agents/${id}/sessions/${session_id}/export`);
+    return this._c._request("GET", `/api/agents/${encodeURIComponent(String(id))}/sessions/${encodeURIComponent(String(session_id))}/export`);
   }
 
   async stopSession(id, session_id) {
-    return this._c._request("POST", `/api/agents/${id}/sessions/${session_id}/stop`);
+    return this._c._request("POST", `/api/agents/${encodeURIComponent(String(id))}/sessions/${encodeURIComponent(String(session_id))}/stop`);
   }
 
   async *attachSessionStream(id, session_id) {
-    yield* this._c._stream("GET", `/api/agents/${id}/sessions/${session_id}/stream`);
+    yield* this._c._stream("GET", `/api/agents/${encodeURIComponent(String(id))}/sessions/${encodeURIComponent(String(session_id))}/stream`);
   }
 
   async switchAgentSession(id, session_id) {
-    return this._c._request("POST", `/api/agents/${id}/sessions/${session_id}/switch`);
+    return this._c._request("POST", `/api/agents/${encodeURIComponent(String(id))}/sessions/${encodeURIComponent(String(session_id))}/switch`);
   }
 
   async exportSessionTrajectory(id, session_id, query) {
-    return this._c._request("GET", `/api/agents/${id}/sessions/${session_id}/trajectory`, undefined, query);
+    return this._c._request("GET", `/api/agents/${encodeURIComponent(String(id))}/sessions/${encodeURIComponent(String(session_id))}/trajectory`, undefined, query);
   }
 
   async getAgentSkills(id) {
-    return this._c._request("GET", `/api/agents/${id}/skills`);
+    return this._c._request("GET", `/api/agents/${encodeURIComponent(String(id))}/skills`);
   }
 
   async setAgentSkills(id, data) {
-    return this._c._request("PUT", `/api/agents/${id}/skills`, data, undefined);
+    return this._c._request("PUT", `/api/agents/${encodeURIComponent(String(id))}/skills`, data, undefined);
   }
 
   async getAgentStats(id) {
-    return this._c._request("GET", `/api/agents/${id}/stats`);
+    return this._c._request("GET", `/api/agents/${encodeURIComponent(String(id))}/stats`);
   }
 
   async stopAgent(id) {
-    return this._c._request("POST", `/api/agents/${id}/stop`);
+    return this._c._request("POST", `/api/agents/${encodeURIComponent(String(id))}/stop`);
   }
 
   async suspendAgent(id) {
-    return this._c._request("PUT", `/api/agents/${id}/suspend`);
+    return this._c._request("PUT", `/api/agents/${encodeURIComponent(String(id))}/suspend`);
   }
 
   async getAgentTools(id) {
-    return this._c._request("GET", `/api/agents/${id}/tools`);
+    return this._c._request("GET", `/api/agents/${encodeURIComponent(String(id))}/tools`);
   }
 
   async setAgentTools(id, data) {
-    return this._c._request("PUT", `/api/agents/${id}/tools`, data, undefined);
+    return this._c._request("PUT", `/api/agents/${encodeURIComponent(String(id))}/tools`, data, undefined);
   }
 
   async getAgentTraces(id) {
-    return this._c._request("GET", `/api/agents/${id}/traces`);
+    return this._c._request("GET", `/api/agents/${encodeURIComponent(String(id))}/traces`);
   }
 
   async uploadFile(id, body, contentType) {
-    return this._c._request("POST", `/api/agents/${id}/upload`, body, undefined, contentType || "application/octet-stream");
+    return this._c._request("POST", `/api/agents/${encodeURIComponent(String(id))}/upload`, body, undefined, contentType || "application/octet-stream");
   }
 
   async serveUpload(file_id) {
-    return this._c._request("GET", `/api/uploads/${file_id}`);
+    return this._c._request("GET", `/api/uploads/${encodeURIComponent(String(file_id))}`);
   }
 }
 
@@ -477,31 +477,31 @@ class ApprovalsResource {
   }
 
   async listApprovalsForSession(session_id) {
-    return this._c._request("GET", `/api/approvals/session/${session_id}`);
+    return this._c._request("GET", `/api/approvals/session/${encodeURIComponent(String(session_id))}`);
   }
 
   async approveAllForSession(session_id, data) {
-    return this._c._request("POST", `/api/approvals/session/${session_id}/approve_all`, data, undefined);
+    return this._c._request("POST", `/api/approvals/session/${encodeURIComponent(String(session_id))}/approve_all`, data, undefined);
   }
 
   async rejectAllForSession(session_id) {
-    return this._c._request("POST", `/api/approvals/session/${session_id}/reject_all`);
+    return this._c._request("POST", `/api/approvals/session/${encodeURIComponent(String(session_id))}/reject_all`);
   }
 
   async getApproval(id) {
-    return this._c._request("GET", `/api/approvals/${id}`);
+    return this._c._request("GET", `/api/approvals/${encodeURIComponent(String(id))}`);
   }
 
   async approveRequest(id, data) {
-    return this._c._request("POST", `/api/approvals/${id}/approve`, data, undefined);
+    return this._c._request("POST", `/api/approvals/${encodeURIComponent(String(id))}/approve`, data, undefined);
   }
 
   async modifyRequest(id, data) {
-    return this._c._request("POST", `/api/approvals/${id}/modify`, data, undefined);
+    return this._c._request("POST", `/api/approvals/${encodeURIComponent(String(id))}/modify`, data, undefined);
   }
 
   async rejectRequest(id) {
-    return this._c._request("POST", `/api/approvals/${id}/reject`);
+    return this._c._request("POST", `/api/approvals/${encodeURIComponent(String(id))}/reject`);
   }
 }
 
@@ -539,7 +539,7 @@ class AuthResource {
   }
 
   async authLoginProvider(provider) {
-    return this._c._request("GET", `/api/auth/login/${provider}`);
+    return this._c._request("GET", `/api/auth/login/${encodeURIComponent(String(provider))}`);
   }
 
   async dashboardLogout() {
@@ -559,7 +559,7 @@ class AuthResource {
   }
 
   async revokeCredential(id) {
-    return this._c._request("DELETE", `/api/auth/passkey/credentials/${id}`);
+    return this._c._request("DELETE", `/api/auth/passkey/credentials/${encodeURIComponent(String(id))}`);
   }
 
   async registrationOptions(data) {
@@ -589,15 +589,15 @@ class AutoDreamResource {
   constructor(client) { this._c = client; }
 
   async autoDreamAbort(id) {
-    return this._c._request("POST", `/api/auto-dream/agents/${id}/abort`);
+    return this._c._request("POST", `/api/auto-dream/agents/${encodeURIComponent(String(id))}/abort`);
   }
 
   async autoDreamSetEnabled(id, data) {
-    return this._c._request("PUT", `/api/auto-dream/agents/${id}/enabled`, data, undefined);
+    return this._c._request("PUT", `/api/auto-dream/agents/${encodeURIComponent(String(id))}/enabled`, data, undefined);
   }
 
   async autoDreamTrigger(id) {
-    return this._c._request("POST", `/api/auto-dream/agents/${id}/trigger`);
+    return this._c._request("POST", `/api/auto-dream/agents/${encodeURIComponent(String(id))}/trigger`);
   }
 
   async autoDreamStatus() {
@@ -623,11 +623,11 @@ class BudgetResource {
   }
 
   async agentBudgetStatus(id) {
-    return this._c._request("GET", `/api/budget/agents/${id}`);
+    return this._c._request("GET", `/api/budget/agents/${encodeURIComponent(String(id))}`);
   }
 
   async updateAgentBudget(id, data) {
-    return this._c._request("PUT", `/api/budget/agents/${id}`, data, undefined);
+    return this._c._request("PUT", `/api/budget/agents/${encodeURIComponent(String(id))}`, data, undefined);
   }
 
   async providerBudgetList() {
@@ -635,7 +635,7 @@ class BudgetResource {
   }
 
   async updateProviderBudget(provider_id, data) {
-    return this._c._request("PUT", `/api/budget/providers/${provider_id}`, data, undefined);
+    return this._c._request("PUT", `/api/budget/providers/${encodeURIComponent(String(provider_id))}`, data, undefined);
   }
 
   async userBudgetRanking(query) {
@@ -643,15 +643,15 @@ class BudgetResource {
   }
 
   async userBudgetDetail(user_id) {
-    return this._c._request("GET", `/api/budget/users/${user_id}`);
+    return this._c._request("GET", `/api/budget/users/${encodeURIComponent(String(user_id))}`);
   }
 
   async updateUserBudget(user_id, data) {
-    return this._c._request("PUT", `/api/budget/users/${user_id}`, data, undefined);
+    return this._c._request("PUT", `/api/budget/users/${encodeURIComponent(String(user_id))}`, data, undefined);
   }
 
   async deleteUserBudget(user_id) {
-    return this._c._request("DELETE", `/api/budget/users/${user_id}`);
+    return this._c._request("DELETE", `/api/budget/users/${encodeURIComponent(String(user_id))}`);
   }
 
   async usageStats(query) {
@@ -697,15 +697,15 @@ class ChannelsResource {
   }
 
   async deleteSidecarChannel(name) {
-    return this._c._request("DELETE", `/api/channels/sidecar/${name}`);
+    return this._c._request("DELETE", `/api/channels/sidecar/${encodeURIComponent(String(name))}`);
   }
 
   async configureSidecarChannel(name, data) {
-    return this._c._request("POST", `/api/channels/sidecar/${name}/configure`, data, undefined);
+    return this._c._request("POST", `/api/channels/sidecar/${encodeURIComponent(String(name))}/configure`, data, undefined);
   }
 
   async getChannelQr(name) {
-    return this._c._request("GET", `/api/channels/${name}/qr`);
+    return this._c._request("GET", `/api/channels/${encodeURIComponent(String(name))}/qr`);
   }
 }
 
@@ -727,7 +727,7 @@ class ExtensionsResource {
   }
 
   async getExtension(name) {
-    return this._c._request("GET", `/api/extensions/${name}`);
+    return this._c._request("GET", `/api/extensions/${encodeURIComponent(String(name))}`);
   }
 }
 
@@ -755,27 +755,27 @@ class GroupsResource {
   }
 
   async getGroup(name) {
-    return this._c._request("GET", `/api/groups/${name}`);
+    return this._c._request("GET", `/api/groups/${encodeURIComponent(String(name))}`);
   }
 
   async updateGroup(name, data) {
-    return this._c._request("PUT", `/api/groups/${name}`, data, undefined);
+    return this._c._request("PUT", `/api/groups/${encodeURIComponent(String(name))}`, data, undefined);
   }
 
   async deleteGroup(name) {
-    return this._c._request("DELETE", `/api/groups/${name}`);
+    return this._c._request("DELETE", `/api/groups/${encodeURIComponent(String(name))}`);
   }
 
   async addGroupMember(name, user) {
-    return this._c._request("PUT", `/api/groups/${name}/members/${user}`);
+    return this._c._request("PUT", `/api/groups/${encodeURIComponent(String(name))}/members/${encodeURIComponent(String(user))}`);
   }
 
   async removeGroupMember(name, user) {
-    return this._c._request("DELETE", `/api/groups/${name}/members/${user}`);
+    return this._c._request("DELETE", `/api/groups/${encodeURIComponent(String(name))}/members/${encodeURIComponent(String(user))}`);
   }
 
   async userGroups(name) {
-    return this._c._request("GET", `/api/users/${name}/groups`);
+    return this._c._request("GET", `/api/users/${encodeURIComponent(String(name))}/groups`);
   }
 }
 
@@ -797,23 +797,23 @@ class HandsResource {
   }
 
   async deactivateHand(id) {
-    return this._c._request("DELETE", `/api/hands/instances/${id}`);
+    return this._c._request("DELETE", `/api/hands/instances/${encodeURIComponent(String(id))}`);
   }
 
   async handInstanceBrowser(id) {
-    return this._c._request("GET", `/api/hands/instances/${id}/browser`);
+    return this._c._request("GET", `/api/hands/instances/${encodeURIComponent(String(id))}/browser`);
   }
 
   async pauseHand(id) {
-    return this._c._request("POST", `/api/hands/instances/${id}/pause`);
+    return this._c._request("POST", `/api/hands/instances/${encodeURIComponent(String(id))}/pause`);
   }
 
   async resumeHand(id) {
-    return this._c._request("POST", `/api/hands/instances/${id}/resume`);
+    return this._c._request("POST", `/api/hands/instances/${encodeURIComponent(String(id))}/resume`);
   }
 
   async handStats(id) {
-    return this._c._request("GET", `/api/hands/instances/${id}/stats`);
+    return this._c._request("GET", `/api/hands/instances/${encodeURIComponent(String(id))}/stats`);
   }
 
   async installHandFromMarketplace(data) {
@@ -825,43 +825,43 @@ class HandsResource {
   }
 
   async getHand(hand_id) {
-    return this._c._request("GET", `/api/hands/${hand_id}`);
+    return this._c._request("GET", `/api/hands/${encodeURIComponent(String(hand_id))}`);
   }
 
   async uninstallHand(hand_id) {
-    return this._c._request("DELETE", `/api/hands/${hand_id}`);
+    return this._c._request("DELETE", `/api/hands/${encodeURIComponent(String(hand_id))}`);
   }
 
   async activateHand(hand_id, data) {
-    return this._c._request("POST", `/api/hands/${hand_id}/activate`, data, undefined);
+    return this._c._request("POST", `/api/hands/${encodeURIComponent(String(hand_id))}/activate`, data, undefined);
   }
 
   async checkHandDeps(hand_id) {
-    return this._c._request("POST", `/api/hands/${hand_id}/check-deps`);
+    return this._c._request("POST", `/api/hands/${encodeURIComponent(String(hand_id))}/check-deps`);
   }
 
   async installHandDeps(hand_id) {
-    return this._c._request("POST", `/api/hands/${hand_id}/install-deps`);
+    return this._c._request("POST", `/api/hands/${encodeURIComponent(String(hand_id))}/install-deps`);
   }
 
   async getHandManifest(hand_id) {
-    return this._c._request("GET", `/api/hands/${hand_id}/manifest`);
+    return this._c._request("GET", `/api/hands/${encodeURIComponent(String(hand_id))}/manifest`);
   }
 
   async updateHandManifest(hand_id, data) {
-    return this._c._request("PUT", `/api/hands/${hand_id}/manifest`, data, undefined);
+    return this._c._request("PUT", `/api/hands/${encodeURIComponent(String(hand_id))}/manifest`, data, undefined);
   }
 
   async setHandSecret(hand_id, data) {
-    return this._c._request("POST", `/api/hands/${hand_id}/secret`, data, undefined);
+    return this._c._request("POST", `/api/hands/${encodeURIComponent(String(hand_id))}/secret`, data, undefined);
   }
 
   async getHandSettings(hand_id) {
-    return this._c._request("GET", `/api/hands/${hand_id}/settings`);
+    return this._c._request("GET", `/api/hands/${encodeURIComponent(String(hand_id))}/settings`);
   }
 
   async updateHandSettings(hand_id, data) {
-    return this._c._request("PUT", `/api/hands/${hand_id}/settings`, data, undefined);
+    return this._c._request("PUT", `/api/hands/${encodeURIComponent(String(hand_id))}/settings`, data, undefined);
   }
 }
 
@@ -889,23 +889,23 @@ class KnowledgeResource {
   }
 
   async deleteBase(name) {
-    return this._c._request("DELETE", `/api/knowledge/${name}`);
+    return this._c._request("DELETE", `/api/knowledge/${encodeURIComponent(String(name))}`);
   }
 
   async setHolders(name, data) {
-    return this._c._request("PUT", `/api/knowledge/${name}/agents`, data, undefined);
+    return this._c._request("PUT", `/api/knowledge/${encodeURIComponent(String(name))}/agents`, data, undefined);
   }
 
   async listDocuments(name) {
-    return this._c._request("GET", `/api/knowledge/${name}/documents`);
+    return this._c._request("GET", `/api/knowledge/${encodeURIComponent(String(name))}/documents`);
   }
 
   async putDocument(name, filename, body, contentType) {
-    return this._c._request("PUT", `/api/knowledge/${name}/documents/${filename}`, body, undefined, contentType || "application/octet-stream");
+    return this._c._request("PUT", `/api/knowledge/${encodeURIComponent(String(name))}/documents/${encodeURIComponent(String(filename))}`, body, undefined, contentType || "application/octet-stream");
   }
 
   async deleteDocument(name, filename) {
-    return this._c._request("DELETE", `/api/knowledge/${name}/documents/${filename}`);
+    return this._c._request("DELETE", `/api/knowledge/${encodeURIComponent(String(name))}/documents/${encodeURIComponent(String(filename))}`);
   }
 }
 
@@ -919,7 +919,7 @@ class McpResource {
   }
 
   async getMcpCatalogEntry(id) {
-    return this._c._request("GET", `/api/mcp/catalog/${id}`);
+    return this._c._request("GET", `/api/mcp/catalog/${encodeURIComponent(String(id))}`);
   }
 
   async mcpHealthHandler() {
@@ -939,35 +939,35 @@ class McpResource {
   }
 
   async getMcpServer(name) {
-    return this._c._request("GET", `/api/mcp/servers/${name}`);
+    return this._c._request("GET", `/api/mcp/servers/${encodeURIComponent(String(name))}`);
   }
 
   async updateMcpServer(name, data) {
-    return this._c._request("PUT", `/api/mcp/servers/${name}`, data, undefined);
+    return this._c._request("PUT", `/api/mcp/servers/${encodeURIComponent(String(name))}`, data, undefined);
   }
 
   async deleteMcpServer(name) {
-    return this._c._request("DELETE", `/api/mcp/servers/${name}`);
+    return this._c._request("DELETE", `/api/mcp/servers/${encodeURIComponent(String(name))}`);
   }
 
   async authRevoke(name) {
-    return this._c._request("DELETE", `/api/mcp/servers/${name}/auth/revoke`);
+    return this._c._request("DELETE", `/api/mcp/servers/${encodeURIComponent(String(name))}/auth/revoke`);
   }
 
   async authStart(name) {
-    return this._c._request("POST", `/api/mcp/servers/${name}/auth/start`);
+    return this._c._request("POST", `/api/mcp/servers/${encodeURIComponent(String(name))}/auth/start`);
   }
 
   async authStatus(name) {
-    return this._c._request("GET", `/api/mcp/servers/${name}/auth/status`);
+    return this._c._request("GET", `/api/mcp/servers/${encodeURIComponent(String(name))}/auth/status`);
   }
 
   async reconnectMcpServerHandler(name) {
-    return this._c._request("POST", `/api/mcp/servers/${name}/reconnect`);
+    return this._c._request("POST", `/api/mcp/servers/${encodeURIComponent(String(name))}/reconnect`);
   }
 
   async patchMcpServerTaint(name, data) {
-    return this._c._request("PATCH", `/api/mcp/servers/${name}/taint`, data, undefined);
+    return this._c._request("PATCH", `/api/mcp/servers/${encodeURIComponent(String(name))}/taint`, data, undefined);
   }
 
   async listMcpTaintRules() {
@@ -1005,7 +1005,7 @@ class MediaResource {
   }
 
   async pollVideoTask(task_id, query) {
-    return this._c._request("GET", `/api/media/video/${task_id}`, undefined, query);
+    return this._c._request("GET", `/api/media/video/${encodeURIComponent(String(task_id))}`, undefined, query);
   }
 }
 
@@ -1015,27 +1015,27 @@ class MemoryResource {
   constructor(client) { this._c = client; }
 
   async exportAgentMemory(id) {
-    return this._c._request("GET", `/api/agents/${id}/memory/export`);
+    return this._c._request("GET", `/api/agents/${encodeURIComponent(String(id))}/memory/export`);
   }
 
   async importAgentMemory(id, data) {
-    return this._c._request("POST", `/api/agents/${id}/memory/import`, data, undefined);
+    return this._c._request("POST", `/api/agents/${encodeURIComponent(String(id))}/memory/import`, data, undefined);
   }
 
   async getAgentKv(id) {
-    return this._c._request("GET", `/api/memory/agents/${id}/kv`);
+    return this._c._request("GET", `/api/memory/agents/${encodeURIComponent(String(id))}/kv`);
   }
 
   async getAgentKvKey(id, key) {
-    return this._c._request("GET", `/api/memory/agents/${id}/kv/${key}`);
+    return this._c._request("GET", `/api/memory/agents/${encodeURIComponent(String(id))}/kv/${encodeURIComponent(String(key))}`);
   }
 
   async setAgentKvKey(id, key, data) {
-    return this._c._request("PUT", `/api/memory/agents/${id}/kv/${key}`, data, undefined);
+    return this._c._request("PUT", `/api/memory/agents/${encodeURIComponent(String(id))}/kv/${encodeURIComponent(String(key))}`, data, undefined);
   }
 
   async deleteAgentKvKey(id, key) {
-    return this._c._request("DELETE", `/api/memory/agents/${id}/kv/${key}`);
+    return this._c._request("DELETE", `/api/memory/agents/${encodeURIComponent(String(id))}/kv/${encodeURIComponent(String(key))}`);
   }
 
   async memoryConfigGet() {
@@ -1081,7 +1081,7 @@ class ModelsResource {
   }
 
   async deleteAlias(alias) {
-    return this._c._request("DELETE", `/api/models/aliases/${alias}`);
+    return this._c._request("DELETE", `/api/models/aliases/${encodeURIComponent(String(alias))}`);
   }
 
   async addCustomModel(data) {
@@ -1089,23 +1089,23 @@ class ModelsResource {
   }
 
   async removeCustomModel(id) {
-    return this._c._request("DELETE", `/api/models/custom/${id}`);
+    return this._c._request("DELETE", `/api/models/custom/${encodeURIComponent(String(id))}`);
   }
 
   async getModelOverrides(id) {
-    return this._c._request("GET", `/api/models/overrides/${id}`);
+    return this._c._request("GET", `/api/models/overrides/${encodeURIComponent(String(id))}`);
   }
 
   async setModelOverrides(id, data) {
-    return this._c._request("PUT", `/api/models/overrides/${id}`, data, undefined);
+    return this._c._request("PUT", `/api/models/overrides/${encodeURIComponent(String(id))}`, data, undefined);
   }
 
   async deleteModelOverrides(id) {
-    return this._c._request("DELETE", `/api/models/overrides/${id}`);
+    return this._c._request("DELETE", `/api/models/overrides/${encodeURIComponent(String(id))}`);
   }
 
   async getModel(id) {
-    return this._c._request("GET", `/api/models/${id}`);
+    return this._c._request("GET", `/api/models/${encodeURIComponent(String(id))}`);
   }
 
   async listProviders() {
@@ -1113,7 +1113,7 @@ class ModelsResource {
   }
 
   async copilotOauthPoll(poll_id) {
-    return this._c._request("GET", `/api/providers/github-copilot/oauth/poll/${poll_id}`);
+    return this._c._request("GET", `/api/providers/github-copilot/oauth/poll/${encodeURIComponent(String(poll_id))}`);
   }
 
   async copilotOauthStart() {
@@ -1121,35 +1121,35 @@ class ModelsResource {
   }
 
   async getProvider(name) {
-    return this._c._request("GET", `/api/providers/${name}`);
+    return this._c._request("GET", `/api/providers/${encodeURIComponent(String(name))}`);
   }
 
   async setDefaultProvider(name, data) {
-    return this._c._request("POST", `/api/providers/${name}/default`, data, undefined);
+    return this._c._request("POST", `/api/providers/${encodeURIComponent(String(name))}/default`, data, undefined);
   }
 
   async setProviderDiscovery(name, data) {
-    return this._c._request("PUT", `/api/providers/${name}/discovery`, data, undefined);
+    return this._c._request("PUT", `/api/providers/${encodeURIComponent(String(name))}/discovery`, data, undefined);
   }
 
   async enableProvider(name) {
-    return this._c._request("POST", `/api/providers/${name}/enable`);
+    return this._c._request("POST", `/api/providers/${encodeURIComponent(String(name))}/enable`);
   }
 
   async setProviderKey(name, data) {
-    return this._c._request("POST", `/api/providers/${name}/key`, data, undefined);
+    return this._c._request("POST", `/api/providers/${encodeURIComponent(String(name))}/key`, data, undefined);
   }
 
   async deleteProviderKey(name) {
-    return this._c._request("DELETE", `/api/providers/${name}/key`);
+    return this._c._request("DELETE", `/api/providers/${encodeURIComponent(String(name))}/key`);
   }
 
   async testProvider(name) {
-    return this._c._request("POST", `/api/providers/${name}/test`);
+    return this._c._request("POST", `/api/providers/${encodeURIComponent(String(name))}/test`);
   }
 
   async setProviderUrl(name, data) {
-    return this._c._request("PUT", `/api/providers/${name}/url`, data, undefined);
+    return this._c._request("PUT", `/api/providers/${encodeURIComponent(String(name))}/url`, data, undefined);
   }
 }
 
@@ -1191,7 +1191,7 @@ class NetworkResource {
   }
 
   async getPeer(id) {
-    return this._c._request("GET", `/api/peers/${id}`);
+    return this._c._request("GET", `/api/peers/${encodeURIComponent(String(id))}`);
   }
 }
 
@@ -1209,7 +1209,7 @@ class PairingResource {
   }
 
   async pairingRemoveDevice(id) {
-    return this._c._request("DELETE", `/api/pairing/devices/${id}`);
+    return this._c._request("DELETE", `/api/pairing/devices/${encodeURIComponent(String(id))}`);
   }
 
   async pairingNotify(data) {
@@ -1275,55 +1275,55 @@ class PluginsResource {
   }
 
   async getPlugin(name) {
-    return this._c._request("GET", `/api/plugins/${name}`);
+    return this._c._request("GET", `/api/plugins/${encodeURIComponent(String(name))}`);
   }
 
   async pluginAdvancedConfig(name) {
-    return this._c._request("GET", `/api/plugins/${name}/advanced-config`);
+    return this._c._request("GET", `/api/plugins/${encodeURIComponent(String(name))}/advanced-config`);
   }
 
   async disablePlugin(name) {
-    return this._c._request("POST", `/api/plugins/${name}/disable`);
+    return this._c._request("POST", `/api/plugins/${encodeURIComponent(String(name))}/disable`);
   }
 
   async enablePlugin(name) {
-    return this._c._request("POST", `/api/plugins/${name}/enable`);
+    return this._c._request("POST", `/api/plugins/${encodeURIComponent(String(name))}/enable`);
   }
 
   async pluginEnv(name) {
-    return this._c._request("GET", `/api/plugins/${name}/env`);
+    return this._c._request("GET", `/api/plugins/${encodeURIComponent(String(name))}/env`);
   }
 
   async installPluginDeps(name) {
-    return this._c._request("POST", `/api/plugins/${name}/install-deps`);
+    return this._c._request("POST", `/api/plugins/${encodeURIComponent(String(name))}/install-deps`);
   }
 
   async lintPlugin(name) {
-    return this._c._request("GET", `/api/plugins/${name}/lint`);
+    return this._c._request("GET", `/api/plugins/${encodeURIComponent(String(name))}/lint`);
   }
 
   async prewarmPlugin(name) {
-    return this._c._request("POST", `/api/plugins/${name}/prewarm`);
+    return this._c._request("POST", `/api/plugins/${encodeURIComponent(String(name))}/prewarm`);
   }
 
   async reloadPlugin(name) {
-    return this._c._request("POST", `/api/plugins/${name}/reload`);
+    return this._c._request("POST", `/api/plugins/${encodeURIComponent(String(name))}/reload`);
   }
 
   async signPlugin(name) {
-    return this._c._request("POST", `/api/plugins/${name}/sign`);
+    return this._c._request("POST", `/api/plugins/${encodeURIComponent(String(name))}/sign`);
   }
 
   async pluginStatus(name) {
-    return this._c._request("GET", `/api/plugins/${name}/status`);
+    return this._c._request("GET", `/api/plugins/${encodeURIComponent(String(name))}/status`);
   }
 
   async testPluginHook(name, data) {
-    return this._c._request("POST", `/api/plugins/${name}/test-hook`, data, undefined);
+    return this._c._request("POST", `/api/plugins/${encodeURIComponent(String(name))}/test-hook`, data, undefined);
   }
 
   async upgradePlugin(name, data) {
-    return this._c._request("POST", `/api/plugins/${name}/upgrade`, data, undefined);
+    return this._c._request("POST", `/api/plugins/${encodeURIComponent(String(name))}/upgrade`, data, undefined);
   }
 }
 
@@ -1341,51 +1341,51 @@ class ProactiveMemoryResource {
   }
 
   async memoryListAgent(id, query) {
-    return this._c._request("GET", `/api/memory/agents/${id}`, undefined, query);
+    return this._c._request("GET", `/api/memory/agents/${encodeURIComponent(String(id))}`, undefined, query);
   }
 
   async memoryResetAgent(id) {
-    return this._c._request("DELETE", `/api/memory/agents/${id}`);
+    return this._c._request("DELETE", `/api/memory/agents/${encodeURIComponent(String(id))}`);
   }
 
   async memoryConsolidate(id) {
-    return this._c._request("POST", `/api/memory/agents/${id}/consolidate`);
+    return this._c._request("POST", `/api/memory/agents/${encodeURIComponent(String(id))}/consolidate`);
   }
 
   async memoryCountAgent(id, query) {
-    return this._c._request("GET", `/api/memory/agents/${id}/count`, undefined, query);
+    return this._c._request("GET", `/api/memory/agents/${encodeURIComponent(String(id))}/count`, undefined, query);
   }
 
   async memoryDuplicates(id) {
-    return this._c._request("GET", `/api/memory/agents/${id}/duplicates`);
+    return this._c._request("GET", `/api/memory/agents/${encodeURIComponent(String(id))}/duplicates`);
   }
 
   async memoryExportAgent(id) {
-    return this._c._request("GET", `/api/memory/agents/${id}/export`);
+    return this._c._request("GET", `/api/memory/agents/${encodeURIComponent(String(id))}/export`);
   }
 
   async memoryImportAgent(id, data) {
-    return this._c._request("POST", `/api/memory/agents/${id}/import`, data, undefined);
+    return this._c._request("POST", `/api/memory/agents/${encodeURIComponent(String(id))}/import`, data, undefined);
   }
 
   async memoryClearLevel(id, level) {
-    return this._c._request("DELETE", `/api/memory/agents/${id}/level/${level}`);
+    return this._c._request("DELETE", `/api/memory/agents/${encodeURIComponent(String(id))}/level/${encodeURIComponent(String(level))}`);
   }
 
   async memoryQueryRelations(id, query) {
-    return this._c._request("GET", `/api/memory/agents/${id}/relations`, undefined, query);
+    return this._c._request("GET", `/api/memory/agents/${encodeURIComponent(String(id))}/relations`, undefined, query);
   }
 
   async memoryStoreRelations(id, data) {
-    return this._c._request("POST", `/api/memory/agents/${id}/relations`, data, undefined);
+    return this._c._request("POST", `/api/memory/agents/${encodeURIComponent(String(id))}/relations`, data, undefined);
   }
 
   async memorySearchAgent(id, query) {
-    return this._c._request("GET", `/api/memory/agents/${id}/search`, undefined, query);
+    return this._c._request("GET", `/api/memory/agents/${encodeURIComponent(String(id))}/search`, undefined, query);
   }
 
   async memoryStatsAgent(id) {
-    return this._c._request("GET", `/api/memory/agents/${id}/stats`);
+    return this._c._request("GET", `/api/memory/agents/${encodeURIComponent(String(id))}/stats`);
   }
 
   async memoryBulkDelete(data) {
@@ -1401,15 +1401,15 @@ class ProactiveMemoryResource {
   }
 
   async memoryUpdate(memory_id, data) {
-    return this._c._request("PUT", `/api/memory/items/${memory_id}`, data, undefined);
+    return this._c._request("PUT", `/api/memory/items/${encodeURIComponent(String(memory_id))}`, data, undefined);
   }
 
   async memoryDelete(memory_id) {
-    return this._c._request("DELETE", `/api/memory/items/${memory_id}`);
+    return this._c._request("DELETE", `/api/memory/items/${encodeURIComponent(String(memory_id))}`);
   }
 
   async memoryHistory(memory_id) {
-    return this._c._request("GET", `/api/memory/items/${memory_id}/history`);
+    return this._c._request("GET", `/api/memory/items/${encodeURIComponent(String(memory_id))}/history`);
   }
 
   async memorySearch(query) {
@@ -1421,7 +1421,7 @@ class ProactiveMemoryResource {
   }
 
   async memoryGetUser(user_id) {
-    return this._c._request("GET", `/api/memory/user/${user_id}`);
+    return this._c._request("GET", `/api/memory/user/${encodeURIComponent(String(user_id))}`);
   }
 }
 
@@ -1431,7 +1431,7 @@ class SessionsResource {
   constructor(client) { this._c = client; }
 
   async findSessionByLabel(id, label) {
-    return this._c._request("GET", `/api/agents/${id}/sessions/by-label/${label}`);
+    return this._c._request("GET", `/api/agents/${encodeURIComponent(String(id))}/sessions/by-label/${encodeURIComponent(String(label))}`);
   }
 
   async listSessions(query) {
@@ -1447,19 +1447,19 @@ class SessionsResource {
   }
 
   async getSession(id) {
-    return this._c._request("GET", `/api/sessions/${id}`);
+    return this._c._request("GET", `/api/sessions/${encodeURIComponent(String(id))}`);
   }
 
   async deleteSession(id) {
-    return this._c._request("DELETE", `/api/sessions/${id}`);
+    return this._c._request("DELETE", `/api/sessions/${encodeURIComponent(String(id))}`);
   }
 
   async setSessionLabel(id, data) {
-    return this._c._request("PUT", `/api/sessions/${id}/label`, data, undefined);
+    return this._c._request("PUT", `/api/sessions/${encodeURIComponent(String(id))}/label`, data, undefined);
   }
 
   async patchSessionModel(id, data) {
-    return this._c._request("PATCH", `/api/sessions/${id}/model`, data, undefined);
+    return this._c._request("PATCH", `/api/sessions/${encodeURIComponent(String(id))}/model`, data, undefined);
   }
 }
 
@@ -1481,11 +1481,11 @@ class SkillsResource {
   }
 
   async clawhubSkillDetail(slug) {
-    return this._c._request("GET", `/api/clawhub/skill/${slug}`);
+    return this._c._request("GET", `/api/clawhub/skill/${encodeURIComponent(String(slug))}`);
   }
 
   async clawhubSkillCode(slug) {
-    return this._c._request("GET", `/api/clawhub/skill/${slug}/code`);
+    return this._c._request("GET", `/api/clawhub/skill/${encodeURIComponent(String(slug))}/code`);
   }
 
   async marketplaceSearch(query) {
@@ -1509,19 +1509,19 @@ class SkillsResource {
   }
 
   async showPendingCandidate(id) {
-    return this._c._request("GET", `/api/skills/pending/${id}`);
+    return this._c._request("GET", `/api/skills/pending/${encodeURIComponent(String(id))}`);
   }
 
   async approvePendingCandidate(id) {
-    return this._c._request("POST", `/api/skills/pending/${id}/approve`);
+    return this._c._request("POST", `/api/skills/pending/${encodeURIComponent(String(id))}/approve`);
   }
 
   async proposePendingToRegistry(id) {
-    return this._c._request("POST", `/api/skills/pending/${id}/propose-to-registry`);
+    return this._c._request("POST", `/api/skills/pending/${encodeURIComponent(String(id))}/propose-to-registry`);
   }
 
   async rejectPendingCandidate(id) {
-    return this._c._request("POST", `/api/skills/pending/${id}/reject`);
+    return this._c._request("POST", `/api/skills/pending/${encodeURIComponent(String(id))}/reject`);
   }
 
   async listSkillRegistry() {
@@ -1537,39 +1537,39 @@ class SkillsResource {
   }
 
   async getSkillDetail(name) {
-    return this._c._request("GET", `/api/skills/${name}`);
+    return this._c._request("GET", `/api/skills/${encodeURIComponent(String(name))}`);
   }
 
   async evolveDeleteSkill(name) {
-    return this._c._request("POST", `/api/skills/${name}/evolve/delete`);
+    return this._c._request("POST", `/api/skills/${encodeURIComponent(String(name))}/evolve/delete`);
   }
 
   async evolveWriteFile(name, data) {
-    return this._c._request("POST", `/api/skills/${name}/evolve/file`, data, undefined);
+    return this._c._request("POST", `/api/skills/${encodeURIComponent(String(name))}/evolve/file`, data, undefined);
   }
 
   async evolveRemoveFile(name, query) {
-    return this._c._request("DELETE", `/api/skills/${name}/evolve/file`, undefined, query);
+    return this._c._request("DELETE", `/api/skills/${encodeURIComponent(String(name))}/evolve/file`, undefined, query);
   }
 
   async evolvePatchSkill(name, data) {
-    return this._c._request("POST", `/api/skills/${name}/evolve/patch`, data, undefined);
+    return this._c._request("POST", `/api/skills/${encodeURIComponent(String(name))}/evolve/patch`, data, undefined);
   }
 
   async evolveRollbackSkill(name) {
-    return this._c._request("POST", `/api/skills/${name}/evolve/rollback`);
+    return this._c._request("POST", `/api/skills/${encodeURIComponent(String(name))}/evolve/rollback`);
   }
 
   async evolveUpdateSkill(name, data) {
-    return this._c._request("POST", `/api/skills/${name}/evolve/update`, data, undefined);
+    return this._c._request("POST", `/api/skills/${encodeURIComponent(String(name))}/evolve/update`, data, undefined);
   }
 
   async getSupportingFile(name, query) {
-    return this._c._request("GET", `/api/skills/${name}/file`, undefined, query);
+    return this._c._request("GET", `/api/skills/${encodeURIComponent(String(name))}/file`, undefined, query);
   }
 
   async proposeSkillToRegistry(name) {
-    return this._c._request("POST", `/api/skills/${name}/propose`);
+    return this._c._request("POST", `/api/skills/${encodeURIComponent(String(name))}/propose`);
   }
 
   async listTools() {
@@ -1577,7 +1577,7 @@ class SkillsResource {
   }
 
   async getTool(name) {
-    return this._c._request("GET", `/api/tools/${name}`);
+    return this._c._request("GET", `/api/tools/${encodeURIComponent(String(name))}`);
   }
 }
 
@@ -1607,7 +1607,7 @@ class SystemResource {
   }
 
   async effectivePermissions(user_id) {
-    return this._c._request("GET", `/api/authz/effective/${user_id}`);
+    return this._c._request("GET", `/api/authz/effective/${encodeURIComponent(String(user_id))}`);
   }
 
   async whoami() {
@@ -1623,7 +1623,7 @@ class SystemResource {
   }
 
   async deleteBackup(filename) {
-    return this._c._request("DELETE", `/api/backups/${filename}`);
+    return this._c._request("DELETE", `/api/backups/${encodeURIComponent(String(filename))}`);
   }
 
   async listBindings() {
@@ -1635,7 +1635,7 @@ class SystemResource {
   }
 
   async removeBinding(index) {
-    return this._c._request("DELETE", `/api/bindings/${index}`);
+    return this._c._request("DELETE", `/api/bindings/${encodeURIComponent(String(index))}`);
   }
 
   async listCommands() {
@@ -1643,7 +1643,7 @@ class SystemResource {
   }
 
   async getCommand(name) {
-    return this._c._request("GET", `/api/commands/${name}`);
+    return this._c._request("GET", `/api/commands/${encodeURIComponent(String(name))}`);
   }
 
   async getConfig() {
@@ -1707,7 +1707,7 @@ class SystemResource {
   }
 
   async getProfile(name) {
-    return this._c._request("GET", `/api/profiles/${name}`);
+    return this._c._request("GET", `/api/profiles/${encodeURIComponent(String(name))}`);
   }
 
   async provisioningStatus() {
@@ -1747,47 +1747,47 @@ class SystemResource {
   }
 
   async getAgentTemplate(name) {
-    return this._c._request("GET", `/api/templates/${name}`);
+    return this._c._request("GET", `/api/templates/${encodeURIComponent(String(name))}`);
   }
 
   async updateAgentType(name, data) {
-    return this._c._request("PUT", `/api/templates/${name}`, data, undefined);
+    return this._c._request("PUT", `/api/templates/${encodeURIComponent(String(name))}`, data, undefined);
   }
 
   async deleteAgentType(name) {
-    return this._c._request("DELETE", `/api/templates/${name}`);
+    return this._c._request("DELETE", `/api/templates/${encodeURIComponent(String(name))}`);
   }
 
   async listTemplateHistory(name, query) {
-    return this._c._request("GET", `/api/templates/${name}/history`, undefined, query);
+    return this._c._request("GET", `/api/templates/${encodeURIComponent(String(name))}/history`, undefined, query);
   }
 
   async restoreTemplateVersion(name, version_id) {
-    return this._c._request("POST", `/api/templates/${name}/history/${version_id}/restore`);
+    return this._c._request("POST", `/api/templates/${encodeURIComponent(String(name))}/history/${encodeURIComponent(String(version_id))}/restore`);
   }
 
   async promoteAgentType(name) {
-    return this._c._request("POST", `/api/templates/${name}/promote`);
+    return this._c._request("POST", `/api/templates/${encodeURIComponent(String(name))}/promote`);
   }
 
   async getAgentTypeRegistryDiff(name) {
-    return this._c._request("GET", `/api/templates/${name}/registry-diff`);
+    return this._c._request("GET", `/api/templates/${encodeURIComponent(String(name))}/registry-diff`);
   }
 
   async restoreAgentTypeFromRegistry(name) {
-    return this._c._request("POST", `/api/templates/${name}/restore`);
+    return this._c._request("POST", `/api/templates/${encodeURIComponent(String(name))}/restore`);
   }
 
   async getAgentTemplateToml(name) {
-    return this._c._request("GET", `/api/templates/${name}/toml`);
+    return this._c._request("GET", `/api/templates/${encodeURIComponent(String(name))}/toml`);
   }
 
   async putAgentTemplateToml(name, body, contentType) {
-    return this._c._request("PUT", `/api/templates/${name}/toml`, body, undefined, contentType || "text/plain");
+    return this._c._request("PUT", `/api/templates/${encodeURIComponent(String(name))}/toml`, body, undefined, contentType || "text/plain");
   }
 
   async postAgentTemplateToml(name, body, contentType) {
-    return this._c._request("POST", `/api/templates/${name}/toml`, body, undefined, contentType || "text/plain");
+    return this._c._request("POST", `/api/templates/${encodeURIComponent(String(name))}/toml`, body, undefined, contentType || "text/plain");
   }
 
   async version() {
@@ -1815,7 +1815,7 @@ class ToolsResource {
   constructor(client) { this._c = client; }
 
   async invokeTool(name, data, query) {
-    return this._c._request("POST", `/api/tools/${name}/invoke`, data, query);
+    return this._c._request("POST", `/api/tools/${encodeURIComponent(String(name))}/invoke`, data, query);
   }
 }
 
@@ -1841,55 +1841,55 @@ class UsersResource {
   }
 
   async getUser(name) {
-    return this._c._request("GET", `/api/users/${name}`);
+    return this._c._request("GET", `/api/users/${encodeURIComponent(String(name))}`);
   }
 
   async updateUser(name, data) {
-    return this._c._request("PUT", `/api/users/${name}`, data, undefined);
+    return this._c._request("PUT", `/api/users/${encodeURIComponent(String(name))}`, data, undefined);
   }
 
   async deleteUser(name) {
-    return this._c._request("DELETE", `/api/users/${name}`);
+    return this._c._request("DELETE", `/api/users/${encodeURIComponent(String(name))}`);
   }
 
   async serveUserAvatar(name) {
-    return this._c._request("GET", `/api/users/${name}/avatar`);
+    return this._c._request("GET", `/api/users/${encodeURIComponent(String(name))}/avatar`);
   }
 
   async uploadUserAvatar(name, body, contentType) {
-    return this._c._request("POST", `/api/users/${name}/avatar`, body, undefined, contentType || "application/octet-stream");
+    return this._c._request("POST", `/api/users/${encodeURIComponent(String(name))}/avatar`, body, undefined, contentType || "application/octet-stream");
   }
 
   async deleteUserAvatar(name) {
-    return this._c._request("DELETE", `/api/users/${name}/avatar`);
+    return this._c._request("DELETE", `/api/users/${encodeURIComponent(String(name))}/avatar`);
   }
 
   async updateUserIdentity(name, data) {
-    return this._c._request("PATCH", `/api/users/${name}/identity`, data, undefined);
+    return this._c._request("PATCH", `/api/users/${encodeURIComponent(String(name))}/identity`, data, undefined);
   }
 
   async getUserPolicy(name) {
-    return this._c._request("GET", `/api/users/${name}/policy`);
+    return this._c._request("GET", `/api/users/${encodeURIComponent(String(name))}/policy`);
   }
 
   async updateUserPolicy(name, data) {
-    return this._c._request("PUT", `/api/users/${name}/policy`, data, undefined);
+    return this._c._request("PUT", `/api/users/${encodeURIComponent(String(name))}/policy`, data, undefined);
   }
 
   async listUserProviderKeys(name) {
-    return this._c._request("GET", `/api/users/${name}/provider-keys`);
+    return this._c._request("GET", `/api/users/${encodeURIComponent(String(name))}/provider-keys`);
   }
 
   async setUserProviderKey(name, provider, data) {
-    return this._c._request("PUT", `/api/users/${name}/provider-keys/${provider}`, data, undefined);
+    return this._c._request("PUT", `/api/users/${encodeURIComponent(String(name))}/provider-keys/${encodeURIComponent(String(provider))}`, data, undefined);
   }
 
   async deleteUserProviderKey(name, provider) {
-    return this._c._request("DELETE", `/api/users/${name}/provider-keys/${provider}`);
+    return this._c._request("DELETE", `/api/users/${encodeURIComponent(String(name))}/provider-keys/${encodeURIComponent(String(provider))}`);
   }
 
   async rotateUserKey(name) {
-    return this._c._request("POST", `/api/users/${name}/rotate-key`);
+    return this._c._request("POST", `/api/users/${encodeURIComponent(String(name))}/rotate-key`);
   }
 }
 
@@ -1903,11 +1903,11 @@ class VaultResource {
   }
 
   async vaultPutKey(key, data) {
-    return this._c._request("PUT", `/api/vault/keys/${key}`, data, undefined);
+    return this._c._request("PUT", `/api/vault/keys/${encodeURIComponent(String(key))}`, data, undefined);
   }
 
   async vaultDeleteKey(key) {
-    return this._c._request("DELETE", `/api/vault/keys/${key}`);
+    return this._c._request("DELETE", `/api/vault/keys/${encodeURIComponent(String(key))}`);
   }
 }
 
@@ -1939,23 +1939,23 @@ class WorkflowsResource {
   }
 
   async getCronJob(id) {
-    return this._c._request("GET", `/api/cron/jobs/${id}`);
+    return this._c._request("GET", `/api/cron/jobs/${encodeURIComponent(String(id))}`);
   }
 
   async updateCronJob(id, data) {
-    return this._c._request("PUT", `/api/cron/jobs/${id}`, data, undefined);
+    return this._c._request("PUT", `/api/cron/jobs/${encodeURIComponent(String(id))}`, data, undefined);
   }
 
   async deleteCronJob(id) {
-    return this._c._request("DELETE", `/api/cron/jobs/${id}`);
+    return this._c._request("DELETE", `/api/cron/jobs/${encodeURIComponent(String(id))}`);
   }
 
   async toggleCronJob(id, data) {
-    return this._c._request("PUT", `/api/cron/jobs/${id}/enable`, data, undefined);
+    return this._c._request("PUT", `/api/cron/jobs/${encodeURIComponent(String(id))}/enable`, data, undefined);
   }
 
   async cronJobStatus(id) {
-    return this._c._request("GET", `/api/cron/jobs/${id}/status`);
+    return this._c._request("GET", `/api/cron/jobs/${encodeURIComponent(String(id))}/status`);
   }
 
   async listSchedules() {
@@ -1967,19 +1967,19 @@ class WorkflowsResource {
   }
 
   async getSchedule(id) {
-    return this._c._request("GET", `/api/schedules/${id}`);
+    return this._c._request("GET", `/api/schedules/${encodeURIComponent(String(id))}`);
   }
 
   async updateSchedule(id, data) {
-    return this._c._request("PUT", `/api/schedules/${id}`, data, undefined);
+    return this._c._request("PUT", `/api/schedules/${encodeURIComponent(String(id))}`, data, undefined);
   }
 
   async deleteSchedule(id) {
-    return this._c._request("DELETE", `/api/schedules/${id}`);
+    return this._c._request("DELETE", `/api/schedules/${encodeURIComponent(String(id))}`);
   }
 
   async runSchedule(id) {
-    return this._c._request("POST", `/api/schedules/${id}/run`);
+    return this._c._request("POST", `/api/schedules/${encodeURIComponent(String(id))}/run`);
   }
 
   async listTriggers(query) {
@@ -1991,15 +1991,15 @@ class WorkflowsResource {
   }
 
   async getTrigger(id) {
-    return this._c._request("GET", `/api/triggers/${id}`);
+    return this._c._request("GET", `/api/triggers/${encodeURIComponent(String(id))}`);
   }
 
   async deleteTrigger(id) {
-    return this._c._request("DELETE", `/api/triggers/${id}`);
+    return this._c._request("DELETE", `/api/triggers/${encodeURIComponent(String(id))}`);
   }
 
   async updateTrigger(id, data) {
-    return this._c._request("PATCH", `/api/triggers/${id}`, data, undefined);
+    return this._c._request("PATCH", `/api/triggers/${encodeURIComponent(String(id))}`, data, undefined);
   }
 
   async listWorkflowTemplates(query) {
@@ -2007,11 +2007,11 @@ class WorkflowsResource {
   }
 
   async getWorkflowTemplate(id) {
-    return this._c._request("GET", `/api/workflow-templates/${id}`);
+    return this._c._request("GET", `/api/workflow-templates/${encodeURIComponent(String(id))}`);
   }
 
   async instantiateTemplate(id, data) {
-    return this._c._request("POST", `/api/workflow-templates/${id}/instantiate`, data, undefined);
+    return this._c._request("POST", `/api/workflow-templates/${encodeURIComponent(String(id))}/instantiate`, data, undefined);
   }
 
   async listWorkflows() {
@@ -2023,55 +2023,55 @@ class WorkflowsResource {
   }
 
   async getWorkflowRun(run_id) {
-    return this._c._request("GET", `/api/workflows/runs/${run_id}`);
+    return this._c._request("GET", `/api/workflows/runs/${encodeURIComponent(String(run_id))}`);
   }
 
   async cancelWorkflowRun(run_id) {
-    return this._c._request("POST", `/api/workflows/runs/${run_id}/cancel`);
+    return this._c._request("POST", `/api/workflows/runs/${encodeURIComponent(String(run_id))}/cancel`);
   }
 
   async operatorActionWorkflowRun(run_id, data) {
-    return this._c._request("POST", `/api/workflows/runs/${run_id}/operator`, data, undefined);
+    return this._c._request("POST", `/api/workflows/runs/${encodeURIComponent(String(run_id))}/operator`, data, undefined);
   }
 
   async pauseWorkflowRun(run_id, data) {
-    return this._c._request("POST", `/api/workflows/runs/${run_id}/pause`, data, undefined);
+    return this._c._request("POST", `/api/workflows/runs/${encodeURIComponent(String(run_id))}/pause`, data, undefined);
   }
 
   async rerunWorkflowRun(run_id) {
-    return this._c._request("POST", `/api/workflows/runs/${run_id}/rerun`);
+    return this._c._request("POST", `/api/workflows/runs/${encodeURIComponent(String(run_id))}/rerun`);
   }
 
   async resumeWorkflowRun(run_id, data) {
-    return this._c._request("POST", `/api/workflows/runs/${run_id}/resume`, data, undefined);
+    return this._c._request("POST", `/api/workflows/runs/${encodeURIComponent(String(run_id))}/resume`, data, undefined);
   }
 
   async getWorkflow(id) {
-    return this._c._request("GET", `/api/workflows/${id}`);
+    return this._c._request("GET", `/api/workflows/${encodeURIComponent(String(id))}`);
   }
 
   async updateWorkflow(id, data) {
-    return this._c._request("PUT", `/api/workflows/${id}`, data, undefined);
+    return this._c._request("PUT", `/api/workflows/${encodeURIComponent(String(id))}`, data, undefined);
   }
 
   async deleteWorkflow(id) {
-    return this._c._request("DELETE", `/api/workflows/${id}`);
+    return this._c._request("DELETE", `/api/workflows/${encodeURIComponent(String(id))}`);
   }
 
   async dryRunWorkflow(id, data) {
-    return this._c._request("POST", `/api/workflows/${id}/dry-run`, data, undefined);
+    return this._c._request("POST", `/api/workflows/${encodeURIComponent(String(id))}/dry-run`, data, undefined);
   }
 
   async runWorkflow(id, data) {
-    return this._c._request("POST", `/api/workflows/${id}/run`, data, undefined);
+    return this._c._request("POST", `/api/workflows/${encodeURIComponent(String(id))}/run`, data, undefined);
   }
 
   async listWorkflowRuns(id) {
-    return this._c._request("GET", `/api/workflows/${id}/runs`);
+    return this._c._request("GET", `/api/workflows/${encodeURIComponent(String(id))}/runs`);
   }
 
   async saveWorkflowAsTemplate(id) {
-    return this._c._request("POST", `/api/workflows/${id}/save-as-template`);
+    return this._c._request("POST", `/api/workflows/${encodeURIComponent(String(id))}/save-as-template`);
   }
 }
 

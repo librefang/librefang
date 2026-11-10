@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
+  appendCanvas,
   applyForeignTerminalFrame,
+  CANVAS_CSP,
+  canvasSrcDoc,
+  parseCanvasFrame,
   asText,
   extractAssistantHistoryParts,
   formatMeta,
@@ -8,6 +12,7 @@ import {
   normalizeRole,
   terminalFrameOwner,
   normalizeToolOutput,
+  type ChatCanvas,
 } from "./chat";
 import type { ContentBlock } from "../api";
 import type { TerminalFrame, TerminalRoutableMessage } from "./chat";
@@ -334,5 +339,37 @@ describe("applyForeignTerminalFrame (#6390)", () => {
     const next = applyForeignTerminalFrame([bubbleA, bubbleB], { type: "response", message_id: "bot-missing", content: "x" });
     expect(next[0]).toBe(bubbleA);
     expect(next[1]).toBe(bubbleB);
+  });
+});
+
+describe("canvas frames", () => {
+  it("reads a canvas frame and drops one with no HTML", () => {
+    expect(parseCanvasFrame({ type: "canvas", canvas_id: "c1", html: "<p>hi</p>", title: "Table" } as never)).toEqual({
+      id: "c1",
+      title: "Table",
+      html: "<p>hi</p>",
+    });
+    expect(parseCanvasFrame({ canvas_id: "c2", html: "<p>x</p>" })?.title).toBe("Canvas");
+    expect(parseCanvasFrame({ canvas_id: "c3", html: "" })).toBeNull();
+    expect(parseCanvasFrame({ canvas_id: "c4" })).toBeNull();
+  });
+
+  it("attaches the canvas only to the owning bubble", () => {
+    type Bubble = { id: string; content: string; canvases?: ChatCanvas[] };
+    const a: Bubble = { id: "bot-a", content: "" };
+    const b: Bubble = { id: "bot-b", content: "" };
+    const canvas = { id: "c1", title: "T", html: "<p>x</p>" };
+    const next = appendCanvas([a, b], "bot-b", canvas);
+    expect(next[0]).toBe(a);
+    expect(next[1].canvases).toEqual([canvas]);
+    const again = appendCanvas(next, "bot-b", { ...canvas, id: "c2" });
+    expect(again[1].canvases?.map(c => c.id)).toEqual(["c1", "c2"]);
+  });
+
+  it("puts the restrictive policy ahead of the model's HTML", () => {
+    const doc = canvasSrcDoc("<img src=\"https://tracker.example/x.png\">");
+    expect(doc.startsWith(`<meta http-equiv="Content-Security-Policy" content="${CANVAS_CSP}">`)).toBe(true);
+    expect(CANVAS_CSP).toContain("default-src 'none'");
+    expect(CANVAS_CSP).not.toContain("script-src");
   });
 });

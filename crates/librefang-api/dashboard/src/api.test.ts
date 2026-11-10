@@ -7,6 +7,7 @@ import {
   getUsageByModelPerformance,
   getUsageDaily,
   getUsageSummary,
+  listAgents,
   listTools,
   listUsageByAgent,
   listUsageByModel,
@@ -116,6 +117,37 @@ describe("dashboard auth helpers", () => {
     expect(fetchMock.mock.calls[0][0]).toBe(
       "/api/memory/agents/agent%2Fone/search?q=needle&limit=50&level=user",
     );
+  });
+
+  it("marks the agent list truncated when the server's total exceeds the page", async () => {
+    // The chat tab prune dropped background tabs whenever the 500-row page
+    // cut agents off (#8596); `truncated` is what lets a caller tell "not in
+    // the page" from "not in the registry".
+    fetchMock.mockResolvedValue(
+      new Response(
+        JSON.stringify({ items: [{ id: "agent-a", name: "A" }], total: 501 }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+
+    await expect(listAgents()).resolves.toEqual({
+      items: [{ id: "agent-a", name: "A" }],
+      truncated: true,
+    });
+    expect(fetchMock.mock.calls[0][0]).toContain("/api/agents?limit=500");
+  });
+
+  it("reports a complete agent page as not truncated", async () => {
+    fetchMock.mockResolvedValue(
+      new Response(
+        JSON.stringify({ items: [{ id: "agent-a", name: "A" }], total: 1 }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+
+    const result = await listAgents();
+    expect(result.items).toHaveLength(1);
+    expect(result.truncated).toBe(false);
   });
 
   it("stores the token in sessionStorage, not localStorage", () => {

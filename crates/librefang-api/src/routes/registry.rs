@@ -10,9 +10,10 @@
 
 use super::skills::write_secret_env;
 use super::AppState;
+use crate::middleware::{AuthenticatedApiUser, UserRole};
 use crate::types::ApiErrorResponse;
 use axum::extract::{Path, Query, State};
-use axum::response::IntoResponse;
+use axum::response::{IntoResponse, Response};
 use axum::Json;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -160,10 +161,18 @@ fn is_valid_registry_identifier(id: &str) -> bool {
 /// so new models / provider changes are available immediately without a restart.
 async fn create_registry_content(
     State(state): State<Arc<AppState>>,
+    api_user: Option<axum::Extension<AuthenticatedApiUser>>,
     Path(content_type): Path<String>,
     Query(params): Query<HashMap<String, String>>,
     Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
+    if let Some(denied) = require_owner_for_spawnable_content(
+        &state,
+        api_user.as_ref().map(|axum::Extension(u)| u),
+        &content_type,
+    ) {
+        return denied;
+    }
     let home_dir = state.kernel.home_dir();
     let allow_overwrite = params
         .get("allow_overwrite")
@@ -283,6 +292,39 @@ async fn create_registry_content(
     } else {
         body_without_secret
     };
+
+    // The provider's `api_key_env` names a process environment variable: the key is planted under it in `secrets.env` and the daemon's own environment, and the persisted catalog value is what `set_provider_key` trusts on later calls.
+    // A name the existing catalog entry already declares is operator-curated and stays accepted, so re-saving a shipped provider keeps working; any other name must pass `check_provider_api_key_env`, which refuses loader / interpreter knobs like `NODE_OPTIONS` and the daemon-reserved `GITHUB_TOKEN`.
+    if content_type == "provider" {
+        let catalog_env = state
+            .kernel
+            .model_catalog_ref()
+            .load()
+            .get_provider(&identifier)
+            .map(|p| p.api_key_env.clone())
+            .filter(|env| !env.is_empty());
+        let toml_env = body_for_toml
+            .get("provider")
+            .and_then(|p| p.get("api_key_env"))
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty());
+        let candidates = api_key_to_save
+            .as_ref()
+            .map(|(env, _)| env.as_str())
+            .into_iter()
+            .chain(toml_env);
+        for env in candidates {
+            if catalog_env.as_deref() == Some(env) {
+                continue;
+            }
+            if let Err(msg) = crate::validation::check_provider_api_key_env(env) {
+                return ApiErrorResponse::bad_request(msg)
+                    .into_json_tuple()
+                    .into_response();
+            }
+        }
+    }
+
     let toml_value = json_to_toml_value(&body_for_toml);
     let toml_string = match toml::to_string_pretty(&toml_value) {
         Ok(s) => s,
@@ -458,12 +500,61 @@ async fn create_registry_content(
 /// Same as POST but always allows overwriting existing files.
 async fn update_registry_content(
     state: State<Arc<AppState>>,
+    api_user: Option<axum::Extension<AuthenticatedApiUser>>,
     path: Path<String>,
     Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
     let mut overwrite = HashMap::new();
     overwrite.insert("allow_overwrite".to_string(), "true".to_string());
-    create_registry_content(state, path, Query(overwrite), Json(body)).await
+    create_registry_content(state, api_user, path, Query(overwrite), Json(body)).await
+}
+
+/// Reject a `mcp` or `plugin` content write unless the caller is an `Owner`.
+///
+/// This is the in-handler half of the Owner gate `middleware::is_owner_only_write` applies to `/api/registry/content/{mcp,plugin}`.
+/// The middleware matches the raw request path, while axum percent-decodes the `{content_type}` capture, so `/api/registry/content/%6Dcp` reaches this handler as `"mcp"`; checking the decoded value here keeps the gate independent of how the segment was spelled.
+/// An MCP catalog entry carries a stdio `command` the daemon spawns and a fresh plugin directory is enabled by default, so both cross the "config write" to "process spawn" line that Admin must not.
+/// The trusted loopback / `LIBREFANG_ALLOW_NO_AUTH=1` path still passes because the middleware injects a synthetic Owner there.
+fn require_owner_for_spawnable_content(
+    state: &AppState,
+    api_user: Option<&AuthenticatedApiUser>,
+    content_type: &str,
+) -> Option<Response> {
+    if !matches!(content_type, "mcp" | "plugin") {
+        return None;
+    }
+    match api_user {
+        Some(u) if u.role >= UserRole::Owner => None,
+        other => {
+            let (detail, user_id) = match other {
+                Some(u) => (
+                    format!(
+                        "registry {content_type} content write denied for role {}",
+                        u.role
+                    ),
+                    Some(u.user_id),
+                ),
+                None => (
+                    format!("registry {content_type} content write denied for anonymous caller"),
+                    None,
+                ),
+            };
+            state.kernel.audit().record_with_context(
+                "system",
+                librefang_kernel::audit::AuditAction::PermissionDenied,
+                detail,
+                "denied",
+                user_id,
+                Some("api".to_string()),
+            );
+            Some(
+                ApiErrorResponse::forbidden(format!(
+                    "Owner role required to write {content_type} registry content"
+                ))
+                .into_response(),
+            )
+        }
+    }
 }
 
 /// Ensure a provider JSON body has the `[provider]` wrapper required by

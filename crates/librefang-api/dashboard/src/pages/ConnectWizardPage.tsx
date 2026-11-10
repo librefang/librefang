@@ -3,9 +3,12 @@ import { Trans, useTranslation } from "react-i18next";
 import { Wifi, QrCode, Loader2, CheckCircle, AlertCircle, RefreshCw } from "lucide-react";
 import { isMobileTauri, scanQrCode, getCredentials, clearCredentials } from "../lib/tauri";
 import { useConnectManual, useConnectViaQr } from "../lib/mutations/connection";
+import { useRovingTabs } from "../lib/useRovingTabs";
 
 type Tab = "manual" | "qr";
 type Step = "idle" | "scanning" | "connecting" | "done" | "error";
+
+const CONNECT_TABS: readonly Tab[] = ["manual", "qr"];
 
 function navigateToDashboard(baseUrl: string) {
   // On mobile Tauri the bundled SPA only serves the connect wizard — once
@@ -81,6 +84,18 @@ export function ConnectWizardPage() {
   const { t } = useTranslation();
   const fallbackName = t("connect_wizard.device_name_default");
   const [tab, setTab] = useState<Tab>("manual");
+  // Switching tabs shares one path for pointer and keyboard, so the arrow
+  // keys do not skip the state reset the click path performs.
+  const selectTab = (next: Tab) => {
+    markUserInteraction();
+    setTab(next);
+    reset();
+  };
+  const tabNav = useRovingTabs({
+    ids: CONNECT_TABS,
+    activeId: tab,
+    onSelect: selectTab,
+  });
   const [step, setStep] = useState<Step>("idle");
   const [baseUrl, setBaseUrl] = useState("");
   const [apiKey, setApiKey] = useState("");
@@ -242,8 +257,9 @@ export function ConnectWizardPage() {
             role="tab"
             aria-selected={tab === "manual"}
             aria-controls="connect-panel-manual"
-            tabIndex={tab === "manual" ? 0 : -1}
-            onClick={() => { markUserInteraction(); setTab("manual"); reset(); }}
+            tabIndex={tabNav.tabIndexFor("manual")}
+            onClick={() => selectTab("manual")}
+            onKeyDown={(event) => tabNav.onKeyDown(event, "manual")}
             disabled={busy}
             className={`rounded-lg py-2 text-sm font-semibold transition-colors ${
               tab === "manual"
@@ -258,8 +274,9 @@ export function ConnectWizardPage() {
             role="tab"
             aria-selected={tab === "qr"}
             aria-controls="connect-panel-qr"
-            tabIndex={tab === "qr" ? 0 : -1}
-            onClick={() => { markUserInteraction(); setTab("qr"); reset(); }}
+            tabIndex={tabNav.tabIndexFor("qr")}
+            onClick={() => selectTab("qr")}
+            onKeyDown={(event) => tabNav.onKeyDown(event, "qr")}
             disabled={busy}
             className={`rounded-lg py-2 text-sm font-semibold transition-colors ${
               tab === "qr"

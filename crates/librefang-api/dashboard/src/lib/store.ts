@@ -433,6 +433,16 @@ export const useUIStore = create<UIState>()(
       name: "librefang-ui-storage",
       version: UI_STORE_VERSION,
       migrate: (persistedState) => migratePersistedUIState(persistedState),
+      // `migrate` runs only when the stored `version` differs from
+      // `UI_STORE_VERSION`, so on its own the sanitizer never sees a record
+      // written by the current build — or one hand-edited to claim the
+      // current version. `merge` runs on every rehydrate, including the
+      // cross-window one below, so the untrusted-shape checks apply to what
+      // actually lands in the store.
+      merge: (persistedState, currentState) => ({
+        ...currentState,
+        ...migratePersistedUIState(persistedState),
+      }),
       onRehydrateStorage: () => (state) => {
         if (!state?.language) return;
         void i18n.changeLanguage(state.language).catch((err) => {

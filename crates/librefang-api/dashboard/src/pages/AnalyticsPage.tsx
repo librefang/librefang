@@ -7,6 +7,7 @@ import { useUpdateBudget, useUpdateProviderBudget } from "../lib/mutations/analy
 import type { ProviderBudgetRow } from "../api";
 import { useUIStore } from "../lib/store";
 import { toastErr } from "../lib/errors";
+import { downloadBlob } from "../lib/download";
 import {
   USAGE_RANGE_PRESETS,
   dailyDaysFor,
@@ -31,6 +32,7 @@ import { Card } from "../components/ui/Card";
 import { Button } from "../components/ui/Button";
 import { PageHeader } from "../components/ui/PageHeader";
 import { EmptyState } from "../components/ui/EmptyState";
+import { ErrorState } from "../components/ui/ErrorState";
 import { BarChart3, DollarSign, Shield, Save, Loader2, Cpu, Users, Zap, TrendingUp, Activity, Clock, Gauge, Target, Download, CalendarRange, Wrench, Coins, Database, Sigma } from "lucide-react";
 import { CardSkeleton } from "../components/ui/Skeleton";
 import { AreaChart, Area, BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, Legend } from "recharts";
@@ -608,6 +610,16 @@ export function AnalyticsPage() {
     dailyQuery.isLoading ||
     modelPerformanceQuery.isLoading;
 
+  // A failed usage query must not fall through to the `?? 0` / empty-chart defaults below: on a spend page "$0.00, no data" is a claim about the window, not a missing answer.
+  // Only queries with no data at all count, so a background refetch failure keeps showing the last good numbers.
+  const usageLoadError = [
+    usageQuery,
+    usageByAgentQuery,
+    usageByModelQuery,
+    dailyQuery,
+    modelPerformanceQuery,
+  ].find((q) => q.isError && q.data === undefined)?.error;
+
   // Sum of the daily rows the chart draws (#8062 item 9).
   // Summed over `dailyChartData` — the array the chart is handed — rather than over `daily.days` a second time, so the caption cannot describe a different set of rows than the ones plotted above it.
   // That is not hypothetical: the `.slice(-30)` this page carried until #8062 sat between the payload and the chart but not between the payload and any caption, which is exactly how a 366-day window would have been captioned over a 30-day picture.
@@ -675,15 +687,8 @@ export function AnalyticsPage() {
       );
     }
     const blob = new Blob([lines.join("\n")], { type: "text/csv;charset=utf-8" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
     // Name the file after the window it covers, not the day it was downloaded — three exports of three different months used to land as one filename.
-    a.href = url;
-    a.download = `librefang-usage-${rangeFileLabel(range)}.csv`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
+    downloadBlob(blob, `librefang-usage-${rangeFileLabel(range)}.csv`);
   };
 
   const kpis = useMemo(() => {
@@ -796,290 +801,296 @@ export function AnalyticsPage() {
         </StaggerList>
       ) : (
         <>
-          {/* KPI Cards */}
-          <StaggerList className="grid grid-cols-2 gap-2 sm:gap-4 md:grid-cols-3 lg:grid-cols-6">
-            {kpis.map((kpi, i) => (
-              <Card key={i} hover padding="md">
-                <div className="flex items-center justify-between">
-                  <span className="text-[10px] font-black uppercase tracking-widest text-text-dim/60">{kpi.label}</span>
-                  <div className={`w-8 h-8 rounded-lg ${kpi.bg} flex items-center justify-center`}><kpi.icon className={`w-4 h-4 ${kpi.color}`} /></div>
-                </div>
-                {/* Six tiles per row instead of four (#8062), so the value
-                    steps down one size to keep a $0.0000 cost-per-call on one
-                    line at the lg breakpoint. */}
-                <p className={`text-xl sm:text-2xl font-black tracking-tight mt-1 sm:mt-2 ${kpi.color}`}>{kpi.value}</p>
-              </Card>
-            ))}
-          </StaggerList>
-
-          {/* Cost by Agent + Cost by Model */}
-          <div className="grid gap-6 md:grid-cols-2">
-            <Card padding="lg" hover>
-              <h2 className="text-sm font-bold mb-4 flex items-center gap-2">
-                <Users className="w-4 h-4 text-brand" /> {t("analytics.usage_by_agent")}
-              </h2>
-              {usageByAgent.length === 0 ? (
-                <EmptyState icon={<Users />} title={t("common.no_data")} description={t("analytics.no_agent_data")} />
-              ) : (
-                <ResponsiveContainer width="100%" height={Math.min(Math.max(usageByAgent.length * 36, 100), 600)}>
-                  <BarChart data={agentChartData} layout="vertical" margin={{ left: 0, right: 20 }}>
-                    <CartesianGrid strokeDasharray="3 3" opacity={0.2} horizontal={false} />
-                    <XAxis type="number" tick={{ fontSize: 10 }} tickFormatter={v => `$${v}`} axisLine={false} tickLine={false} />
-                    <YAxis type="category" dataKey="name" tick={{ fontSize: 10 }} width={100} axisLine={false} tickLine={false} />
-                    <Tooltip contentStyle={{ borderRadius: 12, fontSize: 12 }} formatter={(v) => [formatCost(typeof v === "number" ? v : Number(v ?? 0)), t("analytics.cost")]} />
-                    <Bar dataKey="cost" radius={[0, 6, 6, 0]} fill="#3b82f6" />
-                  </BarChart>
-                </ResponsiveContainer>
-              )}
-            </Card>
-
-            <Card padding="lg" hover>
-              <h2 className="text-sm font-bold mb-4 flex items-center gap-2">
-                <Cpu className="w-4 h-4 text-purple-500" /> {t("analytics.usage_by_model")}
-              </h2>
-              {usageByModel.length === 0 ? (
-                <EmptyState icon={<Cpu />} title={t("common.no_data")} description={t("analytics.no_model_data")} />
-              ) : (
-                <ResponsiveContainer width="100%" height={Math.min(Math.max(usageByModel.length * 36, 100), 600)}>
-                  <BarChart data={modelChartData} layout="vertical" margin={{ left: 0, right: 20 }}>
-                    <CartesianGrid strokeDasharray="3 3" opacity={0.2} horizontal={false} />
-                    <XAxis type="number" tick={{ fontSize: 10 }} tickFormatter={v => `$${v}`} axisLine={false} tickLine={false} />
-                    <YAxis type="category" dataKey="name" tick={{ fontSize: 10 }} width={120} axisLine={false} tickLine={false} />
-                    <Tooltip contentStyle={{ borderRadius: 12, fontSize: 12 }} formatter={(v) => [formatCost(typeof v === "number" ? v : Number(v ?? 0)), t("analytics.cost")]} />
-                    <Bar dataKey="cost" radius={[0, 6, 6, 0]} fill="#a855f7" />
-                  </BarChart>
-                </ResponsiveContainer>
-              )}
-            </Card>
-          </div>
-
-          {/* Daily Trend */}
-          <Card padding="lg" hover>
-            <h2 className="text-sm font-bold mb-4 flex items-center gap-2">
-              <TrendingUp className="w-4 h-4 text-warning" /> {t("analytics.daily_trend")}
-            </h2>
-            {(!daily?.days || daily.days.length === 0) ? (
-              <EmptyState icon={<TrendingUp />} title={t("common.no_data")} description={t("analytics.no_trend_data")} />
-            ) : (
-              <ResponsiveContainer width="100%" height={200}>
-                <AreaChart data={dailyChartData}>
-                  <defs>
-                    <linearGradient id="costGrad" x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="5%" stopColor="#3b82f6" stopOpacity={0.3} />
-                      <stop offset="95%" stopColor="#3b82f6" stopOpacity={0} />
-                    </linearGradient>
-                  </defs>
-                  <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" opacity={0.3} />
-                  <XAxis dataKey="date" tick={{ fontSize: 10 }} tickLine={false} axisLine={false} />
-                  <YAxis tick={{ fontSize: 10 }} tickLine={false} axisLine={false} tickFormatter={v => `$${v}`} width={50} />
-                  <Tooltip
-                    contentStyle={{ borderRadius: 12, border: "1px solid #e5e7eb", fontSize: 12, boxShadow: "0 4px 12px rgba(0,0,0,0.1)" }}
-                    formatter={(v) => [formatCost(typeof v === "number" ? v : Number(v ?? 0)), t("analytics.total_cost")]}
-                    // The unambiguous full date, not the MM-DD axis label — a window can span a year boundary now that it is up to 366 days wide.
-                    labelFormatter={(_l, payload) =>
-                      payload?.[0]?.payload?.fullDate ?? String(_l)
-                    }
-                  />
-                  {/* Single series, so no legend — the card title names it. */}
-                  <Area type="monotone" dataKey="cost" stroke="#3b82f6" strokeWidth={2.5} fill="url(#costGrad)" dot={dailyChartData.length <= DAILY_CHART_DOT_LIMIT ? { r: 3, fill: "#3b82f6", strokeWidth: 2, stroke: "white" } : false} activeDot={{ r: 5 }} />
-                </AreaChart>
-              </ResponsiveContainer>
-            )}
-
-            {/* Range summary (#8062 item 9) — the totals of the days plotted
-                above, so the chart's shape and its magnitude are read together
-                instead of the reader eyeballing an area. */}
-            {rangeTotals.dayCount > 0 && (
-              <div className="mt-4 grid grid-cols-2 gap-3 border-t border-border-subtle pt-3 sm:grid-cols-4">
-                {([
-                  { label: t("analytics.range.summary_days", { defaultValue: "Days with data" }), value: String(rangeTotals.dayCount) },
-                  { label: t("analytics.range.summary_calls", { defaultValue: "Calls in range" }), value: formatCompact(rangeTotals.calls) },
-                  { label: t("analytics.range.summary_tokens", { defaultValue: "Tokens in range" }), value: formatCompact(rangeTotals.tokens) },
-                  { label: t("analytics.range.summary_cost", { defaultValue: "Cost in range" }), value: formatCost(rangeTotals.cost) },
-                ]).map((cell) => (
-                  <div key={cell.label}>
-                    <p className="text-[9px] font-black uppercase tracking-widest text-text-dim/60">{cell.label}</p>
-                    <p className="mt-0.5 font-mono text-sm font-bold">{cell.value}</p>
-                  </div>
-                ))}
-                {spanDays !== null && (
-                  <p className="col-span-2 text-[10px] text-text-dim/60 sm:col-span-4">
-                    {t("analytics.range.summary_span", {
-                      defaultValue:
-                        "{{withData}} of {{span}} days in the selected window recorded usage.",
-                      withData: rangeTotals.dayCount,
-                      span: spanDays,
-                    })}
-                  </p>
-                )}
-              </div>
-            )}
-          </Card>
-
-          {/* Per-agent detail (#8062 item 7). The cost-by-agent chart above
-              compares magnitudes; this answers "what is that agent actually
-              doing" — tool calls and the prompt/completion split — and is the
-              only place a hand's spend is visible, tagged as such. */}
-          {allAgentRows.length > 0 && (
-            <Card padding="lg" hover>
-              <div className="mb-4 flex items-center justify-between">
-                <h2 className="flex items-center gap-2 text-sm font-bold">
-                  <Users className="h-4 w-4 text-brand" />
-                  {t("analytics.agent_detail_table", { defaultValue: "Per-agent Details" })}
-                </h2>
-                <span className="font-mono text-[10px] uppercase tracking-wider text-text-dim">
-                  {t("analytics.agent_detail_count", {
-                    defaultValue: "{{n}} agents",
-                    n: allAgentRows.length,
-                  })}
-                </span>
-              </div>
-              <div className="overflow-x-auto">
-                <table className="w-full text-xs">
-                  <thead>
-                    <tr className="border-b border-border-subtle">
-                      <th className="px-3 py-2 text-left font-bold text-text-dim/60">{t("analytics.agent", { defaultValue: "Agent" })}</th>
-                      <th className="px-3 py-2 text-right font-bold text-text-dim/60">{t("analytics.calls", { defaultValue: "Calls" })}</th>
-                      <th className="px-3 py-2 text-right font-bold text-text-dim/60">{t("analytics.total_tool_calls", { defaultValue: "Tool Calls" })}</th>
-                      <th className="px-3 py-2 text-right font-bold text-text-dim/60">{t("analytics.input_tokens", { defaultValue: "Input" })}</th>
-                      <th className="px-3 py-2 text-right font-bold text-text-dim/60">{t("analytics.output_tokens", { defaultValue: "Output" })}</th>
-                      <th className="px-3 py-2 text-right font-bold text-text-dim/60">{t("analytics.tokens", { defaultValue: "Tokens" })}</th>
-                      <th className="px-3 py-2 text-right font-bold text-text-dim/60">{t("analytics.total_cost", { defaultValue: "Total Cost" })}</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {allAgentRows.map((a, i) => (
-                      <tr key={a.agent_id ?? i} className="border-b border-border-subtle/50 hover:bg-brand/5">
-                        <td className="px-3 py-2 font-mono font-medium">
-                          <span className="flex items-center gap-1.5">
-                            {a.name || a.agent_id?.slice(0, 8) || t("common.unknown")}
-                            {a.is_hand && (
-                              <span className="rounded bg-warning/10 px-1 py-0.5 text-[9px] font-bold uppercase tracking-wider text-warning">
-                                {t("analytics.hand_tag", { defaultValue: "hand" })}
-                              </span>
-                            )}
-                          </span>
-                        </td>
-                        <td className="px-3 py-2 text-right">{a.call_count ?? a.calls ?? 0}</td>
-                        <td className="px-3 py-2 text-right">{a.tool_calls ?? 0}</td>
-                        <td className="px-3 py-2 text-right font-mono text-text-dim">{formatNumber(a.input_tokens ?? 0)}</td>
-                        <td className="px-3 py-2 text-right font-mono text-text-dim">{formatNumber(a.output_tokens ?? 0)}</td>
-                        <td className="px-3 py-2 text-right font-mono">{formatNumber(a.total_tokens ?? 0)}</td>
-                        <td className="px-3 py-2 text-right font-mono">{formatCost(a.total_cost_usd ?? a.cost ?? 0)}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            </Card>
-          )}
-
-          {/* Model Performance Dashboard */}
-          {modelPerformance.length > 0 && (
+          {usageLoadError ? (
+            <ErrorState message={toastErr(usageLoadError, t("common.error"))} onRetry={handleRefresh} />
+          ) : (
             <>
-              {/* KPI Cards for Model Performance — five tiles since #8062 added
-                  the worst-P95 SLO tile. */}
-              <StaggerList className="grid grid-cols-2 gap-2 sm:gap-4 md:grid-cols-3 lg:grid-cols-5">
-                {modelKpis?.map((kpi, i) => (
+              {/* KPI Cards */}
+              <StaggerList className="grid grid-cols-2 gap-2 sm:gap-4 md:grid-cols-3 lg:grid-cols-6">
+                {kpis.map((kpi, i) => (
                   <Card key={i} hover padding="md">
                     <div className="flex items-center justify-between">
                       <span className="text-[10px] font-black uppercase tracking-widest text-text-dim/60">{kpi.label}</span>
                       <div className={`w-8 h-8 rounded-lg ${kpi.bg} flex items-center justify-center`}><kpi.icon className={`w-4 h-4 ${kpi.color}`} /></div>
                     </div>
+                    {/* Six tiles per row instead of four (#8062), so the value
+                        steps down one size to keep a $0.0000 cost-per-call on one
+                        line at the lg breakpoint. */}
                     <p className={`text-xl sm:text-2xl font-black tracking-tight mt-1 sm:mt-2 ${kpi.color}`}>{kpi.value}</p>
                   </Card>
                 ))}
               </StaggerList>
 
-              {/* Latency Comparison + Cost Comparison */}
+              {/* Cost by Agent + Cost by Model */}
               <div className="grid gap-6 md:grid-cols-2">
                 <Card padding="lg" hover>
                   <h2 className="text-sm font-bold mb-4 flex items-center gap-2">
-                    <Activity className="w-4 h-4 text-blue-500" /> {t("analytics.latency_by_model", { defaultValue: "Latency by Model" })}
+                    <Users className="w-4 h-4 text-brand" /> {t("analytics.usage_by_agent")}
                   </h2>
-                  <ResponsiveContainer width="100%" height={Math.max(modelPerformance.slice(0, 8).length * 40, 120)}>
-                    <BarChart data={modelPerformance.slice(0, 8).map(m => ({ 
-                      name: m.model?.slice(0, 18) ?? t("common.unknown"), 
-                      avg: m.avg_latency_ms ?? 0,
-                      min: m.min_latency_ms ?? 0,
-                      max: m.max_latency_ms ?? 0,
-                    }))} layout="vertical" margin={{ left: 0, right: 20 }}>
-                      <CartesianGrid strokeDasharray="3 3" opacity={0.2} horizontal={false} />
-                      <XAxis type="number" tick={{ fontSize: 10 }} tickFormatter={v => `${v}ms`} axisLine={false} tickLine={false} />
-                      <YAxis type="category" dataKey="name" tick={{ fontSize: 10 }} width={120} axisLine={false} tickLine={false} />
-                      <Tooltip contentStyle={{ borderRadius: 12, fontSize: 12 }} formatter={(v, name) => [`${v}ms`, name ?? ""]} />
-                      <Legend />
-                      <Bar dataKey="avg" name={t("analytics.avg")} radius={[0, 4, 4, 0]} fill="#3b82f6" />
-                      <Bar dataKey="min" name={t("analytics.min")} radius={[0, 4, 4, 0]} fill="#22c55e" />
-                      <Bar dataKey="max" name={t("analytics.max")} radius={[0, 4, 4, 0]} fill="#ef4444" />
-                    </BarChart>
-                  </ResponsiveContainer>
+                  {usageByAgent.length === 0 ? (
+                    <EmptyState icon={<Users />} title={t("common.no_data")} description={t("analytics.no_agent_data")} />
+                  ) : (
+                    <ResponsiveContainer width="100%" height={Math.min(Math.max(usageByAgent.length * 36, 100), 600)}>
+                      <BarChart data={agentChartData} layout="vertical" margin={{ left: 0, right: 20 }}>
+                        <CartesianGrid strokeDasharray="3 3" opacity={0.2} horizontal={false} />
+                        <XAxis type="number" tick={{ fontSize: 10 }} tickFormatter={v => `$${v}`} axisLine={false} tickLine={false} />
+                        <YAxis type="category" dataKey="name" tick={{ fontSize: 10 }} width={100} axisLine={false} tickLine={false} />
+                        <Tooltip contentStyle={{ borderRadius: 12, fontSize: 12 }} formatter={(v) => [formatCost(typeof v === "number" ? v : Number(v ?? 0)), t("analytics.cost")]} />
+                        <Bar dataKey="cost" radius={[0, 6, 6, 0]} fill="#3b82f6" />
+                      </BarChart>
+                    </ResponsiveContainer>
+                  )}
                 </Card>
 
                 <Card padding="lg" hover>
                   <h2 className="text-sm font-bold mb-4 flex items-center gap-2">
-                    <DollarSign className="w-4 h-4 text-purple-500" /> {t("analytics.cost_per_call", { defaultValue: "Cost per Call" })}
+                    <Cpu className="w-4 h-4 text-purple-500" /> {t("analytics.usage_by_model")}
                   </h2>
-                  <ResponsiveContainer width="100%" height={Math.max(modelPerformance.slice(0, 8).length * 40, 120)}>
-                    <BarChart data={modelPerformance.slice(0, 8).map(m => ({ 
-                      name: m.model?.slice(0, 18) ?? t("common.unknown"), 
-                      costPerCall: m.cost_per_call ?? 0,
-                    }))} layout="vertical" margin={{ left: 0, right: 20 }}>
-                      <CartesianGrid strokeDasharray="3 3" opacity={0.2} horizontal={false} />
-                      <XAxis type="number" tick={{ fontSize: 10 }} tickFormatter={v => `$${v.toFixed(4)}`} axisLine={false} tickLine={false} />
-                      <YAxis type="category" dataKey="name" tick={{ fontSize: 10 }} width={120} axisLine={false} tickLine={false} />
-                      <Tooltip contentStyle={{ borderRadius: 12, fontSize: 12 }} formatter={(v) => [`$${(typeof v === "number" ? v : Number(v ?? 0)).toFixed(4)}`, t("analytics.cost_per_call_label")]} />
-                      <Bar dataKey="costPerCall" name={t("analytics.cost_per_call_label")} radius={[0, 4, 4, 0]} fill="#a855f7" />
-                    </BarChart>
-                  </ResponsiveContainer>
+                  {usageByModel.length === 0 ? (
+                    <EmptyState icon={<Cpu />} title={t("common.no_data")} description={t("analytics.no_model_data")} />
+                  ) : (
+                    <ResponsiveContainer width="100%" height={Math.min(Math.max(usageByModel.length * 36, 100), 600)}>
+                      <BarChart data={modelChartData} layout="vertical" margin={{ left: 0, right: 20 }}>
+                        <CartesianGrid strokeDasharray="3 3" opacity={0.2} horizontal={false} />
+                        <XAxis type="number" tick={{ fontSize: 10 }} tickFormatter={v => `$${v}`} axisLine={false} tickLine={false} />
+                        <YAxis type="category" dataKey="name" tick={{ fontSize: 10 }} width={120} axisLine={false} tickLine={false} />
+                        <Tooltip contentStyle={{ borderRadius: 12, fontSize: 12 }} formatter={(v) => [formatCost(typeof v === "number" ? v : Number(v ?? 0)), t("analytics.cost")]} />
+                        <Bar dataKey="cost" radius={[0, 6, 6, 0]} fill="#a855f7" />
+                      </BarChart>
+                    </ResponsiveContainer>
+                  )}
                 </Card>
               </div>
 
-              {/* Model Performance Table */}
+              {/* Daily Trend */}
               <Card padding="lg" hover>
                 <h2 className="text-sm font-bold mb-4 flex items-center gap-2">
-                  <Cpu className="w-4 h-4 text-brand" /> {t("analytics.model_performance_table", { defaultValue: "Model Performance Details" })}
+                  <TrendingUp className="w-4 h-4 text-warning" /> {t("analytics.daily_trend")}
                 </h2>
-                <div className="overflow-x-auto">
-                  <table className="w-full text-xs">
-                    <thead>
-                      <tr className="border-b border-border-subtle">
-                        <th className="text-left py-2 px-3 font-bold text-text-dim/60">{t("analytics.model", { defaultValue: "Model" })}</th>
-                        <th className="text-right py-2 px-3 font-bold text-text-dim/60">{t("analytics.calls", { defaultValue: "Calls" })}</th>
-                        <th className="text-right py-2 px-3 font-bold text-text-dim/60">{t("analytics.total_cost", { defaultValue: "Total Cost" })}</th>
-                        <th className="text-right py-2 px-3 font-bold text-text-dim/60">{t("analytics.cost_call", { defaultValue: "Cost/Call" })}</th>
-                        <th className="text-right py-2 px-3 font-bold text-text-dim/60">{t("analytics.avg_latency", { defaultValue: "Avg Latency" })}</th>
-                        {/* #8062 item 8 — the SLO column. */}
-                        <th className="text-right py-2 px-3 font-bold text-text-dim/60">{t("analytics.p95_latency", { defaultValue: "P95" })}</th>
-                        <th className="text-right py-2 px-3 font-bold text-text-dim/60">{t("analytics.min_max", { defaultValue: "Min/Max" })}</th>
-                        {/* #8062 item 6 — prompt vs completion, which is what
-                            makes two models comparable on price. The combined
-                            total is kept so the column the page already had
-                            does not disappear. */}
-                        <th className="text-right py-2 px-3 font-bold text-text-dim/60">{t("analytics.input_tokens", { defaultValue: "Input" })}</th>
-                        <th className="text-right py-2 px-3 font-bold text-text-dim/60">{t("analytics.output_tokens", { defaultValue: "Output" })}</th>
-                        <th className="text-right py-2 px-3 font-bold text-text-dim/60">{t("analytics.tokens", { defaultValue: "Tokens" })}</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {modelPerformance.map((m, i) => (
-                        <tr key={m.model ?? i} className="border-b border-border-subtle/50 hover:bg-brand/5">
-                          <td className="py-2 px-3 font-mono font-medium">{m.model?.slice(0, 25)}</td>
-                          <td className="py-2 px-3 text-right">{m.call_count ?? 0}</td>
-                          <td className="py-2 px-3 text-right font-mono">${(m.total_cost_usd ?? 0).toFixed(4)}</td>
-                          <td className="py-2 px-3 text-right font-mono">${(m.cost_per_call ?? 0).toFixed(4)}</td>
-                          <td className="py-2 px-3 text-right font-mono">{(m.avg_latency_ms ?? 0).toFixed(0)}ms</td>
-                          <td className="py-2 px-3 text-right font-mono">{m.p95_latency_ms ?? 0}ms</td>
-                          <td className="py-2 px-3 text-right font-mono text-text-dim">{(m.min_latency_ms ?? 0)}/{(m.max_latency_ms ?? 0)}ms</td>
-                          <td className="py-2 px-3 text-right font-mono text-text-dim">{formatNumber(m.total_input_tokens ?? 0)}</td>
-                          <td className="py-2 px-3 text-right font-mono text-text-dim">{formatNumber(m.total_output_tokens ?? 0)}</td>
-                          <td className="py-2 px-3 text-right font-mono">{formatNumber((m.total_input_tokens ?? 0) + (m.total_output_tokens ?? 0))}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
+                {(!daily?.days || daily.days.length === 0) ? (
+                  <EmptyState icon={<TrendingUp />} title={t("common.no_data")} description={t("analytics.no_trend_data")} />
+                ) : (
+                  <ResponsiveContainer width="100%" height={200}>
+                    <AreaChart data={dailyChartData}>
+                      <defs>
+                        <linearGradient id="costGrad" x1="0" y1="0" x2="0" y2="1">
+                          <stop offset="5%" stopColor="#3b82f6" stopOpacity={0.3} />
+                          <stop offset="95%" stopColor="#3b82f6" stopOpacity={0} />
+                        </linearGradient>
+                      </defs>
+                      <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" opacity={0.3} />
+                      <XAxis dataKey="date" tick={{ fontSize: 10 }} tickLine={false} axisLine={false} />
+                      <YAxis tick={{ fontSize: 10 }} tickLine={false} axisLine={false} tickFormatter={v => `$${v}`} width={50} />
+                      <Tooltip
+                        contentStyle={{ borderRadius: 12, border: "1px solid #e5e7eb", fontSize: 12, boxShadow: "0 4px 12px rgba(0,0,0,0.1)" }}
+                        formatter={(v) => [formatCost(typeof v === "number" ? v : Number(v ?? 0)), t("analytics.total_cost")]}
+                        // The unambiguous full date, not the MM-DD axis label — a window can span a year boundary now that it is up to 366 days wide.
+                        labelFormatter={(_l, payload) =>
+                          payload?.[0]?.payload?.fullDate ?? String(_l)
+                        }
+                      />
+                      {/* Single series, so no legend — the card title names it. */}
+                      <Area type="monotone" dataKey="cost" stroke="#3b82f6" strokeWidth={2.5} fill="url(#costGrad)" dot={dailyChartData.length <= DAILY_CHART_DOT_LIMIT ? { r: 3, fill: "#3b82f6", strokeWidth: 2, stroke: "white" } : false} activeDot={{ r: 5 }} />
+                    </AreaChart>
+                  </ResponsiveContainer>
+                )}
+
+                {/* Range summary (#8062 item 9) — the totals of the days plotted
+                    above, so the chart's shape and its magnitude are read together
+                    instead of the reader eyeballing an area. */}
+                {rangeTotals.dayCount > 0 && (
+                  <div className="mt-4 grid grid-cols-2 gap-3 border-t border-border-subtle pt-3 sm:grid-cols-4">
+                    {([
+                      { label: t("analytics.range.summary_days", { defaultValue: "Days with data" }), value: String(rangeTotals.dayCount) },
+                      { label: t("analytics.range.summary_calls", { defaultValue: "Calls in range" }), value: formatCompact(rangeTotals.calls) },
+                      { label: t("analytics.range.summary_tokens", { defaultValue: "Tokens in range" }), value: formatCompact(rangeTotals.tokens) },
+                      { label: t("analytics.range.summary_cost", { defaultValue: "Cost in range" }), value: formatCost(rangeTotals.cost) },
+                    ]).map((cell) => (
+                      <div key={cell.label}>
+                        <p className="text-[9px] font-black uppercase tracking-widest text-text-dim/60">{cell.label}</p>
+                        <p className="mt-0.5 font-mono text-sm font-bold">{cell.value}</p>
+                      </div>
+                    ))}
+                    {spanDays !== null && (
+                      <p className="col-span-2 text-[10px] text-text-dim/60 sm:col-span-4">
+                        {t("analytics.range.summary_span", {
+                          defaultValue:
+                            "{{withData}} of {{span}} days in the selected window recorded usage.",
+                          withData: rangeTotals.dayCount,
+                          span: spanDays,
+                        })}
+                      </p>
+                    )}
+                  </div>
+                )}
               </Card>
+
+              {/* Per-agent detail (#8062 item 7). The cost-by-agent chart above
+                  compares magnitudes; this answers "what is that agent actually
+                  doing" — tool calls and the prompt/completion split — and is the
+                  only place a hand's spend is visible, tagged as such. */}
+              {allAgentRows.length > 0 && (
+                <Card padding="lg" hover>
+                  <div className="mb-4 flex items-center justify-between">
+                    <h2 className="flex items-center gap-2 text-sm font-bold">
+                      <Users className="h-4 w-4 text-brand" />
+                      {t("analytics.agent_detail_table", { defaultValue: "Per-agent Details" })}
+                    </h2>
+                    <span className="font-mono text-[10px] uppercase tracking-wider text-text-dim">
+                      {t("analytics.agent_detail_count", {
+                        defaultValue: "{{n}} agents",
+                        n: allAgentRows.length,
+                      })}
+                    </span>
+                  </div>
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-xs">
+                      <thead>
+                        <tr className="border-b border-border-subtle">
+                          <th className="px-3 py-2 text-left font-bold text-text-dim/60">{t("analytics.agent", { defaultValue: "Agent" })}</th>
+                          <th className="px-3 py-2 text-right font-bold text-text-dim/60">{t("analytics.calls", { defaultValue: "Calls" })}</th>
+                          <th className="px-3 py-2 text-right font-bold text-text-dim/60">{t("analytics.total_tool_calls", { defaultValue: "Tool Calls" })}</th>
+                          <th className="px-3 py-2 text-right font-bold text-text-dim/60">{t("analytics.input_tokens", { defaultValue: "Input" })}</th>
+                          <th className="px-3 py-2 text-right font-bold text-text-dim/60">{t("analytics.output_tokens", { defaultValue: "Output" })}</th>
+                          <th className="px-3 py-2 text-right font-bold text-text-dim/60">{t("analytics.tokens", { defaultValue: "Tokens" })}</th>
+                          <th className="px-3 py-2 text-right font-bold text-text-dim/60">{t("analytics.total_cost", { defaultValue: "Total Cost" })}</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {allAgentRows.map((a, i) => (
+                          <tr key={a.agent_id ?? i} className="border-b border-border-subtle/50 hover:bg-brand/5">
+                            <td className="px-3 py-2 font-mono font-medium">
+                              <span className="flex items-center gap-1.5">
+                                {a.name || a.agent_id?.slice(0, 8) || t("common.unknown")}
+                                {a.is_hand && (
+                                  <span className="rounded bg-warning/10 px-1 py-0.5 text-[9px] font-bold uppercase tracking-wider text-warning">
+                                    {t("analytics.hand_tag", { defaultValue: "hand" })}
+                                  </span>
+                                )}
+                              </span>
+                            </td>
+                            <td className="px-3 py-2 text-right">{a.call_count ?? a.calls ?? 0}</td>
+                            <td className="px-3 py-2 text-right">{a.tool_calls ?? 0}</td>
+                            <td className="px-3 py-2 text-right font-mono text-text-dim">{formatNumber(a.input_tokens ?? 0)}</td>
+                            <td className="px-3 py-2 text-right font-mono text-text-dim">{formatNumber(a.output_tokens ?? 0)}</td>
+                            <td className="px-3 py-2 text-right font-mono">{formatNumber(a.total_tokens ?? 0)}</td>
+                            <td className="px-3 py-2 text-right font-mono">{formatCost(a.total_cost_usd ?? a.cost ?? 0)}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </Card>
+              )}
+
+              {/* Model Performance Dashboard */}
+              {modelPerformance.length > 0 && (
+                <>
+                  {/* KPI Cards for Model Performance — five tiles since #8062 added
+                      the worst-P95 SLO tile. */}
+                  <StaggerList className="grid grid-cols-2 gap-2 sm:gap-4 md:grid-cols-3 lg:grid-cols-5">
+                    {modelKpis?.map((kpi, i) => (
+                      <Card key={i} hover padding="md">
+                        <div className="flex items-center justify-between">
+                          <span className="text-[10px] font-black uppercase tracking-widest text-text-dim/60">{kpi.label}</span>
+                          <div className={`w-8 h-8 rounded-lg ${kpi.bg} flex items-center justify-center`}><kpi.icon className={`w-4 h-4 ${kpi.color}`} /></div>
+                        </div>
+                        <p className={`text-xl sm:text-2xl font-black tracking-tight mt-1 sm:mt-2 ${kpi.color}`}>{kpi.value}</p>
+                      </Card>
+                    ))}
+                  </StaggerList>
+
+                  {/* Latency Comparison + Cost Comparison */}
+                  <div className="grid gap-6 md:grid-cols-2">
+                    <Card padding="lg" hover>
+                      <h2 className="text-sm font-bold mb-4 flex items-center gap-2">
+                        <Activity className="w-4 h-4 text-blue-500" /> {t("analytics.latency_by_model", { defaultValue: "Latency by Model" })}
+                      </h2>
+                      <ResponsiveContainer width="100%" height={Math.max(modelPerformance.slice(0, 8).length * 40, 120)}>
+                        <BarChart data={modelPerformance.slice(0, 8).map(m => ({ 
+                          name: m.model?.slice(0, 18) ?? t("common.unknown"), 
+                          avg: m.avg_latency_ms ?? 0,
+                          min: m.min_latency_ms ?? 0,
+                          max: m.max_latency_ms ?? 0,
+                        }))} layout="vertical" margin={{ left: 0, right: 20 }}>
+                          <CartesianGrid strokeDasharray="3 3" opacity={0.2} horizontal={false} />
+                          <XAxis type="number" tick={{ fontSize: 10 }} tickFormatter={v => `${v}ms`} axisLine={false} tickLine={false} />
+                          <YAxis type="category" dataKey="name" tick={{ fontSize: 10 }} width={120} axisLine={false} tickLine={false} />
+                          <Tooltip contentStyle={{ borderRadius: 12, fontSize: 12 }} formatter={(v, name) => [`${v}ms`, name ?? ""]} />
+                          <Legend />
+                          <Bar dataKey="avg" name={t("analytics.avg")} radius={[0, 4, 4, 0]} fill="#3b82f6" />
+                          <Bar dataKey="min" name={t("analytics.min")} radius={[0, 4, 4, 0]} fill="#22c55e" />
+                          <Bar dataKey="max" name={t("analytics.max")} radius={[0, 4, 4, 0]} fill="#ef4444" />
+                        </BarChart>
+                      </ResponsiveContainer>
+                    </Card>
+
+                    <Card padding="lg" hover>
+                      <h2 className="text-sm font-bold mb-4 flex items-center gap-2">
+                        <DollarSign className="w-4 h-4 text-purple-500" /> {t("analytics.cost_per_call", { defaultValue: "Cost per Call" })}
+                      </h2>
+                      <ResponsiveContainer width="100%" height={Math.max(modelPerformance.slice(0, 8).length * 40, 120)}>
+                        <BarChart data={modelPerformance.slice(0, 8).map(m => ({ 
+                          name: m.model?.slice(0, 18) ?? t("common.unknown"), 
+                          costPerCall: m.cost_per_call ?? 0,
+                        }))} layout="vertical" margin={{ left: 0, right: 20 }}>
+                          <CartesianGrid strokeDasharray="3 3" opacity={0.2} horizontal={false} />
+                          <XAxis type="number" tick={{ fontSize: 10 }} tickFormatter={v => `$${v.toFixed(4)}`} axisLine={false} tickLine={false} />
+                          <YAxis type="category" dataKey="name" tick={{ fontSize: 10 }} width={120} axisLine={false} tickLine={false} />
+                          <Tooltip contentStyle={{ borderRadius: 12, fontSize: 12 }} formatter={(v) => [`$${(typeof v === "number" ? v : Number(v ?? 0)).toFixed(4)}`, t("analytics.cost_per_call_label")]} />
+                          <Bar dataKey="costPerCall" name={t("analytics.cost_per_call_label")} radius={[0, 4, 4, 0]} fill="#a855f7" />
+                        </BarChart>
+                      </ResponsiveContainer>
+                    </Card>
+                  </div>
+
+                  {/* Model Performance Table */}
+                  <Card padding="lg" hover>
+                    <h2 className="text-sm font-bold mb-4 flex items-center gap-2">
+                      <Cpu className="w-4 h-4 text-brand" /> {t("analytics.model_performance_table", { defaultValue: "Model Performance Details" })}
+                    </h2>
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-xs">
+                        <thead>
+                          <tr className="border-b border-border-subtle">
+                            <th className="text-left py-2 px-3 font-bold text-text-dim/60">{t("analytics.model", { defaultValue: "Model" })}</th>
+                            <th className="text-right py-2 px-3 font-bold text-text-dim/60">{t("analytics.calls", { defaultValue: "Calls" })}</th>
+                            <th className="text-right py-2 px-3 font-bold text-text-dim/60">{t("analytics.total_cost", { defaultValue: "Total Cost" })}</th>
+                            <th className="text-right py-2 px-3 font-bold text-text-dim/60">{t("analytics.cost_call", { defaultValue: "Cost/Call" })}</th>
+                            <th className="text-right py-2 px-3 font-bold text-text-dim/60">{t("analytics.avg_latency", { defaultValue: "Avg Latency" })}</th>
+                            {/* #8062 item 8 — the SLO column. */}
+                            <th className="text-right py-2 px-3 font-bold text-text-dim/60">{t("analytics.p95_latency", { defaultValue: "P95" })}</th>
+                            <th className="text-right py-2 px-3 font-bold text-text-dim/60">{t("analytics.min_max", { defaultValue: "Min/Max" })}</th>
+                            {/* #8062 item 6 — prompt vs completion, which is what
+                                makes two models comparable on price. The combined
+                                total is kept so the column the page already had
+                                does not disappear. */}
+                            <th className="text-right py-2 px-3 font-bold text-text-dim/60">{t("analytics.input_tokens", { defaultValue: "Input" })}</th>
+                            <th className="text-right py-2 px-3 font-bold text-text-dim/60">{t("analytics.output_tokens", { defaultValue: "Output" })}</th>
+                            <th className="text-right py-2 px-3 font-bold text-text-dim/60">{t("analytics.tokens", { defaultValue: "Tokens" })}</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {modelPerformance.map((m, i) => (
+                            <tr key={m.model ?? i} className="border-b border-border-subtle/50 hover:bg-brand/5">
+                              <td className="py-2 px-3 font-mono font-medium">{m.model?.slice(0, 25)}</td>
+                              <td className="py-2 px-3 text-right">{m.call_count ?? 0}</td>
+                              <td className="py-2 px-3 text-right font-mono">${(m.total_cost_usd ?? 0).toFixed(4)}</td>
+                              <td className="py-2 px-3 text-right font-mono">${(m.cost_per_call ?? 0).toFixed(4)}</td>
+                              <td className="py-2 px-3 text-right font-mono">{(m.avg_latency_ms ?? 0).toFixed(0)}ms</td>
+                              <td className="py-2 px-3 text-right font-mono">{m.p95_latency_ms ?? 0}ms</td>
+                              <td className="py-2 px-3 text-right font-mono text-text-dim">{(m.min_latency_ms ?? 0)}/{(m.max_latency_ms ?? 0)}ms</td>
+                              <td className="py-2 px-3 text-right font-mono text-text-dim">{formatNumber(m.total_input_tokens ?? 0)}</td>
+                              <td className="py-2 px-3 text-right font-mono text-text-dim">{formatNumber(m.total_output_tokens ?? 0)}</td>
+                              <td className="py-2 px-3 text-right font-mono">{formatNumber((m.total_input_tokens ?? 0) + (m.total_output_tokens ?? 0))}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </Card>
+                </>
+              )}
             </>
           )}
 

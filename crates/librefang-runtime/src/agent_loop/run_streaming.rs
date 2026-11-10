@@ -628,14 +628,20 @@ async fn run_agent_loop_streaming_inner(
                     strip_provider_prefix(&manifest.model.model, &manifest.model.provider);
                 // Compact the canonical history, not the working copy — see `compaction_history`.
                 let history = compaction_history(session);
+                // The kernel pre-merges the agent's `[compaction]` overrides into `opts.compaction_config`; hand them to the engine so it does not fall back to the global settings it was built with at boot.
+                let engine_compaction = opts
+                    .compaction_config
+                    .as_ref()
+                    .map(crate::compactor::CompactionConfig::from_toml);
                 match engine
-                    .compact(
+                    .compact_with_config(
                         session.agent_id,
                         &history,
                         driver.clone(),
                         &compact_model,
                         ctx_window,
                         fold_echo_policy,
+                        engine_compaction.as_ref(),
                     )
                     .await
                 {

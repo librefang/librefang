@@ -191,6 +191,26 @@ async fn test_clone_agent_creates_independent_copy() {
     assert_eq!(got["name"], "clone-dest");
 }
 
+/// The kernel rejects a reserved `_operator:` name with `InvalidInput`; that is a caller mistake, so the route answers 400 with the reason instead of a scrubbed 500.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_clone_with_reserved_name_is_400_with_reason() {
+    let h = boot(TEST_TOKEN).await;
+    let src = spawn_named(&h.state, "reserved-clone-source");
+
+    let (status, body) = send(
+        h.app.clone(),
+        post_json(
+            &format!("/api/agents/{}/clone", src),
+            serde_json::json!({"new_name": "_operator:x"}),
+        ),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+    let error = body["error"].as_str().unwrap_or_default();
+    assert!(error.contains("_operator:"), "reason must be kept: {body}");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn test_clone_identity_copy_failure_returns_partial_creation() {
     let h = boot(TEST_TOKEN).await;

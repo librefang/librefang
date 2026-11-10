@@ -620,17 +620,19 @@ pub async fn delete_backup(
     Path(filename): Path<String>,
     api_user: Option<axum::Extension<AuthenticatedApiUser>>,
     lang: Option<axum::Extension<RequestLanguage>>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
     // Sanitize filename to prevent path traversal
     if is_invalid_backup_filename(&filename) {
         let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
         return ApiErrorResponse::bad_request(t.t("api-error-backup-invalid-filename"))
-            .into_json_tuple();
+            .into_json_tuple()
+            .into_response();
     }
     if !filename.ends_with(".zip") {
         let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
         return ApiErrorResponse::bad_request(t.t("api-error-backup-must-be-zip"))
-            .into_json_tuple();
+            .into_json_tuple()
+            .into_response();
     }
 
     let backups_dir = state.kernel.home_dir().join("backups");
@@ -644,12 +646,14 @@ pub async fn delete_backup(
         Ok(Ok(false)) => {
             let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
             return ApiErrorResponse::not_found(t.t("api-error-backup-not-found"))
-                .into_json_tuple();
+                .into_json_tuple()
+                .into_response();
         }
         Ok(Err(e)) if e.kind() == std::io::ErrorKind::NotFound => {
             let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
             return ApiErrorResponse::not_found(t.t("api-error-backup-not-found"))
-                .into_json_tuple();
+                .into_json_tuple()
+                .into_response();
         }
         Ok(Err(e)) => {
             let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
@@ -657,7 +661,8 @@ pub async fn delete_backup(
                 "api-error-backup-delete-failed",
                 &[("error", &e.to_string())],
             ))
-            .into_json_tuple();
+            .into_json_tuple()
+            .into_response();
         }
         Err(e) => {
             let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
@@ -665,7 +670,8 @@ pub async fn delete_backup(
                 "api-error-backup-delete-failed",
                 &[("error", &format!("backup delete task failed: {e}"))],
             ))
-            .into_json_tuple();
+            .into_json_tuple()
+            .into_response();
         }
     }
 
@@ -679,7 +685,7 @@ pub async fn delete_backup(
         user_id,
         Some("api".to_string()),
     );
-    (StatusCode::NO_CONTENT, Json(serde_json::json!(null)))
+    StatusCode::NO_CONTENT.into_response()
 }
 
 /// Categorised failure mode for `restore_backup_blocking`, mapped 1:1 onto
@@ -1119,6 +1125,17 @@ pub async fn restore_backup(
                 .into_json_tuple();
         }
     };
+
+    // A restore that writes the archive's `config.toml` is a config.toml write like any other, so it honours managed mode (#6695) and answers 423 instead of silently replacing the deployment-owned file.
+    let restores_config = !keep_config
+        && components
+            .as_ref()
+            .is_none_or(|names| names.iter().any(|n| n == "config"));
+    if restores_config {
+        if let Some(locked) = crate::routes::guard_config_write(state.kernel.config_path()) {
+            return locked;
+        }
+    }
 
     let home_dir = state.kernel.home_dir().to_path_buf();
     let agent_workspaces_dir = state

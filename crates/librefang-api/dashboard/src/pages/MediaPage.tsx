@@ -24,6 +24,7 @@ import { PageHeader } from "../components/ui/PageHeader";
 import { AuthenticatedImage } from "../components/AuthenticatedImage";
 import { isAuthenticatedImagePath } from "../api";
 import { useUIStore } from "../lib/store";
+import { useRovingTabs } from "../lib/useRovingTabs";
 import {
   Image as ImageIcon,
   Mic,
@@ -58,6 +59,8 @@ const inputClass =
 const textareaClass =
   "w-full rounded-xl border border-border-subtle bg-main px-3 py-2 text-sm outline-none focus:border-brand resize-y min-h-[88px]";
 
+const MEDIA_TABS: readonly MediaTab[] = ["image", "speech", "video", "music"];
+
 const MAX_BASE64_LENGTH = 2 * 1024 * 1024;
 
 export function normalizeSpeechSpeed(speed: number): number | undefined {
@@ -69,6 +72,11 @@ export function MediaPage() {
   const { t } = useTranslation();
   const addToast = useUIStore((s) => s.addToast);
   const [activeTab, setActiveTab] = useState<MediaTab>("image");
+  const tabNav = useRovingTabs({
+    ids: MEDIA_TABS,
+    activeId: activeTab,
+    onSelect: setActiveTab,
+  });
 
   const providersQuery = useMediaProviders();
 
@@ -116,16 +124,16 @@ export function MediaPage() {
 
       {/* Tab bar */}
       <div role="tablist" aria-label={t("media.title")} className="flex gap-1 rounded-xl border border-border-subtle bg-surface p-1 flex-wrap">
-        <TabButton tab="image" active={activeTab} onClick={setActiveTab} icon={TAB_ICONS.image} panelId="media-panel-image">
+        <TabButton tab="image" active={activeTab} onClick={setActiveTab} icon={TAB_ICONS.image} panelId="media-panel-image" tabIndex={tabNav.tabIndexFor("image")} onKeyDown={(event) => tabNav.onKeyDown(event, "image")}>
           {t("media.tab_image")}
         </TabButton>
-        <TabButton tab="speech" active={activeTab} onClick={setActiveTab} icon={TAB_ICONS.speech} panelId="media-panel-speech">
+        <TabButton tab="speech" active={activeTab} onClick={setActiveTab} icon={TAB_ICONS.speech} panelId="media-panel-speech" tabIndex={tabNav.tabIndexFor("speech")} onKeyDown={(event) => tabNav.onKeyDown(event, "speech")}>
           {t("media.tab_speech")}
         </TabButton>
-        <TabButton tab="video" active={activeTab} onClick={setActiveTab} icon={TAB_ICONS.video} panelId="media-panel-video">
+        <TabButton tab="video" active={activeTab} onClick={setActiveTab} icon={TAB_ICONS.video} panelId="media-panel-video" tabIndex={tabNav.tabIndexFor("video")} onKeyDown={(event) => tabNav.onKeyDown(event, "video")}>
           {t("media.tab_video")}
         </TabButton>
-        <TabButton tab="music" active={activeTab} onClick={setActiveTab} icon={TAB_ICONS.music} panelId="media-panel-music">
+        <TabButton tab="music" active={activeTab} onClick={setActiveTab} icon={TAB_ICONS.music} panelId="media-panel-music" tabIndex={tabNav.tabIndexFor("music")} onKeyDown={(event) => tabNav.onKeyDown(event, "music")}>
           {t("media.tab_music")}
         </TabButton>
       </div>
@@ -208,6 +216,8 @@ function TabButton({
   onClick,
   icon,
   panelId,
+  tabIndex,
+  onKeyDown,
   children,
 }: {
   tab: MediaTab;
@@ -215,6 +225,9 @@ function TabButton({
   onClick: (t: MediaTab) => void;
   icon: React.ReactNode;
   panelId: string;
+  /** Roving tab stop handed down by the bar (only the active tab is 0). */
+  tabIndex: number;
+  onKeyDown: (event: React.KeyboardEvent<HTMLButtonElement>) => void;
   children: React.ReactNode;
 }) {
   const isActive = tab === active;
@@ -224,8 +237,9 @@ function TabButton({
       role="tab"
       aria-selected={isActive}
       aria-controls={panelId}
-      tabIndex={isActive ? 0 : -1}
+      tabIndex={tabIndex}
       onClick={() => onClick(tab)}
+      onKeyDown={onKeyDown}
       className={`flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-bold transition-colors ${
         isActive
           ? "bg-brand text-white shadow-sm"

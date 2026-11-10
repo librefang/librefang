@@ -22,6 +22,7 @@ import {
 } from "lucide-react";
 import { StaggerList } from "../components/ui/StaggerList";
 import { toastErr } from "../lib/errors";
+import { useRovingTabs } from "../lib/useRovingTabs";
 
 // Channel icons
 const channelIcons: Record<string, React.ReactNode> = {
@@ -155,10 +156,17 @@ function ChannelTile({ channel: c, t }: { channel: ChannelItem; t: TFunc }) {
   );
 }
 
+const COMMS_TABS = ["channels", "topology", "events"] as const;
+
 export function CommsPage() {
   const { t } = useTranslation();
   const [activeTab, setActiveTab] = useState<"channels" | "topology" | "events">("channels");
   const [search, setSearch] = useState("");
+  const tabNav = useRovingTabs({
+    ids: COMMS_TABS,
+    activeId: activeTab,
+    onSelect: setActiveTab,
+  });
 
   // The cached channel list still supplies the header while another tab is active; only the Channels tab needs live polling.
   const channelsQuery = useChannels({ enabled: activeTab === "channels" });
@@ -267,8 +275,9 @@ export function CommsPage() {
           role="tab"
           aria-selected={activeTab === "channels"}
           aria-controls="comms-panel-channels"
-          tabIndex={activeTab === "channels" ? 0 : -1}
+          tabIndex={tabNav.tabIndexFor("channels")}
           onClick={() => setActiveTab("channels")}
+          onKeyDown={(event) => tabNav.onKeyDown(event, "channels")}
           className={`flex items-center gap-1.5 sm:gap-2 px-3 sm:px-4 py-2 rounded-lg text-xs sm:text-sm font-bold transition-colors whitespace-nowrap ${
             activeTab === "channels" ? "bg-surface text-brand shadow-sm" : "text-text-dim hover:text-text-main"
           }`}
@@ -281,8 +290,9 @@ export function CommsPage() {
           role="tab"
           aria-selected={activeTab === "topology"}
           aria-controls="comms-panel-topology"
-          tabIndex={activeTab === "topology" ? 0 : -1}
+          tabIndex={tabNav.tabIndexFor("topology")}
           onClick={() => setActiveTab("topology")}
+          onKeyDown={(event) => tabNav.onKeyDown(event, "topology")}
           className={`flex items-center gap-1.5 sm:gap-2 px-3 sm:px-4 py-2 rounded-lg text-xs sm:text-sm font-bold transition-colors whitespace-nowrap ${
             activeTab === "topology" ? "bg-surface text-brand shadow-sm" : "text-text-dim hover:text-text-main"
           }`}
@@ -295,8 +305,9 @@ export function CommsPage() {
           role="tab"
           aria-selected={activeTab === "events"}
           aria-controls="comms-panel-events"
-          tabIndex={activeTab === "events" ? 0 : -1}
+          tabIndex={tabNav.tabIndexFor("events")}
           onClick={() => setActiveTab("events")}
+          onKeyDown={(event) => tabNav.onKeyDown(event, "events")}
           className={`flex items-center gap-1.5 sm:gap-2 px-3 sm:px-4 py-2 rounded-lg text-xs sm:text-sm font-bold transition-colors whitespace-nowrap ${
             activeTab === "events" ? "bg-surface text-brand shadow-sm" : "text-text-dim hover:text-text-main"
           }`}

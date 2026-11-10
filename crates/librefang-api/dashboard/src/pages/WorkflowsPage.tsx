@@ -19,6 +19,7 @@ import { Button } from "../components/ui/Button";
 import { Input } from "../components/ui/Input";
 import { PageHeader } from "../components/ui/PageHeader";
 import { useCreateShortcut } from "../lib/useCreateShortcut";
+import { useRovingTabs } from "../lib/useRovingTabs";
 import { ListSkeleton } from "../components/ui/Skeleton";
 import { EmptyState } from "../components/ui/EmptyState";
 import { ScheduleModal } from "../components/ui/ScheduleModal";
@@ -361,6 +362,8 @@ function WorkflowParamFields({
   );
 }
 
+const WORKFLOW_TABS = ["workflows", "templates"] as const;
+
 export function WorkflowsPage() {
   const { t, i18n } = useTranslation();
   const addToast = useUIStore((s) => s.addToast);
@@ -370,6 +373,11 @@ export function WorkflowsPage() {
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
   const [activeTab, setActiveTab] = useState<"workflows" | "templates">("workflows");
+  const tabNav = useRovingTabs({
+    ids: WORKFLOW_TABS,
+    activeId: activeTab,
+    onSelect: setActiveTab,
+  });
   const [scheduleWorkflowId, setScheduleWorkflowId] = useState<string | null>(null);
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
   const [dryRunResult, setDryRunResult] = useState<DryRunResult | null>(null);
@@ -901,8 +909,9 @@ export function WorkflowsPage() {
           role="tab"
           aria-selected={activeTab === "workflows"}
           aria-controls="workflows-panel-workflows"
-          tabIndex={activeTab === "workflows" ? 0 : -1}
+          tabIndex={tabNav.tabIndexFor("workflows")}
           onClick={() => setActiveTab("workflows")}
+          onKeyDown={(event) => tabNav.onKeyDown(event, "workflows")}
           className={`px-4 py-2.5 text-sm font-bold transition-colors border-b-2 -mb-px ${
             activeTab === "workflows"
               ? "border-brand text-brand"
@@ -917,8 +926,9 @@ export function WorkflowsPage() {
           role="tab"
           aria-selected={activeTab === "templates"}
           aria-controls="workflows-panel-templates"
-          tabIndex={activeTab === "templates" ? 0 : -1}
+          tabIndex={tabNav.tabIndexFor("templates")}
           onClick={() => setActiveTab("templates")}
+          onKeyDown={(event) => tabNav.onKeyDown(event, "templates")}
           className={`px-4 py-2.5 text-sm font-bold transition-colors border-b-2 -mb-px ${
             activeTab === "templates"
               ? "border-brand text-brand"

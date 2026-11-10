@@ -27,6 +27,11 @@ import { AutoDreamTab } from "./tabs/AutoDreamTab";
 import { HealthTab } from "./tabs/HealthTab";
 import { AddMemoryDialog, EditMemoryDialog, MemoryConfigDialog } from "./dialogs";
 import { MEMORY_TABS, type MemoryTab } from "./constants";
+import { useRovingTabs } from "../../lib/useRovingTabs";
+
+// The tab content lives in one container whose children follow the selected
+// tab, so every tab controls the same panel (#8597).
+const MEMORY_PANEL_ID = "memory-panel";
 
 export function MemoryPage() {
   const { t } = useTranslation();
@@ -224,7 +229,11 @@ export function MemoryPage() {
             onSelect={(tab) => setSearchParam({ tab })}
           />
 
-          <div>
+          <div
+            id={MEMORY_PANEL_ID}
+            role="tabpanel"
+            aria-labelledby={`memory-tab-${activeTab}`}
+          >
             {activeTab === "records" && (
               <RecordsTab
                 scopedAgentId={selectedAgentId}
@@ -292,6 +301,11 @@ interface TabBarProps {
 
 function TabBar({ activeTab, counts, onSelect }: TabBarProps) {
   const { t } = useTranslation();
+  const tabNav = useRovingTabs({
+    ids: MEMORY_TABS,
+    activeId: activeTab,
+    onSelect,
+  });
   const tabs: { key: MemoryTab; label: string; icon: React.ReactNode }[] = [
     {
       key: "records",
@@ -328,9 +342,13 @@ function TabBar({ activeTab, counts, onSelect }: TabBarProps) {
           return (
             <button
               key={tab.key}
+              id={`memory-tab-${tab.key}`}
               role="tab"
               aria-selected={active}
+              aria-controls={MEMORY_PANEL_ID}
+              tabIndex={tabNav.tabIndexFor(tab.key)}
               onClick={() => onSelect(tab.key)}
+              onKeyDown={(event) => tabNav.onKeyDown(event, tab.key)}
               className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-bold transition-colors shrink-0 ${
                 active
                   ? "bg-brand/10 text-brand"

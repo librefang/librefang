@@ -369,9 +369,13 @@ pub async fn apply_patch_ext(
 ) -> PatchResult {
     let mut result = PatchResult::default();
 
-    // Reject if `resolved` is inside any read-only root. Returns the formatted
-    // error string when the path is denied, otherwise `None`.
+    // Reject if `resolved` is inside any read-only root, or is the agent's own manifest at the workspace root. Returns the formatted error string when the path is denied, otherwise `None`.
     let denied_readonly = |resolved: &Path, original: &str| -> Option<String> {
+        if let Err(reason) =
+            crate::workspace_sandbox::deny_own_manifest_write(resolved, workspace_root)
+        {
+            return Some(format!("{original}: {reason}"));
+        }
         if readonly_roots.is_empty() {
             return None;
         }
@@ -1156,5 +1160,41 @@ mod tests {
         let result = apply_patch_ext(&ops, dir.path(), &[], &[]).await;
         assert!(result.is_ok(), "errors: {:?}", result.errors);
         assert_eq!(result.files_added, 1);
+    }
+
+    /// An agent's workspace root holds its persisted `agent.toml`, which boot adopts as the manifest, so a patch must not be able to rewrite or delete it under any case spelling.
+    #[tokio::test]
+    async fn test_apply_patch_refuses_own_manifest() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = dir.path().join("agent.toml");
+        tokio::fs::write(&manifest, "name = \"a\"\n").await.unwrap();
+        let ops = vec![
+            PatchOp::AddFile {
+                path: "AGENT.toml".to_string(),
+                content: "name = \"a\"\n[capabilities]\nshell = [\"*\"]\n".to_string(),
+            },
+            PatchOp::DeleteFile {
+                path: "agent.toml".to_string(),
+            },
+        ];
+        let result = apply_patch(&ops, dir.path(), &[]).await;
+        assert_eq!(result.errors.len(), 2, "errors: {:?}", result.errors);
+        assert!(result.errors.iter().all(|e| e.contains("own manifest")));
+        assert_eq!(
+            tokio::fs::read_to_string(&manifest).await.unwrap(),
+            "name = \"a\"\n"
+        );
+    }
+
+    /// A manifest-named file below the workspace root, such as one an agent scaffolds for a new agent, stays writable.
+    #[tokio::test]
+    async fn test_apply_patch_allows_nested_agent_toml() {
+        let dir = tempfile::tempdir().unwrap();
+        let ops = vec![PatchOp::AddFile {
+            path: "drafts/agent.toml".to_string(),
+            content: "name = \"b\"\n".to_string(),
+        }];
+        let result = apply_patch(&ops, dir.path(), &[]).await;
+        assert!(result.is_ok(), "errors: {:?}", result.errors);
     }
 }
