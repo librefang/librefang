@@ -31,16 +31,16 @@
 
 use librefang_types::agent::AgentManifest;
 use librefang_types::config::{
-    AuditConfig, AutoDreamConfig, AutoReplyConfig, BraveSearchConfig, BroadcastConfig,
-    BrowserConfig, BudgetConfig, CanvasConfig, ChannelsConfig, ChunkConfig, CompactionTomlConfig,
-    ContextEngineTomlConfig, DockerSandboxConfig, ExtensionsConfig, ExternalAuthConfig,
-    HealthCheckConfig, HeartbeatTomlConfig, InboxConfig, JinaSearchConfig, KernelConfig,
-    MemoryConfig, MemoryDecayConfig, NetworkConfig, PairingConfig, ParallelToolsConfig,
-    PerplexitySearchConfig, PrivacyConfig, PromptIntelligenceConfig, QueueConcurrencyConfig,
-    QueueConfig, RateLimitConfig, RegistryConfig, ReloadConfig, SanitizeConfig, SessionConfig,
-    SkillsConfig, TaskBoardConfig, TavilySearchConfig, TelemetryConfig, TerminalConfig,
-    ThinkingConfig, TriggersConfig, TtsConfig, VaultConfig, WebConfig, WebFetchConfig,
-    WebhookTriggerConfig,
+    ArtifactConfig, AuditConfig, AutoDreamConfig, AutoReplyConfig, BraveSearchConfig,
+    BroadcastConfig, BrowserConfig, BudgetConfig, CanvasConfig, ChannelsConfig, ChunkConfig,
+    CompactionTomlConfig, ContextEngineTomlConfig, DockerSandboxConfig, ExtensionsConfig,
+    ExternalAuthConfig, HealthCheckConfig, HeartbeatTomlConfig, InboxConfig, JinaSearchConfig,
+    KernelConfig, MemoryConfig, MemoryDecayConfig, NetworkConfig, PairingConfig,
+    ParallelToolsConfig, PerplexitySearchConfig, PrivacyConfig, PromptIntelligenceConfig,
+    QueueConcurrencyConfig, QueueConfig, RateLimitConfig, RegistryConfig, ReloadConfig,
+    SanitizeConfig, SessionConfig, SkillsConfig, TaskBoardConfig, TavilySearchConfig,
+    TelemetryConfig, TerminalConfig, ThinkingConfig, TriggersConfig, TtsConfig, VaultConfig,
+    WebConfig, WebFetchConfig, WebhookTriggerConfig,
 };
 use serde::Serialize;
 
@@ -151,6 +151,11 @@ fn budget_config_default_roundtrips_through_toml() {
 #[test]
 fn session_config_default_roundtrips_through_toml() {
     assert_default_roundtrip::<SessionConfig>("SessionConfig");
+}
+
+#[test]
+fn artifact_config_default_roundtrips_through_toml() {
+    assert_default_roundtrip::<ArtifactConfig>("ArtifactConfig");
 }
 
 #[test]

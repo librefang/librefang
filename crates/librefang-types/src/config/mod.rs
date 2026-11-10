@@ -37,6 +37,16 @@ mod tests {
     }
 
     #[test]
+    fn test_artifacts_config_defaults() {
+        let config = ArtifactConfig::default();
+        assert_eq!(config.retention_days, 90);
+        assert!(config.blob_dir.is_none());
+
+        let from_empty: ArtifactConfig = toml::from_str("").unwrap();
+        assert_eq!(from_empty.retention_days, 90);
+    }
+
+    #[test]
     fn test_config_serialization() {
         let config = KernelConfig::default();
         let toml_str = toml::to_string_pretty(&config).unwrap();
