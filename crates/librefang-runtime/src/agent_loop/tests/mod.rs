@@ -515,6 +515,105 @@ fn without_turn_injections_strips_head_and_time_messages() {
     );
 }
 
+fn turn_json(turn: &[Message]) -> Vec<serde_json::Value> {
+    turn.iter()
+        .map(|m| serde_json::to_value(m).unwrap())
+        .collect()
+}
+
+/// The single message session repair leaves when it merges two adjacent user messages.
+fn merged_by_repair(first: Message, second: Message) -> Message {
+    let mut repaired = crate::session_repair::validate_and_repair(&[first, second]);
+    assert_eq!(repaired.len(), 1, "repair merges adjacent user messages");
+    repaired.remove(0)
+}
+
+/// Repair merges the turn's prompt with the time message that follows it in the working copy, so the prompt is no longer in the rewritten session verbatim; the turn must still start at the merged message, not one past it.
+#[test]
+fn current_turn_start_after_rewrite_finds_prompt_merged_by_repair() {
+    let turn = turn_json(&[
+        Message::user("q"),
+        tool_use_message("tu1", serde_json::json!({})),
+        tool_result_message("tu1"),
+    ]);
+    let merged = merged_by_repair(
+        Message::user("q"),
+        Message::user("[Current date/time: Friday 12:00]"),
+    );
+    let rewritten = vec![
+        Message::user("[Context compaction summary] s"),
+        Message::assistant("kept answer"),
+        merged,
+        tool_use_message("tu1", serde_json::json!({})),
+        tool_result_message("tu1"),
+    ];
+    assert_eq!(
+        current_turn_start_after_rewrite(Some(&turn), &rewritten, 40),
+        2
+    );
+
+    // A prompt-only turn merged the same way (compression on the turn's first iteration).
+    assert_eq!(
+        current_turn_start_after_rewrite(
+            Some(&turn_json(&[Message::user("q")])),
+            &rewritten[..3],
+            40
+        ),
+        2
+    );
+
+    // The prompt folded into the user message before it (the previous turn ended on an unanswered user message).
+    let rewritten = vec![
+        Message::assistant("older answer"),
+        merged_by_repair(Message::user("earlier"), Message::user("q")),
+        tool_use_message("tu1", serde_json::json!({})),
+        tool_result_message("tu1"),
+    ];
+    assert_eq!(
+        current_turn_start_after_rewrite(Some(&turn), &rewritten, 40),
+        1
+    );
+
+    // A summary that merely mentions the prompt's text is not the prompt.
+    let rewritten = vec![
+        Message::user("[Context compaction summary] the user asked q"),
+        tool_use_message("tu1", serde_json::json!({})),
+        tool_result_message("tu1"),
+    ];
+    assert_eq!(
+        current_turn_start_after_rewrite(Some(&turn), &rewritten, 40),
+        1
+    );
+}
+
+/// When a long turn's opening messages are summarised along with older history, the turn starts at its first surviving message; nothing from the summary or earlier is counted as this turn's, even an earlier turn that sent the same prompt.
+#[test]
+fn current_turn_start_after_rewrite_starts_at_first_survivor_when_turn_head_was_summarised() {
+    let turn = turn_json(&[
+        Message::user("q"),
+        tool_use_message("tu1", serde_json::json!({})),
+        tool_result_message("tu1"),
+        tool_use_message("tu2", serde_json::json!({})),
+        tool_result_message("tu2"),
+    ]);
+    let rewritten = vec![
+        Message::user("q"),
+        Message::assistant("an earlier turn with the same prompt"),
+        Message::user("[Context compaction summary] s"),
+        tool_use_message("tu2", serde_json::json!({})),
+        tool_result_message("tu2"),
+        Message::user("Please provide your response."),
+    ];
+    assert_eq!(
+        current_turn_start_after_rewrite(Some(&turn), &rewritten, 40),
+        3
+    );
+    assert_eq!(
+        current_turn_start_after_rewrite(Some(&[]), &rewritten, 40),
+        rewritten.len()
+    );
+}
+
 /// #4971: engine compaction (the production path) must reset the file_read dedup tracker, or a re-read of a summarised file returns only a stub.
 #[test]
 fn context_compaction_resets_file_read_dedup_tracker() {

@@ -1928,7 +1928,12 @@ async fn run_agent_loop_streaming_inner(
     session.push_message(Message::assistant(&cap_notice));
 
     // Persist. Fork and incognito turns skip.
-    repair_session_before_save(session, agent_id_str.as_str(), "streaming_max_iterations");
+    repair_running_turn_before_save(
+        session,
+        agent_id_str.as_str(),
+        "streaming_max_iterations",
+        &mut new_messages_start,
+    );
     if !opts.is_fork && !opts.incognito {
         if let Err(e) = memory.save_session_async(session).await {
             warn!("Failed to save session on max iterations: {e}");
