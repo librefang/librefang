@@ -254,26 +254,156 @@ fn working_only_tail(
 /// The working copy minus the per-turn injections, for the inline compressor path that persists its compressed working copy into `session.messages`.
 ///
 /// Without this the time message and the head injections (web search, recalled memory, canonical context) would be written into the session and re-sent on every later turn.
-/// Matched by value, so an injection the compressor folded into its summary is simply absent and nothing else is dropped.
-fn without_turn_injections(messages: &[Message], injections: &TurnInjections) -> Vec<Message> {
-    let injected: Vec<serde_json::Value> = injections
+/// An injection that is still its own message is matched by value; one the compressor folded into its summary is simply absent and nothing else is dropped.
+/// By the time the working copy is persisted it has been through session repair, which merges adjacent user messages: the time message into the prompt before it, the head injections into each other and into the first history message.
+/// Those are found as the text repair left behind (see [`strip_merged_injection_text`]) and cut out of the merged message, which is dropped if nothing else remains.
+/// A message whose only change was absorbing injections is then put back exactly as it sits in `session_before` (the session about to be overwritten), so its `Text` / `Blocks` shape, timestamp and pin flag are the original's rather than those of the merge.
+/// Everything else the compressor, repair and hard trim produced is kept as is.
+fn without_turn_injections(
+    messages: &[Message],
+    injections: &TurnInjections,
+    session_before: &[Message],
+) -> Vec<Message> {
+    let injected: Vec<&Message> = injections
         .head
         .iter()
         .chain(injections.time_msg.iter())
-        .filter_map(|m| serde_json::to_value(m).ok())
         .collect();
     if injected.is_empty() {
         return messages.to_vec();
     }
+    let injected_json: Vec<serde_json::Value> = injected
+        .iter()
+        .filter_map(|m| serde_json::to_value(m).ok())
+        .collect();
+    let injected_texts: Vec<String> = injected
+        .iter()
+        .filter(|m| m.role == Role::User)
+        .map(|m| m.content.text_content())
+        .filter(|text| !text.is_empty())
+        .collect();
     messages
         .iter()
-        .filter(|m| {
-            serde_json::to_value(m)
-                .map(|v| !injected.contains(&v))
-                .unwrap_or(true)
+        .filter_map(|message| {
+            if serde_json::to_value(message)
+                .map(|v| injected_json.contains(&v))
+                .unwrap_or(false)
+            {
+                return None;
+            }
+            // `merge_content` always produces `Blocks`, so a `Text` message or a non-user message is never a merge product.
+            let MessageContent::Blocks(blocks) = &message.content else {
+                return Some(message.clone());
+            };
+            if message.role != Role::User {
+                return Some(message.clone());
+            }
+            let mut changed = false;
+            let mut stripped = Vec::with_capacity(blocks.len());
+            for block in blocks {
+                match block {
+                    ContentBlock::Text {
+                        text,
+                        provider_metadata,
+                    } => match strip_merged_injection_text(text, &injected_texts) {
+                        Some(rest) => {
+                            changed = true;
+                            if !rest.is_empty() {
+                                stripped.push(ContentBlock::Text {
+                                    text: rest,
+                                    provider_metadata: provider_metadata.clone(),
+                                });
+                            }
+                        }
+                        None => stripped.push(block.clone()),
+                    },
+                    other => stripped.push(other.clone()),
+                }
+            }
+            if !changed {
+                return Some(message.clone());
+            }
+            if stripped.is_empty() {
+                return None;
+            }
+            let content = MessageContent::Blocks(stripped);
+            let key = coalesced_content_key(&content);
+            if let Some(original) = session_before.iter().rev().find(|original| {
+                original.role == message.role && coalesced_content_key(&original.content) == key
+            }) {
+                return Some(original.clone());
+            }
+            Some(Message {
+                content,
+                ..message.clone()
+            })
         })
-        .cloned()
         .collect()
+}
+
+/// `text` with every injection in `injected` removed, or `None` when it holds none.
+///
+/// Session repair merges a user message into the one before it by appending its blocks and joining adjacent text blocks with a blank line, so a merged injection is the whole text, its start followed by `\n\n`, its end preceded by `\n\n`, or a run between two `\n\n` separators.
+/// Only those positions are cut, so text that merely mentions an injection's content is left alone.
+fn strip_merged_injection_text(text: &str, injected: &[String]) -> Option<String> {
+    let mut current = text.to_string();
+    let mut changed = false;
+    loop {
+        let mut cut = None;
+        for injection in injected {
+            if current == *injection {
+                cut = Some(String::new());
+            } else if let Some(rest) = current.strip_prefix(&format!("{injection}\n\n")) {
+                cut = Some(rest.to_string());
+            } else if let Some(rest) = current.strip_suffix(&format!("\n\n{injection}")) {
+                cut = Some(rest.to_string());
+            } else {
+                let inner = format!("\n\n{injection}\n\n");
+                if let Some(at) = current.find(&inner) {
+                    cut = Some(format!(
+                        "{}\n\n{}",
+                        &current[..at],
+                        &current[at + inner.len()..]
+                    ));
+                }
+            }
+            if cut.is_some() {
+                break;
+            }
+        }
+        match cut {
+            Some(rest) => {
+                current = rest;
+                changed = true;
+            }
+            None => break,
+        }
+    }
+    changed.then_some(current)
+}
+
+/// `content` as the block sequence session repair would leave it: text runs joined with a blank line, other blocks serialized as they are.
+///
+/// Lets a message restored from a merge be recognised in the pre-merge session whether it was stored as `Text` or as `Blocks`.
+fn coalesced_content_key(content: &MessageContent) -> Vec<serde_json::Value> {
+    let blocks: &[ContentBlock] = match content {
+        MessageContent::Text(text) => return vec![serde_json::Value::String(text.clone())],
+        MessageContent::Blocks(blocks) => blocks,
+    };
+    let mut key: Vec<serde_json::Value> = Vec::with_capacity(blocks.len());
+    for block in blocks {
+        match block {
+            ContentBlock::Text { text, .. } => match key.last_mut() {
+                Some(serde_json::Value::String(run)) => {
+                    run.push_str("\n\n");
+                    run.push_str(text);
+                }
+                _ => key.push(serde_json::Value::String(text.clone())),
+            },
+            other => key.push(serde_json::to_value(other).unwrap_or(serde_json::Value::Null)),
+        }
+    }
+    key
 }
 
 /// The current turn (`session.messages[new_messages_start..]`) in serialized form, so it can be found again after the history is rewritten.
@@ -1602,7 +1732,11 @@ async fn run_agent_loop_inner(
             if had_soft_compression {
                 // Persist the compressed history without the per-turn injections, which belong to this request only.
                 let current_turn = current_turn_snapshot(session, new_messages_start);
-                session.set_messages(without_turn_injections(&messages, &injections));
+                session.set_messages(without_turn_injections(
+                    &messages,
+                    &injections,
+                    &session.messages,
+                ));
                 new_messages_start = current_turn_start_after_rewrite(
                     current_turn.as_deref(),
                     &session.messages,
