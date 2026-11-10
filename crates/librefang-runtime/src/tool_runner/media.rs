@@ -85,6 +85,12 @@ pub(super) async fn tool_media_describe(
     let raw_path = input["path"]
         .as_str()
         .ok_or(ToolError::MissingParameter("path"))?;
+    // The schema advertises a prompt; an absent or blank one means "use the
+    // default instruction" (#8637).
+    let prompt = input["prompt"]
+        .as_str()
+        .map(str::trim)
+        .filter(|p| !p.is_empty());
     let resolved = resolve_media_path(raw_path, workspace_root, additional_roots)?;
 
     let ext = resolved
@@ -111,7 +117,7 @@ pub(super) async fn tool_media_describe(
     };
 
     let understanding = engine
-        .describe_image(&attachment)
+        .describe_image(&attachment, prompt)
         .await
         .map_err(ToolError::upstream_msg)?;
     Ok(serde_json::to_string_pretty(&understanding)?)
