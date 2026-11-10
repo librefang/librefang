@@ -761,7 +761,7 @@ describe("WorkflowsPage", () => {
     // banner row only renders an "N actions" count badge, not the
     // buttons themselves), so finding it proves the bar actually
     // rendered its action list, not just the wrapper.
-    expect(screen.getByRole("button", { name: "approvals.approve" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Approve" })).toBeInTheDocument();
     // The artifact text appears in BOTH the banner row preview and the
     // bar's artifact panel — assert both render so the inline mount
     // path is exercised end-to-end.
