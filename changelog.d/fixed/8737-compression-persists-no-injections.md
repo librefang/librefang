@@ -1,0 +1,2 @@
+Inline context compression no longer saves per-request injections (the current-time message, recalled memory, canonical cross-channel context, web search results) into the session when session repair had merged them into the prompt or an adjacent user message; before, that text was replayed on every later turn.
+  The merged text is cut out of the persisted copy and the affected messages are restored as the session stored them, while the compression summary and hard-trim result are kept exactly as before. (#8737) (@houko)
