@@ -390,6 +390,109 @@ fn is_ssrf_blocked_url_with(
     Ok(())
 }
 
+/// `authorization_servers` from an RFC 9728 protected-resource metadata body.
+///
+/// The document is *not* authorization-server metadata: it only names the
+/// issuers that can mint tokens for the resource.  Parsing it as RFC 8414
+/// metadata fails (no endpoints), which used to end discovery there (#8670).
+pub fn parse_protected_resource_metadata(body: &str) -> Vec<String> {
+    #[derive(Deserialize)]
+    struct ProtectedResource {
+        #[serde(default)]
+        authorization_servers: Vec<String>,
+    }
+    serde_json::from_str::<ProtectedResource>(body)
+        .map(|p| p.authorization_servers)
+        .unwrap_or_default()
+}
+
+/// Candidate RFC 8414 / OIDC metadata URLs for an authorization-server issuer.
+///
+/// RFC 8414 §3.1 inserts the issuer's path *after* the well-known segment (`/.well-known/oauth-authorization-server/<path>`), so an issuer served under a path prefix — the common reverse-proxy deployment — is not reachable at the origin root.
+/// The in-path variant some deployments serve and OIDC discovery are tried afterwards.
+/// Returns an empty list when the issuer is not an https URL (RFC 8414 §2) or its host is SSRF-blocked.
+pub fn authorization_server_metadata_urls(issuer: &str) -> Vec<String> {
+    match Url::parse(issuer) {
+        Ok(parsed) if parsed.scheme() == "https" => well_known_metadata_urls(issuer),
+        _ => Vec::new(),
+    }
+}
+
+/// The RFC 8414 / OIDC candidates of [`authorization_server_metadata_urls`] without its https floor, for Tier 2, which derives them from the operator-configured MCP URL rather than from an issuer named in a remote response.
+fn well_known_metadata_urls(base: &str) -> Vec<String> {
+    let Ok(parsed) = Url::parse(base) else {
+        return Vec::new();
+    };
+    let Some(host) = parsed.host_str() else {
+        return Vec::new();
+    };
+    if is_ssrf_blocked_host(host) {
+        return Vec::new();
+    }
+    let origin = parsed.origin().unicode_serialization();
+    let trimmed = base.trim_end_matches('/');
+    let path = parsed.path().trim_end_matches('/');
+    if path.is_empty() {
+        vec![
+            format!("{origin}/.well-known/oauth-authorization-server"),
+            format!("{origin}/.well-known/openid-configuration"),
+        ]
+    } else {
+        vec![
+            format!("{origin}/.well-known/oauth-authorization-server{path}"),
+            format!("{trimmed}/.well-known/oauth-authorization-server"),
+            format!("{origin}/.well-known/openid-configuration{path}"),
+            format!("{trimmed}/.well-known/openid-configuration"),
+        ]
+    }
+}
+
+/// How many path prefixes of the MCP endpoint get an in-path protected-resource probe.
+const MAX_IN_PATH_PROTECTED_RESOURCE_PROBES: usize = 3;
+
+/// How many `authorization_servers` of one protected-resource document are followed.
+const MAX_FOLLOWED_ISSUERS: usize = 3;
+
+/// Candidate RFC 9728 protected-resource metadata URLs for an MCP endpoint, used when no `WWW-Authenticate` header names one.
+///
+/// Order: the RFC 9728 §3.1 path-inserted form (`{origin}/.well-known/oauth-protected-resource{path}`), the in-path form under the endpoint and its closest parent prefixes (a proxy-mounted server such as #8670's `{origin}/plane-mcp/.well-known/oauth-protected-resource`), then the root form.
+/// Every candidate is on the endpoint's own origin.
+/// Returns an empty list when the endpoint is not https (RFC 9728 §3) or its host is SSRF-blocked.
+pub fn protected_resource_metadata_urls(server_url: &str) -> Vec<String> {
+    let Ok(parsed) = Url::parse(server_url) else {
+        return Vec::new();
+    };
+    if parsed.scheme() != "https" {
+        return Vec::new();
+    }
+    let Some(host) = parsed.host_str() else {
+        return Vec::new();
+    };
+    if is_ssrf_blocked_host(host) {
+        return Vec::new();
+    }
+    let origin = parsed.origin().unicode_serialization();
+    let path = parsed.path().trim_end_matches('/');
+    let mut urls = Vec::new();
+    if !path.is_empty() {
+        urls.push(format!(
+            "{origin}/.well-known/oauth-protected-resource{path}"
+        ));
+        let mut prefix = path;
+        for _ in 0..MAX_IN_PATH_PROTECTED_RESOURCE_PROBES {
+            if prefix.is_empty() {
+                break;
+            }
+            urls.push(format!(
+                "{origin}{prefix}/.well-known/oauth-protected-resource"
+            ));
+            prefix = prefix.rsplit_once('/').map_or("", |(parent, _)| parent);
+        }
+    }
+    urls.push(format!("{origin}/.well-known/oauth-protected-resource"));
+    urls
+}
+
 /// Construct the `.well-known/oauth-authorization-server` URL for a given server URL.
 ///
 /// Parses the URL, extracts the origin, and appends the well-known path.
@@ -768,10 +871,81 @@ pub fn parse_authorization_server_metadata(
     })
 }
 
+/// Fetch a URL body, logging (not propagating) transport and status errors.
+async fn fetch_body(client: &reqwest::Client, url: &str) -> Option<String> {
+    match client.get(url).send().await {
+        Ok(resp) if resp.status().is_success() => match resp.text().await {
+            Ok(body) => Some(body),
+            Err(e) => {
+                warn!(error = %e, url = %url, "metadata body could not be read");
+                None
+            }
+        },
+        Ok(resp) => {
+            warn!(status = %resp.status(), url = %url, "metadata fetch returned non-success");
+            None
+        }
+        Err(e) => {
+            warn!(error = %e, url = %url, "metadata fetch failed");
+            None
+        }
+    }
+}
+
+/// Parse a metadata body and reject endpoints that leave the server's domain.
+fn parse_and_validate(body: &str, server_url: &str, tier: &str) -> Option<OAuthMetadata> {
+    match parse_authorization_server_metadata(body, server_url) {
+        Ok(meta) => match validate_metadata_endpoints(&meta, server_url) {
+            Ok(()) => Some(meta),
+            Err(e) => {
+                warn!(error = %e, tier, "endpoint domain mismatch — rejecting metadata");
+                None
+            }
+        },
+        Err(e) => {
+            warn!(error = %e, tier, "failed to parse authorization-server metadata");
+            None
+        }
+    }
+}
+
+/// Follow the `authorization_servers` an RFC 9728 protected-resource document names (at most [`MAX_FOLLOWED_ISSUERS`]) to their RFC 8414 / OIDC metadata.
+/// Endpoints are still validated against `server_url`, so an issuer outside the server's registrable domain is rejected.
+async fn follow_authorization_servers<F, Fut>(
+    issuers: Vec<String>,
+    server_url: &str,
+    tier: &str,
+    fetch: &F,
+) -> Option<OAuthMetadata>
+where
+    F: Fn(String) -> Fut,
+    Fut: std::future::Future<Output = Option<String>>,
+{
+    for issuer in issuers.into_iter().take(MAX_FOLLOWED_ISSUERS) {
+        debug!(issuer = %issuer, tier, "following protected-resource authorization server");
+        for candidate in authorization_server_metadata_urls(&issuer) {
+            debug!(url = %candidate, tier, "fetching authorization-server metadata");
+            if let Some(body) = fetch(candidate).await {
+                if let Some(meta) = parse_and_validate(&body, server_url, tier) {
+                    return Some(meta);
+                }
+            }
+        }
+    }
+    None
+}
+
+fn merge_with_config(meta: OAuthMetadata, config: Option<&McpOAuthConfig>) -> OAuthMetadata {
+    match config {
+        Some(cfg) => merge_metadata_with_config(meta, cfg),
+        None => meta,
+    }
+}
+
 /// Discover OAuth metadata for an MCP server using three-tier resolution.
 ///
-/// 1. **Tier 1**: Parse `www_authenticate` header -> extract `resource_metadata` URL -> fetch -> parse.
-/// 2. **Tier 2**: Construct `.well-known/oauth-authorization-server` URL from server_url -> fetch -> parse.
+/// 1. **Tier 1**: Parse `www_authenticate` header -> extract `resource_metadata` URL -> fetch.  The body is accepted as authorization-server metadata (legacy) or, per RFC 9728, as a protected-resource document whose `authorization_servers` are followed to their own metadata (RFC 8414 path insertion, in-path and OIDC variants).
+/// 2. **Tier 2**: Without a usable header, probe the RFC 9728 protected-resource well-known URLs derived from `server_url` and follow their `authorization_servers` the same way; then try `.well-known/oauth-authorization-server` (and its path-inserted / OIDC variants) derived from `server_url` directly.
 /// 3. **Tier 3**: Fall back to config (requires both `auth_url` and `token_url`).
 ///
 /// If config is provided, it is merged with discovery results (config values take precedence).
@@ -788,77 +962,84 @@ pub async fn discover_oauth_metadata(
         .timeout(std::time::Duration::from_secs(10))
         .build()
         .map_err(|e| format!("Failed to build HTTP client: {e}"))?;
+    let fetch = |url: String| {
+        let client = client.clone();
+        async move { fetch_body(&client, &url).await }
+    };
+    discover_oauth_metadata_with(server_url, www_authenticate, config, fetch).await
+}
 
-    // Tier 1: WWW-Authenticate header -> resource_metadata URL
+/// [`discover_oauth_metadata`] with the HTTP GET injected, so the tier logic can be exercised without a network (the SSRF guard rules out a loopback mock server).
+async fn discover_oauth_metadata_with<F, Fut>(
+    server_url: &str,
+    www_authenticate: Option<&str>,
+    config: Option<&McpOAuthConfig>,
+    fetch: F,
+) -> Result<OAuthMetadata, String>
+where
+    F: Fn(String) -> Fut,
+    Fut: std::future::Future<Output = Option<String>>,
+{
+    // Tier 1: WWW-Authenticate header -> resource_metadata URL.
+    //
+    // The document can be either authorization-server metadata (legacy
+    // behaviour) or an RFC 9728 protected-resource document naming the
+    // issuers (`authorization_servers`).  The latter is the spec-compliant
+    // shape and used to end discovery here because its body has no endpoints
+    // (#8670), so follow each issuer to its own metadata.
     if let Some(header) = www_authenticate {
         let params = parse_www_authenticate(header);
         if let Some(metadata_url) = extract_metadata_url(&params, server_url) {
             debug!(url = %metadata_url, "Tier 1: fetching metadata from WWW-Authenticate resource_metadata");
-            match client.get(&metadata_url).send().await {
-                Ok(resp) if resp.status().is_success() => {
-                    if let Ok(body) = resp.text().await {
-                        match parse_authorization_server_metadata(&body, server_url) {
-                            Ok(meta) => {
-                                // #3713: Verify discovered endpoints share the server's origin.
-                                if let Err(e) = validate_metadata_endpoints(&meta, server_url) {
-                                    warn!(error = %e, "Tier 1: endpoint domain mismatch — rejecting metadata");
-                                } else {
-                                    let meta = if let Some(cfg) = config {
-                                        merge_metadata_with_config(meta, cfg)
-                                    } else {
-                                        meta
-                                    };
-                                    return Ok(meta);
-                                }
-                            }
-                            Err(e) => {
-                                warn!(error = %e, "Tier 1: failed to parse metadata");
-                            }
-                        }
-                    }
-                }
-                Ok(resp) => {
-                    warn!(status = %resp.status(), "Tier 1: metadata fetch returned non-success");
-                }
-                Err(e) => {
-                    warn!(error = %e, "Tier 1: metadata fetch failed");
+            if let Some(body) = fetch(metadata_url.clone()).await {
+                // Classify first: parsing a protected-resource document as authorization-server metadata always fails and would log a misleading WARN on the success path.
+                let issuers = parse_protected_resource_metadata(&body);
+                let meta = if issuers.is_empty() {
+                    parse_and_validate(&body, server_url, "Tier 1")
+                } else {
+                    follow_authorization_servers(issuers, server_url, "Tier 1", &fetch).await
+                };
+                if let Some(meta) = meta {
+                    return Ok(merge_with_config(meta, config));
                 }
             }
         }
     }
 
-    // Tier 2: .well-known URL
-    // well_known_url() already guards against SSRF (private/loopback hosts) — #3592.
+    // Tier 2a: no usable header (the UI-driven `auth/start` route never has one), so look for RFC 9728 protected-resource metadata at its well-known locations and follow the issuers it names, exactly as Tier 1 does.
+    // The first document that names issuers is authoritative for the resource; later candidates are not probed.
+    for prm_url in protected_resource_metadata_urls(server_url) {
+        debug!(url = %prm_url, "Tier 2: fetching protected-resource metadata");
+        let Some(body) = fetch(prm_url).await else {
+            continue;
+        };
+        let issuers = parse_protected_resource_metadata(&body);
+        if issuers.is_empty() {
+            continue;
+        }
+        if let Some(meta) =
+            follow_authorization_servers(issuers, server_url, "Tier 2", &fetch).await
+        {
+            return Ok(merge_with_config(meta, config));
+        }
+        break;
+    }
+
+    // Tier 2b: .well-known URL at the origin, then the RFC 8414 path-inserted variants and OIDC discovery for a server served under a path prefix.
+    let mut candidates: Vec<String> = Vec::new();
     if let Some(wk_url) = well_known_url(server_url) {
+        candidates.push(wk_url);
+    }
+    for url in well_known_metadata_urls(server_url) {
+        if !candidates.contains(&url) {
+            candidates.push(url);
+        }
+    }
+    for wk_url in candidates {
         debug!(url = %wk_url, "Tier 2: fetching .well-known metadata");
-        match client.get(&wk_url).send().await {
-            Ok(resp) if resp.status().is_success() => {
-                if let Ok(body) = resp.text().await {
-                    match parse_authorization_server_metadata(&body, server_url) {
-                        Ok(meta) => {
-                            // #3713: Verify discovered endpoints share the server's origin.
-                            if let Err(e) = validate_metadata_endpoints(&meta, server_url) {
-                                warn!(error = %e, "Tier 2: endpoint domain mismatch — rejecting metadata");
-                            } else {
-                                let meta = if let Some(cfg) = config {
-                                    merge_metadata_with_config(meta, cfg)
-                                } else {
-                                    meta
-                                };
-                                return Ok(meta);
-                            }
-                        }
-                        Err(e) => {
-                            warn!(error = %e, "Tier 2: failed to parse .well-known metadata");
-                        }
-                    }
-                }
-            }
-            Ok(resp) => {
-                warn!(status = %resp.status(), "Tier 2: .well-known fetch returned non-success");
-            }
-            Err(e) => {
-                warn!(error = %e, "Tier 2: .well-known fetch failed");
+        if let Some(body) = fetch(wk_url).await {
+            if let Some(meta) = parse_and_validate(&body, server_url, "Tier 2") {
+                return Ok(merge_with_config(meta, config));
             }
         }
     }
@@ -881,7 +1062,8 @@ pub async fn discover_oauth_metadata(
 
     Err(format!(
         "OAuth metadata discovery failed for {server_url}: \
-         no resource_metadata in WWW-Authenticate, .well-known fetch failed, \
+         no resource_metadata in WWW-Authenticate, no protected-resource or \
+         authorization-server .well-known metadata, \
          and no config fallback (auth_url + token_url) provided"
     ))
 }
@@ -1646,6 +1828,237 @@ mod tests {
         assert!(
             result.is_err(),
             "registration_endpoint pointing at IMDS must be rejected"
+        );
+    }
+}
+
+#[cfg(test)]
+mod rfc9728_tests {
+    use super::*;
+
+    #[test]
+    fn a_path_prefixed_issuer_gets_the_rfc8414_inserted_url_first() {
+        let urls = authorization_server_metadata_urls("https://host.example/plane-mcp");
+        assert_eq!(
+            urls.first().map(String::as_str),
+            Some("https://host.example/.well-known/oauth-authorization-server/plane-mcp")
+        );
+        assert!(
+            urls.contains(
+                &"https://host.example/plane-mcp/.well-known/oauth-authorization-server"
+                    .to_string()
+            ),
+            "the in-path variant must be tried too: {urls:?}"
+        );
+        assert!(
+            urls.iter()
+                .any(|u| u.ends_with("/.well-known/openid-configuration/plane-mcp")),
+            "OIDC discovery is the last resort: {urls:?}"
+        );
+    }
+
+    #[test]
+    fn a_root_issuer_keeps_the_two_origin_urls() {
+        let urls = authorization_server_metadata_urls("https://host.example");
+        assert_eq!(
+            urls,
+            vec![
+                "https://host.example/.well-known/oauth-authorization-server".to_string(),
+                "https://host.example/.well-known/openid-configuration".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_private_host_is_not_probed() {
+        assert!(authorization_server_metadata_urls("http://127.0.0.1:8080/plane").is_empty());
+        assert!(authorization_server_metadata_urls("not a url").is_empty());
+    }
+
+    #[test]
+    fn a_protected_resource_document_names_its_issuers() {
+        let body = r#"{
+            "resource": "https://host.example/plane-mcp/mcp",
+            "authorization_servers": ["https://host.example/plane-mcp"],
+            "scopes_supported": ["read"]
+        }"#;
+        assert_eq!(
+            parse_protected_resource_metadata(body),
+            vec!["https://host.example/plane-mcp".to_string()]
+        );
+    }
+
+    #[test]
+    fn a_document_without_issuers_yields_none() {
+        assert!(parse_protected_resource_metadata(r#"{"resource":"x"}"#).is_empty());
+        assert!(parse_protected_resource_metadata("not json").is_empty());
+    }
+
+    /// Canned GET responses keyed by URL, recording every URL requested.
+    struct FakeFetch {
+        responses: HashMap<String, String>,
+        requested: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl FakeFetch {
+        fn new(responses: &[(&str, &str)]) -> Self {
+            Self {
+                responses: responses
+                    .iter()
+                    .map(|(u, b)| (u.to_string(), b.to_string()))
+                    .collect(),
+                requested: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+
+        fn get(&self, url: String) -> std::future::Ready<Option<String>> {
+            let body = self.responses.get(&url).cloned();
+            self.requested.lock().unwrap().push(url);
+            std::future::ready(body)
+        }
+
+        fn requested(&self) -> Vec<String> {
+            self.requested.lock().unwrap().clone()
+        }
+    }
+
+    const PLANE_MCP: &str = "https://host.example/plane-mcp/mcp";
+    const PLANE_PRM_URL: &str =
+        "https://host.example/plane-mcp/.well-known/oauth-protected-resource";
+    const PLANE_PRM: &str = r#"{"resource":"https://host.example/plane-mcp/mcp","authorization_servers":["https://host.example/plane-mcp"],"scopes_supported":["read"],"bearer_methods_supported":["header"]}"#;
+    const PLANE_AS_URL: &str =
+        "https://host.example/plane-mcp/.well-known/oauth-authorization-server";
+    const PLANE_AS: &str = r#"{"issuer":"https://host.example/plane-mcp","authorization_endpoint":"https://host.example/plane-mcp/authorize","token_endpoint":"https://host.example/plane-mcp/token","registration_endpoint":"https://host.example/plane-mcp/register","code_challenge_methods_supported":["S256"]}"#;
+    const PLANE_ROOT_HTML: &str = "<!doctype html><html>Plane</html>";
+
+    /// The #8670 deployment: the issuer lives under `/plane-mcp`, the origin root serves the Plane web app.
+    fn plane() -> FakeFetch {
+        FakeFetch::new(&[
+            (PLANE_PRM_URL, PLANE_PRM),
+            (PLANE_AS_URL, PLANE_AS),
+            (
+                "https://host.example/.well-known/oauth-authorization-server",
+                PLANE_ROOT_HTML,
+            ),
+            (
+                "https://host.example/.well-known/oauth-protected-resource",
+                PLANE_ROOT_HTML,
+            ),
+        ])
+    }
+
+    fn assert_plane_metadata(meta: &OAuthMetadata) {
+        assert_eq!(
+            meta.authorization_endpoint,
+            "https://host.example/plane-mcp/authorize"
+        );
+        assert_eq!(meta.token_endpoint, "https://host.example/plane-mcp/token");
+        assert_eq!(
+            meta.registration_endpoint.as_deref(),
+            Some("https://host.example/plane-mcp/register"),
+            "registration_endpoint must survive so dynamic client registration runs"
+        );
+        assert_eq!(meta.server_url, PLANE_MCP);
+    }
+
+    #[tokio::test]
+    async fn the_header_path_follows_authorization_servers() {
+        let fake = plane();
+        let header = format!(r#"Bearer resource_metadata="{PLANE_PRM_URL}""#);
+        let meta = discover_oauth_metadata_with(PLANE_MCP, Some(&header), None, |u| fake.get(u))
+            .await
+            .expect("discovery via the resource_metadata header");
+        assert_plane_metadata(&meta);
+        assert_eq!(
+            fake.requested().first().map(String::as_str),
+            Some(PLANE_PRM_URL)
+        );
+    }
+
+    #[tokio::test]
+    async fn the_headerless_path_probes_protected_resource_metadata() {
+        // `POST /api/mcp/servers/{name}/auth/start` has no 401 to read a header from.
+        let fake = plane();
+        let meta = discover_oauth_metadata_with(PLANE_MCP, None, None, |u| fake.get(u))
+            .await
+            .expect("discovery without a WWW-Authenticate header");
+        assert_plane_metadata(&meta);
+        assert!(fake.requested().contains(&PLANE_PRM_URL.to_string()));
+    }
+
+    #[tokio::test]
+    async fn the_headerless_path_tries_the_rfc9728_path_inserted_url_first() {
+        let fake = FakeFetch::new(&[]);
+        let _ = discover_oauth_metadata_with(PLANE_MCP, None, None, |u| fake.get(u)).await;
+        let requested = fake.requested();
+        assert_eq!(
+            requested.first().map(String::as_str),
+            Some("https://host.example/.well-known/oauth-protected-resource/plane-mcp/mcp")
+        );
+        assert!(
+            requested
+                .contains(&"https://host.example/.well-known/oauth-protected-resource".to_string()),
+            "the root form must be probed too: {requested:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_cross_domain_issuer_is_rejected_without_a_header() {
+        let fake = FakeFetch::new(&[
+            (
+                PLANE_PRM_URL,
+                r#"{"authorization_servers":["https://evil.example"]}"#,
+            ),
+            (
+                "https://evil.example/.well-known/oauth-authorization-server",
+                r#"{"authorization_endpoint":"https://evil.example/authorize","token_endpoint":"https://evil.example/token"}"#,
+            ),
+        ]);
+        let result = discover_oauth_metadata_with(PLANE_MCP, None, None, |u| fake.get(u)).await;
+        assert!(
+            result.is_err(),
+            "endpoints outside the server's domain: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn at_most_three_issuers_are_followed() {
+        let fake = FakeFetch::new(&[(
+            PLANE_PRM_URL,
+            r#"{"authorization_servers":["https://a.host.example","https://b.host.example","https://c.host.example","https://d.host.example"]}"#,
+        )]);
+        let _ = discover_oauth_metadata_with(PLANE_MCP, None, None, |u| fake.get(u)).await;
+        let requested = fake.requested();
+        assert!(requested
+            .iter()
+            .any(|u| u.starts_with("https://c.host.example/")));
+        assert!(
+            !requested
+                .iter()
+                .any(|u| u.starts_with("https://d.host.example/")),
+            "a fourth issuer must not be probed: {requested:?}"
+        );
+    }
+
+    #[test]
+    fn an_http_issuer_is_not_probed() {
+        // RFC 8414 §2: the issuer is an https URL.
+        assert!(authorization_server_metadata_urls("http://host.example/plane-mcp").is_empty());
+        assert!(authorization_server_metadata_urls("ftp://host.example/plane-mcp").is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_http_issuer_named_by_the_resource_is_not_followed() {
+        let fake = FakeFetch::new(&[(
+            PLANE_PRM_URL,
+            r#"{"authorization_servers":["http://host.example/plane-mcp"]}"#,
+        )]);
+        let header = format!(r#"Bearer resource_metadata="{PLANE_PRM_URL}""#);
+        let _ = discover_oauth_metadata_with(PLANE_MCP, Some(&header), None, |u| fake.get(u)).await;
+        let requested = fake.requested();
+        assert!(
+            !requested.iter().any(|u| u.starts_with("http://")),
+            "cleartext issuer metadata must not be fetched: {requested:?}"
         );
     }
 }

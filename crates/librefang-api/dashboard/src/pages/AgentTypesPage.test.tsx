@@ -6,6 +6,7 @@ import { AgentTypesPage } from "./AgentTypesPage";
 import { useAgentType, useAgentTypes, useAgentTypeHistory } from "../lib/queries/agentTypes";
 import { useTools } from "../lib/queries/agents";
 import { useSkills } from "../lib/queries/skills";
+import { useModels } from "../lib/queries/models";
 import { useModelRoutingInertReason } from "../lib/queries/config";
 import {
   useDeleteAgentType,
@@ -16,7 +17,12 @@ import * as agentTypeMutations from "../lib/mutations/agentTypes";
 import { ApiError } from "../lib/http/errors";
 import { useUIStore } from "../lib/store";
 import { createTestQueryClient } from "../lib/test/query-client";
-import type { AgentTemplate, AgentTypeDetail, TemplateVersionEntry } from "../api";
+import type {
+  AgentTemplate,
+  AgentTypeDetail,
+  ModelItem,
+  TemplateVersionEntry,
+} from "../api";
 
 // The promotion flow (#7771) is the part of this page with no net: it opens a
 // pull request against a public registry, so a control that fires the wrong
@@ -34,6 +40,10 @@ vi.mock("../lib/queries/agents", () => ({
 }));
 
 vi.mock("../lib/queries/skills", () => ({ useSkills: vi.fn() }));
+
+// The editor's model picker also feeds the Thinking section's level list, so
+// the models response is the input under test there.
+vi.mock("../lib/queries/models", () => ({ useModels: vi.fn() }));
 
 // Only the routing-inert projection is stubbed; the rest of the module stays real.
 vi.mock("../lib/queries/config", async () => ({
@@ -205,6 +215,8 @@ function renderPage(
         restore?: MutationStub;
         versions?: TemplateVersionEntry[];
         routingInertReason?: "stable_mode" | null;
+        models?: ModelItem[];
+        detail?: AgentTypeDetail;
       }
     | AgentTemplate[] = {},
 ) {
@@ -214,7 +226,14 @@ function renderPage(
     mockQuery(templates) as unknown as ReturnType<typeof useAgentTypes>,
   );
   vi.mocked(useAgentType).mockReturnValue(
-    mockQuery(DETAIL) as unknown as ReturnType<typeof useAgentType>,
+    mockQuery(extras.detail ?? DETAIL) as unknown as ReturnType<typeof useAgentType>,
+  );
+  vi.mocked(useModels).mockReturnValue(
+    mockQuery({
+      models: extras.models ?? [],
+      total: extras.models?.length ?? 0,
+      available: extras.models?.length ?? 0,
+    }) as unknown as ReturnType<typeof useModels>,
   );
   vi.mocked(useAgentTypeHistory).mockReturnValue(
     mockQuery({ versions: extras.versions ?? [] }) as unknown as ReturnType<
@@ -517,5 +536,83 @@ describe("AgentTypesPage editor in Stable mode", () => {
     renderPage(idle, { routingInertReason: null });
     fireEvent.click(screen.getByRole("button", { name: "Edit" }));
     expect(screen.queryByText(new RegExp(WARNING))).not.toBeInTheDocument();
+  });
+});
+
+// The model catalog is the only authority on which levels an editor may offer
+// (#8591). This renders the real editor from a mocked `/api/models` response:
+// the page's `models` memo has to carry `supported_efforts`, `off_allowed`,
+// `mandatory` and `offered_efforts` through to the Thinking selector or the
+// operator is offered a level the model will reject.
+describe("AgentTypesPage editor reasoning levels", () => {
+  const detailWithLevel = (level: string): AgentTypeDetail => ({
+    ...DETAIL,
+    manifest_toml: `name = "researcher"
+
+[model]
+provider = "openai"
+model = "gpt-5"
+
+[thinking]
+reasoning_effort = "${level}"
+`,
+  });
+
+  function openThinkingLevels(models: ModelItem[], storedLevel = "low") {
+    renderPage(idle, { detail: detailWithLevel(storedLevel), models });
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    fireEvent.click(screen.getByText("Extended Thinking"));
+  }
+
+  function offeredValues(): string[] {
+    const select = screen.getByRole("combobox", { name: "Reasoning Effort" });
+    if (!(select instanceof HTMLSelectElement)) throw new Error("not a select");
+    // The empty value is the "inherit" row; the rest are the model's levels.
+    return Array.from(select.options)
+      .map((option) => option.value)
+      .filter((value) => value !== "");
+  }
+
+  it("does not offer none when the model cannot be switched off", () => {
+    openThinkingLevels([
+      {
+        provider: "openai",
+        id: "gpt-5",
+        supported_efforts: ["none", "low", "high"],
+        off_allowed: false,
+      },
+    ]);
+
+    expect(offeredValues()).toEqual(["low", "high"]);
+    expect(screen.queryByRole("option", { name: "None" })).toBeNull();
+  });
+
+  it("offers a mandatory model's declared levels exactly", () => {
+    openThinkingLevels(
+      [
+        {
+          provider: "openai",
+          id: "gpt-5",
+          supported_efforts: ["low", "medium", "high"],
+          mandatory: true,
+        },
+      ],
+      "medium",
+    );
+
+    expect(offeredValues()).toEqual(["low", "medium", "high"]);
+  });
+
+  it("prefers the payload's prepared offered_efforts over the raw declaration", () => {
+    openThinkingLevels([
+      {
+        provider: "openai",
+        id: "gpt-5",
+        supported_efforts: ["none", "low", "high"],
+        offered_efforts: ["low", "medium"],
+      },
+    ]);
+
+    expect(offeredValues()).toEqual(["low", "medium"]);
   });
 });

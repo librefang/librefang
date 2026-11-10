@@ -535,23 +535,63 @@ pub(crate) fn cmd_stop(config: Option<PathBuf>) {
     let daemon = daemon_config_context(config.as_deref());
     match find_daemon_in_home(&daemon.home_dir) {
         Some(base) => {
+            // Record the PID before asking for shutdown: the daemon removes `daemon.json` on its way out, and only the process exiting means it has released `daemon.lock`.
+            let pid = read_daemon_info(&daemon.home_dir).map(|info| info.pid);
             let client = daemon_client_with_api_key(daemon.api_key.as_deref());
             match client.post(format!("{base}/api/shutdown")).send() {
                 Ok(r) if r.status().is_success() => {
-                    // Wait for daemon to actually stop (up to 5 seconds)
-                    for _ in 0..10 {
-                        std::thread::sleep(std::time::Duration::from_millis(500));
-                        if find_daemon_in_home(&daemon.home_dir).is_none() {
+                    let Some(pid) = pid else {
+                        // No PID to watch: fall back to waiting for the API to go away.
+                        let stopped = wait_until(STOP_EXIT_BUDGET, STOP_POLL_INTERVAL, || {
+                            find_daemon_in_home(&daemon.home_dir).is_none()
+                        });
+                        if stopped {
                             ui::success(&i18n::t("daemon-stopped-ok"));
-                            return;
+                        } else {
+                            ui::error(&i18n::t_args(
+                                "daemon-stop-timeout",
+                                &[("secs", &STOP_EXIT_BUDGET.as_secs().to_string())],
+                            ));
+                            std::process::exit(1);
                         }
+                        return;
+                    };
+                    // The HTTP listener closes at the start of graceful shutdown, while cleanup (background tasks, bridges, MCP children) still runs under `daemon.lock` for up to the daemon's 30s hard deadline.
+                    // Wait for the process itself, so `restart` does not start a second daemon that dies on the lock, and so a slow cleanup is not cut short by SIGKILL.
+                    ui::hint(&i18n::t_args(
+                        "daemon-stop-waiting",
+                        &[("pid", &pid.to_string())],
+                    ));
+                    if wait_until(STOP_EXIT_BUDGET, STOP_POLL_INTERVAL, || !process_alive(pid)) {
+                        ui::success(&i18n::t("daemon-stopped-ok"));
+                        return;
                     }
-                    // Still alive — force kill via PID
-                    if let Some(info) = read_daemon_info(&daemon.home_dir) {
-                        force_kill_pid(info.pid);
+                    // Still alive past the daemon's own deadline. Force kill only while that PID is still verifiably our daemon (its API answers or `daemon.lock` is held): after this long a recorded PID may have been reused by an unrelated process, and SIGKILLing that would be far worse than a slow stop.
+                    if find_daemon_in_home(&daemon.home_dir).is_none()
+                        && !daemon_lock_held(&daemon.home_dir, pid)
+                    {
                         let _ = std::fs::remove_file(daemon.home_dir.join("daemon.json"));
+                        ui::success(&i18n::t("daemon-stopped-ok"));
+                        return;
                     }
-                    ui::success(&i18n::t("daemon-stopped-forced"));
+                    force_kill_pid(pid);
+                    if wait_until(
+                        std::time::Duration::from_secs(5),
+                        STOP_POLL_INTERVAL,
+                        || !process_alive(pid),
+                    ) {
+                        let _ = std::fs::remove_file(daemon.home_dir.join("daemon.json"));
+                        ui::success(&i18n::t("daemon-stopped-forced"));
+                    } else {
+                        ui::error_with_fix(
+                            &i18n::t_args("daemon-stop-kill-failed", &[("pid", &pid.to_string())]),
+                            &i18n::t_args(
+                                "daemon-stop-kill-failed-fix",
+                                &[("pid", &pid.to_string())],
+                            ),
+                        );
+                        std::process::exit(1);
+                    }
                 }
                 Ok(r) if r.status().as_u16() == 401 => {
                     // Issue #4693 — the new CLI cannot authenticate against
@@ -637,6 +677,86 @@ pub(crate) fn cmd_restart(config: Option<PathBuf>, tail: bool, foreground: bool)
     }
 
     cmd_start(config, tail, false, foreground);
+}
+
+/// How long `stop` waits for the daemon process to exit after a successful `/api/shutdown`: a little above the daemon's own 30s `SHUTDOWN_HARD_DEADLINE`, after which it aborts itself.
+const STOP_EXIT_BUDGET: std::time::Duration = std::time::Duration::from_secs(35);
+const STOP_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// Poll `done` every `interval` until it returns true or `budget` elapses; returns whether it did.
+fn wait_until(
+    budget: std::time::Duration,
+    interval: std::time::Duration,
+    mut done: impl FnMut() -> bool,
+) -> bool {
+    let deadline = std::time::Instant::now() + budget;
+    loop {
+        if done() {
+            return true;
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(interval);
+    }
+}
+
+/// Whether `daemon.lock` under `home_dir` is still held by a daemon process.
+///
+/// On Unix the daemon holds an exclusive `flock` on the file for its whole life, so a non-blocking `flock` attempt that fails with `EWOULDBLOCK` means a daemon is still running; a successful attempt is released immediately by dropping the descriptor.
+/// Other platforms only create the file as a marker, so there the best available signal is whether the recorded `pid` is still alive.
+fn daemon_lock_held(home_dir: &std::path::Path, pid: u32) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::io::AsRawFd;
+        let _ = pid;
+        let Ok(file) = std::fs::File::open(home_dir.join("daemon.lock")) else {
+            return false;
+        };
+        // SAFETY: flock(2) is safe on any open fd; `file` keeps it valid for the call, and closing it on drop releases a lock this call took.
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+            return false;
+        }
+        std::io::Error::last_os_error().raw_os_error() == Some(libc::EWOULDBLOCK)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = home_dir;
+        process_alive(pid)
+    }
+}
+
+/// Whether a process with this PID exists and is one we can signal.
+fn process_alive(pid: u32) -> bool {
+    #[cfg(unix)]
+    {
+        let Ok(pid) = libc::pid_t::try_from(pid) else {
+            return false;
+        };
+        // EPERM means the PID now belongs to another user's process, which cannot be the daemon this user started: treat it as gone rather than waiting on, or force-killing, a stranger.
+        // SAFETY: signal 0 performs only the existence and permission check; no signal is delivered.
+        unsafe { libc::kill(pid, 0) == 0 }
+    }
+    #[cfg(windows)]
+    {
+        // tasklist filter expression `PID eq <pid>`; it is a command argument, not user-facing text.
+        let filter = ["PID", "eq", &pid.to_string()].join(" ");
+        std::process::Command::new("tasklist")
+            .args(["/FI", &filter, "/NH"])
+            .output()
+            .map(|o| {
+                o.status.success() && {
+                    let out = String::from_utf8_lossy(&o.stdout);
+                    !out.contains("INFO:") && out.contains(&pid.to_string())
+                }
+            })
+            .unwrap_or(false)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = pid;
+        false
+    }
 }
 
 pub(crate) fn force_kill_pid(pid: u32) {
@@ -769,6 +889,74 @@ pub(crate) fn cmd_logs(config: Option<PathBuf>, lines: usize, follow: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `stop` used to report success as soon as the health probe failed, while the daemon was still cleaning up under `daemon.lock`; it now waits on the process itself.
+    #[test]
+    fn process_alive_tracks_a_real_process() {
+        assert!(process_alive(std::process::id()));
+        let mut child = std::process::Command::new(if cfg!(windows) { "cmd" } else { "true" })
+            .args(if cfg!(windows) {
+                &["/C", "exit"][..]
+            } else {
+                &[][..]
+            })
+            .spawn()
+            .expect("spawn child");
+        let pid = child.id();
+        child.wait().expect("reap child");
+        assert!(!process_alive(pid), "a reaped child must not read as alive");
+    }
+
+    /// The force-kill fallback is gated on `daemon.lock`: a missing or free lock must read as released, a held one as held.
+    /// Other tests in this binary spawn children, and a child forked while a lock descriptor is open briefly shares that lock, so transitions are polled rather than asserted on the first probe.
+    #[cfg(unix)]
+    #[test]
+    fn daemon_lock_held_reflects_the_flock() {
+        use std::os::unix::io::AsRawFd;
+        let dir = tempfile::TempDir::new().unwrap();
+        let pid = std::process::id();
+        let settle = std::time::Duration::from_secs(2);
+        let poll = std::time::Duration::from_millis(5);
+        assert!(!daemon_lock_held(dir.path(), pid), "no lock file");
+        let lock = std::fs::File::create(dir.path().join("daemon.lock")).unwrap();
+        assert!(wait_until(settle, poll, || !daemon_lock_held(
+            dir.path(),
+            pid
+        )));
+        // SAFETY: flock(2) on an fd that `lock` keeps open for the rest of the test; the blocking form waits out a probe's transient hold.
+        assert_eq!(unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) }, 0);
+        assert!(daemon_lock_held(dir.path(), pid), "held lock");
+        drop(lock);
+        assert!(wait_until(settle, poll, || !daemon_lock_held(
+            dir.path(),
+            pid
+        )));
+    }
+
+    #[test]
+    fn wait_until_polls_until_done_or_budget() {
+        let mut calls = 0;
+        assert!(wait_until(
+            std::time::Duration::from_secs(5),
+            std::time::Duration::from_millis(1),
+            || {
+                calls += 1;
+                calls == 3
+            }
+        ));
+        assert_eq!(calls, 3);
+        assert!(!wait_until(
+            std::time::Duration::from_millis(20),
+            std::time::Duration::from_millis(5),
+            || false
+        ));
+    }
+
+    /// The budget must outlast the daemon's own 30s hard shutdown deadline, or `stop` SIGKILLs a daemon that is still cleaning up.
+    #[test]
+    fn stop_budget_outlasts_daemon_hard_deadline() {
+        assert!(STOP_EXIT_BUDGET > std::time::Duration::from_secs(30));
+    }
 
     fn write_with_mtime(path: &std::path::Path, secs_ago: u64) {
         std::fs::write(path, "x").unwrap();

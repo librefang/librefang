@@ -54,6 +54,7 @@ pub use terminal::{TerminalCapabilities, TerminalClientHandle};
 
 use std::sync::Arc;
 
+use agent_client_protocol::schema::v1::SessionId as AcpSessionId;
 use async_trait::async_trait;
 use librefang_llm_driver::StreamEvent;
 use librefang_types::agent::{AgentId, SessionId as LfSessionId};
@@ -90,6 +91,11 @@ pub trait AcpKernel: Send + Sync + 'static {
         message: String,
         librefang_session_id: LfSessionId,
     ) -> AcpResult<mpsc::Receiver<StreamEvent>>;
+
+    /// Stop the agent loop running `librefang_session_id`, called when the editor sends `session/cancel` for an in-flight turn.
+    /// Dropping the event receiver alone does not stop it: the streaming loop treats a disconnected consumer as non-fatal and keeps calling the LLM and running tools.
+    /// Default impl is a no-op for pure-protocol consumers (integration tests).
+    async fn cancel_prompt(&self, _agent_id: AgentId, _librefang_session_id: LfSessionId) {}
 
     /// Subscribe to [`ApprovalEvent`]s emitted by the kernel's approval
     /// manager. The ACP server filters by `session_id` to match its own
@@ -132,7 +138,9 @@ pub trait AcpKernel: Send + Sync + 'static {
     /// when handling that session's tool calls (#3313). Called once
     /// per ACP `session/{new,load,resume}` after the LibreFang
     /// session id has been minted. Default impl is a no-op.
-    fn register_session_fs(&self, _lf_session_id: LfSessionId) {}
+    ///
+    /// `acp_session_id` is the editor-facing id; every `fs/*` request for this session must carry it, since editors reject a request whose `sessionId` they did not mint.
+    fn register_session_fs(&self, _lf_session_id: LfSessionId, _acp_session_id: &AcpSessionId) {}
 
     /// Drop the runtime-side `fs/*` registration for the given
     /// LibreFang session — called from `session/close` so a stale
@@ -145,8 +153,13 @@ pub trait AcpKernel: Send + Sync + 'static {
     fn set_terminal_client(&self, _handle: terminal::TerminalClientHandle) {}
 
     /// Bind the active `terminal/*` client (set via
-    /// [`Self::set_terminal_client`]) to a LibreFang session.
-    fn register_session_terminal(&self, _lf_session_id: LfSessionId) {}
+    /// [`Self::set_terminal_client`]) to a LibreFang session, naming `acp_session_id` on every `terminal/*` request as [`Self::register_session_fs`] does.
+    fn register_session_terminal(
+        &self,
+        _lf_session_id: LfSessionId,
+        _acp_session_id: &AcpSessionId,
+    ) {
+    }
 
     /// Drop the runtime-side `terminal/*` registration on close.
     fn unregister_session_terminal(&self, _lf_session_id: LfSessionId) {}

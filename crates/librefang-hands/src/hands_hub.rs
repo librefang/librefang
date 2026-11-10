@@ -95,6 +95,10 @@ fn retry_delay_ms(attempt: u32, retry_after_secs: Option<u64>) -> u64 {
 /// before the limit is enforced.
 const MAX_BUNDLE_BYTES: usize = 8 * 1024 * 1024;
 
+/// Hard cap on the registry index body (bytes).
+/// The index is metadata only, so a few MiB covers thousands of entries; it is streamed under this cap for the same reason as [`MAX_BUNDLE_BYTES`], since `browse`, `search` and every install fetch it from a possibly caller-supplied registry.
+const MAX_INDEX_BYTES: usize = 4 * 1024 * 1024;
+
 // ---------------------------------------------------------------------------
 // Index / entry types
 // ---------------------------------------------------------------------------
@@ -330,9 +334,27 @@ impl HandsHubClient {
     pub async fn fetch_index(&self) -> Result<HandsHubIndex, HandError> {
         let url = format!("{}/index", self.base_url);
         let response = self.get_with_retry(&url, "HandsHub index").await?;
-        let index: HandsHubIndex = response
-            .json()
-            .await
+        // `response.json()` would buffer the whole body with no limit; stream it under a cap instead, exactly like `download_bundle`.
+        if let Some(len) = response.content_length() {
+            if len > MAX_INDEX_BYTES as u64 {
+                return Err(HandError::Config(format!(
+                    "HandsHub index advertises {len} bytes, exceeds the {MAX_INDEX_BYTES}-byte cap"
+                )));
+            }
+        }
+        let mut stream = response.bytes_stream();
+        let mut buf: Vec<u8> = Vec::new();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk
+                .map_err(|e| HandError::Config(format!("Failed to read HandsHub index: {e}")))?;
+            if buf.len() + chunk.len() > MAX_INDEX_BYTES {
+                return Err(HandError::Config(format!(
+                    "HandsHub index exceeds the {MAX_INDEX_BYTES}-byte cap"
+                )));
+            }
+            buf.extend_from_slice(&chunk);
+        }
+        let index: HandsHubIndex = serde_json::from_slice(&buf)
             .map_err(|e| HandError::Config(format!("Failed to parse HandsHub index: {e}")))?;
         Ok(index)
     }
@@ -584,6 +606,49 @@ mod tests {
             msg.contains("redirect") || msg.to_lowercase().contains("ssrf"),
             "error should name the refused redirect, got: {msg}"
         );
+    }
+
+    /// The index is fetched by `browse`, `search` and every install, from a registry the caller may choose.
+    /// An oversized body must be refused at the cap rather than buffered whole by `response.json()`.
+    #[tokio::test]
+    async fn fetch_index_rejects_oversized_body() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let oversized = vec![b' '; MAX_INDEX_BYTES + 1024];
+        Mock::given(method("GET"))
+            .and(path("/index"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(oversized))
+            .mount(&server)
+            .await;
+
+        let client = HandsHubClient::with_url(&server.uri());
+        let err = client
+            .fetch_index()
+            .await
+            .expect_err("an oversized index must be refused");
+        assert!(
+            err.to_string().contains("cap"),
+            "error should name the byte cap, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn fetch_index_parses_a_normal_body() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/index"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(r#"{"hands":[]}"#))
+            .mount(&server)
+            .await;
+
+        let client = HandsHubClient::with_url(&server.uri());
+        let index = client.fetch_index().await.expect("a small index parses");
+        assert!(index.hands.is_empty());
     }
 
     /// F2 (#5954): a bundle body larger than the cap is refused. With an

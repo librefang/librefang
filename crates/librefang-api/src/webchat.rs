@@ -248,6 +248,27 @@ pub async fn locale_pl() -> impl IntoResponse {
     )
 }
 
+/// Cache policy of the SPA shell (`index.html`), wherever it is served from.
+///
+/// The shell names the content-hashed bundle of the build it came from, so a copy replayed from cache after a dashboard sync or an upgrade asks for chunks the server no longer has; `public/sw.js` keeps navigations out of its cache for the same reason.
+/// When dashboard login is enabled the shell is also behind the session gate in `middleware::auth`, which a shared cache must not answer on the gate's behalf, and a browser that cached it would show the shell instead of the login page after a logout.
+/// `no-cache, private` makes every load revalidate with the daemon and keeps proxies from storing it.
+const SHELL_CACHE_CONTROL: &str = "no-cache, private";
+
+/// Cache policy of a file under `/dashboard/`.
+///
+/// Only Vite's `assets/` output carries a content hash in its name, so only it can be `immutable`.
+/// Everything copied from `dashboard/public/` keeps a stable name across builds — `sw.js`, `manifest.json`, the icons — as does `index.html` itself, and caching those for a day would pin a stale service worker or shell across an upgrade.
+fn dashboard_asset_cache_control(asset_path: &str) -> &'static str {
+    if asset_path.starts_with("assets/") {
+        "public, max-age=86400, immutable"
+    } else if asset_path == "index.html" {
+        SHELL_CACHE_CONTROL
+    } else {
+        "no-cache"
+    }
+}
+
 /// GET / — Serve the React dashboard shell.
 pub async fn webchat_page(State(state): State<Arc<crate::routes::AppState>>) -> impl IntoResponse {
     let home_dir = Some(state.kernel.home_dir().to_path_buf());
@@ -256,10 +277,7 @@ pub async fn webchat_page(State(state): State<Arc<crate::routes::AppState>>) -> 
             [
                 (header::CONTENT_TYPE, "text/html; charset=utf-8"),
                 (header::ETAG, ETAG),
-                (
-                    header::CACHE_CONTROL,
-                    "public, max-age=300, must-revalidate",
-                ),
+                (header::CACHE_CONTROL, SHELL_CACHE_CONTROL),
             ],
             data,
         )
@@ -415,7 +433,10 @@ pub async fn react_asset(
         Some(data) => (
             [
                 (header::CONTENT_TYPE, content_type_for(asset_path)),
-                (header::CACHE_CONTROL, "public, max-age=86400, immutable"),
+                (
+                    header::CACHE_CONTROL,
+                    dashboard_asset_cache_control(asset_path),
+                ),
             ],
             data,
         )
@@ -434,7 +455,13 @@ pub async fn react_asset(
             if !has_ext && is_spa_route(asset_path) {
                 if let Some(index) = resolve_dashboard_file(home_dir.as_deref(), "index.html").await
                 {
-                    return ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], index)
+                    return (
+                        [
+                            (header::CONTENT_TYPE, "text/html; charset=utf-8"),
+                            (header::CACHE_CONTROL, SHELL_CACHE_CONTROL),
+                        ],
+                        index,
+                    )
                         .into_response();
                 }
             }
@@ -465,9 +492,20 @@ fn content_type_for(path: &str) -> &'static str {
     }
 }
 
+/// Release asset URL of the dashboard bundle built for daemon version `version`.
+///
+/// Release tags are `v{CARGO_PKG_VERSION}`, so this pins the download to the running daemon's own release.
+/// `releases/latest` would resolve to whatever stable release is newest, which an older pinned daemon or a pre-release daemon would then serve against an API surface it does not have, and keep serving because `.version` records the daemon's version rather than the bundle's.
+/// A release without the asset answers 404, which leaves the embedded build in place.
+fn dashboard_release_url(version: &str) -> String {
+    format!(
+        "https://github.com/librefang/librefang/releases/download/v{version}/dashboard-dist.tar.gz"
+    )
+}
+
 /// Sync dashboard assets from GitHub to `~/.librefang/dashboard/`.
 ///
-/// Downloads the dashboard-dist branch tarball and extracts it.
+/// Downloads the `dashboard-dist.tar.gz` asset of the running version's release and extracts it.
 /// Called during daemon startup (non-blocking).
 ///
 /// Short-circuits when [`EMBEDDED_ONLY_ENV`] is truthy so local builds and
@@ -494,9 +532,8 @@ pub async fn sync_dashboard(home_dir: &std::path::Path) {
         }
     }
 
-    let url =
-        "https://github.com/librefang/librefang/releases/latest/download/dashboard-dist.tar.gz";
-    tracing::info!("Syncing dashboard assets from release...");
+    let url = dashboard_release_url(current_version);
+    tracing::info!("Syncing dashboard assets from release v{current_version}...");
 
     // Use librefang-http so dashboard sync respects [proxy] config (#3577).
     let client = librefang_http::proxied_client_builder()
@@ -504,7 +541,7 @@ pub async fn sync_dashboard(home_dir: &std::path::Path) {
         .build()
         .unwrap_or_default();
 
-    let response = match client.get(url).send().await {
+    let response = match client.get(&url).send().await {
         Ok(r) if r.status().is_success() => r,
         Ok(r) => {
             tracing::debug!(
@@ -662,6 +699,39 @@ fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> std::io::
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_content_hashed_dashboard_assets_are_immutable() {
+        assert_eq!(
+            dashboard_asset_cache_control("assets/index-3f9a1c2b.js"),
+            "public, max-age=86400, immutable"
+        );
+        // Stable names from `dashboard/public/` must revalidate, or an upgrade keeps serving the old copy for a day.
+        for path in ["sw.js", "manifest.json", "icon-192.png"] {
+            assert_eq!(dashboard_asset_cache_control(path), "no-cache", "{path}");
+        }
+        assert_eq!(
+            dashboard_asset_cache_control("index.html"),
+            SHELL_CACHE_CONTROL
+        );
+        assert!(!SHELL_CACHE_CONTROL.contains("public"));
+    }
+
+    #[test]
+    fn dashboard_sync_url_is_pinned_to_running_version() {
+        let url = dashboard_release_url(env!("CARGO_PKG_VERSION"));
+        assert_eq!(
+            url,
+            format!(
+                "https://github.com/librefang/librefang/releases/download/v{}/dashboard-dist.tar.gz",
+                env!("CARGO_PKG_VERSION")
+            )
+        );
+        assert!(
+            !url.contains("/latest/"),
+            "the synced bundle must match the daemon's version, not the newest release"
+        );
+    }
 
     #[test]
     fn install_dashboard_extracts_archive_and_writes_version() {

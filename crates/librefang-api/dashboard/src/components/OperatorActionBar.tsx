@@ -152,7 +152,9 @@ export function OperatorActionBar({ runId }: Props) {
           verbs expand into an inline textarea on click. */}
       <div className="flex flex-wrap gap-1.5">
         {pause.actions.map((action, idx) => {
-          const desc = describeAction(action, t);
+          const desc = describeAction(action, (key, fallback, options) =>
+            t(key, { defaultValue: fallback, ...(options ?? {}) }) as string,
+          );
           if (!desc) return null;
           const key = `${desc.verb}:${desc.field ?? ""}`;
           const Icon = desc.icon;

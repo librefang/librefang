@@ -1,0 +1,3 @@
+The dashboard Authorize button still failed with "OAuth discovery failed" for MCP servers whose authorization server sits under a path prefix, such as the self-hosted Plane gateway from #8670.
+The `auth/start` route has no 401 to read a `WWW-Authenticate` header from, so the RFC 9728 `authorization_servers` follow only ever ran at connect time.
+Discovery without a header now probes the server's protected-resource metadata at its well-known locations and follows the issuers it names, keeping the SSRF, no-redirect and same-domain checks, and issuers must now be https as RFC 8414 requires (#8728) (@houko)

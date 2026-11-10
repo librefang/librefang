@@ -171,6 +171,31 @@ fn lock_server_handle<T>(mutex: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'
     })
 }
 
+/// Take the handle out of `slot` and run `shutdown` on it; a second call finds the slot empty and does nothing.
+#[cfg(not(any(target_os = "ios", target_os = "android")))]
+fn take_and_shutdown<H>(slot: &std::sync::Mutex<Option<H>>, shutdown: impl FnOnce(H)) -> bool {
+    match lock_server_handle(slot).take() {
+        Some(handle) => {
+            shutdown(handle);
+            true
+        }
+        None => false,
+    }
+}
+
+/// Run the embedded server's and kernel's shutdown sequence (HTTP server and channel-bridge stop, in-flight workflow drain, agent state persistence, WAL checkpoint) before the process exits.
+///
+/// Nothing else does it: tao's event loop ends the process with `process::exit` once `RunEvent::Exit` has been handled, so managed state is never dropped, and `ServerHandle`'s `Drop` only signals the server and never calls `kernel.shutdown()`.
+/// `AppHandle::restart` (used after an update installs) skips the event loop entirely, so its caller runs this first.
+#[cfg(not(any(target_os = "ios", target_os = "android")))]
+pub(crate) fn shutdown_embedded_server<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
+    if let Some(holder) = app.try_state::<ServerHandleHolder>() {
+        if take_and_shutdown(&holder.0, server::ServerHandle::shutdown) {
+            info!("Embedded server and kernel shut down");
+        }
+    }
+}
+
 /// Forward critical kernel events as native OS notifications.
 ///
 /// Only truly critical events — crashes, hard quota limits, and kernel shutdown.
@@ -578,16 +603,16 @@ pub fn run(server_url: Option<String>, force_local: bool) {
         })
         .build(tauri::generate_context!())
         .expect("Failed to build Tauri application")
-        .run(|_app, event| {
-            if let tauri::RunEvent::ExitRequested { .. } = event {
-                info!("Tauri app exit requested");
+        .run(|_app, event| match event {
+            tauri::RunEvent::ExitRequested { .. } => info!("Tauri app exit requested"),
+            tauri::RunEvent::Exit => {
+                info!("Tauri app exiting, shutting down...");
+                // The event loop calls `process::exit` after this event, so the kernel must be shut down here; nothing after `run` executes.
+                #[cfg(not(any(target_os = "ios", target_os = "android")))]
+                shutdown_embedded_server(_app);
             }
+            _ => {}
         });
-
-    // App event loop has ended — shut down the embedded server + kernel if local
-    info!("Tauri app closed, shutting down...");
-    // The ServerHandle's Drop impl will signal shutdown automatically when
-    // Tauri's managed state is dropped.
 }
 
 #[cfg(test)]
@@ -617,6 +642,18 @@ mod tests {
 
         *lock_server_handle(&holder) = None;
         assert_eq!(*holder.lock().unwrap(), None);
+    }
+
+    /// Quit, tray "Quit" and the updater's restart each reach the shutdown path; the handle must be shut down exactly once and the slot left empty.
+    #[cfg(not(any(target_os = "ios", target_os = "android")))]
+    #[test]
+    fn take_and_shutdown_runs_once_and_empties_the_slot() {
+        let slot = std::sync::Mutex::new(Some("server"));
+        let mut calls = Vec::new();
+        assert!(super::take_and_shutdown(&slot, |h| calls.push(h)));
+        assert!(!super::take_and_shutdown(&slot, |h| calls.push(h)));
+        assert_eq!(calls, vec!["server"]);
+        assert!(slot.lock().unwrap().is_none());
     }
 
     #[test]

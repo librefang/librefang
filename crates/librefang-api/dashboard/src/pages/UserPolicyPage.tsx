@@ -349,7 +349,7 @@ export function UserPolicyPage() {
   const validationError = useMemo(
     () =>
       validateForm(form, (key, fallback, vars) =>
-        t(key, fallback, vars as Record<string, unknown> | undefined) as string,
+        t(key, { defaultValue: fallback, ...(vars ?? {}) }) as string,
       ),
     [form, t],
   );

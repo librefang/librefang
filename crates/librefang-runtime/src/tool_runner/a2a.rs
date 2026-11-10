@@ -18,8 +18,9 @@ pub(super) async fn tool_a2a_discover(input: &serde_json::Value) -> ToolResult {
         .as_str()
         .ok_or(ToolError::MissingParameter("url"))?;
 
-    // SSRF protection: block private/metadata IPs
-    if let Err(reason) = crate::web_fetch::check_ssrf(url, &[]) {
+    // SSRF protection: block private/metadata IPs.
+    // The async variant keeps the DNS lookup off the tokio worker.
+    if let Err(reason) = crate::web_fetch::check_ssrf_async(url, &[]).await {
         return Err(ToolError::InvalidParameter {
             name: "url",
             reason: format!("SSRF blocked for '{url}': {reason}"),
@@ -50,7 +51,7 @@ pub(super) async fn tool_a2a_send(
     // approve flow stored.
     let url = if let Some(raw) = input["agent_url"].as_str() {
         // SSRF protection
-        if let Err(reason) = crate::web_fetch::check_ssrf(raw, &[]) {
+        if let Err(reason) = crate::web_fetch::check_ssrf_async(raw, &[]).await {
             return Err(ToolError::InvalidParameter {
                 name: "agent_url",
                 reason: format!("SSRF blocked for '{raw}': {reason}"),

@@ -359,8 +359,8 @@ class _AgentsResource(_Resource):
     def save_agent_as_agent_type(self, id: str, **data):
         return self._c._request("POST", f"/api/agents/{quote(str(id), safe='')}/save-as-agent-type", data)
 
-    def get_agent_session(self, id: str, session_id: Any = None):
-        return self._c._request("GET", f"/api/agents/{quote(str(id), safe='')}/session", None, query={"session_id": session_id})
+    def get_agent_session(self, id: str, session_id: Any = None, materialize: Any = None):
+        return self._c._request("GET", f"/api/agents/{quote(str(id), safe='')}/session", None, query={"session_id": session_id, "materialize": materialize})
 
     def compact_session(self, id: str):
         return self._c._request("POST", f"/api/agents/{quote(str(id), safe='')}/session/compact")
@@ -1196,6 +1196,9 @@ class _SessionsResource(_Resource):
 
     def patch_session_model(self, id: str, **data):
         return self._c._request("PATCH", f"/api/sessions/{quote(str(id), safe='')}/model", data)
+
+    def patch_session_reasoning(self, id: str, **data):
+        return self._c._request("PATCH", f"/api/sessions/{quote(str(id), safe='')}/reasoning", data)
 
 
 # ── Skills Resource ────────────────────────────────────────────

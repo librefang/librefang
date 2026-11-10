@@ -426,6 +426,59 @@ async fn add_custom_model_rejects_missing_id() {
     assert_eq!(status, StatusCode::BAD_REQUEST);
 }
 
+/// Refs #8591: the custom-model route carries the four policy fields straight
+/// into the catalog entry, and the GET echoes them back — this is the
+/// no-release path for teaching LibreFang a gateway model's rungs.
+#[tokio::test(flavor = "multi_thread")]
+async fn add_custom_model_carries_the_reasoning_policy() {
+    let h = boot();
+
+    let (status, body) = json_request(
+        &h,
+        Method::POST,
+        "/api/models/custom",
+        Some(serde_json::json!({
+            "id": "test-custom-reasoning-8591",
+            "provider": "openai",
+            "display_name": "Gateway reasoning model",
+            "context_window": 64_000,
+            "max_output_tokens": 4_096,
+            "supported_efforts": ["minimal", "low", "medium", "high", "xhigh"],
+            "default_effort": "medium",
+            "off_allowed": false,
+            "mandatory": true,
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body:?}");
+
+    let (status, body) = json_request(
+        &h,
+        Method::GET,
+        "/api/models/test-custom-reasoning-8591",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body["supported_efforts"],
+        serde_json::json!(["minimal", "low", "medium", "high", "xhigh"]),
+        "{body:?}"
+    );
+    assert_eq!(body["default_effort"], "medium");
+    assert_eq!(body["off_allowed"], false);
+    assert_eq!(body["mandatory"], true);
+
+    let (status, _body) = json_request(
+        &h,
+        Method::DELETE,
+        "/api/models/custom/test-custom-reasoning-8591",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn add_custom_model_then_get_then_delete_round_trips() {
     let h = boot();
@@ -1905,6 +1958,10 @@ fn boot_with_provider(provider: ProviderInfo) -> Harness {
         supports_thinking: false,
         aliases: Vec::new(),
         reasoning_echo_policy: ReasoningEchoPolicy::default(),
+        supported_efforts: Vec::new(),
+        default_effort: None,
+        off_allowed: true,
+        mandatory: false,
     };
     let test = TestAppState::with_builder(
         MockKernelBuilder::new()

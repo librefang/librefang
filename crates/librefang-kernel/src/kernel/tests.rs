@@ -4071,6 +4071,7 @@ async fn session_model_override_beats_model_selection_on_both_paths() {
             context_window_tokens: 0,
             label: None,
             model_override: None,
+            reasoning_effort: None,
             messages_generation: 0,
             last_repaired_generation: None,
             peer_id: None,
@@ -4109,6 +4110,114 @@ async fn session_model_override_beats_model_selection_on_both_paths() {
             "the {path} path must run the session /model override over Stable pinning: {body}"
         );
     }
+
+    kernel.shutdown();
+}
+
+/// A per-session reasoning pin (#8591) must reach the wire on the streaming
+/// dispatch path, not just the blocking one. Mirrors
+/// [`session_model_override_beats_model_selection_on_both_paths`]: the session
+/// row is seeded, the pin is written through the same substrate update the
+/// `PATCH /api/sessions/{id}/reasoning` route uses, and the streamed turn must
+/// carry the pin — not the agent-level `[thinking]` default it overrides.
+#[tokio::test(flavor = "multi_thread")]
+async fn session_reasoning_effort_pin_reaches_the_streaming_path() {
+    use librefang_memory::session::Session as MemSession;
+    use librefang_types::config::{ReasoningMode, ThinkingConfig};
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let backend = MockServer::start().await;
+    // OpenAI-compatible SSE: one content delta, a finish frame, then [DONE].
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\
+             data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1}}\n\
+             data: [DONE]\n",
+            "text/event-stream",
+        ))
+        .mount(&backend)
+        .await;
+
+    let dir = tempfile::tempdir().unwrap();
+    let home_dir = dir.path().to_path_buf();
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        default_model: DefaultModelConfig::driverless(),
+        ..KernelConfig::default()
+    };
+    let kernel = Arc::new(LibreFangKernel::boot_with_config(config).expect("kernel should boot"));
+    kernel.set_self_handle();
+
+    // An unrecognised provider plus a custom `base_url` builds the
+    // OpenAI-compatible driver against the mock without a credential. The
+    // agent level pins `low`; the session pin must win.
+    let mut manifest = test_manifest("reasoning-pin", "session reasoning precedence", vec![]);
+    manifest.model.provider = "reasoning-test".to_string();
+    manifest.model.model = "mock-reasoning-model".to_string();
+    manifest.model.base_url = Some(backend.uri());
+    manifest.thinking = Some(ThinkingConfig {
+        reasoning_effort: Some(ReasoningMode::low()),
+        ..Default::default()
+    });
+    let agent_id = kernel.spawn_agent(manifest).expect("spawn should succeed");
+    let session_id = kernel
+        .agents
+        .registry
+        .get(agent_id)
+        .expect("agent entry")
+        .session_id;
+    kernel
+        .memory
+        .substrate
+        .save_session(&MemSession {
+            id: session_id,
+            agent_id,
+            parent_session_id: None,
+            messages: Vec::new(),
+            context_window_tokens: 0,
+            label: None,
+            model_override: None,
+            reasoning_effort: None,
+            messages_generation: 0,
+            last_repaired_generation: None,
+            peer_id: None,
+        })
+        .expect("seeding the session should succeed");
+    // `save_session` deliberately does not write the pin; the reasoning route
+    // sets it through this dedicated update.
+    kernel
+        .memory
+        .substrate
+        .set_session_reasoning_effort(session_id, Some("xhigh"))
+        .expect("setting the session reasoning pin should succeed");
+
+    let (mut rx, join) = kernel
+        .send_message_streaming(agent_id, "streamed turn", None)
+        .expect("the streaming turn must start");
+    let drain = tokio::spawn(async move { while rx.recv().await.is_some() {} });
+    join.await
+        .expect("the streaming task joins")
+        .expect("the streamed turn must not error");
+    drain.await.expect("the drain task joins");
+
+    let requests = backend
+        .received_requests()
+        .await
+        .expect("requests recorded");
+    assert_eq!(
+        requests.len(),
+        1,
+        "the streamed turn must reach the backend"
+    );
+    let body: serde_json::Value = requests[0].body_json().expect("valid JSON body");
+    assert_eq!(
+        body["reasoning_effort"], "xhigh",
+        "the streamed turn must run the session reasoning pin over the agent-level low: {body}"
+    );
 
     kernel.shutdown();
 }
@@ -4590,12 +4699,12 @@ fn test_apply_thinking_override_force_on_keeps_existing_budget() {
 // direction shows up here rather than in production.
 
 /// Rung 3: an agent that declares no `[thinking]` table inherits the global
-/// `reasoning_mode`.
+/// `reasoning_effort`.
 #[test]
-fn test_reasoning_mode_global_reaches_an_agent_that_declares_nothing() {
+fn test_reasoning_effort_global_reaches_an_agent_that_declares_nothing() {
     use librefang_types::config::{ReasoningMode, ThinkingConfig, ThinkingOverride};
     let global = ThinkingConfig {
-        reasoning_mode: Some(ReasoningMode::High),
+        reasoning_effort: Some(ReasoningMode::high()),
         ..Default::default()
     };
     let mut manifest = librefang_types::agent::AgentManifest::default();
@@ -4608,24 +4717,24 @@ fn test_reasoning_mode_global_reaches_an_agent_that_declares_nothing() {
     apply_thinking_override(&mut manifest, ThinkingOverride::Inherit);
 
     assert_eq!(
-        manifest.thinking.expect("backfilled").reasoning_mode,
-        Some(ReasoningMode::High),
+        manifest.thinking.expect("backfilled").reasoning_effort,
+        Some(ReasoningMode::high()),
     );
 }
 
 /// Rung 2 beats rung 3: a per-agent `[thinking]` table suppresses the global
-/// backfill entirely, so its `reasoning_mode` wins.
+/// backfill entirely, so its `reasoning_effort` wins.
 #[test]
-fn test_reasoning_mode_per_agent_beats_global() {
+fn test_reasoning_effort_per_agent_beats_global() {
     use librefang_types::config::{ReasoningMode, ThinkingConfig, ThinkingOverride};
     let global = ThinkingConfig {
-        reasoning_mode: Some(ReasoningMode::High),
+        reasoning_effort: Some(ReasoningMode::high()),
         ..Default::default()
     };
     let mut manifest = librefang_types::agent::AgentManifest {
         source_template: None,
         thinking: Some(ThinkingConfig {
-            reasoning_mode: Some(ReasoningMode::Low),
+            reasoning_effort: Some(ReasoningMode::low()),
             ..Default::default()
         }),
         ..Default::default()
@@ -4637,25 +4746,25 @@ fn test_reasoning_mode_per_agent_beats_global() {
     apply_thinking_override(&mut manifest, ThinkingOverride::Inherit);
 
     assert_eq!(
-        manifest.thinking.expect("per-agent kept").reasoning_mode,
-        Some(ReasoningMode::Low),
+        manifest.thinking.expect("per-agent kept").reasoning_effort,
+        Some(ReasoningMode::low()),
         "the per-agent table must not be overwritten by the global backfill",
     );
 }
 
 /// Rung 1 beats both: the per-call override is stamped on last.
 #[test]
-fn test_reasoning_mode_per_call_beats_per_agent_beats_global() {
+fn test_reasoning_effort_per_call_beats_per_agent_beats_global() {
     use librefang_types::config::{ReasoningMode, ThinkingConfig, ThinkingOverride};
     let global = ThinkingConfig {
-        reasoning_mode: Some(ReasoningMode::High),
+        reasoning_effort: Some(ReasoningMode::high()),
         ..Default::default()
     };
     let mut manifest = librefang_types::agent::AgentManifest {
         source_template: None,
         thinking: Some(ThinkingConfig {
             budget_tokens: 7777,
-            reasoning_mode: Some(ReasoningMode::Low),
+            reasoning_effort: Some(ReasoningMode::low()),
             ..Default::default()
         }),
         ..Default::default()
@@ -4664,38 +4773,296 @@ fn test_reasoning_mode_per_call_beats_per_agent_beats_global() {
     if manifest.thinking.is_none() {
         manifest.thinking = Some(global.clone());
     }
-    apply_thinking_override(&mut manifest, ThinkingOverride::Mode(ReasoningMode::Max));
+    apply_thinking_override(&mut manifest, ThinkingOverride::Mode(ReasoningMode::max()));
 
     let cfg = manifest.thinking.expect("thinking present");
-    assert_eq!(cfg.reasoning_mode, Some(ReasoningMode::Max));
+    assert_eq!(cfg.reasoning_effort, Some(ReasoningMode::max()));
     assert_eq!(
         cfg.budget_tokens, 7777,
         "a mode override must not disturb the agent's configured budget",
     );
 }
 
+/// Rung 2.5 (#8591): the per-session override beats the agent and global
+/// levels and loses to the per-call one — `frame > session > agent > global`.
+/// The kernel composes exactly these three calls in this order.
+#[test]
+fn test_session_reasoning_effort_resolution_order() {
+    use librefang_types::config::{ReasoningMode, ThinkingConfig, ThinkingOverride};
+
+    let global = ThinkingConfig {
+        reasoning_effort: Some(ReasoningMode::high()),
+        ..Default::default()
+    };
+    let agent = ThinkingConfig {
+        budget_tokens: 7777,
+        reasoning_effort: Some(ReasoningMode::low()),
+        ..Default::default()
+    };
+
+    // Session beats agent+global when no per-call override is present.
+    let mut manifest = librefang_types::agent::AgentManifest {
+        thinking: Some(agent.clone()),
+        ..Default::default()
+    };
+    if manifest.thinking.is_none() {
+        manifest.thinking = Some(global.clone());
+    }
+    apply_session_reasoning_effort(&mut manifest, "xhigh");
+    apply_thinking_override(&mut manifest, ThinkingOverride::Inherit);
+    let cfg = manifest.thinking.clone().expect("thinking present");
+    assert_eq!(
+        cfg.reasoning_effort,
+        Some(ReasoningMode::new("xhigh").unwrap())
+    );
+    assert_eq!(
+        cfg.budget_tokens, 7777,
+        "a session mode pin must not disturb the agent's configured budget",
+    );
+
+    // Per-call beats the session override.
+    let mut manifest = librefang_types::agent::AgentManifest {
+        thinking: Some(agent.clone()),
+        ..Default::default()
+    };
+    apply_session_reasoning_effort(&mut manifest, "xhigh");
+    apply_thinking_override(&mut manifest, ThinkingOverride::Mode(ReasoningMode::max()));
+    assert_eq!(
+        manifest
+            .thinking
+            .expect("thinking present")
+            .reasoning_effort,
+        Some(ReasoningMode::max()),
+        "the per-message frame is the top rung",
+    );
+
+    // The full chain, one rung at a time: agent absent → global high; then a
+    // session pin beats it; then the per-message frame beats the session.
+    let global = ThinkingConfig {
+        reasoning_effort: Some(ReasoningMode::high()),
+        ..Default::default()
+    };
+    let mut manifest = librefang_types::agent::AgentManifest::default();
+    if manifest.thinking.is_none() {
+        manifest.thinking = Some(global.clone());
+    }
+    apply_session_reasoning_effort(&mut manifest, "medium");
+    apply_thinking_override(&mut manifest, ThinkingOverride::Inherit);
+    assert_eq!(
+        manifest
+            .thinking
+            .clone()
+            .expect("present")
+            .reasoning_effort
+            .as_ref()
+            .map(|m| m.as_str()),
+        Some("medium"),
+        "session beats the global backfill",
+    );
+
+    apply_thinking_override(&mut manifest, ThinkingOverride::Mode(ReasoningMode::low()));
+    assert_eq!(
+        manifest
+            .thinking
+            .expect("present")
+            .reasoning_effort
+            .as_ref()
+            .map(|m| m.as_str()),
+        Some("low"),
+        "the per-message frame beats the session pin",
+    );
+
+    // The legacy boolean clears an inherited session `none`, matching its
+    // documented "force thinking on even if the manifest has it off".
+    let mut manifest = librefang_types::agent::AgentManifest {
+        thinking: Some(agent.clone()),
+        ..Default::default()
+    };
+    apply_session_reasoning_effort(&mut manifest, "none");
+    apply_thinking_override(&mut manifest, ThinkingOverride::Enable);
+    assert_eq!(
+        manifest
+            .thinking
+            .expect("Enable keeps a config")
+            .reasoning_effort,
+        None,
+        "`thinking: true` must clear a session-pinned non-think mode",
+    );
+}
+
+/// The session field carries the open vocabulary (#8591): a token the old
+/// four-rung enum could not express is stamped verbatim, and clearing the
+/// override falls back to the agent's own level.
+#[test]
+fn test_session_reasoning_effort_open_token_and_clearing() {
+    use librefang_types::config::{ReasoningMode, ThinkingConfig, ThinkingOverride};
+
+    let mut manifest = librefang_types::agent::AgentManifest {
+        thinking: Some(ThinkingConfig {
+            reasoning_effort: Some(ReasoningMode::low()),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+
+    apply_session_reasoning_effort(&mut manifest, "minimal");
+    assert_eq!(
+        manifest
+            .thinking
+            .clone()
+            .expect("present")
+            .reasoning_effort
+            .as_ref()
+            .map(|m| m.as_str()),
+        Some("minimal"),
+    );
+
+    // No session pin → the agent's level is untouched.
+    let mut manifest = librefang_types::agent::AgentManifest {
+        thinking: Some(ThinkingConfig {
+            reasoning_effort: Some(ReasoningMode::low()),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    apply_thinking_override(&mut manifest, ThinkingOverride::Inherit);
+    assert_eq!(
+        manifest.thinking.expect("present").reasoning_effort,
+        Some(ReasoningMode::low()),
+    );
+}
+
+/// A malformed session value — reachable only through a hand-edited database —
+/// is ignored with a warning rather than failing the turn or silently pinning
+/// nonsense.
+#[test]
+fn test_session_reasoning_effort_malformed_is_ignored() {
+    use librefang_types::config::{ReasoningMode, ThinkingConfig};
+
+    let mut manifest = librefang_types::agent::AgentManifest {
+        thinking: Some(ThinkingConfig {
+            reasoning_effort: Some(ReasoningMode::low()),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    apply_session_reasoning_effort(&mut manifest, "not a token");
+    assert_eq!(
+        manifest.thinking.expect("present").reasoning_effort,
+        Some(ReasoningMode::low()),
+        "the agent level must survive a malformed session pin",
+    );
+}
+
+/// The catalog coercion (#8591): a token outside the model's declared set is
+/// mapped to the nearest supported rung (with a warning) before the request is
+/// built; `none` on a model that cannot be switched off falls to the floor;
+/// an undeclared model is left alone so pre-#8591 configs keep their behaviour.
+#[test]
+fn test_declared_reasoning_policy_coerces_the_manifest() {
+    use librefang_types::config::{ReasoningEffortPolicy, ReasoningMode, ThinkingConfig};
+
+    let manifest_with = |mode: &str| librefang_types::agent::AgentManifest {
+        thinking: Some(ThinkingConfig {
+            reasoning_effort: Some(ReasoningMode::new(mode).unwrap()),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let policy = |efforts: &[&str]| ReasoningEffortPolicy {
+        supported_efforts: efforts.iter().map(|s| (*s).to_string()).collect(),
+        ..Default::default()
+    };
+
+    // Outside the declared set → coerced to the nearest, never forwarded.
+    let mut manifest = manifest_with("xhigh");
+    coerce_reasoning_effort_to_model(&mut manifest, &policy(&["low", "high"]));
+    assert_eq!(
+        manifest.thinking.expect("kept").reasoning_effort,
+        Some(ReasoningMode::high()),
+        "xhigh must be coerced to high, the nearer of low/high",
+    );
+
+    // Inside the declared set → untouched.
+    let mut manifest = manifest_with("high");
+    coerce_reasoning_effort_to_model(&mut manifest, &policy(&["low", "high"]));
+    assert_eq!(
+        manifest.thinking.expect("kept").reasoning_effort,
+        Some(ReasoningMode::high()),
+    );
+
+    // `none` on a model that forbids off → the lowest graded rung.
+    let mut manifest = manifest_with("none");
+    let no_off = ReasoningEffortPolicy {
+        off_allowed: false,
+        ..policy(&["low", "high"])
+    };
+    coerce_reasoning_effort_to_model(&mut manifest, &no_off);
+    assert_eq!(
+        manifest.thinking.expect("kept").reasoning_effort,
+        Some(ReasoningMode::low()),
+    );
+
+    let mut manifest = manifest_with("none");
+    let mandatory = ReasoningEffortPolicy {
+        mandatory: true,
+        ..policy(&["low", "high"])
+    };
+    coerce_reasoning_effort_to_model(&mut manifest, &mandatory);
+    assert_eq!(
+        manifest.thinking.expect("kept").reasoning_effort,
+        Some(ReasoningMode::low()),
+    );
+
+    // `none` where the model allows it → untouched.
+    let mut manifest = manifest_with("none");
+    coerce_reasoning_effort_to_model(&mut manifest, &policy(&["low", "high"]));
+    assert_eq!(
+        manifest.thinking.expect("kept").reasoning_effort,
+        Some(ReasoningMode::none()),
+    );
+
+    // Undeclared model → untouched (legacy behaviour).
+    let mut manifest = manifest_with("xhigh");
+    coerce_reasoning_effort_to_model(&mut manifest, &ReasoningEffortPolicy::default());
+    assert_eq!(
+        manifest
+            .thinking
+            .expect("kept")
+            .reasoning_effort
+            .as_ref()
+            .map(|m| m.as_str()),
+        Some("xhigh"),
+    );
+
+    // No thinking config at all → no panic, nothing created.
+    let mut manifest = librefang_types::agent::AgentManifest::default();
+    coerce_reasoning_effort_to_model(&mut manifest, &policy(&["low"]));
+    assert!(manifest.thinking.is_none());
+}
+
 /// A per-call mode on an agent with no `[thinking]` table at all must still
 /// land. Creating the config lazily is the difference between the feature
 /// working and silently doing nothing.
 #[test]
-fn test_reasoning_mode_per_call_creates_thinking_config_when_absent() {
+fn test_reasoning_effort_per_call_creates_thinking_config_when_absent() {
     use librefang_types::config::{ReasoningMode, ThinkingOverride};
     let mut manifest = librefang_types::agent::AgentManifest::default();
     assert!(manifest.thinking.is_none());
 
-    apply_thinking_override(&mut manifest, ThinkingOverride::Mode(ReasoningMode::None));
+    apply_thinking_override(&mut manifest, ThinkingOverride::Mode(ReasoningMode::none()));
 
     assert_eq!(
         manifest
             .thinking
             .expect("thinking config created for the mode")
-            .reasoning_mode,
-        Some(ReasoningMode::None),
+            .reasoning_effort,
+        Some(ReasoningMode::none()),
     );
 }
 
 /// The legacy boolean documents itself as "force thinking on even if the
-/// manifest has it off". A manifest (or backfilled global) `reasoning_mode =
+/// manifest has it off". A manifest (or backfilled global) `reasoning_effort =
 /// "none"` is exactly that off-state, so `thinking: true` has to clear it —
 /// otherwise the override deserializes, resolves to `Enable`, reaches the
 /// manifest, and the driver still sends the provider's non-think toggle.
@@ -4706,7 +5073,7 @@ fn test_enable_clears_an_inherited_non_think_mode() {
     let mut manifest = librefang_types::agent::AgentManifest {
         thinking: Some(ThinkingConfig {
             budget_tokens: 7777,
-            reasoning_mode: Some(ReasoningMode::None),
+            reasoning_effort: Some(ReasoningMode::none()),
             ..Default::default()
         }),
         ..Default::default()
@@ -4718,7 +5085,7 @@ fn test_enable_clears_an_inherited_non_think_mode() {
         .thinking
         .expect("Enable must keep a thinking config");
     assert_eq!(
-        cfg.reasoning_mode, None,
+        cfg.reasoning_effort, None,
         "`thinking: true` must not be silently overruled by an inherited non-think mode",
     );
     assert_eq!(
@@ -4734,17 +5101,21 @@ fn test_enable_clears_an_inherited_non_think_mode() {
 fn test_enable_leaves_a_graded_mode_alone() {
     use librefang_types::config::{ReasoningMode, ThinkingConfig, ThinkingOverride};
 
-    for mode in [ReasoningMode::Low, ReasoningMode::High, ReasoningMode::Max] {
+    for mode in [
+        ReasoningMode::low(),
+        ReasoningMode::high(),
+        ReasoningMode::max(),
+    ] {
         let mut manifest = librefang_types::agent::AgentManifest {
             thinking: Some(ThinkingConfig {
-                reasoning_mode: Some(mode),
+                reasoning_effort: Some(mode.clone()),
                 ..Default::default()
             }),
             ..Default::default()
         };
         apply_thinking_override(&mut manifest, ThinkingOverride::Enable);
         assert_eq!(
-            manifest.thinking.expect("kept").reasoning_mode,
+            manifest.thinking.expect("kept").reasoning_effort,
             Some(mode),
             "Enable must not downgrade a graded mode",
         );
@@ -4774,13 +5145,16 @@ fn test_disable_and_mode_none_are_not_the_same_thing() {
     );
 
     let mut non_think = base.clone();
-    apply_thinking_override(&mut non_think, ThinkingOverride::Mode(ReasoningMode::None));
+    apply_thinking_override(
+        &mut non_think,
+        ThinkingOverride::Mode(ReasoningMode::none()),
+    );
     assert_eq!(
         non_think
             .thinking
             .expect("Mode(None) must keep a thinking config to carry the mode")
-            .reasoning_mode,
-        Some(ReasoningMode::None),
+            .reasoning_effort,
+        Some(ReasoningMode::none()),
     );
 }
 
@@ -14404,6 +14778,212 @@ async fn resolve_driver_for_owner_canonicalizes_alias_provider_in_fallback_slot(
     kernel.shutdown();
 }
 
+/// Sentinel-provider credential rule (production incident: a production agent
+/// on an instance). A manifest with `provider = "default"` and a stale
+/// `api_key_env` pin must take its credential from the EFFECTIVE default, not
+/// from the pin: the default had been hot-swapped to another vendor, so the
+/// pin sent the old vendor's key to the new endpoint and every turn 401'd
+/// (`All providers exhausted` — primary and fallback both carried the pin).
+///
+/// `resolve_driver_for_owner` returns an opaque driver, but the driver cache
+/// keys on the hash of the resolved API key, so two identical Arcs prove both
+/// resolutions read the SAME env var — the effective default's — and the pin
+/// was ignored.
+#[tokio::test(flavor = "multi_thread")]
+#[serial_test::serial(librefang_vault_key)]
+async fn sentinel_provider_ignores_manifest_credential_pin() {
+    // Distinct values so "read the stale pin" and "read the effective default"
+    // produce drivers with different cache keys.
+    let _default_key = set_test_env(
+        "LIBREFANG_TEST_FX_SENTINEL_DEFAULT_KEY",
+        "sk-effective-default",
+    );
+    let _stale_key = set_test_env("LIBREFANG_TEST_FX_SENTINEL_STALE_KEY", "sk-stale-vendor");
+
+    let dir = tempfile::tempdir().unwrap();
+    let home_dir = dir.path().to_path_buf();
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+    std::fs::create_dir_all(home_dir.join("registry")).unwrap();
+    std::fs::write(home_dir.join("registry").join(".sync_marker"), "").unwrap();
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        network_enabled: false,
+        // A custom OpenAI-compatible endpoint: builds deterministically, needs
+        // no network, and its `api_key_env` is exactly the operator's choice.
+        default_model: DefaultModelConfig {
+            provider: "fx-sentinel-default".to_string(),
+            model: "test-model".to_string(),
+            api_key_env: "LIBREFANG_TEST_FX_SENTINEL_DEFAULT_KEY".to_string(),
+            base_url: Some("http://127.0.0.1:9/v1".to_string()),
+            ..DefaultModelConfig::default()
+        },
+        ..KernelConfig::default()
+    };
+    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+
+    // The reported shape: `provider = "default"`, `model = "default"`, plus a
+    // pin left over from the vendor the instance default used to point at.
+    let mut pinned = librefang_types::agent::AgentManifest::default();
+    pinned.model.provider = "default".to_string();
+    pinned.model.model = "default".to_string();
+    pinned.model.api_key_env = Some("LIBREFANG_TEST_FX_SENTINEL_STALE_KEY".to_string());
+
+    // Same sentinel manifest without the pin.
+    let mut unpinned = pinned.clone();
+    unpinned.model.api_key_env = None;
+
+    let d_pinned = kernel
+        .resolve_driver_for_owner(&pinned, None)
+        .expect("sentinel manifest with a stale pin must resolve");
+    let d_unpinned = kernel
+        .resolve_driver_for_owner(&unpinned, None)
+        .expect("sentinel manifest without a pin must resolve");
+    assert!(
+        Arc::ptr_eq(&d_pinned, &d_unpinned),
+        "a manifest pin on the `default` provider sentinel must be ignored: \
+         both resolutions must read the effective default's api_key_env and \
+         therefore share one cached driver"
+    );
+
+    // Non-vacuity: the pin IS observable through the same cache when the
+    // provider is explicit, so the equality above proves the sentinel dropped
+    // the pin rather than the two env values collapsing onto one driver.
+    let mut explicit = pinned.clone();
+    explicit.model.provider = "fx-sentinel-default".to_string();
+    let d_explicit_pinned = kernel
+        .resolve_driver_for_owner(&explicit, None)
+        .expect("explicit provider with a pin must resolve");
+    assert!(
+        !Arc::ptr_eq(&d_pinned, &d_explicit_pinned),
+        "an explicit provider must still honour its pin; if this driver is \
+         the same as the sentinel one, the two env vars did not diverge and \
+         the equality assertion above is vacuous"
+    );
+
+    kernel.shutdown();
+}
+
+/// Regression guard for the sentinel rule: an EXPLICIT provider's manifest pin
+/// is still an operator override and must win over the convention env var.
+/// The sentinel guard must not leak onto explicit providers.
+#[tokio::test(flavor = "multi_thread")]
+#[serial_test::serial(librefang_vault_key)]
+async fn explicit_provider_keeps_manifest_credential_pin() {
+    let _pinned = set_test_env("LIBREFANG_TEST_FX_EXPLICIT_PIN_KEY", "sk-pinned");
+    // The convention env var carries a DIFFERENT value, so an over-broad
+    // sentinel rule (ignoring the pin everywhere) is observable as the two
+    // resolutions collapsing onto the same driver.
+    let _convention = set_test_env("FX_SENTINEL_EXPLICIT_API_KEY", "sk-convention");
+
+    let dir = tempfile::tempdir().unwrap();
+    let home_dir = dir.path().to_path_buf();
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+    std::fs::create_dir_all(home_dir.join("registry")).unwrap();
+    std::fs::write(home_dir.join("registry").join(".sync_marker"), "").unwrap();
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        network_enabled: false,
+        default_model: DefaultModelConfig::driverless(),
+        ..KernelConfig::default()
+    };
+    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+
+    let mut pinned = librefang_types::agent::AgentManifest::default();
+    pinned.model.provider = "fx-sentinel-explicit".to_string();
+    pinned.model.model = "m".to_string();
+    pinned.model.api_key_env = Some("LIBREFANG_TEST_FX_EXPLICIT_PIN_KEY".to_string());
+    pinned.model.base_url = Some("http://127.0.0.1:9/v1".to_string());
+
+    let mut unpinned = pinned.clone();
+    unpinned.model.api_key_env = None;
+
+    let d_pinned = kernel
+        .resolve_driver_for_owner(&pinned, None)
+        .expect("explicit provider with a pin must resolve");
+    let d_unpinned = kernel
+        .resolve_driver_for_owner(&unpinned, None)
+        .expect("explicit provider without a pin must resolve");
+    assert!(
+        !Arc::ptr_eq(&d_pinned, &d_unpinned),
+        "an explicit provider's api_key_env pin must still be read (it is an \
+         operator override); identical drivers here mean the sentinel rule \
+         leaked onto explicit providers and the pin was ignored"
+    );
+
+    kernel.shutdown();
+}
+
+/// Fallback slot with the `default` sentinel + stale pin: same rule as the
+/// primary slot. The slot's pin names an env var that is NOT set and it has no
+/// `base_url`; the effective default has both a key and an endpoint.
+///
+/// Post-fix the slot takes the default's credential and endpoint and builds,
+/// so the result is a NEW `FallbackDriver` wrapping it. Pre-fix the slot sees
+/// no key and no endpoint, `create_driver` fails, the slot is dropped and
+/// resolution returns the bare primary driver — `Arc::ptr_eq` with the
+/// primary-only resolution, which is exactly what this test forbids.
+#[tokio::test(flavor = "multi_thread")]
+#[serial_test::serial(librefang_vault_key)]
+async fn sentinel_fallback_slot_ignores_manifest_credential_pin() {
+    let _primary_key = set_test_env("LIBREFANG_TEST_FX_FB_PRIMARY_KEY", "sk-fb-primary");
+    let _default_key = set_test_env("LIBREFANG_TEST_FX_FB_DEFAULT_KEY", "sk-fb-default");
+
+    let dir = tempfile::tempdir().unwrap();
+    let home_dir = dir.path().to_path_buf();
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+    std::fs::create_dir_all(home_dir.join("registry")).unwrap();
+    std::fs::write(home_dir.join("registry").join(".sync_marker"), "").unwrap();
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        network_enabled: false,
+        default_model: DefaultModelConfig {
+            provider: "fx-sentinel-fb-default".to_string(),
+            model: "m-default".to_string(),
+            api_key_env: "LIBREFANG_TEST_FX_FB_DEFAULT_KEY".to_string(),
+            base_url: Some("http://127.0.0.1:9/default-v1".to_string()),
+            ..DefaultModelConfig::default()
+        },
+        ..KernelConfig::default()
+    };
+    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+
+    let mut primary_only = librefang_types::agent::AgentManifest::default();
+    primary_only.model.provider = "fx-sentinel-fb-primary".to_string();
+    primary_only.model.model = "m-primary".to_string();
+    primary_only.model.api_key_env = Some("LIBREFANG_TEST_FX_FB_PRIMARY_KEY".to_string());
+    primary_only.model.base_url = Some("http://127.0.0.1:9/primary-v1".to_string());
+
+    let mut with_fallback = primary_only.clone();
+    with_fallback.fallback_models = Some(vec![librefang_types::agent::FallbackModel {
+        provider: "default".to_string(),
+        model: "default".to_string(),
+        // Names a variable that is deliberately not set, and no base_url, so
+        // any code path that honours the pin cannot build the slot.
+        api_key_env: Some("LIBREFANG_TEST_FX_FB_STALE_UNSET_KEY_9C1F".to_string()),
+        base_url: None,
+        extra_params: Default::default(),
+    }]);
+
+    let d_primary_only = kernel
+        .resolve_driver_for_owner(&primary_only, None)
+        .expect("primary-only resolution must build");
+    let d_with_fallback = kernel
+        .resolve_driver_for_owner(&with_fallback, None)
+        .expect("resolution with a sentinel fallback slot must still build");
+    assert!(
+        !Arc::ptr_eq(&d_primary_only, &d_with_fallback),
+        "the sentinel fallback slot must build from the effective default's \
+         credential and endpoint, not from its stale pin; identical Arcs mean \
+         the slot was dropped because the unset pinned env var (and missing \
+         base_url) were still honoured"
+    );
+
+    kernel.shutdown();
+}
+
 /// Regression test for the kernel install façade introduced in #3295: the
 /// HTTP install path historically opened `vault.enc` and ran the Argon2id
 /// KDF on every request. After the refactor, `Kernel::install_integration`
@@ -15625,6 +16205,95 @@ async fn reload_pushes_trigger_cooldown_and_per_event_budget_into_the_live_engin
     kernel.shutdown();
 }
 
+fn stdio_mcp_entry(name: &str) -> librefang_types::config::McpServerConfigEntry {
+    librefang_types::config::McpServerConfigEntry {
+        name: name.to_string(),
+        template_id: None,
+        transport: Some(librefang_types::config::McpTransportEntry::Stdio {
+            command: format!("/nonexistent/librefang-test-mcp-{name}"),
+            args: vec![],
+        }),
+        timeout_secs: 5,
+        env: vec![],
+        headers: vec![],
+        oauth: None,
+        taint_scanning: true,
+        taint_policy: None,
+    }
+}
+
+/// A config hot-reload of `[[mcp_servers]]` must overlay the DB-backed servers like boot does, and must attempt a connection for a server the edit added.
+/// Before the fix the DB-backed server dropped out of the effective list, and a pure addition never spawned the connect task.
+#[tokio::test(flavor = "multi_thread")]
+async fn mcp_hot_reload_keeps_db_servers_and_connects_added_ones() {
+    let dir = tempfile::tempdir().unwrap();
+    let home_dir = dir.path().to_path_buf();
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+
+    let mut baseline = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    baseline.mcp_servers = vec![stdio_mcp_entry("file-a")];
+    baseline.clamp_bounds();
+    let config_path = home_dir.join("config.toml");
+    std::fs::write(&config_path, toml::to_string_pretty(&baseline).unwrap()).unwrap();
+
+    let kernel = Arc::new(LibreFangKernel::boot_with_config(baseline.clone()).expect("boot"));
+    kernel.set_self_handle();
+
+    // Store a DB-backed server and apply the same overlay boot applies, so the live list is what a `mcp_runtime_store = "db"` daemon would hold.
+    let store = librefang_memory::McpConfigStore::new(kernel.memory.substrate.pool());
+    store.upsert(&stdio_mcp_entry("db-b")).unwrap();
+    {
+        let merged = store.merge_over(baseline.mcp_servers.clone()).unwrap().0;
+        *kernel.mcp.effective_mcp_servers.write().unwrap() = merged;
+    }
+
+    let mut updated = baseline;
+    updated.mcp_servers.push(stdio_mcp_entry("file-c"));
+    std::fs::write(&config_path, toml::to_string_pretty(&updated).unwrap()).unwrap();
+    kernel
+        .reload_config()
+        .await
+        .expect("reload of an mcp_servers edit must succeed");
+
+    let names: Vec<String> = kernel
+        .mcp
+        .effective_mcp_servers
+        .read()
+        .unwrap()
+        .iter()
+        .map(|server| server.name.clone())
+        .collect();
+    assert!(
+        names.contains(&"db-b".to_string()),
+        "hot-reload must keep the DB-backed server, got {names:?}"
+    );
+    assert!(names.contains(&"file-c".to_string()));
+
+    // The added server's command does not exist, so a connect attempt records an error on its health entry; no attempt leaves it untouched.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    loop {
+        let attempted = kernel
+            .mcp
+            .mcp_health
+            .get_health("file-c")
+            .is_some_and(|health| health.last_error.is_some());
+        if attempted {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "hot-reload must attempt to connect a newly added MCP server"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+
+    kernel.shutdown();
+}
+
 // ─── #5117: kill_agent_with_purge propagates DB delete failure ───────────────
 
 /// Happy-path regression for #5117: `kill_agent_with_purge` previously
@@ -16192,6 +16861,7 @@ fn boot_canonical_recovery_advances_pointer_to_most_recently_active_session_5198
         context_window_tokens: 0,
         label: None,
         model_override: None,
+        reasoning_effort: None,
         messages_generation: 0,
         last_repaired_generation: None,
         peer_id: None,
@@ -16219,6 +16889,7 @@ fn boot_canonical_recovery_advances_pointer_to_most_recently_active_session_5198
         context_window_tokens: 0,
         label: None,
         model_override: None,
+        reasoning_effort: None,
         messages_generation: 0,
         last_repaired_generation: None,
         peer_id: None,
@@ -16478,6 +17149,7 @@ async fn streaming_turn_on_non_canonical_session_survives_in_turn_auto_compactio
             context_window_tokens: 0,
             label: None,
             model_override: None,
+            reasoning_effort: None,
             messages_generation: 0,
             last_repaired_generation: None,
             peer_id: None,
@@ -16580,6 +17252,7 @@ async fn kernel_with_seeded_session(
             context_window_tokens: 0,
             label: None,
             model_override: None,
+            reasoning_effort: None,
             messages_generation: 0,
             last_repaired_generation: None,
             peer_id: None,
@@ -16720,6 +17393,7 @@ async fn kernel_with_small_window_session(
             context_window_tokens: 0,
             label: None,
             model_override: None,
+            reasoning_effort: None,
             messages_generation: 0,
             last_repaired_generation: None,
             peer_id: None,
@@ -16965,6 +17639,7 @@ async fn test_compact_gate_passes_when_tokens_above_threshold_but_messages_below
         context_window_tokens: 0,
         label: None,
         model_override: None,
+        reasoning_effort: None,
         messages_generation: 0,
         last_repaired_generation: None,
         peer_id: None,
@@ -17188,6 +17863,194 @@ fn suspend_resume_actually_transition_in_memory_state() {
     kernel.shutdown();
 }
 
+/// Suspend / resume must patch only the root `enabled` key of `agent.toml`.
+/// The old line-based rewrite turned every nested `enabled = ...` (here `[skill_workshop]`) into the new value, so a resume silently switched on the skill workshop.
+#[test]
+fn suspend_resume_persists_only_root_enabled_flag() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().to_path_buf();
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+
+    let toml_path = home_dir
+        .join("agent-manifests")
+        .join("enabled-persist-agent")
+        .join("agent.toml");
+    let agent_id = kernel
+        .spawn_agent_inner(
+            AgentManifest {
+                name: "enabled-persist-agent".to_string(),
+                source_template: None,
+                description: "suspend/resume enabled persistence".to_string(),
+                author: "test".to_string(),
+                module: "builtin:chat".to_string(),
+                ..Default::default()
+            },
+            None,
+            Some(toml_path.clone()),
+            None,
+        )
+        .expect("agent should spawn");
+
+    let entry = kernel.agents.registry.get(agent_id).unwrap();
+    let mut source = toml::to_string_pretty(&entry.manifest).unwrap();
+    source = source
+        .lines()
+        .filter(|line| !line.starts_with("enabled ="))
+        .collect::<Vec<_>>()
+        .join("\n");
+    if !source.contains("[skill_workshop]") {
+        source.push_str("\n[skill_workshop]\nenabled = false\n");
+    }
+    std::fs::create_dir_all(toml_path.parent().unwrap()).unwrap();
+    std::fs::write(&toml_path, &source).unwrap();
+
+    kernel.suspend_agent(agent_id).expect("suspend");
+    let suspended: AgentManifest =
+        toml::from_str(&std::fs::read_to_string(&toml_path).unwrap()).unwrap();
+    assert!(
+        !suspended.enabled,
+        "suspend must persist a root enabled = false"
+    );
+    assert!(!suspended.skill_workshop.enabled);
+
+    kernel.resume_agent(agent_id).expect("resume");
+    let resumed: AgentManifest =
+        toml::from_str(&std::fs::read_to_string(&toml_path).unwrap()).unwrap();
+    assert!(resumed.enabled);
+    assert!(
+        !resumed.skill_workshop.enabled,
+        "resume must not switch on the skill workshop"
+    );
+
+    kernel.shutdown();
+}
+
+/// A spawned agent's canonical session must be the one spawn created and seeded with the reset prompt, and a respawn must restore it rather than mint another.
+#[test]
+fn spawn_uses_created_session_and_respawn_restores_it() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().to_path_buf();
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+    let mut config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    config.session.reset_prompt = Some("Always answer in English".to_string());
+    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+
+    let manifest = AgentManifest {
+        name: "session-spawn-agent".to_string(),
+        source_template: None,
+        description: "spawn session wiring".to_string(),
+        author: "test".to_string(),
+        module: "builtin:chat".to_string(),
+        ..Default::default()
+    };
+    let agent_id = kernel
+        .spawn_agent_inner(manifest.clone(), None, None, None)
+        .expect("agent should spawn");
+    let session_id = kernel.agents.registry.get(agent_id).unwrap().session_id;
+    let session = kernel
+        .memory
+        .substrate
+        .get_session(session_id)
+        .unwrap()
+        .expect("the entry's session must exist in the substrate");
+    assert!(
+        format!("{:?}", session.messages).contains("Always answer in English"),
+        "the canonical session must carry the configured reset prompt"
+    );
+
+    kernel.agents.registry.remove(agent_id).unwrap();
+    let respawned = kernel
+        .spawn_agent_inner(manifest, None, None, Some(agent_id))
+        .expect("agent should respawn");
+    assert_eq!(respawned, agent_id);
+    assert_eq!(
+        kernel.agents.registry.get(agent_id).unwrap().session_id,
+        session_id,
+        "respawn must restore the existing session"
+    );
+    assert_eq!(
+        kernel
+            .memory
+            .substrate
+            .get_agent_session_ids(agent_id)
+            .unwrap()
+            .len(),
+        1,
+        "respawn must not create an orphan session"
+    );
+
+    kernel.shutdown();
+}
+
+/// A wrong export file is the caller's mistake, so `import_session` must report it as `InvalidInput`, which the API can turn into a 400 with the message instead of a scrubbed 500.
+#[test]
+fn import_session_reports_bad_exports_as_invalid_input() {
+    use librefang_types::error::LibreFangError;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().to_path_buf();
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+    let agent_id = kernel
+        .spawn_agent_inner(
+            AgentManifest {
+                name: "import-target-agent".to_string(),
+                source_template: None,
+                description: "import validation".to_string(),
+                author: "test".to_string(),
+                module: "builtin:chat".to_string(),
+                ..Default::default()
+            },
+            None,
+            None,
+            None,
+        )
+        .expect("agent should spawn");
+
+    let export = |version: u32, owner: String, messages: Vec<librefang_types::message::Message>| {
+        librefang_memory::session::SessionExport {
+            version,
+            agent_name: "other".to_string(),
+            agent_id: owner,
+            session_id: SessionId::new().0.to_string(),
+            messages,
+            context_window_tokens: 0,
+            label: None,
+            exported_at: chrono::Utc::now().to_rfc3339(),
+            metadata: Default::default(),
+        }
+    };
+    let message = || vec![librefang_types::message::Message::user("hello")];
+    let cases = [
+        export(2, agent_id.to_string(), message()),
+        export(1, AgentId::new().to_string(), message()),
+        export(1, agent_id.to_string(), Vec::new()),
+    ];
+    for case in cases {
+        match kernel.import_session(agent_id, case) {
+            Err(KernelError::LibreFang(LibreFangError::InvalidInput(_))) => {}
+            other => panic!("expected InvalidInput, got {other:?}"),
+        }
+    }
+
+    kernel.shutdown();
+}
+
 /// A suspend whose `agent.toml` write fails must still record the disagreement.
 /// `suspend_agent` has already moved the registry to `Suspended`, so going silent leaves the registry saying suspended, disk still saying `enabled = true`, and the History tab showing no row at all.
 ///
@@ -17343,6 +18206,67 @@ fn a_suspend_snapshot_is_normalized_to_the_serializer_layout() {
         !snapshot.enabled,
         "the normalized snapshot must still carry the toggled value:\n{}",
         newest.manifest_toml
+    );
+
+    kernel.shutdown();
+}
+
+/// A hand agent's `source_toml_path` is the shared `hand.toml`, not an agent manifest.
+/// Suspend must leave it untouched and must not record the hand definition as the agent's manifest in its history, matching the no-op a hand agent without its own `agent.toml` always had.
+#[test]
+fn suspending_a_hand_agent_does_not_patch_its_hand_toml() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().join("librefang-kernel-suspend-hand-toml");
+    std::fs::create_dir_all(&home_dir).unwrap();
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    let hand_toml = config
+        .effective_hands_workspaces_dir()
+        .join("demo-hand")
+        .join("hand.toml");
+    std::fs::create_dir_all(hand_toml.parent().unwrap()).unwrap();
+    let hand_source = "id = \"demo-hand\"\nname = \"Demo Hand\"\ntools = [\"web_fetch\"]\n";
+    std::fs::write(&hand_toml, hand_source).unwrap();
+    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+
+    let agent_id = kernel
+        .spawn_agent_inner(
+            AgentManifest {
+                name: "demo-hand-role".to_string(),
+                source_template: None,
+                description: "a hand role".to_string(),
+                author: "test".to_string(),
+                module: "builtin:chat".to_string(),
+                ..Default::default()
+            },
+            None,
+            Some(hand_toml.clone()),
+            None,
+        )
+        .expect("agent should spawn");
+
+    kernel
+        .suspend_agent(agent_id)
+        .expect("suspend should succeed");
+
+    assert_eq!(
+        std::fs::read_to_string(&hand_toml).unwrap(),
+        hand_source,
+        "hand.toml must not be patched with an agent-level `enabled` key"
+    );
+    let store = librefang_memory::ManifestVersionStore::new(kernel.memory.substrate.pool());
+    let rows = store
+        .list_for_agent(&agent_id.to_string(), 10)
+        .expect("history read should succeed");
+    assert!(
+        rows.iter().all(|row| row.change_source != "suspend"),
+        "no suspend row may be recorded from hand.toml: {:?}",
+        rows.iter()
+            .map(|row| &row.change_source)
+            .collect::<Vec<_>>()
     );
 
     kernel.shutdown();
@@ -21351,6 +22275,7 @@ async fn resetting_a_session_does_not_cascade_delete_its_children() {
         context_window_tokens: 0,
         label: None,
         model_override: None,
+        reasoning_effort: None,
         messages_generation: 0,
         last_repaired_generation: None,
         peer_id: None,
@@ -21870,6 +22795,7 @@ async fn manual_compact_passes_per_agent_compaction_overrides_to_engine() {
             context_window_tokens: 0,
             label: None,
             model_override: None,
+            reasoning_effort: None,
             messages_generation: 0,
             last_repaired_generation: None,
             peer_id: None,
