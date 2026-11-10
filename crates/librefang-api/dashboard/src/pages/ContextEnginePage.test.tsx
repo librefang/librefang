@@ -89,7 +89,7 @@ const defaultConfig: ContextEngineConfigSnapshot = {
   engine: "default",
   plugin: null,
   plugin_stack: null,
-  hook_timeout_secs: 30,
+  hook_timeout_secs: null,
   on_hook_failure: "warn",
   max_retries: 0,
   retry_delay_ms: 500,
@@ -228,7 +228,7 @@ describe("ContextEnginePage", () => {
     expect(within(card).getByText("context_engine.traces.empty_desc")).toBeInTheDocument();
   });
 
-  it("renders traces newest first with success, duration and preview", async () => {
+  it("renders traces newest first with success, duration and expandable detail", async () => {
     const traces: ContextEngineTraces = {
       count: 2,
       traces: [
@@ -240,6 +240,7 @@ describe("ContextEnginePage", () => {
           elapsed_ms: 5,
           success: true,
           input_preview: { messages: 4 },
+          output_preview: { ok: true },
         },
         {
           trace_id: "bbbbbbbbbbbbbbbb",
@@ -250,6 +251,7 @@ describe("ContextEnginePage", () => {
           success: false,
           error: "hook timed out",
           input_preview: { message: "hello" },
+          output_preview: null,
         },
       ],
     };
@@ -262,18 +264,56 @@ describe("ContextEnginePage", () => {
     expect(rows[0]).toHaveTextContent("ingest");
     expect(rows[0]).toHaveTextContent("9 ms");
     expect(rows[0]).toHaveTextContent("context_engine.traces.failure");
-    expect(rows[0]).toHaveTextContent("hook timed out");
     expect(rows[0]).toHaveTextContent('{"message":"hello"}');
+
+    const failedToggle = within(rows[0]).getByRole("button");
+    expect(failedToggle).toHaveAttribute("aria-expanded", "false");
+    fireEvent.click(failedToggle);
+    expect(failedToggle).toHaveAttribute("aria-expanded", "true");
+    expect(within(rows[0]).getByText(/hook timed out/)).toBeInTheDocument();
+    expect(within(rows[0]).queryByText("context_engine.traces.output")).toBeNull();
+
     expect(rows[1]).toHaveTextContent("assemble");
     expect(rows[1]).toHaveTextContent("context_engine.traces.success");
     expect(rows[1]).toHaveTextContent("5 ms");
+    fireEvent.click(within(rows[1]).getByRole("button"));
+    expect(within(rows[1]).getByText("context_engine.traces.output")).toBeInTheDocument();
+    expect(within(rows[1]).getByText('{"ok":true}')).toBeInTheDocument();
+  });
+
+  it("caps the trace list at 50 and truncates the collapsed preview", async () => {
+    const longInput = "x".repeat(200);
+    tracesMock.mockResolvedValue({
+      count: 60,
+      traces: Array.from({ length: 60 }, (_, index) => ({
+        trace_id: index.toString(16).padStart(16, "0"),
+        correlation_id: "turn-1",
+        hook: "ingest",
+        started_at: new Date(Date.UTC(2026, 0, 1, 10, index)).toISOString(),
+        elapsed_ms: index,
+        success: true,
+        input_preview: longInput,
+      })),
+    });
+    renderPage();
+
+    const card = await screen.findByTestId("context-engine-traces");
+    const rows = within(card).getAllByTestId("context-engine-trace");
+    expect(rows).toHaveLength(50);
+
+    const toggle = within(rows[0]).getByRole("button");
+    expect(toggle).toHaveTextContent("x".repeat(120));
+    expect(toggle).not.toHaveTextContent("x".repeat(121));
+    fireEvent.click(toggle);
+    expect(within(rows[0]).getByText(longInput)).toBeInTheDocument();
   });
 
   it("renders the read-only configuration summary", async () => {
     configMock.mockResolvedValue({
       ...defaultConfig,
       engine: "scriptable",
-      plugin: "policy-plugin",
+      plugin: "unused-single-plugin",
+      plugin_stack: ["policy-plugin", "recall-plugin"],
       hook_timeout_secs: 45,
       on_hook_failure: "abort",
       max_retries: 2,
@@ -289,7 +329,8 @@ describe("ContextEnginePage", () => {
 
     const card = await screen.findByTestId("context-engine-config");
     expect(within(card).getByText("scriptable")).toBeInTheDocument();
-    expect(within(card).getByText("policy-plugin")).toBeInTheDocument();
+    expect(within(card).getByText("policy-plugin, recall-plugin")).toBeInTheDocument();
+    expect(within(card).queryByText("unused-single-plugin")).toBeNull();
     expect(within(card).getByText("45s")).toBeInTheDocument();
     expect(within(card).getByText("abort")).toBeInTheDocument();
     expect(within(card).getByText("2")).toBeInTheDocument();
@@ -300,6 +341,29 @@ describe("ContextEnginePage", () => {
     expect(within(card).getByText("256 MB")).toBeInTheDocument();
     expect(within(card).getByText("5 / 30s")).toBeInTheDocument();
     expect(within(card).getByText("Official")).toBeInTheDocument();
+  });
+
+  it("marks the runtime default when the hook timeout is null", async () => {
+    configMock.mockResolvedValue({
+      ...defaultConfig,
+      plugin: "policy-plugin",
+      hook_timeout_secs: null,
+    });
+    renderPage();
+
+    const card = await screen.findByTestId("context-engine-config");
+    expect(within(card).getByText("30s")).toBeInTheDocument();
+    expect(within(card).getByText("context_engine.chain.mode_default")).toBeInTheDocument();
+    expect(within(card).getByText("policy-plugin")).toBeInTheDocument();
+  });
+
+  it("renders the no-engine state when the sandbox policy returns 204", async () => {
+    sandboxMock.mockResolvedValue(null);
+    renderPage();
+
+    const card = await screen.findByTestId("context-engine-sandbox");
+    expect(within(card).getByText("context_engine.no_engine")).toBeInTheDocument();
+    expect(within(card).getByText("context_engine.no_engine_desc")).toBeInTheDocument();
   });
 
   it("renders one sandbox policy card per plugin", async () => {

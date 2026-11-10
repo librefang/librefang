@@ -5905,7 +5905,8 @@ export interface ContextEngineConfigSnapshot {
   engine: string;
   plugin: string | null;
   plugin_stack: string[] | null;
-  hook_timeout_secs: number;
+  // `Option<u64>` in the config: absent resolves to null, not the runtime default.
+  hook_timeout_secs: number | null;
   on_hook_failure: string;
   max_retries: number;
   retry_delay_ms: number;
@@ -5986,8 +5987,8 @@ export async function getContextEngineConfig(): Promise<ContextEngineConfigSnaps
   return get<ContextEngineConfigSnapshot>("/api/context-engine/config");
 }
 
-export async function getContextEngineSandboxPolicy(): Promise<ContextEngineSandboxPolicy> {
-  return get<ContextEngineSandboxPolicy>("/api/context-engine/sandbox-policy");
+export async function getContextEngineSandboxPolicy(): Promise<ContextEngineSandboxPolicy | null> {
+  return getAllowNoContent<ContextEngineSandboxPolicy>("/api/context-engine/sandbox-policy");
 }
 
 export interface PromptVersion {

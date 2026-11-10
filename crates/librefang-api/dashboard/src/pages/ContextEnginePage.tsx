@@ -1,6 +1,6 @@
-import { useMemo, type ReactNode } from "react";
+import { useId, useMemo, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
-import { Brain, GitBranch, Gauge, ListTree, ScrollText, ShieldCheck } from "lucide-react";
+import { Brain, ChevronDown, GitBranch, Gauge, ListChecks, ScrollText, ShieldCheck } from "lucide-react";
 import type {
   ContextEngineConfigSnapshot,
   ContextEngineHookCoverage,
@@ -237,7 +237,7 @@ function MetricsCard() {
   return (
     <Card padding="lg" data-testid="context-engine-metrics">
       <SectionHeader
-        icon={<ListTree className="h-4 w-4 text-brand" />}
+        icon={<ListChecks className="h-4 w-4 text-brand" />}
         title={t("context_engine.metrics.title")}
       />
       {metrics === null ? (
@@ -247,11 +247,11 @@ function MetricsCard() {
           <table className="w-full text-left text-xs">
             <thead>
               <tr className="border-b border-border-subtle text-[10px] uppercase tracking-wider text-text-dim/60">
-                <th className="py-2 pr-3 font-bold">{t("context_engine.metrics.hook")}</th>
-                <th className="px-3 py-2 text-right font-bold">{t("context_engine.metrics.calls")}</th>
-                <th className="px-3 py-2 text-right font-bold">{t("context_engine.metrics.successes")}</th>
-                <th className="px-3 py-2 text-right font-bold">{t("context_engine.metrics.failures")}</th>
-                <th className="py-2 pl-3 text-right font-bold">{t("context_engine.metrics.avg_latency")}</th>
+                <th scope="col" className="py-2 pr-3 font-bold">{t("context_engine.metrics.hook")}</th>
+                <th scope="col" className="px-3 py-2 text-right font-bold">{t("context_engine.metrics.calls")}</th>
+                <th scope="col" className="px-3 py-2 text-right font-bold">{t("context_engine.metrics.successes")}</th>
+                <th scope="col" className="px-3 py-2 text-right font-bold">{t("context_engine.metrics.failures")}</th>
+                <th scope="col" className="py-2 pl-3 text-right font-bold">{t("context_engine.metrics.avg_latency")}</th>
               </tr>
             </thead>
             <tbody>
@@ -280,14 +280,26 @@ function MetricsCard() {
 
 function TraceRow({ trace }: { trace: ContextEngineTrace }) {
   const { t } = useTranslation();
+  const [expanded, setExpanded] = useState(false);
+  const panelId = useId();
   const preview = previewText(trace.input_preview);
 
   return (
-    <details
+    <div
       data-testid="context-engine-trace"
       className="rounded-lg border border-border-subtle/60 bg-main/30"
     >
-      <summary className="flex cursor-pointer list-none items-center gap-2 px-3 py-2">
+      <button
+        type="button"
+        aria-expanded={expanded}
+        aria-controls={panelId}
+        onClick={() => setExpanded((open) => !open)}
+        className="flex w-full items-center gap-2 px-3 py-2 text-left transition-colors hover:bg-main/50"
+      >
+        <ChevronDown
+          aria-hidden="true"
+          className={`h-3.5 w-3.5 shrink-0 text-text-dim transition-transform ${expanded ? "rotate-180" : ""}`}
+        />
         <Badge variant={trace.success ? "success" : "error"}>
           {trace.success ? t("context_engine.traces.success") : t("context_engine.traces.failure")}
         </Badge>
@@ -299,48 +311,50 @@ function TraceRow({ trace }: { trace: ContextEngineTrace }) {
           </span>
         ) : null}
         <span className="ml-auto shrink-0 text-[10px] text-text-dim/70">{formatStarted(trace.started_at)}</span>
-      </summary>
-      <div className="space-y-2 border-t border-border-subtle/50 px-3 py-2">
-        <p className="text-[10px] text-text-dim">
-          {t("context_engine.traces.trace_id")}: <span className="font-mono">{trace.trace_id}</span>
-        </p>
-        {trace.error ? (
-          <p className="break-words text-[11px] text-error">
-            {t("context_engine.traces.error")}: {trace.error}
+      </button>
+      {expanded ? (
+        <div id={panelId} className="space-y-2 border-t border-border-subtle/50 px-3 py-2">
+          <p className="text-[10px] text-text-dim">
+            {t("context_engine.traces.trace_id")}: <span className="font-mono">{trace.trace_id}</span>
           </p>
-        ) : null}
-        <div className="grid gap-2 md:grid-cols-2">
-          <div>
-            <p className="mb-1 text-[10px] font-bold uppercase tracking-wider text-text-dim/60">
-              {t("context_engine.traces.input")}
+          {trace.error ? (
+            <p className="break-words text-[11px] text-error">
+              {t("context_engine.traces.error")}: {trace.error}
             </p>
-            <pre className="max-h-40 overflow-auto whitespace-pre-wrap break-all rounded-lg bg-main/60 p-2 font-mono text-[10px]">
-              {preview}
-            </pre>
-          </div>
-          {trace.output_preview !== undefined ? (
+          ) : null}
+          <div className="grid gap-2 md:grid-cols-2">
             <div>
               <p className="mb-1 text-[10px] font-bold uppercase tracking-wider text-text-dim/60">
-                {t("context_engine.traces.output")}
+                {t("context_engine.traces.input")}
               </p>
               <pre className="max-h-40 overflow-auto whitespace-pre-wrap break-all rounded-lg bg-main/60 p-2 font-mono text-[10px]">
-                {previewText(trace.output_preview)}
+                {preview}
               </pre>
             </div>
-          ) : null}
-          {trace.annotations !== undefined ? (
-            <div className="md:col-span-2">
-              <p className="mb-1 text-[10px] font-bold uppercase tracking-wider text-text-dim/60">
-                {t("context_engine.traces.annotations")}
-              </p>
-              <pre className="max-h-40 overflow-auto whitespace-pre-wrap break-all rounded-lg bg-main/60 p-2 font-mono text-[10px]">
-                {previewText(trace.annotations)}
-              </pre>
-            </div>
-          ) : null}
+            {trace.output_preview != null ? (
+              <div>
+                <p className="mb-1 text-[10px] font-bold uppercase tracking-wider text-text-dim/60">
+                  {t("context_engine.traces.output")}
+                </p>
+                <pre className="max-h-40 overflow-auto whitespace-pre-wrap break-all rounded-lg bg-main/60 p-2 font-mono text-[10px]">
+                  {previewText(trace.output_preview)}
+                </pre>
+              </div>
+            ) : null}
+            {trace.annotations != null ? (
+              <div className="md:col-span-2">
+                <p className="mb-1 text-[10px] font-bold uppercase tracking-wider text-text-dim/60">
+                  {t("context_engine.traces.annotations")}
+                </p>
+                <pre className="max-h-40 overflow-auto whitespace-pre-wrap break-all rounded-lg bg-main/60 p-2 font-mono text-[10px]">
+                  {previewText(trace.annotations)}
+                </pre>
+              </div>
+            ) : null}
+          </div>
         </div>
-      </div>
-    </details>
+      ) : null}
+    </div>
   );
 }
 
@@ -391,7 +405,12 @@ function TracesCard() {
 
 function ConfigCard({ config }: { config: ContextEngineConfigSnapshot }) {
   const { t } = useTranslation();
-  const plugins = config.plugin ?? (config.plugin_stack?.join(", ") || t("common.none"));
+  // The runtime runs the stack when one is configured; `plugin` would name a
+  // plugin that is not in the active chain.
+  const stack = config.plugin_stack ?? [];
+  const plugins = stack.length > 0
+    ? stack.join(", ")
+    : (config.plugin ?? t("common.none"));
 
   return (
     <Card padding="lg" data-testid="context-engine-config">
@@ -402,7 +421,15 @@ function ConfigCard({ config }: { config: ContextEngineConfigSnapshot }) {
       <div className="grid gap-x-8 md:grid-cols-2">
         <ValueRow label={t("context_engine.config.engine")} mono>{config.engine}</ValueRow>
         <ValueRow label={t("context_engine.config.plugin")} mono>{plugins}</ValueRow>
-        <ValueRow label={t("context_engine.config.timeout")}>{config.hook_timeout_secs}s</ValueRow>
+        <ValueRow label={t("context_engine.config.timeout")}>
+          {config.hook_timeout_secs === null ? (
+            <span className="flex items-center justify-end gap-1.5">
+              30s <Badge variant="default">{t("context_engine.chain.mode_default")}</Badge>
+            </span>
+          ) : (
+            `${config.hook_timeout_secs}s`
+          )}
+        </ValueRow>
         <ValueRow label={t("context_engine.config.on_failure")}>{config.on_hook_failure}</ValueRow>
         <ValueRow label={t("context_engine.config.max_retries")}>{config.max_retries}</ValueRow>
         <ValueRow label={t("context_engine.config.retry_delay")}>{config.retry_delay_ms} ms</ValueRow>
@@ -497,36 +524,39 @@ function SandboxCard() {
           sandbox ? <Badge variant="default" className="ml-auto">{t(modeLabelKey(sandbox.mode))}</Badge> : undefined
         }
       />
-      {sandbox ? (
-        sandbox.mode === "default" ? (
-          <div>
-            <p className="mb-2 text-xs font-bold">{t("context_engine.sandbox.default_mode")}</p>
-            {sandbox.global_defaults ? (
-              <div>
-                <Flag
-                  label={t("context_engine.sandbox.filesystem")}
-                  enabled={sandbox.global_defaults.allow_filesystem}
-                />
-                <Flag
-                  label={t("context_engine.sandbox.network")}
-                  enabled={sandbox.global_defaults.allow_network}
-                />
-                <ValueRow label={t("context_engine.sandbox.memory")}>
-                  {sandbox.global_defaults.max_memory_mb
-                    ? `${sandbox.global_defaults.max_memory_mb} MB`
-                    : t("context_engine.sandbox.unlimited")}
-                </ValueRow>
-              </div>
-            ) : null}
-          </div>
-        ) : (
-          <div className="grid gap-3 md:grid-cols-2">
-            {sandbox.plugins.map((plugin) => (
-              <SandboxPluginCard key={plugin.name} plugin={plugin} />
-            ))}
-          </div>
-        )
-      ) : null}
+      {sandbox == null ? (
+        <div>
+          <p className="text-sm font-bold">{t("context_engine.no_engine")}</p>
+          <p className="mt-1 text-xs text-text-dim">{t("context_engine.no_engine_desc")}</p>
+        </div>
+      ) : sandbox.mode === "default" ? (
+        <div>
+          <p className="mb-2 text-xs font-bold">{t("context_engine.sandbox.default_mode")}</p>
+          {sandbox.global_defaults ? (
+            <div>
+              <Flag
+                label={t("context_engine.sandbox.filesystem")}
+                enabled={sandbox.global_defaults.allow_filesystem}
+              />
+              <Flag
+                label={t("context_engine.sandbox.network")}
+                enabled={sandbox.global_defaults.allow_network}
+              />
+              <ValueRow label={t("context_engine.sandbox.memory")}>
+                {sandbox.global_defaults.max_memory_mb
+                  ? `${sandbox.global_defaults.max_memory_mb} MB`
+                  : t("context_engine.sandbox.unlimited")}
+              </ValueRow>
+            </div>
+          ) : null}
+        </div>
+      ) : (
+        <div className="grid gap-3 md:grid-cols-2">
+          {sandbox.plugins.map((plugin) => (
+            <SandboxPluginCard key={plugin.name} plugin={plugin} />
+          ))}
+        </div>
+      )}
     </Card>
   );
 }
