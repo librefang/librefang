@@ -83,8 +83,8 @@ use self::prompt::{
 use self::retry::call_with_retry;
 use self::text_recovery::{recover_text_tool_calls, replace_unrecoverable_tool_call_reply};
 use self::tool_call::{
-    append_skipped_tool_results, execute_single_tool_call, execute_tool_group,
-    handle_mid_turn_signal, stage_tool_use_turn, tool_use_blocks_from_calls,
+    append_skipped_tool_results, commit_aborted_tool_use_turn, execute_single_tool_call,
+    execute_tool_group, handle_mid_turn_signal, stage_tool_use_turn, tool_use_blocks_from_calls,
     update_consecutive_hard_failures, ExecutedToolCall, StagedToolUseTurn, ToolExecutionContext,
     ToolResultOutcomeSummary,
 };
@@ -117,14 +117,7 @@ const MAX_CONTINUATIONS: u32 = 5;
 ///
 /// This helper replaces `session.messages` with the repaired copy so the
 /// persisted history is always well-formed.
-///
-/// A caller that still reports `new_messages_start` afterwards passes it, so the index follows the repaired history instead of keeping its pre-repair position.
-fn repair_session_before_save(
-    session: &mut Session,
-    agent_id: &str,
-    reason: &str,
-    new_messages_start: Option<&mut usize>,
-) {
+fn repair_session_before_save(session: &mut Session, agent_id: &str, reason: &str) {
     let (repaired, stats) =
         crate::session_repair::validate_and_repair_with_stats(&session.messages);
     if stats != crate::session_repair::RepairStats::default() {
@@ -142,80 +135,68 @@ fn repair_session_before_save(
             "Session repair applied before save"
         );
     }
-    match new_messages_start {
-        Some(start) => replace_session_messages_mid_turn(session, repaired, start),
-        None => session.set_messages(repaired),
-    }
+    session.set_messages(repaired);
     session.last_repaired_generation = Some(session.messages_generation);
 }
 
-/// Replace `session.messages` while a turn is running, moving `new_messages_start` to where that turn now sits in the replacement.
+/// [`repair_session_before_save`] for an exit that still reports `new_messages_start` afterwards (the `max_iterations` exits of both loops).
 ///
-/// `new_messages_start` is a `session.messages` index that end-of-turn consumers (auto_memorize, the kernel's canonical-session append) slice from, so it must name the same turn after any rewrite that changes the session's length.
-fn replace_session_messages_mid_turn(
+/// Repair changes the session's length — it drops orphaned tool results and empty messages, and merges the neighbours they leave adjacent — so the pre-repair index would make end-of-turn consumers (auto_memorize, the kernel's canonical-session append) slice from the wrong place; the index is moved to where the turn sits in the repaired history.
+fn repair_running_turn_before_save(
     session: &mut Session,
-    replacement: Vec<Message>,
+    agent_id: &str,
+    reason: &str,
     new_messages_start: &mut usize,
 ) {
-    let start = (*new_messages_start).min(session.messages.len());
-    let running_turn = session.messages[start..].to_vec();
-    session.set_messages(replacement);
-    *new_messages_start = relocate_turn_start(&session.messages, &running_turn);
+    let current_turn = current_turn_snapshot(session, *new_messages_start);
+    repair_session_before_save(session, agent_id, reason);
+    *new_messages_start = current_turn_start_after_rewrite(
+        current_turn.as_deref(),
+        &session.messages,
+        *new_messages_start,
+    );
 }
 
-/// Index in `messages` where `running_turn`, taken from the session before it was rewritten, now begins.
+/// The note left in session history when a non-timeout provider failure kills a turn.
 ///
-/// Rewrites keep the end of the session verbatim (the compressor's protected tail, repair's untouched pairs), so the turn's surviving messages are matched by value from the back, stopping at the first one that is gone; whatever came before it was summarised or dropped along with it.
-/// The one turn message a rewrite reshapes rather than drops is its prompt: repair merges it with the time message after it or into a user message before it, so a prompt that is no longer present verbatim is looked for inside the user message right before the survivors.
-/// Messages after the turn's last one (working-copy nudges the rewrite persisted) stay inside the returned range, because they belong to the same turn.
-fn relocate_turn_start(messages: &[Message], running_turn: &[Message]) -> usize {
-    let Some(prompt) = running_turn.first() else {
-        return messages.len();
-    };
-    let messages_json: Vec<Option<serde_json::Value>> = messages
-        .iter()
-        .map(|m| serde_json::to_value(m).ok())
-        .collect();
-    let mut cursor = messages.len();
-    let mut first_survivor = running_turn.len();
-    for (index, turn_message) in running_turn.iter().enumerate().rev() {
-        let Some(wanted) = serde_json::to_value(turn_message).ok() else {
-            break;
-        };
-        match messages_json[..cursor]
-            .iter()
-            .rposition(|m| m.as_ref() == Some(&wanted))
-        {
-            Some(at) => {
-                cursor = at;
-                first_survivor = index;
-            }
-            None => break,
+/// Deliberately opaque, for the same reason `IMAGE_DESCRIPTION_UNAVAILABLE` is on the media path: the driver error's `Display` carries endpoint URLs, model ids and upstream response bodies, and `build_user_facing_llm_error` appends that raw string verbatim for the `Format` category — which is also where an unrecognised provider error lands by default.
+/// The raw error goes to the `warn!` in `persist_provider_failure_note` and nowhere else.
+const PROVIDER_FAILURE_NOTE: &str = "[System: the model provider failed and the task could not be completed. No response was produced; the provider error is recorded in the daemon log.]";
+
+/// Record a terminal provider failure in the session before the turn returns the error.
+///
+/// The inbound user message was persisted before the first LLM call, so without a note the saved session ends on an unanswered user turn.
+/// The next turn's repair then merges the two user messages into one, and the model acts on the stale request as if it were part of the new one, with nothing in the history saying the first request never completed.
+/// Shared by both loops so the streaming and non-streaming paths cannot drift.
+async fn persist_provider_failure_note(
+    session: &mut Session,
+    memory: &MemorySubstrate,
+    opts: &LoopOptions,
+    agent_name: &str,
+    agent_id_str: &str,
+    error: &str,
+    reason: &str,
+) {
+    // `Role::Assistant`, with the `[System: …]` text prefix carrying the "this is the daemon speaking" framing.
+    // A `Role::System` message in the middle of history reaches no hosted model: `anthropic.rs` filters it out of the request, `gemini.rs` and `bedrock.rs` skip it, and `openai.rs` / `ollama.rs` only emit one when the request carries no system prompt — which the agent loop always sets.
+    // Worse, it survives long enough to break alternation: `session_repair` merges *adjacent* same-role messages, so a system note interposed between two user turns blocks that merge and the driver then strips it, handing the provider the `user, user` pair the merge exists to prevent.
+    warn!(
+        event = "provider_failure_note",
+        agent = %agent_name,
+        error = %error,
+        reason,
+        "Provider failed — the session gets an opaque note, and this line is the only place the raw provider error appears"
+    );
+    session.push_message(Message::assistant(PROVIDER_FAILURE_NOTE));
+    repair_session_before_save(session, agent_id_str, reason);
+    if !opts.is_fork && !opts.incognito {
+        if let Err(save_err) = memory.save_session_async(session).await {
+            warn!(
+                "Failed to persist provider-error note to session: {save_err}. \
+                 The error will not appear on next session load."
+            );
         }
     }
-    if first_survivor == 0 {
-        return cursor;
-    }
-    let prompt_text = prompt.content.text_content();
-    let absorbed_prompt = first_survivor == 1
-        && !prompt_text.is_empty()
-        && cursor
-            .checked_sub(1)
-            .and_then(|i| messages.get(i))
-            .is_some_and(|m| {
-                m.role == Role::User && m.content.text_content().contains(&prompt_text)
-            });
-    if absorbed_prompt {
-        return cursor - 1;
-    }
-    if first_survivor < running_turn.len() {
-        return cursor;
-    }
-    warn!(
-        turn_messages = running_turn.len(),
-        "None of the running turn survived a mid-turn session rewrite; assuming it is the session's tail"
-    );
-    messages.len().saturating_sub(running_turn.len())
 }
 
 /// The canonical history handed to `ContextEngine::compact`.
@@ -295,6 +276,154 @@ fn without_turn_injections(messages: &[Message], injections: &TurnInjections) ->
         .collect()
 }
 
+/// The current turn (`session.messages[new_messages_start..]`) in serialized form, so it can be found again after the history is rewritten.
+///
+/// `None` when a message fails to serialize; callers then fall back to treating the turn as unknown.
+fn current_turn_snapshot(
+    session: &Session,
+    new_messages_start: usize,
+) -> Option<Vec<serde_json::Value>> {
+    let start = new_messages_start.min(session.messages.len());
+    session.messages[start..]
+        .iter()
+        .map(serde_json::to_value)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| {
+            warn!(%error, "Failed to identify current-turn boundary before rewriting history");
+        })
+        .ok()
+}
+
+/// Start index of the last occurrence of `turn` as a contiguous window of `history`.
+///
+/// An empty turn starts at the end of the history.
+fn locate_current_turn(turn: &[serde_json::Value], history: &[Message]) -> Option<usize> {
+    if turn.is_empty() {
+        return Some(history.len());
+    }
+    let history_json = history
+        .iter()
+        .map(serde_json::to_value)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| {
+            warn!(%error, "Failed to identify rewritten current-turn boundary");
+        })
+        .ok()?;
+    history_json
+        .windows(turn.len())
+        .rposition(|window| window == turn)
+}
+
+/// Where the current turn starts in `history` after `session.messages` was rewritten mid-turn: by the inline context compressor, or by the repair that runs before a `max_iterations` exit saves the session.
+///
+/// Both rewrites keep the end of the session verbatim, so the whole turn is normally found as a window.
+/// A turn longer than the compressor's tail is partly summarised away; only its surviving suffix is then new, because the summarised head now lives in the summary message and must not be re-appended to the canonical session or re-memorized.
+/// Without this the pre-rewrite index survives into `AgentLoopResult.new_messages_start`, where it either points past the end (nothing is appended to the canonical session) or into older history (earlier turns are appended again).
+fn current_turn_start_after_rewrite(
+    turn: Option<&[serde_json::Value]>,
+    history: &[Message],
+    previous_start: usize,
+) -> usize {
+    let Some(turn) = turn else {
+        return previous_start.min(history.len());
+    };
+    if let Some(start) = locate_current_turn(turn, history) {
+        return start;
+    }
+    let history_json: Vec<Option<serde_json::Value>> = history
+        .iter()
+        .map(|msg| serde_json::to_value(msg).ok())
+        .collect();
+    let at = |index: usize| history_json.get(index).and_then(Option::as_ref);
+    // The working copy can differ from `session.messages` inside the turn: the context guard truncates oversized tool results in the working copy only, so a long turn may no longer match as a whole window.
+    // Its first message is the inbound user message, which the guard never touches, and the assistant reply right after it is not a tool result either; when that pair survived, everything from it to the end is the turn.
+    // Requiring the pair rather than the prompt alone keeps an earlier turn that happened to send the same prompt from being taken for this one.
+    if let [head, second, ..] = turn {
+        if let Some(start) = (0..history_json.len())
+            .rev()
+            .find(|&i| at(i) == Some(head) && at(i + 1) == Some(second))
+        {
+            return start;
+        }
+    }
+    // Otherwise match the turn from the back, stopping at the first message that is gone: whatever came before it was summarised or dropped along with it.
+    // Later messages need not be contiguous, because working-copy nudges the rewrite persisted sit between or after them and belong to the same turn.
+    let mut cursor = history.len();
+    let mut first_survivor = turn.len();
+    for (index, wanted) in turn.iter().enumerate().rev() {
+        match history_json[..cursor]
+            .iter()
+            .rposition(|msg| msg.as_ref() == Some(wanted))
+        {
+            Some(found) => {
+                cursor = found;
+                first_survivor = index;
+            }
+            None => break,
+        }
+    }
+    if first_survivor == 0 {
+        return cursor;
+    }
+    // The one turn message a rewrite reshapes rather than drops is the prompt: repair merges adjacent user messages, so the prompt can be folded together with the time message after it or into a user message before it.
+    // It then lives on as a contiguous run of the content blocks of the user message right before the survivors, and that message is where the turn starts.
+    if first_survivor == 1
+        && cursor
+            .checked_sub(1)
+            .is_some_and(|i| user_message_absorbed(&history[i], &turn[0]))
+    {
+        return cursor - 1;
+    }
+    if first_survivor < turn.len() {
+        return cursor;
+    }
+    warn!(
+        turn_len = turn.len(),
+        "Current turn not found in rewritten history; treating it as fully summarised"
+    );
+    history.len()
+}
+
+/// Whether `merged` is a user message that session repair produced by merging `prompt` (a serialized user message) with an adjacent user message.
+///
+/// Repair appends the second message's blocks to the first and then coalesces adjacent text blocks with a blank line between them, so the prompt's text survives at the start of the merged text (merged with what followed it), at its end (merged into what preceded it), or between two blank-line separators, and its non-text blocks (images) survive as a contiguous run.
+/// Matching on the separators, rather than on a substring, keeps a summary that merely quotes the prompt from being taken for it.
+fn user_message_absorbed(merged: &Message, prompt: &serde_json::Value) -> bool {
+    let Ok(prompt) = serde_json::from_value::<Message>(prompt.clone()) else {
+        return false;
+    };
+    if merged.role != Role::User || prompt.role != Role::User {
+        return false;
+    }
+    let non_text_blocks = |content: &MessageContent| -> Vec<Option<serde_json::Value>> {
+        match content {
+            MessageContent::Text(_) => Vec::new(),
+            MessageContent::Blocks(blocks) => blocks
+                .iter()
+                .filter(|block| !matches!(block, ContentBlock::Text { .. }))
+                .map(|block| serde_json::to_value(block).ok())
+                .collect(),
+        }
+    };
+    let prompt_text = prompt.content.text_content();
+    let prompt_blocks = non_text_blocks(&prompt.content);
+    if prompt_text.is_empty() && prompt_blocks.is_empty() {
+        return false;
+    }
+    let merged_text = merged.content.text_content();
+    let text_absorbed = prompt_text.is_empty()
+        || merged_text == prompt_text
+        || merged_text.starts_with(&format!("{prompt_text}\n\n"))
+        || merged_text.ends_with(&format!("\n\n{prompt_text}"))
+        || merged_text.contains(&format!("\n\n{prompt_text}\n\n"));
+    let blocks_absorbed = prompt_blocks.is_empty()
+        || (prompt_blocks.iter().all(Option::is_some)
+            && non_text_blocks(&merged.content)
+                .windows(prompt_blocks.len())
+                .any(|window| window == prompt_blocks.as_slice()));
+    text_absorbed && blocks_absorbed
+}
+
 /// Apply an engine compaction result to the session and rebuild the LLM working copy from it.
 ///
 /// `kept_messages` must come from `compaction_history(session)`, never from the working copy, so nothing injected per turn is persisted.
@@ -314,14 +443,7 @@ fn apply_context_compaction(
     );
     let previous_new_messages_start = (*new_messages_start).min(session.messages.len());
     let current_turn = &session.messages[previous_new_messages_start..];
-    let current_turn_json = current_turn
-        .iter()
-        .map(serde_json::to_value)
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|error| {
-            warn!(%error, "Failed to identify current-turn boundary during compaction");
-        })
-        .ok();
+    let current_turn_json = current_turn_snapshot(session, *new_messages_start);
 
     let mut compacted = Vec::with_capacity(kept_messages.len() + usize::from(!summary.is_empty()));
     if !summary.is_empty() {
@@ -338,23 +460,8 @@ fn apply_context_compaction(
     compacted.extend(kept_messages);
 
     let compacted_new_messages_start = current_turn_json
-        .as_ref()
-        .and_then(|turn| {
-            if turn.is_empty() {
-                return Some(compacted.len());
-            }
-            let compacted_json = compacted
-                .iter()
-                .map(serde_json::to_value)
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(|error| {
-                    warn!(%error, "Failed to identify compacted current-turn boundary");
-                })
-                .ok()?;
-            compacted_json
-                .windows(turn.len())
-                .rposition(|window| window == turn.as_slice())
-        })
+        .as_deref()
+        .and_then(|turn| locate_current_turn(turn, &compacted))
         .unwrap_or_else(|| {
             // A custom context engine may omit or rewrite the current turn.
             // Keep it in persistent history and in the next LLM request rather
@@ -1141,7 +1248,9 @@ async fn run_agent_loop_inner(
         .as_ref()
         .map(|k| k.reasoning_echo_policy_for(&manifest.model.model))
         .unwrap_or_default();
-    if let Some(search_results) = web_search_augment(
+    // Declared before the augment call so its query-generation LLM call is metered with the rest of the turn.
+    let mut total_usage = TokenUsage::default();
+    let (search_results, augment_usage) = web_search_augment(
         manifest,
         user_message,
         web_ctx,
@@ -1149,8 +1258,9 @@ async fn run_agent_loop_inner(
         &session.messages,
         web_search_echo_policy,
     )
-    .await
-    {
+    .await;
+    accumulate_token_usage(&mut total_usage, &augment_usage);
+    if let Some(search_results) = search_results {
         let search_msg = Message::user(format!(
             "[Web search results — use these to inform your response]\n{search_results}"
         ));
@@ -1158,7 +1268,6 @@ async fn run_agent_loop_inner(
         injections.head.insert(0, search_msg);
     }
 
-    let mut total_usage = TokenUsage::default();
     let final_response;
     // Track the slot that actually served the most recent LLM call —
     // populated by `FallbackDriver` / `FallbackChain` on chain failover
@@ -1298,10 +1407,19 @@ async fn run_agent_loop_inner(
         // without affecting other concurrent sessions.
         if opts.interrupt.as_ref().is_some_and(|i| i.is_cancelled()) {
             debug!(iteration, "Agent loop interrupted by session cancel signal");
+            // Carry everything the turn already accumulated: the kernel settles the quota reservation and records cost from `total_usage`, so a zeroed result would credit back every LLM call that ran before the interrupt.
             return Ok(AgentLoopResult {
                 hit_iteration_cap: false,
                 silent: true,
+                total_usage,
+                iterations: iteration,
+                decision_traces,
+                memories_used,
+                experiment_context,
                 new_messages_start,
+                owner_notice: pending_owner_notice,
+                actual_provider: last_actual_provider,
+                actual_model: last_actual_model,
                 ..Default::default()
             });
         }
@@ -1483,10 +1601,12 @@ async fn run_agent_loop_inner(
             }
             if had_soft_compression {
                 // Persist the compressed history without the per-turn injections, which belong to this request only.
-                replace_session_messages_mid_turn(
-                    session,
-                    without_turn_injections(&messages, &injections),
-                    &mut new_messages_start,
+                let current_turn = current_turn_snapshot(session, new_messages_start);
+                session.set_messages(without_turn_injections(&messages, &injections));
+                new_messages_start = current_turn_start_after_rewrite(
+                    current_turn.as_deref(),
+                    &session.messages,
+                    new_messages_start,
                 );
             }
             apply_context_guard(&mut messages, &context_budget, available_tools);
@@ -1656,13 +1776,29 @@ async fn run_agent_loop_inner(
 
         // Call LLM with retry, error classification, and circuit breaker
         let provider_name = manifest.model.provider.as_str();
-        let mut response = call_with_retry(
+        let mut response = match call_with_retry(
             &*driver,
             request,
             Some(provider_name),
             Some(&*retry::PROVIDER_COOLDOWN),
         )
-        .await?;
+        .await
+        {
+            Ok(response) => response,
+            Err(e) => {
+                persist_provider_failure_note(
+                    session,
+                    memory,
+                    opts,
+                    &manifest.name,
+                    agent_id_str.as_str(),
+                    &e.to_string(),
+                    "provider_error",
+                )
+                .await;
+                return Err(e);
+            }
+        };
 
         accumulate_token_usage(&mut total_usage, &response.usage);
         // Track the actual-serving slot for billing attribution (#4807
@@ -2137,8 +2273,23 @@ async fn run_agent_loop_inner(
                             group,
                             max_concurrent,
                         )
-                        .await?;
+                        .await;
                         drop(tool_exec_ctx);
+                        let group_results = match group_results {
+                            Ok(results) => results,
+                            Err(e) => {
+                                commit_aborted_tool_use_turn(
+                                    &mut staged,
+                                    session,
+                                    &mut messages,
+                                    memory,
+                                    opts,
+                                    agent_id_str.as_str(),
+                                )
+                                .await;
+                                return Err(e);
+                            }
+                        };
                         // Append results in original index order (the helper
                         // already sorts), running shared bookkeeping per call.
                         for (idx, executed) in &group_results {
@@ -2227,8 +2378,23 @@ async fn run_agent_loop_inner(
                     for (call_idx, tool_call) in response.tool_calls.iter().enumerate() {
                         let mut tool_exec_ctx = build_tool_exec_ctx!();
                         let executed =
-                            execute_single_tool_call(&mut tool_exec_ctx, tool_call).await?;
+                            execute_single_tool_call(&mut tool_exec_ctx, tool_call).await;
                         drop(tool_exec_ctx);
+                        let executed = match executed {
+                            Ok(executed) => executed,
+                            Err(e) => {
+                                commit_aborted_tool_use_turn(
+                                    &mut staged,
+                                    session,
+                                    &mut messages,
+                                    memory,
+                                    opts,
+                                    agent_id_str.as_str(),
+                                )
+                                .await;
+                                return Err(e);
+                            }
+                        };
 
                         let is_hard_error = process_executed(
                             &executed,
@@ -2498,11 +2664,11 @@ async fn run_agent_loop_inner(
 
     // Persist. Fork and incognito turns skip — both are ephemeral and must
     // not pollute canonical session history.
-    repair_session_before_save(
+    repair_running_turn_before_save(
         session,
         agent_id_str.as_str(),
         "max_iterations",
-        Some(&mut new_messages_start),
+        &mut new_messages_start,
     );
     if !opts.is_fork && !opts.incognito {
         if let Err(e) = memory.save_session_async(session).await {

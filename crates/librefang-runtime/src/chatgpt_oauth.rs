@@ -630,6 +630,21 @@ async fn handle_oauth_callback(
         let state = params.get("state").cloned().unwrap_or_default();
         let error = params.get("error").cloned();
 
+        // Check `state` before anything else. A request without the state this flow generated did not come from the authorization server (any local page can hit this port), so it is answered with 400 but must not end the wait: the real redirect may still arrive.
+        if state != expected_state {
+            let msg = "State parameter mismatch -- possible CSRF attack";
+            let response = format!(
+                "HTTP/1.1 400 Bad Request\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                msg.len(),
+                msg
+            );
+            stream
+                .write_all(response.as_bytes())
+                .await
+                .map_err(|e| format!("Write error: {e}"))?;
+            return Err(msg.to_string());
+        }
+
         if let Some(err) = error {
             let desc = params.get("error_description").cloned().unwrap_or_default();
             let callback_error = format!("OAuth error: {err}: {desc}");
@@ -645,21 +660,6 @@ async fn handle_oauth_callback(
                 .await
                 .map_err(|e| format!("Write error: {e}"))?;
             return Err(callback_error);
-        }
-
-        if state != expected_state {
-            let msg = "State parameter mismatch -- possible CSRF attack";
-            send_oauth_callback_result(&tx, Err(msg.to_string())).await;
-            let response = format!(
-                "HTTP/1.1 400 Bad Request\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                msg.len(),
-                msg
-            );
-            stream
-                .write_all(response.as_bytes())
-                .await
-                .map_err(|e| format!("Write error: {e}"))?;
-            return Err(msg.to_string());
         }
 
         if code.is_empty() {
@@ -727,22 +727,41 @@ fn parse_query_params(path: &str) -> std::collections::HashMap<String, String> {
 }
 
 /// Simple URL-decode (%XX and + handling).
+///
+/// Escapes are collected as raw bytes and converted once, so a multi-byte UTF-8 sequence such as `%C3%A9` decodes to `é` instead of two Latin-1 characters.
 fn urldecode(s: &str) -> String {
-    let mut result = String::with_capacity(s.len());
-    let mut chars = s.chars();
-    while let Some(c) = chars.next() {
-        if c == '%' {
-            let hex: String = chars.by_ref().take(2).collect();
-            if let Ok(byte) = u8::from_str_radix(&hex, 16) {
-                result.push(byte as char);
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'%' => {
+                let hex = bytes.get(i + 1..i + 3);
+                match hex
+                    .and_then(|h| std::str::from_utf8(h).ok())
+                    .and_then(|h| u8::from_str_radix(h, 16).ok())
+                {
+                    Some(byte) => {
+                        out.push(byte);
+                        i += 3;
+                    }
+                    None => {
+                        // Malformed escape: drop it as the previous decoder did, consuming at most the two following bytes.
+                        i += 1 + hex.map_or(bytes.len() - i - 1, |h| h.len());
+                    }
+                }
             }
-        } else if c == '+' {
-            result.push(' ');
-        } else {
-            result.push(c);
+            b'+' => {
+                out.push(b' ');
+                i += 1;
+            }
+            b => {
+                out.push(b);
+                i += 1;
+            }
         }
     }
-    result
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 /// Percent-encode a string for use in a URL query parameter.
@@ -1049,13 +1068,53 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_callback_server_returns_state_mismatch_immediately() {
-        let result = send_test_callback("/auth/callback?code=code-123&state=wrong-state").await;
+    async fn test_callback_server_ignores_wrong_state_and_waits_for_real_callback() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-        assert_eq!(
-            result,
-            Err("State parameter mismatch -- possible CSRF attack".to_string())
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            wait_for_oauth_callback(
+                listener,
+                "expected-state",
+                std::time::Duration::from_secs(5),
+            )
+            .await
+        });
+
+        // Stray or hostile requests: wrong state, and a provider error without any state.
+        for path in [
+            "/auth/callback?code=evil&state=wrong-state",
+            "/auth/callback?error=access_denied",
+        ] {
+            let mut stray = tokio::net::TcpStream::connect(address).await.unwrap();
+            stray
+                .write_all(format!("GET {path} HTTP/1.1\r\nHost: localhost\r\n\r\n").as_bytes())
+                .await
+                .unwrap();
+            let mut response = String::new();
+            stray.read_to_string(&mut response).await.unwrap();
+            assert!(
+                response.starts_with("HTTP/1.1 400"),
+                "stray callback {path} should get 400, got: {response}"
+            );
+        }
+        assert!(
+            !server.is_finished(),
+            "a request with the wrong state must not end the wait"
         );
+
+        let mut real = tokio::net::TcpStream::connect(address).await.unwrap();
+        real.write_all(
+            b"GET /auth/callback?code=code-123&state=expected-state HTTP/1.1\r\nHost: localhost\r\n\r\n",
+        )
+        .await
+        .unwrap();
+        let result = tokio::time::timeout(std::time::Duration::from_secs(1), server)
+            .await
+            .expect("valid callback should end the wait")
+            .unwrap();
+        assert_eq!(result, Ok("code-123".to_string()));
     }
 
     #[tokio::test]
@@ -1099,6 +1158,10 @@ mod tests {
         assert_eq!(urldecode("hello%20world"), "hello world");
         assert_eq!(urldecode("a+b"), "a b");
         assert_eq!(urldecode("no%2Fslash"), "no/slash");
+        assert_eq!(urldecode("caf%C3%A9"), "café");
+        assert_eq!(urldecode("%E3%81%82"), "あ");
+        assert_eq!(urldecode("bad%zzx"), "badx");
+        assert_eq!(urldecode("trail%4"), "trail");
     }
 
     #[test]

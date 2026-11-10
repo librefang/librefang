@@ -21,22 +21,32 @@ fn render_page(source_url: &str, data: &serde_json::Value) -> String {
     crate::web_content::wrap_external_content(source_url, &crate::browser::render_page_body(data))
 }
 
+/// SSRF gate for `browser_navigate`.
+///
+/// Browser navigation goes through CDP/WebSocket, not reqwest, so DNS-pinning the resolved address is not possible here.
+/// We still run the SSRF check to validate the URL scheme and reject IPs that resolve to internal/loopback ranges; the SsrfResolution result is intentionally discarded.
+/// The async variant keeps the DNS lookup off the tokio worker running the agent loop.
+async fn check_navigate_url(url: &str, ssrf_allowed_hosts: &[String]) -> Result<(), ToolError> {
+    crate::web_fetch::check_ssrf_async(url, ssrf_allowed_hosts)
+        .await
+        .map(|_| ())
+        .map_err(|e| ToolError::InvalidParameter {
+            name: "url",
+            reason: e,
+        })
+}
+
+/// `ssrf_allowed_hosts` is the operator's `web_fetch.ssrf_allowed_hosts`, so a host allowlisted for `web_fetch` is reachable by the browser too.
 pub async fn tool_browser_navigate(
     input: &serde_json::Value,
     mgr: &BrowserManager,
     agent_id: &str,
+    ssrf_allowed_hosts: &[String],
 ) -> Result<String, ToolError> {
     let url = input["url"]
         .as_str()
         .ok_or(ToolError::MissingParameter("url"))?;
-    // Browser navigation goes through CDP/WebSocket, not reqwest, so DNS-pinning
-    // the resolved address is not possible here. We still call check_ssrf to
-    // validate the URL scheme and reject IPs that resolve to internal/loopback
-    // ranges; the SsrfResolution result is intentionally discarded.
-    let _ = crate::web_fetch::check_ssrf(url, &[]).map_err(|e| ToolError::InvalidParameter {
-        name: "url",
-        reason: e,
-    })?;
+    check_navigate_url(url, ssrf_allowed_hosts).await?;
 
     let resp = mgr
         .send_command(
@@ -344,6 +354,26 @@ mod tests {
             ],
             "links_base": "https://news.ycombinator.com",
         })
+    }
+
+    /// browser_navigate honours `web_fetch.ssrf_allowed_hosts`: an operator-allowlisted internal range is reachable, and the default stays blocked.
+    #[tokio::test]
+    async fn navigate_ssrf_gate_honours_operator_allowlist() {
+        let url = "http://127.0.0.1:8080/wiki";
+        let blocked = check_navigate_url(url, &[]).await.unwrap_err();
+        assert!(matches!(
+            blocked,
+            ToolError::InvalidParameter { name: "url", .. }
+        ));
+        check_navigate_url(url, &["127.0.0.0/8".to_string()])
+            .await
+            .expect("allowlisted host must pass the browser SSRF gate");
+        // The allowlist never opens cloud metadata.
+        assert!(
+            check_navigate_url("http://169.254.169.254/", &["169.254.0.0/16".to_string()])
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]

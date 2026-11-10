@@ -1,0 +1,4 @@
+Fix defects found in a second workspace audit.
+Suspending and resuming an agent no longer rewrites every nested `enabled` flag in `agent.toml` (which turned the skill workshop and disabled triggers back on), a freshly spawned agent now runs on the session that received its `reset_prompt`, and a config reload no longer drops DB-backed MCP servers or forgets to connect newly added ones.
+Turns stopped with `/stop` are billed for the tokens they used, Gemini tool calls with a `STOP` finish reason are executed, and a transient HTTP 500 from an OpenAI-compatible provider no longer strips the tools from every later request.
+`librefang mcp` speaks newline-delimited JSON as MCP stdio clients expect, ACP file and terminal tools send the session id editors require and `session/cancel` stops the agent loop, and the TUI lists for workflows, triggers, sessions, peers, audit and usage render again (#8588) (@houko)

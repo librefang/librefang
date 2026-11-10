@@ -9,12 +9,19 @@ use crate::commands::prelude::*;
 // Workflow commands
 // ---------------------------------------------------------------------------
 
+/// Rows of a `GET /api/workflows` response, which is the paginated `{items,total,...}` envelope (a bare array is still accepted).
+fn workflow_rows(body: &serde_json::Value) -> Option<&Vec<serde_json::Value>> {
+    body.get("items")
+        .and_then(|v| v.as_array())
+        .or_else(|| body.as_array())
+}
+
 pub(crate) fn cmd_workflow_list() {
     let base = require_daemon("workflow list");
     let client = daemon_client();
     let body = daemon_json(client.get(format!("{base}/api/workflows")).send());
 
-    match body.as_array() {
+    match workflow_rows(&body) {
         Some(workflows) if workflows.is_empty() => {
             println!("{}", i18n::t("automation-workflow-none"));
         }
@@ -285,7 +292,7 @@ pub(crate) fn cmd_trigger_list(agent_id: Option<&str>) {
                         &no_str
                     },
                     &t["fire_count"].as_u64().unwrap_or(0).to_string(),
-                    t["pattern"].as_str().unwrap_or("?"),
+                    &crate::api_json::display_value(&t["pattern"], "?"),
                 ]);
             }
             tbl.print();
@@ -834,6 +841,18 @@ pub(crate) fn cmd_cron_toggle(id: &str, enable: bool) {
 mod tests {
     use super::*;
     use reqwest::StatusCode;
+
+    /// `GET /api/workflows` answers the paginated envelope; reading it as a bare array printed "no workflows" against a daemon that had some.
+    #[test]
+    fn workflow_rows_reads_paginated_envelope() {
+        let body = serde_json::json!({
+            "items": [{"id": "w1", "name": "build", "steps": 3, "created_at": "2026-10-01T00:00:00Z"}],
+            "total": 1,
+            "offset": 0,
+            "limit": null,
+        });
+        assert_eq!(workflow_rows(&body).map(Vec::len), Some(1));
+    }
 
     /// The bug in #7825: the default arm of `run_workflow` answers 202 with a body carrying only `run_id`, and the command read `output` from it.
     /// Every successful launch printed "Unknown error" and exited 1, so any script gating on the exit code saw a failure on every run.

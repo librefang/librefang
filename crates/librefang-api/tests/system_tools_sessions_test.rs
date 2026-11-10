@@ -22,9 +22,11 @@
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
 use axum::Router;
+use librefang_api::middleware::AuthenticatedApiUser;
 use librefang_api::routes::{self, AppState};
+use librefang_kernel::auth::UserRole;
 use librefang_testing::{MockKernelBuilder, TestAppState};
-use librefang_types::agent::AgentId;
+use librefang_types::agent::{AgentId, AgentManifest, UserId};
 use librefang_types::config::McpServerConfigEntry;
 use librefang_types::tool::ToolDefinition;
 use std::sync::Arc;
@@ -400,15 +402,146 @@ async fn search_sessions_returns_scrubbed_500_on_database_failure() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn search_sessions_malformed_agent_id_is_silently_ignored() {
-    // The handler parses `agent_id` with `Uuid::parse_str(...).ok()`, so a
-    // garbage value falls through to `None` rather than 400. Pin the
-    // behaviour so a future refactor that suddenly starts rejecting it
-    // doesn't break dashboard callers that rely on the lenient shape.
+async fn search_sessions_malformed_agent_id_is_rejected() {
+    // A garbage `agent_id` used to fall through to `None`, silently widening a search the caller meant to narrow to one agent into a search over every session.
     let h = boot().await;
     let (status, body) = get_json(&h, "/api/sessions/search?q=anything&agent_id=not-a-uuid").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body:?}");
+    assert!(body.get("error").is_some(), "{body:?}");
+
+    // An empty value is "no filter", not a malformed one.
+    let (status, body) = get_json(&h, "/api/sessions/search?q=anything&agent_id=").await;
     assert_eq!(status, StatusCode::OK, "{body:?}");
     assert!(body["items"].is_array(), "{body:?}");
+}
+
+// ---------------------------------------------------------------------------
+// Owner-scoping on the flat /api/sessions* routes (#6753)
+// ---------------------------------------------------------------------------
+
+fn api_user(name: &str, role: UserRole) -> AuthenticatedApiUser {
+    AuthenticatedApiUser {
+        name: name.to_string(),
+        role,
+        user_id: UserId::from_name(name),
+    }
+}
+
+async fn get_json_as(
+    h: &Harness,
+    path: &str,
+    user: AuthenticatedApiUser,
+) -> (StatusCode, serde_json::Value) {
+    let mut req = Request::builder()
+        .method(Method::GET)
+        .uri(path)
+        .body(Body::empty())
+        .unwrap();
+    req.extensions_mut().insert(user);
+    let resp = h.app.clone().oneshot(req).await.unwrap();
+    let status = resp.status();
+    let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20)
+        .await
+        .unwrap();
+    let value = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+    (status, value)
+}
+
+/// Spawn an agent authored by `author` and seed one labelled session for it whose transcript contains `marker`.
+fn seed_authored_session(h: &Harness, name: &str, author: &str, marker: &str) -> (AgentId, String) {
+    let manifest = AgentManifest {
+        name: name.to_string(),
+        author: author.to_string(),
+        ..AgentManifest::default()
+    };
+    let agent_id = h.state.kernel.spawn_agent_typed(manifest).expect("spawn");
+    let substrate = h.state.kernel.memory_substrate();
+    let mut session = substrate
+        .create_session_with_label(agent_id, Some(&format!("{name}-label")))
+        .expect("seed session");
+    session
+        .messages
+        .push(librefang_types::message::Message::user(format!(
+            "secret {marker} text"
+        )));
+    substrate.save_session(&session).expect("save session");
+    (agent_id, session.id.0.to_string())
+}
+
+fn ids_in(body: &serde_json::Value) -> Vec<String> {
+    body["items"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|r| r["session_id"].as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn sessions_routes_hide_other_authors_sessions_from_non_admin() {
+    let h = boot().await;
+    let (alice_agent, alice_sid) = seed_authored_session(&h, "scope-alice", "alice", "alicemarker");
+    let (bob_agent, bob_sid) = seed_authored_session(&h, "scope-bob", "bob", "bobmarker");
+    let bob = || api_user("bob", UserRole::User);
+
+    // Detail: another author's transcript is a 404, own session is served.
+    let (status, body) = get_json_as(&h, &format!("/api/sessions/{alice_sid}"), bob()).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body:?}");
+    assert!(!body.to_string().contains("alicemarker"), "{body:?}");
+    let (status, body) = get_json_as(&h, &format!("/api/sessions/{bob_sid}"), bob()).await;
+    assert_eq!(status, StatusCode::OK, "{body:?}");
+
+    // List: only rows of bob's own agent (spawning also creates its default session), and `total` counts only what bob may see.
+    let (status, body) = get_json_as(&h, "/api/sessions", bob()).await;
+    assert_eq!(status, StatusCode::OK, "{body:?}");
+    let rows = body["items"].as_array().expect("items");
+    assert!(ids_in(&body).contains(&bob_sid), "{body:?}");
+    assert!(
+        rows.iter()
+            .all(|r| r["agent_id"].as_str() == Some(bob_agent.to_string().as_str())),
+        "{body:?}"
+    );
+    assert_eq!(body["total"].as_u64(), Some(rows.len() as u64), "{body:?}");
+
+    // Search: unfiltered search does not surface alice's content, an explicit filter on her agent is a 404.
+    let (status, body) = get_json_as(&h, "/api/sessions/search?q=alicemarker", bob()).await;
+    assert_eq!(status, StatusCode::OK, "{body:?}");
+    assert!(ids_in(&body).is_empty(), "{body:?}");
+    let (status, body) = get_json_as(&h, "/api/sessions/search?q=bobmarker", bob()).await;
+    assert_eq!(status, StatusCode::OK, "{body:?}");
+    assert_eq!(ids_in(&body), vec![bob_sid.clone()], "{body:?}");
+    let (status, _) = get_json_as(
+        &h,
+        &format!("/api/sessions/search?q=alicemarker&agent_id={alice_agent}"),
+        bob(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    // Label lookup on another author's agent is a 404.
+    let (status, _) = get_json_as(
+        &h,
+        &format!("/api/agents/{alice_agent}/sessions/by-label/scope-alice-label"),
+        bob(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    // Admin still sees everything.
+    let admin = || api_user("ops", UserRole::Admin);
+    let (status, _) = get_json_as(&h, &format!("/api/sessions/{alice_sid}"), admin()).await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, body) = get_json_as(&h, "/api/sessions", admin()).await;
+    let ids = ids_in(&body);
+    assert!(
+        ids.contains(&alice_sid) && ids.contains(&bob_sid),
+        "{body:?}"
+    );
+    let (status, body) = get_json_as(&h, "/api/sessions/search?q=alicemarker", admin()).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(ids_in(&body), vec![alice_sid], "{body:?}");
 }
 
 // ---------------------------------------------------------------------------

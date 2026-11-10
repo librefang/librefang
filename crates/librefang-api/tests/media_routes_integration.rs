@@ -586,6 +586,45 @@ async fn media_transcribe_rejects_oversized_body() {
     assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
 }
 
+/// A recording between axum's default 2 MiB `Bytes` cap and the advertised 10 MB limit must reach the handler (and the kernel) instead of being cut off by the extractor with a bodiless 413.
+#[tokio::test(flavor = "multi_thread")]
+async fn media_transcribe_accepts_bodies_above_the_default_extractor_cap() {
+    let h = boot().await;
+    let (status, body) = raw_request(
+        &h,
+        Method::POST,
+        "/api/media/transcribe",
+        Some("audio/webm"),
+        vec![0u8; 3 * 1024 * 1024],
+    )
+    .await;
+    assert_ne!(
+        status,
+        StatusCode::PAYLOAD_TOO_LARGE,
+        "a 3 MiB recording is under the documented 10 MB cap: {body}"
+    );
+    assert!(
+        status.is_server_error(),
+        "the body must pass every gate and reach the kernel's transcription pipeline; got {status}: {body}"
+    );
+}
+
+/// Just over the cap, the handler (not the extractor) answers, with its JSON error naming the limit.
+#[tokio::test(flavor = "multi_thread")]
+async fn media_transcribe_oversized_body_gets_the_handlers_json_413() {
+    let h = boot().await;
+    let (status, body) = raw_request(
+        &h,
+        Method::POST,
+        "/api/media/transcribe",
+        Some("audio/webm"),
+        vec![0u8; 10 * 1024 * 1024 + 1],
+    )
+    .await;
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+    assert!(body.to_string().contains("max 10MB"), "got: {body}");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn media_transcribe_strips_content_type_parameters() {
     // `audio/webm;codecs=opus` must pass the `starts_with("audio/")` gate.
