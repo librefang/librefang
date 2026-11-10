@@ -38,9 +38,6 @@ yanked = "deny"
 # constrained by crate/version. Re-review the full dependency graph whenever
 # an ignored advisory appears on a new path. Yank ignores use exact crate versions.
 ignore = [
-    # All zip 4.x releases are yanked; even tauri-plugin-updater 2.14.0 still requires ^4 on Windows.
-    # Remove this exact-version yank exception when the updater supports zip 9; RustSec advisories remain enforced.
-    { crate = "zip@4.6.1", reason = "Windows-only tauri-plugin-updater dependency; no non-yanked zip 4.x release exists. https://crates.io/crates/tauri-plugin-updater/2.14.0/dependencies" },
     # ── gtk-rs GTK3 bindings, unmaintained ─────────────────────────────────
     # Transitive via tauri-runtime-wry on Linux only. Cannot upgrade until
     # tauri migrates to GTK4 — track upstream: https://github.com/tauri-apps/tauri/issues/9220
@@ -77,9 +74,6 @@ ignore = [
     { id = "RUSTSEC-2025-0100", reason = "unic-* unmaintained (kuchikiki/selectors chain). https://rustsec.org/advisories/RUSTSEC-2025-0100" },
     { id = "RUSTSEC-2026-0192", reason = "ttf-parser unmaintained; transitive via pdf-extract -> lopdf, no safe upgrade available. https://rustsec.org/advisories/RUSTSEC-2026-0192" },
     { id = "RUSTSEC-2024-0449", reason = "unsafe-libyaml is unmaintained; transitive via serde_yaml_ng, which has no safe upgrade available. https://rustsec.org/advisories/RUSTSEC-2024-0449" },
-    { id = "RUSTSEC-2026-0367", reason = "zip 4.6.1 is reached only through tauri-plugin-updater (2.x and the 3.0 alphas all require zip ^4), whose sole extract() call runs on Windows, after the minisign check against the pubkey pinned in tauri.conf.json; the advisory concerns Unix symlinks and permission bits. The workspace's own zip is 9.x. https://rustsec.org/advisories/RUSTSEC-2026-0367" },
-    { id = "RUSTSEC-2026-0368", reason = "zip 4.6.1 is reached only through tauri-plugin-updater (2.x and the 3.0 alphas all require zip ^4), whose sole extract() call runs on Windows, after the minisign check against the pubkey pinned in tauri.conf.json; the advisory concerns Unix symlinks and permission bits. The workspace's own zip is 9.x. https://rustsec.org/advisories/RUSTSEC-2026-0368" },
-    { id = "RUSTSEC-2026-0369", reason = "zip 4.6.1 is reached only through tauri-plugin-updater (2.x and the 3.0 alphas all require zip ^4), whose sole extract() call runs on Windows, after the minisign check against the pubkey pinned in tauri.conf.json; the advisory concerns Unix symlinks and permission bits. The workspace's own zip is 9.x. https://rustsec.org/advisories/RUSTSEC-2026-0369" },
     { id = "RUSTSEC-2026-0370", reason = "zvariant unmaintained, merged into zbus 6; transitive via zbus 5 (ksni, notify-rust, tauri-plugin-single-instance), none of which has moved to zbus 6. https://rustsec.org/advisories/RUSTSEC-2026-0370" },
     { id = "RUSTSEC-2026-0371", reason = "zbus_names unmaintained, merged into zbus 6; transitive via zbus 5 (ksni, notify-rust, tauri-plugin-single-instance), none of which has moved to zbus 6. https://rustsec.org/advisories/RUSTSEC-2026-0371" },
     { id = "RUSTSEC-2026-0372", reason = "zvariant_derive unmaintained, merged into zbus 6; transitive via zbus 5 (ksni, notify-rust, tauri-plugin-single-instance), none of which has moved to zbus 6. https://rustsec.org/advisories/RUSTSEC-2026-0372" },
@@ -151,9 +145,6 @@ external-default-features = "allow"
 allow = []
 deny = []
 skip = [
-    # `zip` 4.x is pulled in by tauri-plugin-updater (transitive) while our
-    # own code uses 9.x. Allow the duplicate until tauri upstream catches up.
-    { name = "zip", version = "=4.6.1" },
 ]
 skip-tree = []
 

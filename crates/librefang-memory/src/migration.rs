@@ -2754,7 +2754,7 @@ mod tests {
 
     #[test]
     fn test_schema_version_read_error_stops_before_migration_ddl() {
-        let conn = Connection::open_in_memory().unwrap();
+        let mut conn = Connection::open_in_memory().unwrap();
         let ddl_attempts = Arc::new(AtomicUsize::new(0));
         let callback_attempts = Arc::clone(&ddl_attempts);
 
@@ -2781,7 +2781,7 @@ mod tests {
 
     #[test]
     fn test_final_schema_version_read_error_is_propagated() {
-        let conn = Connection::open_in_memory().unwrap();
+        let mut conn = Connection::open_in_memory().unwrap();
         run_migrations(&conn).unwrap();
         let reads = Arc::new(AtomicUsize::new(0));
         let callback_reads = Arc::clone(&reads);
