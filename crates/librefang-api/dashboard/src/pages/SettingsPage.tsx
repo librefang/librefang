@@ -123,6 +123,7 @@ export function SettingsPage() {
     { value: "uk" as const, icon: Globe, label: "Українська" },
     { value: "zh" as const, icon: Globe, label: "中文" },
     { value: "pl" as const, icon: Globe, label: "Polski" },
+    { value: "es" as const, icon: Globe, label: "Español" },
   ], []);
 
   const navLayoutOptions = useMemo(() => [
