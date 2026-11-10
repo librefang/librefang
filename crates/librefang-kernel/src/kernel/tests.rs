@@ -4222,6 +4222,107 @@ async fn session_reasoning_effort_pin_reaches_the_streaming_path() {
     kernel.shutdown();
 }
 
+/// The blocking dispatch path (`execute_llm_agent`, used by channels, cron, triggers and `agent_send`) must coerce the reasoning effort against the model that model selection routes to, not the manifest's pre-routing model (#8591).
+/// The base model declares only `low` / `medium` and the Stable `pinned_model` declares up to `xhigh`; coercing before selection clamped the agent's `xhigh` to `medium`, and the agent loop's per-model policy cannot recover a token the kernel already rewrote.
+#[tokio::test(flavor = "multi_thread")]
+async fn reasoning_effort_is_coerced_against_the_routed_model_on_the_blocking_path() {
+    use librefang_types::config::{ReasoningMode, ThinkingConfig};
+    use librefang_types::model_catalog::ModelCatalogEntry;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let backend = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "id": "chatcmpl-effort-routing",
+            "object": "chat.completion",
+            "choices": [{
+                "index": 0,
+                "message": { "role": "assistant", "content": "ok" },
+                "finish_reason": "stop"
+            }],
+            "usage": { "prompt_tokens": 5, "completion_tokens": 3, "total_tokens": 8 }
+        })))
+        .mount(&backend)
+        .await;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().to_path_buf();
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        default_model: DefaultModelConfig::driverless(),
+        mode: librefang_types::config::KernelMode::Stable,
+        ..KernelConfig::default()
+    };
+    let kernel = Arc::new(LibreFangKernel::boot_with_config(config).expect("boot"));
+    LibreFangKernel::set_self_handle(&kernel);
+
+    let efforts = |tokens: &[&str]| tokens.iter().map(|t| (*t).to_string()).collect::<Vec<_>>();
+    kernel.model_catalog_update(|cat| {
+        cat.add_custom_model(ModelCatalogEntry {
+            id: "effort-base".to_string(),
+            display_name: "Effort Base".to_string(),
+            provider: "testprov".to_string(),
+            supported_efforts: efforts(&["low", "medium"]),
+            ..Default::default()
+        });
+        cat.add_custom_model(ModelCatalogEntry {
+            id: "effort-routed".to_string(),
+            display_name: "Effort Routed".to_string(),
+            provider: "testprov".to_string(),
+            supported_efforts: efforts(&["low", "medium", "high", "xhigh"]),
+            ..Default::default()
+        });
+    });
+
+    // An unrecognised provider plus a custom `base_url` builds the OpenAI-compatible driver against the mock without a credential.
+    let mut manifest = test_manifest("effort-routing", "effort coerced after routing", vec![]);
+    manifest.model.provider = "testprov".to_string();
+    manifest.model.model = "effort-base".to_string();
+    manifest.model.base_url = Some(backend.uri());
+    manifest.pinned_model = Some("effort-routed".to_string());
+    manifest.thinking = Some(ThinkingConfig {
+        reasoning_effort: Some(ReasoningMode::new("xhigh").unwrap()),
+        ..Default::default()
+    });
+    let agent_id = kernel.spawn_agent(manifest).expect("spawn should succeed");
+
+    kernel
+        .send_message(agent_id, "blocking turn")
+        .await
+        .expect("the blocking turn must not error");
+
+    let requests = backend
+        .received_requests()
+        .await
+        .expect("requests recorded");
+    // Select out the web-augmentation query generator, which also runs through the agent's driver.
+    let turn_requests: Vec<serde_json::Value> = requests
+        .iter()
+        .filter_map(|request| serde_json::from_slice::<serde_json::Value>(&request.body).ok())
+        .filter(|body| !body.to_string().contains("search query generator"))
+        .collect();
+    assert_eq!(
+        turn_requests.len(),
+        1,
+        "exactly one agent-loop call; bodies: {requests:?}"
+    );
+    let body = &turn_requests[0];
+    assert_eq!(
+        body["model"], "effort-routed",
+        "Stable mode must route the turn to the pinned model: {body}"
+    );
+    assert_eq!(
+        body["reasoning_effort"], "xhigh",
+        "the effort must be coerced against the routed model, which accepts xhigh, not the base model's low/medium set: {body}"
+    );
+
+    kernel.shutdown();
+}
+
 /// The fourth dispatcher: the **ephemeral worker spawn**.
 ///
 /// `ephemeral_spawn::spawn_ephemeral_worker` derives the worker's manifest from
