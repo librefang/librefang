@@ -38,6 +38,7 @@ import {
   HelpCircle,
   Share2,
   Gauge,
+  Brain,
   LogOut,
   UserCircle,
   X,
@@ -69,6 +70,7 @@ const NAV_ACTIVE_CLASS = "bg-brand/10 text-brand font-medium before:content-['']
 type NavIcon = React.ComponentType<{ className?: string }>;
 type DashboardRoute =
   | "/overview"
+  | "/context-engine"
   | "/agents"
   | "/chat"
   | "/approvals"
@@ -1102,6 +1104,7 @@ function DashboardApp() {
     const observabilityItems: NavItem[] = [
       { to: "/analytics", label: t("nav.analytics"), icon: BarChart3 },
       { to: "/telemetry", label: t("nav.telemetry"), icon: Gauge },
+      { to: "/context-engine", label: t("context_engine.nav"), icon: Brain },
       { to: "/audit", label: t("nav.audit", { defaultValue: "Audit" }), icon: FileText },
       { to: "/logs", label: t("nav.logs"), icon: FileText },
       ...(terminalEnabled ? [{ to: "/terminal" as const, label: t("nav.terminal"), icon: Terminal }] : []),

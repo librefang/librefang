@@ -108,6 +108,13 @@ export {
   // plugins
   listPlugins,
   listPluginRegistries,
+  // context engine (all read-only)
+  getContextEngineHealth,
+  getContextEngineChain,
+  getContextEngineMetrics,
+  getContextEngineTraces,
+  getContextEngineConfig,
+  getContextEngineSandboxPolicy,
   // schedules & triggers
   listSchedules,
   listTriggers,

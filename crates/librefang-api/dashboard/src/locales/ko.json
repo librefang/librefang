@@ -4839,5 +4839,89 @@
     "size_hint": "문서당 최대 {{limit}}",
     "too_large": "{{name}}은(는) {{size}}입니다 — 문서는 최대 {{limit}}까지 가능합니다.",
     "no_agents": "아직 공유할 에이전트가 없습니다."
+  },
+  "context_engine": {
+    "nav": "컨텍스트 엔진",
+    "title": "컨텍스트 엔진",
+    "subtitle": "플러그인 체인, 훅 지표 및 최근 트레이스 활동",
+    "badge": "관측성",
+    "load_error": "컨텍스트 엔진 상태를 불러오지 못했습니다.",
+    "no_engine": "활성 플러그인 엔진 없음",
+    "no_engine_desc": "컨텍스트 엔진 플러그인을 구성하면 훅 지표와 트레이스가 수집됩니다.",
+    "health": {
+      "title": "엔진 상태",
+      "healthy": "정상",
+      "unhealthy": "비정상",
+      "active_plugins": "활성 플러그인",
+      "issues": "문제",
+      "no_issues": "보고된 문제 없음"
+    },
+    "chain": {
+      "title": "플러그인 체인",
+      "mode": "모드",
+      "mode_default": "기본",
+      "mode_single": "단일 플러그인",
+      "mode_stacked": "스택",
+      "length": "체인 길이",
+      "fallback": "폴백",
+      "plugin_error": "플러그인 사용 불가",
+      "disabled": "비활성화됨",
+      "invalid": "훅이 유효하지 않음",
+      "cache_ttl": "캐시 TTL"
+    },
+    "metrics": {
+      "title": "훅 지표",
+      "hook": "훅",
+      "calls": "호출",
+      "successes": "성공",
+      "failures": "실패",
+      "avg_latency": "평균 지연"
+    },
+    "traces": {
+      "title": "최근 트레이스",
+      "count": "트레이스 {{total}}개",
+      "empty": "아직 트레이스가 없습니다",
+      "empty_desc": "엔진이 턴을 처리하면 훅 호출이 여기에 표시됩니다.",
+      "success": "성공",
+      "failure": "실패",
+      "input": "입력",
+      "output": "출력",
+      "annotations": "주석",
+      "error": "오류",
+      "trace_id": "트레이스"
+    },
+    "config": {
+      "title": "엔진 구성",
+      "engine": "엔진",
+      "plugin": "플러그인",
+      "timeout": "훅 제한 시간",
+      "on_failure": "훅 실패 시",
+      "max_retries": "최대 재시도",
+      "retry_delay": "재시도 지연",
+      "hook_cache_ttl": "훅 캐시 TTL",
+      "assemble_cache_ttl": "어셈블 캐시 TTL",
+      "compact_cache_ttl": "컴팩트 캐시 TTL",
+      "allow_network": "네트워크 허용",
+      "allow_filesystem": "파일 시스템 허용",
+      "max_memory": "최대 메모리",
+      "circuit_breaker": "서킷 브레이커",
+      "registries": "레지스트리"
+    },
+    "sandbox": {
+      "title": "샌드박스 정책",
+      "default_mode": "기본 정책 — 플러그인 엔진 없음",
+      "allowed": "허용",
+      "denied": "차단",
+      "filesystem": "파일 시스템",
+      "network": "네트워크",
+      "memory": "메모리",
+      "persistent": "지속 서브프로세스",
+      "prewarm": "서브프로세스 예열",
+      "queue_depth": "턴 후 큐 깊이",
+      "circuit_breaker": "서킷 브레이커",
+      "otel_endpoint": "OTel 엔드포인트",
+      "unlimited": "무제한",
+      "plugin_error": "정책을 사용할 수 없음"
+    }
   }
 }
