@@ -19,7 +19,7 @@ It also cannot reach rungs that providers name themselves — `xhigh`, `minimal`
 
 1. **The token is data, not a description.** The level the operator picks travels to the wire verbatim; drivers choose *where* to put it, not *which rung it means*.
 2. **The catalog's per-model policy is authoritative.** `supported_efforts` (with `default_effort`, `off_allowed`, `mandatory`) is the model's declared vocabulary. A request outside it is **coerced to the nearest supported rung with a warning** — never dropped silently, never forwarded, never answered with a 400 by us. `none` on a model that forbids off (`off_allowed = false` or `mandatory = true`) becomes the lowest graded rung.
-3. **An entry that declares nothing keeps the pre-#8591 behaviour.** Undeclared means "no published vocabulary", not "supports everything": the legacy tokens keep their family spellings (`max` folded where the schema demands it) because that is what every pre-#8591 config was written against. Budget-based families — Gemini 2.5, older Anthropic, Ollama, Qwen's budget control — live in that state by design.
+3. **An entry that declares nothing keeps the pre-#8591 wire spellings.** Undeclared means "no published vocabulary", not "supports everything": the four legacy rungs (`none`, `low`, `high`, `max`) keep their family spellings (`max` folded where the schema demands it) because that is what every pre-#8591 config was written against, and a newer rung (`minimal`, `medium`, `xhigh`) is coerced to the nearest legacy rung rather than sent to a model that never published it (#8616 review). Budget-based families — Gemini 2.5, older Anthropic, Ollama, Qwen's budget control — live in that state by design.
 4. **Enum and budget are never parallel.** Where the model declares an effort enum, the effort is the control and the `budget_tokens` bucket is not consulted; where the model declares no enum, `budget_tokens` is the control (Ollama: the `think` boolean). The two never ride the same request.
 
 ## Naming, and the deprecated alias
@@ -55,7 +55,7 @@ Mechanically, in the order the kernel performs it:
 2. `messaging.rs` / `agent_execution.rs` backfill the global `[thinking]` table into the manifest **only when the manifest has none**, so a per-agent table beats the global one by suppressing the backfill entirely rather than by merging field-by-field.
 3. The session snapshot's `reasoning_effort` (stored in the `sessions.reasoning_effort` column, migration v65) is stamped on via `manifest_helpers::apply_session_reasoning_effort`, after the backfill so it beats the agent/global level.
 4. `manifest_helpers::apply_thinking_override` stamps the per-message override on top of whatever survived.
-5. **Coercion runs last**, against the effective model: `lookup_reasoning_policy(&manifest.model.model)` then `coerce_reasoning_effort_to_model`. `ReasoningEffortPolicy::coerce` maps a token outside the declared set to the nearest supported rung (ties resolve downward — `xhigh` → `high`) and `none` to the floor when the model forbids off, logging a `warn!` whenever the token changed. An undeclared policy passes everything through.
+5. **Coercion runs last**, against the effective model: `lookup_reasoning_policy(&manifest.model.provider, &manifest.model.model)` — provider-scoped, so a same-id model under another provider cannot borrow a declaration it never published (#8616 review) — then `coerce_reasoning_effort_to_model`. `ReasoningEffortPolicy::coerce` maps a token outside the declared set to the nearest supported rung (ties resolve downward — `xhigh` → `high`) and `none` to the floor when the model forbids off, logging a `warn!` whenever the token changed. An undeclared policy is constrained to the four legacy rungs with the same nearest-rung rule.
 6. Whatever is left in `manifest.thinking` is copied onto the `CompletionRequest`, together with the effective policy, and each driver re-applies the same coercion as a wire-side backstop for callers that build requests directly.
 
 Tests: `test_reasoning_effort_global_reaches_an_agent_that_declares_nothing`, `test_reasoning_effort_per_agent_beats_global`, `test_reasoning_effort_per_call_beats_per_agent_beats_global`, `test_session_reasoning_effort_resolution_order`, `test_declared_reasoning_policy_coerces_the_manifest` in `crates/librefang-kernel/src/kernel/tests.rs`; `test_reasoning_policy_coerces_to_the_nearest_supported_effort` in `crates/librefang-types/src/config/mod.rs`.
@@ -68,6 +68,8 @@ When both are present `reasoning_effort` wins — it is strictly more specific, 
 
 The two are not redundant. `thinking: false` clears the thinking config, which only *omits* the opt-in; `reasoning_effort: "none"` keeps a config carrying the mode, which is what lets the driver send the provider's explicit non-think toggle.
 Collapsing the two would re-open the gap this feature closes — see `test_disable_and_mode_none_are_not_the_same_thing`.
+
+The per-call boolean is the top rung, so an explicit `thinking: false` clears a per-session pin as well. An *untouched* frame sends no override at all (`ThinkingOverride::Inherit`) and leaves the pin in place — the dashboard sends `thinking` only after the user touches the control (`thinkingFrameField`), which is what makes frame-wins safe.
 
 `thinking: true` clears an inherited `reasoning_effort = "none"` — from the agent, the global config, or the session pin — rather than leaving it in place.
 The boolean documents itself as "force thinking on even if the manifest has it off", and a non-think mode is exactly that off-state, so leaving it would make the boolean a silent no-op on any agent (or global config) that pins `none`.
@@ -102,8 +104,9 @@ Every table below is read together with rule 2: the token shown is what reaches 
 | a graded token | `"thinking": {"type": "enabled"}`, `"reasoning_effort": <token verbatim>` |
 | *unset* | neither field — see below |
 
-The token is verbatim: `low` → `low`, `medium` → `medium`, `xhigh` → `xhigh`, `max` → `max`.
-The pre-#8591 folds (`medium` / `xhigh` → `high`) applied only to the four-rung enum and are gone for any model with a declared policy; a model whose entry declares nothing keeps the legacy spellings, so old configs stay byte-identical.
+The token is verbatim when the model declares it: `low` → `low`, `medium` → `medium`, `xhigh` → `xhigh`, `max` → `max`.
+A model whose entry declares nothing gets the legacy rungs only: `medium` / `minimal` → `low`, `xhigh` → `high`, while `none` / `low` / `high` / `max` pass unchanged (#8616 review).
+The pre-#8591 folds (`medium` / `xhigh` → `high`) applied only to the four-rung enum and are gone for any model with a declared policy.
 
 With **no** explicit mode a V4 body is byte-for-byte what it was before #7946.
 DeepSeek ignores `budget_tokens`, so deriving an effort from the budget would change the wire shape of every existing V4 request without changing what the model does.
@@ -133,7 +136,7 @@ Top-level form only:
 | Mode | Wire |
 |---|---|
 | `none` | field omitted |
-| a graded token | `"reasoning_effort": <token verbatim>` — including `xhigh`, `medium`, `minimal` |
+| a graded token | `"reasoning_effort": <token verbatim>` — including `xhigh`, `medium`, `minimal` when the model declares them; an undeclared model coerces them to the nearest legacy rung |
 | *unset, undeclared model* | `"reasoning_effort": <budget bucket>`, or nothing under 1024 |
 | *unset, declared model* | nothing — the enum is the control |
 
@@ -155,7 +158,7 @@ If a declared token still draws a 400, the #7769 strip-and-retry handles it rath
 Opus 4.6 and newer no longer have a token budget to send: `thinking.budget_tokens` was deprecated on the 4.6 pair and answers 400 from Opus 4.7 onwards, and the depth control that replaced it is `output_config.effort`.
 The API's rungs are `low` / `medium` / `high` / `xhigh` / `max`, and **which of them a generation accepts is catalog data** — `xhigh` only from Opus 4.7 onwards.
 So the driver emits the token verbatim when the model's policy declares it and coerces an out-of-set request to the nearest declared rung — the same rule the kernel and the OpenAI-compatible driver apply, so the two wires cannot disagree about what a request meant.
-An entry that declares nothing keeps the pre-#8591 mapping — `low` / `high` / `max` only, and the open tokens are dropped with a warning — because sending `xhigh` to a generation that rejects it would be a 400 rather than a rung, and no model that predates the vocabulary should start receiving one.
+An entry that declares nothing constrains the token to the four legacy rungs with the same nearest-rung rule — `medium` / `minimal` → `low`, `xhigh` → `high` — rather than dropping it or sending a rung a generation that predates the vocabulary never published (#8616 review).
 `none` is still off, spelled `thinking: {"type": "disabled"}` on the ids that both reason unasked and accept that spelling and by omission everywhere else; when the model forbids off, the kernel has already coerced it to the lowest graded rung.
 
 With no mode set, the driver sends **no** `output_config` at all rather than bucketing `budget_tokens` into one.

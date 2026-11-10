@@ -3,7 +3,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { ReactNode } from "react";
 import type { AgentItem } from "../api";
-import { useChatMessages } from "./ChatPage";
+import { thinkingFrameField, useChatMessages } from "./ChatPage";
 
 const sendAgentMessage = vi.fn().mockResolvedValue({ response: "http answer" });
 
@@ -248,5 +248,31 @@ describe("chat turn survives an agent switch", () => {
     });
 
     expect(socket.messageListenerCount()).toBe(0);
+  });
+});
+
+// Refs #8616: the chat page sent `thinking: deepThinking` on every frame, so
+// an untouched toggle sent the legacy `false` and the kernel cleared the
+// thinking config — erasing a per-session reasoning pin. Until the user moves
+// the toggle the key is omitted and the kernel inherits.
+describe("deep-thinking frame field", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    MockWebSocket.instances = [];
+    vi.stubGlobal("WebSocket", MockWebSocket);
+  });
+
+  it("omits the legacy thinking key while the toggle is untouched", async () => {
+    const { socket } = await sendOverSocket();
+    const frames = socket.sent.map((frame) => JSON.parse(frame) as Record<string, unknown>);
+    const turn = frames.find((frame) => frame.content === "run the long job");
+    expect(turn).toBeDefined();
+    expect(turn).not.toHaveProperty("thinking");
+  });
+
+  it("sends the boolean only once the user has toggled", () => {
+    expect(thinkingFrameField(false, false)).toEqual({});
+    expect(thinkingFrameField(false, true)).toEqual({ thinking: false });
+    expect(thinkingFrameField(true, true)).toEqual({ thinking: true });
   });
 });

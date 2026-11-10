@@ -561,11 +561,10 @@ fn build_anthropic_request(request: &CompletionRequest) -> ApiRequest {
 /// A token outside the declared set is coerced to the nearest supported rung —
 /// the same rule the OpenAI-compatible driver and the kernel apply, so the two
 /// wires cannot disagree about what a request meant.
-/// An entry that declares nothing keeps the pre-#8591 mapping (`low` / `high` /
-/// `max` only) — the open tokens were never representable on this wire before
-/// the vocabulary existed, and sending one to a generation that rejects it
-/// would be a 400 rather than a rung, so an undeclared model drops them with a
-/// warning instead.
+/// An entry that declares nothing constrains the token to the four pre-#8591
+/// rungs (`none` / `low` / `high` / `max`) with that same nearest-rung rule, so
+/// `medium` / `xhigh` / `minimal` reach this wire as `low` / `high` / `low`
+/// instead of being dropped (#8616 review).
 /// `none` is filtered out as an opt-out before the form is chosen, so it cannot
 /// arrive here; when the model forbids off, the kernel has already coerced it
 /// to the lowest graded rung, which arrives here as an ordinary token.
@@ -577,32 +576,18 @@ fn adaptive_effort(
     if mode.is_none() {
         return None;
     }
-    if policy.is_declared() {
-        let coerced = policy.coerce(mode);
-        if let Some(from) = coerced.coerced_from.as_deref() {
-            tracing::warn!(
-                from = %from,
-                to = %coerced.effective.as_str(),
-                "reasoning effort coerced to the nearest supported rung"
-            );
-        }
-        if coerced.effective.is_none() {
-            return None;
-        }
-        return Some(coerced.effective.as_str().to_string());
+    let coerced = policy.coerce(mode);
+    if let Some(from) = coerced.coerced_from.as_deref() {
+        tracing::warn!(
+            from = %from,
+            to = %coerced.effective.as_str(),
+            "reasoning effort coerced to the nearest supported rung"
+        );
     }
-    let token = mode.as_str();
-    match token {
-        "low" | "high" | "max" => Some(token.to_string()),
-        other => {
-            tracing::warn!(
-                token = %other,
-                model_declares = "nothing",
-                "reasoning effort is not representable on an undeclared Anthropic model; omitting output_config.effort"
-            );
-            None
-        }
+    if coerced.effective.is_none() {
+        return None;
     }
+    Some(coerced.effective.as_str().to_string())
 }
 
 #[async_trait]
@@ -2468,19 +2453,19 @@ mod tests {
     /// `reasoning_effort` is the only thing that names an effort rung.
     /// A budget must not be bucketed into one: `output_config` defaults to `high` when absent, so deriving `medium` from the compiled-in default budget of 10_000 would make every agent that configured nothing reason less than an unconfigured request does.
     ///
-    /// #8591: with no catalog declaration the driver keeps the pre-#8591
-    /// mapping — the three tokens it always sent — because the adaptive API
-    /// rejects `xhigh` on half the generation and the open tokens were never
-    /// representable here.
+    /// #8591: with no catalog declaration the driver constrains the token to
+    /// the four legacy rungs with the same nearest-rung rule a declared set
+    /// gets, so `medium` / `xhigh` / `minimal` arrive as `low` / `high` / `low`
+    /// rather than reaching a generation that may reject them (#8616 review).
     #[test]
     fn only_an_explicit_mode_pins_an_effort_rung() {
         for (reasoning_effort, expected) in [
             (Some(ReasoningMode::low()), Some("low")),
             (Some(ReasoningMode::high()), Some("high")),
             (Some(ReasoningMode::max()), Some("max")),
-            (Some(ReasoningMode::new("medium").unwrap()), None),
-            (Some(ReasoningMode::new("xhigh").unwrap()), None),
-            (Some(ReasoningMode::new("minimal").unwrap()), None),
+            (Some(ReasoningMode::new("medium").unwrap()), Some("low")),
+            (Some(ReasoningMode::new("xhigh").unwrap()), Some("high")),
+            (Some(ReasoningMode::new("minimal").unwrap()), Some("low")),
             (None, None),
         ] {
             // The budgets straddle every bucket boundary the OpenAI-compatible driver uses, so a reintroduced budget bucket shows up as a rung appearing where `None` is expected or moving where a mode was named.
