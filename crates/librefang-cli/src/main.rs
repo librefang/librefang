@@ -20,6 +20,7 @@ static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 // would expose pre-existing (already-dead) builder methods/variants to the
 // dead_code lint. Deleting that dead API is out of scope for a code-move PR.
 pub(crate) mod acp;
+pub(crate) mod api_json;
 mod cli;
 mod commands;
 pub(crate) mod desktop_install;

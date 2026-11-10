@@ -775,3 +775,173 @@ async fn hook_newline_less_stdout_hits_cap() {
         other => panic!("expected InvalidOutput, got {other:?}"),
     }
 }
+
+#[cfg(unix)]
+fn write_exec_script(dir: &std::path::Path, name: &str, body: &str) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let path = dir.join(name);
+    std::fs::write(&path, body).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    path
+}
+
+/// Reports the sandbox-relevant environment for every request line it reads.
+#[cfg(unix)]
+const SANDBOX_ENV_REPORTER: &str = "#!/bin/sh\nwhile read _line; do printf '{\"sandbox\":\"%s\",\"ro\":\"%s\",\"home\":\"%s\",\"state\":\"%s\",\"tmp\":\"%s\"}\\n' \"$LIBREFANG_SANDBOX\" \"$LIBREFANG_READONLY_FS\" \"$HOME\" \"$LIBREFANG_STATE_FILE\" \"$TMPDIR\"; done\n";
+
+/// A persistent hook must be confined exactly like a one-shot hook of the same plugin, and must be told its shared state file.
+#[cfg(unix)]
+#[tokio::test]
+async fn persistent_hook_gets_the_same_sandbox_as_one_shot() {
+    let tmp = tempfile::tempdir().unwrap();
+    let hook = write_exec_script(tmp.path(), "env_hook", SANDBOX_ENV_REPORTER);
+    let state = tmp.path().join("state").join("agent-1.json");
+    let config = HookConfig {
+        state_file: Some(state.clone()),
+        ..Default::default()
+    };
+    let input = serde_json::json!({"type": "ingest", "agent_id": "agent-1", "message": "m"});
+
+    let pool = HookProcessPool::new();
+    let persistent = pool
+        .call(
+            hook.to_str().unwrap(),
+            PluginRuntime::Native,
+            &input,
+            &config,
+        )
+        .await
+        .expect("persistent hook ran");
+    let one_shot = run_hook_json(
+        "ingest",
+        hook.to_str().unwrap(),
+        PluginRuntime::Native,
+        &input,
+        &config,
+    )
+    .await
+    .expect("one-shot hook ran");
+
+    assert_eq!(persistent["sandbox"], "1", "got {persistent}");
+    assert_eq!(persistent["ro"], "1", "got {persistent}");
+    assert_eq!(persistent["home"], "/dev/null", "got {persistent}");
+    assert_eq!(
+        persistent["state"],
+        state.to_str().unwrap(),
+        "got {persistent}"
+    );
+    assert!(
+        persistent["tmp"]
+            .as_str()
+            .is_some_and(|t| t.contains("librefang_hook_")),
+        "got {persistent}"
+    );
+    assert_eq!(std::fs::read_to_string(&state).unwrap(), "{}");
+    for key in ["sandbox", "ro", "home", "state"] {
+        assert_eq!(
+            persistent[key], one_shot[key],
+            "{key} differs between spawn paths"
+        );
+    }
+}
+
+/// A process pre-warmed with default (sandboxed) settings must not serve a call whose config allows network.
+#[cfg(unix)]
+#[tokio::test]
+async fn persistent_hook_respawns_when_sandbox_settings_change() {
+    let tmp = tempfile::tempdir().unwrap();
+    let hook = write_exec_script(tmp.path(), "env_hook", SANDBOX_ENV_REPORTER);
+    let pool = HookProcessPool::new();
+    pool.prewarm(hook.to_str().unwrap(), PluginRuntime::Native, &[])
+        .await
+        .unwrap();
+
+    let out = pool
+        .call(
+            hook.to_str().unwrap(),
+            PluginRuntime::Native,
+            &serde_json::json!({"type": "ingest"}),
+            &HookConfig {
+                allow_network: true,
+                allow_filesystem: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(out["sandbox"], "", "got {out}");
+    assert_eq!(out["ro"], "", "got {out}");
+}
+
+/// A timed-out call may already have run its side effect, so it must not be replayed on a fresh process.
+#[cfg(unix)]
+#[tokio::test]
+async fn persistent_hook_timeout_is_not_replayed() {
+    let tmp = tempfile::tempdir().unwrap();
+    let counter = tmp.path().join("calls");
+    let hook = write_exec_script(
+        tmp.path(),
+        "slow_hook",
+        "#!/bin/sh\nwhile read _line; do echo x >> \"$COUNTER\"; sleep 3; printf '{}\\n'; done\n",
+    );
+    let config = HookConfig {
+        allow_network: true,
+        allow_filesystem: true,
+        timeout_secs: 1,
+        plugin_env: vec![("COUNTER".to_string(), counter.display().to_string())],
+        ..Default::default()
+    };
+
+    let pool = HookProcessPool::new();
+    let started = std::time::Instant::now();
+    let err = pool
+        .call(
+            hook.to_str().unwrap(),
+            PluginRuntime::Native,
+            &serde_json::json!({"type": "ingest"}),
+            &config,
+        )
+        .await
+        .expect_err("call must time out");
+    let elapsed = started.elapsed();
+    assert!(err.to_string().contains("timed out"), "{err}");
+    assert!(
+        elapsed < Duration::from_millis(1800),
+        "a timeout must be reported once, not after a replay: {elapsed:?}"
+    );
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let calls = std::fs::read_to_string(&counter).unwrap_or_default();
+    assert_eq!(calls.lines().count(), 1, "request was replayed: {calls:?}");
+}
+
+/// A process that dies before replying is still restarted and the request retried once.
+#[cfg(unix)]
+#[tokio::test]
+async fn persistent_hook_crash_before_reply_is_retried() {
+    let tmp = tempfile::tempdir().unwrap();
+    let marker = tmp.path().join("crashed_once");
+    let hook = write_exec_script(
+        tmp.path(),
+        "crash_once_hook",
+        "#!/bin/sh\nif [ ! -e \"$MARKER\" ]; then : > \"$MARKER\"; read _line; exit 3; fi\nwhile read _line; do printf '{\"ok\":true}\\n'; done\n",
+    );
+    let config = HookConfig {
+        allow_network: true,
+        allow_filesystem: true,
+        timeout_secs: 5,
+        plugin_env: vec![("MARKER".to_string(), marker.display().to_string())],
+        ..Default::default()
+    };
+
+    let pool = HookProcessPool::new();
+    let out = pool
+        .call(
+            hook.to_str().unwrap(),
+            PluginRuntime::Native,
+            &serde_json::json!({"type": "ingest"}),
+            &config,
+        )
+        .await
+        .expect("crash before reply is retried on a fresh process");
+    assert_eq!(out["ok"], true);
+}

@@ -52,12 +52,12 @@ fn install_session<K: AcpKernel>(
     state: SessionState,
 ) -> LfSessionId {
     let lf_id = state.librefang_session_id;
-    if let Some(previous) = sessions.insert(acp_id, state) {
+    if let Some(previous) = sessions.insert(acp_id.clone(), state) {
         kernel.unregister_session_fs(previous.librefang_session_id);
         kernel.unregister_session_terminal(previous.librefang_session_id);
     }
-    kernel.register_session_fs(lf_id);
-    kernel.register_session_terminal(lf_id);
+    kernel.register_session_fs(lf_id, &acp_id);
+    kernel.register_session_terminal(lf_id, &acp_id);
     lf_id
 }
 

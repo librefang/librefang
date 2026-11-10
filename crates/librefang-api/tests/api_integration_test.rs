@@ -1130,12 +1130,9 @@ async fn test_agent_session_empty() {
 /// `GET /api/agents/{id}/session` and then pins the effort with
 /// `PATCH /api/sessions/{id}/reasoning` (#8591).
 ///
-/// On a never-used agent nothing had created the canonical session row, so the
-/// GET reported an id the PATCH could not address and the pin 404-ed with
-/// nothing in the payload to explain why. The TUI now asks the GET to
-/// materialize the row (`?materialize=true`) — a plain GET stays read-only;
-/// the PATCH must still refuse a genuinely unknown id, so materialization must
-/// not turn it into an upsert.
+/// When the canonical session row does not exist, the GET reports an id the PATCH cannot address and the pin 404-s with nothing in the payload to explain why.
+/// Spawn now creates the canonical row itself, but the row can still be missing afterwards (a deleted or reset session, an agent restored from an older database), so the test removes it to reach that state.
+/// The TUI asks the GET to materialize the row (`?materialize=true`) — a plain GET stays read-only; the PATCH must still refuse a genuinely unknown id, so materialization must not turn it into an upsert.
 #[tokio::test(flavor = "multi_thread")]
 async fn get_agent_session_materializes_only_when_asked_and_the_patch_then_works() {
     use librefang_types::agent::AgentId;
@@ -1162,8 +1159,13 @@ async fn get_agent_session_materializes_only_when_asked_and_the_patch_then_works
         .expect("spawned agent")
         .session_id;
     assert!(
+        substrate.get_session(canonical).unwrap().is_some(),
+        "spawn creates the canonical session row the agent points at"
+    );
+    substrate.delete_session_only(canonical).unwrap();
+    assert!(
         substrate.get_session(canonical).unwrap().is_none(),
-        "pre-condition: a never-used agent has no session row"
+        "pre-condition: the canonical session row is missing"
     );
 
     // Half one: a plain GET reports the canonical id and is read-only.

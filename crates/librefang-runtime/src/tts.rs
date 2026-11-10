@@ -18,6 +18,32 @@ fn resolve_elevenlabs_format<'a>(
     format_override.unwrap_or(cfg.output_format.as_str())
 }
 
+/// Shape check for the ElevenLabs `voice_id` path segment and `output_format` query value.
+///
+/// Mirrors the media driver's validation (`librefang-runtime-media` `elevenlabs.rs`): a voice_id is exactly 20 ASCII alphanumerics and a format is a token of lowercase letters, digits and `_`.
+fn validate_elevenlabs_url_parts(voice_id: &str, output_format: &str) -> Result<(), String> {
+    const VOICE_ID_LEN: usize = 20;
+    const ECHO_MAX_BYTES: usize = 64;
+    if voice_id.len() != VOICE_ID_LEN || !voice_id.chars().all(|c| c.is_ascii_alphanumeric()) {
+        let echoed = crate::str_utils::safe_truncate_str(voice_id, ECHO_MAX_BYTES);
+        return Err(format!(
+            "Invalid ElevenLabs voice_id {echoed:?}: expected {VOICE_ID_LEN} ASCII alphanumeric characters"
+        ));
+    }
+    if output_format.is_empty()
+        || output_format.len() > 32
+        || !output_format
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+    {
+        let echoed = crate::str_utils::safe_truncate_str(output_format, ECHO_MAX_BYTES);
+        return Err(format!(
+            "Invalid ElevenLabs output_format {echoed:?}: expected a format such as \"mp3_44100_128\""
+        ));
+    }
+    Ok(())
+}
+
 /// Resolve the final container the `text_to_speech` tool writes to `output/`:
 /// the per-call `output_format` argument wins over the operator-wide
 /// `[tts] output_format`, which itself falls back to
@@ -231,15 +257,17 @@ impl TtsEngine {
         voice_override: Option<&str>,
         format_override: Option<&str>,
     ) -> Result<TtsResult, String> {
-        let api_key =
-            std::env::var("ELEVENLABS_API_KEY").map_err(|_| "ELEVENLABS_API_KEY not set")?;
-
         let voice_id = voice_override.unwrap_or(&self.config.elevenlabs.voice_id);
         // 3-tier resolution: tool-arg override > `[tts.elevenlabs].output_format`
         // (default `opus_48000_32` for WhatsApp PTT) > built-in default. Request
         // the format explicitly so ElevenLabs returns Ogg/Opus, not its MP3
         // default (#6116).
         let output_format = resolve_elevenlabs_format(format_override, &self.config.elevenlabs);
+        // Both values come from tool input and are spliced into the URL path and query of a request that carries the operator's API key, so reject anything that could change the endpoint or add parameters.
+        validate_elevenlabs_url_parts(voice_id, output_format)?;
+
+        let api_key =
+            std::env::var("ELEVENLABS_API_KEY").map_err(|_| "ELEVENLABS_API_KEY not set")?;
         let url = format!(
             "https://api.elevenlabs.io/v1/text-to-speech/{voice_id}?output_format={output_format}"
         );
@@ -763,5 +791,35 @@ mod tests {
             msg.contains("LIBREFANG_TEST_MISSING_KEY_ZXQ99"),
             "error should name the env var"
         );
+    }
+
+    #[tokio::test]
+    async fn elevenlabs_fallback_rejects_injected_voice_and_format_before_network() {
+        let mut config = default_config();
+        config.enabled = true;
+        config.provider = Some("elevenlabs".to_string());
+        let engine = TtsEngine::new(config);
+
+        let err = engine
+            .synthesize("Hello", Some("x/../../voices/abc/settings/edit?"), None)
+            .await
+            .unwrap_err();
+        assert!(err.contains("Invalid ElevenLabs voice_id"), "{err}");
+
+        let err = engine
+            .synthesize("Hello", None, Some("mp3_44100_128&enable_logging=true"))
+            .await
+            .unwrap_err();
+        assert!(err.contains("Invalid ElevenLabs output_format"), "{err}");
+    }
+
+    #[test]
+    fn elevenlabs_url_parts_accept_defaults() {
+        let cfg = TtsConfig::default();
+        assert!(validate_elevenlabs_url_parts(
+            &cfg.elevenlabs.voice_id,
+            &cfg.elevenlabs.output_format
+        )
+        .is_ok());
     }
 }

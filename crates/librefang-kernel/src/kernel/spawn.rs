@@ -167,13 +167,12 @@ impl LibreFangKernel {
 
         // Restore the most recent session for this agent if one exists in the
         // database, so conversation history survives daemon restarts.
-        let session_id = self
+        let restored_session_id = self
             .memory
             .substrate
             .get_agent_session_ids(agent_id)
             .ok()
-            .and_then(|ids| ids.into_iter().next())
-            .unwrap_or_default();
+            .and_then(|ids| ids.into_iter().next());
 
         // SECURITY: If this spawn is linked to a running parent agent,
         // enforce that the child's capabilities are a subset of the
@@ -222,13 +221,20 @@ impl LibreFangKernel {
 
         info!(agent = %name, id = %agent_id, parent = ?parent, "Spawning agent");
 
-        // Create the backing session now; prompt injection happens after
-        // registration so agent-scoped metadata is visible.
-        let mut session = self
-            .memory
-            .substrate
-            .create_session(agent_id)
-            .map_err(KernelError::LibreFang)?;
+        // Create the backing session only when there is nothing to restore, and make it the canonical session.
+        // Creating one unconditionally while pointing the entry at a different id left the reset prompt and context injections in a session the agent never used, and on a respawn the newer empty row became the "most recent" session that the next respawn restored.
+        // Prompt injection happens after registration so agent-scoped metadata is visible.
+        let (session_id, mut new_session) = match restored_session_id {
+            Some(restored) => (restored, None),
+            None => {
+                let session = self
+                    .memory
+                    .substrate
+                    .create_session(agent_id)
+                    .map_err(KernelError::LibreFang)?;
+                (session.id, Some(session))
+            }
+        };
 
         // Inherit kernel exec_policy as fallback if agent manifest doesn't have one.
         // Exception: if the agent declares shell_exec in capabilities.tools, promote
@@ -459,16 +465,19 @@ impl LibreFangKernel {
 
         // Inject reset/context prompts only after the agent is registered so
         // agent-scoped injections and tag-gated global injections are visible.
-        self.inject_reset_prompt(&mut session, agent_id);
+        // A restored session already went through this when it was created.
+        if let Some(session) = new_session.as_mut() {
+            self.inject_reset_prompt(session, agent_id);
 
-        // Fire external session:start hook for the newly created session.
-        self.governance.external_hooks.fire(
-            crate::hooks::ExternalHookEvent::SessionStart,
-            serde_json::json!({
-                "agent_id": agent_id.to_string(),
-                "session_id": session.id.0.to_string(),
-            }),
-        );
+            // Fire external session:start hook for the newly created session.
+            self.governance.external_hooks.fire(
+                crate::hooks::ExternalHookEvent::SessionStart,
+                serde_json::json!({
+                    "agent_id": agent_id.to_string(),
+                    "session_id": session.id.0.to_string(),
+                }),
+            );
+        }
 
         // Update parent's children list
         if let Some(parent_id) = parent {

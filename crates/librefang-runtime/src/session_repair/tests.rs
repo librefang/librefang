@@ -2019,3 +2019,212 @@ mod prop {
     }
     }
 }
+
+// --- Tool results are never folded into a real user question (Text before ToolResult) ---
+
+fn is_tool_result(block: &ContentBlock) -> bool {
+    matches!(block, ContentBlock::ToolResult { .. })
+}
+
+/// Every user message that carries ToolResult blocks must carry them first, and the user's own question must stay a message of its own.
+fn assert_tool_results_never_follow_text(messages: &[Message], question: &str) {
+    for (idx, msg) in messages.iter().enumerate() {
+        if let MessageContent::Blocks(blocks) = &msg.content {
+            if let Some(first_other) = blocks.iter().position(|b| !is_tool_result(b)) {
+                assert!(
+                    !blocks[first_other..].iter().any(is_tool_result),
+                    "message {idx} has a ToolResult after a non-ToolResult block: {blocks:?}"
+                );
+            }
+        }
+    }
+    let question_msg = messages
+        .iter()
+        .find(|m| m.role == Role::User && m.content.text_content().contains(question))
+        .expect("the user's question must survive repair");
+    match &question_msg.content {
+        MessageContent::Text(_) => {}
+        MessageContent::Blocks(blocks) => assert!(
+            !blocks.iter().any(is_tool_result),
+            "tool results were folded into the user's question: {blocks:?}"
+        ),
+    }
+}
+
+fn assistant_tool_use(id: &str) -> Message {
+    Message {
+        role: Role::Assistant,
+        content: MessageContent::Blocks(vec![tool_use_block(id)]),
+        pinned: false,
+        timestamp: None,
+    }
+}
+
+#[test]
+fn enforce_adjacent_inserts_synthetic_result_before_user_question() {
+    let question = "what is the status of order 42?";
+    let mut messages = vec![
+        Message::user("start"),
+        assistant_tool_use("t1"),
+        Message::user(question),
+    ];
+
+    let inserted = enforce_adjacent_tool_result_pairs(&mut messages);
+
+    assert_eq!(inserted, 1);
+    assert_eq!(messages.len(), 4);
+    assert!(message_is_only_tool_results(&messages[2]));
+    assert!(has_synthetic_result_for(&messages[2], "t1"));
+    assert!(matches!(&messages[3].content, MessageContent::Text(t) if t == question));
+    assert_tool_results_never_follow_text(&messages, question);
+}
+
+#[test]
+fn enforce_adjacent_keeps_results_ahead_of_trailing_guidance_text() {
+    let mut messages = vec![
+        Message::user("start"),
+        Message {
+            role: Role::Assistant,
+            content: MessageContent::Blocks(vec![tool_use_block("t1"), tool_use_block("t2")]),
+            pinned: false,
+            timestamp: None,
+        },
+        Message {
+            role: Role::User,
+            content: MessageContent::Blocks(vec![
+                tool_result_block("t1", "ok"),
+                text_block("[System: guidance]"),
+            ]),
+            pinned: false,
+            timestamp: None,
+        },
+    ];
+
+    let inserted = enforce_adjacent_tool_result_pairs(&mut messages);
+
+    assert_eq!(inserted, 1);
+    assert_eq!(messages.len(), 3);
+    let MessageContent::Blocks(blocks) = &messages[2].content else {
+        panic!("expected blocks");
+    };
+    assert_eq!(blocks.len(), 3);
+    assert!(is_tool_result(&blocks[0]) && is_tool_result(&blocks[1]));
+    assert!(matches!(&blocks[2], ContentBlock::Text { text, .. } if text == "[System: guidance]"));
+}
+
+#[test]
+fn insert_synthetic_results_inserts_before_user_question() {
+    let question = "please summarise the report";
+    let mut messages = vec![
+        Message::user("start"),
+        assistant_tool_use("t1"),
+        Message {
+            role: Role::User,
+            content: MessageContent::Blocks(vec![text_block(question), image_block()]),
+            pinned: false,
+            timestamp: None,
+        },
+    ];
+
+    let inserted = insert_synthetic_results(&mut messages);
+
+    assert_eq!(inserted, 1);
+    assert_eq!(messages.len(), 4);
+    assert!(message_is_only_tool_results(&messages[2]));
+    assert!(matches!(
+        &messages[3].content,
+        MessageContent::Blocks(b) if *b == vec![text_block(question), image_block()]
+    ));
+    assert_tool_results_never_follow_text(&messages, question);
+}
+
+#[test]
+fn reorder_tool_results_does_not_fold_moved_result_into_user_question() {
+    let question = "and what about the other one?";
+    let mut messages = vec![
+        Message::user("start"),
+        assistant_tool_use("t1"),
+        Message::user(question),
+        Message::assistant("thinking about it"),
+        Message {
+            role: Role::User,
+            content: MessageContent::Blocks(vec![tool_result_block("t1", "late result")]),
+            pinned: false,
+            timestamp: None,
+        },
+    ];
+
+    let reordered = reorder_tool_results(&mut messages);
+
+    assert_eq!(reordered, 1);
+    assert!(message_is_only_tool_results(&messages[2]));
+    assert!(matches!(&messages[3].content, MessageContent::Text(t) if t == question));
+    assert_tool_results_never_follow_text(&messages, question);
+}
+
+#[test]
+fn rescue_misplaced_results_does_not_fold_into_user_question() {
+    let question = "did it work?";
+    let mut messages = vec![
+        Message::user("start"),
+        Message {
+            role: Role::Assistant,
+            content: MessageContent::Blocks(vec![
+                tool_use_block("t1"),
+                tool_result_block("t1", "stuck in assistant"),
+            ]),
+            pinned: false,
+            timestamp: None,
+        },
+        Message::user(question),
+    ];
+
+    let rescued = rescue_misplaced_tool_results(&mut messages);
+
+    assert_eq!(rescued, 1);
+    assert!(message_is_only_tool_results(&messages[2]));
+    assert!(matches!(&messages[3].content, MessageContent::Text(t) if t == question));
+    assert_tool_results_never_follow_text(&messages, question);
+}
+
+#[test]
+fn full_repair_never_mixes_synthetic_result_into_current_question() {
+    let question = "what is the status of order 42?";
+    let messages = vec![
+        Message::user("start"),
+        assistant_tool_use("t1"),
+        Message::user(question),
+    ];
+
+    let repaired = validate_and_repair(&messages);
+
+    assert_tool_results_never_follow_text(&repaired, question);
+    assert_eq!(repaired.last().unwrap().content.text_content(), question);
+}
+
+/// Sessions persisted by the old repair already hold `[Text(question), ToolResult]`; repair must heal them, or the same rejected history is rebuilt every turn.
+#[test]
+fn full_repair_splits_persisted_text_led_tool_result_turn() {
+    let question = "what is the status of order 42?";
+    let messages = vec![
+        Message::user("start"),
+        assistant_tool_use("t1"),
+        Message {
+            role: Role::User,
+            content: MessageContent::Blocks(vec![
+                text_block(question),
+                tool_result_block("t1", "[Tool execution was interrupted or lost]"),
+            ]),
+            pinned: false,
+            timestamp: None,
+        },
+    ];
+
+    let repaired = validate_and_repair(&messages);
+
+    assert_eq!(repaired.len(), 4, "{repaired:?}");
+    assert!(message_is_only_tool_results(&repaired[2]));
+    assert_eq!(repaired[3].role, Role::User);
+    assert_eq!(repaired[3].content.text_content(), question);
+    assert_tool_results_never_follow_text(&repaired, question);
+}

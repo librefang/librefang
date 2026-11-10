@@ -12,15 +12,39 @@ use std::fmt;
 use std::hash::Hash;
 use std::marker::PhantomData;
 
-/// Deserialize a `Vec<T>` leniently: if the stored value is not a sequence
-/// (e.g., it's a map, integer, string, bool, or null), return an empty Vec
-/// instead of failing.
+/// Try to read a bare string as the single element of a list.
+///
+/// A hand-written `tool_allowlist = "web_fetch"` means "this one tool", so discarding it would invert the operator's intent on every allowlist where empty means unrestricted.
+/// Returns `None` when `T` cannot be built from a string (a struct element such as `FallbackModel`), leaving the caller's lenient default in charge.
+fn single_from_str<'de, T, E>(v: &str) -> Option<T>
+where
+    T: Deserialize<'de>,
+    E: de::Error,
+{
+    T::deserialize(de::value::StrDeserializer::<E>::new(v)).ok()
+}
+
+/// Deserialize a `Vec<T>` leniently: if the stored value is not a sequence, fall back instead of failing.
+///
+/// - sequence → its elements
+/// - bare string → a one-element Vec when `T` can be read from a string, otherwise empty
+/// - map, integer, float, bool, null → empty Vec
+///
+/// Every coercion of a present, non-null value is logged at `warn`, because several of these fields are allowlists where empty means "unrestricted" and the operator must be able to see that a value was discarded.
 pub fn vec_lenient<'de, D, T>(deserializer: D) -> Result<Vec<T>, D::Error>
 where
     D: Deserializer<'de>,
     T: Deserialize<'de>,
 {
     struct VecLenientVisitor<T>(PhantomData<T>);
+
+    fn discarded<T>(found: &str) -> Vec<T> {
+        tracing::warn!(
+            found,
+            "Expected a list, found a {found}; treating the field as an empty list"
+        );
+        Vec::new()
+    }
 
     impl<'de, T: Deserialize<'de>> Visitor<'de> for VecLenientVisitor<T> {
         type Value = Vec<T>;
@@ -40,34 +64,42 @@ where
             Ok(vec)
         }
 
-        // All non-sequence types return empty Vec
-        fn visit_map<A>(self, mut _map: A) -> Result<Self::Value, A::Error>
+        fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
         where
             A: MapAccess<'de>,
         {
             // Drain the map to keep the deserializer state consistent
-            while let Some((_, _)) = _map.next_entry::<de::IgnoredAny, de::IgnoredAny>()? {}
-            Ok(Vec::new())
+            while let Some((_, _)) = map.next_entry::<de::IgnoredAny, de::IgnoredAny>()? {}
+            Ok(discarded("map"))
         }
 
         fn visit_i64<E: de::Error>(self, _v: i64) -> Result<Self::Value, E> {
-            Ok(Vec::new())
+            Ok(discarded("integer"))
         }
 
         fn visit_u64<E: de::Error>(self, _v: u64) -> Result<Self::Value, E> {
-            Ok(Vec::new())
+            Ok(discarded("integer"))
         }
 
         fn visit_f64<E: de::Error>(self, _v: f64) -> Result<Self::Value, E> {
-            Ok(Vec::new())
+            Ok(discarded("float"))
         }
 
-        fn visit_str<E: de::Error>(self, _v: &str) -> Result<Self::Value, E> {
-            Ok(Vec::new())
+        fn visit_str<E: de::Error>(self, v: &str) -> Result<Self::Value, E> {
+            match single_from_str::<T, E>(v) {
+                Some(item) => {
+                    tracing::warn!(
+                        value = v,
+                        "Expected a list, found a bare string; treating it as a one-element list"
+                    );
+                    Ok(vec![item])
+                }
+                None => Ok(discarded("string")),
+            }
         }
 
         fn visit_bool<E: de::Error>(self, _v: bool) -> Result<Self::Value, E> {
-            Ok(Vec::new())
+            Ok(discarded("bool"))
         }
 
         fn visit_none<E: de::Error>(self) -> Result<Self::Value, E> {
@@ -82,84 +114,132 @@ where
     deserializer.deserialize_any(VecLenientVisitor(PhantomData))
 }
 
+/// Shared visitor for the two `Option<Vec<T>>` deserializers.
+///
+/// `deny_on_mismatch` picks what a present value of the wrong shape becomes: `Some([])` for fields where `None` would mean "unrestricted", `None` for fields where it means "inherit the global default".
+struct OptionVecLenientVisitor<T> {
+    deny_on_mismatch: bool,
+    marker: PhantomData<T>,
+}
+
+impl<T> OptionVecLenientVisitor<T> {
+    fn mismatch(&self, found: &str) -> Option<Vec<T>> {
+        if self.deny_on_mismatch {
+            tracing::warn!(
+                found,
+                "Expected a list, found a {found}; treating the field as an empty list (grants nothing)"
+            );
+            Some(Vec::new())
+        } else {
+            tracing::warn!(
+                found,
+                "Expected a list, found a {found}; treating the field as unset"
+            );
+            None
+        }
+    }
+}
+
+impl<'de, T: Deserialize<'de>> Visitor<'de> for OptionVecLenientVisitor<T> {
+    type Value = Option<Vec<T>>;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+        formatter.write_str("a sequence or absent/null (which becomes None)")
+    }
+
+    fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+    where
+        A: SeqAccess<'de>,
+    {
+        let mut vec = Vec::with_capacity(seq.size_hint().unwrap_or(0));
+        while let Some(item) = seq.next_element()? {
+            vec.push(item);
+        }
+        Ok(Some(vec))
+    }
+
+    fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+    where
+        A: MapAccess<'de>,
+    {
+        while let Some((_, _)) = map.next_entry::<de::IgnoredAny, de::IgnoredAny>()? {}
+        Ok(self.mismatch("map"))
+    }
+
+    fn visit_i64<E: de::Error>(self, _v: i64) -> Result<Self::Value, E> {
+        Ok(self.mismatch("integer"))
+    }
+
+    fn visit_u64<E: de::Error>(self, _v: u64) -> Result<Self::Value, E> {
+        Ok(self.mismatch("integer"))
+    }
+
+    fn visit_f64<E: de::Error>(self, _v: f64) -> Result<Self::Value, E> {
+        Ok(self.mismatch("float"))
+    }
+
+    fn visit_str<E: de::Error>(self, v: &str) -> Result<Self::Value, E> {
+        match single_from_str::<T, E>(v) {
+            Some(item) => {
+                tracing::warn!(
+                    value = v,
+                    "Expected a list, found a bare string; treating it as a one-element list"
+                );
+                Ok(Some(vec![item]))
+            }
+            None => Ok(self.mismatch("string")),
+        }
+    }
+
+    fn visit_bool<E: de::Error>(self, _v: bool) -> Result<Self::Value, E> {
+        Ok(self.mismatch("bool"))
+    }
+
+    fn visit_none<E: de::Error>(self) -> Result<Self::Value, E> {
+        Ok(None)
+    }
+
+    fn visit_unit<E: de::Error>(self) -> Result<Self::Value, E> {
+        Ok(None)
+    }
+
+    fn visit_some<D2: Deserializer<'de>>(self, deserializer: D2) -> Result<Self::Value, D2::Error> {
+        deserializer.deserialize_any(self)
+    }
+}
+
 /// Deserialize an `Option<Vec<T>>` leniently:
-/// - absent / null / unit / non-sequence primitive → `None`
+/// - absent / null / unit → `None`
 /// - empty sequence → `Some([])`
 /// - non-empty sequence → `Some([…])`
-/// - map → `None` (drain map for consistency)
+/// - bare string → `Some([s])` when `T` can be read from a string
+/// - any other value (map, number, bool, or a string `T` cannot hold) → `None`, logged at `warn`
 ///
-/// Used for fields like `fallback_models` where `None` means "inherit the
-/// global default" and `Some(vec)` means "agent override" (#5112).
+/// Used for fields like `fallback_models` where `None` means "inherit the global default" and `Some(vec)` means "agent override" (#5112).
+/// For a field where `None` means "unrestricted", use [`option_vec_lenient_deny`] instead.
 pub fn option_vec_lenient<'de, D, T>(deserializer: D) -> Result<Option<Vec<T>>, D::Error>
 where
     D: Deserializer<'de>,
     T: Deserialize<'de>,
 {
-    struct OptionVecLenientVisitor<T>(PhantomData<T>);
+    deserializer.deserialize_any(OptionVecLenientVisitor {
+        deny_on_mismatch: false,
+        marker: PhantomData,
+    })
+}
 
-    impl<'de, T: Deserialize<'de>> Visitor<'de> for OptionVecLenientVisitor<T> {
-        type Value = Option<Vec<T>>;
-
-        fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
-            formatter.write_str("a sequence or absent/null (which becomes None)")
-        }
-
-        fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
-        where
-            A: SeqAccess<'de>,
-        {
-            let mut vec = Vec::with_capacity(seq.size_hint().unwrap_or(0));
-            while let Some(item) = seq.next_element()? {
-                vec.push(item);
-            }
-            Ok(Some(vec))
-        }
-
-        fn visit_map<A>(self, mut _map: A) -> Result<Self::Value, A::Error>
-        where
-            A: MapAccess<'de>,
-        {
-            while let Some((_, _)) = _map.next_entry::<de::IgnoredAny, de::IgnoredAny>()? {}
-            Ok(None)
-        }
-
-        fn visit_i64<E: de::Error>(self, _v: i64) -> Result<Self::Value, E> {
-            Ok(None)
-        }
-
-        fn visit_u64<E: de::Error>(self, _v: u64) -> Result<Self::Value, E> {
-            Ok(None)
-        }
-
-        fn visit_f64<E: de::Error>(self, _v: f64) -> Result<Self::Value, E> {
-            Ok(None)
-        }
-
-        fn visit_str<E: de::Error>(self, _v: &str) -> Result<Self::Value, E> {
-            Ok(None)
-        }
-
-        fn visit_bool<E: de::Error>(self, _v: bool) -> Result<Self::Value, E> {
-            Ok(None)
-        }
-
-        fn visit_none<E: de::Error>(self) -> Result<Self::Value, E> {
-            Ok(None)
-        }
-
-        fn visit_unit<E: de::Error>(self) -> Result<Self::Value, E> {
-            Ok(None)
-        }
-
-        fn visit_some<D2: Deserializer<'de>>(
-            self,
-            deserializer: D2,
-        ) -> Result<Self::Value, D2::Error> {
-            deserializer.deserialize_any(self)
-        }
-    }
-
-    deserializer.deserialize_any(OptionVecLenientVisitor(PhantomData))
+/// Fail-closed variant of [`option_vec_lenient`] for tri-state allowlists where `None` means "unrestricted" (the #7605 `capabilities.memory_read` / `memory_write`).
+///
+/// Absent and null still read as `None`, and a bare string is still a one-element list, but any other wrong-shaped value — `memory_read = false`, a number, a table — becomes `Some([])` ("declared, grants nothing") instead of silently widening to unrestricted.
+pub fn option_vec_lenient_deny<'de, D, T>(deserializer: D) -> Result<Option<Vec<T>>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    deserializer.deserialize_any(OptionVecLenientVisitor {
+        deny_on_mismatch: true,
+        marker: PhantomData,
+    })
 }
 
 /// Deserialize a `HashMap<K, V>` leniently: if the stored value is not a map
@@ -420,10 +500,30 @@ mod tests {
         assert!(result.items.is_empty());
     }
 
+    /// A bare string keeps its intent: `tool_allowlist = "web_fetch"` must not become `[]`, which every allowlist reads as "all tools".
     #[test]
-    fn vec_lenient_given_string_returns_empty() {
-        let json = r#"{"items": "not a vec"}"#;
+    fn vec_lenient_given_string_returns_one_element() {
+        let json = r#"{"items": "web_fetch"}"#;
         let result: TestVec = serde_json::from_str(json).unwrap();
+        assert_eq!(result.items, vec!["web_fetch"]);
+
+        let toml_result: TestVec = toml::from_str(r#"items = "web_fetch""#).unwrap();
+        assert_eq!(toml_result.items, vec!["web_fetch"]);
+    }
+
+    /// A string that cannot become an element (a struct element type) still falls back to empty rather than failing the whole manifest.
+    #[test]
+    fn vec_lenient_given_string_for_struct_element_returns_empty() {
+        #[derive(Debug, Deserialize, PartialEq)]
+        struct Elem {
+            provider: String,
+        }
+        #[derive(Debug, Deserialize)]
+        struct Holder {
+            #[serde(default, deserialize_with = "vec_lenient")]
+            items: Vec<Elem>,
+        }
+        let result: Holder = serde_json::from_str(r#"{"items": "x"}"#).unwrap();
         assert!(result.items.is_empty());
     }
 
@@ -693,6 +793,44 @@ full_mode_skips_approval = false
         let json = r#"{"items": ["a", "b"]}"#;
         let result: TestOptionVec = serde_json::from_str(json).unwrap();
         assert_eq!(result.items, Some(vec!["a".to_string(), "b".to_string()]));
+    }
+
+    #[test]
+    fn option_vec_lenient_string_yields_one_element() {
+        let result: TestOptionVec = serde_json::from_str(r#"{"items": "a"}"#).unwrap();
+        assert_eq!(result.items, Some(vec!["a".to_string()]));
+    }
+
+    #[derive(Debug, Deserialize, PartialEq)]
+    struct TestOptionVecDeny {
+        #[serde(default, deserialize_with = "option_vec_lenient_deny")]
+        items: Option<Vec<String>>,
+    }
+
+    /// `memory_read = false` used to read as `None`, which the #7605 tri-state treats as unrestricted — the opposite of what the operator wrote.
+    #[test]
+    fn option_vec_lenient_deny_wrong_shape_yields_some_empty() {
+        for toml_str in [
+            "items = false",
+            "items = true",
+            "items = 3",
+            "[items]\nkey = \"value\"",
+        ] {
+            let result: TestOptionVecDeny = toml::from_str(toml_str).unwrap();
+            assert_eq!(result.items, Some(vec![]), "input: {toml_str}");
+        }
+    }
+
+    #[test]
+    fn option_vec_lenient_deny_keeps_absent_null_string_and_list() {
+        let absent: TestOptionVecDeny = serde_json::from_str("{}").unwrap();
+        assert_eq!(absent.items, None);
+        let null: TestOptionVecDeny = serde_json::from_str(r#"{"items": null}"#).unwrap();
+        assert_eq!(null.items, None);
+        let string: TestOptionVecDeny = toml::from_str(r#"items = "self.*""#).unwrap();
+        assert_eq!(string.items, Some(vec!["self.*".to_string()]));
+        let list: TestOptionVecDeny = toml::from_str(r#"items = ["a"]"#).unwrap();
+        assert_eq!(list.items, Some(vec!["a".to_string()]));
     }
 
     #[test]

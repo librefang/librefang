@@ -1,0 +1,2 @@
+`apply_patch` now refuses a hunk whose context and removed lines match more than one place in the file instead of silently editing the first occurrence; name the enclosing line in an `@@ <line>` scope header (or add context lines) to pick the one meant.
+Inside a hunk, an indented ` @@ ...` or ` ***` line is now read as a context line whose content starts with those characters rather than as a new hunk header or section marker, so a patch that relied on indenting its `@@` headers has to start them at column zero (#8588) (@houko)

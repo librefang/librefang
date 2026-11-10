@@ -12,6 +12,8 @@
 //!   - `DELETE /api/bindings/{index}`  — 204 with no body, and the side effect
 //!   - `DELETE /api/bindings/{index}`  — 404 for an out-of-range index
 //!   - `DELETE /api/bindings/{index}`  — 400 for a non-`u32` index
+//!   - `POST` / `DELETE` reach the running channel bridge's router, not just the kernel list
+//!   - `POST` to a defined-but-unspawned agent resolves in the running router
 
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
@@ -135,4 +137,107 @@ async fn delete_binding_rejects_an_index_outside_u32() {
     // value that does not fit is a request error rather than a silent wrap or a 404.
     let response = send(&h, Method::DELETE, "/api/bindings/4294967296", None).await;
     assert_eq!(response.status, StatusCode::BAD_REQUEST);
+}
+
+/// The channel bridge copies the binding list into its router once, at start.
+/// A binding added or removed through the API must reach that live router too, or it does not route a message until the next restart.
+#[tokio::test(flavor = "multi_thread")]
+async fn binding_mutations_reach_the_running_channel_router() {
+    let h = boot().await;
+    let state = h._test.state.clone();
+
+    let router = Arc::new(librefang_channels::router::AgentRouter::new());
+    let bridge = librefang_channels::bridge::BridgeManager::new(
+        Arc::new(librefang_api::channel_bridge::KernelBridgeAdapter::new(
+            state.kernel.clone(),
+        )),
+        router.clone(),
+    );
+    state.bridge_manager.store(Arc::new(Some(bridge)));
+
+    // Spawned after the bridge started, so the router's name cache has never seen it.
+    let agent_id = state
+        .kernel
+        .spawn_agent_typed(librefang_types::agent::AgentManifest {
+            name: "late-agent".to_string(),
+            ..Default::default()
+        })
+        .expect("spawn agent");
+
+    let created = send(
+        &h,
+        Method::POST,
+        "/api/bindings",
+        Some(serde_json::json!({
+            "agent": "late-agent",
+            "match_rule": { "channel": "discord", "peer_id": "room-1" }
+        })),
+    )
+    .await;
+    assert_eq!(created.status, StatusCode::CREATED);
+    assert_eq!(router.bindings().len(), 1, "the new binding must be live");
+    assert_eq!(
+        router.bound_recipients_for_agent(agent_id, "discord", None, None),
+        vec!["room-1".to_string()],
+        "the binding must resolve to the agent it names"
+    );
+
+    let deleted = send(&h, Method::DELETE, "/api/bindings/0", None).await;
+    assert_eq!(deleted.status, StatusCode::NO_CONTENT);
+    assert!(router.bindings().is_empty(), "the removal must be live");
+}
+
+/// A bridge started with no bindings never seeds the router's name cache, so a binding to an agent that is defined but not spawned yet (a lazy cron-first agent, or one left Suspended) must be resolved through the identity registry, not the spawned-agent registry.
+#[tokio::test(flavor = "multi_thread")]
+async fn binding_to_a_defined_but_unspawned_agent_resolves_in_the_running_router() {
+    let h = boot().await;
+    let state = h._test.state.clone();
+
+    let router = Arc::new(librefang_channels::router::AgentRouter::new());
+    let bridge = librefang_channels::bridge::BridgeManager::new(
+        Arc::new(librefang_api::channel_bridge::KernelBridgeAdapter::new(
+            state.kernel.clone(),
+        )),
+        router.clone(),
+    );
+    state.bridge_manager.store(Arc::new(Some(bridge)));
+
+    let agent_id = librefang_types::agent::AgentId::new();
+    state
+        .kernel
+        .agent_identities()
+        .register_if_absent("lazy-agent", agent_id);
+    assert!(
+        state.kernel.agent_registry().get(agent_id).is_none(),
+        "the agent must not be spawned for this case"
+    );
+
+    let created = send(
+        &h,
+        Method::POST,
+        "/api/bindings",
+        Some(serde_json::json!({
+            "agent": "lazy-agent",
+            "match_rule": { "channel": "discord", "peer_id": "room-2" }
+        })),
+    )
+    .await;
+    assert_eq!(created.status, StatusCode::CREATED);
+    assert_eq!(
+        router.bound_recipients_for_agent(agent_id, "discord", None, None),
+        vec!["room-2".to_string()],
+        "the binding must resolve to the defined agent's canonical id"
+    );
+}
+
+/// With no channel bridge running there is no router to update; the mutation still succeeds against the kernel list.
+#[tokio::test(flavor = "multi_thread")]
+async fn binding_mutations_without_a_running_bridge_still_succeed() {
+    let h = boot().await;
+    assert!(h._test.state.bridge_manager.load().is_none());
+
+    let created = send(&h, Method::POST, "/api/bindings", Some(binding("alpha"))).await;
+    assert_eq!(created.status, StatusCode::CREATED);
+    let deleted = send(&h, Method::DELETE, "/api/bindings/0", None).await;
+    assert_eq!(deleted.status, StatusCode::NO_CONTENT);
 }

@@ -1374,6 +1374,7 @@ fn silent_response_single_source_of_truth() {
 
 mod hook_payload;
 mod integration;
+mod loop_accounting;
 mod recovery;
 mod sampling_params;
 mod sender;
