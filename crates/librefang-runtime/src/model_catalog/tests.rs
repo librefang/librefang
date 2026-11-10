@@ -2531,6 +2531,63 @@ fn test_alibaba_coding_plan_all_models_support_tools() {
     }
 }
 
+/// Refs #8591. The operator's `model_overrides.json` policy wins field by
+/// field over the entry's declaration — including an explicit empty set, which
+/// declares "no effort enum" — and absent fields defer to the entry.
+#[test]
+fn effective_reasoning_policy_override_wins_field_by_field() {
+    let mut catalog = test_catalog();
+    let mut entry = catalog.find_model("claude-sonnet-4-6").unwrap().clone();
+    entry.supported_efforts = vec!["low".to_string(), "high".to_string()];
+    entry.default_effort = Some("low".to_string());
+    let key = format!("{}:{}", entry.provider, entry.id);
+
+    // No override: the entry's own declaration, untouched.
+    let policy = catalog.effective_reasoning_policy(&entry);
+    assert_eq!(policy.supported_efforts, vec!["low", "high"]);
+    assert_eq!(policy.default_effort.as_deref(), Some("low"));
+    assert!(policy.off_allowed && !policy.mandatory);
+
+    // An override replaces the set wholesale (widening a gateway model's
+    // rungs) and can flip the off flags without touching the set.
+    catalog.set_overrides(
+        key.clone(),
+        ModelOverrides {
+            supported_efforts: Some(vec!["minimal".to_string(), "xhigh".to_string()]),
+            off_allowed: Some(false),
+            mandatory: Some(true),
+            ..Default::default()
+        },
+    );
+    let policy = catalog.effective_reasoning_policy(&entry);
+    assert_eq!(policy.supported_efforts, vec!["minimal", "xhigh"]);
+    assert_eq!(
+        policy.default_effort.as_deref(),
+        Some("low"),
+        "an untouched field still defers to the entry",
+    );
+    assert!(!policy.off_allowed);
+    assert!(policy.mandatory);
+
+    // `Some(vec![])` declares "budget-controlled", not "inherit".
+    catalog.set_overrides(
+        key,
+        ModelOverrides {
+            supported_efforts: Some(Vec::new()),
+            ..Default::default()
+        },
+    );
+    let policy = catalog.effective_reasoning_policy(&entry);
+    assert!(
+        policy.supported_efforts.is_empty(),
+        "an explicit empty declaration must win over the entry",
+    );
+    assert!(
+        !policy.is_declared(),
+        "the empty override is itself the declaration that this model has no enum",
+    );
+}
+
 /// Refs #4745. With no override, effective capabilities equal the catalog
 /// entry's declared values byte-for-byte.
 #[test]

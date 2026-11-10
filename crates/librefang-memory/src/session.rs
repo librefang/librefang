@@ -158,6 +158,19 @@ pub struct Session {
     /// `"<model>"` (model only — provider stays as agent manifest default).
     /// `None` means "use the agent default" — fully backward compatible.
     pub model_override: Option<String>,
+    /// Per-session reasoning-mode override (#8591).
+    ///
+    /// The open-vocabulary effort token (`"none"`, `"low"`, `"medium"`,
+    /// `"high"`, `"xhigh"`, `"max"`, `"minimal"`, or whatever the model's
+    /// catalog entry declares) that pins this session's reasoning level.
+    /// Applied per turn — after the agent/global default, before the
+    /// per-message override — so the resolution order is
+    /// frame > session > agent > global > compiled default.
+    ///
+    /// Stored as a validated `ReasoningMode` string, same shape as
+    /// `model_override`: `None` means "inherit the agent/global level", fully
+    /// backward compatible with sessions written before the column existed.
+    pub reasoning_effort: Option<String>,
     /// Monotonically incremented on every mutation to `messages`.
     /// Used to skip redundant repair passes when the history hasn't changed.
     pub messages_generation: u64,
@@ -194,6 +207,8 @@ pub struct SessionMeta {
     pub agent_id: AgentId,
     /// Per-session model override (issue #4898).
     pub model_override: Option<String>,
+    /// Per-session reasoning-effort override (#8591); `None` inherits.
+    pub reasoning_effort: Option<String>,
     /// Estimated token count for the context window.
     pub context_window_tokens: u64,
     /// Conversation identifier for contact-scoped sessions; see [`Session::peer_id`].
@@ -391,25 +406,27 @@ impl SessionStore {
     pub fn session_meta(&self, session_id: SessionId) -> LibreFangResult<Option<SessionMeta>> {
         let conn = self.pool.get().map_err(LibreFangError::memory)?;
         let result = conn.query_row(
-            "SELECT agent_id, model_override, context_window_tokens, peer_id FROM sessions WHERE id = ?1",
+            "SELECT agent_id, model_override, reasoning_effort, context_window_tokens, peer_id FROM sessions WHERE id = ?1",
             rusqlite::params![session_id.0.to_string()],
             |row| {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, Option<String>>(1).unwrap_or(None),
-                    row.get::<_, i64>(2)?,
-                    row.get::<_, Option<String>>(3).unwrap_or(None),
+                    row.get::<_, Option<String>>(2).unwrap_or(None),
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, Option<String>>(4).unwrap_or(None),
                 ))
             },
         );
         match result {
-            Ok((agent_str, model_override, tokens, peer_id)) => {
+            Ok((agent_str, model_override, reasoning_effort, tokens, peer_id)) => {
                 let agent_id = uuid::Uuid::parse_str(&agent_str)
                     .map(AgentId)
                     .map_err(LibreFangError::memory)?;
                 Ok(Some(SessionMeta {
                     agent_id,
                     model_override,
+                    reasoning_effort,
                     context_window_tokens: tokens as u64,
                     peer_id,
                 }))
@@ -423,7 +440,7 @@ impl SessionStore {
     pub fn get_session(&self, session_id: SessionId) -> LibreFangResult<Option<Session>> {
         let conn = self.pool.get().map_err(LibreFangError::memory)?;
         let mut stmt = conn
-            .prepare("SELECT agent_id, messages, context_window_tokens, label, model_override, messages_generation, peer_id, parent_session_id FROM sessions WHERE id = ?1")
+            .prepare("SELECT agent_id, messages, context_window_tokens, label, model_override, reasoning_effort, messages_generation, peer_id, parent_session_id FROM sessions WHERE id = ?1")
             .map_err(LibreFangError::memory)?;
 
         let result = stmt.query_row(rusqlite::params![session_id.0.to_string()], |row| {
@@ -432,15 +449,17 @@ impl SessionStore {
             let tokens: i64 = row.get(2)?;
             let label: Option<String> = row.get(3).unwrap_or(None);
             let model_override: Option<String> = row.get(4).unwrap_or(None);
-            let messages_generation: i64 = row.get(5).unwrap_or(0);
-            let peer_id: Option<String> = row.get(6).unwrap_or(None);
-            let parent_str: Option<String> = row.get(7).unwrap_or(None);
+            let reasoning_effort: Option<String> = row.get(5).unwrap_or(None);
+            let messages_generation: i64 = row.get(6).unwrap_or(0);
+            let peer_id: Option<String> = row.get(7).unwrap_or(None);
+            let parent_str: Option<String> = row.get(8).unwrap_or(None);
             Ok((
                 agent_str,
                 messages_blob,
                 tokens,
                 label,
                 model_override,
+                reasoning_effort,
                 messages_generation,
                 peer_id,
                 parent_str,
@@ -454,6 +473,7 @@ impl SessionStore {
                 tokens,
                 label,
                 model_override,
+                reasoning_effort,
                 messages_generation,
                 peer_id,
                 parent_str,
@@ -471,6 +491,7 @@ impl SessionStore {
                     context_window_tokens: tokens as u64,
                     label,
                     model_override,
+                    reasoning_effort,
                     messages_generation: messages_generation.max(0) as u64,
                     last_repaired_generation: None,
                     peer_id,
@@ -488,7 +509,7 @@ impl SessionStore {
     ) -> LibreFangResult<Option<(Session, String)>> {
         let conn = self.pool.get().map_err(LibreFangError::memory)?;
         let mut stmt = conn
-            .prepare("SELECT agent_id, messages, context_window_tokens, label, created_at, model_override, messages_generation, peer_id, parent_session_id FROM sessions WHERE id = ?1")
+            .prepare("SELECT agent_id, messages, context_window_tokens, label, created_at, model_override, reasoning_effort, messages_generation, peer_id, parent_session_id FROM sessions WHERE id = ?1")
             .map_err(LibreFangError::memory)?;
 
         let result = stmt.query_row(rusqlite::params![session_id.0.to_string()], |row| {
@@ -498,9 +519,10 @@ impl SessionStore {
             let label: Option<String> = row.get(3).unwrap_or(None);
             let created_at: String = row.get(4)?;
             let model_override: Option<String> = row.get(5).unwrap_or(None);
-            let messages_generation: i64 = row.get(6).unwrap_or(0);
-            let peer_id: Option<String> = row.get(7).unwrap_or(None);
-            let parent_str: Option<String> = row.get(8).unwrap_or(None);
+            let reasoning_effort: Option<String> = row.get(6).unwrap_or(None);
+            let messages_generation: i64 = row.get(7).unwrap_or(0);
+            let peer_id: Option<String> = row.get(8).unwrap_or(None);
+            let parent_str: Option<String> = row.get(9).unwrap_or(None);
             Ok((
                 agent_str,
                 messages_blob,
@@ -508,6 +530,7 @@ impl SessionStore {
                 label,
                 created_at,
                 model_override,
+                reasoning_effort,
                 messages_generation,
                 peer_id,
                 parent_str,
@@ -522,6 +545,7 @@ impl SessionStore {
                 label,
                 created_at,
                 model_override,
+                reasoning_effort,
                 messages_generation,
                 peer_id,
                 parent_str,
@@ -540,6 +564,7 @@ impl SessionStore {
                         context_window_tokens: tokens as u64,
                         label,
                         model_override,
+                        reasoning_effort,
                         messages_generation: messages_generation.max(0) as u64,
                         last_repaired_generation: None,
                         peer_id,
@@ -562,7 +587,7 @@ impl SessionStore {
         let conn = self.pool.get().map_err(LibreFangError::memory)?;
         let mut stmt = conn
             .prepare(
-                "SELECT id, agent_id, messages, context_window_tokens, label, model_override, messages_generation, peer_id \
+                "SELECT id, agent_id, messages, context_window_tokens, label, model_override, reasoning_effort, messages_generation, peer_id \
                  FROM sessions WHERE parent_session_id = ?1 ORDER BY created_at ASC",
             )
             .map_err(LibreFangError::memory)?;
@@ -575,8 +600,9 @@ impl SessionStore {
                 let tokens: i64 = row.get(3)?;
                 let label: Option<String> = row.get(4).unwrap_or(None);
                 let model_override: Option<String> = row.get(5).unwrap_or(None);
-                let messages_generation: i64 = row.get(6).unwrap_or(0);
-                let peer_id: Option<String> = row.get(7).unwrap_or(None);
+                let reasoning_effort: Option<String> = row.get(6).unwrap_or(None);
+                let messages_generation: i64 = row.get(7).unwrap_or(0);
+                let peer_id: Option<String> = row.get(8).unwrap_or(None);
                 Ok((
                     id_str,
                     agent_str,
@@ -584,6 +610,7 @@ impl SessionStore {
                     tokens,
                     label,
                     model_override,
+                    reasoning_effort,
                     messages_generation,
                     peer_id,
                 ))
@@ -599,6 +626,7 @@ impl SessionStore {
                 tokens,
                 label,
                 model_override,
+                reasoning_effort,
                 messages_generation,
                 peer_id,
             ) = row.map_err(LibreFangError::memory)?;
@@ -622,6 +650,7 @@ impl SessionStore {
                 context_window_tokens: tokens as u64,
                 label,
                 model_override,
+                reasoning_effort,
                 messages_generation: messages_generation.max(0) as u64,
                 last_repaired_generation: None,
                 peer_id,
@@ -1408,6 +1437,7 @@ impl SessionStore {
             context_window_tokens: 0,
             label: None,
             model_override: None,
+            reasoning_effort: None,
             messages_generation: 0,
             last_repaired_generation: None,
             // No sender context — admin / diagnostic / API path.
@@ -1440,6 +1470,106 @@ impl SessionStore {
         Ok(())
     }
 
+    /// Set (or clear) the per-session reasoning-mode override (#8591).
+    ///
+    /// `reasoning_effort = Some(token)` pins this session's reasoning level for
+    /// subsequent turns; `None` clears the override and restores the
+    /// agent/global default. The token is validated at the API boundary
+    /// (`ReasoningMode::new`); this setter stores the string as given.
+    pub fn set_session_reasoning_effort(
+        &self,
+        session_id: SessionId,
+        reasoning_effort: Option<&str>,
+    ) -> LibreFangResult<()> {
+        let conn = self.pool.get().map_err(LibreFangError::memory)?;
+        conn.execute(
+            "UPDATE sessions SET reasoning_effort = ?1, updated_at = ?2 WHERE id = ?3",
+            rusqlite::params![
+                reasoning_effort,
+                Utc::now().to_rfc3339(),
+                session_id.0.to_string()
+            ],
+        )
+        .map_err(LibreFangError::memory)?;
+        Ok(())
+    }
+
+    /// Materialize an empty session row for `(agent_id, session_id)` when one
+    /// does not exist yet (#8591).
+    ///
+    /// Per-session pins are stored with an UPDATE on the session row, but the
+    /// inbound resolver only creates that row lazily on a conversation's first
+    /// turn — and it builds it with `reasoning_effort = None`. A pin set before
+    /// the first message (a channel `/think high` on a fresh chat, a TUI pin on
+    /// a just-spawned agent) would silently vanish. Creating the row up front
+    /// makes the lazy path load it instead.
+    ///
+    /// Existing rows are never touched, and that guarantee is enforced by the
+    /// statement itself rather than by a read-then-write check: the insert is
+    /// `ON CONFLICT(id) DO NOTHING`, so a row created concurrently — a first
+    /// turn committing between this call's check and its write in the previous
+    /// shape — survives with its `messages`, `message_count`,
+    /// `messages_generation` and `peer_id` intact. Writing through
+    /// [`Self::save_session`] here would run its `DO UPDATE` clause and erase
+    /// exactly that history; it must never be used on this path.
+    ///
+    /// Only the call that actually inserted the row (`changes() == 1`) writes
+    /// the FTS placeholder row, in the same transaction. That keeps a session
+    /// created by this method visible to the index. It does **not** make the
+    /// invariant global: a row that already existed without an FTS row stays
+    /// unindexed here, because the conflict path does nothing — that gap is
+    /// closed only by [`Self::reconcile_fts_index`] at boot.
+    pub fn ensure_session(&self, agent_id: AgentId, session_id: SessionId) -> LibreFangResult<()> {
+        let mut conn = self.pool.get().map_err(LibreFangError::memory)?;
+        let session_id_str = session_id.0.to_string();
+        let agent_id_str = agent_id.0.to_string();
+        let now = Utc::now().to_rfc3339();
+        // `rmp_serde` encodes the empty message list as a one-byte array
+        // marker, not an empty blob: `get_session` deserialises this column,
+        // and a zero-length blob is not valid MessagePack.
+        let empty_messages = rmp_serde::to_vec_named(&Vec::<Message>::new())
+            .map_err(LibreFangError::serialization)?;
+
+        // BEGIN IMMEDIATE for the same reason as `save_session`: the first
+        // statement is a write, and a deferred transaction that another
+        // connection beats to the lock fails with SQLITE_BUSY_SNAPSHOT, which
+        // the busy timeout does not retry.
+        let tx = conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(LibreFangError::memory)?;
+
+        tx.execute(
+            "INSERT INTO sessions (id, agent_id, messages, context_window_tokens, label, message_count, messages_generation, peer_id, parent_session_id, created_at, updated_at)
+             VALUES (?1, ?2, ?3, 0, NULL, 0, 0, NULL, NULL, ?4, ?4)
+             ON CONFLICT(id) DO NOTHING",
+            rusqlite::params![session_id_str, agent_id_str, empty_messages, now],
+        )
+        .map_err(LibreFangError::memory)?;
+
+        if tx.changes() == 1 {
+            // This call created the `sessions` row, but an orphaned FTS row
+            // for the same id may still exist — a session deleted without its
+            // index row, or a writer that died between the two before v64.
+            // Sweep by id with the fallback scan enabled so the placeholder
+            // below is the only row and search cannot resolve to a duplicate.
+            delete_session_fts_row(&tx, &session_id_str, true)
+                .map_err(|e| LibreFangError::memory_msg(format!("FTS delete failed: {e}")))?;
+            tx.execute(
+                "INSERT INTO sessions_fts (session_id, agent_id, content) VALUES (?1, ?2, '')",
+                rusqlite::params![session_id_str, agent_id_str],
+            )
+            .map_err(|e| LibreFangError::memory_msg(format!("FTS insert failed: {e}")))?;
+            tx.execute(
+                "INSERT OR REPLACE INTO sessions_fts_map (session_id, fts_rowid) VALUES (?1, ?2)",
+                rusqlite::params![session_id_str, tx.last_insert_rowid()],
+            )
+            .map_err(|e| LibreFangError::memory_msg(format!("FTS map update failed: {e}")))?;
+        }
+
+        tx.commit().map_err(LibreFangError::memory)?;
+        Ok(())
+    }
+
     /// Set the label on an existing session.
     pub fn set_session_label(
         &self,
@@ -1464,7 +1594,7 @@ impl SessionStore {
         let conn = self.pool.get().map_err(LibreFangError::memory)?;
         let mut stmt = conn
             .prepare(
-                "SELECT id, messages, context_window_tokens, label, model_override, messages_generation, peer_id, parent_session_id FROM sessions \
+                "SELECT id, messages, context_window_tokens, label, model_override, reasoning_effort, messages_generation, peer_id, parent_session_id FROM sessions \
                  WHERE agent_id = ?1 AND label = ?2 LIMIT 1",
             )
             .map_err(LibreFangError::memory)?;
@@ -1475,15 +1605,17 @@ impl SessionStore {
             let tokens: i64 = row.get(2)?;
             let lbl: Option<String> = row.get(3).unwrap_or(None);
             let model_override: Option<String> = row.get(4).unwrap_or(None);
-            let messages_generation: i64 = row.get(5).unwrap_or(0);
-            let peer_id: Option<String> = row.get(6).unwrap_or(None);
-            let parent_str: Option<String> = row.get(7).unwrap_or(None);
+            let reasoning_effort: Option<String> = row.get(5).unwrap_or(None);
+            let messages_generation: i64 = row.get(6).unwrap_or(0);
+            let peer_id: Option<String> = row.get(7).unwrap_or(None);
+            let parent_str: Option<String> = row.get(8).unwrap_or(None);
             Ok((
                 id_str,
                 messages_blob,
                 tokens,
                 lbl,
                 model_override,
+                reasoning_effort,
                 messages_generation,
                 peer_id,
                 parent_str,
@@ -1497,6 +1629,7 @@ impl SessionStore {
                 tokens,
                 lbl,
                 model_override,
+                reasoning_effort,
                 messages_generation,
                 peer_id,
                 parent_str,
@@ -1514,6 +1647,7 @@ impl SessionStore {
                     context_window_tokens: tokens as u64,
                     label: lbl,
                     model_override,
+                    reasoning_effort,
                     messages_generation: messages_generation.max(0) as u64,
                     last_repaired_generation: None,
                     peer_id,
@@ -1591,6 +1725,7 @@ impl SessionStore {
             context_window_tokens: 0,
             label: label.map(|s| s.to_string()),
             model_override: None,
+            reasoning_effort: None,
             messages_generation: 0,
             last_repaired_generation: None,
             // No sender context — admin / diagnostic / API path.
@@ -2506,6 +2641,286 @@ mod tests {
         assert!(result.is_none());
     }
 
+    /// `ensure_session` materializes a row for a not-yet-used derived session
+    /// id, and a second call must leave the row — and any per-session pin on
+    /// it — untouched (#8591).
+    #[test]
+    fn ensure_session_materializes_once_and_preserves_the_pin() {
+        let store = setup();
+        let agent_id = AgentId::new();
+        let session_id = SessionId::new();
+
+        assert!(store.get_session(session_id).unwrap().is_none());
+        store.ensure_session(agent_id, session_id).unwrap();
+
+        let row = store
+            .get_session(session_id)
+            .unwrap()
+            .expect("ensure_session must create the row");
+        assert_eq!(row.agent_id, agent_id);
+        assert!(row.messages.is_empty());
+        assert!(row.reasoning_effort.is_none());
+
+        // A pin written after the materialization survives a repeat
+        // `ensure_session` (the early-return path must not touch the row).
+        store
+            .set_session_reasoning_effort(session_id, Some("high"))
+            .unwrap();
+        store.ensure_session(agent_id, session_id).unwrap();
+        assert_eq!(
+            store
+                .get_session(session_id)
+                .unwrap()
+                .unwrap()
+                .reasoning_effort
+                .as_deref(),
+            Some("high"),
+        );
+    }
+
+    /// Pins that the insert path does not touch a row that already exists.
+    ///
+    /// The row is populated first (history, generation, peer, FTS content),
+    /// then `ensure_session` runs against it. Every one of those columns must
+    /// survive, and the FTS row must still be searchable rather than replaced
+    /// by the empty placeholder.
+    ///
+    /// This is the documented intent, not a discriminating regression: the
+    /// old shape started with a `get_session` early return, so it also passed
+    /// here — the wiping required the row to appear between that check and
+    /// `save_session`, which a single thread cannot reproduce. The old/new
+    /// gap that *is* deterministic is the orphan-FTS case pinned by
+    /// `ensure_session_sweeps_an_orphaned_fts_row` below.
+    #[test]
+    fn ensure_session_never_clobbers_an_existing_session_row() {
+        let store = setup();
+        let agent_id = AgentId::new();
+        let session_id = SessionId::new();
+        store.ensure_session(agent_id, session_id).unwrap();
+
+        // Populate the row the way a first turn does.
+        let mut session = store.get_session(session_id).unwrap().unwrap();
+        session.push_message(Message::user("first turn secret"));
+        session.push_message(Message::assistant("reply"));
+        session.mark_messages_mutated();
+        session.peer_id = Some("telegram:12345".to_string());
+        let generation = session.messages_generation;
+        store.save_session(&session).unwrap();
+
+        // The racing materialization: must find the row and leave it alone.
+        store.ensure_session(agent_id, session_id).unwrap();
+
+        let row = store
+            .get_session(session_id)
+            .unwrap()
+            .expect("the racing call must not delete the row");
+        assert_eq!(
+            row.messages.len(),
+            2,
+            "history written by the winning turn must survive"
+        );
+        assert_eq!(
+            row.messages[0].content.text_content(),
+            session.messages[0].content.text_content()
+        );
+        assert_eq!(
+            row.messages_generation, generation,
+            "messages_generation must survive"
+        );
+        assert_eq!(
+            row.peer_id.as_deref(),
+            Some("telegram:12345"),
+            "peer_id must survive"
+        );
+        let listed = store.list_sessions().unwrap();
+        let listed_row = listed
+            .iter()
+            .find(|s| s["session_id"] == session_id.0.to_string())
+            .expect("session must be listed");
+        assert_eq!(
+            listed_row["message_count"].as_u64(),
+            Some(2),
+            "the denormalised message_count must survive"
+        );
+
+        // The FTS row must still carry the history too: a placeholder
+        // replacing it would silently drop the session from search.
+        let hits = store.search_sessions("secret", None).unwrap();
+        assert_eq!(
+            hits.len(),
+            1,
+            "the racing call must not overwrite the FTS row: {hits:?}"
+        );
+        assert_eq!(hits[0].session_id, session_id.0.to_string());
+    }
+
+    /// A materialized row is immediately visible to the FTS index (the
+    /// placeholder-row invariant `save_session` maintains), and repeating the
+    /// call neither duplicates that row nor rewrites the session.
+    #[test]
+    fn ensure_session_indexes_once_and_is_idempotent() {
+        let store = setup();
+        let agent_id = AgentId::new();
+        let session_id = SessionId::new();
+
+        store.ensure_session(agent_id, session_id).unwrap();
+        store.ensure_session(agent_id, session_id).unwrap();
+
+        let conn = store.pool.get().unwrap();
+        let (fts_rows, map_rows): (i64, i64) = conn
+            .query_row(
+                "SELECT (SELECT COUNT(*) FROM sessions_fts WHERE session_id = ?1),
+                        (SELECT COUNT(*) FROM sessions_fts_map WHERE session_id = ?1)",
+                [session_id.0.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(fts_rows, 1, "exactly one FTS row per session");
+        assert_eq!(map_rows, 1, "exactly one rowid mapping per session");
+        drop(conn);
+        assert_eq!(store.count_sessions().unwrap(), 1);
+    }
+
+    /// The deterministic old/new gap: an FTS row for the id survives while the
+    /// `sessions` row (and, as a pre-v64 writer could leave it, its rowid
+    /// mapping) is gone.
+    ///
+    /// The old body called `save_session` for this state. That function
+    /// computes `session_existed` from the *sessions* table, sees `false`, and
+    /// skips its unmapped-FTS fallback scan — so it inserted a second index
+    /// row and left the orphan in place. The insert-only body sweeps by id on
+    /// every row it creates, so the orphan is replaced by the placeholder.
+    /// Red on the old body: `fts_rows` was 2; green here: 1.
+    #[test]
+    fn ensure_session_sweeps_an_orphaned_fts_row() {
+        let store = setup();
+        let agent_id = AgentId::new();
+        let mut session = store.create_session(agent_id).unwrap();
+        let session_id = session.id;
+        let sid = session_id.0.to_string();
+        session.push_message(Message::user("orphan secret"));
+        store.save_session(&session).unwrap();
+
+        // Reproduce the partial state: sessions row and rowid mapping gone,
+        // the content-bearing FTS row left behind (and still searchable —
+        // `search_sessions` does not join `sessions`).
+        {
+            let conn = store.pool.get().unwrap();
+            conn.execute("DELETE FROM sessions WHERE id = ?1", [&sid])
+                .unwrap();
+            conn.execute("DELETE FROM sessions_fts_map WHERE session_id = ?1", [&sid])
+                .unwrap();
+            let orphaned: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sessions_fts WHERE session_id = ?1",
+                    [&sid],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(orphaned, 1, "pre-condition: one orphaned FTS row");
+        }
+        assert_eq!(
+            store.search_sessions("secret", None).unwrap().len(),
+            1,
+            "pre-condition: the orphan is still searchable"
+        );
+
+        store.ensure_session(agent_id, session_id).unwrap();
+
+        let conn = store.pool.get().unwrap();
+        let (session_rows, fts_rows, map_rows): (i64, i64, i64) = conn
+            .query_row(
+                "SELECT (SELECT COUNT(*) FROM sessions WHERE id = ?1),
+                        (SELECT COUNT(*) FROM sessions_fts WHERE session_id = ?1),
+                        (SELECT COUNT(*) FROM sessions_fts_map WHERE session_id = ?1)",
+                [&sid],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(session_rows, 1);
+        assert_eq!(
+            fts_rows, 1,
+            "the orphaned FTS row must be swept, not duplicated"
+        );
+        assert_eq!(map_rows, 1, "the fresh row must be mapped");
+        drop(conn);
+
+        // The orphan's content must be gone with it, not left as a second hit
+        // pointing at an id whose row is now empty.
+        assert!(
+            store.search_sessions("secret", None).unwrap().is_empty(),
+            "the orphan's content must not survive the sweep"
+        );
+    }
+
+    /// The race the insert-only statement exists for: several connections
+    /// materialize the same `(agent, session)` at once against a file-backed
+    /// pool. Every call must return `Ok`, and the transaction must leave
+    /// exactly one session row, one FTS row, and one rowid mapping.
+    ///
+    /// This is the shape that exposed the primitive, not a red/green test:
+    /// the old read-then-write also usually finished with one row because its
+    /// `save_session` upsert serialised on the write lock — what it could lose
+    /// was the *content* of a turn that committed in between, which needs a
+    /// writer interleaved at a specific point. The barrier only forces the
+    /// materializations to collide.
+    #[test]
+    fn ensure_session_is_safe_under_concurrent_first_calls() {
+        use std::sync::{Arc, Barrier};
+
+        const THREADS: usize = 8;
+
+        let dir = tempfile::tempdir().unwrap();
+        let manager = r2d2_sqlite::SqliteConnectionManager::file(dir.path().join("sessions.db"))
+            .with_init(|c| c.execute_batch(crate::substrate::DEFAULT_CONNECTION_PRAGMAS));
+        let pool = r2d2::Pool::builder()
+            .max_size(THREADS as u32)
+            .build(manager)
+            .unwrap();
+        run_migrations(&pool.get().unwrap()).unwrap();
+        let store = Arc::new(SessionStore::new(pool));
+
+        let agent_id = AgentId::new();
+        let session_id = SessionId::new();
+        let barrier = Arc::new(Barrier::new(THREADS));
+        let handles: Vec<_> = (0..THREADS)
+            .map(|_| {
+                let store = Arc::clone(&store);
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    store.ensure_session(agent_id, session_id)
+                })
+            })
+            .collect();
+        for handle in handles {
+            handle
+                .join()
+                .expect("worker panicked")
+                .expect("every concurrent ensure_session must succeed");
+        }
+
+        let sid = session_id.0.to_string();
+        let conn = store.pool.get().unwrap();
+        let (session_rows, fts_rows, map_rows): (i64, i64, i64) = conn
+            .query_row(
+                "SELECT (SELECT COUNT(*) FROM sessions WHERE id = ?1),
+                        (SELECT COUNT(*) FROM sessions_fts WHERE session_id = ?1),
+                        (SELECT COUNT(*) FROM sessions_fts_map WHERE session_id = ?1)",
+                [&sid],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(session_rows, 1, "exactly one sessions row");
+        assert_eq!(fts_rows, 1, "exactly one FTS row");
+        assert_eq!(map_rows, 1, "exactly one rowid mapping");
+        drop(conn);
+
+        let row = store.get_session(session_id).unwrap().unwrap();
+        assert_eq!(row.agent_id, agent_id);
+        assert!(row.messages.is_empty());
+    }
+
     #[test]
     fn messages_generation_round_trips_across_reload_5138() {
         // #5138: the generation counter must survive a save/load cycle
@@ -3040,6 +3455,7 @@ mod tests {
             SessionMeta {
                 agent_id,
                 model_override: Some("openai/gpt-4o".to_string()),
+                reasoning_effort: None,
                 context_window_tokens: 1234,
                 peer_id: Some("chat-1".to_string()),
             }
@@ -3268,6 +3684,7 @@ mod tests {
             context_window_tokens: 0,
             label: None,
             model_override: None,
+            reasoning_effort: None,
             messages_generation: 0,
             last_repaired_generation: None,
             peer_id: None,
@@ -3329,6 +3746,7 @@ mod tests {
             context_window_tokens: 0,
             label: None,
             model_override: None,
+            reasoning_effort: None,
             messages_generation: 0,
             last_repaired_generation: None,
             peer_id: None,
@@ -3720,6 +4138,7 @@ mod tests {
             context_window_tokens: 0,
             label: None,
             model_override: None,
+            reasoning_effort: None,
             messages_generation: 0,
             last_repaired_generation: None,
             peer_id: None,
@@ -4816,6 +5235,7 @@ mod tests {
             context_window_tokens: 0,
             label: Some("whatsapp:+393760105565".to_string()),
             model_override: None,
+            reasoning_effort: None,
             messages_generation: 0,
             last_repaired_generation: None,
             peer_id: Some(peer.to_string()),
@@ -4874,6 +5294,7 @@ mod tests {
             context_window_tokens: 0,
             label: None,
             model_override: None,
+            reasoning_effort: None,
             messages_generation: 0,
             last_repaired_generation: None,
             peer_id: None,
@@ -4919,6 +5340,7 @@ mod tests {
             context_window_tokens: 0,
             label: Some("parent".to_string()),
             model_override: None,
+            reasoning_effort: None,
             messages_generation: 0,
             last_repaired_generation: None,
             peer_id: None,
@@ -4933,6 +5355,7 @@ mod tests {
             context_window_tokens: 0,
             label: Some("child".to_string()),
             model_override: None,
+            reasoning_effort: None,
             messages_generation: 0,
             last_repaired_generation: None,
             peer_id: None,
@@ -4997,6 +5420,85 @@ mod tests {
             raw_parent.as_deref(),
             Some(parent_id.0.to_string().as_str()),
             "INSERT must persist parent_session_id into the SQL column"
+        );
+    }
+
+    /// Per-session reasoning-mode round trip (#8591). Mirrors the
+    /// `parent_session_id` test because the same three hydration sites each
+    /// carry their own SELECT list: `get_session`,
+    /// `get_session_with_created_at`, and `find_session_by_label`. It also
+    /// pins the two contract details inherited from `model_override`:
+    /// `save_session` must NOT clobber the pin, and `None` clears it.
+    #[test]
+    fn test_session_reasoning_effort_round_trip() {
+        let store = setup();
+        let agent_id = AgentId::new();
+        let session = store.create_session(agent_id).unwrap();
+
+        // Fresh sessions start unpinned.
+        assert!(
+            store
+                .get_session(session.id)
+                .unwrap()
+                .unwrap()
+                .reasoning_effort
+                .is_none(),
+            "a fresh session must inherit (None)",
+        );
+
+        // Pin an open-vocabulary token — the point of #8591 is that this is
+        // stored as-is, not folded into the four legacy rungs.
+        store
+            .set_session_reasoning_effort(session.id, Some("xhigh"))
+            .expect("set ok");
+
+        // 1. `get_session` hydrates it.
+        let loaded = store.get_session(session.id).unwrap().unwrap();
+        assert_eq!(loaded.reasoning_effort.as_deref(), Some("xhigh"));
+        // 2. `get_session_with_created_at` — second SELECT list.
+        let (loaded2, _) = store
+            .get_session_with_created_at(session.id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(loaded2.reasoning_effort.as_deref(), Some("xhigh"));
+        // 3. `find_session_by_label` — third SELECT list.
+        store
+            .set_session_label(session.id, Some("pinned"))
+            .expect("label ok");
+        let loaded3 = store
+            .find_session_by_label(agent_id, "pinned")
+            .unwrap()
+            .expect("found by label");
+        assert_eq!(loaded3.reasoning_effort.as_deref(), Some("xhigh"));
+
+        // A routine save (history append) must not clear the pin — the same
+        // contract `model_override` has.
+        let mut loaded4 = store.get_session(session.id).unwrap().unwrap();
+        loaded4.messages.push(Message::user("hi"));
+        store.save_session(&loaded4).unwrap();
+        assert_eq!(
+            store
+                .get_session(session.id)
+                .unwrap()
+                .unwrap()
+                .reasoning_effort
+                .as_deref(),
+            Some("xhigh"),
+            "save_session must preserve the reasoning pin",
+        );
+
+        // Clearing restores the inherit default.
+        store
+            .set_session_reasoning_effort(session.id, None)
+            .expect("clear ok");
+        assert!(
+            store
+                .get_session(session.id)
+                .unwrap()
+                .unwrap()
+                .reasoning_effort
+                .is_none(),
+            "clearing the pin must persist NULL",
         );
     }
 
@@ -5068,6 +5570,7 @@ mod tests {
             context_window_tokens: 0,
             label: Some(label.to_string()),
             model_override: None,
+            reasoning_effort: None,
             messages_generation: 0,
             last_repaired_generation: None,
             peer_id: None,
@@ -5209,6 +5712,7 @@ mod tests {
             context_window_tokens: 0,
             label: Some(label.to_string()),
             model_override: None,
+            reasoning_effort: None,
             messages_generation: 0,
             last_repaired_generation: None,
             peer_id: None,
