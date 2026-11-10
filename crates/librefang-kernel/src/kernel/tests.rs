@@ -1857,6 +1857,82 @@ fn test_set_agent_model_clears_overrides_when_provider_changes() {
 /// attached to the new one — the same gap the model router closed for
 /// `apply_routed_profile` and `apply_tier_routed_model`, in the file next door.
 /// Both paths now share `clear_stale_provider_overrides`.
+/// A model switch clears the canonical session so the old model's context stays out of the new
+/// model's prompt. Since #8645 the prompt path falls back to the per-session compaction mirror
+/// when the canonical row has nothing for a session, so the switch has to clear the mirrors as
+/// well or the pre-switch summary comes straight back.
+#[test]
+fn switching_model_does_not_resurface_the_old_compaction_summary() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().join("librefang-kernel-model-switch-summary");
+    std::fs::create_dir_all(&home_dir).unwrap();
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+    let agent_id = kernel
+        .spawn_agent_inner(
+            AgentManifest {
+                name: "model-switch-summary-agent".to_string(),
+                author: "test".to_string(),
+                ..AgentManifest::default()
+            },
+            None,
+            None,
+            None,
+        )
+        .expect("agent should spawn");
+
+    let session = SessionId::new();
+    kernel
+        .memory
+        .substrate
+        .store_llm_summary(
+            agent_id,
+            "summary written by the old model",
+            vec![librefang_types::message::Message::user("old")],
+            Some(session),
+        )
+        .unwrap();
+    let summary = || {
+        kernel
+            .memory
+            .substrate
+            .canonical_context(agent_id, Some(session), None)
+            .unwrap()
+            .0
+    };
+    assert_eq!(
+        summary().as_deref(),
+        Some("summary written by the old model")
+    );
+
+    kernel
+        .set_agent_model(agent_id, "gpt-4o-mini", Some("openai"))
+        .expect("model switch should succeed");
+
+    assert_eq!(
+        summary(),
+        None,
+        "a model switch must not leave the old model's summary in the prompt"
+    );
+    assert_eq!(
+        kernel
+            .memory
+            .substrate
+            .structured_get(
+                agent_id,
+                &librefang_memory::compaction_summary_key(&session)
+            )
+            .unwrap(),
+        None,
+        "a model switch must remove the compaction mirror"
+    );
+    kernel.shutdown();
+}
+
 #[test]
 fn switching_provider_also_drops_the_old_endpoints_capacity_limits() {
     let tmp = tempfile::tempdir().unwrap();
