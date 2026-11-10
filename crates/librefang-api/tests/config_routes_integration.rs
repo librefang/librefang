@@ -237,6 +237,8 @@ async fn get_config_exposes_writable_fields_that_used_to_be_write_only() {
         // #8536: writable under `exec_policy.`, and its empty default is skipped on serialize, so only an explicit entry in the response builder makes it readable.
         "exec_policy.denied_commands",
         "session.reset",
+        "artifacts.retention_days",
+        "artifacts.blob_dir",
         "session.context_injection",
         "memory.decay",
         "memory.chunking",

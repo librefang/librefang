@@ -755,6 +755,11 @@ fn redacted_config_json(
         "reset": serde_json::to_value(&config.session.reset).unwrap_or_default(),
     });
 
+    set!("artifacts", {
+        "retention_days": config.artifacts.retention_days,
+        "blob_dir": config.artifacts.blob_dir,
+    });
+
     set!("queue", {
         "max_depth_per_agent": config.queue.max_depth_per_agent,
         "max_depth_global": config.queue.max_depth_global,
