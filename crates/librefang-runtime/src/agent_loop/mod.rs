@@ -62,9 +62,9 @@ pub use self::types::{AgentLoopResult, ExperimentContext, LoopOptions, LoopPhase
 use self::end_turn::{
     build_silent_agent_loop_result, classify_end_turn_retry, finalize_end_turn_text,
     finalize_iteration_cap_text, finalize_successful_end_turn, gated_proactive_memory_for_memorize,
-    gated_proactive_memory_for_retrieve, maybe_fold_stale_tool_results, remember_turn_exchange,
-    session_recall_scope, EndTurnRetry, EndTurnRetryContext, FinalizeEndTurnContext,
-    FinalizeEndTurnResultData,
+    gated_proactive_memory_for_retrieve, maybe_fold_stale_tool_results, prior_tool_ids,
+    remember_turn_exchange, running_turn_start, session_recall_scope, EndTurnRetry,
+    EndTurnRetryContext, FinalizeEndTurnContext, FinalizeEndTurnResultData,
 };
 use self::history::resolve_max_history;
 use self::message::{
@@ -1098,6 +1098,8 @@ async fn run_agent_loop_inner(
     let mut accumulated_text = String::new();
 
     new_messages_start = prepared_new_messages_start;
+    // The fold's turn boundary lives in working-copy coordinates, which `new_messages_start` (a `session.messages` index) does not share — see `prior_tool_ids`.
+    let pre_turn_tool_ids = prior_tool_ids(&messages);
 
     // Resolution order: per-agent manifest > operator LoopOptions > library default.
     let max_iterations = manifest
@@ -1309,6 +1311,7 @@ async fn run_agent_loop_inner(
         // before context assembly so the LLM never sees raw bulk payloads
         // from old turns.  Runs fold first, then the compressor, mirroring
         // the ordering rationale in `history_fold`'s module-level doc.
+        let current_turn_start = running_turn_start(&messages, &pre_turn_tool_ids);
         messages = maybe_fold_stale_tool_results(
             messages,
             session,
@@ -1321,7 +1324,7 @@ async fn run_agent_loop_inner(
             driver.clone(),
             false,
             fold_echo_policy,
-            new_messages_start,
+            current_turn_start,
         )
         .await;
 
