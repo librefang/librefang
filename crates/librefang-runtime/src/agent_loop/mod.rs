@@ -117,7 +117,14 @@ const MAX_CONTINUATIONS: u32 = 5;
 ///
 /// This helper replaces `session.messages` with the repaired copy so the
 /// persisted history is always well-formed.
-fn repair_session_before_save(session: &mut Session, agent_id: &str, reason: &str) {
+///
+/// A caller that still reports `new_messages_start` afterwards passes it, so the index follows the repaired history instead of keeping its pre-repair position.
+fn repair_session_before_save(
+    session: &mut Session,
+    agent_id: &str,
+    reason: &str,
+    new_messages_start: Option<&mut usize>,
+) {
     let (repaired, stats) =
         crate::session_repair::validate_and_repair_with_stats(&session.messages);
     if stats != crate::session_repair::RepairStats::default() {
@@ -135,8 +142,80 @@ fn repair_session_before_save(session: &mut Session, agent_id: &str, reason: &st
             "Session repair applied before save"
         );
     }
-    session.set_messages(repaired);
+    match new_messages_start {
+        Some(start) => replace_session_messages_mid_turn(session, repaired, start),
+        None => session.set_messages(repaired),
+    }
     session.last_repaired_generation = Some(session.messages_generation);
+}
+
+/// Replace `session.messages` while a turn is running, moving `new_messages_start` to where that turn now sits in the replacement.
+///
+/// `new_messages_start` is a `session.messages` index that end-of-turn consumers (auto_memorize, the kernel's canonical-session append) slice from, so it must name the same turn after any rewrite that changes the session's length.
+fn replace_session_messages_mid_turn(
+    session: &mut Session,
+    replacement: Vec<Message>,
+    new_messages_start: &mut usize,
+) {
+    let start = (*new_messages_start).min(session.messages.len());
+    let running_turn = session.messages[start..].to_vec();
+    session.set_messages(replacement);
+    *new_messages_start = relocate_turn_start(&session.messages, &running_turn);
+}
+
+/// Index in `messages` where `running_turn`, taken from the session before it was rewritten, now begins.
+///
+/// Rewrites keep the end of the session verbatim (the compressor's protected tail, repair's untouched pairs), so the turn's surviving messages are matched by value from the back, stopping at the first one that is gone; whatever came before it was summarised or dropped along with it.
+/// The one turn message a rewrite reshapes rather than drops is its prompt: repair merges it with the time message after it or into a user message before it, so a prompt that is no longer present verbatim is looked for inside the user message right before the survivors.
+/// Messages after the turn's last one (working-copy nudges the rewrite persisted) stay inside the returned range, because they belong to the same turn.
+fn relocate_turn_start(messages: &[Message], running_turn: &[Message]) -> usize {
+    let Some(prompt) = running_turn.first() else {
+        return messages.len();
+    };
+    let messages_json: Vec<Option<serde_json::Value>> = messages
+        .iter()
+        .map(|m| serde_json::to_value(m).ok())
+        .collect();
+    let mut cursor = messages.len();
+    let mut first_survivor = running_turn.len();
+    for (index, turn_message) in running_turn.iter().enumerate().rev() {
+        let Some(wanted) = serde_json::to_value(turn_message).ok() else {
+            break;
+        };
+        match messages_json[..cursor]
+            .iter()
+            .rposition(|m| m.as_ref() == Some(&wanted))
+        {
+            Some(at) => {
+                cursor = at;
+                first_survivor = index;
+            }
+            None => break,
+        }
+    }
+    if first_survivor == 0 {
+        return cursor;
+    }
+    let prompt_text = prompt.content.text_content();
+    let absorbed_prompt = first_survivor == 1
+        && !prompt_text.is_empty()
+        && cursor
+            .checked_sub(1)
+            .and_then(|i| messages.get(i))
+            .is_some_and(|m| {
+                m.role == Role::User && m.content.text_content().contains(&prompt_text)
+            });
+    if absorbed_prompt {
+        return cursor - 1;
+    }
+    if first_survivor < running_turn.len() {
+        return cursor;
+    }
+    warn!(
+        turn_messages = running_turn.len(),
+        "None of the running turn survived a mid-turn session rewrite; assuming it is the session's tail"
+    );
+    messages.len().saturating_sub(running_turn.len())
 }
 
 /// The canonical history handed to `ContextEngine::compact`.
@@ -1404,7 +1483,11 @@ async fn run_agent_loop_inner(
             }
             if had_soft_compression {
                 // Persist the compressed history without the per-turn injections, which belong to this request only.
-                session.set_messages(without_turn_injections(&messages, &injections));
+                replace_session_messages_mid_turn(
+                    session,
+                    without_turn_injections(&messages, &injections),
+                    &mut new_messages_start,
+                );
             }
             apply_context_guard(&mut messages, &context_budget, available_tools);
         }
@@ -2415,7 +2498,12 @@ async fn run_agent_loop_inner(
 
     // Persist. Fork and incognito turns skip — both are ephemeral and must
     // not pollute canonical session history.
-    repair_session_before_save(session, agent_id_str.as_str(), "max_iterations");
+    repair_session_before_save(
+        session,
+        agent_id_str.as_str(),
+        "max_iterations",
+        Some(&mut new_messages_start),
+    );
     if !opts.is_fork && !opts.incognito {
         if let Err(e) = memory.save_session_async(session).await {
             warn!("Failed to save session on max iterations: {e}");

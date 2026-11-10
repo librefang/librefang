@@ -753,7 +753,11 @@ async fn run_agent_loop_streaming_inner(
             }
             if had_soft_compression {
                 // Persist the compressed history without the per-turn injections, which belong to this request only.
-                session.set_messages(without_turn_injections(&messages, &injections));
+                replace_session_messages_mid_turn(
+                    session,
+                    without_turn_injections(&messages, &injections),
+                    &mut new_messages_start,
+                );
             }
             apply_context_guard(&mut messages, &context_budget, available_tools);
             recovery
@@ -969,7 +973,12 @@ async fn run_agent_loop_streaming_inner(
                          Any partial output was already sent to the user.]"
                     );
                     session.push_message(Message::assistant(note));
-                    repair_session_before_save(session, agent_id_str.as_str(), "streaming_timeout");
+                    repair_session_before_save(
+                        session,
+                        agent_id_str.as_str(),
+                        "streaming_timeout",
+                        None,
+                    );
                     if !opts.is_fork && !opts.incognito {
                         if let Err(save_err) = memory.save_session_async(session).await {
                             warn!(
@@ -1001,6 +1010,7 @@ async fn run_agent_loop_streaming_inner(
                         session,
                         agent_id_str.as_str(),
                         "streaming_provider_error",
+                        None,
                     );
                     if !opts.is_fork && !opts.incognito {
                         if let Err(save_err) = memory.save_session_async(session).await {
@@ -1897,7 +1907,12 @@ async fn run_agent_loop_streaming_inner(
     session.push_message(Message::assistant(&cap_notice));
 
     // Persist. Fork and incognito turns skip.
-    repair_session_before_save(session, agent_id_str.as_str(), "streaming_max_iterations");
+    repair_session_before_save(
+        session,
+        agent_id_str.as_str(),
+        "streaming_max_iterations",
+        Some(&mut new_messages_start),
+    );
     if !opts.is_fork && !opts.incognito {
         if let Err(e) = memory.save_session_async(session).await {
             warn!("Failed to save session on max iterations: {e}");

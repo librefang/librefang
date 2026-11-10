@@ -542,14 +542,8 @@ pub(super) fn running_turn_start(
 /// vs `"non-streaming"` in production.
 /// `current_turn_start` is an index into the working copy `messages`, never into `session.messages`; the loops compute it with [`running_turn_start`].
 ///
-/// **Ordering note** — when soft-compression later in this same loop
-/// iteration fires `session.set_messages(messages.clone())`, it writes
-/// the (already-folded) working copy back over `session.messages`, so
-/// the explicit replay above is redundant on that path.  The replay is
-/// load-bearing only on the no-compression path; keeping it on both
-/// paths keeps session-mutation semantics uniform and removes a foot-gun
-/// for future refactors that move the fold call out from under the
-/// compression step.
+/// **Ordering note** — when soft-compression later in this same loop iteration persists its working copy through `replace_session_messages_mid_turn`, it writes the (already-folded) working copy back over `session.messages`, so the explicit replay above is redundant on that path.
+/// The replay is load-bearing only on the no-compression path; keeping it on both paths keeps session-mutation semantics uniform and removes a foot-gun for future refactors that move the fold call out from under the compression step.
 // Eight args because every parameter is genuinely distinct (working
 // messages, durable session, knobs, model, aux+primary driver chain,
 // streaming flag, reasoning policy) and bundling them into a context

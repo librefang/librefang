@@ -864,7 +864,7 @@ pub(super) async fn precheck_loop_guard(
             } else {
                 warn!(tool = %tool_call.name, "Circuit breaker triggered");
             }
-            repair_session_before_save(session, agent_id_str, "circuit_breaker");
+            repair_session_before_save(session, agent_id_str, "circuit_breaker", None);
             if !opts.is_fork && !opts.incognito {
                 if let Err(e) = memory.save_session_async(session).await {
                     warn!("Failed to save session on circuit break: {e}");
