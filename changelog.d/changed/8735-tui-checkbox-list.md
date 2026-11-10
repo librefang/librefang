@@ -1,0 +1,1 @@
+The agent editor screens share one checkbox-list widget instead of seven copies, so cursor keys clamp at both ends and a stale cursor toggles nothing instead of indexing past the list. (#8735) (@DaBlitzStein)
