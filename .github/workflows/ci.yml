@@ -261,6 +261,20 @@ jobs:
             FULL_TEST=true; TREASON="$DIRECT_COUNT crates affected (>= $WIDE_SELECTIVE_THRESHOLD): sharded full run"
           fi
 
+          # The crate count is not the only way to overrun that one runner: `librefang-api` and `librefang-kernel` carry the two largest integration suites, so a selective run containing either one is most of the workspace's test time on a single runner.
+          # A one-crate kernel fix measured 3043 of 5634 tests done when the 45-minute cap cancelled it, while a sharded full run finished its whole quarter (3682 tests) in about 8 minutes, so these crates always take the sharded full run.
+          HEAVY_SELECTIVE_CRATES="librefang-api librefang-kernel"
+          if [ "$FULL_TEST" = "false" ]; then
+            for heavy in $HEAVY_SELECTIVE_CRATES; do
+              case " $DIRECT " in
+                *" $heavy "*)
+                  FULL_TEST=true; TREASON="$heavy affected (heavy integration suite): sharded full run"
+                  break
+                  ;;
+              esac
+            done
+          fi
+
           {
             echo "rust=$RUST"
             echo "docs=$DOCS"

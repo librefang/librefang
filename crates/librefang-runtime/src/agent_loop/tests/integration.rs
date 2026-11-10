@@ -1047,12 +1047,9 @@ impl LlmDriver for FoldSummaryDriver {
     }
 }
 
-/// Verifies that the history-fold path is exercised end-to-end:
-/// after enough tool-use cycles the fold path replaces stale tool-result
-/// messages with compact `[history-fold]` stubs that are visible in the
-/// CompletionRequest messages delivered to the primary driver.
+/// Drives one turn of many tool cycles end-to-end with the fold armed, and verifies that none of the turn's own tool results reach the primary driver folded (#8653).
 #[tokio::test]
-async fn test_history_fold_stub_appears_in_llm_request_after_enough_tool_cycles() {
+async fn test_history_fold_never_folds_running_turn_after_many_tool_cycles() {
     use crate::aux_client::AuxClient;
     use librefang_types::config::ToolResultsConfig;
 
@@ -1180,6 +1177,282 @@ async fn test_history_fold_stub_appears_in_llm_request_after_enough_tool_cycles(
             .map(|m| format!("{:?}: {:?}", m.role, m.content))
             .collect::<Vec<_>>()
     );
+}
+
+/// Ids of every tool result that reached the primary driver folded, across all requests.
+fn folded_ids_seen_by(primary: &MultiToolCycleDriver) -> std::collections::BTreeSet<String> {
+    primary
+        .seen_messages
+        .lock()
+        .unwrap()
+        .iter()
+        .flat_map(|m| match &m.content {
+            librefang_types::message::MessageContent::Blocks(blocks) => blocks
+                .iter()
+                .filter_map(|b| match b {
+                    librefang_types::message::ContentBlock::ToolResult {
+                        tool_use_id,
+                        content,
+                        ..
+                    } if content.starts_with("[history-fold]") => Some(tool_use_id.clone()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+            _ => Vec::new(),
+        })
+        .collect()
+}
+
+/// Asserts the fold ran on the earlier turn's result and on nothing the running turn produced.
+fn assert_only_prior_turn_folded(primary: &MultiToolCycleDriver) {
+    let folded = folded_ids_seen_by(primary);
+    assert!(
+        folded.contains("prior_tid"),
+        "the earlier turn's tool result must still fold — the fold is armed and it is stale; folded: {folded:?}"
+    );
+    let running: Vec<&String> = folded.iter().filter(|id| id.starts_with("tid_")).collect();
+    assert!(
+        running.is_empty(),
+        "the running turn's tool results must never be folded, even when the session holds System messages (#8653); folded: {running:?}"
+    );
+}
+
+/// A session whose history holds `system_messages` `Role::System` entries, as the kernel writes them (`session_ops.rs`).
+/// `prepare_llm_messages` drops those from the working copy, so a turn boundary taken from `session.messages` lands that many positions past the turn's real start in the copy the fold walks.
+fn session_with_system_messages(system_messages: usize) -> librefang_memory::session::Session {
+    let mut session = librefang_memory::session::Session {
+        id: librefang_types::agent::SessionId::new(),
+        agent_id: librefang_types::agent::AgentId::new(),
+        parent_session_id: None,
+        messages: Vec::new(),
+        context_window_tokens: 0,
+        label: None,
+        model_override: None,
+        reasoning_effort: None,
+        messages_generation: 0,
+        last_repaired_generation: None,
+        peer_id: None,
+    };
+    session
+        .messages
+        .push(librefang_types::message::Message::user("earlier question"));
+    session.messages.push(librefang_types::message::Message {
+        role: librefang_types::message::Role::Assistant,
+        content: librefang_types::message::MessageContent::Blocks(vec![ContentBlock::ToolUse {
+            id: "prior_tid".to_string(),
+            name: "tool_search".to_string(),
+            input: serde_json::json!({"query": "earlier"}),
+            provider_metadata: None,
+        }]),
+        pinned: false,
+        timestamp: None,
+    });
+    session.messages.push(librefang_types::message::Message {
+        role: librefang_types::message::Role::User,
+        content: librefang_types::message::MessageContent::Blocks(vec![ContentBlock::ToolResult {
+            tool_use_id: "prior_tid".to_string(),
+            tool_name: "tool_search".to_string(),
+            content: "earlier search output".to_string(),
+            is_error: false,
+            status: librefang_types::tool::ToolExecutionStatus::Completed,
+            approval_request_id: None,
+        }]),
+        pinned: false,
+        timestamp: None,
+    });
+    session
+        .messages
+        .push(librefang_types::message::Message::assistant(
+            "earlier answer",
+        ));
+    for i in 0..system_messages {
+        session
+            .messages
+            .push(librefang_types::message::Message::system(format!(
+                "[system notice {i}]"
+            )));
+    }
+    session
+}
+
+fn fold_armed_loop_options() -> LoopOptions {
+    let aux_driver: Arc<dyn LlmDriver> = Arc::new(FoldSummaryDriver);
+    LoopOptions {
+        aux_client: Some(Arc::new(crate::aux_client::AuxClient::with_primary_only(
+            aux_driver,
+        ))),
+        tool_results_config: Some(librefang_types::config::ToolResultsConfig {
+            history_fold_after_turns: 3,
+            fold_min_batch_size: 1,
+            ..librefang_types::config::ToolResultsConfig::default()
+        }),
+        ..LoopOptions::default()
+    }
+}
+
+/// #8653 follow-up: the fold boundary must be found in the working copy the fold walks, not taken from `session.messages`.
+/// With System messages in the session the old session index pointed past the turn's first tool cycles, so they were folded while the turn was still running on them.
+#[tokio::test]
+async fn test_history_fold_spares_running_turn_when_session_holds_system_messages() {
+    let memory = librefang_memory::MemorySubstrate::open_in_memory(0.01).unwrap();
+    let mut session = session_with_system_messages(12);
+    let manifest = test_manifest();
+    let primary = Arc::new(MultiToolCycleDriver::new(10));
+    let driver: Arc<dyn LlmDriver> = Arc::clone(&primary) as Arc<dyn LlmDriver>;
+    let loop_opts = fold_armed_loop_options();
+    let tool_search_def = fake_tool("tool_search");
+
+    run_agent_loop(
+        &manifest,
+        "Run many tool cycles",
+        &mut session,
+        &memory,
+        driver,
+        std::slice::from_ref(&tool_search_def),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None, // on_phase
+        None, // media_engine
+        None, // media_drivers
+        None, // tts_engine
+        None, // docker_config
+        None, // hooks
+        None, // context_window_tokens
+        None, // process_manager
+        None, // checkpoint_manager
+        None, // process_registry
+        None, // user_content_blocks
+        None, // proactive_memory
+        None, // context_engine
+        None, // pending_messages
+        &loop_opts,
+    )
+    .await
+    .expect("Loop should complete without error");
+
+    assert_only_prior_turn_folded(&primary);
+}
+
+/// Streaming twin of `test_history_fold_spares_running_turn_when_session_holds_system_messages`.
+#[tokio::test]
+async fn test_streaming_history_fold_spares_running_turn_when_session_holds_system_messages() {
+    let memory = librefang_memory::MemorySubstrate::open_in_memory(0.01).unwrap();
+    let mut session = session_with_system_messages(12);
+    let manifest = test_manifest();
+    let primary = Arc::new(MultiToolCycleDriver::new(10));
+    let driver: Arc<dyn LlmDriver> = Arc::clone(&primary) as Arc<dyn LlmDriver>;
+    let loop_opts = fold_armed_loop_options();
+    let tool_search_def = fake_tool("tool_search");
+    let (tx, _rx) = mpsc::channel(1024);
+
+    run_agent_loop_streaming(
+        &manifest,
+        "Run many tool cycles",
+        &mut session,
+        &memory,
+        driver,
+        std::slice::from_ref(&tool_search_def),
+        None,
+        tx,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None, // checkpoint_manager
+        None, // process_registry
+        None,
+        None,
+        None,
+        None,
+        &loop_opts,
+    )
+    .await
+    .expect("Streaming loop should complete without error");
+
+    assert_only_prior_turn_folded(&primary);
+}
+
+/// The fold boundary is recovered from tool ids, so it stays on the running turn after the working copy is rewritten under it: here inline compression has replaced the old history with a summary, repair has merged the turn's prompt with the time message, and a head injection sits at index 0.
+/// No index carried over from before the rewrite would still be right, and a `session.messages` index never was.
+#[test]
+fn running_turn_start_survives_working_copy_rewrites() {
+    use librefang_types::message::{ContentBlock, Message, MessageContent, Role};
+    use librefang_types::tool::ToolExecutionStatus;
+
+    fn tool_use(id: &str) -> Message {
+        Message {
+            role: Role::Assistant,
+            content: MessageContent::Blocks(vec![ContentBlock::ToolUse {
+                id: id.to_string(),
+                name: "tool_search".to_string(),
+                input: serde_json::json!({}),
+                provider_metadata: None,
+            }]),
+            pinned: false,
+            timestamp: None,
+        }
+    }
+    fn tool_result(id: &str) -> Message {
+        Message {
+            role: Role::User,
+            content: MessageContent::Blocks(vec![ContentBlock::ToolResult {
+                tool_use_id: id.to_string(),
+                tool_name: "tool_search".to_string(),
+                content: format!("result {id}"),
+                is_error: false,
+                status: ToolExecutionStatus::Completed,
+                approval_request_id: None,
+            }]),
+            pinned: false,
+            timestamp: None,
+        }
+    }
+
+    let prepared = vec![
+        Message::user("[System context — memory]"),
+        Message::user("old question"),
+        tool_use("old_1"),
+        tool_result("old_1"),
+        tool_use("old_2"),
+        tool_result("old_2"),
+        Message::assistant("old answer"),
+        Message::user("current prompt"),
+        Message::user("[current time]"),
+    ];
+    let prior = prior_tool_ids(&prepared);
+    assert_eq!(
+        running_turn_start(&prepared, &prior),
+        prepared.len(),
+        "a turn that has made no call has nothing to protect"
+    );
+
+    let rewritten = vec![
+        Message::user("[System context — memory]"),
+        Message::user("[Context compaction summary] old question, old_1 ran"),
+        tool_use("old_2"),
+        tool_result("old_2"),
+        Message::user("current prompt\n[current time]"),
+        tool_use("new_1"),
+        tool_result("new_1"),
+        tool_use("new_2"),
+        tool_result("new_2"),
+    ];
+    assert_eq!(running_turn_start(&rewritten, &prior), 5);
 }
 
 /// Axis-2 wiring regression for #4866: `maybe_fold_stale_tool_results`
