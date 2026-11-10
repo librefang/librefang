@@ -10,6 +10,7 @@ members = [
     "crates/librefang-runtime-media",
     "crates/librefang-runtime-sandbox-docker",
     "crates/librefang-runtime-mcp",
+    "crates/librefang-storage",
     "crates/librefang-llm-drivers",
     "crates/librefang-llm-driver",
     "crates/librefang-kernel-handle",
@@ -108,6 +109,12 @@ webauthn-rs = "0.5.5"
 rusqlite = { version = "0.39.0", features = ["bundled", "serde_json"] }
 r2d2 = "0.8"
 r2d2_sqlite = "0.34"
+# SurrealDB (opt-in storage backend, crates/librefang-storage) - pinned exactly.
+# `surrealdb = "=x.y.z"` does not constrain surrealdb-core / surrealdb-types, so all three are pinned here.
+# SurrealDB 4.0 removed `kv-rocksdb`; the embedded engine is `kv-surrealkv`.
+surrealdb = { version = "=4.0.0", default-features = false, features = ["kv-surrealkv", "protocol-ws", "protocol-http"] }
+surrealdb-core = { version = "=4.0.0", default-features = false }
+surrealdb-types = { version = "=4.0.0", default-features = false }
 
 # CLI
 clap = { version = "4", features = ["derive"] }
@@ -291,6 +298,13 @@ split-debuginfo = "unpacked" # Speeds up incremental linking on macOS
 # (#1805, #1807, #2117). Panics and backtraces still carry file:line; only
 # interactive debugger (lldb/gdb) variable inspection is lost.
 debug = "line-tables-only"
+
+# SurrealDB 4.0's query executor overflows small test-thread stacks and runs ~25x slower at opt-level 0.
+[profile.dev.package.surrealdb-core]
+opt-level = 1
+
+[profile.dev.package.surrealdb-expr]
+opt-level = 1
 
 [profile.release]
 lto = "fat"
