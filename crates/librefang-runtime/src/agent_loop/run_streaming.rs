@@ -474,6 +474,8 @@ async fn run_agent_loop_streaming_inner(
     let mut accumulated_text = String::new();
 
     new_messages_start = prepared_new_messages_start;
+    // The fold's turn boundary lives in working-copy coordinates, which `new_messages_start` (a `session.messages` index) does not share — see `prior_tool_ids`.
+    let pre_turn_tool_ids = prior_tool_ids(&messages);
 
     // Resolution order: per-agent manifest > operator LoopOptions > library default.
     let max_iterations = manifest
@@ -672,6 +674,7 @@ async fn run_agent_loop_streaming_inner(
         // History fold (#3347 3/N): rewrite stale tool-result blocks in place
         // before context assembly — streaming path mirrors non-streaming via
         // `maybe_fold_stale_tool_results` (#4 review-followup DRY).
+        let current_turn_start = running_turn_start(&messages, &pre_turn_tool_ids);
         messages = maybe_fold_stale_tool_results(
             messages,
             session,
@@ -684,7 +687,7 @@ async fn run_agent_loop_streaming_inner(
             driver.clone(),
             true,
             fold_echo_policy,
-            new_messages_start,
+            current_turn_start,
         )
         .await;
 
