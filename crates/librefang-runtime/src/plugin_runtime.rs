@@ -1816,7 +1816,9 @@ impl SpawnSandbox {
 
 /// Why a persistent hook call failed, which decides whether replaying the request is safe.
 enum PersistentCallError {
-    /// The process was gone before it could have handled the request (stdin write failed, or stdout hit EOF with no reply), so restarting and replaying cannot duplicate work.
+    /// The process died instead of answering: the stdin write failed, or stdout hit EOF with no reply.
+    /// A failed write means the request never reached a live process, so replaying it cannot duplicate work.
+    /// EOF after a successful write is replayed too, deliberately: the process may have read the request and acted on part of it before crashing, but a crash (OOM kill, SIGSYS, panic) is the case a restart exists to recover from, so it is retried once on a fresh process at the cost of possibly repeating a side effect the crashed process had started.
     ProcessGone(PluginRuntimeError),
     /// The process may have received and acted on the request (timeout, invalid or oversized output, read error); replaying could run side effects twice.
     MaybeDelivered(PluginRuntimeError),
@@ -1950,7 +1952,7 @@ impl HookProcessPool {
         match Self::do_call(guard.as_mut().unwrap(), input, timeout).await {
             Ok(value) => Ok(value),
             Err(PersistentCallError::ProcessGone(e)) => {
-                // The request never reached a live process, so restarting and replaying it once is safe.
+                // The process died instead of answering; restart it and replay the request once (see `ProcessGone` for why EOF after a delivered write is replayed too).
                 let exit_label = match guard.as_mut().map(|proc| proc.child.try_wait()) {
                     Some(Ok(Some(status))) => format!(
                         "Persistent hook process exited unexpectedly: {}",
