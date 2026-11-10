@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect, useMemo, useRef, useDeferredValue, memo } from "react";
+import { useState, useCallback, useEffect, useMemo, useRef, memo } from "react";
 import { useTranslation } from "react-i18next";
 import { type RegistrySchema, type RegistrySchemaField, type RegistrySchemaSection } from "../api";
 import { useRegistrySchema } from "../lib/queries/config";
@@ -7,28 +7,6 @@ import { Select } from "./ui/Select";
 import { Button } from "./ui/Button";
 import { Skeleton } from "./ui/Skeleton";
 import { ErrorState } from "./ui/ErrorState";
-import { ChevronDown, ChevronRight, Plus, Trash2 } from "lucide-react";
-
-let _uidCounter = 0;
-function uid(): string {
-  return `_${_uidCounter++}`;
-}
-
-function ensureUids(items: unknown[]): Record<string, unknown>[] {
-  return (items as Record<string, unknown>[]).map((item) => ({ ...item, _uid: uid() }));
-}
-
-function stripUids(obj: unknown): unknown {
-  if (Array.isArray(obj)) return obj.map(stripUids);
-  if (obj && typeof obj === "object") {
-    const result: Record<string, unknown> = {};
-    for (const [k, v] of Object.entries(obj as Record<string, unknown>)) {
-      if (k !== "_uid") result[k] = stripUids(v);
-    }
-    return result;
-  }
-  return obj;
-}
 
 interface SchemaFormProps {
   contentType: string;
@@ -39,36 +17,22 @@ interface SchemaFormProps {
   submitLabel?: string;
 }
 
-// Recursively build defaults for a single section (including sub-sections)
-function buildSectionDefaults(
-  section: RegistrySchemaSection,
-  initialValues?: Record<string, unknown>,
-): Record<string, unknown> {
-  const defaults: Record<string, unknown> = {};
-  for (const [fKey, f] of Object.entries(section.fields ?? {})) {
-    if (initialValues && fKey in initialValues) {
-      defaults[fKey] = initialValues[fKey];
-    } else if (f.default !== undefined) {
-      defaults[fKey] = f.default;
-    } else if (f.type === "bool") {
-      defaults[fKey] = false;
-    } else {
-      defaults[fKey] = "";
-    }
-  }
-  for (const [sKey, s] of Object.entries(section.sections ?? {})) {
-    if (initialValues && sKey in initialValues) {
-      defaults[sKey] = s.repeatable ? ensureUids(initialValues[sKey] as unknown[]) : initialValues[sKey];
-    } else if (s.repeatable) {
-      defaults[sKey] = [];
-    } else {
-      defaults[sKey] = buildSectionDefaults(s);
-    }
-  }
-  return defaults;
-}
+const textareaClass =
+  "w-full rounded-lg border border-border-subtle bg-main px-3 py-2 text-xs font-mono outline-none focus:border-brand resize-y";
 
-// Build initial form values from schema defaults and provided initialValues
+/**
+ * Scope of the schema-driven form (#T2.5, decision D6):
+ *
+ * - Top-level fields (string, number, bool, array of scalars) get real controls.
+ * - A nested object or a list of objects (`schema.sections`) is edited as JSON
+ *   text in a textarea, validated on every keystroke.
+ *
+ * Nested sections are deliberately NOT rendered recursively: a generated form
+ * that tries to draw every shape costs more UI than it saves, and a JSON box
+ * keeps the whole schema reachable. If a screen ever needs nested controls, it
+ * should be hand-built for the shapes that matter, not generated.
+ */
+
 function buildDefaults(
   schema: RegistrySchema,
   initialValues?: Record<string, unknown>,
@@ -87,44 +51,15 @@ function buildDefaults(
     }
   }
 
-  // Initialize sections — repeatable sections start with empty array,
-  // non-repeatable sections get a single flat object with defaults (recursive)
-  for (const [sectionKey, section] of Object.entries(schema.sections ?? {})) {
+  // Sections keep whatever the record already had; a section with no value
+  // starts empty and is omitted from the payload until the operator types JSON.
+  for (const sectionKey of Object.keys(schema.sections ?? {})) {
     if (initialValues && sectionKey in initialValues) {
-      values[sectionKey] = section.repeatable ? ensureUids(initialValues[sectionKey] as unknown[]) : initialValues[sectionKey];
-    } else if (section.repeatable) {
-      values[sectionKey] = [];
-    } else {
-      values[sectionKey] = buildSectionDefaults(
-        section,
-        initialValues?.[sectionKey] as Record<string, unknown> | undefined,
-      );
+      values[sectionKey] = initialValues[sectionKey];
     }
   }
 
   return values;
-}
-
-// Build a blank entry for a repeatable section (including sub-section defaults)
-function blankSectionEntry(section: RegistrySchemaSection): Record<string, unknown> {
-  const entry: Record<string, unknown> = { _uid: uid() };
-  for (const [key, field] of Object.entries(section.fields ?? {})) {
-    if (field.default !== undefined) {
-      entry[key] = field.default;
-    } else if (field.type === "bool") {
-      entry[key] = false;
-    } else {
-      entry[key] = "";
-    }
-  }
-  for (const [sKey, s] of Object.entries(section.sections ?? {})) {
-    if (s.repeatable) {
-      entry[sKey] = [];
-    } else {
-      entry[sKey] = buildSectionDefaults(s);
-    }
-  }
-  return entry;
 }
 
 function hasInvalidNumberValue(value: unknown, required: boolean): boolean {
@@ -135,44 +70,6 @@ function hasInvalidNumberValue(value: unknown, required: boolean): boolean {
   return typeof value !== "number" || Number.isNaN(value);
 }
 
-// Recursively validate required fields within a section
-function validateSectionRequired(
-  section: RegistrySchemaSection,
-  values: Record<string, unknown>,
-  pathPrefix: string,
-  errors: string[],
-): void {
-  for (const [fKey, f] of Object.entries(section.fields ?? {})) {
-    const v = values[fKey];
-    if (f.required && (v === undefined || v === null || v === "")) {
-      errors.push(`${pathPrefix}.${fKey}`);
-    } else if (f.type === "number" && hasInvalidNumberValue(v, f.required ?? false)) {
-      errors.push(`${pathPrefix}.${fKey}`);
-    }
-  }
-  for (const [sKey, s] of Object.entries(section.sections ?? {})) {
-    if (s.repeatable) {
-      const items = values[sKey];
-      if (Array.isArray(items)) {
-        items.forEach((item, idx) => {
-          validateSectionRequired(
-            s,
-            item as Record<string, unknown>,
-            `${pathPrefix}.${sKey}[${idx}]`,
-            errors,
-          );
-        });
-      }
-    } else {
-      const subVal = values[sKey] as Record<string, unknown> | undefined;
-      if (subVal) {
-        validateSectionRequired(s, subVal, `${pathPrefix}.${sKey}`, errors);
-      }
-    }
-  }
-}
-
-// Validate required fields; returns list of field paths that are missing
 function validateRequired(
   schema: RegistrySchema,
   values: Record<string, unknown>,
@@ -188,27 +85,98 @@ function validateRequired(
     }
   }
 
-  for (const [sectionKey, section] of Object.entries(schema.sections ?? {})) {
-    if (section.repeatable) {
-      const items = values[sectionKey];
-      if (Array.isArray(items)) {
-        items.forEach((item, idx) => {
-          validateSectionRequired(
-            section,
-            item as Record<string, unknown>,
-            `${sectionKey}[${idx}]`,
-            errors,
-          );
-        });
-      }
-    } else {
-      const sectionVal = values[sectionKey] as Record<string, unknown> | undefined;
-      if (sectionVal) {
-        validateSectionRequired(section, sectionVal, sectionKey, errors);
-      }
+  return errors;
+}
+
+// Comma-separated array editor. The draft is local because a controlled input
+// whose value is the parsed array drops the comma the moment it is typed.
+const ArrayField = memo(function ArrayField({
+  fieldKey,
+  field,
+  value,
+  onChange,
+  hasError,
+}: {
+  fieldKey: string;
+  field: RegistrySchemaField;
+  value: unknown;
+  onChange: (value: unknown) => void;
+  hasError: boolean;
+}) {
+  const { t } = useTranslation();
+  const [draft, setDraft] = useState(() =>
+    Array.isArray(value) ? value.join(", ") : String(value ?? ""),
+  );
+  const lastEmitted = useRef<unknown>(value);
+
+  useEffect(() => {
+    if (value === lastEmitted.current) return;
+    lastEmitted.current = value;
+    setDraft(Array.isArray(value) ? value.join(", ") : String(value ?? ""));
+  }, [value]);
+
+  return (
+    <div className="space-y-1">
+      <Input
+        label={field.required ? `${fieldKey} *` : fieldKey}
+        value={draft}
+        onChange={(e) => {
+          const raw = e.target.value;
+          setDraft(raw);
+          const next = raw
+            .split(",")
+            .map((s) => s.trim())
+            .filter(Boolean);
+          lastEmitted.current = next;
+          onChange(next);
+        }}
+        placeholder={
+          field.example != null ? String(field.example) : t("schema_form.comma_separated")
+        }
+        className={hasError ? "border-error" : ""}
+      />
+      {field.description && (
+        <p className="text-[10px] text-text-dim/60 pl-0.5">{field.description}</p>
+      )}
+    </div>
+  );
+});
+
+/** Required/number checks inside a nested object or list of objects. */
+function validateSection(
+  section: RegistrySchemaSection,
+  value: unknown,
+  pathPrefix: string,
+  errors: string[],
+): void {
+  if (Array.isArray(value)) {
+    value.forEach((item, idx) => validateSection(section, item, `${pathPrefix}[${idx}]`, errors));
+    return;
+  }
+  if (!value || typeof value !== "object") return;
+  const record = value as Record<string, unknown>;
+  for (const [key, field] of Object.entries(section.fields ?? {})) {
+    const v = record[key];
+    if (field.required && (v === undefined || v === null || v === "")) {
+      errors.push(`${pathPrefix}.${key}`);
+    } else if (field.type === "number" && hasInvalidNumberValue(v, field.required ?? false)) {
+      errors.push(`${pathPrefix}.${key}`);
     }
   }
+  for (const [key, sub] of Object.entries(section.sections ?? {})) {
+    if (key in record) validateSection(sub, record[key], `${pathPrefix}.${key}`, errors);
+  }
+}
 
+function validateSections(
+  schema: RegistrySchema,
+  values: Record<string, unknown>,
+): string[] {
+  const errors: string[] = [];
+  for (const [key, section] of Object.entries(schema.sections ?? {})) {
+    const value = values[key];
+    if (value !== undefined) validateSection(section, value, key, errors);
+  }
   return errors;
 }
 
@@ -233,11 +201,7 @@ const SchemaField = memo(function SchemaField({
     return (
       <div className="space-y-1">
         <Select
-          label={
-            field.required
-              ? `${fieldKey} *`
-              : fieldKey
-          }
+          label={field.required ? `${fieldKey} *` : fieldKey}
           options={field.options.map((o) => ({ value: o, label: o }))}
           value={String(value ?? "")}
           onChange={(e) => onChange(e.target.value)}
@@ -314,30 +278,16 @@ const SchemaField = memo(function SchemaField({
     );
   }
 
-  // array -> comma-separated text
+  // array -> comma-separated text, kept as text so separators survive typing
   if (field.type === "array") {
-    const arrValue = Array.isArray(value) ? value.join(", ") : String(value ?? "");
     return (
-      <div className="space-y-1">
-        <Input
-          label={field.required ? `${fieldKey} *` : fieldKey}
-          value={arrValue}
-          onChange={(e) => {
-            const raw = e.target.value;
-            onChange(
-              raw
-                .split(",")
-                .map((s) => s.trim())
-                .filter(Boolean),
-            );
-          }}
-          placeholder={field.example != null ? String(field.example) : t("schema_form.comma_separated")}
-          className={hasError ? "border-error" : ""}
-        />
-        {field.description && (
-          <p className="text-[10px] text-text-dim/60 pl-0.5">{field.description}</p>
-        )}
-      </div>
+      <ArrayField
+        fieldKey={fieldKey}
+        field={field}
+        value={value}
+        onChange={onChange}
+        hasError={hasError}
+      />
     );
   }
 
@@ -358,184 +308,111 @@ const SchemaField = memo(function SchemaField({
   );
 });
 
-// Collapsible section fieldset (supports recursive sub-sections)
-const SectionFieldset = memo(function SectionFieldset({
+const pretty = (value: unknown): string =>
+  value === undefined ? "" : JSON.stringify(value, null, 2);
+
+/** A nested object or list of objects, edited as validated JSON. */
+const SectionJsonEditor = memo(function SectionJsonEditor({
   sectionKey,
   section,
-  values,
-  errors,
+  value,
+  invalid,
+  resetKey,
   onChange,
-  pathPrefix,
+  onValidityChange,
 }: {
   sectionKey: string;
   section: RegistrySchemaSection;
-  values: Record<string, unknown>;
-  errors: Set<string>;
-  onChange: (sectionKey: string, newVal: unknown, errorPathsToClear?: string[]) => void;
-  pathPrefix?: string;
+  value: unknown;
+  invalid: boolean;
+  resetKey: string;
+  onChange: (value: unknown) => void;
+  onValidityChange: (sectionKey: string, message: string | null) => void;
 }) {
   const { t } = useTranslation();
-  const [collapsed, setCollapsed] = useState(false);
-  const fullPath = pathPrefix ?? sectionKey;
+  const [draft, setDraft] = useState(() => pretty(value));
+  const [error, setError] = useState<string | null>(null);
+  const lastEmitted = useRef<unknown>(undefined);
 
-  if (section.repeatable) {
-    const items = (Array.isArray(values[sectionKey]) ? values[sectionKey] : []) as Record<string, unknown>[];
+  // Opening a different record resets the box even if both records have no
+  // value for this section (reference comparison alone would miss undefined).
+  useEffect(() => {
+    lastEmitted.current = value;
+    setDraft(pretty(value));
+    setError(null);
+    onValidityChange(sectionKey, null);
+    // Only when the record changes; `value` is the fresh record's value.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [resetKey]);
 
-    const addItem = () => {
-      onChange(sectionKey, [...items, blankSectionEntry(section)], []);
-    };
+  // Re-seed when the record itself changes (editing a different row), but not
+  // when the change came from this textarea: reformatting under the cursor
+  // would fight every keystroke.
+  useEffect(() => {
+    if (value === lastEmitted.current) return;
+    lastEmitted.current = value;
+    setDraft(pretty(value));
+    if (value !== undefined) {
+      setError(null);
+      onValidityChange(sectionKey, null);
+    }
+  }, [value, sectionKey, onValidityChange]);
 
-    const removeItem = (idx: number) => {
-      onChange(sectionKey, items.filter((_, i) => i !== idx), [`${fullPath}[${idx}]`]);
-    };
-
-    const updateItem = (idx: number, fieldKey: string, fieldValue: unknown, errorPaths?: string[]) => {
-      const updated = items.map((item, i) =>
-        i === idx ? { ...item, [fieldKey]: fieldValue } : item,
-      );
-      onChange(sectionKey, updated, errorPaths);
-    };
-
-    return (
-      <fieldset className="border border-border-subtle/50 rounded-xl overflow-hidden">
-        <button
-          type="button"
-          className="w-full flex items-center gap-2 px-4 py-3 bg-main/30 hover:bg-main/50 transition-colors text-left"
-          onClick={() => setCollapsed(!collapsed)}
-        >
-          {collapsed ? (
-            <ChevronRight className="w-3.5 h-3.5 text-text-dim shrink-0" />
-          ) : (
-            <ChevronDown className="w-3.5 h-3.5 text-text-dim shrink-0" />
-          )}
-          <span className="text-xs font-black uppercase tracking-widest text-text-dim">
-            {sectionKey}
-          </span>
-          <span className="text-[10px] text-text-dim/50 ml-1">
-            ({items.length})
-          </span>
-        </button>
-
-        {!collapsed && (
-          <div className="p-4 space-y-3">
-            {section.description && (
-              <p className="text-[10px] text-text-dim/60">{section.description}</p>
-            )}
-
-            {items.map((item, idx) => (
-              <div
-                key={String(item._uid ?? idx)}
-                className="p-3 rounded-lg border border-border-subtle/30 bg-surface space-y-3"
-              >
-                <div className="flex items-center justify-between">
-                  <span className="text-[10px] font-bold text-text-dim uppercase tracking-widest">
-                    #{idx + 1}
-                  </span>
-                  <button
-                    type="button"
-                    onClick={() => removeItem(idx)}
-                    className="p-1 rounded hover:bg-error/10 text-text-dim hover:text-error transition-colors"
-                    aria-label={t("common.delete")}
-                  >
-                    <Trash2 className="w-3.5 h-3.5" />
-                  </button>
-                </div>
-                {Object.entries(section.fields ?? {}).map(([fKey, f]) => (
-                  <SchemaField
-                    key={fKey}
-                    fieldKey={fKey}
-                    field={f}
-                    value={item[fKey]}
-                    onChange={(v) => updateItem(idx, fKey, v, [`${fullPath}[${idx}].${fKey}`])}
-                    hasError={errors.has(`${fullPath}[${idx}].${fKey}`)}
-                  />
-                ))}
-                {Object.entries(section.sections ?? {}).map(([subKey, subSection]) => (
-                  <SectionFieldset
-                    key={subKey}
-                    sectionKey={subKey}
-                    section={subSection}
-                    values={item}
-                    errors={errors}
-                    onChange={(subSectionKey, newSubVal, subErrorPaths) => {
-                      updateItem(idx, subSectionKey, newSubVal, subErrorPaths);
-                    }}
-                    pathPrefix={`${fullPath}[${idx}].${subKey}`}
-                  />
-                ))}
-              </div>
-            ))}
-
-            <Button
-              type="button"
-              variant="ghost"
-              size="sm"
-              onClick={addItem}
-              className="w-full border border-dashed border-border-subtle"
-            >
-              <Plus className="w-3.5 h-3.5 mr-1" />
-              {t("schema_form.add_item")}
-            </Button>
-          </div>
-        )}
-      </fieldset>
-    );
-  }
-
-  // Non-repeatable section
-  const sectionVal = (values[sectionKey] ?? {}) as Record<string, unknown>;
-
-  const updateField = (fieldKey: string, fieldValue: unknown) => {
-    onChange(sectionKey, { ...sectionVal, [fieldKey]: fieldValue }, [`${fullPath}.${fieldKey}`]);
+  const handleChange = (text: string) => {
+    setDraft(text);
+    if (text.trim() === "") {
+      setError(null);
+      onValidityChange(sectionKey, null);
+      lastEmitted.current = undefined;
+      onChange(undefined);
+      return;
+    }
+    try {
+      const parsed: unknown = JSON.parse(text);
+      setError(null);
+      onValidityChange(sectionKey, null);
+      lastEmitted.current = parsed;
+      onChange(parsed);
+    } catch {
+      const message = t("schema_form.json_invalid");
+      setError(message);
+      onValidityChange(sectionKey, message);
+    }
   };
+
+  const errorId = `schema-form-${sectionKey}-json-error`;
 
   return (
     <fieldset className="border border-border-subtle/50 rounded-xl overflow-hidden">
-      <button
-        type="button"
-        className="w-full flex items-center gap-2 px-4 py-3 bg-main/30 hover:bg-main/50 transition-colors text-left"
-        onClick={() => setCollapsed(!collapsed)}
-      >
-        {collapsed ? (
-          <ChevronRight className="w-3.5 h-3.5 text-text-dim shrink-0" />
-        ) : (
-          <ChevronDown className="w-3.5 h-3.5 text-text-dim shrink-0" />
-        )}
-        <span className="text-xs font-black uppercase tracking-widest text-text-dim">
+      <div className="px-4 py-3 bg-main/30">
+        <label
+          htmlFor={`schema-form-${sectionKey}-json`}
+          className="text-xs font-black uppercase tracking-widest text-text-dim"
+        >
           {sectionKey}
-        </span>
-      </button>
-
-      {!collapsed && (
-        <div className="p-4 space-y-3">
-          {section.description && (
-            <p className="text-[10px] text-text-dim/60">{section.description}</p>
-          )}
-          {Object.entries(section.fields ?? {}).map(([fKey, f]) => (
-            <SchemaField
-              key={fKey}
-              fieldKey={fKey}
-              field={f}
-              value={sectionVal[fKey]}
-              onChange={(v) => updateField(fKey, v)}
-              hasError={errors.has(`${fullPath}.${fKey}`)}
-            />
-          ))}
-          {Object.entries(section.sections ?? {}).map(([subKey, subSection]) => (
-            <SectionFieldset
-              key={subKey}
-              sectionKey={subKey}
-              section={subSection}
-              values={sectionVal}
-              errors={errors}
-              onChange={(subSectionKey, newSubVal, subErrorPaths) => {
-                onChange(sectionKey, { ...sectionVal, [subSectionKey]: newSubVal }, subErrorPaths);
-              }}
-              pathPrefix={`${fullPath}.${subKey}`}
-            />
-          ))}
-        </div>
-      )}
+        </label>
+        {section.description && (
+          <p className="text-[10px] text-text-dim/60 mt-1">{section.description}</p>
+        )}
+      </div>
+      <div className="p-4 space-y-1">
+        <textarea
+          id={`schema-form-${sectionKey}-json`}
+          value={draft}
+          onChange={(e) => handleChange(e.target.value)}
+          rows={6}
+          spellCheck={false}
+          placeholder={section.repeatable ? "[]" : "{}"}
+          aria-invalid={invalid || undefined}
+          aria-describedby={error ? errorId : undefined}
+          className={`${textareaClass} ${invalid ? "border-error" : ""}`}
+        />
+        {error && (
+          <p id={errorId} className="text-[10px] text-error">
+            {error}
+          </p>
+        )}
+      </div>
     </fieldset>
   );
 });
@@ -569,6 +446,7 @@ export function SchemaForm({
   const { t } = useTranslation();
   const [submitting, setSubmitting] = useState(false);
   const [errors, setErrors] = useState<string[]>([]);
+  const [jsonErrors, setJsonErrors] = useState<Record<string, string>>({});
   const [submitError, setSubmitError] = useState<string | null>(null);
   const errorSet = useMemo(() => new Set(errors), [errors]);
 
@@ -576,21 +454,15 @@ export function SchemaForm({
 
   const schema = schemaQuery.data;
 
-  // Initialize values once schema loads
   const defaultValues = useMemo(() => {
     if (!schema) return {};
     return buildDefaults(schema, initialValues);
   }, [schema, initialValues]);
 
   const [values, setValues] = useState<Record<string, unknown>>({});
-  const deferredValues = useDeferredValue(values);
 
   // Sync defaults into values when schema arrives or when the caller passes
-  // structurally different initialValues (e.g. opening the form to edit a
-  // different record). Without re-seeding, the form would silently keep the
-  // previous record's values (#3540). We compare a stable JSON snapshot to
-  // avoid wiping user edits on every parent re-render that happens to pass
-  // a new object reference with identical content.
+  // structurally different initialValues (editing a different record).
   const initialValuesSnapshot = useMemo(
     () => (initialValues ? JSON.stringify(initialValues) : ""),
     [initialValues],
@@ -602,42 +474,53 @@ export function SchemaForm({
     lastSnapshot.current = initialValuesSnapshot;
     setValues(defaultValues);
     setErrors([]);
+    setJsonErrors({});
     setSubmitError(null);
   }, [schema, defaultValues, initialValuesSnapshot]);
 
   const updateField = useCallback((key: string, value: unknown) => {
     setValues((prev) => ({ ...prev, [key]: value }));
-    // Clear error for this field when user types
     setErrors((prev) => prev.filter((e) => e !== key));
   }, []);
 
-  const updateSection = useCallback((sectionKey: string, newVal: unknown, errorPathsToClear?: string[]) => {
-    setValues((prev) => ({ ...prev, [sectionKey]: newVal }));
-    setErrors((prev) => {
-      if (errorPathsToClear) {
-        return errorPathsToClear.length > 0
-          ? prev.filter((e) => !errorPathsToClear.some((p) => e === p || e.startsWith(`${p}.`) || e.startsWith(`${p}[`)))
-          : prev;
-      }
-      return prev.filter((e) =>
-        e !== sectionKey && !e.startsWith(`${sectionKey}.`) && !e.startsWith(`${sectionKey}[`)
-      );
+  const updateSection = useCallback((sectionKey: string, newVal: unknown) => {
+    setValues((prev) => {
+      const next = { ...prev };
+      if (newVal === undefined) delete next[sectionKey];
+      else next[sectionKey] = newVal;
+      return next;
+    });
+  }, []);
+
+  const handleJsonValidity = useCallback((sectionKey: string, message: string | null) => {
+    setJsonErrors((prev) => {
+      const next = { ...prev };
+      if (message) next[sectionKey] = message;
+      else delete next[sectionKey];
+      return next;
     });
   }, []);
 
   const handleSubmit = async () => {
     if (!schema) return;
 
-    const validationErrors = validateRequired(schema, values);
+    const validationErrors = [
+      ...validateRequired(schema, values),
+      ...validateSections(schema, values),
+    ];
     if (validationErrors.length > 0) {
       setErrors(validationErrors);
+      return;
+    }
+    if (Object.keys(jsonErrors).length > 0) {
+      setErrors(Object.keys(jsonErrors));
       return;
     }
 
     setSubmitting(true);
     setSubmitError(null);
     try {
-      await onSubmit(stripUids(values) as Record<string, unknown>);
+      await onSubmit(values);
     } catch (err) {
       setSubmitError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -645,7 +528,6 @@ export function SchemaForm({
     }
   };
 
-  // Loading state
   if (schemaQuery.isLoading) {
     return (
       <div>
@@ -659,7 +541,6 @@ export function SchemaForm({
     );
   }
 
-  // Error state
   if (schemaQuery.isError) {
     return (
       <div>
@@ -708,7 +589,6 @@ export function SchemaForm({
           <p className="text-[10px] text-text-dim/60">{schema.description}</p>
         )}
 
-        {/* Top-level fields */}
         {topLevelFields.map(([key, field]) => (
           <SchemaField
             key={key}
@@ -720,38 +600,37 @@ export function SchemaForm({
           />
         ))}
 
-        {/* Sections */}
         {sections.map(([sKey, section]) => (
-          <SectionFieldset
+          <SectionJsonEditor
             key={sKey}
             sectionKey={sKey}
             section={section}
-            values={deferredValues}
-            errors={errorSet}
-            onChange={updateSection}
+            value={values[sKey]}
+            invalid={
+              sKey in jsonErrors ||
+              [...errorSet].some((e) => e === sKey || e.startsWith(`${sKey}.`) || e.startsWith(`${sKey}[`))
+            }
+            resetKey={initialValuesSnapshot}
+            onChange={(v) => updateSection(sKey, v)}
+            onValidityChange={handleJsonValidity}
           />
         ))}
 
-        {/* Validation summary */}
         {errors.length > 0 && (
           <p className="text-xs text-error">
             {t("schema_form.required_missing", { count: errors.length })}
           </p>
         )}
 
-        {/* Submit error */}
-        {submitError && (
-          <p className="text-xs text-error">{submitError}</p>
-        )}
+        {submitError && <p className="text-xs text-error">{submitError}</p>}
 
-        {/* Actions */}
         <div className="flex gap-2 pt-2">
           <Button
             variant="primary"
             className="flex-1"
             onClick={handleSubmit}
             isLoading={submitting}
-            disabled={submitting}
+            disabled={submitting || Object.keys(jsonErrors).length > 0}
           >
             {submitLabel ?? t("common.save")}
           </Button>
