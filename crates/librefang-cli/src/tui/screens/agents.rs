@@ -2726,7 +2726,7 @@ fn manifest_toml_rows(toml: &str, width: u16) -> usize {
 /// `resume` — plus the `*-persist-failed` variants recorded when the `agent.toml` write fails —
 /// come from `persist_agent_enabled`; `unknown` is the SQLite column default, which no producer
 /// writes but an older row can carry.
-/// Every token here has a `tui-agents-manifest-source-<token>` key in all four locale packs.
+/// Every token here has a `tui-agents-manifest-source-<token>` key in all five locale packs.
 const MANIFEST_CHANGE_SOURCES: &[&str] = &[
     "model",
     "skills",

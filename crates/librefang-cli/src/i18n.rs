@@ -315,8 +315,8 @@ mod tests {
         );
     }
 
-    /// All four packs are hand-maintained translations of the same message
-    /// set. As of this writing they define exactly the same 2398 keys; this
+    /// All five packs are hand-maintained translations of the same message
+    /// set. As of this writing they define exactly the same 2585 messages; this
     /// pins that invariant so a key added to one locale and silently missed
     /// in another (leaving `[key-name]` or an English fallback rendered)
     /// gets caught here instead of by a user noticing untranslated text.
