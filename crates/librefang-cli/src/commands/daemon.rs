@@ -566,7 +566,14 @@ pub(crate) fn cmd_stop(config: Option<PathBuf>) {
                         ui::success(&i18n::t("daemon-stopped-ok"));
                         return;
                     }
-                    // Still alive past the daemon's own deadline — force kill, then confirm it is gone.
+                    // Still alive past the daemon's own deadline. Force kill only while that PID is still verifiably our daemon (its API answers or `daemon.lock` is held): after this long a recorded PID may have been reused by an unrelated process, and SIGKILLing that would be far worse than a slow stop.
+                    if find_daemon_in_home(&daemon.home_dir).is_none()
+                        && !daemon_lock_held(&daemon.home_dir, pid)
+                    {
+                        let _ = std::fs::remove_file(daemon.home_dir.join("daemon.json"));
+                        ui::success(&i18n::t("daemon-stopped-ok"));
+                        return;
+                    }
                     force_kill_pid(pid);
                     if wait_until(
                         std::time::Duration::from_secs(5),
@@ -694,19 +701,41 @@ fn wait_until(
     }
 }
 
-/// Whether a process with this PID exists.
+/// Whether `daemon.lock` under `home_dir` is still held by a daemon process.
+///
+/// On Unix the daemon holds an exclusive `flock` on the file for its whole life, so a non-blocking `flock` attempt that fails with `EWOULDBLOCK` means a daemon is still running; a successful attempt is released immediately by dropping the descriptor.
+/// Other platforms only create the file as a marker, so there the best available signal is whether the recorded `pid` is still alive.
+fn daemon_lock_held(home_dir: &std::path::Path, pid: u32) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::io::AsRawFd;
+        let _ = pid;
+        let Ok(file) = std::fs::File::open(home_dir.join("daemon.lock")) else {
+            return false;
+        };
+        // SAFETY: flock(2) is safe on any open fd; `file` keeps it valid for the call, and closing it on drop releases a lock this call took.
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+            return false;
+        }
+        std::io::Error::last_os_error().raw_os_error() == Some(libc::EWOULDBLOCK)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = home_dir;
+        process_alive(pid)
+    }
+}
+
+/// Whether a process with this PID exists and is one we can signal.
 fn process_alive(pid: u32) -> bool {
     #[cfg(unix)]
     {
         let Ok(pid) = libc::pid_t::try_from(pid) else {
             return false;
         };
+        // EPERM means the PID now belongs to another user's process, which cannot be the daemon this user started: treat it as gone rather than waiting on, or force-killing, a stranger.
         // SAFETY: signal 0 performs only the existence and permission check; no signal is delivered.
-        if unsafe { libc::kill(pid, 0) } == 0 {
-            return true;
-        }
-        // EPERM means the process exists but belongs to someone else.
-        std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+        unsafe { libc::kill(pid, 0) == 0 }
     }
     #[cfg(windows)]
     {
@@ -876,6 +905,32 @@ mod tests {
         let pid = child.id();
         child.wait().expect("reap child");
         assert!(!process_alive(pid), "a reaped child must not read as alive");
+    }
+
+    /// The force-kill fallback is gated on `daemon.lock`: a missing or free lock must read as released, a held one as held.
+    /// Other tests in this binary spawn children, and a child forked while a lock descriptor is open briefly shares that lock, so transitions are polled rather than asserted on the first probe.
+    #[cfg(unix)]
+    #[test]
+    fn daemon_lock_held_reflects_the_flock() {
+        use std::os::unix::io::AsRawFd;
+        let dir = tempfile::TempDir::new().unwrap();
+        let pid = std::process::id();
+        let settle = std::time::Duration::from_secs(2);
+        let poll = std::time::Duration::from_millis(5);
+        assert!(!daemon_lock_held(dir.path(), pid), "no lock file");
+        let lock = std::fs::File::create(dir.path().join("daemon.lock")).unwrap();
+        assert!(wait_until(settle, poll, || !daemon_lock_held(
+            dir.path(),
+            pid
+        )));
+        // SAFETY: flock(2) on an fd that `lock` keeps open for the rest of the test; the blocking form waits out a probe's transient hold.
+        assert_eq!(unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) }, 0);
+        assert!(daemon_lock_held(dir.path(), pid), "held lock");
+        drop(lock);
+        assert!(wait_until(settle, poll, || !daemon_lock_held(
+            dir.path(),
+            pid
+        )));
     }
 
     #[test]
