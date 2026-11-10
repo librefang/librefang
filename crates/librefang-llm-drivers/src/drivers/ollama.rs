@@ -853,15 +853,27 @@ impl LlmDriver for OllamaDriver {
         let mut receiver_dropped = false;
         let mut utf8 = crate::utf8_stream::Utf8StreamDecoder::new();
 
+        let mut saw_done = false;
         let mut byte_stream = resp.bytes_stream();
-        while let Some(chunk_result) = byte_stream.next().await {
+        let mut stream_ended = false;
+        while !stream_ended {
             if receiver_dropped {
                 debug!("streaming receiver dropped; cancelling Ollama stream");
                 break;
             }
-            let chunk = chunk_result.map_err(|e| LlmError::Http(e.to_string()))?;
-            chunk_count += 1;
-            buffer.push_str(&utf8.decode(&chunk));
+            match byte_stream.next().await {
+                Some(chunk_result) => {
+                    let chunk = chunk_result.map_err(|e| LlmError::Http(e.to_string()))?;
+                    chunk_count += 1;
+                    buffer.push_str(&utf8.decode(&chunk));
+                }
+                None => {
+                    // Flush a final object that arrived without its trailing newline, so the `done` chunk is never lost to framing.
+                    stream_ended = true;
+                    buffer.push_str(&utf8.finish());
+                    buffer.push('\n');
+                }
+            }
 
             // NDJSON: one complete JSON object per line.
             while let Some(pos) = buffer.find('\n') {
@@ -938,6 +950,7 @@ impl LlmDriver for OllamaDriver {
                 }
 
                 if json.get("done").and_then(|v| v.as_bool()) == Some(true) {
+                    saw_done = true;
                     if let Some(reason) = json.get("done_reason").and_then(|v| v.as_str()) {
                         done_reason = Some(reason.to_string());
                     }
@@ -951,11 +964,16 @@ impl LlmDriver for OllamaDriver {
             }
         }
 
-        // Drain any half-codepoint left in the decoder. We don't append it
-        // to `buffer` because there are no further line-aligned reads to
-        // do — calling `finish()` exists only so the decoder explicitly
-        // releases that state on a stream-truncated path (#3448 parity).
-        let _ = utf8.finish();
+        // A generation that finished sends a final `done: true` chunk; a stream that closed without one (proxy idle timeout, runner killed, receiver dropped) carries a partial answer, and returning it as Ok would hide the failure from retry and failover (mirrors the Anthropic driver).
+        if !saw_done {
+            warn!(
+                chunks = chunk_count,
+                receiver_dropped, "Ollama stream ended before a done chunk"
+            );
+            return Err(LlmError::Http(
+                "Ollama stream ended before a done: true chunk".to_string(),
+            ));
+        }
 
         // ── Emit aggregated tool calls ───────────────────────────
         let mut content_blocks: Vec<ContentBlock> = Vec::new();

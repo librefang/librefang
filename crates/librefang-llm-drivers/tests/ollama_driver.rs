@@ -737,16 +737,10 @@ async fn streaming_unparseable_tool_calls_chunk_keeps_prior_snapshot() {
     assert_eq!(resp.tool_calls[0].input["host"], "8.8.8.8");
 }
 
-/// Streaming: if the upstream closes the connection cleanly mid-stream
-/// without ever sending a `done: true` chunk, the driver returns
-/// gracefully with whatever was aggregated so far AND zero token usage
-/// (we never observed `prompt_eval_count` / `eval_count`). This pins
-/// the contract so callers can detect "incomplete" by usage being all
-/// zeros — a hard error would force the chain to retry on what may be
-/// a usable partial answer.
+/// Streaming: an upstream that closes the connection mid-stream without ever sending a `done: true` chunk (proxy idle timeout, runner killed) must surface as an error so retry and failover engage, not as the partial text returned as a finished answer.
 #[tokio::test]
 #[serial_test::serial]
-async fn streaming_truncated_response_returns_partial_with_zero_usage() {
+async fn streaming_truncated_response_without_done_is_error() {
     let _env = isolated_env();
     let server = MockServer::start().await;
     let mut body = String::new();
@@ -777,13 +771,48 @@ async fn streaming_truncated_response_returns_partial_with_zero_usage() {
 
     let driver = mock_ollama_driver(&server);
     let (result, _events) = collect_stream(&driver, simple_request("m")).await;
-    let resp = result.expect("partial stream must surface, not hard-error");
-    assert_eq!(resp.text(), "Hello world");
-    assert_eq!(
-        resp.usage.input_tokens, 0,
-        "no done chunk → no prompt_eval_count → caller can detect incomplete",
+    let err = result.expect_err("a stream cut off before done: true must not be returned as Ok");
+    assert!(
+        matches!(err, LlmError::Http(ref m) if m.contains("done")),
+        "unexpected error: {err:?}"
     );
-    assert_eq!(resp.usage.output_tokens, 0);
+}
+
+/// Streaming: a final `done: true` object that arrives without a trailing newline still completes the turn.
+#[tokio::test]
+#[serial_test::serial]
+async fn streaming_final_done_without_trailing_newline_completes() {
+    let _env = isolated_env();
+    let server = MockServer::start().await;
+    let mut body = serde_json::json!({
+        "message": {"role": "assistant", "content": "Hi"},
+        "done": false
+    })
+    .to_string();
+    body.push('\n');
+    body.push_str(
+        &serde_json::json!({
+            "message": {"role": "assistant", "content": ""},
+            "done": true,
+            "done_reason": "stop",
+            "prompt_eval_count": 3,
+            "eval_count": 1
+        })
+        .to_string(),
+    );
+
+    Mock::given(method("POST"))
+        .and(path("/api/chat"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(body))
+        .mount(&server)
+        .await;
+
+    let driver = mock_ollama_driver(&server);
+    let (result, _events) = collect_stream(&driver, simple_request("m")).await;
+    let resp = result.expect("a complete stream must succeed");
+    assert_eq!(resp.text(), "Hi");
+    assert_eq!(resp.usage.input_tokens, 3);
+    assert_eq!(resp.usage.output_tokens, 1);
 }
 
 /// Streaming: an `{"error": ...}` line written into the 200 body after generation started (runner OOM / crash) must surface as an error, not as the partial text returned as a finished answer.
