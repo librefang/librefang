@@ -2515,6 +2515,16 @@ mod tests {
     use super::*;
     use crate::types::{InteractiveButton, MediaGroupItem};
 
+    /// Sidecar children and subprocess-transport children must withhold the same daemon-only secrets, or adding one to a single list re-opens the leak on the other spawn path.
+    #[test]
+    fn daemon_only_env_matches_the_subprocess_transport_list() {
+        let mut sidecar = super::DAEMON_ONLY_ENV.to_vec();
+        let mut transport = librefang_subprocess::DAEMON_ONLY_ENV.to_vec();
+        sidecar.sort_unstable();
+        transport.sort_unstable();
+        assert_eq!(sidecar, transport);
+    }
+
     #[test]
     fn std_sidecar_state_lock_recovers_after_poisoning() {
         let status = Arc::new(std::sync::Mutex::new(ChannelStatus::default()));

@@ -421,7 +421,8 @@ impl SupervisedTransport {
 ///
 /// `LIBREFANG_VAULT_KEY` decrypts `vault.enc`, which holds every provider and channel credential; the daemon loads it into its own environment from `.env` at boot, so it is removed explicitly at spawn.
 /// This crate sits below `librefang-runtime`, so it mirrors the vault entry of the runtime's reserved list rather than importing it.
-const DAEMON_ONLY_ENV: &[&str] = &["LIBREFANG_VAULT_KEY"];
+/// `librefang-channels` keeps the same list for sidecar children; its `daemon_only_env_matches_the_subprocess_transport_list` test keeps the two in sync.
+pub const DAEMON_ONLY_ENV: &[&str] = &["LIBREFANG_VAULT_KEY"];
 
 /// Build the child `Command` for `cfg`: piped stdio, reaped on drop, and without the daemon-only secrets in its inherited environment.
 fn build_command(cfg: &TransportConfig) -> Command {
