@@ -1166,10 +1166,15 @@ async fn test_history_fold_stub_appears_in_llm_request_after_enough_tool_cycles(
         }),
         _ => false,
     });
+    // #8653: the fold never touches the running turn.  Every tool result in
+    // this single turn is the model's working set, so none may be replaced —
+    // folding them is what made the agent re-read the same pages until the
+    // iteration cap.  (Foldable history is covered by the history_fold unit
+    // tests, which drive messages from earlier turns.)
     assert!(
-        fold_stub_found,
-        "expected at least one [history-fold] ToolResult stub in a CompletionRequest after 10 \
-         tool cycles with fold_after_turns=3; messages seen by primary driver: {:#?}",
+        !fold_stub_found,
+        "the running turn's tool results must never be folded (#8653); \
+         messages seen by primary driver: {:#?}",
         seen.iter()
             .map(|m| format!("{:?}: {:?}", m.role, m.content))
             .collect::<Vec<_>>()
@@ -1251,6 +1256,7 @@ async fn maybe_fold_stale_tool_results_persists_rewrites_to_session_messages() {
         aux_driver,
         false,
         librefang_types::model_catalog::ReasoningEchoPolicy::None,
+        usize::MAX,
     )
     .await;
 
@@ -1354,6 +1360,7 @@ async fn maybe_fold_stale_tool_results_persists_rewrites_to_session_messages() {
         aux_driver_2,
         false,
         librefang_types::model_catalog::ReasoningEchoPolicy::None,
+        usize::MAX,
     )
     .await;
     assert_eq!(
@@ -1426,6 +1433,7 @@ async fn maybe_fold_stale_tool_results_resets_file_read_dedup_tracker() {
         aux_driver,
         false,
         librefang_types::model_catalog::ReasoningEchoPolicy::None,
+        usize::MAX,
     )
     .await;
     assert!(
