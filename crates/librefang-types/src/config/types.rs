@@ -3529,6 +3529,30 @@ impl Default for SessionConfig {
     }
 }
 
+/// Artifact store configuration (exposed in the `[artifacts]` TOML section).
+///
+/// Session artifacts are content-addressed blobs on disk plus a versioned
+/// SQLite row per `(session, path)`. Blobs shared by several sessions are
+/// stored once, so pruning is driven by rows and only removes blobs no row
+/// references any more.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(default)]
+pub struct ArtifactConfig {
+    /// Age in days after which artifacts are pruned (0 = keep everything).
+    pub retention_days: u32,
+    /// Blob storage directory. `None` means `<home_dir>/artifacts`.
+    pub blob_dir: Option<String>,
+}
+
+impl Default for ArtifactConfig {
+    fn default() -> Self {
+        Self {
+            retention_days: 90,
+            blob_dir: None,
+        }
+    }
+}
+
 /// Session compaction configuration (exposed in `[compaction]` TOML section).
 ///
 /// Controls when and how the LLM-based history compaction runs.
@@ -4791,6 +4815,9 @@ pub struct KernelConfig {
     /// Session retention policy (automatic cleanup of old/excess sessions).
     #[serde(default)]
     pub session: SessionConfig,
+    /// Session artifact store (content-addressed blobs plus versioned rows).
+    #[serde(default)]
+    pub artifacts: ArtifactConfig,
     /// Session compaction configuration (LLM-based history summarization).
     #[serde(default)]
     pub compaction: CompactionTomlConfig,
@@ -7629,6 +7656,7 @@ impl Default for KernelConfig {
             prompt_caching: default_prompt_caching(),
             prompt_cache: PromptCacheConfig::default(),
             session: SessionConfig::default(),
+            artifacts: ArtifactConfig::default(),
             compaction: CompactionTomlConfig::default(),
             gateway_compression: GatewayCompressionConfig::default(),
             queue: QueueConfig::default(),

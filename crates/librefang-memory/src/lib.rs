@@ -15,6 +15,7 @@
 //! - `ProactiveMemoryStore`: Implementation on top of MemorySubstrate
 
 pub mod agent_tables;
+pub mod artifact_store;
 pub mod channel_binding_store;
 pub mod chunker;
 pub mod consolidation;
@@ -43,6 +44,7 @@ mod session_store;
 mod substrate;
 #[cfg(test)]
 mod test_support;
+pub use artifact_store::{ArtifactRecord, ArtifactStore, PruneReport};
 pub use channel_binding_store::ChannelBindingStore;
 pub use ephemeral_run_store::{EphemeralRunRollup, EphemeralRunRow, EphemeralRunStore};
 pub use goal_run_store::{GoalRunRow, GoalRunStore};

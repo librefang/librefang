@@ -5,7 +5,7 @@
 use rusqlite::Connection;
 
 /// Current schema version.
-const SCHEMA_VERSION: u32 = 65;
+const SCHEMA_VERSION: u32 = 66;
 
 /// Run all migrations to bring the database up to date.
 pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
@@ -338,6 +338,11 @@ pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
     // effort token (e.g. "xhigh", "medium", "minimal"); it is validated at
     // the API boundary and stored as given.
     run_step!(65, migrate_v65);
+
+    // v66: versioned session artifacts. Each row names one version of a
+    // caller-supplied path for a session; the bytes live once in a
+    // content-addressed blob store shared across sessions.
+    run_step!(66, migrate_v66);
 
     // Reconcile the pre-renumber reasoning footprint (#8616). A build of this
     // branch that carried the reasoning-effort step as v64 stamped databases
@@ -1735,6 +1740,41 @@ fn migrate_v65(conn: &Connection) -> Result<(), rusqlite::Error> {
     conn.execute(
         "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
          VALUES (65, datetime('now'), 'Add sessions.reasoning_effort for per-session reasoning-effort pin (#8591)')",
+        [],
+    )?;
+    Ok(())
+}
+
+/// v66: versioned session artifacts.
+///
+/// One row per `(session, path, version)`; the bytes live in the
+/// content-addressed blob store and are shared across sessions. `version`
+/// increments per path only when the content hash changes, so re-writing
+/// identical bytes is a read of the latest row rather than a new version.
+/// `message_id` is the message that produced the write (nullable: crons and
+/// triggers have none). Purely additive.
+fn migrate_v66(conn: &Connection) -> Result<(), rusqlite::Error> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS artifacts (
+            id            TEXT PRIMARY KEY,
+            session_id    TEXT NOT NULL,
+            message_id    TEXT,
+            path          TEXT NOT NULL,
+            content_hash  TEXT NOT NULL,
+            size_bytes    INTEGER NOT NULL,
+            mime_type     TEXT,
+            version       INTEGER NOT NULL,
+            created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+            UNIQUE(session_id, path, version)
+        );
+        CREATE INDEX IF NOT EXISTS idx_artifacts_session_path
+            ON artifacts(session_id, path);
+        CREATE INDEX IF NOT EXISTS idx_artifacts_content_hash
+            ON artifacts(content_hash);",
+    )?;
+    conn.execute(
+        "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
+         VALUES (66, datetime('now'), 'Add artifacts table for versioned content-addressed session artifacts')",
         [],
     )?;
     Ok(())
@@ -5535,7 +5575,7 @@ mod tests {
         {
             let conn = pool.get().unwrap();
             run_migrations(&conn).unwrap();
-            conn.execute("DELETE FROM migrations WHERE version = 65", [])
+            conn.execute("DELETE FROM migrations WHERE version >= 65", [])
                 .unwrap();
             conn.execute("ALTER TABLE sessions DROP COLUMN reasoning_effort", [])
                 .unwrap();
@@ -5566,8 +5606,8 @@ mod tests {
             let conn = pool.get().unwrap();
             run_migrations(&conn).unwrap();
             simulate_pre_renumber_footprint(&conn, true);
-            // The pre-renumber build had no v65 audit row.
-            conn.execute("DELETE FROM migrations WHERE version = 65", [])
+            // The pre-renumber build had no v65 audit row (nor v66).
+            conn.execute("DELETE FROM migrations WHERE version >= 65", [])
                 .unwrap();
             conn.pragma_update(None, "user_version", 64i64).unwrap();
             assert!(
@@ -5622,6 +5662,9 @@ mod tests {
                 [],
             )
             .unwrap();
+            // The deployed build predates v66, so it has no artifacts audit row.
+            conn.execute("DELETE FROM migrations WHERE version >= 66", [])
+                .unwrap();
             // A real deployed row, so the trigger/map rebuild has something to
             // map and `save_session` has a row to update.
             conn.execute(

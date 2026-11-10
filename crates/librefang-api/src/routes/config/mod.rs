@@ -412,6 +412,7 @@ pub fn ui_sections_overlay() -> serde_json::Value {
         {"key": "terminal", "struct_field": "terminal"},
         {"key": "docker", "struct_field": "docker"},
         {"key": "session", "struct_field": "session"},
+        {"key": "artifacts", "struct_field": "artifacts"},
         {"key": "queue", "struct_field": "queue"},
         {"key": "webhook_triggers", "struct_field": "webhook_triggers"},
         {"key": "vertex_ai", "struct_field": "vertex_ai"},
@@ -754,6 +755,8 @@ const WRITABLE_SECTION_PREFIXES: &[&str] = &[
     // Extensions reconnect tuning, session retention.
     "extensions.",
     "session.",
+    // Artifact retention and blob location (delivery block).
+    "artifacts.",
     // Memory tuning.
     "proactive_memory.",
     "memory.",
