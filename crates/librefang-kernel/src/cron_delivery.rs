@@ -453,6 +453,8 @@ async fn deliver_local_file(
             ));
         }
     }
+    // The workspace root holds the agent's persisted `agent.toml`, which boot adopts as its manifest, so a cron job must not be able to rewrite its own capabilities through a delivery target.
+    librefang_runtime::workspace_sandbox::deny_own_manifest_write(&path, &canonical_root)?;
     let path = path.as_path();
     if append {
         use tokio::io::AsyncWriteExt;
@@ -714,6 +716,49 @@ mod tests {
 
         assert!(!results[0].success);
         assert_eq!(std::fs::read_to_string(&victim).unwrap(), "ORIGINAL");
+    }
+
+    /// The workspace root holds the agent's own `agent.toml`; a delivery target must not rewrite it under any spelling Win32 or a case-insensitive volume maps onto it.
+    #[tokio::test]
+    async fn localfile_refuses_the_agents_own_manifest() {
+        let tmp = tempfile::tempdir().unwrap();
+        let manifest = tmp.path().join("agent.toml");
+        std::fs::write(&manifest, "name = \"a\"\n").unwrap();
+        let engine = rooted_engine(MockSender::new(), tmp.path());
+        let aliases = [
+            "agent.toml",
+            "./agent.toml",
+            "AGENT.toml",
+            "agent.toml.",
+            "agent.toml ",
+            "agent.toml::$DATA",
+        ];
+        let targets: Vec<_> = aliases
+            .iter()
+            .flat_map(|name| [local_file(name, false), local_file(name, true)])
+            .collect();
+        let results = engine.deliver(&targets, "job", "[capabilities]").await;
+
+        assert!(results.iter().all(|r| !r.success), "{results:?}");
+        assert!(results.iter().all(|r| r
+            .error
+            .as_deref()
+            .is_some_and(|e| e.contains("own manifest"))));
+        assert_eq!(
+            std::fs::read_to_string(&manifest).unwrap(),
+            "name = \"a\"\n"
+        );
+        let entries: Vec<_> = std::fs::read_dir(tmp.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(entries, vec![std::ffi::OsString::from("agent.toml")]);
+
+        // A manifest-named file below the root is not the agent's manifest and stays writable.
+        let nested = engine
+            .deliver(&[local_file("reports/agent.toml", false)], "job", "ok")
+            .await;
+        assert!(nested[0].success, "error: {:?}", nested[0].error);
     }
 
     // -- Webhook -------------------------------------------------------------
