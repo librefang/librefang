@@ -385,6 +385,43 @@ pub(super) fn infer_provider_from_model(model: &str) -> Option<String> {
     }
 }
 
+/// Whether `provider` is the manifest's "use this instance's default" sentinel.
+pub(super) fn is_default_provider_sentinel(provider: &str) -> bool {
+    provider.is_empty() || provider == "default"
+}
+
+/// Resolve a manifest `[model]` block that declared the `"default"` provider
+/// sentinel against the effective default model.
+///
+/// `provider`, `api_key_env` and `base_url` are REPLACED, never kept-if-absent:
+/// the instance default can be hot-swapped to another vendor at any moment
+/// (config `[default_model]`, or the WebUI's `default_model_override`), so a
+/// credential pin left over from the previous default would send that vendor's
+/// key to the new endpoint — observed in production as an HTTP 401 on every
+/// provider in the chain. On the sentinel the effective default is the only
+/// authority, for the credential exactly as for the provider.
+///
+/// Returns `false` and touches nothing when the manifest names an explicit
+/// provider: there the pin is a legitimate operator override.
+pub(super) fn inherit_default_provider(
+    model: &mut ModelConfig,
+    dm: &librefang_types::config::DefaultModelConfig,
+) -> bool {
+    if !is_default_provider_sentinel(&model.provider) {
+        return false;
+    }
+    if !dm.provider.is_empty() {
+        model.provider = dm.provider.clone();
+    }
+    model.api_key_env = if dm.api_key_env.is_empty() {
+        None
+    } else {
+        Some(dm.api_key_env.clone())
+    };
+    model.base_url.clone_from(&dm.base_url);
+    true
+}
+
 pub(super) fn resolve_fallback_target(
     fallback_provider: &str,
     fallback_model: &str,
@@ -1336,6 +1373,90 @@ mod tests {
         assert!(caps.contains(&Capability::MemoryRead("self.*".into())));
         assert!(caps.contains(&Capability::MemoryWrite("self.*".into())));
         assert_eq!(manifest.resources.max_cost_per_hour_usd, 1.0);
+    }
+
+    /// The sentinel rule (production incident: a production agent on an
+    /// instance): on the `"default"`/empty provider sentinel the effective
+    /// default owns provider, credential and endpoint; a stale manifest pin is
+    /// REPLACED, never preserved. An explicit provider keeps its pins
+    /// untouched.
+    #[test]
+    fn sentinel_inheritance_replaces_stale_credential_pins() {
+        use librefang_types::config::DefaultModelConfig;
+
+        let dm = DefaultModelConfig {
+            provider: "othervendor".to_string(),
+            model: "test-model".to_string(),
+            api_key_env: "OTHERVENDOR_KEY".to_string(),
+            base_url: Some("https://othervendor.example/v1".to_string()),
+            ..DefaultModelConfig::default()
+        };
+
+        // Sentinel + stale pins (the reported manifest shape) → replaced.
+        let mut model = ModelConfig {
+            provider: "default".to_string(),
+            model: "default".to_string(),
+            api_key_env: Some("DEEPSEEK_API_KEY".to_string()),
+            base_url: Some("https://api.deepseek.com/v1".to_string()),
+            ..ModelConfig::default()
+        };
+        assert!(inherit_default_provider(&mut model, &dm));
+        assert_eq!(model.provider, "othervendor");
+        assert_eq!(model.api_key_env.as_deref(), Some("OTHERVENDOR_KEY"));
+        assert_eq!(
+            model.base_url.as_deref(),
+            Some("https://othervendor.example/v1")
+        );
+
+        // The empty provider is the same sentinel.
+        let mut empty = ModelConfig {
+            provider: String::new(),
+            api_key_env: Some("GROQ_API_KEY".to_string()),
+            ..ModelConfig::default()
+        };
+        assert!(inherit_default_provider(&mut empty, &dm));
+        assert_eq!(empty.provider, "othervendor");
+        assert_eq!(empty.api_key_env.as_deref(), Some("OTHERVENDOR_KEY"));
+
+        // A default that declares no credential clears the stale pin instead
+        // of letting it survive onto the new provider.
+        let bare = DefaultModelConfig {
+            provider: "othervendor".to_string(),
+            ..DefaultModelConfig::default()
+        };
+        let mut model = ModelConfig {
+            provider: "default".to_string(),
+            api_key_env: Some("DEEPSEEK_API_KEY".to_string()),
+            base_url: Some("https://api.deepseek.com/v1".to_string()),
+            ..ModelConfig::default()
+        };
+        assert!(inherit_default_provider(&mut model, &bare));
+        assert!(model.api_key_env.is_none());
+        assert!(model.base_url.is_none());
+
+        // Explicit provider: pins are a legitimate operator override and are
+        // left alone (the helper reports "not applicable").
+        let mut explicit = ModelConfig {
+            provider: "deepseek".to_string(),
+            api_key_env: Some("DEEPSEEK_API_KEY".to_string()),
+            base_url: Some("https://api.deepseek.com/v1".to_string()),
+            ..ModelConfig::default()
+        };
+        assert!(!inherit_default_provider(&mut explicit, &dm));
+        assert_eq!(explicit.provider, "deepseek");
+        assert_eq!(explicit.api_key_env.as_deref(), Some("DEEPSEEK_API_KEY"));
+        assert_eq!(
+            explicit.base_url.as_deref(),
+            Some("https://api.deepseek.com/v1")
+        );
+    }
+
+    #[test]
+    fn provider_sentinel_detection_covers_empty_and_default() {
+        assert!(is_default_provider_sentinel(""));
+        assert!(is_default_provider_sentinel("default"));
+        assert!(!is_default_provider_sentinel("othervendor"));
+        assert!(!is_default_provider_sentinel("DEFAULT"));
     }
 
     const HAND_TOML: &str = r#"

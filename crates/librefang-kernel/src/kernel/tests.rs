@@ -14404,6 +14404,212 @@ async fn resolve_driver_for_owner_canonicalizes_alias_provider_in_fallback_slot(
     kernel.shutdown();
 }
 
+/// Sentinel-provider credential rule (production incident: a production agent
+/// on an instance). A manifest with `provider = "default"` and a stale
+/// `api_key_env` pin must take its credential from the EFFECTIVE default, not
+/// from the pin: the default had been hot-swapped to another vendor, so the
+/// pin sent the old vendor's key to the new endpoint and every turn 401'd
+/// (`All providers exhausted` — primary and fallback both carried the pin).
+///
+/// `resolve_driver_for_owner` returns an opaque driver, but the driver cache
+/// keys on the hash of the resolved API key, so two identical Arcs prove both
+/// resolutions read the SAME env var — the effective default's — and the pin
+/// was ignored.
+#[tokio::test(flavor = "multi_thread")]
+#[serial_test::serial(librefang_vault_key)]
+async fn sentinel_provider_ignores_manifest_credential_pin() {
+    // Distinct values so "read the stale pin" and "read the effective default"
+    // produce drivers with different cache keys.
+    let _default_key = set_test_env(
+        "LIBREFANG_TEST_FX_SENTINEL_DEFAULT_KEY",
+        "sk-effective-default",
+    );
+    let _stale_key = set_test_env("LIBREFANG_TEST_FX_SENTINEL_STALE_KEY", "sk-stale-vendor");
+
+    let dir = tempfile::tempdir().unwrap();
+    let home_dir = dir.path().to_path_buf();
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+    std::fs::create_dir_all(home_dir.join("registry")).unwrap();
+    std::fs::write(home_dir.join("registry").join(".sync_marker"), "").unwrap();
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        network_enabled: false,
+        // A custom OpenAI-compatible endpoint: builds deterministically, needs
+        // no network, and its `api_key_env` is exactly the operator's choice.
+        default_model: DefaultModelConfig {
+            provider: "fx-sentinel-default".to_string(),
+            model: "test-model".to_string(),
+            api_key_env: "LIBREFANG_TEST_FX_SENTINEL_DEFAULT_KEY".to_string(),
+            base_url: Some("http://127.0.0.1:9/v1".to_string()),
+            ..DefaultModelConfig::default()
+        },
+        ..KernelConfig::default()
+    };
+    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+
+    // The reported shape: `provider = "default"`, `model = "default"`, plus a
+    // pin left over from the vendor the instance default used to point at.
+    let mut pinned = librefang_types::agent::AgentManifest::default();
+    pinned.model.provider = "default".to_string();
+    pinned.model.model = "default".to_string();
+    pinned.model.api_key_env = Some("LIBREFANG_TEST_FX_SENTINEL_STALE_KEY".to_string());
+
+    // Same sentinel manifest without the pin.
+    let mut unpinned = pinned.clone();
+    unpinned.model.api_key_env = None;
+
+    let d_pinned = kernel
+        .resolve_driver_for_owner(&pinned, None)
+        .expect("sentinel manifest with a stale pin must resolve");
+    let d_unpinned = kernel
+        .resolve_driver_for_owner(&unpinned, None)
+        .expect("sentinel manifest without a pin must resolve");
+    assert!(
+        Arc::ptr_eq(&d_pinned, &d_unpinned),
+        "a manifest pin on the `default` provider sentinel must be ignored: \
+         both resolutions must read the effective default's api_key_env and \
+         therefore share one cached driver"
+    );
+
+    // Non-vacuity: the pin IS observable through the same cache when the
+    // provider is explicit, so the equality above proves the sentinel dropped
+    // the pin rather than the two env values collapsing onto one driver.
+    let mut explicit = pinned.clone();
+    explicit.model.provider = "fx-sentinel-default".to_string();
+    let d_explicit_pinned = kernel
+        .resolve_driver_for_owner(&explicit, None)
+        .expect("explicit provider with a pin must resolve");
+    assert!(
+        !Arc::ptr_eq(&d_pinned, &d_explicit_pinned),
+        "an explicit provider must still honour its pin; if this driver is \
+         the same as the sentinel one, the two env vars did not diverge and \
+         the equality assertion above is vacuous"
+    );
+
+    kernel.shutdown();
+}
+
+/// Regression guard for the sentinel rule: an EXPLICIT provider's manifest pin
+/// is still an operator override and must win over the convention env var.
+/// The sentinel guard must not leak onto explicit providers.
+#[tokio::test(flavor = "multi_thread")]
+#[serial_test::serial(librefang_vault_key)]
+async fn explicit_provider_keeps_manifest_credential_pin() {
+    let _pinned = set_test_env("LIBREFANG_TEST_FX_EXPLICIT_PIN_KEY", "sk-pinned");
+    // The convention env var carries a DIFFERENT value, so an over-broad
+    // sentinel rule (ignoring the pin everywhere) is observable as the two
+    // resolutions collapsing onto the same driver.
+    let _convention = set_test_env("FX_SENTINEL_EXPLICIT_API_KEY", "sk-convention");
+
+    let dir = tempfile::tempdir().unwrap();
+    let home_dir = dir.path().to_path_buf();
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+    std::fs::create_dir_all(home_dir.join("registry")).unwrap();
+    std::fs::write(home_dir.join("registry").join(".sync_marker"), "").unwrap();
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        network_enabled: false,
+        default_model: DefaultModelConfig::driverless(),
+        ..KernelConfig::default()
+    };
+    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+
+    let mut pinned = librefang_types::agent::AgentManifest::default();
+    pinned.model.provider = "fx-sentinel-explicit".to_string();
+    pinned.model.model = "m".to_string();
+    pinned.model.api_key_env = Some("LIBREFANG_TEST_FX_EXPLICIT_PIN_KEY".to_string());
+    pinned.model.base_url = Some("http://127.0.0.1:9/v1".to_string());
+
+    let mut unpinned = pinned.clone();
+    unpinned.model.api_key_env = None;
+
+    let d_pinned = kernel
+        .resolve_driver_for_owner(&pinned, None)
+        .expect("explicit provider with a pin must resolve");
+    let d_unpinned = kernel
+        .resolve_driver_for_owner(&unpinned, None)
+        .expect("explicit provider without a pin must resolve");
+    assert!(
+        !Arc::ptr_eq(&d_pinned, &d_unpinned),
+        "an explicit provider's api_key_env pin must still be read (it is an \
+         operator override); identical drivers here mean the sentinel rule \
+         leaked onto explicit providers and the pin was ignored"
+    );
+
+    kernel.shutdown();
+}
+
+/// Fallback slot with the `default` sentinel + stale pin: same rule as the
+/// primary slot. The slot's pin names an env var that is NOT set and it has no
+/// `base_url`; the effective default has both a key and an endpoint.
+///
+/// Post-fix the slot takes the default's credential and endpoint and builds,
+/// so the result is a NEW `FallbackDriver` wrapping it. Pre-fix the slot sees
+/// no key and no endpoint, `create_driver` fails, the slot is dropped and
+/// resolution returns the bare primary driver — `Arc::ptr_eq` with the
+/// primary-only resolution, which is exactly what this test forbids.
+#[tokio::test(flavor = "multi_thread")]
+#[serial_test::serial(librefang_vault_key)]
+async fn sentinel_fallback_slot_ignores_manifest_credential_pin() {
+    let _primary_key = set_test_env("LIBREFANG_TEST_FX_FB_PRIMARY_KEY", "sk-fb-primary");
+    let _default_key = set_test_env("LIBREFANG_TEST_FX_FB_DEFAULT_KEY", "sk-fb-default");
+
+    let dir = tempfile::tempdir().unwrap();
+    let home_dir = dir.path().to_path_buf();
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+    std::fs::create_dir_all(home_dir.join("registry")).unwrap();
+    std::fs::write(home_dir.join("registry").join(".sync_marker"), "").unwrap();
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        network_enabled: false,
+        default_model: DefaultModelConfig {
+            provider: "fx-sentinel-fb-default".to_string(),
+            model: "m-default".to_string(),
+            api_key_env: "LIBREFANG_TEST_FX_FB_DEFAULT_KEY".to_string(),
+            base_url: Some("http://127.0.0.1:9/default-v1".to_string()),
+            ..DefaultModelConfig::default()
+        },
+        ..KernelConfig::default()
+    };
+    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+
+    let mut primary_only = librefang_types::agent::AgentManifest::default();
+    primary_only.model.provider = "fx-sentinel-fb-primary".to_string();
+    primary_only.model.model = "m-primary".to_string();
+    primary_only.model.api_key_env = Some("LIBREFANG_TEST_FX_FB_PRIMARY_KEY".to_string());
+    primary_only.model.base_url = Some("http://127.0.0.1:9/primary-v1".to_string());
+
+    let mut with_fallback = primary_only.clone();
+    with_fallback.fallback_models = Some(vec![librefang_types::agent::FallbackModel {
+        provider: "default".to_string(),
+        model: "default".to_string(),
+        // Names a variable that is deliberately not set, and no base_url, so
+        // any code path that honours the pin cannot build the slot.
+        api_key_env: Some("LIBREFANG_TEST_FX_FB_STALE_UNSET_KEY_9C1F".to_string()),
+        base_url: None,
+        extra_params: Default::default(),
+    }]);
+
+    let d_primary_only = kernel
+        .resolve_driver_for_owner(&primary_only, None)
+        .expect("primary-only resolution must build");
+    let d_with_fallback = kernel
+        .resolve_driver_for_owner(&with_fallback, None)
+        .expect("resolution with a sentinel fallback slot must still build");
+    assert!(
+        !Arc::ptr_eq(&d_primary_only, &d_with_fallback),
+        "the sentinel fallback slot must build from the effective default's \
+         credential and endpoint, not from its stale pin; identical Arcs mean \
+         the slot was dropped because the unset pinned env var (and missing \
+         base_url) were still honoured"
+    );
+
+    kernel.shutdown();
+}
+
 /// Regression test for the kernel install façade introduced in #3295: the
 /// HTTP install path historically opened `vault.enc` and ran the Argon2id
 /// KDF on every request. After the refactor, `Kernel::install_integration`
