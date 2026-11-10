@@ -41,6 +41,8 @@ pub mod workflow_store;
 
 mod session_store;
 mod substrate;
+#[cfg(test)]
+mod test_support;
 pub use channel_binding_store::ChannelBindingStore;
 pub use ephemeral_run_store::{EphemeralRunRollup, EphemeralRunRow, EphemeralRunStore};
 pub use goal_run_store::{GoalRunRow, GoalRunStore};

@@ -873,10 +873,11 @@ impl SessionStore {
     /// This is the cascading "dashboard delete" primitive; callers that must
     /// touch exactly one row (`reset_session`) want [`Self::delete_session_only`].
     pub fn delete_session(&self, session_id: SessionId) -> LibreFangResult<Vec<SessionId>> {
-        let conn = self.pool.get().map_err(LibreFangError::memory)?;
+        let mut conn = self.pool.get().map_err(LibreFangError::memory)?;
         let id_str = session_id.0.to_string();
+        // BEGIN IMMEDIATE because the first statement is the `doomed` read: a deferred transaction starts as a reader and fails the upgrade at the first delete with SQLITE_BUSY whenever another connection holds the write lock, and the busy timeout does not retry that upgrade.
         let tx = conn
-            .unchecked_transaction()
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(LibreFangError::memory)?;
         // The seed is `?1` unconditionally, NOT `SELECT id FROM sessions
         // WHERE id = ?1`: a session whose `sessions` row is already gone (a
@@ -950,10 +951,11 @@ impl SessionStore {
     /// with it (#7991 review).
     pub fn delete_session_only(&self, session_id: SessionId) -> LibreFangResult<()> {
         use rusqlite::OptionalExtension;
-        let conn = self.pool.get().map_err(LibreFangError::memory)?;
+        let mut conn = self.pool.get().map_err(LibreFangError::memory)?;
         let id_str = session_id.0.to_string();
+        // BEGIN IMMEDIATE because the owner lookup below reads before the first delete: as a deferred transaction this failed `/new` with "FTS delete failed: database is locked" whenever the previous reset's detached summary write still held the write lock, since the busy timeout does not retry a read-to-write upgrade.
         let tx = conn
-            .unchecked_transaction()
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(LibreFangError::memory)?;
         // Resolve the owner while the row is still there: the summaries are keyed per agent.
         let owner: Option<String> = tx
@@ -3063,6 +3065,44 @@ mod tests {
         let row = store.get_session(session_id).unwrap().unwrap();
         assert_eq!(row.agent_id, agent_id);
         assert!(row.messages.is_empty());
+    }
+
+    /// `reset_session` (`/new`) deletes the old session while the previous reset's detached summary write can still hold the write lock on another connection.
+    /// The delete reads before it writes, so as a deferred transaction it failed the read-to-write upgrade with "FTS delete failed: database is locked" in microseconds instead of waiting under `busy_timeout`; Windows CI hit exactly that in `session_reset_scope_test`.
+    #[test]
+    fn delete_session_only_waits_for_a_concurrent_writer() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sessions.db");
+        let store = SessionStore::new(crate::test_support::file_backed_pool(&path));
+        let session = store.create_session(AgentId::new()).unwrap();
+
+        let holder =
+            crate::test_support::hold_write_lock(&path, std::time::Duration::from_millis(300));
+        store.delete_session_only(session.id).expect(
+            "delete_session_only must wait for the other writer, not fail with database is locked",
+        );
+        holder.join().unwrap();
+
+        assert!(store.get_session(session.id).unwrap().is_none());
+    }
+
+    /// The cascading dashboard delete has the same read-first shape: its first statement is the `doomed` descendant CTE.
+    #[test]
+    fn delete_session_waits_for_a_concurrent_writer() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sessions.db");
+        let store = SessionStore::new(crate::test_support::file_backed_pool(&path));
+        let session = store.create_session(AgentId::new()).unwrap();
+
+        let holder =
+            crate::test_support::hold_write_lock(&path, std::time::Duration::from_millis(300));
+        let deleted = store.delete_session(session.id).expect(
+            "delete_session must wait for the other writer, not fail with database is locked",
+        );
+        holder.join().unwrap();
+
+        assert_eq!(deleted, vec![session.id]);
+        assert!(store.get_session(session.id).unwrap().is_none());
     }
 
     #[test]
