@@ -8,8 +8,9 @@ const EN_FTL: &str = include_str!("../locales/en/main.ftl");
 const ZH_CN_FTL: &str = include_str!("../locales/zh-CN/main.ftl");
 const UK_FTL: &str = include_str!("../locales/uk/main.ftl");
 const KO_FTL: &str = include_str!("../locales/ko/main.ftl");
+const ES_FTL: &str = include_str!("../locales/es/main.ftl");
 
-pub const SUPPORTED_LANGUAGES: &[&str] = &["en", "zh-CN", "uk", "ko"];
+pub const SUPPORTED_LANGUAGES: &[&str] = &["en", "zh-CN", "uk", "ko", "es"];
 pub use librefang_types::i18n::DEFAULT_LANGUAGE;
 
 /// Maps a supported language to its embedded `.ftl` source.
@@ -23,6 +24,7 @@ fn locale_source(language: &str) -> &'static str {
         "zh-CN" => ZH_CN_FTL,
         "uk" => UK_FTL,
         "ko" => KO_FTL,
+        "es" => ES_FTL,
         _ => EN_FTL,
     }
 }
@@ -366,6 +368,13 @@ mod tests {
     fn renders_korean_translation() {
         init("ko");
         assert_eq!(t("label-dashboard"), "대시보드");
+    }
+
+    /// Also proves `es/main.ftl` parses: a syntax error makes `bundle_for` fail and `init` falls back to English.
+    #[test]
+    fn renders_spanish_translation() {
+        init("es");
+        assert_eq!(t("label-dashboard"), "Panel");
     }
 
     #[test]
