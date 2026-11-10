@@ -21,8 +21,9 @@ use librefang_types::config::{
 use librefang_types::message::ContentBlock;
 use regex::{Regex, RegexSet};
 use serde::{Deserialize, Serialize};
+use std::borrow::Cow;
 use std::collections::HashMap;
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, LazyLock, OnceLock};
 use std::time::Instant;
 use tokio::sync::{mpsc, watch};
 use tracing::{debug, error, info, warn};
@@ -1147,6 +1148,91 @@ fn suppress_button_command_ack(content: &ChannelContent, command: &str) -> bool 
         && matches!(command, "approve" | "reject")
 }
 
+/// `bot<id>:<secret>` as it appears in the path of a Telegram Bot API file URL.
+///
+/// The Bot API puts the bot credential in the path (`…/file/bot<id>:<secret>/<file_path>`) instead of an auth header, so the URL cannot be handed to the daemon without it — see `sdk/rust/librefang-sidecar-telegram/src/adapter.rs` for the media-fetch contract that depends on this shape.
+/// The pattern is deliberately not host-scoped, unlike the Discord one: the sidecar accepts a custom `api_root` for a self-hosted Bot API server, so pinning the mask to `api.telegram.org` would let a self-hosted deployment leak.
+/// The cost of that choice is the opposite failure: a link on any host whose path happens to look like `/bot<digits>:<20+ chars>` is masked too. That is over-masking of text the agent reads, never a wrong download, and it is the direction this should fail in.
+static TELEGRAM_BOT_TOKEN_IN_URL: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(^|/)bot(\d+):[A-Za-z0-9_-]{20,}").expect("TELEGRAM_BOT_TOKEN_IN_URL is valid")
+});
+
+/// Discord's CDN signs attachment URLs with an `hm` query parameter.
+///
+/// `ex` and `is` are only the expiry and issue timestamps and stay readable, the same way the Telegram bot id does; `hm` is the HMAC and is the counterpart of the bot secret.
+static DISCORD_SIGNATURE_IN_URL: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"([?&]hm=)[^&\s"<>]+"#).expect("DISCORD_SIGNATURE_IN_URL is valid")
+});
+
+/// The hosts Discord serves attachments from, as bare domains.
+///
+/// Scoping matters: `hm=` is a generic query parameter, so masking it on every URL would rewrite unrelated links that never carried a credential.
+const DISCORD_CDN_DOMAINS: [&str; 3] = ["discordapp.com", "discord.com", "discordapp.net"];
+
+/// True for a Discord attachment URL, and only for one that actually carries the signature.
+///
+/// The `hm=` gate comes first because this runs on every rendered placeholder: it is a byte scan, whereas parsing the URL allocates.
+fn is_signed_discord_url(url: &str) -> bool {
+    if !url.contains("hm=") {
+        return false;
+    }
+    let Some(host) = url::Url::parse(url)
+        .ok()
+        .and_then(|parsed| parsed.host_str().map(str::to_ascii_lowercase))
+    else {
+        return false;
+    };
+    DISCORD_CDN_DOMAINS.iter().any(|domain| {
+        host == *domain
+            || host
+                .strip_suffix(domain)
+                .is_some_and(|prefix| prefix.ends_with('.'))
+    })
+}
+
+/// Mask the credential in a media URL that is about to be rendered into agent-facing text.
+///
+/// This is the sanitizing counterpart of [`content_to_text`]: the `url` field on [`ChannelContent`] deliberately keeps the real URL, because the bridge downloads the attachment with it, while every prompt-bound rendering goes through here.
+/// Two adapters hand over a URL that carries a credential: Telegram puts the bot token in the path, Discord signs the query string. Both are masked down to their shape — the bot id, the expiry and the issue timestamp stay, only the secret does not.
+fn redact_media_url_for_text(url: &str) -> Cow<'_, str> {
+    let masked = TELEGRAM_BOT_TOKEN_IN_URL.replace_all(url, "${1}bot${2}:<redacted>");
+    if !is_signed_discord_url(url) {
+        return masked;
+    }
+    match DISCORD_SIGNATURE_IN_URL.replace_all(masked.as_ref(), "${1}<redacted>") {
+        Cow::Borrowed(_) => masked,
+        Cow::Owned(owned) => Cow::Owned(owned),
+    }
+}
+
+/// Mask both credential shapes in free-form text.
+///
+/// A response body is not a URL — it is JSON, an HTML error page, a proxy's message — so the Discord host check cannot apply there: `hm=` only shows up in a body when a Discord URL was echoed into it, which is exactly the case this exists for.
+fn redact_credentials_in_text(text: &str) -> String {
+    let telegram = TELEGRAM_BOT_TOKEN_IN_URL.replace_all(text, "${1}bot${2}:<redacted>");
+    DISCORD_SIGNATURE_IN_URL
+        .replace_all(telegram.as_ref(), "${1}<redacted>")
+        .into_owned()
+}
+
+/// Emit the non-2xx download warning with both credential-bearing fields masked.
+///
+/// The body needs the mask as much as the URL does: a proxy or a Bot API error path can echo the request URL back into the response body, and the sidecar documents exactly that before redacting it in `api/client.rs`.
+/// Logging lives here rather than at the call site so the warning a test can capture is the warning production emits.
+fn warn_download_status_failure(status: impl std::fmt::Display, url: &str, body: &str) {
+    // Mask first, then cut to 200 characters: the other order leaves a fragment of the secret in the log whenever the cut lands inside it, because a fragment shorter than the pattern's 20-character minimum never matches.
+    let masked_body = redact_credentials_in_text(body);
+    let preview: String = masked_body.chars().take(200).collect();
+    let logged_url = redact_media_url_for_text(url).into_owned();
+    let logged_preview = preview;
+    warn!(
+        status = %status,
+        body_preview = %logged_preview,
+        url = %logged_url,
+        "File download returned non-success status"
+    );
+}
+
 fn content_to_text(content: &ChannelContent) -> String {
     match content {
         ChannelContent::Text(t) => t.clone(),
@@ -1157,16 +1243,22 @@ fn content_to_text(content: &ChannelContent) -> String {
                 format!("/{name} {}", args.join(" "))
             }
         }
-        ChannelContent::Image { url, caption, .. } => match caption {
-            Some(c) => format!("[Photo: {url}]\n{c}"),
-            None => format!("[Photo: {url}]"),
-        },
-        ChannelContent::File { url, filename } => format!("[File ({filename}): {url}]"),
+        ChannelContent::Image { url, caption, .. } => {
+            let url = redact_media_url_for_text(url);
+            match caption {
+                Some(c) => format!("[Photo: {url}]\n{c}"),
+                None => format!("[Photo: {url}]"),
+            }
+        }
+        ChannelContent::File { url, filename } => {
+            format!("[File ({filename}): {}]", redact_media_url_for_text(url))
+        }
         ChannelContent::Voice {
             url,
             duration_seconds,
             caption,
         } => {
+            let url = redact_media_url_for_text(url);
             let cap = caption.as_deref().unwrap_or("");
             if cap.is_empty() {
                 format!("[Voice message ({duration_seconds}s): {url}]")
@@ -1179,10 +1271,13 @@ fn content_to_text(content: &ChannelContent) -> String {
             caption,
             duration_seconds,
             ..
-        } => match caption {
-            Some(c) => format!("[Video ({duration_seconds}s): {url}]\n{c}"),
-            None => format!("[Video ({duration_seconds}s): {url}]"),
-        },
+        } => {
+            let url = redact_media_url_for_text(url);
+            match caption {
+                Some(c) => format!("[Video ({duration_seconds}s): {url}]\n{c}"),
+                None => format!("[Video ({duration_seconds}s): {url}]"),
+            }
+        }
         ChannelContent::Location { lat, lon } => format!("[Location: {lat}, {lon}]"),
         ChannelContent::FileData { filename, .. } => format!("[File: {filename}]"),
         ChannelContent::Interactive { text, .. } => text.clone(),
@@ -1205,18 +1300,24 @@ fn content_to_text(content: &ChannelContent) -> String {
             caption,
             duration_seconds,
             ..
-        } => match caption {
-            Some(c) => format!("[Audio ({duration_seconds}s): {url}]\n{c}"),
-            None => format!("[Audio ({duration_seconds}s): {url}]"),
-        },
+        } => {
+            let url = redact_media_url_for_text(url);
+            match caption {
+                Some(c) => format!("[Audio ({duration_seconds}s): {url}]\n{c}"),
+                None => format!("[Audio ({duration_seconds}s): {url}]"),
+            }
+        }
         ChannelContent::Animation {
             url,
             caption,
             duration_seconds,
-        } => match caption {
-            Some(c) => format!("[Animation ({duration_seconds}s): {url}]\n{c}"),
-            None => format!("[Animation ({duration_seconds}s): {url}]"),
-        },
+        } => {
+            let url = redact_media_url_for_text(url);
+            match caption {
+                Some(c) => format!("[Animation ({duration_seconds}s): {url}]\n{c}"),
+                None => format!("[Animation ({duration_seconds}s): {url}]"),
+            }
+        }
         ChannelContent::Sticker { file_id } => format!("[Sticker: {file_id}]"),
         ChannelContent::MediaGroup { items } => format!("[Media group: {} items]", items.len()),
         ChannelContent::Poll { question, .. } => format!("[Poll: {question}]"),
@@ -4938,6 +5039,7 @@ async fn dispatch_message(
             ..
         } => {
             // Fallback when image download failed
+            let url = redact_media_url_for_text(url);
             match caption {
                 Some(c) => format!("[User sent a photo: {url}]\nCaption: {c}"),
                 None => format!("[User sent a photo: {url}]"),
@@ -4947,29 +5049,40 @@ async fn dispatch_message(
             ref url,
             ref filename,
         } => {
-            format!("[User sent a file ({filename}): {url}]")
+            format!(
+                "[User sent a file ({filename}): {}]",
+                redact_media_url_for_text(url)
+            )
         }
         ChannelContent::Voice {
             ref url,
             ref caption,
             duration_seconds,
-        } => match caption {
-            Some(c) => {
-                format!("[User sent a voice message ({duration_seconds}s): {url}]\nCaption: {c}")
+        } => {
+            let url = redact_media_url_for_text(url);
+            match caption {
+                Some(c) => {
+                    format!(
+                        "[User sent a voice message ({duration_seconds}s): {url}]\nCaption: {c}"
+                    )
+                }
+                None => format!("[User sent a voice message ({duration_seconds}s): {url}]"),
             }
-            None => format!("[User sent a voice message ({duration_seconds}s): {url}]"),
-        },
+        }
         ChannelContent::Video {
             ref url,
             ref caption,
             duration_seconds,
             ..
-        } => match caption {
-            Some(c) => {
-                format!("[User sent a video ({duration_seconds}s): {url}]\nCaption: {c}")
+        } => {
+            let url = redact_media_url_for_text(url);
+            match caption {
+                Some(c) => {
+                    format!("[User sent a video ({duration_seconds}s): {url}]\nCaption: {c}")
+                }
+                None => format!("[User sent a video ({duration_seconds}s): {url}]"),
             }
-            None => format!("[User sent a video ({duration_seconds}s): {url}]"),
-        },
+        }
         ChannelContent::Location { lat, lon } => {
             format!("[User shared location: {lat}, {lon}]")
         }
@@ -5006,20 +5119,26 @@ async fn dispatch_message(
             ref caption,
             duration_seconds,
             ..
-        } => match caption {
-            Some(c) => format!("[User sent audio ({duration_seconds}s): {url}]\nCaption: {c}"),
-            None => format!("[User sent audio ({duration_seconds}s): {url}]"),
-        },
+        } => {
+            let url = redact_media_url_for_text(url);
+            match caption {
+                Some(c) => format!("[User sent audio ({duration_seconds}s): {url}]\nCaption: {c}"),
+                None => format!("[User sent audio ({duration_seconds}s): {url}]"),
+            }
+        }
         ChannelContent::Animation {
             ref url,
             ref caption,
             duration_seconds,
-        } => match caption {
-            Some(c) => {
-                format!("[User sent animation ({duration_seconds}s): {url}]\nCaption: {c}")
+        } => {
+            let url = redact_media_url_for_text(url);
+            match caption {
+                Some(c) => {
+                    format!("[User sent animation ({duration_seconds}s): {url}]\nCaption: {c}")
+                }
+                None => format!("[User sent animation ({duration_seconds}s): {url}]"),
             }
-            None => format!("[User sent animation ({duration_seconds}s): {url}]"),
-        },
+        }
         ChannelContent::Sticker { ref file_id } => format!("[User sent sticker: {file_id}]"),
         ChannelContent::MediaGroup { ref items } => {
             format!("[User sent media group: {} items]", items.len())
@@ -6689,7 +6808,14 @@ async fn download_file_to_blocks(
     let resp = match req.send().await {
         Ok(r) => r,
         Err(e) => {
-            warn!("Failed to download file from channel: {e}");
+            // `reqwest::Error`'s Display appends the full request URL, and a Telegram file URL carries the bot token in its path. The sidecar strips it for the same reason (`sdk/rust/librefang-sidecar-telegram/src/api/error.rs`); both the log line and the failure block below derive from this error, so strip once here.
+            let e = e.without_url();
+            // The URL is stripped from the error (its Display appends it verbatim), so it goes back in the one form that is safe to log — otherwise every channel's transport failure reads "error sending request" with no host and no file.
+            warn!(
+                url = %redact_media_url_for_text(url),
+                filename = %filename,
+                "Failed to download file from channel: {e}"
+            );
             return DownloadedFile::failed(vec![ContentBlock::Text {
                 text: format!("[File download failed: {e}]"),
                 provider_metadata: None,
@@ -6704,13 +6830,7 @@ async fn download_file_to_blocks(
     if !resp.status().is_success() {
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
-        let preview: String = body.chars().take(200).collect();
-        warn!(
-            status = %status,
-            body_preview = %preview,
-            url = %url,
-            "File download returned non-success status"
-        );
+        warn_download_status_failure(status, url, &body);
         return DownloadedFile::failed(vec![ContentBlock::Text {
             text: format!("[File download failed: HTTP {status} ({filename})]"),
             provider_metadata: None,
@@ -7000,7 +7120,10 @@ async fn download_image_to_blocks(
                 }];
             }
             Err(crate::http_client::FetchError::Failed(reason)) => {
-                warn!("Image download failed: {reason}");
+                warn!(
+                    url = %redact_media_url_for_text(url),
+                    "Image download failed: {reason}"
+                );
                 return vec![ContentBlock::Text {
                     text: format!("[Image download failed: {reason}]"),
                     provider_metadata: None,
@@ -10971,6 +11094,336 @@ mod tests {
         assert_eq!(
             content_to_text(&voice),
             "[Voice message (30s): https://example.com/voice.ogg]"
+        );
+    }
+
+    /// The secret half of a Telegram Bot API file URL is a live credential: the sidecar hands the daemon `…/file/bot<id>:<secret>/<path>`, and that URL is rendered into the prompt by `content_to_text`.
+    /// Pinned end to end so a future arm rewrite cannot quietly drop the mask.
+    #[test]
+    fn test_content_to_text_voice_redacts_telegram_bot_token() {
+        const SECRET: &str = "AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw";
+        let voice = ChannelContent::Voice {
+            url: format!("https://api.telegram.org/file/bot123456:{SECRET}/voice/file_7.oga"),
+            duration_seconds: 4,
+            caption: None,
+        };
+
+        let text = content_to_text(&voice);
+
+        assert!(
+            !text.contains(SECRET),
+            "the bot token must never reach prompt text, got: {text}"
+        );
+        assert_eq!(
+            text,
+            "[Voice message (4s): https://api.telegram.org/file/bot123456:<redacted>/voice/file_7.oga]",
+            "the URL must keep its shape with only the secret masked"
+        );
+    }
+
+    /// Every url-bearing variant renders through the same mask — `Image`, `File`, `Video`, `Audio` and `Animation` are all fed by the Telegram sidecar's `file_url()`.
+    #[test]
+    fn test_content_to_text_redacts_bot_token_for_every_media_variant() {
+        const SECRET: &str = "AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw";
+        let url = format!("https://api.telegram.org/file/bot123456:{SECRET}/photos/file_42.jpg");
+        let cases = vec![
+            ChannelContent::Image {
+                url: url.clone(),
+                caption: Some("A cat".to_string()),
+                mime_type: None,
+            },
+            ChannelContent::File {
+                url: url.clone(),
+                filename: "report.pdf".to_string(),
+            },
+            ChannelContent::Voice {
+                url: url.clone(),
+                duration_seconds: 4,
+                caption: None,
+            },
+            ChannelContent::Video {
+                url: url.clone(),
+                caption: None,
+                duration_seconds: 9,
+                filename: None,
+            },
+            ChannelContent::Audio {
+                url: url.clone(),
+                caption: None,
+                duration_seconds: 9,
+                title: None,
+                performer: None,
+            },
+            ChannelContent::Animation {
+                url: url.clone(),
+                caption: None,
+                duration_seconds: 3,
+            },
+            // The same arms with a caption: each renders the URL in both the `Some(_)` and the `None` branch, so a mask applied to only one branch has to fail here.
+            ChannelContent::Image {
+                url: url.clone(),
+                caption: Some("a cat".to_string()),
+                mime_type: None,
+            },
+            ChannelContent::Voice {
+                url: url.clone(),
+                duration_seconds: 4,
+                caption: Some("listen".to_string()),
+            },
+            ChannelContent::Video {
+                url: url.clone(),
+                caption: Some("watch".to_string()),
+                duration_seconds: 9,
+                filename: None,
+            },
+            ChannelContent::Audio {
+                url: url.clone(),
+                caption: Some("track".to_string()),
+                duration_seconds: 9,
+                title: None,
+                performer: None,
+            },
+            ChannelContent::Animation {
+                url: url.clone(),
+                caption: Some("lol".to_string()),
+                duration_seconds: 3,
+            },
+        ];
+
+        for content in cases {
+            let text = content_to_text(&content);
+            assert!(
+                !text.contains(SECRET),
+                "{content:?} leaked the bot token: {text}"
+            );
+            assert!(
+                text.contains("bot123456:<redacted>/"),
+                "{content:?} must keep the masked URL shape, got: {text}"
+            );
+        }
+    }
+
+    /// Captions are user text and must survive the mask untouched.
+    #[test]
+    fn test_content_to_text_redaction_preserves_caption() {
+        const SECRET: &str = "AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw";
+        let image = ChannelContent::Image {
+            url: format!("https://api.telegram.org/file/bot123456:{SECRET}/photos/file_42.jpg"),
+            caption: Some("see bot123456: not a token here".to_string()),
+            mime_type: None,
+        };
+
+        let text = content_to_text(&image);
+
+        assert!(text.ends_with("\nsee bot123456: not a token here"));
+        assert!(!text.contains(SECRET));
+    }
+
+    #[test]
+    fn test_redact_media_url_for_text_leaves_ordinary_urls_alone() {
+        for url in [
+            "https://example.com/photo.jpg",
+            "https://example.com:8443/files/a:b/c.pdf",
+            "https://example.com/download?token=abc",
+            // No path-segment boundary before `bot`: an ordinary slug is not a bot URL.
+            "https://example.com/robot123:abcdefghijklmnopqrstuvwxyz0/a.jpg",
+            // Too short to be a Bot API secret (35 chars in practice).
+            "https://api.telegram.org/file/bot123:short/file_1.jpg",
+        ] {
+            let redacted = redact_media_url_for_text(url);
+            assert_eq!(redacted, url, "ordinary URL was rewritten: {url}");
+            assert!(
+                matches!(redacted, Cow::Borrowed(_)),
+                "a non-matching URL must be returned without copying: {url}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_redact_media_url_for_text_masks_api_root_form() {
+        const SECRET: &str = "AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw";
+        assert_eq!(
+            redact_media_url_for_text(&format!(
+                "https://api.telegram.org/bot123456:{SECRET}/getMe"
+            )),
+            "https://api.telegram.org/bot123456:<redacted>/getMe"
+        );
+    }
+
+    /// Collects `WARN` events emitted on this thread, so a test can assert on the line production logs rather than on the helper that feeds it.
+    struct WarnCollector(std::sync::Arc<std::sync::Mutex<Vec<String>>>);
+
+    struct FieldVisitor(String);
+
+    impl tracing::field::Visit for FieldVisitor {
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            self.0.push_str(&format!(" {}={:?}", field.name(), value));
+        }
+    }
+
+    impl tracing::Subscriber for WarnCollector {
+        fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
+            *metadata.level() <= tracing::Level::WARN
+        }
+        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+        fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+        fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+        fn event(&self, event: &tracing::Event<'_>) {
+            let mut visitor = FieldVisitor(String::new());
+            event.record(&mut visitor);
+            self.0.lock().unwrap().push(visitor.0);
+        }
+        fn enter(&self, _: &tracing::span::Id) {}
+        fn exit(&self, _: &tracing::span::Id) {}
+    }
+
+    /// A failed media fetch must not put the token into the failure text, nor into the warning written to the daemon log.
+    ///
+    /// `reqwest::Error`'s Display appends the request URL, so both download paths strip it before formatting and put it back masked in the `warn!` fields.
+    /// This drives both paths and captures the events: a `warn!` that stops masking is invisible to the returned blocks.
+    #[tokio::test]
+    async fn download_failure_text_and_warning_do_not_carry_the_bot_token() {
+        const SECRET: &str = "AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw";
+        let url = format!("https://example.invalid/file/bot123456:{SECRET}/voice/file_7.oga");
+        let dir = tempfile::TempDir::new().unwrap();
+
+        let file_events = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let file = {
+            let _guard = tracing::subscriber::set_default(WarnCollector(file_events.clone()));
+            download_file_to_blocks(&url, "voice.oga", 1024 * 1024, dir.path(), &[]).await
+        };
+        let file_text = format!("{:?}", file.blocks);
+        assert!(
+            !file_text.contains(SECRET),
+            "the file-download failure text leaked the token: {file_text}"
+        );
+        let captured = file_events.lock().unwrap().join("\n");
+        assert!(
+            captured.contains("Failed to download file from channel"),
+            "the transport failure must still log something: {captured}"
+        );
+        assert!(
+            !captured.contains(SECRET),
+            "the transport-failure warning leaked the token: {captured}"
+        );
+        assert!(
+            captured.contains("bot123456:<redacted>") && captured.contains("filename"),
+            "the warning must keep the masked URL and the filename: {captured}"
+        );
+
+        let image_events = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let blocks = {
+            let _guard = tracing::subscriber::set_default(WarnCollector(image_events.clone()));
+            download_image_to_blocks(&url, None, None, dir.path(), &[]).await
+        };
+        let image_text = format!("{blocks:?}");
+        assert!(
+            !image_text.contains(SECRET),
+            "the image-download failure text leaked the token: {image_text}"
+        );
+        let captured = image_events.lock().unwrap().join("\n");
+        assert!(
+            captured.contains("Image download failed"),
+            "the image failure must still log something: {captured}"
+        );
+        assert!(
+            !captured.contains(SECRET),
+            "the image-failure warning leaked the token: {captured}"
+        );
+        assert!(
+            captured.contains("bot123456:<redacted>"),
+            "the image warning must keep the masked URL: {captured}"
+        );
+    }
+
+    #[test]
+    fn test_download_status_failure_warn_masks_the_url_and_the_echoed_body() {
+        const SECRET: &str = "AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw";
+        const HMAC: &str = "9d1e2f3a4b5c6d7e8f90a1b2c3d4e5f6a7b8c9d0";
+        let url = format!("https://api.telegram.org/file/bot123456:{SECRET}/voice/file_7.oga");
+        let body = format!(
+            r#"{{"message":"403 Forbidden","request":"https://cdn.discordapp.com/attachments/1/2/x.png?ex=1&is=2&hm={HMAC}","other":"diag"}}"#
+        );
+
+        let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        tracing::subscriber::with_default(WarnCollector(events.clone()), || {
+            warn_download_status_failure("403 Forbidden", &url, &body);
+        });
+
+        let captured = events.lock().unwrap().join("\n");
+        assert!(
+            !captured.contains(SECRET),
+            "the logged url leaked the token: {captured}"
+        );
+        assert!(
+            !captured.contains(HMAC),
+            "the logged body preview leaked the Discord signature: {captured}"
+        );
+        assert!(
+            captured.contains(r#""other":"diag"}"#),
+            "the mask must stop at the JSON value boundary, not eat the rest of the body: {captured}"
+        );
+        assert!(
+            captured.contains("bot123456:<redacted>/voice/file_7.oga"),
+            "the url keeps its shape apart from the secret: {captured}"
+        );
+
+        // The same echo, positioned so that the 200-character cut lands inside the secret: truncating before masking leaves a fragment too short for the pattern to match.
+        let padded = format!(
+            "{}https://api.telegram.org/file/bot123456:{SECRET}/voice/file_7.oga",
+            "x".repeat(141)
+        );
+        let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        tracing::subscriber::with_default(WarnCollector(events.clone()), || {
+            warn_download_status_failure("403 Forbidden", &url, &padded);
+        });
+        let captured = events.lock().unwrap().join("\n");
+        assert!(
+            !captured.contains("AAHdqTcvCH1vGWJx"),
+            "a secret cut by the 200-character window leaked a fragment: {captured}"
+        );
+    }
+
+    /// Discord signs the query string instead of the path; only `hm` is the signature, so `ex` / `is` stay readable.
+    /// The mask is host-scoped, because `hm=` on an unrelated host is not a credential and rewriting it would corrupt an ordinary link.
+    /// The Telegram mask is host-agnostic on purpose, because the sidecar can point at a self-hosted Bot API server.
+    /// The price is that a bot-shaped path on an unrelated host is masked too; this pins that as intended rather than leaving it to be rediscovered as a bug.
+    #[test]
+    fn test_redact_media_url_for_text_masks_bot_shaped_path_on_any_host() {
+        let url = "https://example.com/files/bot123:abcdefghijklmnopqrstuvwxyz0/data.pdf";
+        assert_eq!(
+            redact_media_url_for_text(url),
+            "https://example.com/files/bot123:<redacted>/data.pdf",
+            "a bot-shaped path is masked on any host, by design"
+        );
+    }
+
+    #[test]
+    fn test_redact_media_url_for_text_masks_discord_signature_on_discord_hosts_only() {
+        const HMAC: &str = "9d1e2f3a4b5c6d7e8f90a1b2c3d4e5f6a7b8c9d0";
+        for host in ["cdn.discordapp.com", "media.discordapp.net", "discord.com"] {
+            let url = format!(
+                "https://{host}/attachments/1/2/screenshot.png?ex=67abcdef&is=67abcd00&hm={HMAC}"
+            );
+            let masked = redact_media_url_for_text(&url);
+            assert!(
+                !masked.contains(HMAC),
+                "the Discord signature survived on {host}: {masked}"
+            );
+            assert_eq!(
+                masked,
+                format!("https://{host}/attachments/1/2/screenshot.png?ex=67abcdef&is=67abcd00&hm=<redacted>"),
+                "only `hm` should be masked on {host}"
+            );
+        }
+
+        let ordinary = format!("https://example.com/report.pdf?hm={HMAC}");
+        assert_eq!(
+            redact_media_url_for_text(&ordinary),
+            ordinary,
+            "a non-Discord host must keep its query string"
         );
     }
 
