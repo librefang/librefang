@@ -12,7 +12,7 @@ import {
   type RefObject,
 } from "react";
 import { useTranslation } from "react-i18next";
-import { AlertTriangle, ChevronDown, Plus, RotateCcw, Trash2, X } from "lucide-react";
+import { AlertTriangle, ChevronDown, Plus, RotateCcw, Trash2 } from "lucide-react";
 import {
   AUTO_ROUTE_STRATEGIES,
   CAPABILITY_ROUTING_KEYS,
@@ -33,12 +33,17 @@ import type { JsonRowType, ManifestExtras, ManifestFormState } from "../lib/agen
 import type { ModelRoutingInertReason } from "../api";
 import { isToolAdmittedByCapabilities } from "../lib/toolGrants";
 import {
+  reasoningEffortLabel,
+  modelReasoningEfforts,
+} from "../lib/reasoningEffort";
+import {
   applyRoutingEngine,
   ROUTING_TIER_DEFAULTS,
   routingEngineOf,
   routingTierModel,
   type RoutingEngine,
 } from "../lib/routingEngine";
+import { ListField } from "./ui/ListField";
 
 /// The tri-state caption for a memory capability field (#7749 review):
 /// `null` is the omitted key (unrestricted), `[]` is the declared-empty deny.
@@ -206,6 +211,18 @@ interface AgentManifestFormProps {
     context_window?: number;
     max_output_tokens?: number;
     limits_known?: boolean;
+    /**
+     * Reasoning capability metadata (see `lib/reasoningEffort`). All optional:
+     * an older daemon serves none of it, and the editor falls back to the
+     * canonical levels. When present, the model's own set wins and a model
+     * that cannot be switched off loses `none`.
+     */
+    supported_efforts?: string[];
+    /** The backend's prepared offer; wins over `supported_efforts` when present. */
+    offered_efforts?: string[];
+    default_effort?: string | null;
+    off_allowed?: boolean;
+    mandatory?: boolean;
   }[];
   /**
    * State of the query that produced `models`. Without it a catalog that is
@@ -673,6 +690,15 @@ export function AgentManifestForm({
     t,
   );
 
+  // Levels the chosen model declares for the Thinking section's selector.
+  // Falls back to the canonical set whenever the model is unknown to the
+  // catalog (nothing chosen yet, or the catalog still loading) — the same
+  // "nobody said" reading the composer gives the field.
+  const reasoningEfforts = useMemo(
+    () => modelReasoningEfforts(models, value.model.model, value.model.provider),
+    [models, value.model.model, value.model.provider],
+  );
+
   const jsonSchemaFormat =
     value.response_format.mode === "json_schema" ? value.response_format : null;
 
@@ -780,7 +806,7 @@ export function AgentManifestForm({
             </Field>
           </div>
             <Field label={t("agents.form.tags")}>
-            <TagInput
+            <ListField
               value={value.tags}
               onChange={(next) => update({ tags: next })}
               placeholder={t("agents.form.tags_placeholder")}
@@ -1122,7 +1148,7 @@ export function AgentManifestForm({
                 allowFreeText
               />
             ) : (
-              <TagInput
+              <ListField
                 value={value.model.router_allowed_profiles}
                 onChange={(next) => updateModel({ router_allowed_profiles: next })}
                 placeholder={t("agents.form.router_allowed_profiles_placeholder")}
@@ -1288,14 +1314,14 @@ export function AgentManifestForm({
           {t("agents.form.capabilities_layers_note")}
         </p>
         <Field label={t("agents.form.network_hosts")} hint={t("agents.form.network_hosts_hint")}>
-          <TagInput
+          <ListField
             value={value.capabilities.network}
             onChange={(next) => updateCapabilities({ network: next })}
             placeholder={t("agents.form.network_hosts_placeholder")}
           />
         </Field>
         <Field label={t("agents.form.shell_commands")} hint={t("agents.form.shell_commands_hint")}>
-          <TagInput
+          <ListField
             value={value.capabilities.shell}
             onChange={(next) => updateCapabilities({ shell: next })}
             placeholder={t("agents.form.shell_commands_placeholder")}
@@ -1322,7 +1348,7 @@ export function AgentManifestForm({
               allowFreeText
             />
           ) : (
-            <TagInput
+            <ListField
               value={value.capabilities.tools}
               onChange={(next) => updateCapabilities({ tools: next })}
               placeholder={t("agents.form.cap_tools_placeholder")}
@@ -1337,7 +1363,7 @@ export function AgentManifestForm({
               typing here; leaving it alone keeps `null` and the key stays off
               disk.
             */}
-            <TagInput
+            <ListField
               value={value.capabilities.memory_read ?? []}
               onChange={(next) => updateCapabilities({ memory_read: next })}
               placeholder={t("agents.form.memory_glob_placeholder")}
@@ -1348,7 +1374,7 @@ export function AgentManifestForm({
             />
           </Field>
           <Field label={t("agents.form.memory_write")}>
-            <TagInput
+            <ListField
               value={value.capabilities.memory_write ?? []}
               onChange={(next) => updateCapabilities({ memory_write: next })}
               placeholder={t("agents.form.memory_glob_placeholder")}
@@ -1359,14 +1385,14 @@ export function AgentManifestForm({
             />
           </Field>
           <Field label={t("agents.form.agent_message")}>
-            <TagInput
+            <ListField
               value={value.capabilities.agent_message}
               onChange={(next) => updateCapabilities({ agent_message: next })}
               placeholder={t("agents.form.agent_message_placeholder")}
             />
           </Field>
           <Field label={t("agents.form.ofp_connect")}>
-            <TagInput
+            <ListField
               value={value.capabilities.ofp_connect}
               onChange={(next) => updateCapabilities({ ofp_connect: next })}
               placeholder={t("agents.form.ofp_connect_placeholder")}
@@ -1576,7 +1602,7 @@ export function AgentManifestForm({
               allowFreeText
             />
           ) : (
-            <TagInput
+            <ListField
               value={value.skills}
               onChange={(next) => update({ skills: next })}
               placeholder={t("agents.form.skills_placeholder")}
@@ -1626,7 +1652,7 @@ export function AgentManifestForm({
               allowFreeText
             />
           ) : (
-            <TagInput
+            <ListField
               value={value.mcp_servers}
               onChange={(next) => update({ mcp_servers: next })}
               placeholder={t("agents.form.mcp_servers_placeholder")}
@@ -1697,10 +1723,11 @@ export function AgentManifestForm({
         )}
         {value.schedule.mode === "proactive" && (
           <Field label={t("agents.form.conditions")}>
-            <TagInput
+            <ListField
               value={value.schedule.conditions}
               onChange={(next) => update({ schedule: { mode: "proactive", conditions: next } })}
               placeholder={t("agents.form.conditions_placeholder")}
+              splitOnComma={false}
             />
           </Field>
         )}
@@ -1848,28 +1875,46 @@ export function AgentManifestForm({
           onChange={(checked) => updateThinking({ enabled: checked })}
         />
         {value.thinking.enabled && (
-          <div className="grid grid-cols-2 gap-3 mt-2">
-            <StepLadderInput
-              label={t("agents.form.budget_tokens")}
-              value={value.thinking.budget_tokens}
-              onChange={(next) => updateThinking({ budget_tokens: next })}
-              ladder={THINKING_BUDGET_LADDER}
-              formatRung={formatCount}
-              inheritLabel={t("model_param.inherit")}
-              customLabel={t("model_param.custom")}
-              customPlaceholder={t("agents.form.budget_tokens_placeholder")}
-              min={0}
-            />
-
-            <Field label={t("agents.form.stream_thinking")}>
-              <Toggle
-                label=""
-                ariaLabel={t("agents.form.stream_thinking")}
-                checked={value.thinking.stream_thinking}
-                onChange={(checked) => updateThinking({ stream_thinking: checked })}
+          <>
+            {/* The default reasoning effort this agent's turns run with.
+                Leads the section: it is the decision the model needs before it
+                reasons at all (budget and streaming shape the trace once it
+                does), and "inherit" is a real setting rather than a blank. */}
+            <div className="mt-2">
+              <Field
+                label={t("agents.form.reasoning_effort")}
+                hint={t("agents.form.reasoning_effort_hint")}
+              >
+                <ReasoningEffortField
+                  value={value.thinking.reasoning_effort}
+                  options={reasoningEfforts}
+                  onChange={(next) => updateThinking({ reasoning_effort: next })}
+                />
+              </Field>
+            </div>
+            <div className="grid grid-cols-2 gap-3 mt-2">
+              <StepLadderInput
+                label={t("agents.form.budget_tokens")}
+                value={value.thinking.budget_tokens}
+                onChange={(next) => updateThinking({ budget_tokens: next })}
+                ladder={THINKING_BUDGET_LADDER}
+                formatRung={formatCount}
+                inheritLabel={t("model_param.inherit")}
+                customLabel={t("model_param.custom")}
+                customPlaceholder={t("agents.form.budget_tokens_placeholder")}
+                min={0}
               />
-            </Field>
-          </div>
+
+              <Field label={t("agents.form.stream_thinking")}>
+                <Toggle
+                  label=""
+                  ariaLabel={t("agents.form.stream_thinking")}
+                  checked={value.thinking.stream_thinking}
+                  onChange={(checked) => updateThinking({ stream_thinking: checked })}
+                />
+              </Field>
+            </div>
+          </>
         )}
       </FormSection>
 
@@ -2132,9 +2177,10 @@ export function AgentManifestForm({
                   </select>
                 </Field></div>
               <div className="col-span-2"><Field label={t("agents.form.channel_overrides_group_trigger_patterns")}>
-                  <TagInput value={value.channel_overrides.group_trigger_patterns}
+                  <ListField value={value.channel_overrides.group_trigger_patterns}
                     onChange={(next) => updateChannelOverrides({ group_trigger_patterns: next })}
-                    placeholder={t("agents.form.inherit_default")} />
+                    placeholder={t("agents.form.inherit_default")}
+                    splitOnComma={false} />
                 </Field></div>
               <div><Toggle label={t("agents.form.channel_overrides_reply_precheck")} checked={value.channel_overrides.reply_precheck}
                   onChange={(checked) => updateChannelOverrides({ reply_precheck: checked })} /></div>
@@ -2220,12 +2266,12 @@ export function AgentManifestForm({
               <div><Toggle label={t("agents.form.channel_overrides_disable_commands")} checked={value.channel_overrides.disable_commands}
                   onChange={(checked) => updateChannelOverrides({ disable_commands: checked })} /></div>
               <div className="col-span-2"><Field label={t("agents.form.channel_overrides_allowed_commands")}>
-                  <TagInput value={value.channel_overrides.allowed_commands}
+                  <ListField value={value.channel_overrides.allowed_commands}
                     onChange={(next) => updateChannelOverrides({ allowed_commands: next })}
                     placeholder={t("agents.form.inherit_default")} />
                 </Field></div>
               <div className="col-span-2"><Field label={t("agents.form.channel_overrides_blocked_commands")}>
-                  <TagInput value={value.channel_overrides.blocked_commands}
+                  <ListField value={value.channel_overrides.blocked_commands}
                     onChange={(next) => updateChannelOverrides({ blocked_commands: next })}
                     placeholder={t("agents.form.inherit_default")} />
                 </Field></div>
@@ -2581,7 +2627,7 @@ export function AgentManifestForm({
             label={t("agents.form.context_engine_plugin_stack")}
             hint={t("agents.form.context_engine_plugin_stack_hint")}
           >
-            <TagInput
+            <ListField
               value={ce.plugin_stack}
               onChange={(next) => updateContextEngine({ plugin_stack: next })}
               placeholder={t("agents.form.context_engine_plugin_stack_placeholder")}
@@ -2734,12 +2780,13 @@ export function AgentManifestForm({
                   label={t("agents.form.context_engine_sidecar_args")}
                   hint={t("agents.form.context_engine_sidecar_args_hint")}
                 >
-                  <TagInput
+                  <ListField
                     value={ce.sidecar.args}
                     onChange={(next) =>
                       updateContextEngine({ sidecar: { ...ce.sidecar, args: next } })
                     }
                     placeholder={t("agents.form.context_engine_sidecar_args_placeholder")}
+                    splitOnComma={false}
                   />
                 </Field>
               </div>
@@ -2953,7 +3000,7 @@ export function AgentManifestForm({
                 label={t("agents.form.context_engine_only_for_agents")}
                 hint={t("agents.form.context_engine_only_for_agents_hint")}
               >
-                <TagInput
+                <ListField
                   value={hook.only_for_agent_ids}
                   onChange={(next) => updateHook({ only_for_agent_ids: next })}
                   placeholder={t("agents.form.context_engine_only_for_agents_placeholder")}
@@ -2963,7 +3010,7 @@ export function AgentManifestForm({
                 label={t("agents.form.context_engine_allowed_secrets")}
                 hint={t("agents.form.context_engine_allowed_secrets_hint")}
               >
-                <TagInput
+                <ListField
                   value={hook.allowed_secrets}
                   onChange={(next) => updateHook({ allowed_secrets: next })}
                   placeholder={t("agents.form.context_engine_allowed_secrets_placeholder")}
@@ -3643,7 +3690,7 @@ export function AgentManifestForm({
             />
           </Field>
           <Field label={t("agents.form.allowed_plugins")}>
-            <TagInput
+            <ListField
               value={value.allowed_plugins}
               onChange={(next) => update({ allowed_plugins: next })}
               placeholder={t("agents.form.allowed_plugins_placeholder")}
@@ -3792,7 +3839,7 @@ export function AgentManifestForm({
                 label={t("agents.form.exec_policy_safe_bins")}
                 hint={t("agents.form.exec_policy_safe_bins_hint")}
               >
-                <TagInput
+                <ListField
                   value={value.exec_policy.safe_bins ?? []}
                   onChange={(next) => updateExecPolicy({ safe_bins: next })}
                   placeholder={t("agents.form.exec_policy_safe_bins_placeholder")}
@@ -3816,7 +3863,7 @@ export function AgentManifestForm({
               label={t("agents.form.exec_policy_allowed_commands")}
               hint={t("agents.form.exec_policy_allowed_commands_hint")}
             >
-              <TagInput
+              <ListField
                 value={value.exec_policy.allowed_commands}
                 onChange={(next) => updateExecPolicy({ allowed_commands: next })}
                 placeholder={t("agents.form.exec_policy_allowed_commands_placeholder")}
@@ -3826,7 +3873,7 @@ export function AgentManifestForm({
               label={t("agents.form.exec_policy_allowed_env_vars")}
               hint={t("agents.form.exec_policy_allowed_env_vars_hint")}
             >
-              <TagInput
+              <ListField
                 value={value.exec_policy.allowed_env_vars}
                 onChange={(next) => updateExecPolicy({ allowed_env_vars: next })}
                 placeholder={t("agents.form.exec_policy_allowed_env_vars_placeholder")}
@@ -4474,6 +4521,69 @@ function OpenStringSelect({
 }
 
 /**
+ * The agent's default reasoning effort — `[thinking] reasoning_effort`.
+ *
+ * "inherit default" is the absent key: the model (or the global default)
+ * decides. The level list is the chosen model's own when the catalog declares
+ * one, the canonical set otherwise; a stored value the list does not know
+ * stays selectable, so opening and saving an older manifest cannot silently
+ * rewrite it. The clear button is the one-click way back to inherit from any
+ * level, without hunting for the blank option.
+ *
+ * Module scope for the same reason as `FormSection`.
+ */
+function ReasoningEffortField({
+  value,
+  options,
+  onChange,
+}: {
+  value: string;
+  options: readonly string[];
+  onChange: (next: string) => void;
+}) {
+  const { t } = useTranslation();
+  const known = value === "" || options.includes(value);
+  const clearLabel = t("agents.form.reasoning_effort_clear");
+  return (
+    <div className="flex items-center gap-2">
+      <select
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        aria-label={t("agents.form.reasoning_effort")}
+        className={`${inputClass} flex-1`}
+      >
+        <option value="">{t("agents.form.reasoning_effort_inherit")}</option>
+        {options.map((level) => (
+          <option key={level} value={level}>
+            {reasoningEffortLabel(level)}
+          </option>
+        ))}
+        {/* A stored value the model's list does not carry keeps its row so the
+            current setting stays visible, but it is disabled: this model does
+            not declare it, and the selector must not offer what the model
+            cannot take. */}
+        {!known ? (
+          <option value={value} disabled>
+            {reasoningEffortLabel(value)}
+          </option>
+        ) : null}
+      </select>
+      {value !== "" && (
+        <button
+          type="button"
+          onClick={() => onChange("")}
+          title={clearLabel}
+          aria-label={clearLabel}
+          className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-border-subtle text-text-dim transition-colors hover:border-border hover:text-text"
+        >
+          <RotateCcw className="h-3.5 w-3.5" aria-hidden="true" />
+        </button>
+      )}
+    </div>
+  );
+}
+
+/**
  * One hook script path.
  *
  * Nine of these, one per lifecycle hook, and they are the same control nine
@@ -4674,66 +4784,6 @@ function PreservedValues({
         </p>
       ))}
       <p className="text-[10px] text-text-dim/70">{hint}</p>
-    </div>
-  );
-}
-
-function TagInput({
-  value,
-  onChange,
-  placeholder,
-}: {
-  value: string[];
-  onChange: (next: string[]) => void;
-  placeholder?: string;
-}) {
-  const [inputValue, setInputValue] = useState("");
-
-  const commit = (raw: string): void => {
-    const cleaned = raw.trim();
-    if (!cleaned) return;
-    setInputValue("");
-    if (value.includes(cleaned)) return;
-    onChange([...value, cleaned]);
-  };
-  return (
-    <div className="flex flex-wrap items-center gap-1.5 rounded-lg border border-border-subtle bg-main px-2 py-1.5 focus-within:border-brand">
-      {value.map((tag) => (
-        <span
-          key={tag}
-          className="inline-flex items-center gap-1 rounded-md bg-surface px-1.5 py-0.5 text-[11px] font-medium text-text"
-        >
-          {tag}
-          <button
-            type="button"
-            onClick={() => onChange(value.filter((t) => t !== tag))}
-            className="text-text-dim hover:text-error"
-            aria-label={`remove ${tag}`}
-          >
-            <X className="h-3 w-3" />
-          </button>
-        </span>
-      ))}
-      <input
-        type="text"
-        value={inputValue}
-        onChange={(e) => setInputValue(e.target.value)}
-        placeholder={value.length === 0 ? placeholder : undefined}
-        onKeyDown={(e) => {
-          if (e.key === "Enter" || e.key === ",") {
-            e.preventDefault();
-            commit(inputValue);
-          } else if (e.key === "Backspace" && !inputValue && value.length > 0) {
-            onChange(value.slice(0, -1));
-          }
-        }}
-        onBlur={() => {
-          if (inputValue) {
-            commit(inputValue);
-          }
-        }}
-        className="flex-1 min-w-[100px] bg-transparent text-xs outline-none placeholder:text-text-dim/40"
-      />
     </div>
   );
 }

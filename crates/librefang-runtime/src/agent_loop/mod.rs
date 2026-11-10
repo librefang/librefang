@@ -62,8 +62,9 @@ pub use self::types::{AgentLoopResult, ExperimentContext, LoopOptions, LoopPhase
 use self::end_turn::{
     build_silent_agent_loop_result, classify_end_turn_retry, finalize_end_turn_text,
     finalize_iteration_cap_text, finalize_successful_end_turn, gated_proactive_memory_for_memorize,
-    gated_proactive_memory_for_retrieve, maybe_fold_stale_tool_results, session_recall_scope,
-    EndTurnRetry, EndTurnRetryContext, FinalizeEndTurnContext, FinalizeEndTurnResultData,
+    gated_proactive_memory_for_retrieve, maybe_fold_stale_tool_results, remember_turn_exchange,
+    session_recall_scope, EndTurnRetry, EndTurnRetryContext, FinalizeEndTurnContext,
+    FinalizeEndTurnResultData,
 };
 use self::history::resolve_max_history;
 use self::message::{
@@ -1320,6 +1321,7 @@ async fn run_agent_loop_inner(
             driver.clone(),
             false,
             fold_echo_policy,
+            new_messages_start,
         )
         .await;
 
@@ -1462,6 +1464,13 @@ async fn run_agent_loop_inner(
             .as_ref()
             .map(|k| k.reasoning_echo_policy_for(&api_model))
             .unwrap_or_default();
+        // Catalog-driven reasoning policy (#8591). Undeclared keeps the legacy
+        // wire spellings; a declared set drives verbatim passthrough and
+        // nearest-rung coercion, and is what the drivers gate on.
+        let reasoning_policy = kernel
+            .as_ref()
+            .map(|k| k.reasoning_policy_for(&api_model))
+            .unwrap_or_default();
 
         // Catalog-driven vision-capability gate (#6010, refs #7957). Only a model the catalog
         // *declares* text-only gets its image content blocks redacted to a text placeholder before
@@ -1537,6 +1546,7 @@ async fn run_agent_loop_inner(
             // path enforces the cross-account guard too.
             sender_account_id: sender_account_id.clone(),
             reasoning_echo_policy,
+            reasoning_policy,
         };
         // The stripped-tools request has been built; restore tools for any
         // subsequent iteration (the degrade is a single forced prose turn).
@@ -2407,6 +2417,23 @@ async fn run_agent_loop_inner(
         if let Err(e) = memory.save_session_async(session).await {
             warn!("Failed to save session on max iterations: {e}");
         }
+        // A capped turn is still a turn that happened (#8625).
+        // It records the delivered text, cut-off notice included, so a later recall can tell this attempt from a finished answer instead of finding no trace of it at all.
+        remember_turn_exchange(
+            manifest,
+            session.agent_id,
+            memory,
+            embedding_driver,
+            user_message,
+            &text,
+            false,
+            sender_user_id.as_deref(),
+            sender_chat_scope.as_deref(),
+            session_scope.as_deref(),
+            Some(max_iterations),
+        )
+        .await;
+        // Deliberately not `auto_memorize` / `context_engine.after_turn` here: a cut-off answer is the least trustworthy text in the store to distil facts from, and whether a partial turn may advance context state is a separate lifecycle question rather than part of recording that the attempt happened.
     }
 
     // Fire AgentLoopEnd hook on max iterations reached — with delivery.

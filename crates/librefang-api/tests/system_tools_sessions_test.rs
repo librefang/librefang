@@ -510,6 +510,188 @@ async fn patch_session_model_clears_override_with_null() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn patch_session_reasoning_sets_open_token_and_reads_back() {
+    let h = boot().await;
+    let agent_id = AgentId(uuid::Uuid::new_v4());
+    let substrate = h.state.kernel.memory_substrate();
+    let session = substrate.create_session(agent_id).expect("seed session");
+    let sid = session.id.0.to_string();
+
+    // `xhigh` is the point of #8591: an open-vocabulary token that must be
+    // stored verbatim, not folded into the four legacy rungs.
+    let (status, body) = patch_json(
+        &h,
+        &format!("/api/sessions/{sid}/reasoning"),
+        serde_json::json!({"reasoning_effort": "xhigh"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "set override: {body:?}");
+    assert_eq!(body["status"].as_str(), Some("updated"), "{body:?}");
+    assert_eq!(body["reasoning_effort"].as_str(), Some("xhigh"), "{body:?}");
+
+    let stored = substrate
+        .get_session(session.id)
+        .expect("get_session ok")
+        .expect("session must exist");
+    assert_eq!(
+        stored.reasoning_effort.as_deref(),
+        Some("xhigh"),
+        "reasoning_effort not persisted: {stored:?}"
+    );
+
+    // The session JSON exposes the field next to `model_override`.
+    let req = Request::builder()
+        .method(Method::GET)
+        .uri(format!("/api/sessions/{sid}"))
+        .body(Body::empty())
+        .unwrap();
+    let resp = h.app.clone().oneshot(req).await.unwrap();
+    let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20)
+        .await
+        .unwrap();
+    let detail: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(
+        detail["reasoning_effort"].as_str(),
+        Some("xhigh"),
+        "session detail must expose reasoning_effort: {detail:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn patch_session_reasoning_clears_override_with_null() {
+    let h = boot().await;
+    let agent_id = AgentId(uuid::Uuid::new_v4());
+    let substrate = h.state.kernel.memory_substrate();
+    let session = substrate.create_session(agent_id).expect("seed session");
+    let sid = session.id.0.to_string();
+
+    substrate
+        .set_session_reasoning_effort(session.id, Some("minimal"))
+        .expect("pre-seed override");
+
+    let (status, body) = patch_json(
+        &h,
+        &format!("/api/sessions/{sid}/reasoning"),
+        serde_json::json!({"reasoning_effort": null}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "clear override: {body:?}");
+    assert!(
+        body["reasoning_effort"].is_null(),
+        "reasoning_effort must be null after clear: {body:?}"
+    );
+
+    let stored = substrate
+        .get_session(session.id)
+        .expect("get_session ok")
+        .expect("session must exist");
+    assert!(
+        stored.reasoning_effort.is_none(),
+        "stored override must be None after clear"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn patch_session_reasoning_rejects_malformed_or_missing_mode() {
+    let h = boot().await;
+    let agent_id = AgentId(uuid::Uuid::new_v4());
+    let session = h
+        .state
+        .kernel
+        .memory_substrate()
+        .create_session(agent_id)
+        .expect("seed session");
+    let sid = session.id.0.to_string();
+
+    // Empty / whitespace-bearing tokens cannot be provider rungs.
+    for body in [
+        serde_json::json!({"reasoning_effort": ""}),
+        serde_json::json!({"reasoning_effort": "high low"}),
+        serde_json::json!({"reasoning_effort": 42}),
+    ] {
+        let (status, resp) =
+            patch_json(&h, &format!("/api/sessions/{sid}/reasoning"), body.clone()).await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "expected 400 for {body:?}: {resp:?}"
+        );
+    }
+
+    // The key itself is required, same contract as /model.
+    let (status, resp) = patch_json(
+        &h,
+        &format!("/api/sessions/{sid}/reasoning"),
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{resp:?}");
+
+    // Unknown-but-well-formed tokens are accepted: the vocabulary is
+    // per-model catalog data, and `banana` is a provider-side typo.
+    let (status, resp) = patch_json(
+        &h,
+        &format!("/api/sessions/{sid}/reasoning"),
+        serde_json::json!({"reasoning_effort": "banana"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{resp:?}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn patch_session_reasoning_unknown_session_is_404() {
+    let h = boot().await;
+    let sid = uuid::Uuid::new_v4().to_string();
+    let (status, body) = patch_json(
+        &h,
+        &format!("/api/sessions/{sid}/reasoning"),
+        serde_json::json!({"reasoning_effort": "low"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body:?}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn patch_session_reasoning_accepts_deprecated_alias_key() {
+    let h = boot().await;
+    let agent_id = AgentId(uuid::Uuid::new_v4());
+    let substrate = h.state.kernel.memory_substrate();
+    let session = substrate.create_session(agent_id).expect("seed session");
+    let sid = session.id.0.to_string();
+
+    // The pre-#8591 key name must keep working, and the response uses the
+    // canonical one.
+    let (status, body) = patch_json(
+        &h,
+        &format!("/api/sessions/{sid}/reasoning"),
+        serde_json::json!({"reasoning_mode": "medium"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "alias set: {body:?}");
+    assert_eq!(
+        body["reasoning_effort"].as_str(),
+        Some("medium"),
+        "{body:?}"
+    );
+
+    let stored = substrate
+        .get_session(session.id)
+        .expect("get_session ok")
+        .expect("session must exist");
+    assert_eq!(stored.reasoning_effort.as_deref(), Some("medium"));
+
+    // Canonical wins when both keys are present.
+    let (status, body) = patch_json(
+        &h,
+        &format!("/api/sessions/{sid}/reasoning"),
+        serde_json::json!({"reasoning_mode": "low", "reasoning_effort": "xhigh"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body:?}");
+    assert_eq!(body["reasoning_effort"].as_str(), Some("xhigh"), "{body:?}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn patch_session_model_rejects_empty_override() {
     let h = boot().await;
     let agent_id = AgentId(uuid::Uuid::new_v4());
@@ -947,6 +1129,7 @@ async fn delete_session_cascades_to_children_and_reports_them() {
         context_window_tokens: 0,
         label: None,
         model_override: None,
+        reasoning_effort: None,
         messages_generation: 0,
         last_repaired_generation: None,
         peer_id: None,

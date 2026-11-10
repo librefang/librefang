@@ -55,6 +55,7 @@ ignore = [
     # ── Other unmaintained transitive crates ───────────────────────────────
     { id = "RUSTSEC-2023-0071", reason = "rsa Marvin attack; reviewed 2026-08-14, RustSec still lists patched = []. https://rustsec.org/advisories/RUSTSEC-2023-0071" },
     { id = "RUSTSEC-2024-0370", reason = "proc-macro-error unmaintained; transitive. https://rustsec.org/advisories/RUSTSEC-2024-0370" },
+    { id = "RUSTSEC-2024-0429", reason = "glib VariantStrIter unsoundness; the fix needs glib >=0.20 (GTK4) and the GTK3 Tauri stack pins 0.18. https://rustsec.org/advisories/RUSTSEC-2024-0429" },
     { id = "RUSTSEC-2025-0057", reason = "fxhash unmaintained; transitive. https://rustsec.org/advisories/RUSTSEC-2025-0057" },
     { id = "RUSTSEC-2025-0075", reason = "unic-* unmaintained (kuchikiki/selectors chain). https://rustsec.org/advisories/RUSTSEC-2025-0075" },
     { id = "RUSTSEC-2025-0080", reason = "unic-* unmaintained (kuchikiki/selectors chain). https://rustsec.org/advisories/RUSTSEC-2025-0080" },

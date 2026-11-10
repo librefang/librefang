@@ -1,0 +1,2 @@
+The Rust sidecar SDK (`librefang-sidecar`) now requires Rust 1.85 instead of 1.71, because tokio 1.54 raised its own minimum to 1.85 and staying on tokio 1.53 would forgo upstream fixes such as the 1.54.1 timer revert.
+The only in-tree consumer, `librefang-sidecar-telegram`, already requires 1.88, so it is unaffected; external adapters building with an older toolchain need to upgrade. (#8695) (@houko)

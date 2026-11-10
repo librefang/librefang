@@ -661,6 +661,58 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut TemplatesState) {
     );
 }
 
+/// The closed inventory of `template_versions.change_source` tokens the API can record (#8609).
+///
+/// Mirrors the server's writable set.
+/// `toml`, `create`, `dashboard`, `registry-restore` and `restore` are the `AgentTypeWrite` variants in `routes/agent_templates.rs`.
+/// `pre-registry-restore` is the record-only snapshot `restore_from_registry` takes of the local file just before the registry copy overwrites it.
+/// `agent-tool` is the snapshot the kernel records when the agent-facing `agent_type_create` tool authors a type (`kernel/handles/agent_control.rs`).
+/// `unknown` is the SQLite column default (`crates/librefang-memory/src/migration.rs`), which no producer writes but an older row can carry.
+/// Every token here has a `tui-templates-source-<token>` key in all four locale packs.
+const TEMPLATE_CHANGE_SOURCES: &[&str] = &[
+    "toml",
+    "create",
+    "dashboard",
+    "registry-restore",
+    "pre-registry-restore",
+    "restore",
+    "agent-tool",
+    "unknown",
+];
+
+/// Operator-facing label for a stored version's `change_source` (#8609).
+///
+/// The column is free text on the server, so the value is looked up against the closed vocabulary above rather than shown: a raw `pre-registry-restore` spliced into an otherwise translated row reads as neither language.
+/// A value outside [`TEMPLATE_CHANGE_SOURCES`] — a producer this list has not been taught, or a row from an older database — comes back verbatim, because provenance is worth more than a tidy blank.
+/// Membership is checked before the Fluent lookup so a dotted token can never resolve as a nested key.
+fn template_change_source_label(source: &str) -> String {
+    if TEMPLATE_CHANGE_SOURCES.contains(&source) {
+        crate::i18n::t(&format!("tui-templates-source-{source}"))
+    } else {
+        source.to_string()
+    }
+}
+
+/// Characters the change-source column of the history overlay has room for.
+///
+/// Sized to the widest label the shipped locales produce — 22 characters, English's `Restored from registry` — so a localized label reads in full instead of being cut.
+const TEMPLATE_SOURCE_COLUMN_CHARS: usize = 22;
+
+/// Truncate a rendered label to [`TEMPLATE_SOURCE_COLUMN_CHARS`], counting characters, with an ellipsis when it does not fit.
+///
+/// `widgets::truncate` counts bytes, which would cut a Cyrillic label at roughly half the visible text (each letter is two bytes) while an ASCII token of the same visible width passed through.
+/// Only unmapped tokens are long enough to reach this at all; the mapped labels fit by construction.
+fn truncate_template_source(label: &str) -> String {
+    if label.chars().count() <= TEMPLATE_SOURCE_COLUMN_CHARS {
+        return label.to_string();
+    }
+    let prefix: String = label
+        .chars()
+        .take(TEMPLATE_SOURCE_COLUMN_CHARS - 1)
+        .collect();
+    format!("{prefix}\u{2026}")
+}
+
 fn draw_version_history(f: &mut Frame, area: Rect, state: &mut TemplatesState) {
     let chunks = Layout::vertical([
         Constraint::Length(2),
@@ -724,7 +776,12 @@ fn draw_version_history(f: &mut Frame, area: Rect, state: &mut TemplatesState) {
                         theme::dim_style(),
                     ),
                     Span::styled(
-                        format!(" {}", row.change_source),
+                        format!(
+                            " {}",
+                            truncate_template_source(&template_change_source_label(
+                                &row.change_source
+                            ))
+                        ),
                         Style::default().fg(theme::BLUE),
                     ),
                 ]))
@@ -1432,5 +1489,129 @@ mod tests {
         state.history_name = "payroll".to_string();
         let action = state.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert!(matches!(action, TemplatesAction::Continue));
+    }
+
+    /// Every token the template store can write maps to its label — pinned exactly, so a key renamed in `locales/en/main.ftl` or a token added to the inventory without one fails here.
+    #[test]
+    fn template_change_source_labels_cover_the_store_vocabulary() {
+        let expected = [
+            ("toml", "Raw TOML edit"),
+            ("create", "Created"),
+            ("dashboard", "Dashboard edit"),
+            ("registry-restore", "Restored from registry"),
+            ("pre-registry-restore", "Pre-restore snapshot"),
+            ("restore", "Restored"),
+            ("agent-tool", "Agent tool"),
+            ("unknown", "Unknown source"),
+        ];
+        assert_eq!(
+            expected.len(),
+            TEMPLATE_CHANGE_SOURCES.len(),
+            "the pinned vocabulary and the inventory must not drift apart"
+        );
+        for (token, label) in expected {
+            assert_eq!(
+                template_change_source_label(token),
+                label,
+                "{token} must render its operator-facing label"
+            );
+        }
+    }
+
+    /// A producer the TUI has not been taught, or a row from an older database, still says where it came from — verbatim — and a dotted token is never resolved as a locale key.
+    #[test]
+    fn unmapped_template_change_sources_render_verbatim() {
+        assert_eq!(
+            template_change_source_label("some_future_source"),
+            "some_future_source"
+        );
+        assert_eq!(
+            template_change_source_label("tui-templates-history-col-source"),
+            "tui-templates-history-col-source"
+        );
+    }
+
+    /// The labels are Fluent messages, not hardcoded English: an operator who selected another language reads the history in that language.
+    #[test]
+    fn template_change_source_labels_are_localized() {
+        crate::i18n::init("uk");
+        assert_eq!(
+            template_change_source_label("registry-restore"),
+            "Відновлено з реєстру"
+        );
+        assert_eq!(
+            template_change_source_label("pre-registry-restore"),
+            "Знімок до відновлення"
+        );
+        assert_eq!(
+            template_change_source_label("agent-tool"),
+            "Інструмент агента"
+        );
+        assert_eq!(template_change_source_label("unknown"), "Невідоме джерело");
+    }
+
+    /// The longest known tokens now render as their labels in full; an unmapped token wider than the column is ellipsized rather than clipped mid-word by the pane edge, and the truncation cannot cut a Cyrillic label short by counting bytes.
+    #[test]
+    fn change_source_labels_fit_the_overlay_and_unknown_tokens_truncate() {
+        let mut state = TemplatesState::new();
+        state.showing_history = true;
+        state.history_name = "payroll".to_string();
+        let with_source = |source: &str| TemplateVersionRow {
+            id: "1".to_string(),
+            timestamp: "2026-09-07 10:00:00".to_string(),
+            change_source: source.to_string(),
+        };
+        state.version_history = vec![
+            with_source("pre-registry-restore"),
+            with_source("registry-restore"),
+            with_source("toml"),
+            with_source("agent-tool"),
+            with_source("some-future-source-token-that-does-not-fit"),
+        ];
+        state.history_list.select(Some(0));
+
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(140, 24)).unwrap();
+        terminal
+            .draw(|f| draw(f, f.area(), &mut state))
+            .expect("the history overlay must render");
+        let rendered: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+
+        assert!(
+            rendered.contains("Pre-restore snapshot"),
+            "the pre-restore snapshot label must render in full:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("Restored from registry"),
+            "the registry-restore label must render in full:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("Raw TOML edit"),
+            "the toml label must render in full:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("Agent tool"),
+            "the agent-tool label must render in full:\n{rendered}"
+        );
+        assert_eq!(
+            truncate_template_source("some-future-source-token-that-does-not-fit"),
+            "some-future-source-to\u{2026}",
+            "an unmapped token wider than the column must carry the ellipsis"
+        );
+        assert!(
+            rendered.contains("some-future-source-to\u{2026}"),
+            "the truncated token must render, not vanish:\n{rendered}"
+        );
+        assert_eq!(
+            truncate_template_source("Знімок до відновлення"),
+            "Знімок до відновлення",
+            "a Cyrillic label that fits the column must not be cut by byte counting"
+        );
     }
 }

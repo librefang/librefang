@@ -5,6 +5,7 @@
 //! and is not streamed. Extracted into its own file to keep `mod.rs` under
 //! the #3710 2,000 LOC cap.
 
+use super::end_turn::remember_turn_exchange;
 use super::retry::stream_with_retry;
 use super::*;
 
@@ -683,6 +684,7 @@ async fn run_agent_loop_streaming_inner(
             driver.clone(),
             true,
             fold_echo_policy,
+            new_messages_start,
         )
         .await;
 
@@ -832,6 +834,12 @@ async fn run_agent_loop_streaming_inner(
             .as_ref()
             .map(|k| k.reasoning_echo_policy_for(&api_model))
             .unwrap_or_default();
+        // Catalog-driven reasoning policy (#8591) — same as the
+        // non-streaming path above.
+        let reasoning_policy = kernel
+            .as_ref()
+            .map(|k| k.reasoning_policy_for(&api_model))
+            .unwrap_or_default();
 
         // Mirror the non-streaming vision gate (#6010, refs #7957): only a model the catalog
         // *declares* text-only gets its image blocks redacted before the request is built.
@@ -899,6 +907,7 @@ async fn run_agent_loop_streaming_inner(
             // path enforces the cross-account guard too.
             sender_account_id: sender_account_id.clone(),
             reasoning_echo_policy,
+            reasoning_policy,
         };
         // The stripped-tools request has been built; restore tools for any
         // subsequent iteration (the degrade is a single forced prose turn).
@@ -1916,6 +1925,25 @@ async fn run_agent_loop_streaming_inner(
 
     // Unblock consumers still waiting for the response-complete phase.
     signal_response_complete(&stream_tx).await;
+
+    // After the terminal event, not before: `signal_response_complete` exists so the consumer unblocks before this path does any post-processing, and this write can reach an embedding endpoint.
+    // Streaming twin of the non-streaming cap-exit write (#8625); see `run_agent_loop` for why the extraction half is skipped.
+    if !opts.is_fork && !opts.incognito {
+        remember_turn_exchange(
+            manifest,
+            session.agent_id,
+            memory,
+            embedding_driver,
+            user_message,
+            &text,
+            true,
+            sender_user_id.as_deref(),
+            sender_chat_scope.as_deref(),
+            session_scope.as_deref(),
+            Some(max_iterations),
+        )
+        .await;
+    }
 
     Ok(AgentLoopResult {
         response: text,

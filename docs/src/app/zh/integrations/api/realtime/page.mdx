@@ -38,7 +38,7 @@ GET /api/agents/&lbrace;id&rbrace;/ws
 | `/model <name>` | 切换 Agent 的模型 |
 | `/stop` | 取消当前 LLM 运行 |
 | `/usage` | 显示 Token 用量和费用 |
-| `/think` | 切换扩展思考模式 |
+| `/think <level\|on\|off>` | 把当前 session 的推理强度固定到指定档位；裸 `/think` 或 `on` 清除固定；`off` 固定为 `none` |
 | `/models` | 列出可用模型 |
 | `/providers` | 列出 LLM 提供商及认证状态 |
 

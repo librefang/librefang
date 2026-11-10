@@ -96,7 +96,7 @@ impl ConsolidationEngine {
     /// Run a consolidation cycle: decay old memories.
     pub fn consolidate(&self) -> LibreFangResult<ConsolidationReport> {
         let start = std::time::Instant::now();
-        let conn = self.pool.get().map_err(LibreFangError::memory)?;
+        let mut conn = self.pool.get().map_err(LibreFangError::memory)?;
 
         // Decay confidence of memories not accessed in the last 7 days
         let cutoff = (Utc::now() - chrono::Duration::days(7)).to_rfc3339();
@@ -162,8 +162,9 @@ impl ConsolidationEngine {
         // `?` propagation below. Consolidate is idempotent and the next
         // run will pick up where this one left off, which makes
         // all-or-nothing safe here.
+        // BEGIN IMMEDIATE because each agent's candidate SELECT runs before its merge writes: a deferred transaction starts as a reader and fails the upgrade with SQLITE_BUSY whenever another connection holds the write lock, and the busy timeout does not retry that upgrade.
         let outer_tx = conn
-            .unchecked_transaction()
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(LibreFangError::memory)?;
 
         'agents: for agent_id in &agent_ids {

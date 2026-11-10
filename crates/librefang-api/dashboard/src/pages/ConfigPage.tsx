@@ -31,6 +31,7 @@ import { TomlViewer } from "../components/TomlViewer";
 import { AuxiliaryLlmSection } from "../components/AuxiliaryLlmSection";
 import { StringMapEditor } from "../components/config/StringMapEditor";
 import { StructListEditor } from "../components/config/StructListEditor";
+import { ListField } from "../components/ui/ListField";
 
 export function configValuesEqual(a: unknown, b: unknown): boolean {
   if (a === b) return true;
@@ -599,11 +600,10 @@ function ConfigFieldInput({
   }
 
   if (fieldType === "string[]" || fieldType === "array") {
-    const arr = Array.isArray(value) ? value : [];
+    const arr = Array.isArray(value) ? value.map(String) : [];
     return (
-      <input id={inputId} type="text" value={arr.join(", ")}
-        onChange={(e) => onChange(e.target.value.split(",").map((s) => s.trim()).filter(Boolean))}
-        placeholder={t("config.comma_separated_values", "comma-separated values")} className={inputClass} />
+      <ListField id={inputId} value={arr} onChange={onChange}
+        placeholder={t("config.comma_separated_values", "comma-separated values")} />
     );
   }
 
