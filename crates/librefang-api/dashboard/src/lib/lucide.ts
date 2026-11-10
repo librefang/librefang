@@ -109,6 +109,7 @@ export { default as Paperclip } from "lucide-react/dist/esm/icons/paperclip.mjs"
 export { default as Pause } from "lucide-react/dist/esm/icons/pause.mjs";
 export { default as Pencil } from "lucide-react/dist/esm/icons/pencil.mjs";
 export { default as Phone } from "lucide-react/dist/esm/icons/phone.mjs";
+export { default as Pin } from "lucide-react/dist/esm/icons/pin.mjs";
 export { default as Play } from "lucide-react/dist/esm/icons/play.mjs";
 export { default as Plug } from "lucide-react/dist/esm/icons/plug.mjs";
 export { default as Plus } from "lucide-react/dist/esm/icons/plus.mjs";
