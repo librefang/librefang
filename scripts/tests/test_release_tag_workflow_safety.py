@@ -922,7 +922,7 @@ def check_repository_automation() -> None:
     expected_contributor_actions = {
         "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
         "dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8",
-        "Swatinem/rust-cache@a45951ff880207c249adf57334cf2e9bd81d6e1e",
+        "Swatinem/rust-cache@c8037a86dde8214a8310e9f54a8fc61ab362aa31",
         "peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1",
     }
     actual_contributor_actions = {
