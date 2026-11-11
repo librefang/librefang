@@ -7,6 +7,210 @@ and this project uses [Calendar Versioning](https://calver.org/) (YYYY.M.DD).
 
 ## [Unreleased]
 
+## [2026.11.11] - 2026-11-11
+
+_87 PRs from 5 contributors since v2026.10.16._
+
+### Highlights
+
+- **Reasoning-effort controls** — set thinking depth per chat message or agent via `/think` levels, with session pinning and TUI support.
+- **Improved session memory** — trimmed messages from other sessions fold into their own summaries, and capped turns now record their exchange in memory so context is better preserved across compaction.
+- **Accurate memory recall** — auto-retrieval now respects similarity thresholds, and misses surface a self-describing hint to help agents understand why results came back empty.
+- **DeepSeek V4 and MCP OAuth reliability** — reasoning content echoes correctly on historical turns, DSML markup is handled gracefully, and OAuth discovery now follows RFC 9728 with or without a `WWW-Authenticate` header.
+- **Compaction and history correctness** — several fixes ensure compressed sessions stay clean: injections from merged turns are excluded, compaction summaries are session-scoped, and the new-messages boundary tracks correctly through rewrites.
+
+### Added
+
+- The chat composer gains a reasoning-effort control beside Deep Thinking: it lists the levels the active model allows — the backend's prepared `offered_efforts` when the daemon serves it (#8616), otherwise its catalog `supported_efforts` mirrored the way the backend offers it (graded rungs, with `none` prepended only when `off_allowed` is not false and `mandatory` is not true; the canonical `none`/`minimal`/`low`/`medium`/`high`/`xhigh`/`max` only when an older daemon declares nothing) — and a level outside the offered set is shown as current state but never offered, since the session route validates the token rather than coercing it to a declared level.
+  A session pinned to another model through `model_override` lists that model's levels, not the agent's.
+  It splits the two things operators kept asking for in one place: clicking a level arms it for the next message only, sent as `reasoning_effort` on the WS turn (and as `reasoning_mode` on the HTTP fallback, the key current main's `MessageRequest` accepts and #8616 keeps as a deprecated alias) and consumed after it, while a pin on the row fixes the level to the session through `PATCH /api/sessions/{id}/reasoning` (`{"reasoning_effort": …}`), with a pinned banner and an un-pin action and the session's stored value read back on load.
+  The pin updates the cached session scalar in place instead of refetching the transcript, and its error is scoped to the session that failed.
+  The agent editor's Thinking section gains the same selector for `[thinking] reasoning_effort` — the level every automated turn runs with — with an inherit option so the key stays absent (the model's `default_effort` applies), a one-click clear, and the chosen model's level list when the catalog has one.
+  A manifest still carrying the deprecated `reasoning_mode` spelling loads into the same field and is written back with that same key, so a daemon that predates the rename keeps reading it.
+  Level names stay the technical wire spellings (None, Minimal, Low, Medium, High, xHigh, Max) in every language, because the level a model documents is the string the API takes (#8617) (@DaBlitzStein)
+- `/think` now accepts the same effort vocabulary the backend speaks — `none` / `minimal` / `low` / `medium` / `high` / `xhigh` / `max` — and pins it on the conversation's session, the very session `/new` resets; `on` (and the bare `/think`) clears the pin back to the agent/global default, and `off` pins the explicit non-think `none`, so the pre-existing on/off words keep working under the new stored semantics.
+  The pin is written through the #8591 session setter (`sessions.reasoning_effort`), and a chat that has not had its first turn yet gets its row materialized first — otherwise the lazy session-creation path would store `None` and the pin would silently vanish.
+  The TUI chat runner (`librefang chat`) gains the same `/think <level|on|off>` command through the shared argument parser, an unknown argument is answered with the usage line instead of being folded onto a level, and the Telegram command menu plus both `/help` texts pick up the new hint from the command registry (#8618) (@DaBlitzStein)
+- Reasoning effort is now an open, per-model vocabulary instead of a four-value enum: `[thinking] reasoning_effort` — with `reasoning_mode` kept as a deprecated alias on TOML, REST bodies, the WebSocket frame, and the session route — accepts `none` / `minimal` / `low` / `medium` / `high` / `xhigh` / `max` and any token a model declares, and drivers put the chosen token on the wire verbatim. `provider-default` is the absence of a value, not a level, so an unset effort still sends nothing.
+  Each catalog entry now declares a policy — `supported_efforts`, `default_effort`, `off_allowed`, `mandatory` — settable field by field from `model_overrides.json` and the custom-model route; a request outside the set is coerced to the nearest supported rung with a warning (ties resolve downward, `xhigh` → `high`) and `none` on a model that forbids off becomes the lowest graded rung. Undeclared entries keep the pre-#8591 wire spellings, and budget-based families (Ollama, older Anthropic, Gemini 2.5, Qwen's budget control) keep `budget_tokens` as their control — the enum and a budget never ride the same request.
+  A session can pin its effort with `PATCH /api/sessions/{id}/reasoning` (`null` clears it, stored in the nullable `sessions.reasoning_effort` column added by schema v65, exposed in the session JSON and the model views), and the WebSocket chat frame accepts `reasoning_effort` per message, so the resolution order is now message > session > agent > global > compiled default.
+  (#8616) (@DaBlitzStein)
+
+### Fixed
+
+- A malformed `localStorage` record could crash the Chat page, and the open-tab strip could silently lose its selected tab: the persisted UI state is now sanitized on every rehydrate, and the active session is exempt from tab pruning. (#8598, #8326) (@DaBlitzStein)
+- Renaming, creating or importing a user now clears any stale avatar files under the new name's stem (a leftover `.png` could shadow the moved `.webp`), moving a name onto itself keeps the picture, and deleting an avatar reports a genuine unlink failure instead of pretending it removed nothing. (#8602, #8386) (@DaBlitzStein)
+- Fix defects found in a second workspace audit.
+  Suspending and resuming an agent no longer rewrites every nested `enabled` flag in `agent.toml` (which turned the skill workshop and disabled triggers back on), a freshly spawned agent now runs on the session that received its `reset_prompt`, and a config reload no longer drops DB-backed MCP servers or forgets to connect newly added ones.
+  Turns stopped with `/stop` are billed for the tokens they used, Gemini tool calls with a `STOP` finish reason are executed, and a transient HTTP 500 from an OpenAI-compatible provider no longer strips the tools from every later request.
+  `librefang mcp` speaks newline-delimited JSON as MCP stdio clients expect, ACP file and terminal tools send the session id editors require and `session/cancel` stops the agent loop, and the TUI lists for workflows, triggers, sessions, peers, audit and usage render again (#8588) (@houko)
+- Fix defects found in a third cross-cutting workspace audit covering security, concurrency, API contracts, performance, configuration hot-reload, the dashboard and persistence.
+  Notable ones: an agent with `file_write` can no longer rewrite its own `agent.toml`, Admin can no longer reach command execution or arbitrary environment variables through the extension and registry provider routes, `GET /api/config` no longer returns MCP, sidecar, provider base / proxy, vector store or A2A agent credentials, and streaming turns now apply agent routing, `pinned_model` and `[model_router]` plus the per-agent cost quota, with a session `/model` pick winning over that selection on every entry point.
+  `[network] max_peers` is enforced on inbound OFP connections, `[a2a] listen_path` is honoured, renaming an agent moves its conversation bindings, and the generated SDKs percent-encode path parameters and send booleans as `true` / `false`. (#8591) (@houko)
+- Chat tab pruning now checks that the agent list can prove absence before dropping a tab: it is skipped when the caller is not an admin/owner (their list is owner-scoped) or when the list page is truncated, and a tab opened after the cached list was fetched survives until a newer list omits it. (#8599, #8596) (@DaBlitzStein)
+- The dashboard's remaining tab strips now carry the tab semantics their `role="tablist"` promised: a roving tabindex with Arrow/Home/End keys (automatic activation), `aria-controls` links to the panel each strip switches and `aria-labelledby` back to the selected tab, the terminal strip's new-tab button moved outside the tablist, and its close control kept out of the tab order at a 24 px hit target. A shared `useRovingTabs` hook backs every strip so the keyboard model cannot drift between dialogs, pages and the terminal.
+  (#8608, #8597) (@DaBlitzStein)
+- Manifest history rows and the restore confirmation now render the store's `change_source` as a label — `model` as Model change, `suspend` as Suspended, and the other fourteen tokens the store can write — instead of the raw word the kernel records. (#8603, #8601) (@DaBlitzStein)
+- The TUI's configuration-history pane now shows a readable label for what produced each stored version (`Model change`, `Suspended`, `Suspend write failed`, and the rest of the manifest store's closed 16-token vocabulary) where it printed the raw `change_source` token truncated to 18 cells.
+  `change_source` is free text on the server, and this pane was the last surface rendering it as-is: the same event read `suspend-persist-failed` in the TUI and "Suspend write failed" in the dashboard, and no locale could translate a wire tag spliced into the row.
+  The labels live in the four shipped Fluent packs, the cell budget now fits them (truncation counts characters rather than bytes, so Cyrillic and Korean labels are not cut in half), and a token outside the inventory still renders verbatim rather than blank, because provenance matters more than a tidy row (#8607, #8604) (@DaBlitzStein)
+- The TUI's template version-history overlay now shows a readable label for what produced each stored version (`Raw TOML edit`, `Created`, `Dashboard edit`, `Restored from registry`, `Pre-restore snapshot`, `Restored`, `Agent tool`, `Unknown source`) where it printed the raw `change_source` token.
+  The token is free text on the server, so a value the inventory does not know would otherwise reach the operator as a wire tag.
+  The labels live in the four shipped Fluent packs, the history column truncates by characters rather than bytes, and a token outside the inventory still renders verbatim rather than blank (#8621, #8609) (@DaBlitzStein)
+- A flaky pair of `librefang-api` unit tests could interleave their use of the process-global identity-file locks into a cycle and fail the crate's run with 10s timeouts.
+  `identity_md_write_waits_for_the_front_matter_lock` holds the kernel's front-matter lock while waiting for a helper that needs the mutation lock, and the sibling delete test's helper takes the mutation lock before waiting for the front-matter lock, so in parallel the two could chain front-matter → mutation → front-matter.
+  Both now take a shared test-only serialization lock, so they can no longer overlap; the production lock order and what each test covers are unchanged. (#8620) (@DaBlitzStein)
+- A turn that ends at the iteration cap now records its exchange in episodic memory, instead of delivering the partial answer, saving the session and leaving no trace that the attempt happened.
+  `memory_recall` making its miss self-describing (#8628) only closed half of the reported loop: the capped turn those invented keys belonged to left nothing behind, so the next turn could not learn "we tried this and ran out of budget" and re-derived the same dead end.
+  The cap exit now writes the same `[Past exchange]` row the successful path writes, through one shared helper, so the `capabilities.memory_write` gate, the envelope sanitising, the `max_episodic_chars` budget and the chat/session scope stamps apply identically on both paths.
+  The row holds the delivered text, and a capped turn's row also carries an `[Unfinished — this turn reached the iteration limit (N) before finishing.]` line in its header, outside the two halves the size budget cuts, so a long cut-off answer stays distinguishable from a long finished one instead of losing that distinction to the very truncation that made the question worth asking (#8688) (@nevgenov)
+- `memory_recall` now answers a miss with the keys that do exist in the caller's own scope, instead of only `No value found for key '<key>'.`
+  The store is the only party that knows the key space and the miss returned none of it, so an agent convinced its key should exist varied the name — `…-docx-v32` through `-v41` — until the iteration cap ended the turn with a generic error; the loop guard could not see it because enumerating invented keys produces fresh params by construction.
+  The nearby names come from a range scan on the key column (`key >= prefix AND key < prefix + U+10FFFF`) rather than `LIKE`, which would lose the index on a BINARY-collated primary key, and they are probed in the same agent + peer namespace `memory_recall` reads, so a hint can neither cross agents nor cross peers.
+  The miss text mirrors `memory_semantic_search`, which already named its store and its escape hatches (#8628) (@nevgenov)
+- Emit the `[File: …] saved to …` attachment marker ahead of the inlined enrichment body on the channel download path.
+  An agent keys on that marker to find the raw file on disk, but it was pushed after an inlined body that can reach 200,000 characters, so for a text-like attachment the marker landed at the tail of the message and the agent worked from the truncated inline copy instead of the saved file.
+  Nothing depended on the old order: `has_file_saved_block`, the marker's only consumer, matches the prefix on any block (#8627) (@nevgenov)
+- `media_describe` advertised an optional `prompt` in its schema but never read it, so every call sent the same hardcoded English instruction and a caller asking for another language or a specific question got a generic description with no hint that its field was dropped. The prompt now travels from the tool through `MediaEngine::describe_image` to all three provider helpers; an absent or blank prompt keeps the previous default instruction. (#8637) (@DaBlitzStein)
+- Compaction summaries are now kept per session as well as per agent.
+  A conversation keeps reading its own summary after another conversation on the same agent compacts — before, the agent-scoped `canonical_sessions` row held a single summary, so only the session that compacted last could read one and every other session lost its compressed history to the next compaction.
+  The per-session copy lives in its own reserved key namespace, separate from the `session_` summaries the reset path writes, so a reset summary cannot be served to the next conversation as if it were a compaction summary.
+  It is written by both compaction paths — the LLM one and the threshold-driven canonical one that normal turns take — and a reset, a clear or a delete removes it together with any canonical summary the removed conversation owned, while the `session_` keys agents already use are left untouched (#8646) (@nevgenov)
+- DeepSeek can answer with its native tool-call markup written as text when the runtime has stripped the tool channel for a turn. The reply guard did not recognise that syntax, so the markup was delivered to the channel and persisted in the transcript. The guard now recognises the single-bar, double-bar and ASCII DSML spellings and replaces a reply that consists of one with the honest "the call could not be parsed" sentence; the streaming withholding buffer treats a partial opener the same way, so the markup never reaches the user in pieces. (#8652) (@DaBlitzStein)
+- `history_fold` counted every assistant message as a turn, so inside one long agent turn it began compacting the turn's own earlier tool results. The model lost the payload it was still working from, re-read the same records, and repeated until the iteration cap — a single turn spent 50 iterations re-fetching the same pages. The fold now stops at the start of the running turn (the boundary the loop already tracks), so only history from earlier turns is eligible. When the summariser is unavailable the fold also keeps a preview of each original result instead of a content-free stub, so the model still has something to act on. (#8653) (@DaBlitzStein)
+- An agent or fallback slot whose manifest uses the `provider = "default"` sentinel no longer sends a stale manifest `api_key_env` (or `base_url`) pin to the resolved default provider: provider, model, credential and endpoint all come from the effective default, so hot-swapping the instance default can no longer 401 every turn of an agent that kept a pin from the previous vendor. (#8656) (@DaBlitzStein)
+- A Telegram sidecar could stay alive but stop receiving messages after a transient error.
+  The poll round-trip had no overall deadline: `urllib`'s timeout bounds one socket operation, not the whole response, so a 502 whose body never terminated could park the worker thread forever, with no log line and no process exit for the supervisor to notice.
+  `produce()` now wraps the poll in a 50 s deadline, distinguishes a normal long-poll timeout from a wedged thread, and escalates three consecutive wedges to a producer crash that exits the process with status 1 so the supervisor restarts the sidecar.
+  Each poll publishes its batch only if it is still the current one, so a poll abandoned at its deadline can no longer double-emit or move the offset backwards.
+  Repeated timeouts and long gaps without a successful poll are logged at WARN, rate-limited. (#8662) (@DaBlitzStein)
+- The dependency audit counted an ignored-only pnpm report as a vulnerability when pnpm wrote its human `Error: …` line ahead of the JSON report on exit 1. The audit now extracts the JSON object from the output and still fails on any non-empty advisory map; a real advisory cannot be turned into a pass. (#8665) (@DaBlitzStein)
+- Remote MCP servers that follow the MCP authorization spec could not be connected: the `resource_metadata` document was parsed as authorization-server metadata, so it failed (it only names issuers), its `authorization_servers` were never followed, and the fallback only tried the origin-root well-known URL — a server behind a path prefix answers that with its web app.
+  Discovery now follows `authorization_servers` and tries the RFC 8414 path-inserted URL first, then the in-path and OIDC variants; a `registration_endpoint` found along the way is kept, so dynamic client registration still runs and the dashboard can show Authorize. (#8670) (@DaBlitzStein)
+- `/new`, deleting a session from the dashboard, the memory decay sweep and consolidation could fail with "database is locked" whenever any other write was in flight, instead of waiting their turn.
+  Each of them read before its first write inside a deferred SQLite transaction, and SQLite refuses that read-to-write upgrade immediately rather than honouring the busy timeout; they now take the write lock up front with `BEGIN IMMEDIATE`. (#8727) (@houko)
+- The dashboard Authorize button still failed with "OAuth discovery failed" for MCP servers whose authorization server sits under a path prefix, such as the self-hosted Plane gateway from #8670.
+  The `auth/start` route has no 401 to read a `WWW-Authenticate` header from, so the RFC 9728 `authorization_servers` follow only ever ran at connect time.
+  Discovery without a header now probes the server's protected-resource metadata at its well-known locations and follows the issuers it names, keeping the SSRF, no-redirect and same-domain checks, and issuers must now be https as RFC 8414 requires (#8728) (@houko)
+- Channel, cron, trigger and `agent_send` turns now send the reasoning effort the routed model accepts, instead of one already clamped to the agent's pre-routing model.
+  The blocking dispatch path coerced the effort against the manifest's model before Stable pinning, profile routing or tier routing ran, so a routed model with a wider declared set received a downgraded token (for example `xhigh` became `medium`) that nothing downstream could restore.
+  Coercion now runs after model selection and the session `/model` override, matching the streaming path (#8729) (@houko)
+- Close the gaps left by the per-session compaction summary mirror from #8646.
+  Switching an agent's model, or restoring a manifest that changes it, cleared only the agent's canonical session, so the prompt fell back to the per-session mirror and the old model's summary came straight back; the wipe now removes the mirrors in the same transaction.
+  A conversation that compacted again after another one had taken the agent's single canonical summary slot restarted its summary from nothing and lost everything compacted before, which only postponed #8645 by one round; it now builds on its own earlier summary.
+  The mirror is no longer rewritten on every turn when nothing changed, and the REST key/value list, export, import and single-key write no longer expose or accept the reserved `compaction_summary_` keys, so an import cannot plant a summary that a later turn trusts as its own history (#8730) (@houko)
+- The history fold now finds the running turn in the message list it actually folds, so a turn's own tool results stay out of reach even when the session holds System messages.
+  The #8653 fix bounded the fold with an index into the stored session, but the fold walks the LLM working copy, which leaves out System messages, gains injected context at its head, and is rewritten by repair and compression.
+  In a session with System messages that index landed past the turn's real start, so the turn's first tool results were still folded and the agent went back to re-fetching them.
+  The boundary is now the turn's first new tool call, found by tool id, which stays correct through each of those rewrites (#8731) (@houko)
+- Proactive memory and the canonical cross-channel session no longer miss part of a turn that hit its iteration cap.
+  The repair that runs before a capped turn is saved can drop an orphaned tool result and merge the neighbours it leaves adjacent, which shortens the session, but the index marking where the turn began kept its pre-repair value, so end-of-turn recording started two messages late and lost the turn's prompt.
+  Both loops now move the index to where the turn sits in the repaired history, with the same turn-boundary lookup inline compression already uses, and that lookup now also recognises a prompt that repair merged into an adjacent user message instead of skipping past it (#8734) (@houko)
+- Inline context compression no longer saves per-request injections (the current-time message, recalled memory, canonical cross-channel context, web search results) into the session when session repair had merged them into the prompt or an adjacent user message; before, that text was replayed on every later turn.
+  The merged text is cut out of the persisted copy and the affected messages are restored as the session stored them, while the compression summary and hard-trim result are kept exactly as before. (#8737) (@houko)
+- Echo `reasoning_content` from every historical assistant turn with a Thinking block on DeepSeek V4 thinking models, not just the turns carrying `tool_calls`.
+  DeepSeek's current contract requires the full echo whenever the request carries `tools` — "even for turns where the model did not perform a tool call" — and answers 400 "The reasoning_content in the thinking mode must be passed back to the API." when any previous turn's reasoning is missing.
+  A session therefore worked through its first tool loop and broke from the second user turn on, once a text-only final-answer turn was part of the replayed history (#8639) (@DaBlitzStein)
+- The upload 429 test no longer depends on `tokio::join!` reaching its third arm while the first two are parked, a premise the scheduler is free to break: every `tokio::fs` await resolves on the blocking pool, and its result can already be there on the future's first poll, letting a request run to completion and return its concurrency permit before the third is polled.
+  The first two uploads now park in the `Bytes` extractor on a body the test releases only after the third request has been refused, so `max_concurrent_uploads` is exercised through the semaphore rather than through the scheduler (#8611) (@DaBlitzStein)
+
+### Changed
+
+- `apply_patch` now refuses a hunk whose context and removed lines match more than one place in the file instead of silently editing the first occurrence; name the enclosing line in an `@@ <line>` scope header (or add context lines) to pick the one meant.
+  Inside a hunk, an indented ` @@ ...` or ` ***` line is now read as a context line whose content starts with those characters rather than as a new hunk header or section marker, so a patch that relied on indenting its `@@` headers has to start them at column zero (#8588) (@houko)
+- Dashboard forms now edit short string lists as removable chips: pasting a comma-, semicolon- or newline-separated list creates one chip per value and duplicates are dropped.
+  Fields whose values may contain commas — trigger conditions, group trigger regexes and sidecar arguments — keep them intact. (#8657) (@DaBlitzStein)
+- The Rust sidecar SDK (`librefang-sidecar`) now requires Rust 1.85 instead of 1.71, because tokio 1.54 raised its own minimum to 1.85 and staying on tokio 1.53 would forgo upstream fixes such as the 1.54.1 timer revert.
+  The only in-tree consumer, `librefang-sidecar-telegram`, already requires 1.88, so it is unaffected; external adapters building with an older toolchain need to upgrade. (#8695) (@houko)
+- A session no longer loses compacted history because a different session on the same agent compacted.
+  The threshold compaction trims the oldest messages out of the agent's shared canonical window, and until now only the compacting session's own messages reached a summary while every other session's trimmed messages were dropped.
+  Each other session's trimmed messages are now folded into that session's own compaction summary in the same transaction, without changing which session owns the canonical summary or letting any session's content into another's. (#8736) (@houko)
+
+### Security
+
+- Close isolation gaps found in a second workspace audit.
+  `/api/sessions`, `/api/sessions/{id}` and session search are now owner-scoped, so a non-admin role can no longer read every user's transcripts, and `web_fetch` no longer serves one agent's authenticated response from cache to another.
+  A cron `LocalFile` delivery target resolves inside the agent workspace instead of the daemon's working directory, persistent hook processes run under the same plugin sandbox as one-shot hooks, sidecar and subprocess-transport children no longer inherit `LIBREFANG_VAULT_KEY`, and combined shell flags such as `bash -lc` can no longer slip past the exec allowlist.
+  A scalar value in a manifest allowlist no longer reads as "unrestricted", and the channel model-picker button now applies the same RBAC and command-policy check as the `/model` command (#8588) (@houko)
+- Bump `lru` 0.18.0 → 0.18.2 (RUSTSEC-2026-0253: unsound, potential use-after-free on the `LruCache::pop()` eviction path; `lru` reaches the binary through `ratatui-core` → `librefang-cli`). (#8610) (@DaBlitzStein)
+- Clear the advisory batch published between 19 and 23 October 2026: `webpki-roots` 1.0.10 (RUSTSEC-2026-0381, bundled emSign roots), `webpki-root-certs` 1.0.10 (RUSTSEC-2026-0383, the same roots through the separate crate), `rustls-webpki` 0.103.16 (RUSTSEC-2026-0382, distrusted intermediates), `ctutils` 0.4.5 (RUSTSEC-2026-0385, non-constant-time mask generation), `tokio` 1.53.3 (RUSTSEC-2026-0386, `AsyncFd` I/O safety) and `crypto-bigint` 0.7.10 (RUSTSEC-2026-0387, timing variability; 0.7.6 was yanked after publication).
+  The dashboard pins `dompurify` 3.4.17, which closes GHSA-cg2g-xh64-v4q7, GHSA-mrv2-3pqr-j5jr and GHSA-c6gr-qvv4-5v3f. (#8665) (@DaBlitzStein)
+- Upgrade `wasmtime` from 48.0.6 to 48.0.7, clearing RUSTSEC-2026-0379 (critical: Cranelift on aarch64 can jump to an incorrect target on a large Wasm `br_table`) and RUSTSEC-2026-0378 (medium: panic lowering a host-created component-model stream into a guest that expects a different payload type). The bump moves the cranelift family to 0.135.7; no source changes were required. (#8665) (@DaBlitzStein)
+  Four zstd advisories published on 16 October 2026 (RUSTSEC-2026-0391, -0398, -0403, -0410) are now ignored explicitly: zstd reaches the build only through `wasmtime-internal-cache`, which is inert unless a `wasmtime::Cache` is configured, and Librefang never builds one. wasmtime 48 through 50 all require zstd `^0.13`, while the fixes need `>=0.14.3`, so no compatible upgrade exists yet; the ignore is recorded in `deny.toml` with that reasoning and must be revisited when wasmtime raises its floor. (#8665) (@DaBlitzStein)
+- Clear the RustSec batch published between 20 October and 5 November 2026 by upgrading rather than ignoring: `wasmtime` 48.0.8 (RUSTSEC-2026-0422/0423/0424, kept on the 48 line because 49 needs a newer rustc than the workspace MSRV), `rmcp` 3.9 (RUSTSEC-2026-0457 OAuth SSRF filter, RUSTSEC-2026-0461 unbounded tool schema cache, RUSTSEC-2026-0462 unbounded response buffering), and `rusqlite` 0.41 with `r2d2_sqlite` 0.36, which brings `libsqlite3-sys` 0.39 and a bundled SQLite with CVE-2026-119375 fixed (RUSTSEC-2026-0459).
+  `tauri-plugin-updater` 2.14.1 moves the desktop updater from `zip` 4.6.1 to `zip` 9, which clears RUSTSEC-2026-0429 and lets the three older `zip` 4 ignores and its yank exception be dropped; the yanked `async-executor` 1.14.0 is updated to 1.14.1.
+  The dashboard moves `seroval` from 1.6.7 to 1.7.10, closing GHSA-f86p-h4j2-7qgj, GHSA-9wx9-5pv9-3349, GHSA-97r2-qh9m-474h, GHSA-wp97-x4hv-qvhp and GHSA-7rv5-mrxv-xcr9. (#8722) (@houko)
+
+### Fixed
+
+- Enforce the agent-type write funnel and version the tool-authored path (#8600) (@DaBlitzStein)
+- Respect Dev.to write limits and retry HTTP 429 (#8632) (@houko)
+- Repair release bundling and ARM64 link memory (#8633) (@houko)
+- Publish CLI packages after release assets are public (#8636) (@houko)
+- Gate the unix-only output_with_deadline test import (#8678) (@houko)
+- Treat DeepSeek DSML markup as an unparseable tool call (#8680) (@DaBlitzStein)
+- Never fold the running turn's tool results (#8681) (@DaBlitzStein)
+- Send media_describe's prompt to the vision provider (#8683) (@DaBlitzStein)
+- Follow RFC 9728 authorization servers during OAuth discovery (#8684) (@DaBlitzStein)
+- Honour min_similarity in auto_retrieve (#8712) (@nevgenov)
+
+<details>
+<summary>Documentation, maintenance, and other internal changes</summary>
+
+### Documentation
+
+- Align the save-as-agent-type narration with what shipped (#8595) (@DaBlitzStein)
+
+### Maintenance
+
+- Update model snapshot (#8593) (@houko)
+- Bump the sidecar-cargo-minor-patch group across 2 directories with 2 updates (#8612) (@app/dependabot)
+- Bump agent-client-protocol from 2.2.0 to 3.3.0 (#8614) (@app/dependabot)
+- Bump the actions-minor-patch group with 7 updates (#8619) (@app/dependabot)
+- Bump the dashboard-minor-patch group in /crates/librefang-api/dashboard with 12 updates (#8623) (@app/dependabot)
+- Replace to-be deprecated `fetch_update` with `try_update` (#8635) (@botantony)
+- Bump the cargo-minor-patch group across 1 directory with 21 updates (#8638) (@app/dependabot)
+- Update model snapshot (#8640) (@houko)
+- Update model snapshot (#8647) (@houko)
+- Ignore the zip 4 advisories reached only through the Tauri updater (#8649) (@houko)
+- Update model snapshot (#8651) (@houko)
+- Update model snapshot (#8654) (@houko)
+- Bump the sidecar-cargo-minor-patch group across 2 directories with 2 updates (#8658) (@app/dependabot)
+- Update model snapshot (#8661) (@houko)
+- Give each build-timings tempdir a unique suffix (#8664) (@DaBlitzStein)
+- Bump the actions-minor-patch group with 3 updates (#8666) (@app/dependabot)
+- Bump the web-minor-patch group in /web with 10 updates (#8667) (@app/dependabot)
+- Bump follow-redirects from 1.16.0 to 1.16.1 in /packages/whatsapp-gateway (#8669) (@app/dependabot)
+- Bump the docs-minor-patch group in /docs with 7 updates (#8671) (@app/dependabot)
+- Bump toml from 4.2.0 to 5.0.1 in /packages/whatsapp-gateway (#8672) (@app/dependabot)
+- Use a stdin-free sleep for the Windows long-running test process (#8679) (@houko)
+- Update model snapshot (#8682) (@houko)
+- Bump Swatinem/rust-cache from a45951ff880207c249adf57334cf2e9bd81d6e1e to c8037a86dde8214a8310e9f54a8fc61ab362aa31 (#8686) (@app/dependabot)
+- Update model snapshot (#8687) (@houko)
+- Update model snapshot (#8691) (@houko)
+- Bump rustls from 0.23.45 to 0.23.46 in /sdk/rust/librefang-sidecar-telegram (#8693) (@app/dependabot)
+- Bump the actions-minor-patch group across 1 directory with 7 updates (#8698) (@app/dependabot)
+- Bump the web-minor-patch group across 1 directory with 7 updates (#8700) (@app/dependabot)
+- Bump the dashboard-minor-patch group across 1 directory with 19 updates (#8701) (@app/dependabot)
+- Bump follow-redirects from 1.16.1 to 1.16.2 in /packages/whatsapp-gateway (#8702) (@app/dependabot)
+- Bump the docs-minor-patch group across 1 directory with 13 updates (#8706) (@app/dependabot)
+- Bump the cargo-minor-patch group across 1 directory with 22 updates (#8714) (@app/dependabot)
+- Bump ip-address from 10.5.0 to 10.7.6 in /web (#8715) (@app/dependabot)
+- Bump compression from 1.8.1 to 1.8.2 in /web (#8716) (@app/dependabot)
+- Bump brace-expansion from 1.1.18 to 1.1.21 in /web (#8717) (@app/dependabot)
+- Bump source-map-js from 1.2.1 to 1.2.2 in /web (#8718) (@app/dependabot)
+- Bump qs from 6.16.0 to 6.16.2 in /web (#8719) (@app/dependabot)
+- Bump proxy-addr from 2.0.7 to 2.0.8 in /web (#8720) (@app/dependabot)
+- Bump source-map-js from 1.2.1 to 1.2.2 in /crates/librefang-api/dashboard (#8724) (@app/dependabot)
+- Bump brace-expansion from 5.0.9 to 5.0.12 in /crates/librefang-api/dashboard (#8725) (@app/dependabot)
+- Bump pageant from 0.2.3 to 0.2.5 (#8726) (@app/dependabot)
+- Shard the test run when the selective set includes api or kernel (#8733) (@houko)
+- Update model snapshot (#8742) (@houko)
+- Raise the macOS test lane timeout to 120 minutes (#8748) (@houko)
+
+</details>
+
+
 ## [2026.10.16] - 2026-10-16
 
 _144 PRs from 6 contributors since v2026.9.19._

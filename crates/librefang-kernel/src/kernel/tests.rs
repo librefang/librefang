@@ -1857,6 +1857,82 @@ fn test_set_agent_model_clears_overrides_when_provider_changes() {
 /// attached to the new one — the same gap the model router closed for
 /// `apply_routed_profile` and `apply_tier_routed_model`, in the file next door.
 /// Both paths now share `clear_stale_provider_overrides`.
+/// A model switch clears the canonical session so the old model's context stays out of the new
+/// model's prompt. Since #8645 the prompt path falls back to the per-session compaction mirror
+/// when the canonical row has nothing for a session, so the switch has to clear the mirrors as
+/// well or the pre-switch summary comes straight back.
+#[test]
+fn switching_model_does_not_resurface_the_old_compaction_summary() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().join("librefang-kernel-model-switch-summary");
+    std::fs::create_dir_all(&home_dir).unwrap();
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+    let agent_id = kernel
+        .spawn_agent_inner(
+            AgentManifest {
+                name: "model-switch-summary-agent".to_string(),
+                author: "test".to_string(),
+                ..AgentManifest::default()
+            },
+            None,
+            None,
+            None,
+        )
+        .expect("agent should spawn");
+
+    let session = SessionId::new();
+    kernel
+        .memory
+        .substrate
+        .store_llm_summary(
+            agent_id,
+            "summary written by the old model",
+            vec![librefang_types::message::Message::user("old")],
+            Some(session),
+        )
+        .unwrap();
+    let summary = || {
+        kernel
+            .memory
+            .substrate
+            .canonical_context(agent_id, Some(session), None)
+            .unwrap()
+            .0
+    };
+    assert_eq!(
+        summary().as_deref(),
+        Some("summary written by the old model")
+    );
+
+    kernel
+        .set_agent_model(agent_id, "gpt-4o-mini", Some("openai"))
+        .expect("model switch should succeed");
+
+    assert_eq!(
+        summary(),
+        None,
+        "a model switch must not leave the old model's summary in the prompt"
+    );
+    assert_eq!(
+        kernel
+            .memory
+            .substrate
+            .structured_get(
+                agent_id,
+                &librefang_memory::compaction_summary_key(&session)
+            )
+            .unwrap(),
+        None,
+        "a model switch must remove the compaction mirror"
+    );
+    kernel.shutdown();
+}
+
 #[test]
 fn switching_provider_also_drops_the_old_endpoints_capacity_limits() {
     let tmp = tempfile::tempdir().unwrap();
@@ -4217,6 +4293,107 @@ async fn session_reasoning_effort_pin_reaches_the_streaming_path() {
     assert_eq!(
         body["reasoning_effort"], "xhigh",
         "the streamed turn must run the session reasoning pin over the agent-level low: {body}"
+    );
+
+    kernel.shutdown();
+}
+
+/// The blocking dispatch path (`execute_llm_agent`, used by channels, cron, triggers and `agent_send`) must coerce the reasoning effort against the model that model selection routes to, not the manifest's pre-routing model (#8591).
+/// The base model declares only `low` / `medium` and the Stable `pinned_model` declares up to `xhigh`; coercing before selection clamped the agent's `xhigh` to `medium`, and the agent loop's per-model policy cannot recover a token the kernel already rewrote.
+#[tokio::test(flavor = "multi_thread")]
+async fn reasoning_effort_is_coerced_against_the_routed_model_on_the_blocking_path() {
+    use librefang_types::config::{ReasoningMode, ThinkingConfig};
+    use librefang_types::model_catalog::ModelCatalogEntry;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let backend = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "id": "chatcmpl-effort-routing",
+            "object": "chat.completion",
+            "choices": [{
+                "index": 0,
+                "message": { "role": "assistant", "content": "ok" },
+                "finish_reason": "stop"
+            }],
+            "usage": { "prompt_tokens": 5, "completion_tokens": 3, "total_tokens": 8 }
+        })))
+        .mount(&backend)
+        .await;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().to_path_buf();
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        default_model: DefaultModelConfig::driverless(),
+        mode: librefang_types::config::KernelMode::Stable,
+        ..KernelConfig::default()
+    };
+    let kernel = Arc::new(LibreFangKernel::boot_with_config(config).expect("boot"));
+    LibreFangKernel::set_self_handle(&kernel);
+
+    let efforts = |tokens: &[&str]| tokens.iter().map(|t| (*t).to_string()).collect::<Vec<_>>();
+    kernel.model_catalog_update(|cat| {
+        cat.add_custom_model(ModelCatalogEntry {
+            id: "effort-base".to_string(),
+            display_name: "Effort Base".to_string(),
+            provider: "testprov".to_string(),
+            supported_efforts: efforts(&["low", "medium"]),
+            ..Default::default()
+        });
+        cat.add_custom_model(ModelCatalogEntry {
+            id: "effort-routed".to_string(),
+            display_name: "Effort Routed".to_string(),
+            provider: "testprov".to_string(),
+            supported_efforts: efforts(&["low", "medium", "high", "xhigh"]),
+            ..Default::default()
+        });
+    });
+
+    // An unrecognised provider plus a custom `base_url` builds the OpenAI-compatible driver against the mock without a credential.
+    let mut manifest = test_manifest("effort-routing", "effort coerced after routing", vec![]);
+    manifest.model.provider = "testprov".to_string();
+    manifest.model.model = "effort-base".to_string();
+    manifest.model.base_url = Some(backend.uri());
+    manifest.pinned_model = Some("effort-routed".to_string());
+    manifest.thinking = Some(ThinkingConfig {
+        reasoning_effort: Some(ReasoningMode::new("xhigh").unwrap()),
+        ..Default::default()
+    });
+    let agent_id = kernel.spawn_agent(manifest).expect("spawn should succeed");
+
+    kernel
+        .send_message(agent_id, "blocking turn")
+        .await
+        .expect("the blocking turn must not error");
+
+    let requests = backend
+        .received_requests()
+        .await
+        .expect("requests recorded");
+    // Select out the web-augmentation query generator, which also runs through the agent's driver.
+    let turn_requests: Vec<serde_json::Value> = requests
+        .iter()
+        .filter_map(|request| serde_json::from_slice::<serde_json::Value>(&request.body).ok())
+        .filter(|body| !body.to_string().contains("search query generator"))
+        .collect();
+    assert_eq!(
+        turn_requests.len(),
+        1,
+        "exactly one agent-loop call; bodies: {requests:?}"
+    );
+    let body = &turn_requests[0];
+    assert_eq!(
+        body["model"], "effort-routed",
+        "Stable mode must route the turn to the pinned model: {body}"
+    );
+    assert_eq!(
+        body["reasoning_effort"], "xhigh",
+        "the effort must be coerced against the routed model, which accepts xhigh, not the base model's low/medium set: {body}"
     );
 
     kernel.shutdown();
@@ -14773,6 +14950,89 @@ async fn resolve_driver_for_owner_canonicalizes_alias_provider_in_fallback_slot(
          wrapped in a NEW FallbackDriver, distinct from the bare primary \
          driver; identical Arcs mean the fallback slot silently failed and \
          was dropped — the fallback-slot alias canonicalization regressed",
+    );
+
+    kernel.shutdown();
+}
+
+/// #8663: the per-turn path for the DEFAULT provider must read the provider file's `api_key_env`.
+///
+/// The file declares `STRATA1_LAN_KEY`, which differs from the convention `STRATA1_API_KEY`, and both env vars hold different values.
+/// A path that still reads the convention therefore resolves a different credential and a different cached driver.
+/// The agent that pins the file's env var explicitly is the control: it reads `STRATA1_LAN_KEY` by construction, so pointer equality proves the default path read the same variable.
+#[test]
+#[serial_test::serial(librefang_vault_key)]
+fn default_provider_file_resolution_applies_on_the_per_turn_path() {
+    const PROVIDER: &str = "strata1";
+    const FILE_KEY_ENV: &str = "STRATA1_LAN_KEY";
+    // The fixture is only meaningful while the file's name differs from the convention.
+    assert_ne!(FILE_KEY_ENV, "STRATA1_API_KEY");
+
+    let _file_key = set_test_env(FILE_KEY_ENV, "sk-from-provider-file");
+    let _convention_key = set_test_env("STRATA1_API_KEY", "sk-from-convention");
+
+    let dir = tempfile::tempdir().unwrap();
+    let home_dir = dir.path().to_path_buf();
+    let data_dir = home_dir.join("data");
+    std::fs::create_dir_all(&data_dir).unwrap();
+    let registry_dir = home_dir.join("registry");
+    std::fs::create_dir_all(&registry_dir).unwrap();
+    std::fs::write(registry_dir.join(".sync_marker"), "").unwrap();
+    let providers_dir = home_dir.join("providers");
+    std::fs::create_dir_all(&providers_dir).unwrap();
+    std::fs::write(
+        providers_dir.join(format!("{PROVIDER}.toml")),
+        format!(
+            r#"
+[provider]
+id = "{PROVIDER}"
+display_name = "Strata1"
+api_key_env = "{FILE_KEY_ENV}"
+base_url = "http://127.0.0.1:9/v1"
+key_required = true
+"#
+        ),
+    )
+    .unwrap();
+
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: data_dir.clone(),
+        network_enabled: false,
+        memory: librefang_types::config::MemoryConfig {
+            sqlite_path: Some(data_dir.join("test.db")),
+            ..Default::default()
+        },
+        default_model: DefaultModelConfig {
+            provider: PROVIDER.to_string(),
+            model: "m".to_string(),
+            api_key_env: String::new(),
+            base_url: None,
+            ..DefaultModelConfig::default()
+        },
+        ..KernelConfig::default()
+    };
+    let kernel = LibreFangKernel::boot_with_config(config).expect("kernel boot");
+
+    let mut default_agent = librefang_types::agent::AgentManifest::default();
+    default_agent.model.provider = PROVIDER.to_string();
+    default_agent.model.model = "m".to_string();
+
+    let mut pinned = default_agent.clone();
+    pinned.model.api_key_env = Some(FILE_KEY_ENV.to_string());
+
+    let d_default = kernel
+        .resolve_driver_for_owner(&default_agent, None)
+        .expect("default-provider turn must resolve");
+    let d_pinned = kernel
+        .resolve_driver_for_owner(&pinned, None)
+        .expect("explicitly pinned env var must resolve");
+    assert!(
+        Arc::ptr_eq(&d_default, &d_pinned),
+        "the default-provider turn must read the provider file's api_key_env \
+         ({}): identical drivers prove both resolutions read that variable; a \
+         different driver means the turn fell back to STRATA1_API_KEY (#8663)",
+        FILE_KEY_ENV
     );
 
     kernel.shutdown();

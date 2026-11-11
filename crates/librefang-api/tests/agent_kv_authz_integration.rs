@@ -362,3 +362,183 @@ async fn owner_import_then_export_round_trip_is_ok() {
     assert_eq!(export_body["agent_id"], id.to_string());
     assert_eq!(export_body["kv"]["oncall.contact"], "alice@example.com");
 }
+
+// ---------------------------------------------------------------------------
+// Reserved `compaction_summary_` namespace (#8645): the per-conversation compaction mirrors are
+// platform state the prompt path trusts, so the KV surface neither shows nor accepts them.
+// ---------------------------------------------------------------------------
+
+/// Seed a real compaction mirror the way the compactor does, and return its key.
+fn seed_compaction_mirror(state: &Arc<AppState>, id: AgentId) -> String {
+    let session = librefang_types::agent::SessionId::new();
+    state
+        .kernel
+        .memory_substrate()
+        .store_llm_summary(
+            id,
+            "private summary of one conversation",
+            vec![librefang_types::message::Message::user("kept")],
+            Some(session),
+        )
+        .expect("store_llm_summary");
+    let key = librefang_memory::compaction_summary_key(&session);
+    assert!(
+        state
+            .kernel
+            .memory_substrate()
+            .structured_get(id, &key)
+            .unwrap()
+            .is_some(),
+        "the compactor must have written the mirror"
+    );
+    key
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn list_and_export_hide_compaction_mirrors() {
+    let h = boot();
+    let id = spawn_owned_by(&h.state, "owned-by-alice", "alice");
+    let mirror_key = seed_compaction_mirror(&h.state, id);
+    h.state
+        .kernel
+        .memory_substrate()
+        .structured_set(id, "oncall.contact", serde_json::json!("alice"))
+        .unwrap();
+
+    let (status, body) = run_json(
+        &h,
+        req(
+            Method::GET,
+            &format!("/api/memory/agents/{id}/kv"),
+            Some(viewer("alice")),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let keys: Vec<&str> = body["kv_pairs"]
+        .as_array()
+        .expect("kv_pairs array")
+        .iter()
+        .map(|pair| pair["key"].as_str().unwrap())
+        .collect();
+    assert!(
+        !keys.contains(&mirror_key.as_str()),
+        "the mirror must not be listed: {keys:?}"
+    );
+    assert!(
+        keys.contains(&"oncall.contact"),
+        "agent keys stay listed: {keys:?}"
+    );
+
+    let (status, body) = run_json(
+        &h,
+        req(
+            Method::GET,
+            &format!("/api/agents/{id}/memory/export"),
+            Some(viewer("alice")),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let exported = body["kv"].as_object().expect("kv object");
+    assert!(
+        !exported.contains_key(&mirror_key),
+        "the mirror must not be exported: {exported:?}"
+    );
+    assert_eq!(exported["oncall.contact"], "alice");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn import_rejects_a_compaction_mirror_and_writes_nothing() {
+    let h = boot();
+    let id = spawn_owned_by(&h.state, "owned-by-alice", "alice");
+    let planted = format!(
+        "compaction_summary_{}",
+        librefang_types::agent::SessionId::new().0
+    );
+    let body = serde_json::json!({
+        "kv": { "oncall.contact": "alice", planted.clone(): "planted summary" },
+    });
+
+    let status = run(
+        &h,
+        req_with_body(
+            Method::POST,
+            &format!("/api/agents/{id}/memory/import"),
+            Some(viewer("alice")),
+            Body::from(body.to_string()),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    let substrate = h.state.kernel.memory_substrate();
+    assert!(
+        substrate.structured_get(id, &planted).unwrap().is_none(),
+        "a rejected import must not plant the mirror"
+    );
+    assert!(
+        substrate
+            .structured_get(id, "oncall.contact")
+            .unwrap()
+            .is_none(),
+        "a rejected import must not write its other keys either"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn import_with_clear_keeps_compaction_mirrors() {
+    let h = boot();
+    let id = spawn_owned_by(&h.state, "owned-by-alice", "alice");
+    let mirror_key = seed_compaction_mirror(&h.state, id);
+
+    let (status, body) = run_json(
+        &h,
+        req_with_body(
+            Method::POST,
+            &format!("/api/agents/{id}/memory/import"),
+            Some(viewer("alice")),
+            Body::from(r#"{"kv":{"oncall.contact":"alice"},"clear_existing":true}"#),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["status"], "imported");
+    assert!(
+        h.state
+            .kernel
+            .memory_substrate()
+            .structured_get(id, &mirror_key)
+            .unwrap()
+            .is_some(),
+        "clearing the KV surface must not delete state it does not expose"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn put_single_key_rejects_a_compaction_mirror() {
+    let h = boot();
+    let id = spawn_owned_by(&h.state, "owned-by-alice", "alice");
+    let planted = format!(
+        "compaction_summary_{}",
+        librefang_types::agent::SessionId::new().0
+    );
+    let status = run(
+        &h,
+        req_with_body(
+            Method::PUT,
+            &format!("/api/memory/agents/{id}/kv/{planted}"),
+            Some(admin("ops")),
+            Body::from(r#"{"value":"planted summary"}"#),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(h
+        .state
+        .kernel
+        .memory_substrate()
+        .structured_get(id, &planted)
+        .unwrap()
+        .is_none());
+}

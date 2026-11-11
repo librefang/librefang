@@ -3931,6 +3931,7 @@
     "select_option": "Wybierz...",
     "comma_separated": "Wartości oddzielone przecinkami",
     "add_item": "Dodaj",
+    "json_invalid": "Nieprawidłowy JSON. Sprawdź składnię.",
     "load_error": "Nie udało się załadować schematu formularza",
     "required_missing": "Proszę wypełnić wszystkie wymagane pola"
   },

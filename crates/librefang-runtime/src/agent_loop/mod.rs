@@ -139,6 +139,24 @@ fn repair_session_before_save(session: &mut Session, agent_id: &str, reason: &st
     session.last_repaired_generation = Some(session.messages_generation);
 }
 
+/// [`repair_session_before_save`] for an exit that still reports `new_messages_start` afterwards (the `max_iterations` exits of both loops).
+///
+/// Repair changes the session's length — it drops orphaned tool results and empty messages, and merges the neighbours they leave adjacent — so the pre-repair index would make end-of-turn consumers (auto_memorize, the kernel's canonical-session append) slice from the wrong place; the index is moved to where the turn sits in the repaired history.
+fn repair_running_turn_before_save(
+    session: &mut Session,
+    agent_id: &str,
+    reason: &str,
+    new_messages_start: &mut usize,
+) {
+    let current_turn = current_turn_snapshot(session, *new_messages_start);
+    repair_session_before_save(session, agent_id, reason);
+    *new_messages_start = current_turn_start_after_rewrite(
+        current_turn.as_deref(),
+        &session.messages,
+        *new_messages_start,
+    );
+}
+
 /// The note left in session history when a non-timeout provider failure kills a turn.
 ///
 /// Deliberately opaque, for the same reason `IMAGE_DESCRIPTION_UNAVAILABLE` is on the media path: the driver error's `Display` carries endpoint URLs, model ids and upstream response bodies, and `build_user_facing_llm_error` appends that raw string verbatim for the `Format` category — which is also where an unrecognised provider error lands by default.
@@ -236,26 +254,156 @@ fn working_only_tail(
 /// The working copy minus the per-turn injections, for the inline compressor path that persists its compressed working copy into `session.messages`.
 ///
 /// Without this the time message and the head injections (web search, recalled memory, canonical context) would be written into the session and re-sent on every later turn.
-/// Matched by value, so an injection the compressor folded into its summary is simply absent and nothing else is dropped.
-fn without_turn_injections(messages: &[Message], injections: &TurnInjections) -> Vec<Message> {
-    let injected: Vec<serde_json::Value> = injections
+/// An injection that is still its own message is matched by value; one the compressor folded into its summary is simply absent and nothing else is dropped.
+/// By the time the working copy is persisted it has been through session repair, which merges adjacent user messages: the time message into the prompt before it, the head injections into each other and into the first history message.
+/// Those are found as the text repair left behind (see [`strip_merged_injection_text`]) and cut out of the merged message, which is dropped if nothing else remains.
+/// A message whose only change was absorbing injections is then put back exactly as it sits in `session_before` (the session about to be overwritten), so its `Text` / `Blocks` shape, timestamp and pin flag are the original's rather than those of the merge.
+/// Everything else the compressor, repair and hard trim produced is kept as is.
+fn without_turn_injections(
+    messages: &[Message],
+    injections: &TurnInjections,
+    session_before: &[Message],
+) -> Vec<Message> {
+    let injected: Vec<&Message> = injections
         .head
         .iter()
         .chain(injections.time_msg.iter())
-        .filter_map(|m| serde_json::to_value(m).ok())
         .collect();
     if injected.is_empty() {
         return messages.to_vec();
     }
+    let injected_json: Vec<serde_json::Value> = injected
+        .iter()
+        .filter_map(|m| serde_json::to_value(m).ok())
+        .collect();
+    let injected_texts: Vec<String> = injected
+        .iter()
+        .filter(|m| m.role == Role::User)
+        .map(|m| m.content.text_content())
+        .filter(|text| !text.is_empty())
+        .collect();
     messages
         .iter()
-        .filter(|m| {
-            serde_json::to_value(m)
-                .map(|v| !injected.contains(&v))
-                .unwrap_or(true)
+        .filter_map(|message| {
+            if serde_json::to_value(message)
+                .map(|v| injected_json.contains(&v))
+                .unwrap_or(false)
+            {
+                return None;
+            }
+            // `merge_content` always produces `Blocks`, so a `Text` message or a non-user message is never a merge product.
+            let MessageContent::Blocks(blocks) = &message.content else {
+                return Some(message.clone());
+            };
+            if message.role != Role::User {
+                return Some(message.clone());
+            }
+            let mut changed = false;
+            let mut stripped = Vec::with_capacity(blocks.len());
+            for block in blocks {
+                match block {
+                    ContentBlock::Text {
+                        text,
+                        provider_metadata,
+                    } => match strip_merged_injection_text(text, &injected_texts) {
+                        Some(rest) => {
+                            changed = true;
+                            if !rest.is_empty() {
+                                stripped.push(ContentBlock::Text {
+                                    text: rest,
+                                    provider_metadata: provider_metadata.clone(),
+                                });
+                            }
+                        }
+                        None => stripped.push(block.clone()),
+                    },
+                    other => stripped.push(other.clone()),
+                }
+            }
+            if !changed {
+                return Some(message.clone());
+            }
+            if stripped.is_empty() {
+                return None;
+            }
+            let content = MessageContent::Blocks(stripped);
+            let key = coalesced_content_key(&content);
+            if let Some(original) = session_before.iter().rev().find(|original| {
+                original.role == message.role && coalesced_content_key(&original.content) == key
+            }) {
+                return Some(original.clone());
+            }
+            Some(Message {
+                content,
+                ..message.clone()
+            })
         })
-        .cloned()
         .collect()
+}
+
+/// `text` with every injection in `injected` removed, or `None` when it holds none.
+///
+/// Session repair merges a user message into the one before it by appending its blocks and joining adjacent text blocks with a blank line, so a merged injection is the whole text, its start followed by `\n\n`, its end preceded by `\n\n`, or a run between two `\n\n` separators.
+/// Only those positions are cut, so text that merely mentions an injection's content is left alone.
+fn strip_merged_injection_text(text: &str, injected: &[String]) -> Option<String> {
+    let mut current = text.to_string();
+    let mut changed = false;
+    loop {
+        let mut cut = None;
+        for injection in injected {
+            if current == *injection {
+                cut = Some(String::new());
+            } else if let Some(rest) = current.strip_prefix(&format!("{injection}\n\n")) {
+                cut = Some(rest.to_string());
+            } else if let Some(rest) = current.strip_suffix(&format!("\n\n{injection}")) {
+                cut = Some(rest.to_string());
+            } else {
+                let inner = format!("\n\n{injection}\n\n");
+                if let Some(at) = current.find(&inner) {
+                    cut = Some(format!(
+                        "{}\n\n{}",
+                        &current[..at],
+                        &current[at + inner.len()..]
+                    ));
+                }
+            }
+            if cut.is_some() {
+                break;
+            }
+        }
+        match cut {
+            Some(rest) => {
+                current = rest;
+                changed = true;
+            }
+            None => break,
+        }
+    }
+    changed.then_some(current)
+}
+
+/// `content` as the block sequence session repair would leave it: text runs joined with a blank line, other blocks serialized as they are.
+///
+/// Lets a message restored from a merge be recognised in the pre-merge session whether it was stored as `Text` or as `Blocks`.
+fn coalesced_content_key(content: &MessageContent) -> Vec<serde_json::Value> {
+    let blocks: &[ContentBlock] = match content {
+        MessageContent::Text(text) => return vec![serde_json::Value::String(text.clone())],
+        MessageContent::Blocks(blocks) => blocks,
+    };
+    let mut key: Vec<serde_json::Value> = Vec::with_capacity(blocks.len());
+    for block in blocks {
+        match block {
+            ContentBlock::Text { text, .. } => match key.last_mut() {
+                Some(serde_json::Value::String(run)) => {
+                    run.push_str("\n\n");
+                    run.push_str(text);
+                }
+                _ => key.push(serde_json::Value::String(text.clone())),
+            },
+            other => key.push(serde_json::to_value(other).unwrap_or(serde_json::Value::Null)),
+        }
+    }
+    key
 }
 
 /// The current turn (`session.messages[new_messages_start..]`) in serialized form, so it can be found again after the history is rewritten.
@@ -296,11 +444,11 @@ fn locate_current_turn(turn: &[serde_json::Value], history: &[Message]) -> Optio
         .rposition(|window| window == turn)
 }
 
-/// Where the current turn starts in `history` after the inline context compressor replaced `session.messages` with its compressed copy.
+/// Where the current turn starts in `history` after `session.messages` was rewritten mid-turn: by the inline context compressor, or by the repair that runs before a `max_iterations` exit saves the session.
 ///
-/// The compressor keeps its tail verbatim, so the whole turn is normally found as a window.
-/// A turn longer than that tail is partly summarised away; only its surviving suffix is then new, because the summarised head now lives in the summary message and must not be re-appended to the canonical session or re-memorized.
-/// Without this the pre-compression index survives into `AgentLoopResult.new_messages_start`, where it either points past the end (nothing is appended to the canonical session) or into older history (earlier turns are appended again).
+/// Both rewrites keep the end of the session verbatim, so the whole turn is normally found as a window.
+/// A turn longer than the compressor's tail is partly summarised away; only its surviving suffix is then new, because the summarised head now lives in the summary message and must not be re-appended to the canonical session or re-memorized.
+/// Without this the pre-rewrite index survives into `AgentLoopResult.new_messages_start`, where it either points past the end (nothing is appended to the canonical session) or into older history (earlier turns are appended again).
 fn current_turn_start_after_rewrite(
     turn: Option<&[serde_json::Value]>,
     history: &[Message],
@@ -312,29 +460,98 @@ fn current_turn_start_after_rewrite(
     if let Some(start) = locate_current_turn(turn, history) {
         return start;
     }
+    let history_json: Vec<Option<serde_json::Value>> = history
+        .iter()
+        .map(|msg| serde_json::to_value(msg).ok())
+        .collect();
+    let at = |index: usize| history_json.get(index).and_then(Option::as_ref);
     // The working copy can differ from `session.messages` inside the turn: the context guard truncates oversized tool results in the working copy only, so a long turn may no longer match as a whole window.
-    // Its first message is the inbound user message, which the guard never touches; when that survived, everything from it to the end is the turn.
-    if let Some(head) = turn.first() {
-        if let Some(start) = history
-            .iter()
-            .rposition(|msg| serde_json::to_value(msg).ok().as_ref() == Some(head))
+    // Its first message is the inbound user message, which the guard never touches, and the assistant reply right after it is not a tool result either; when that pair survived, everything from it to the end is the turn.
+    // Requiring the pair rather than the prompt alone keeps an earlier turn that happened to send the same prompt from being taken for this one.
+    if let [head, second, ..] = turn {
+        if let Some(start) = (0..history_json.len())
+            .rev()
+            .find(|&i| at(i) == Some(head) && at(i + 1) == Some(second))
         {
             return start;
         }
     }
-    let survived = turn
-        .iter()
-        .rev()
-        .zip(history.iter().rev())
-        .take_while(|(turn_msg, msg)| serde_json::to_value(msg).ok().as_ref() == Some(*turn_msg))
-        .count();
-    if survived == 0 {
-        warn!(
-            turn_len = turn.len(),
-            "Current turn not found in compressed history; treating it as fully summarised"
-        );
+    // Otherwise match the turn from the back, stopping at the first message that is gone: whatever came before it was summarised or dropped along with it.
+    // Later messages need not be contiguous, because working-copy nudges the rewrite persisted sit between or after them and belong to the same turn.
+    let mut cursor = history.len();
+    let mut first_survivor = turn.len();
+    for (index, wanted) in turn.iter().enumerate().rev() {
+        match history_json[..cursor]
+            .iter()
+            .rposition(|msg| msg.as_ref() == Some(wanted))
+        {
+            Some(found) => {
+                cursor = found;
+                first_survivor = index;
+            }
+            None => break,
+        }
     }
-    history.len() - survived
+    if first_survivor == 0 {
+        return cursor;
+    }
+    // The one turn message a rewrite reshapes rather than drops is the prompt: repair merges adjacent user messages, so the prompt can be folded together with the time message after it or into a user message before it.
+    // It then lives on as a contiguous run of the content blocks of the user message right before the survivors, and that message is where the turn starts.
+    if first_survivor == 1
+        && cursor
+            .checked_sub(1)
+            .is_some_and(|i| user_message_absorbed(&history[i], &turn[0]))
+    {
+        return cursor - 1;
+    }
+    if first_survivor < turn.len() {
+        return cursor;
+    }
+    warn!(
+        turn_len = turn.len(),
+        "Current turn not found in rewritten history; treating it as fully summarised"
+    );
+    history.len()
+}
+
+/// Whether `merged` is a user message that session repair produced by merging `prompt` (a serialized user message) with an adjacent user message.
+///
+/// Repair appends the second message's blocks to the first and then coalesces adjacent text blocks with a blank line between them, so the prompt's text survives at the start of the merged text (merged with what followed it), at its end (merged into what preceded it), or between two blank-line separators, and its non-text blocks (images) survive as a contiguous run.
+/// Matching on the separators, rather than on a substring, keeps a summary that merely quotes the prompt from being taken for it.
+fn user_message_absorbed(merged: &Message, prompt: &serde_json::Value) -> bool {
+    let Ok(prompt) = serde_json::from_value::<Message>(prompt.clone()) else {
+        return false;
+    };
+    if merged.role != Role::User || prompt.role != Role::User {
+        return false;
+    }
+    let non_text_blocks = |content: &MessageContent| -> Vec<Option<serde_json::Value>> {
+        match content {
+            MessageContent::Text(_) => Vec::new(),
+            MessageContent::Blocks(blocks) => blocks
+                .iter()
+                .filter(|block| !matches!(block, ContentBlock::Text { .. }))
+                .map(|block| serde_json::to_value(block).ok())
+                .collect(),
+        }
+    };
+    let prompt_text = prompt.content.text_content();
+    let prompt_blocks = non_text_blocks(&prompt.content);
+    if prompt_text.is_empty() && prompt_blocks.is_empty() {
+        return false;
+    }
+    let merged_text = merged.content.text_content();
+    let text_absorbed = prompt_text.is_empty()
+        || merged_text == prompt_text
+        || merged_text.starts_with(&format!("{prompt_text}\n\n"))
+        || merged_text.ends_with(&format!("\n\n{prompt_text}"))
+        || merged_text.contains(&format!("\n\n{prompt_text}\n\n"));
+    let blocks_absorbed = prompt_blocks.is_empty()
+        || (prompt_blocks.iter().all(Option::is_some)
+            && non_text_blocks(&merged.content)
+                .windows(prompt_blocks.len())
+                .any(|window| window == prompt_blocks.as_slice()));
+    text_absorbed && blocks_absorbed
 }
 
 /// Apply an engine compaction result to the session and rebuild the LLM working copy from it.
@@ -1515,7 +1732,11 @@ async fn run_agent_loop_inner(
             if had_soft_compression {
                 // Persist the compressed history without the per-turn injections, which belong to this request only.
                 let current_turn = current_turn_snapshot(session, new_messages_start);
-                session.set_messages(without_turn_injections(&messages, &injections));
+                session.set_messages(without_turn_injections(
+                    &messages,
+                    &injections,
+                    &session.messages,
+                ));
                 new_messages_start = current_turn_start_after_rewrite(
                     current_turn.as_deref(),
                     &session.messages,
@@ -2577,7 +2798,12 @@ async fn run_agent_loop_inner(
 
     // Persist. Fork and incognito turns skip — both are ephemeral and must
     // not pollute canonical session history.
-    repair_session_before_save(session, agent_id_str.as_str(), "max_iterations");
+    repair_running_turn_before_save(
+        session,
+        agent_id_str.as_str(),
+        "max_iterations",
+        &mut new_messages_start,
+    );
     if !opts.is_fork && !opts.incognito {
         if let Err(e) = memory.save_session_async(session).await {
             warn!("Failed to save session on max iterations: {e}");

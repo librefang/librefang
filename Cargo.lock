@@ -2487,11 +2487,10 @@ dependencies = [
 
 [[package]]
 name = "event-listener"
-version = "5.4.1"
+version = "5.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e13b66accf52311f30a0db42147dadea9850cb48cd070028831ae5f5d4b856ab"
+checksum = "5a23add41df1562121a9393cb065eab5146a1242410f23a644851e90cfd669d2"
 dependencies = [
- "concurrent-queue",
  "parking",
  "pin-project-lite",
 ]
@@ -4358,7 +4357,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-acp"
-version = "2026.10.16"
+version = "2026.11.11"
 dependencies = [
  "agent-client-protocol",
  "async-trait",
@@ -4379,7 +4378,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-api"
-version = "2026.10.16"
+version = "2026.11.11"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
@@ -4468,7 +4467,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-channels"
-version = "2026.10.16"
+version = "2026.11.11"
 dependencies = [
  "async-trait",
  "axum",
@@ -4507,7 +4506,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-cli"
-version = "2026.10.16"
+version = "2026.11.11"
 dependencies = [
  "arc-swap",
  "base64 0.23.1",
@@ -4555,7 +4554,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-desktop"
-version = "2026.10.16"
+version = "2026.11.11"
 dependencies = [
  "axum",
  "clap",
@@ -4588,7 +4587,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-extensions"
-version = "2026.10.16"
+version = "2026.11.11"
 dependencies = [
  "aes-gcm",
  "argon2 0.5.3",
@@ -4622,7 +4621,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-hands"
-version = "2026.10.16"
+version = "2026.11.11"
 dependencies = [
  "chrono",
  "dashmap",
@@ -4647,7 +4646,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-http"
-version = "2026.10.16"
+version = "2026.11.11"
 dependencies = [
  "librefang-types",
  "reqwest",
@@ -4659,7 +4658,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-import"
-version = "2026.10.16"
+version = "2026.11.11"
 dependencies = [
  "chrono",
  "dirs 7.0.0",
@@ -4677,7 +4676,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-kernel"
-version = "2026.10.16"
+version = "2026.11.11"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -4739,7 +4738,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-kernel-handle"
-version = "2026.10.16"
+version = "2026.11.11"
 dependencies = [
  "async-trait",
  "bytes",
@@ -4752,7 +4751,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-kernel-metering"
-version = "2026.10.16"
+version = "2026.11.11"
 dependencies = [
  "librefang-llm-driver",
  "librefang-memory",
@@ -4764,7 +4763,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-kernel-router"
-version = "2026.10.16"
+version = "2026.11.11"
 dependencies = [
  "dirs 7.0.0",
  "librefang-hands",
@@ -4780,7 +4779,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-llm-driver"
-version = "2026.10.16"
+version = "2026.11.11"
 dependencies = [
  "async-trait",
  "dashmap",
@@ -4794,7 +4793,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-llm-drivers"
-version = "2026.10.16"
+version = "2026.11.11"
 dependencies = [
  "async-trait",
  "base64 0.23.1",
@@ -4831,7 +4830,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-memory"
-version = "2026.10.16"
+version = "2026.11.11"
 dependencies = [
  "async-trait",
  "chrono",
@@ -4854,7 +4853,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-memory-wiki"
-version = "2026.10.16"
+version = "2026.11.11"
 dependencies = [
  "chrono",
  "librefang-kernel-handle",
@@ -4870,7 +4869,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-rl-export"
-version = "2026.10.16"
+version = "2026.11.11"
 dependencies = [
  "base64 0.23.1",
  "chrono",
@@ -4891,7 +4890,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-runtime"
-version = "2026.10.16"
+version = "2026.11.11"
 dependencies = [
  "async-trait",
  "base64 0.23.1",
@@ -4960,7 +4959,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-runtime-audit"
-version = "2026.10.16"
+version = "2026.11.11"
 dependencies = [
  "chrono",
  "hex",
@@ -4978,7 +4977,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-runtime-mcp"
-version = "2026.10.16"
+version = "2026.11.11"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -5007,7 +5006,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-runtime-media"
-version = "2026.10.16"
+version = "2026.11.11"
 dependencies = [
  "async-trait",
  "base64 0.23.1",
@@ -5028,7 +5027,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-runtime-sandbox-docker"
-version = "2026.10.16"
+version = "2026.11.11"
 dependencies = [
  "chrono",
  "dashmap",
@@ -5040,7 +5039,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-skills"
-version = "2026.10.16"
+version = "2026.11.11"
 dependencies = [
  "aho-corasick",
  "base64 0.23.1",
@@ -5070,7 +5069,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-subprocess"
-version = "2026.10.16"
+version = "2026.11.11"
 dependencies = [
  "metrics",
  "serde_json",
@@ -5082,7 +5081,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-telemetry"
-version = "2026.10.16"
+version = "2026.11.11"
 dependencies = [
  "librefang-types",
  "metrics",
@@ -5090,7 +5089,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-testing"
-version = "2026.10.16"
+version = "2026.11.11"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -5112,7 +5111,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-types"
-version = "2026.10.16"
+version = "2026.11.11"
 dependencies = [
  "async-trait",
  "chrono",
@@ -5139,7 +5138,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-wire"
-version = "2026.10.16"
+version = "2026.11.11"
 dependencies = [
  "async-trait",
  "base64 0.23.1",
@@ -12412,7 +12411,7 @@ checksum = "b9cc00251562a284751c9973bace760d86c0276c471b4be569fe6b068ee97a56"
 
 [[package]]
 name = "xtask"
-version = "2026.10.16"
+version = "2026.11.11"
 dependencies = [
  "base64 0.23.1",
  "chrono",
@@ -12652,27 +12651,27 @@ dependencies = [
 
 [[package]]
 name = "zstd"
-version = "0.13.3"
+version = "0.13.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e91ee311a569c327171651566e07972200e76fcfe2242a4fa446149a3881c08a"
+checksum = "cdb02c3132d251ab1606e9fc913a7da6c6ed08cc263df15edf082e1dc497d157"
 dependencies = [
  "zstd-safe",
 ]
 
 [[package]]
 name = "zstd-safe"
-version = "7.2.4"
+version = "7.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8f49c4d5f0abb602a93fb8736af2a4f4dd9512e36f7f570d66e65ff867ed3b9d"
+checksum = "1c8ea04668f5de8d8d51051714ba560c9536519cadcdb8829bba4fe2ad159b03"
 dependencies = [
  "zstd-sys",
 ]
 
 [[package]]
 name = "zstd-sys"
-version = "2.0.16+zstd.1.5.7"
+version = "2.1.2+zstd.1.5.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "91e19ebc2adc8f83e43039e79776e3fda8ca919132d68a1fed6a5faca2683748"
+checksum = "481ada9c543b2323cbb7bbdbb5249177fbf0188ed959ed2c15e4b22421c84ed3"
 dependencies = [
  "cc",
  "pkg-config",

@@ -1,0 +1,2 @@
+The Chat session tab strip now carries the tab semantics its `role="tablist"` promised: every tab links to the message panel via `aria-controls` and a `role="tabpanel"` with `aria-labelledby`, the arrow keys and Home/End move the selection with a roving tabindex, the new-session button sits outside the tablist, and the close button keeps a 24 px hit target while staying out of the tab order.
+(#8606, #8597) (@DaBlitzStein)
