@@ -4358,7 +4358,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-acp"
-version = "2026.10.16"
+version = "2026.11.11"
 dependencies = [
  "agent-client-protocol",
  "async-trait",
@@ -4379,7 +4379,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-api"
-version = "2026.10.16"
+version = "2026.11.11"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
@@ -4468,7 +4468,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-channels"
-version = "2026.10.16"
+version = "2026.11.11"
 dependencies = [
  "async-trait",
  "axum",
@@ -4507,7 +4507,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-cli"
-version = "2026.10.16"
+version = "2026.11.11"
 dependencies = [
  "arc-swap",
  "base64 0.23.1",
@@ -4555,7 +4555,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-desktop"
-version = "2026.10.16"
+version = "2026.11.11"
 dependencies = [
  "axum",
  "clap",
@@ -4588,7 +4588,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-extensions"
-version = "2026.10.16"
+version = "2026.11.11"
 dependencies = [
  "aes-gcm",
  "argon2 0.5.3",
@@ -4622,7 +4622,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-hands"
-version = "2026.10.16"
+version = "2026.11.11"
 dependencies = [
  "chrono",
  "dashmap",
@@ -4647,7 +4647,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-http"
-version = "2026.10.16"
+version = "2026.11.11"
 dependencies = [
  "librefang-types",
  "reqwest",
@@ -4659,7 +4659,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-import"
-version = "2026.10.16"
+version = "2026.11.11"
 dependencies = [
  "chrono",
  "dirs 7.0.0",
@@ -4677,7 +4677,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-kernel"
-version = "2026.10.16"
+version = "2026.11.11"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -4739,7 +4739,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-kernel-handle"
-version = "2026.10.16"
+version = "2026.11.11"
 dependencies = [
  "async-trait",
  "bytes",
@@ -4752,7 +4752,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-kernel-metering"
-version = "2026.10.16"
+version = "2026.11.11"
 dependencies = [
  "librefang-llm-driver",
  "librefang-memory",
@@ -4764,7 +4764,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-kernel-router"
-version = "2026.10.16"
+version = "2026.11.11"
 dependencies = [
  "dirs 7.0.0",
  "librefang-hands",
@@ -4780,7 +4780,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-llm-driver"
-version = "2026.10.16"
+version = "2026.11.11"
 dependencies = [
  "async-trait",
  "dashmap",
@@ -4794,7 +4794,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-llm-drivers"
-version = "2026.10.16"
+version = "2026.11.11"
 dependencies = [
  "async-trait",
  "base64 0.23.1",
@@ -4831,7 +4831,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-memory"
-version = "2026.10.16"
+version = "2026.11.11"
 dependencies = [
  "async-trait",
  "chrono",
@@ -4854,7 +4854,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-memory-wiki"
-version = "2026.10.16"
+version = "2026.11.11"
 dependencies = [
  "chrono",
  "librefang-kernel-handle",
@@ -4870,7 +4870,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-rl-export"
-version = "2026.10.16"
+version = "2026.11.11"
 dependencies = [
  "base64 0.23.1",
  "chrono",
@@ -4891,7 +4891,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-runtime"
-version = "2026.10.16"
+version = "2026.11.11"
 dependencies = [
  "async-trait",
  "base64 0.23.1",
@@ -4960,7 +4960,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-runtime-audit"
-version = "2026.10.16"
+version = "2026.11.11"
 dependencies = [
  "chrono",
  "hex",
@@ -4978,7 +4978,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-runtime-mcp"
-version = "2026.10.16"
+version = "2026.11.11"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -5007,7 +5007,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-runtime-media"
-version = "2026.10.16"
+version = "2026.11.11"
 dependencies = [
  "async-trait",
  "base64 0.23.1",
@@ -5028,7 +5028,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-runtime-sandbox-docker"
-version = "2026.10.16"
+version = "2026.11.11"
 dependencies = [
  "chrono",
  "dashmap",
@@ -5040,7 +5040,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-skills"
-version = "2026.10.16"
+version = "2026.11.11"
 dependencies = [
  "aho-corasick",
  "base64 0.23.1",
@@ -5070,7 +5070,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-subprocess"
-version = "2026.10.16"
+version = "2026.11.11"
 dependencies = [
  "metrics",
  "serde_json",
@@ -5082,7 +5082,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-telemetry"
-version = "2026.10.16"
+version = "2026.11.11"
 dependencies = [
  "librefang-types",
  "metrics",
@@ -5090,7 +5090,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-testing"
-version = "2026.10.16"
+version = "2026.11.11"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -5112,7 +5112,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-types"
-version = "2026.10.16"
+version = "2026.11.11"
 dependencies = [
  "async-trait",
  "chrono",
@@ -5139,7 +5139,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-wire"
-version = "2026.10.16"
+version = "2026.11.11"
 dependencies = [
  "async-trait",
  "base64 0.23.1",
@@ -12412,7 +12412,7 @@ checksum = "b9cc00251562a284751c9973bace760d86c0276c471b4be569fe6b068ee97a56"
 
 [[package]]
 name = "xtask"
-version = "2026.10.16"
+version = "2026.11.11"
 dependencies = [
  "base64 0.23.1",
  "chrono",
