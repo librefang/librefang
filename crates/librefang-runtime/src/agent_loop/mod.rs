@@ -663,22 +663,39 @@ fn sanitize_agent_label(name: &str) -> String {
 /// Maps the loop result to a stable metric `reason` label; no `empty_response` branch (empty replies retry in-loop and land on `completed`).
 fn classify_exit_reason(result: &LibreFangResult<AgentLoopResult>) -> &'static str {
     match result {
-        // #8556: the loop now returns `Ok` when it exhausts its iteration
-        // budget and delivers the best-so-far text, so without this arm the
-        // `max_iterations` reason would never be counted again. The flag is
-        // the only thing that distinguishes a capped turn from an ordinary
-        // completed one.
-        Ok(r) if r.hit_iteration_cap => "max_iterations",
-        Ok(_) => "completed",
-        Err(LibreFangError::MaxIterationsExceeded(_)) => "max_iterations",
-        Err(LibreFangError::RepeatedToolFailures { .. }) => "repeated_tool_failures",
-        Err(LibreFangError::ContentFiltered { .. }) => "content_filtered",
-        Err(LibreFangError::Internal(msg))
+        Ok(r) => classify_ok_outcome(r),
+        Err(e) => classify_error_reason(e),
+    }
+}
+
+/// Stable label for a turn that ended with a result, shared by the exit counter and the cache metric so the two cannot drift.
+///
+/// `#8556`: the loop returns `Ok` when it exhausts its iteration budget and delivers the best-so-far text, so without the cap arm the `max_iterations` reason would never be counted again; the flag is the only thing that distinguishes a capped turn from an ordinary completed one.
+/// `silent` covers the exits whose reply is thrown away (no-reply, cascade-leak, progress-leak) and the session interrupt.
+pub(super) fn classify_ok_outcome(result: &AgentLoopResult) -> &'static str {
+    if result.silent {
+        "silent"
+    } else if result.hit_iteration_cap {
+        "max_iterations"
+    } else if result.truncated_by_continuation {
+        "max_continuation"
+    } else {
+        "completed"
+    }
+}
+
+/// Stable label for a failed turn, shared by the exit counter and the cache metric so the two cannot drift.
+fn classify_error_reason(e: &LibreFangError) -> &'static str {
+    match e {
+        LibreFangError::MaxIterationsExceeded(_) => "max_iterations",
+        LibreFangError::RepeatedToolFailures { .. } => "repeated_tool_failures",
+        LibreFangError::ContentFiltered { .. } => "content_filtered",
+        LibreFangError::Internal(msg)
             if msg.starts_with(crate::loop_guard::CIRCUIT_BREAKER_MSG_PREFIX) =>
         {
             "circuit_break"
         }
-        Err(_) => "error",
+        _ => "error",
     }
 }
 
@@ -1004,6 +1021,8 @@ pub async fn run_agent_loop(
         )
         .await;
     record_agent_loop_exit(&agent_label, &result);
+    // The cache line keeps the agent id the event has always carried; the counter uses the readable name.
+    end_turn::log_cache_metrics_on_exit(&session.agent_id.0.to_string(), &result);
     result
 }
 
@@ -1058,6 +1077,7 @@ async fn run_agent_loop_inner(
     if !driver.is_configured() {
         return Ok(AgentLoopResult {
             hit_iteration_cap: false,
+            truncated_by_continuation: false,
             silent: true,
             provider_not_configured: true,
             new_messages_start,
@@ -1540,6 +1560,7 @@ async fn run_agent_loop_inner(
             // Carry everything the turn already accumulated: the kernel settles the quota reservation and records cost from `total_usage`, so a zeroed result would credit back every LLM call that ran before the interrupt.
             return Ok(AgentLoopResult {
                 hit_iteration_cap: false,
+                truncated_by_continuation: false,
                 silent: true,
                 total_usage,
                 iterations: iteration,
@@ -1930,6 +1951,11 @@ async fn run_agent_loop_inner(
                     "provider_error",
                 )
                 .await;
+                end_turn::log_cache_metrics(
+                    agent_id_str.as_str(),
+                    &total_usage,
+                    classify_error_reason(&e),
+                );
                 return Err(e);
             }
         };
@@ -2421,6 +2447,11 @@ async fn run_agent_loop_inner(
                                     agent_id_str.as_str(),
                                 )
                                 .await;
+                                end_turn::log_cache_metrics(
+                                    agent_id_str.as_str(),
+                                    &total_usage,
+                                    classify_error_reason(&e),
+                                );
                                 return Err(e);
                             }
                         };
@@ -2526,6 +2557,11 @@ async fn run_agent_loop_inner(
                                     agent_id_str.as_str(),
                                 )
                                 .await;
+                                end_turn::log_cache_metrics(
+                                    agent_id_str.as_str(),
+                                    &total_usage,
+                                    classify_error_reason(&e),
+                                );
                                 return Err(e);
                             }
                         };
@@ -2630,10 +2666,16 @@ async fn run_agent_loop_inner(
                         }),
                     };
                     fire_hook_best_effort(hooks, &ctx);
-                    return Err(LibreFangError::RepeatedToolFailures {
+                    let err = LibreFangError::RepeatedToolFailures {
                         iterations: consecutive_all_failed,
                         error_count: hard_error_count,
-                    });
+                    };
+                    end_turn::log_cache_metrics(
+                        agent_id_str.as_str(),
+                        &total_usage,
+                        classify_error_reason(&err),
+                    );
+                    return Err(err);
                 }
 
                 // Block-stall graceful degrade (#5979) — streaming twin in
@@ -2722,6 +2764,7 @@ async fn run_agent_loop_inner(
                     fire_hook_best_effort(hooks, &ctx);
                     return Ok(AgentLoopResult {
                         hit_iteration_cap: false,
+                        truncated_by_continuation: true,
                         response: text,
                         total_usage,
                         iterations: iteration + 1,
@@ -2776,7 +2819,13 @@ async fn run_agent_loop_inner(
                         warn!("Failed to save session on content filter: {e}");
                     }
                 }
-                return Err(LibreFangError::ContentFiltered { message: partial });
+                let err = LibreFangError::ContentFiltered { message: partial };
+                end_turn::log_cache_metrics(
+                    agent_id_str.as_str(),
+                    &total_usage,
+                    classify_error_reason(&err),
+                );
+                return Err(err);
             }
         }
     }
@@ -2872,6 +2921,7 @@ async fn run_agent_loop_inner(
         actual_provider: last_actual_provider.clone(),
         actual_model: last_actual_model.clone(),
         hit_iteration_cap: true,
+        truncated_by_continuation: false,
     })
 }
 

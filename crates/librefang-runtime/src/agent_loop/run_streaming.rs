@@ -93,6 +93,8 @@ pub async fn run_agent_loop_streaming(
         )
         .await;
     super::record_agent_loop_exit(&agent_label, &result);
+    // The cache line keeps the agent id the event has always carried; the counter uses the readable name.
+    super::end_turn::log_cache_metrics_on_exit(&session.agent_id.0.to_string(), &result);
     result
 }
 
@@ -144,6 +146,7 @@ async fn run_agent_loop_streaming_inner(
         info!(agent = %manifest.name, "Skipping streaming agent loop — no LLM provider configured");
         return Ok(AgentLoopResult {
             hit_iteration_cap: false,
+            truncated_by_continuation: false,
             silent: true,
             provider_not_configured: true,
             experiment_context: None,
@@ -596,6 +599,7 @@ async fn run_agent_loop_streaming_inner(
             // Same accumulated state as the non-streaming interrupt: the kernel settles quota and records cost from `total_usage`.
             return Ok(AgentLoopResult {
                 hit_iteration_cap: false,
+                truncated_by_continuation: false,
                 silent: true,
                 total_usage,
                 iterations: iteration,
@@ -1013,6 +1017,11 @@ async fn run_agent_loop_streaming_inner(
                     )
                     .await;
                 }
+                super::end_turn::log_cache_metrics(
+                    agent_id_str.as_str(),
+                    &total_usage,
+                    super::classify_error_reason(&e),
+                );
                 return Err(e);
             }
         };
@@ -1572,6 +1581,11 @@ async fn run_agent_loop_streaming_inner(
                                     agent_id_str.as_str(),
                                 )
                                 .await;
+                                super::end_turn::log_cache_metrics(
+                                    agent_id_str.as_str(),
+                                    &total_usage,
+                                    super::classify_error_reason(&e),
+                                );
                                 return Err(e);
                             }
                         };
@@ -1665,6 +1679,11 @@ async fn run_agent_loop_streaming_inner(
                                     agent_id_str.as_str(),
                                 )
                                 .await;
+                                super::end_turn::log_cache_metrics(
+                                    agent_id_str.as_str(),
+                                    &total_usage,
+                                    super::classify_error_reason(&e),
+                                );
                                 return Err(e);
                             }
                         };
@@ -1751,10 +1770,16 @@ async fn run_agent_loop_streaming_inner(
                         }),
                     };
                     fire_hook_best_effort(hooks, &ctx);
-                    return Err(LibreFangError::RepeatedToolFailures {
+                    let err = LibreFangError::RepeatedToolFailures {
                         iterations: consecutive_all_failed,
                         error_count: hard_error_count,
-                    });
+                    };
+                    super::end_turn::log_cache_metrics(
+                        agent_id_str.as_str(),
+                        &total_usage,
+                        super::classify_error_reason(&err),
+                    );
+                    return Err(err);
                 }
 
                 // Block-stall graceful degrade (#5979). A block-only iteration
@@ -1848,6 +1873,7 @@ async fn run_agent_loop_streaming_inner(
                     signal_response_complete(&stream_tx).await;
                     return Ok(AgentLoopResult {
                         hit_iteration_cap: false,
+                        truncated_by_continuation: true,
                         response: text,
                         total_usage,
                         iterations: iteration + 1,
@@ -1900,7 +1926,13 @@ async fn run_agent_loop_streaming_inner(
                     }
                 }
                 signal_response_complete(&stream_tx).await;
-                return Err(LibreFangError::ContentFiltered { message: partial });
+                let err = LibreFangError::ContentFiltered { message: partial };
+                super::end_turn::log_cache_metrics(
+                    agent_id_str.as_str(),
+                    &total_usage,
+                    super::classify_error_reason(&err),
+                );
+                return Err(err);
             }
         }
     }
@@ -2009,5 +2041,6 @@ async fn run_agent_loop_streaming_inner(
         actual_provider: last_actual_provider.clone(),
         actual_model: last_actual_model.clone(),
         hit_iteration_cap: true,
+        truncated_by_continuation: false,
     })
 }
