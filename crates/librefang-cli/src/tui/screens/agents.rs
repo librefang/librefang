@@ -30,6 +30,17 @@ const TOOL_OPTIONS: &[(&str, &str)] = &[
 
 const DEFAULT_TOOLS: &[bool] = &[true, false, true, true, true, true, false, false, false];
 
+/// The custom builder's tool picker, seeded from [`DEFAULT_TOOLS`].
+fn default_tool_list() -> widgets::CheckboxList {
+    widgets::CheckboxList::new(
+        TOOL_OPTIONS
+            .iter()
+            .zip(DEFAULT_TOOLS)
+            .map(|((name, _), &checked)| (name.to_string(), checked))
+            .collect(),
+    )
+}
+
 /// Lines `PageUp`/`PageDown` move in the manifest-history TOML pane.
 ///
 /// A fixed step rather than the pane height because the handler has no `Rect`; ten lines is roughly half the right pane at the usual terminal size, enough to make the trailing `[model]` / `[resources]` tables reachable without overshooting the whole snapshot in one keypress.
@@ -104,12 +115,10 @@ pub struct AgentSelectState {
     pub custom_name: String,
     pub custom_desc: String,
     pub custom_prompt: String,
-    pub tool_checks: Vec<bool>,
-    pub tool_cursor: usize,
+    pub tool_list: widgets::CheckboxList,
 
     // Skill/MCP editor (shared by creation wizard + detail editor)
-    pub available_skills: Vec<(String, bool)>,
-    pub skill_cursor: usize,
+    pub available_skills: widgets::CheckboxList,
     // Shared folders editor: (name, path, mode).
     pub workspaces: Vec<(String, String, String)>,
     pub ws_cursor: usize,
@@ -144,13 +153,11 @@ pub struct AgentSelectState {
     /// operator *changed* on such a row, which the kernel then drops with only
     /// a `WARN` while the PATCH answers 200 (#7835 review).
     pub ws_manifest_rows: std::collections::HashSet<(String, String)>,
-    pub available_mcp: Vec<(String, bool)>,
-    pub mcp_cursor: usize,
+    pub available_mcp: widgets::CheckboxList,
     // Channel allowlist editor. Detail-only: agent creation writes no `channels`
     // key, which the kernel reads as "every channel", the same default a new
     // agent has always had.
-    pub available_channels: Vec<(String, bool)>,
-    pub channel_cursor: usize,
+    pub available_channels: widgets::CheckboxList,
 
     pub token_usage: Option<AgentTokenUsage>,
     // Inference-parameter editor (detail view)
@@ -159,10 +166,9 @@ pub struct AgentSelectState {
     // Model routing editor
     /// `"fixed"` or `"flexible"`.
     pub model_mode: String,
-    /// The resolved profile catalog with this agent's allowlist applied:
-    /// `(profile name, allowed)`. All-unchecked means "any profile".
-    pub router_profiles: Vec<(String, bool)>,
-    pub router_profile_cursor: usize,
+    /// The resolved profile catalog with this agent's allowlist applied.
+    /// All-unchecked means "any profile".
+    pub router_profiles: widgets::CheckboxList,
     /// Index into [`COST_BUDGET_OPTIONS`].
     pub cost_budget_idx: usize,
     /// The fallback profile loaded from the agent's stored routing settings.
@@ -380,8 +386,7 @@ impl AgentSelectState {
             custom_name: String::new(),
             custom_desc: String::new(),
             custom_prompt: String::new(),
-            tool_checks: DEFAULT_TOOLS.to_vec(),
-            tool_cursor: 0,
+            tool_list: default_tool_list(),
             model_params: super::model_params::ModelParamsEditor::new(),
             manifest_history: Vec::new(),
             manifest_history_list: ListState::default(),
@@ -389,16 +394,12 @@ impl AgentSelectState {
             manifest_history_error: None,
             manifest_history_scroll: 0,
             manifest_history_wrap_width: 0,
-            available_skills: Vec::new(),
-            skill_cursor: 0,
-            available_mcp: Vec::new(),
-            available_channels: Vec::new(),
-            channel_cursor: 0,
-            mcp_cursor: 0,
+            available_skills: widgets::CheckboxList::new(Vec::new()),
+            available_mcp: widgets::CheckboxList::new(Vec::new()),
+            available_channels: widgets::CheckboxList::new(Vec::new()),
             token_usage: None,
             model_mode: "fixed".to_string(),
-            router_profiles: Vec::new(),
-            router_profile_cursor: 0,
+            router_profiles: widgets::CheckboxList::new(Vec::new()),
             cost_budget_idx: 0,
             router_default_profile: None,
             router_fixed: false,
@@ -426,17 +427,12 @@ impl AgentSelectState {
         self.custom_name.clear();
         self.custom_desc.clear();
         self.custom_prompt.clear();
-        self.tool_checks = DEFAULT_TOOLS.to_vec();
-        self.tool_cursor = 0;
-        self.available_skills.clear();
-        self.skill_cursor = 0;
-        self.available_mcp.clear();
-        self.mcp_cursor = 0;
-        self.available_channels.clear();
-        self.channel_cursor = 0;
+        self.tool_list = default_tool_list();
+        self.available_skills = widgets::CheckboxList::new(Vec::new());
+        self.available_mcp = widgets::CheckboxList::new(Vec::new());
+        self.available_channels = widgets::CheckboxList::new(Vec::new());
         self.model_mode = "fixed".to_string();
-        self.router_profiles.clear();
-        self.router_profile_cursor = 0;
+        self.router_profiles = widgets::CheckboxList::new(Vec::new());
         self.cost_budget_idx = 0;
         self.router_default_profile = None;
         self.router_fixed = false;
@@ -816,8 +812,7 @@ impl AgentSelectState {
                 if let Some(ref detail) = self.detail {
                     let id = detail.id.clone();
                     self.model_mode = "fixed".to_string();
-                    self.router_profiles.clear();
-                    self.router_profile_cursor = 0;
+                    self.router_profiles = widgets::CheckboxList::new(Vec::new());
                     self.cost_budget_idx = 0;
                     self.router_default_profile = None;
                     self.router_fixed = false;
@@ -1023,8 +1018,7 @@ impl AgentSelectState {
                         self.custom_name.clear();
                         self.custom_desc.clear();
                         self.custom_prompt.clear();
-                        self.tool_checks = DEFAULT_TOOLS.to_vec();
-                        self.tool_cursor = 0;
+                        self.tool_list = default_tool_list();
                         self.sub = AgentSubScreen::CustomName;
                     }
                     _ => {}
@@ -1142,22 +1136,12 @@ impl AgentSelectState {
             KeyCode::Esc => {
                 self.sub = AgentSubScreen::CustomPrompt;
             }
-            KeyCode::Up | KeyCode::Char('k') if self.tool_cursor > 0 => {
-                self.tool_cursor -= 1;
-            }
-            KeyCode::Down | KeyCode::Char('j') if self.tool_cursor < TOOL_OPTIONS.len() - 1 => {
-                self.tool_cursor += 1;
-            }
-            KeyCode::Char(' ') => {
-                self.tool_checks[self.tool_cursor] = !self.tool_checks[self.tool_cursor];
-            }
+            KeyCode::Up | KeyCode::Char('k') => self.tool_list.up(),
+            KeyCode::Down | KeyCode::Char('j') => self.tool_list.down(),
+            KeyCode::Char(' ') => self.tool_list.toggle(),
             KeyCode::Enter => {
-                // Advance to skill selection (populate with all unchecked = "all skills" mode)
-                if self.available_skills.is_empty() {
-                    // Pre-populate on first entry (will be empty until backend fills it)
-                    // Default: all unchecked = use all skills
-                }
-                self.skill_cursor = 0;
+                // All unchecked means "use all skills"; the catalog arrives from the backend after this step.
+                self.available_skills.cursor = 0;
                 self.sub = AgentSubScreen::CustomSkills;
             }
             _ => {}
@@ -1166,24 +1150,16 @@ impl AgentSelectState {
     }
 
     fn handle_custom_skills(&mut self, key: KeyEvent) -> AgentAction {
-        let len = self.available_skills.len();
         match key.code {
             KeyCode::Esc => {
                 self.sub = AgentSubScreen::CustomTools;
             }
-            KeyCode::Up | KeyCode::Char('k') if self.skill_cursor > 0 => {
-                self.skill_cursor -= 1;
-            }
-            KeyCode::Down | KeyCode::Char('j') if len > 0 && self.skill_cursor < len - 1 => {
-                self.skill_cursor += 1;
-            }
-            KeyCode::Char(' ') if len > 0 => {
-                let checked = &mut self.available_skills[self.skill_cursor].1;
-                *checked = !*checked;
-            }
+            KeyCode::Up | KeyCode::Char('k') => self.available_skills.up(),
+            KeyCode::Down | KeyCode::Char('j') => self.available_skills.down(),
+            KeyCode::Char(' ') => self.available_skills.toggle(),
             KeyCode::Enter => {
                 // Advance to MCP server selection
-                self.mcp_cursor = 0;
+                self.available_mcp.cursor = 0;
                 self.sub = AgentSubScreen::CustomMcpServers;
             }
             _ => {}
@@ -1192,21 +1168,13 @@ impl AgentSelectState {
     }
 
     fn handle_custom_mcp_servers(&mut self, key: KeyEvent) -> AgentAction {
-        let len = self.available_mcp.len();
         match key.code {
             KeyCode::Esc => {
                 self.sub = AgentSubScreen::CustomSkills;
             }
-            KeyCode::Up | KeyCode::Char('k') if self.mcp_cursor > 0 => {
-                self.mcp_cursor -= 1;
-            }
-            KeyCode::Down | KeyCode::Char('j') if len > 0 && self.mcp_cursor < len - 1 => {
-                self.mcp_cursor += 1;
-            }
-            KeyCode::Char(' ') if len > 0 => {
-                let checked = &mut self.available_mcp[self.mcp_cursor].1;
-                *checked = !*checked;
-            }
+            KeyCode::Up | KeyCode::Char('k') => self.available_mcp.up(),
+            KeyCode::Down | KeyCode::Char('j') => self.available_mcp.down(),
+            KeyCode::Char(' ') => self.available_mcp.toggle(),
             KeyCode::Enter => {
                 let toml = self.build_custom_toml();
                 return AgentAction::CreatedManifest(toml);
@@ -1217,30 +1185,17 @@ impl AgentSelectState {
     }
 
     fn handle_edit_skills(&mut self, key: KeyEvent) -> AgentAction {
-        let len = self.available_skills.len();
         match key.code {
             KeyCode::Esc => {
                 self.sub = AgentSubScreen::AgentDetail;
             }
-            KeyCode::Up | KeyCode::Char('k') if self.skill_cursor > 0 => {
-                self.skill_cursor -= 1;
-            }
-            KeyCode::Down | KeyCode::Char('j') if len > 0 && self.skill_cursor < len - 1 => {
-                self.skill_cursor += 1;
-            }
-            KeyCode::Char(' ') if len > 0 => {
-                let checked = &mut self.available_skills[self.skill_cursor].1;
-                *checked = !*checked;
-            }
+            KeyCode::Up | KeyCode::Char('k') => self.available_skills.up(),
+            KeyCode::Down | KeyCode::Char('j') => self.available_skills.down(),
+            KeyCode::Char(' ') => self.available_skills.toggle(),
             KeyCode::Enter => {
                 // Save — collect checked skill names (none checked = "all")
                 if let Some(ref detail) = self.detail {
-                    let skills: Vec<String> = self
-                        .available_skills
-                        .iter()
-                        .filter(|(_, checked)| *checked)
-                        .map(|(name, _)| name.clone())
-                        .collect();
+                    let skills = self.available_skills.selected_names();
                     return AgentAction::UpdateSkills {
                         id: detail.id.clone(),
                         skills,
@@ -1262,7 +1217,6 @@ impl AgentSelectState {
     /// `fixed`, which is how an operator turns routing back off. Returning to
     /// the detail screen without emitting would silently discard the edit.
     fn handle_edit_model_routing(&mut self, key: KeyEvent) -> AgentAction {
-        let profile_count = self.router_profiles.len();
         let flexible = self.model_mode == "flexible";
         match key.code {
             KeyCode::Esc => {
@@ -1271,19 +1225,14 @@ impl AgentSelectState {
             KeyCode::Tab => {
                 self.model_mode = if flexible { "fixed" } else { "flexible" }.to_string();
             }
-            KeyCode::Up | KeyCode::Char('k') if flexible && self.router_profile_cursor > 0 => {
-                self.router_profile_cursor -= 1;
+            KeyCode::Up | KeyCode::Char('k') if flexible => {
+                self.router_profiles.up();
             }
-            KeyCode::Down | KeyCode::Char('j')
-                if flexible
-                    && profile_count > 0
-                    && self.router_profile_cursor < profile_count - 1 =>
-            {
-                self.router_profile_cursor += 1;
+            KeyCode::Down | KeyCode::Char('j') if flexible => {
+                self.router_profiles.down();
             }
-            KeyCode::Char(' ') if flexible && profile_count > 0 => {
-                let checked = &mut self.router_profiles[self.router_profile_cursor].1;
-                *checked = !*checked;
+            KeyCode::Char(' ') if flexible => {
+                self.router_profiles.toggle();
             }
             KeyCode::Char('+') | KeyCode::Char('=') if flexible => {
                 self.cost_budget_idx = (self.cost_budget_idx + 1) % COST_BUDGET_OPTIONS.len();
@@ -1318,11 +1267,7 @@ impl AgentSelectState {
                     // server clears the override wholesale.
                     let (allowed_profiles, cost_budget) = if flexible {
                         (
-                            self.router_profiles
-                                .iter()
-                                .filter(|(_, checked)| *checked)
-                                .map(|(name, _)| name.clone())
-                                .collect(),
+                            self.router_profiles.selected_names(),
                             COST_BUDGET_OPTIONS[self.cost_budget_idx]
                                 .1
                                 .map(str::to_string),
@@ -1574,30 +1519,17 @@ impl AgentSelectState {
     }
 
     fn handle_edit_mcp_servers(&mut self, key: KeyEvent) -> AgentAction {
-        let len = self.available_mcp.len();
         match key.code {
             KeyCode::Esc => {
                 self.sub = AgentSubScreen::AgentDetail;
             }
-            KeyCode::Up | KeyCode::Char('k') if self.mcp_cursor > 0 => {
-                self.mcp_cursor -= 1;
-            }
-            KeyCode::Down | KeyCode::Char('j') if len > 0 && self.mcp_cursor < len - 1 => {
-                self.mcp_cursor += 1;
-            }
-            KeyCode::Char(' ') if len > 0 => {
-                let checked = &mut self.available_mcp[self.mcp_cursor].1;
-                *checked = !*checked;
-            }
+            KeyCode::Up | KeyCode::Char('k') => self.available_mcp.up(),
+            KeyCode::Down | KeyCode::Char('j') => self.available_mcp.down(),
+            KeyCode::Char(' ') => self.available_mcp.toggle(),
             KeyCode::Enter => {
                 // Save — collect checked server names (none checked = "all")
                 if let Some(ref detail) = self.detail {
-                    let servers: Vec<String> = self
-                        .available_mcp
-                        .iter()
-                        .filter(|(_, checked)| *checked)
-                        .map(|(name, _)| name.clone())
-                        .collect();
+                    let servers = self.available_mcp.selected_names();
                     return AgentAction::UpdateMcpServers {
                         id: detail.id.clone(),
                         servers,
@@ -1617,29 +1549,16 @@ impl AgentSelectState {
     /// documents empty as the backward-compatible all-channels default), so saving with nothing
     /// checked is a widening rather than a lockout.
     fn handle_edit_channels(&mut self, key: KeyEvent) -> AgentAction {
-        let len = self.available_channels.len();
         match key.code {
             KeyCode::Esc => {
                 self.sub = AgentSubScreen::AgentDetail;
             }
-            KeyCode::Up | KeyCode::Char('k') if self.channel_cursor > 0 => {
-                self.channel_cursor -= 1;
-            }
-            KeyCode::Down | KeyCode::Char('j') if len > 0 && self.channel_cursor < len - 1 => {
-                self.channel_cursor += 1;
-            }
-            KeyCode::Char(' ') if len > 0 => {
-                let checked = &mut self.available_channels[self.channel_cursor].1;
-                *checked = !*checked;
-            }
+            KeyCode::Up | KeyCode::Char('k') => self.available_channels.up(),
+            KeyCode::Down | KeyCode::Char('j') => self.available_channels.down(),
+            KeyCode::Char(' ') => self.available_channels.toggle(),
             KeyCode::Enter => {
                 if let Some(ref detail) = self.detail {
-                    let channels: Vec<String> = self
-                        .available_channels
-                        .iter()
-                        .filter(|(_, checked)| *checked)
-                        .map(|(name, _)| name.clone())
-                        .collect();
+                    let channels = self.available_channels.selected_names();
                     return AgentAction::UpdateChannels {
                         id: detail.id.clone(),
                         channels,
@@ -1653,27 +1572,27 @@ impl AgentSelectState {
     }
 
     fn build_custom_toml(&self) -> String {
-        let tools_str: String = TOOL_OPTIONS
-            .iter()
-            .zip(self.tool_checks.iter())
-            .filter(|(_, &checked)| checked)
-            .map(|((name, _), _)| format!("\"{}\"", name))
+        let tools_str: String = self
+            .tool_list
+            .selected_names()
+            .into_iter()
+            .map(|name| format!("\"{name}\""))
             .collect::<Vec<_>>()
             .join(", ");
 
         let selected_skills: Vec<String> = self
             .available_skills
-            .iter()
-            .filter(|(_, checked)| *checked)
-            .map(|(name, _)| format!("\"{}\"", name))
+            .selected_names()
+            .into_iter()
+            .map(|name| format!("\"{name}\""))
             .collect();
         let skills_str = selected_skills.join(", ");
 
         let selected_mcp: Vec<String> = self
             .available_mcp
-            .iter()
-            .filter(|(_, checked)| *checked)
-            .map(|(name, _)| format!("\"{}\"", name))
+            .selected_names()
+            .into_iter()
+            .map(|name| format!("\"{name}\""))
             .collect();
         let mcp_str = selected_mcp.join(", ");
 
@@ -2310,21 +2229,18 @@ fn draw_tool_select(f: &mut Frame, area: Rect, state: &AgentSelectState) {
     let prompt = Paragraph::new(crate::i18n::t("tui-agents-prompt-tools"));
     f.render_widget(prompt, chunks[0]);
 
-    let items: Vec<ListItem> = TOOL_OPTIONS
+    let items: Vec<ListItem> = state
+        .tool_list
+        .items
         .iter()
-        .zip(state.tool_checks.iter())
+        .zip(TOOL_OPTIONS.iter())
         .enumerate()
-        .map(|(i, ((name, desc), &checked))| {
-            let check = if checked { "\u{25c9}" } else { "\u{25cb}" };
-            let highlight = if i == state.tool_cursor {
-                Style::default()
-                    .fg(theme::CYAN)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default()
-            };
+        .map(|(i, ((name, _), (_, desc)))| {
             ListItem::new(Line::from(vec![
-                Span::styled(format!("  {}{:<16}", check, name), highlight),
+                Span::styled(
+                    format!("  {}{:<16}", state.tool_list.marker(i), name),
+                    state.tool_list.row_style(i),
+                ),
                 Span::styled(crate::i18n::t(desc), theme::dim_style()),
             ]))
         })
@@ -2340,23 +2256,19 @@ fn draw_tool_select(f: &mut Frame, area: Rect, state: &AgentSelectState) {
 }
 
 fn draw_skill_select(f: &mut Frame, area: Rect, state: &AgentSelectState) {
-    draw_checkbox_list(
+    state.available_skills.render(
         f,
         area,
         &crate::i18n::t("tui-agents-prompt-skills"),
-        &state.available_skills,
-        state.skill_cursor,
         &crate::i18n::t("tui-agents-hints-skills"),
     );
 }
 
 fn draw_mcp_select(f: &mut Frame, area: Rect, state: &AgentSelectState) {
-    draw_checkbox_list(
+    state.available_mcp.render(
         f,
         area,
         &crate::i18n::t("tui-agents-prompt-mcp"),
-        &state.available_mcp,
-        state.mcp_cursor,
         &crate::i18n::t("tui-agents-hints-mcp"),
     );
 }
@@ -2411,21 +2323,18 @@ fn draw_edit_workspaces(f: &mut Frame, area: Rect, state: &AgentSelectState) {
 }
 
 fn draw_edit_allowlist(f: &mut Frame, area: Rect, state: &AgentSelectState) {
-    let (title, items, cursor) = match state.sub {
+    let (title, list) = match state.sub {
         AgentSubScreen::EditSkills => (
             crate::i18n::t("tui-agents-title-custom-skills"),
             &state.available_skills,
-            state.skill_cursor,
         ),
         AgentSubScreen::EditMcpServers => (
             crate::i18n::t("tui-agents-title-custom-mcp"),
             &state.available_mcp,
-            state.mcp_cursor,
         ),
         AgentSubScreen::EditChannels => (
             crate::i18n::t("tui-agents-title-edit-channels"),
             &state.available_channels,
-            state.channel_cursor,
         ),
         _ => return,
     };
@@ -2440,14 +2349,7 @@ fn draw_edit_allowlist(f: &mut Frame, area: Rect, state: &AgentSelectState) {
 
     let inner = widgets::render_screen_block(f, area, title.trim());
 
-    draw_checkbox_list(
-        f,
-        inner,
-        &prompt,
-        items,
-        cursor,
-        &crate::i18n::t("tui-agents-hints-save"),
-    );
+    list.render(f, inner, &prompt, &crate::i18n::t("tui-agents-hints-save"));
 }
 
 /// Width of the label column in the inference-parameter editor, in cells.
@@ -2639,29 +2541,19 @@ fn draw_edit_model_routing(f: &mut Frame, area: Rect, state: &AgentSelectState) 
     } else {
         let items: Vec<ListItem> = state
             .router_profiles
+            .items
             .iter()
             .enumerate()
-            .map(|(i, (name, checked))| {
-                let check = if *checked { "\u{25c9}" } else { "\u{25cb}" };
-                let style = if i == state.router_profile_cursor {
-                    Style::default()
-                        .fg(theme::CYAN)
-                        .add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default()
-                };
-                ListItem::new(format!("  {check} {name}")).style(style)
+            .map(|(i, (name, _))| {
+                ListItem::new(format!("  {} {name}", state.router_profiles.marker(i)))
+                    .style(state.router_profiles.row_style(i))
             })
             .collect();
         f.render_widget(List::new(items), chunks[2]);
     }
 
     let budget_label = crate::i18n::t(COST_BUDGET_OPTIONS[state.cost_budget_idx].0);
-    let allowed = state
-        .router_profiles
-        .iter()
-        .filter(|(_, checked)| *checked)
-        .count();
+    let allowed = state.router_profiles.selected_count();
     let allowlist_summary = if !flexible {
         String::new()
     } else if allowed == 0 {
@@ -2886,56 +2778,6 @@ fn draw_manifest_history(f: &mut Frame, area: Rect, state: &mut AgentSelectState
         widgets::hint_bar(&crate::i18n::t("tui-agents-hints-manifest-history")),
         chunks[1],
     );
-}
-
-fn draw_checkbox_list(
-    f: &mut Frame,
-    area: Rect,
-    prompt_text: &str,
-    items: &[(String, bool)],
-    cursor: usize,
-    hints_text: &str,
-) {
-    let chunks = Layout::vertical([
-        Constraint::Length(2),
-        Constraint::Min(3),
-        Constraint::Length(1),
-    ])
-    .split(area);
-
-    let prompt = Paragraph::new(format!("  {prompt_text}"));
-    f.render_widget(prompt, chunks[0]);
-
-    if items.is_empty() {
-        f.render_widget(
-            widgets::empty_state(&crate::i18n::t("tui-agents-label-none-available")),
-            chunks[1],
-        );
-    } else {
-        let list_items: Vec<ListItem> = items
-            .iter()
-            .enumerate()
-            .map(|(i, (name, checked))| {
-                let check = if *checked { "\u{25c9}" } else { "\u{25cb}" };
-                let highlight = if i == cursor {
-                    Style::default()
-                        .fg(theme::CYAN)
-                        .add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default()
-                };
-                ListItem::new(Line::from(vec![Span::styled(
-                    format!("  {check} {name}"),
-                    highlight,
-                )]))
-            })
-            .collect();
-
-        let list = List::new(list_items);
-        f.render_widget(list, chunks[1]);
-    }
-
-    f.render_widget(widgets::hint_bar(hints_text), chunks[2]);
 }
 
 #[cfg(test)]
@@ -3600,8 +3442,8 @@ mod tests {
         });
         // Simulate leftover state from a previously edited agent.
         state.model_mode = "flexible".to_string();
-        state.router_profiles = vec![("coder".to_string(), true)];
-        state.router_profile_cursor = 1;
+        state.router_profiles = widgets::CheckboxList::new(vec![("coder".to_string(), true)]);
+        state.router_profiles.cursor = 1;
         state.cost_budget_idx = 2;
         state.router_default_profile = Some("coder".to_string());
         state.router_fixed = true;
@@ -3613,7 +3455,7 @@ mod tests {
 
         assert_eq!(state.model_mode, "fixed");
         assert!(state.router_profiles.is_empty());
-        assert_eq!(state.router_profile_cursor, 0);
+        assert_eq!(state.router_profiles.cursor, 0);
         assert_eq!(state.cost_budget_idx, 0);
         assert_eq!(state.router_default_profile, None);
         assert!(!state.router_fixed);
@@ -3681,7 +3523,7 @@ mod tests {
         for mode in ["flexible", "fixed"] {
             let mut state = AgentSelectState::new();
             state.model_mode = mode.to_string();
-            state.router_profiles = vec![("coder".to_string(), true)];
+            state.router_profiles = widgets::CheckboxList::new(vec![("coder".to_string(), true)]);
             state.routing_stable_mode = true;
             state.router_pinned_model = Some("pinned-test-model".to_string());
             state.routing_loaded = true;
@@ -3695,7 +3537,7 @@ mod tests {
 
         let mut live = AgentSelectState::new();
         live.model_mode = "flexible".to_string();
-        live.router_profiles = vec![("coder".to_string(), true)];
+        live.router_profiles = widgets::CheckboxList::new(vec![("coder".to_string(), true)]);
         live.routing_loaded = true;
         let rendered = render_model_routing(&live);
         assert!(
@@ -3713,7 +3555,7 @@ mod tests {
     fn routing_stable_warning_is_not_truncated_at_80_columns() {
         let mut state = AgentSelectState::new();
         state.model_mode = "flexible".to_string();
-        state.router_profiles = vec![("coder".to_string(), true)];
+        state.router_profiles = widgets::CheckboxList::new(vec![("coder".to_string(), true)]);
         state.routing_stable_mode = true;
         state.router_pinned_model =
             Some("openrouter/anthropic/claude-sonnet-4.5-20250929-extended-context".to_string());

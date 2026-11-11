@@ -447,14 +447,10 @@ impl App {
                     .to_string();
                     detail.skills = assigned.clone();
                 }
-                self.agents.available_skills = available
-                    .into_iter()
-                    .map(|name| {
-                        let checked = assigned.contains(&name);
-                        (name, checked)
-                    })
-                    .collect();
-                self.agents.skill_cursor = 0;
+                self.agents.available_skills =
+                    widgets::CheckboxList::from_names(available, |name| {
+                        assigned.iter().any(|skill| skill == name)
+                    });
             }
             AppEvent::AgentMcpServersLoaded {
                 assigned,
@@ -472,14 +468,9 @@ impl App {
                     .to_string();
                     detail.mcp_servers = assigned.clone();
                 }
-                self.agents.available_mcp = available
-                    .into_iter()
-                    .map(|name| {
-                        let checked = assigned.contains(&name);
-                        (name, checked)
-                    })
-                    .collect();
-                self.agents.mcp_cursor = 0;
+                self.agents.available_mcp = widgets::CheckboxList::from_names(available, |name| {
+                    assigned.iter().any(|server| server == name)
+                });
             }
             AppEvent::AgentModelRoutingLoaded {
                 mode,
@@ -494,14 +485,10 @@ impl App {
                 // Populate the routing editor from the agent's real stored
                 // state, not from whatever the previous screen left behind.
                 self.agents.model_mode = mode;
-                self.agents.router_profiles = available
-                    .into_iter()
-                    .map(|name| {
-                        let checked = allowed_profiles.contains(&name);
-                        (name, checked)
-                    })
-                    .collect();
-                self.agents.router_profile_cursor = 0;
+                self.agents.router_profiles =
+                    widgets::CheckboxList::from_names(available, |name| {
+                        allowed_profiles.iter().any(|profile| profile == name)
+                    });
                 self.agents.cost_budget_idx = agents::COST_BUDGET_OPTIONS
                     .iter()
                     .position(|(_, wire)| *wire == cost_budget.as_deref())
@@ -541,14 +528,10 @@ impl App {
                     .to_string();
                     detail.channels = assigned.clone();
                 }
-                self.agents.available_channels = available
-                    .into_iter()
-                    .map(|name| {
-                        let checked = assigned.contains(&name);
-                        (name, checked)
-                    })
-                    .collect();
-                self.agents.channel_cursor = 0;
+                self.agents.available_channels =
+                    widgets::CheckboxList::from_names(available, |name| {
+                        assigned.iter().any(|channel| channel == name)
+                    });
             }
             AppEvent::AgentChannelsUpdated(id) => {
                 self.agents.status_msg =
@@ -557,13 +540,7 @@ impl App {
                 // The detail pane renders the allowlist it was built with, so refresh it
                 // instead of leaving the old value on screen next to a success message.
                 if let Some(detail) = self.agents.detail.as_mut() {
-                    detail.channels = self
-                        .agents
-                        .available_channels
-                        .iter()
-                        .filter(|(_, checked)| *checked)
-                        .map(|(name, _)| name.clone())
-                        .collect();
+                    detail.channels = self.agents.available_channels.selected_names();
                     detail.channels_mode = if detail.channels.is_empty() {
                         "all".to_string()
                     } else {
