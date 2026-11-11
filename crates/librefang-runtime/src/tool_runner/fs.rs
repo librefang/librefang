@@ -109,12 +109,13 @@ pub(super) fn named_ws_aliases(
     }
 }
 
-/// Tool input keys that carry a workspace-sandbox path, and so accept the
-/// `@name` form the kernel advertises in `TOOLS.md` (#8051).
+/// Tool input keys that carry a workspace-sandbox path, and so accept the `@name` form the kernel advertises in `TOOLS.md` (#8051).
 ///
-/// `apply_patch` is deliberately absent: its paths live inside the patch text
-/// under `*** Update File:` headers rather than in a path argument, and
-/// rewriting a patch body is a different job from rewriting an argument.
+/// A tool may appear more than once: `media_transcribe` takes both the input file (`path`) and the transcript destination (`out_path`), and a tool with two paths must not have one of them silently left unexpanded.
+/// Keys that name a path *inside a skill directory* (`skill_read_file`, `skill_evolve_*`) are deliberately absent — they are not workspace paths, so `@name` has nothing to resolve against.
+///
+/// `apply_patch` is deliberately absent: its paths live inside the patch text under `*** Update File:` headers rather than in a path argument, so there is no key to rewrite.
+/// It gets the same treatment at the same dispatch barrier, one step later: the parsed [`crate::apply_patch::PatchOp`]s are expanded by [`expand_aliases_in_patch_ops`] instead of the raw text, so a `+*** Add File:` line inside a hunk can never be mistaken for a header.
 const ALIAS_PATH_KEYS: &[(&str, &str)] = &[
     ("file_read", "path"),
     ("file_write", "path"),
@@ -123,6 +124,8 @@ const ALIAS_PATH_KEYS: &[(&str, &str)] = &[
     ("image_analyze", "path"),
     ("media_describe", "path"),
     ("media_transcribe", "path"),
+    ("media_transcribe", "out_path"),
+    ("speech_to_text", "path"),
     ("channel_send", "file_path"),
     ("web_fetch_to_file", "dest_path"),
 ];
@@ -144,26 +147,37 @@ pub(super) fn expand_alias_in_tool_input(
     kernel: Option<&Arc<dyn KernelHandle>>,
     caller_agent_id: Option<&str>,
 ) -> Result<Option<serde_json::Value>, String> {
-    let Some((_, key)) = ALIAS_PATH_KEYS.iter().find(|(t, _)| *t == tool_name) else {
+    let keys: Vec<&str> = ALIAS_PATH_KEYS
+        .iter()
+        .filter(|(t, _)| *t == tool_name)
+        .map(|(_, key)| *key)
+        .collect();
+    if keys.is_empty() {
         return Ok(None);
-    };
-    let Some(raw) = input.get(*key).and_then(|v| v.as_str()) else {
-        return Ok(None);
-    };
-    if !raw.starts_with('@') {
+    }
+    // Resolving aliases canonicalizes every declared mount, so do not pay for it when no argument is an alias in the first place.
+    let has_alias_path = keys.iter().any(|key| {
+        input
+            .get(*key)
+            .and_then(|v| v.as_str())
+            .is_some_and(|raw| raw.starts_with('@'))
+    });
+    if !has_alias_path {
         return Ok(None);
     }
     let aliases = named_ws_aliases(kernel, caller_agent_id);
-    if aliases.is_empty() {
-        // This agent has no named workspaces, so `@` here is just the first
-        // character of a filename. Rewriting it would break a legitimate path,
-        // and there is no alias the agent could have meant.
-        return Ok(None);
+    let mut rewritten: Option<serde_json::Value> = None;
+    for key in keys {
+        let Some(raw) = input.get(key).and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let Some(expanded) = expand_alias_path(raw, &aliases)? else {
+            continue;
+        };
+        let target = rewritten.get_or_insert_with(|| input.clone());
+        target[key] = serde_json::Value::String(expanded);
     }
-    let expanded = expand_workspace_alias(raw, &aliases)?;
-    let mut rewritten = input.clone();
-    rewritten[*key] = serde_json::Value::String(expanded);
-    Ok(Some(rewritten))
+    Ok(rewritten)
 }
 
 /// Resolve `@name` / `@name/sub/path` against `aliases`.
@@ -185,7 +199,8 @@ pub(super) fn expand_workspace_alias(
         let mut known: Vec<String> = aliases.iter().map(|(n, _)| format!("@{n}")).collect();
         known.sort();
         return Err(format!(
-            "unknown named workspace '@{name}'. Declared for this agent: {}",
+            "unknown named workspace '@{name}'. Declared for this agent: {}. \
+             If you meant a file whose name starts with '@', pass its absolute path instead",
             known.join(", ")
         ));
     };
@@ -208,6 +223,101 @@ pub(super) fn expand_workspace_alias(
         ));
     }
     Ok(root.join(rest_path).display().to_string())
+}
+
+/// Expand a leading `@name/` in a *tool argument* or a *patch header* path.
+///
+/// This is the one place the `@name` gate is written: [`expand_alias_in_tool_input`] applies it to `ALIAS_PATH_KEYS` fields, and [`expand_aliases_in_patch_ops`] applies it to the paths inside a patch.
+/// Both callers therefore agree on the three cases — not starting with `@`, no alias declared, and unknown alias — instead of each spelling them out again.
+///
+/// `Ok(None)` means there is nothing to rewrite (the path does not start with `@`, or the agent declares no named workspace, in which case `@` is a filename character); `Err` is a message for the model.
+fn expand_alias_path(raw: &str, aliases: &[(String, PathBuf)]) -> Result<Option<String>, String> {
+    if !raw.starts_with('@') || aliases.is_empty() {
+        return Ok(None);
+    }
+    expand_workspace_alias(raw, aliases).map(Some)
+}
+
+/// Rewrite the `@name/...` paths carried by a parsed patch into the mounts they name.
+///
+/// `apply_patch` keeps its paths in the patch body (`*** Add File:`, `*** Update File:`, `*** Delete File:`, and the `old -> new` form of `*** Update File:`) rather than in a path argument, so [`ALIAS_PATH_KEYS`] cannot reach it.
+/// Expanding the *parsed* operations instead of the raw text is what keeps file content untouched: a `+*** Add File: x` line inside a hunk is a `new_line`, not an operation, so it is never inspected here.
+///
+/// A patch target that names a directory is rejected: the spellings `@name`, `@name/`, `@name/.` and `@name/sub/` all do, and so does `@name/notes` when `notes` already exists as a directory.
+/// Handing any of them to the patch would surface as `File exists` / `Is a directory` from the filesystem and, for `*** Add File:`, leave a staging file before the write failed.
+/// The spelling is checked first because it also catches a directory that does not exist yet, and because it keeps the diagnostic about what the model wrote rather than about where it resolved to.
+fn expand_aliases_in_patch_ops(
+    ops: Vec<crate::apply_patch::PatchOp>,
+    aliases: &[(String, PathBuf)],
+) -> Result<Vec<crate::apply_patch::PatchOp>, String> {
+    use crate::apply_patch::PatchOp;
+
+    if aliases.is_empty() {
+        // Nothing is declared, so a leading `@` is just the first character of a filename, and rewriting it would break a legitimate path.
+        return Ok(ops);
+    }
+
+    // A patch target must be a file.
+    // Every directory-shaped spelling is caught here, including `@name/.`, which resolves to the mount root like `@name` does but does not end with a slash — a `ends_with('/')` test alone lets it through to the filesystem.
+    // A directory that already exists is caught as well: `@name/notes` has none of those spellings, and without the second test it reached `atomic_create` and surfaced `File exists`.
+    let expand_file = |raw: String| -> Result<String, String> {
+        let Some(expanded) = expand_alias_path(&raw, aliases)? else {
+            return Ok(raw);
+        };
+        let body = raw.strip_prefix('@').unwrap_or(&raw);
+        let name = body.split('/').next().unwrap_or_default();
+        // `..` never reaches this point: `expand_alias_path` above rejects a ParentDir remainder with its own diagnostic.
+        let names_directory = !body.contains('/') || raw.ends_with('/') || raw.ends_with("/.");
+        if names_directory || Path::new(&expanded).is_dir() {
+            return Err(format!(
+                "path '{raw}' names a directory, not a file; a patch target must be a file path under the '@{name}' named workspace (e.g. '@{name}/notes.md')"
+            ));
+        }
+        Ok(expanded)
+    };
+
+    ops.into_iter()
+        .map(|op| match op {
+            PatchOp::AddFile { path, content } => Ok(PatchOp::AddFile {
+                path: expand_file(path)?,
+                content,
+            }),
+            PatchOp::DeleteFile { path } => Ok(PatchOp::DeleteFile {
+                path: expand_file(path)?,
+            }),
+            PatchOp::UpdateFile {
+                path,
+                move_to,
+                hunks,
+            } => {
+                // Only an alias target is held to this rule: a relative destination next
+                // to an absolute source is the long-standing behaviour for an agent's own
+                // workspace, and rejecting it would break renames that never touched a
+                // named workspace.
+                let source_from_alias = path.starts_with('@');
+                let path = expand_file(path)?;
+                let move_to = match move_to {
+                    Some(dest) => {
+                        let dest = expand_file(dest)?;
+                        // A relative destination resolves against the agent workspace, not against the directory the source lives in (`resolve_patch_path`).
+                        // For an `@name` source that turns a rename into a move *out* of the share, and the source is removed afterwards, so the only trace is a file in a directory the user never looked at.
+                        if source_from_alias && !Path::new(&dest).is_absolute() {
+                            return Err(format!(
+                                "path '{dest}' is relative, so it would resolve against the agent workspace rather than the named workspace '{path}' came from; give an absolute or '@name/...' destination"
+                            ));
+                        }
+                        Some(dest)
+                    }
+                    None => None,
+                };
+                Ok(PatchOp::UpdateFile {
+                    path,
+                    move_to,
+                    hunks,
+                })
+            }
+        })
+        .collect()
 }
 
 /// Like [`named_ws_prefixes`] but only returns prefixes for read-write
@@ -602,28 +712,42 @@ pub(super) async fn tool_file_list(
     Ok(out)
 }
 
-pub(super) async fn tool_apply_patch(
+/// Parse the patch and expand the `@name` paths it carries.
+///
+/// Split out of the apply path so the dispatch arm can run its read-only pre-check against the *expanded* paths (#8744 review): the pre-check used to look at the raw header text, so an `@alias` target slipped past it and the per-operation check inside `apply_patch_ext` turned a whole-patch denial into a partial apply.
+///
+/// A patch that cannot be parsed or expanded is rejected here, before the caller snapshots the workspace or touches the filesystem.
+pub(super) fn parse_and_expand_patch(
     input: &serde_json::Value,
-    workspace_root: Option<&Path>,
-    additional_roots: &[&Path],
-    readonly_roots: &[&Path],
-) -> ToolResult {
+    aliases: &[(String, PathBuf)],
+) -> Result<Vec<crate::apply_patch::PatchOp>, ToolError> {
     let patch_str = input["patch"]
         .as_str()
         .ok_or(ToolError::MissingParameter("patch"))?;
-    let root = workspace_root.ok_or(ToolError::Unavailable("workspace directory"))?;
     let ops = crate::apply_patch::parse_patch(patch_str).map_err(|reason| {
         ToolError::InvalidParameter {
             name: "patch",
             reason,
         }
     })?;
-    // SECURITY #3662: defense-in-depth — pass readonly named-workspace prefixes
-    // through to `apply_patch_ext` so any resolved target path that lands
-    // inside a read-only workspace is rejected at the write site as well as
-    // at dispatch.
+    expand_aliases_in_patch_ops(ops, aliases).map_err(|reason| ToolError::InvalidParameter {
+        name: "patch",
+        reason,
+    })
+}
+
+/// Apply already-parsed, already-expanded patch operations.
+///
+/// SECURITY #3662: `readonly_roots` goes through to `apply_patch_ext` so any resolved target path that lands inside a read-only workspace is rejected at the write site as well as at dispatch.
+pub(super) async fn apply_patch_ops(
+    ops: &[crate::apply_patch::PatchOp],
+    workspace_root: Option<&Path>,
+    additional_roots: &[&Path],
+    readonly_roots: &[&Path],
+) -> ToolResult {
+    let root = workspace_root.ok_or(ToolError::Unavailable("workspace directory"))?;
     let result =
-        crate::apply_patch::apply_patch_ext(&ops, root, additional_roots, readonly_roots).await;
+        crate::apply_patch::apply_patch_ext(ops, root, additional_roots, readonly_roots).await;
     if result.is_ok() {
         Ok(result.summary())
     } else {
@@ -785,15 +909,84 @@ mod toolerror_tests {
         }
     }
 
+    /// Every workspace path a tool declares must be expandable, or `@name` silently
+    /// resolves against the agent workspace instead — the bug this table exists to
+    /// prevent, one renamed key away.
+    ///
+    /// Keys that name a path *inside a skill directory* are excluded: they are not
+    /// workspace paths, so there is no mount for `@name` to resolve against.
+    #[test]
+    fn every_workspace_path_argument_is_in_the_alias_table() {
+        const NOT_WORKSPACE_PATHS: &[(&str, &str)] = &[
+            ("skill_read_file", "path"),
+            ("skill_evolve_write_file", "path"),
+            ("skill_evolve_remove_file", "path"),
+        ];
+
+        let mut missing = Vec::new();
+        for tool in crate::tool_runner::builtin_tool_definitions() {
+            let Some(properties) = tool.input_schema.get("properties") else {
+                continue;
+            };
+            let Some(properties) = properties.as_object() else {
+                continue;
+            };
+            for key in properties.keys() {
+                if !key.contains("path") {
+                    continue;
+                }
+                let excluded = NOT_WORKSPACE_PATHS
+                    .iter()
+                    .any(|(tool_name, key_name)| *tool_name == tool.name && key_name == key);
+                let listed = ALIAS_PATH_KEYS
+                    .iter()
+                    .any(|(tool_name, key_name)| *tool_name == tool.name && key_name == key);
+                if !listed && !excluded {
+                    missing.push(format!("{}.{key}", tool.name));
+                }
+            }
+        }
+        missing.sort();
+
+        assert!(
+            missing.is_empty(),
+            "rows missing from ALIAS_PATH_KEYS: {missing:?} — an `@name` in those arguments would resolve against the agent workspace"
+        );
+
+        // The reverse direction: a row that matches no tool, or a tool that has no
+        // such property, covers nothing while looking like coverage — and a typo in
+        // either half is how the real key ends up unexpanded.
+        let definitions = crate::tool_runner::builtin_tool_definitions();
+        let mut orphaned = Vec::new();
+        for (tool_name, key) in ALIAS_PATH_KEYS {
+            let Some(tool) = definitions.iter().find(|tool| tool.name == *tool_name) else {
+                orphaned.push(format!("{tool_name}.{key} (no such tool)"));
+                continue;
+            };
+            let has_property = tool
+                .input_schema
+                .get("properties")
+                .and_then(|properties| properties.as_object())
+                .is_some_and(|properties| properties.contains_key(*key));
+            if !has_property {
+                orphaned.push(format!("{tool_name}.{key} (no such property)"));
+            }
+        }
+        assert!(
+            orphaned.is_empty(),
+            "rows in ALIAS_PATH_KEYS that cover nothing: {orphaned:?}"
+        );
+    }
+
     #[tokio::test]
     async fn apply_patch_missing_patch_is_missing_parameter() {
-        let r = tool_apply_patch(&json!({}), None, &[], &[]).await;
+        let r = parse_and_expand_patch(&json!({}), &[]);
         assert!(matches!(r, Err(ToolError::MissingParameter("patch"))));
     }
 
     #[tokio::test]
     async fn apply_patch_without_workspace_is_unavailable() {
-        let r = tool_apply_patch(&json!({"patch": "x"}), None, &[], &[]).await;
+        let r = apply_patch_ops(&[], None, &[], &[]).await;
         assert!(matches!(
             r,
             Err(ToolError::Unavailable("workspace directory"))

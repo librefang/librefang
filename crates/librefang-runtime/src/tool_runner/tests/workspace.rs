@@ -2200,6 +2200,935 @@ async fn alias_write_into_a_readonly_workspace_is_still_denied() {
     assert_eq!(std::fs::read_to_string(&target).unwrap(), "original");
 }
 
+// ── `@alias` inside an `apply_patch` body (#8051 follow-up) ──────────
+//
+// `ALIAS_PATH_KEYS` rewrites a path *argument*, and `apply_patch` has none: its paths live in `*** Update File:` headers.
+// Before this, an agent that followed its own TOOLS.md and patched `@vault/note.md` got a literal `<workspace>/@vault/` directory and a cheerful "1 added" — the same silent miss #8051 fixed for `file_write`.
+
+#[tokio::test]
+async fn alias_path_inside_a_patch_lands_in_the_named_workspace() {
+    use librefang_types::agent::WorkspaceMode;
+
+    let primary = tempfile::tempdir().expect("primary");
+    let shared = tempfile::tempdir().expect("shared");
+    let shared_canon = shared.path().canonicalize().unwrap();
+    let kernel = make_aliased_ws_kernel(vec![(
+        "vault".to_string(),
+        shared_canon.clone(),
+        WorkspaceMode::ReadWrite,
+    )]);
+
+    let patch =
+        "*** Begin Patch\n*** Add File: @vault/added.md\n+hello-from-alias\n*** End Patch\n";
+    let result = run_named_ws_tool(
+        "apply_patch",
+        &serde_json::json!({"patch": patch}),
+        &kernel,
+        primary.path(),
+    )
+    .await;
+
+    assert!(!result.is_error, "got error: {}", result.content);
+    assert_eq!(
+        std::fs::read_to_string(shared_canon.join("added.md")).unwrap(),
+        "hello-from-alias"
+    );
+    assert!(
+        !primary.path().join("@vault").exists(),
+        "the alias must not leave a literal '@vault' directory in the workspace"
+    );
+}
+
+#[tokio::test]
+async fn alias_path_inside_a_patch_update_and_move_are_expanded() {
+    use librefang_types::agent::WorkspaceMode;
+
+    let primary = tempfile::tempdir().expect("primary");
+    let shared = tempfile::tempdir().expect("shared");
+    let shared_canon = shared.path().canonicalize().unwrap();
+    std::fs::write(shared_canon.join("note.md"), "old line\n").unwrap();
+    let kernel = make_aliased_ws_kernel(vec![(
+        "vault".to_string(),
+        shared_canon.clone(),
+        WorkspaceMode::ReadWrite,
+    )]);
+
+    let patch = "*** Begin Patch\n*** Update File: @vault/note.md -> @vault/moved.md\n@@\n-old line\n+new line\n*** End Patch\n";
+    let result = run_named_ws_tool(
+        "apply_patch",
+        &serde_json::json!({"patch": patch}),
+        &kernel,
+        primary.path(),
+    )
+    .await;
+
+    assert!(!result.is_error, "got error: {}", result.content);
+    assert_eq!(
+        std::fs::read_to_string(shared_canon.join("moved.md")).unwrap(),
+        "new line\n"
+    );
+    assert!(!shared_canon.join("note.md").exists(), "source should move");
+    assert!(!primary.path().join("@vault").exists());
+}
+
+#[tokio::test]
+async fn unknown_alias_inside_a_patch_names_the_declared_aliases() {
+    use librefang_types::agent::WorkspaceMode;
+
+    let primary = tempfile::tempdir().expect("primary");
+    let shared = tempfile::tempdir().expect("shared");
+    let shared_canon = shared.path().canonicalize().unwrap();
+    let kernel = make_aliased_ws_kernel(vec![(
+        "vault".to_string(),
+        shared_canon.clone(),
+        WorkspaceMode::ReadWrite,
+    )]);
+
+    let patch = "*** Begin Patch\n*** Add File: @valut/x.md\n+x\n*** End Patch\n";
+    let result = run_named_ws_tool(
+        "apply_patch",
+        &serde_json::json!({"patch": patch}),
+        &kernel,
+        primary.path(),
+    )
+    .await;
+
+    assert!(
+        result.is_error,
+        "a typo must not resolve: {}",
+        result.content
+    );
+    assert!(
+        result.content.contains("@valut") && result.content.contains("@vault"),
+        "error must name the typo and the real alias, got: {}",
+        result.content
+    );
+    assert!(!shared_canon.join("x.md").exists());
+    assert!(!primary.path().join("@valut").exists());
+}
+
+#[tokio::test]
+async fn alias_inside_a_patch_cannot_climb_out_of_the_workspace() {
+    use librefang_types::agent::WorkspaceMode;
+
+    let primary = tempfile::tempdir().expect("primary");
+    let shared = tempfile::tempdir().expect("shared");
+    let shared_canon = shared.path().canonicalize().unwrap();
+    let kernel = make_aliased_ws_kernel(vec![(
+        "vault".to_string(),
+        shared_canon,
+        WorkspaceMode::ReadWrite,
+    )]);
+
+    let patch = "*** Begin Patch\n*** Add File: @vault/../../escaped.txt\n+x\n*** End Patch\n";
+    let result = run_named_ws_tool(
+        "apply_patch",
+        &serde_json::json!({"patch": patch}),
+        &kernel,
+        primary.path(),
+    )
+    .await;
+
+    assert!(
+        result.is_error,
+        "traversal must be rejected: {}",
+        result.content
+    );
+    assert!(
+        result.content.contains(".."),
+        "error must name the offending component, got: {}",
+        result.content
+    );
+}
+
+#[tokio::test]
+async fn alias_inside_a_patch_cannot_write_a_readonly_workspace() {
+    use librefang_types::agent::WorkspaceMode;
+
+    let primary = tempfile::tempdir().expect("primary");
+    let shared = tempfile::tempdir().expect("shared");
+    let shared_canon = shared.path().canonicalize().unwrap();
+    let kernel = make_aliased_ws_kernel(vec![(
+        "vault".to_string(),
+        shared_canon.clone(),
+        WorkspaceMode::ReadOnly,
+    )]);
+
+    let patch = "*** Begin Patch\n*** Add File: @vault/locked.md\n+x\n*** End Patch\n";
+    let result = run_named_ws_tool(
+        "apply_patch",
+        &serde_json::json!({"patch": patch}),
+        &kernel,
+        primary.path(),
+    )
+    .await;
+
+    assert!(
+        result.is_error,
+        "the alias must not be a way around a read-only mount: {}",
+        result.content
+    );
+    assert!(!shared_canon.join("locked.md").exists());
+}
+
+#[tokio::test]
+async fn alias_denial_of_a_read_only_target_aborts_the_whole_patch() {
+    use librefang_types::tool::ToolExecutionStatus;
+
+    // A read-only target reached through an alias must be rejected as a whole patch, exactly like the same target reached by absolute path.
+    // Otherwise a mixed patch applies its writable operations and reports the read-only one as a partial-apply error, and the model (whose prompt told it the alias and the absolute path are interchangeable) has no way to predict which of the two it will get.
+    use librefang_types::agent::WorkspaceMode;
+
+    let primary = tempfile::tempdir().expect("primary");
+    let locked = tempfile::tempdir().expect("locked");
+    let shared = tempfile::tempdir().expect("shared");
+    let locked_canon = locked.path().canonicalize().unwrap();
+    let shared_canon = shared.path().canonicalize().unwrap();
+    let kernel = make_aliased_ws_kernel(vec![
+        (
+            "locked".to_string(),
+            locked_canon.clone(),
+            WorkspaceMode::ReadOnly,
+        ),
+        (
+            "shared".to_string(),
+            shared_canon.clone(),
+            WorkspaceMode::ReadWrite,
+        ),
+    ]);
+
+    let patch = "*** Begin Patch\n*** Add File: @locked/x.md\n+a\n*** Add File: @shared/ok.md\n+b\n*** End Patch\n";
+    let result = run_named_ws_tool(
+        "apply_patch",
+        &serde_json::json!({"patch": patch}),
+        &kernel,
+        primary.path(),
+    )
+    .await;
+
+    assert!(result.is_error, "expected denial, got: {}", result.content);
+    assert_eq!(
+        result.status,
+        ToolExecutionStatus::Denied,
+        "a read-only denial is soft, not a hard error: {}",
+        result.content
+    );
+    assert!(
+        result.content.contains("is in a read-only named workspace"),
+        "denial must keep the read-only wording, got: {}",
+        result.content
+    );
+    assert!(
+        !shared_canon.join("ok.md").exists(),
+        "the writable half of the patch must not be applied"
+    );
+    assert!(!locked_canon.join("x.md").exists());
+    assert!(!primary.path().join("@locked").exists());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn an_alias_that_reaches_a_read_only_mount_through_a_symlink_is_still_a_whole_patch_denial() {
+    use librefang_types::agent::WorkspaceMode;
+
+    // The pre-check compares the path it can see; the resolver compares the path it canonicalizes.
+    // A symlink inside a writable mount that points into a read-only one is where those two disagree — and the per-operation check downstream would then apply the rest of the patch instead of refusing it.
+    let primary = tempfile::tempdir().expect("primary");
+    let locked = tempfile::tempdir().expect("locked");
+    let shared = tempfile::tempdir().expect("shared");
+    let locked_canon = locked.path().canonicalize().unwrap();
+    let shared_canon = shared.path().canonicalize().unwrap();
+    std::os::unix::fs::symlink(&locked_canon, shared_canon.join("lnk")).unwrap();
+
+    let kernel = make_aliased_ws_kernel(vec![
+        (
+            "locked".to_string(),
+            locked_canon.clone(),
+            WorkspaceMode::ReadOnly,
+        ),
+        (
+            "shared".to_string(),
+            shared_canon.clone(),
+            WorkspaceMode::ReadWrite,
+        ),
+    ]);
+
+    let patch = "*** Begin Patch\n*** Add File: @shared/lnk/x.md\n+a\n*** Add File: @shared/sib.md\n+b\n*** End Patch\n";
+    let result = run_named_ws_tool(
+        "apply_patch",
+        &serde_json::json!({"patch": patch}),
+        &kernel,
+        primary.path(),
+    )
+    .await;
+
+    assert!(result.is_error, "got: {}", result.content);
+    assert!(
+        matches!(
+            result.status,
+            librefang_types::tool::ToolExecutionStatus::Denied
+        ),
+        "a read-only denial reached through a symlink is still soft: {}",
+        result.content
+    );
+    assert!(
+        !shared_canon.join("sib.md").exists(),
+        "the writable half of the patch must not be applied"
+    );
+    assert!(!locked_canon.join("x.md").exists());
+}
+
+#[tokio::test]
+async fn read_only_denial_covers_update_and_delete_headers() {
+    use librefang_types::agent::WorkspaceMode;
+
+    // Same whole-patch contract as the Add File case, for the two headers that name a path only in their first line (`Update File: … -> …`) or name a file they do not create (`Delete File:`).
+    let primary = tempfile::tempdir().expect("primary");
+    let locked = tempfile::tempdir().expect("locked");
+    let shared = tempfile::tempdir().expect("shared");
+    let locked_canon = locked.path().canonicalize().unwrap();
+    let shared_canon = shared.path().canonicalize().unwrap();
+    std::fs::write(locked_canon.join("victim.md"), "do not touch").unwrap();
+    std::fs::write(shared_canon.join("movable.md"), "move me\n").unwrap();
+
+    let kernel = make_aliased_ws_kernel(vec![
+        (
+            "locked".to_string(),
+            locked_canon.clone(),
+            WorkspaceMode::ReadOnly,
+        ),
+        (
+            "shared".to_string(),
+            shared_canon.clone(),
+            WorkspaceMode::ReadWrite,
+        ),
+    ]);
+
+    let cases = [
+        "*** Begin Patch\n*** Delete File: @locked/victim.md\n*** Add File: @shared/sib.md\n+b\n*** End Patch\n",
+        "*** Begin Patch\n*** Update File: @locked/victim.md\n@@\n-do not touch\n+changed\n*** Add File: @shared/sib.md\n+b\n*** End Patch\n",
+        "*** Begin Patch\n*** Update File: @shared/movable.md -> @locked/stolen.md\n@@\n-move me\n+moved\n*** Add File: @shared/sib.md\n+b\n*** End Patch\n",
+    ];
+
+    for patch in cases {
+        let header = patch.lines().nth(1).unwrap_or_default();
+        let result = run_named_ws_tool(
+            "apply_patch",
+            &serde_json::json!({"patch": patch}),
+            &kernel,
+            primary.path(),
+        )
+        .await;
+
+        assert!(result.is_error, "[{header}] got: {}", result.content);
+        assert!(
+            matches!(
+                result.status,
+                librefang_types::tool::ToolExecutionStatus::Denied
+            ),
+            "[{header}] must be a whole-patch denial: {}",
+            result.content
+        );
+        assert!(
+            !shared_canon.join("sib.md").exists(),
+            "[{header}] the writable sibling must not be written"
+        );
+    }
+
+    assert_eq!(
+        std::fs::read_to_string(locked_canon.join("victim.md")).unwrap(),
+        "do not touch"
+    );
+    assert!(!locked_canon.join("stolen.md").exists());
+    assert!(shared_canon.join("movable.md").exists());
+}
+
+#[tokio::test]
+async fn media_transcribe_expands_both_of_its_paths() {
+    use librefang_types::agent::WorkspaceMode;
+
+    // `media_transcribe` takes the input file and the transcript destination.
+    // Expanding only one of them is the silent-miss bug again, one key over.
+    let shared = tempfile::tempdir().expect("shared");
+    let shared_canon = shared.path().canonicalize().unwrap();
+    let kernel = make_aliased_ws_kernel(vec![(
+        "vault".to_string(),
+        shared_canon.clone(),
+        WorkspaceMode::ReadWrite,
+    )]);
+
+    let input = serde_json::json!({"path": "@vault/rec.mp3", "out_path": "@vault/rec.md"});
+    let rewritten = expand_alias_in_tool_input(
+        "media_transcribe",
+        &input,
+        Some(&kernel),
+        Some("00000000-0000-0000-0000-000000000001"),
+    )
+    .expect("expansion must succeed")
+    .expect("both paths are aliases, so the input is rewritten");
+
+    assert_eq!(
+        rewritten["path"].as_str().unwrap(),
+        shared_canon.join("rec.mp3").to_str().unwrap()
+    );
+    assert_eq!(
+        rewritten["out_path"].as_str().unwrap(),
+        shared_canon.join("rec.md").to_str().unwrap()
+    );
+}
+
+#[tokio::test]
+async fn speech_to_text_expands_its_path() {
+    use librefang_types::agent::WorkspaceMode;
+
+    let shared = tempfile::tempdir().expect("shared");
+    let shared_canon = shared.path().canonicalize().unwrap();
+    let kernel = make_aliased_ws_kernel(vec![(
+        "vault".to_string(),
+        shared_canon.clone(),
+        WorkspaceMode::ReadWrite,
+    )]);
+
+    let input = serde_json::json!({"path": "@vault/rec.mp3"});
+    let rewritten = expand_alias_in_tool_input(
+        "speech_to_text",
+        &input,
+        Some(&kernel),
+        Some("00000000-0000-0000-0000-000000000001"),
+    )
+    .expect("expansion must succeed")
+    .expect("the path is an alias, so the input is rewritten");
+
+    assert_eq!(
+        rewritten["path"].as_str().unwrap(),
+        shared_canon.join("rec.mp3").to_str().unwrap()
+    );
+}
+
+#[tokio::test]
+async fn media_transcribe_will_not_write_its_transcript_into_a_read_only_mount() {
+    use librefang_types::tool::ToolExecutionStatus;
+
+    // The arm hands the tool every mount so the *input* file can be read from a
+    // read-only one; that is not a licence to write the destination there, and
+    // the transcript is opened with `truncate`, so a miss here overwrites a file
+    // the mount was declared to protect.
+    use librefang_types::agent::WorkspaceMode;
+
+    let primary = tempfile::tempdir().expect("primary");
+    let locked = tempfile::tempdir().expect("locked");
+    let locked_canon = locked.path().canonicalize().unwrap();
+    std::fs::write(locked_canon.join("notes.md"), "curated").unwrap();
+    let kernel = make_aliased_ws_kernel(vec![(
+        "vault".to_string(),
+        locked_canon.clone(),
+        WorkspaceMode::ReadOnly,
+    )]);
+
+    let result = run_named_ws_tool(
+        "media_transcribe",
+        &serde_json::json!({"path": "/tmp/rec.oga", "out_path": "@vault/notes.md"}),
+        &kernel,
+        primary.path(),
+    )
+    .await;
+
+    assert!(result.is_error, "got: {}", result.content);
+    assert_eq!(
+        result.status,
+        ToolExecutionStatus::Denied,
+        "a read-only denial is soft: {}",
+        result.content
+    );
+    assert!(
+        result.content.contains("is in a read-only named workspace"),
+        "got: {}",
+        result.content
+    );
+    assert_eq!(
+        std::fs::read_to_string(locked_canon.join("notes.md")).unwrap(),
+        "curated"
+    );
+}
+
+#[tokio::test]
+async fn a_move_out_of_a_named_workspace_to_a_relative_destination_is_rejected() {
+    use librefang_types::agent::WorkspaceMode;
+
+    // A relative `move_to` resolves against the agent workspace, while the source
+    // is an absolute path inside the mount — so the move lands in a directory the
+    // user never sees and the source is removed afterwards.
+    let primary = tempfile::tempdir().expect("primary");
+    let shared = tempfile::tempdir().expect("shared");
+    let shared_canon = shared.path().canonicalize().unwrap();
+    std::fs::write(shared_canon.join("note.md"), "keep me\n").unwrap();
+    let kernel = make_aliased_ws_kernel(vec![(
+        "vault".to_string(),
+        shared_canon.clone(),
+        WorkspaceMode::ReadWrite,
+    )]);
+
+    let cases = [
+        "*** Begin Patch\n*** Update File: @vault/note.md -> notes-2026.md\n@@\n-keep me\n+renamed\n*** End Patch\n",
+    ];
+    for patch in cases {
+        let result = run_named_ws_tool(
+            "apply_patch",
+            &serde_json::json!({"patch": patch}),
+            &kernel,
+            primary.path(),
+        )
+        .await;
+
+        assert!(result.is_error, "got: {}", result.content);
+        assert!(
+            result.content.contains("rather than the named workspace"),
+            "got: {}",
+            result.content
+        );
+        assert_eq!(
+            std::fs::read_to_string(shared_canon.join("note.md")).unwrap(),
+            "keep me\n",
+            "the source must not be removed"
+        );
+        assert!(
+            !primary.path().join("notes-2026.md").exists(),
+            "nothing may be moved into the agent workspace"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_rename_inside_the_agent_workspace_still_works() {
+    use librefang_types::agent::WorkspaceMode;
+
+    // The rename rule is about `@name` sources only: an agent that declares a mount
+    // can still rename its own files with a relative destination, which is what the
+    // resolver has always done for an absolute source inside the workspace.
+    let primary = tempfile::tempdir().expect("primary");
+    let primary_canon = primary.path().canonicalize().unwrap();
+    std::fs::write(primary_canon.join("a.md"), "old\n").unwrap();
+    let shared = tempfile::tempdir().expect("shared");
+    let kernel = make_aliased_ws_kernel(vec![(
+        "vault".to_string(),
+        shared.path().canonicalize().unwrap(),
+        WorkspaceMode::ReadWrite,
+    )]);
+
+    let patch = format!(
+        "*** Begin Patch\n*** Update File: {} -> b.md\n@@\n-old\n+new\n*** End Patch\n",
+        primary_canon.join("a.md").display()
+    );
+    let result = run_named_ws_tool(
+        "apply_patch",
+        &serde_json::json!({"patch": patch}),
+        &kernel,
+        primary.path(),
+    )
+    .await;
+
+    assert!(!result.is_error, "got error: {}", result.content);
+    assert!(!primary_canon.join("a.md").exists(), "source should move");
+    assert_eq!(
+        std::fs::read_to_string(primary_canon.join("b.md")).unwrap(),
+        "new\n"
+    );
+}
+
+#[tokio::test]
+async fn a_relative_patch_target_through_a_workspace_symlink_into_a_read_only_mount_is_denied() {
+    use librefang_types::agent::WorkspaceMode;
+    use librefang_types::tool::ToolExecutionStatus;
+
+    let primary = tempfile::tempdir().expect("primary");
+    let locked = tempfile::tempdir().expect("locked");
+    let shared = tempfile::tempdir().expect("shared");
+    let primary_canon = primary.path().canonicalize().unwrap();
+    let locked_canon = locked.path().canonicalize().unwrap();
+    let shared_canon = shared.path().canonicalize().unwrap();
+    std::fs::write(locked_canon.join("victim.md"), "curated").unwrap();
+    std::os::unix::fs::symlink(&locked_canon, primary_canon.join("lnk")).unwrap();
+    let kernel = make_aliased_ws_kernel(vec![
+        (
+            "locked".to_string(),
+            locked_canon.clone(),
+            WorkspaceMode::ReadOnly,
+        ),
+        (
+            "shared".to_string(),
+            shared_canon.clone(),
+            WorkspaceMode::ReadWrite,
+        ),
+    ]);
+
+    let patch = "*** Begin Patch\n*** Add File: lnk/x.md\n+x\n*** Add File: @shared/sib.md\n+b\n*** End Patch\n";
+    let result = run_named_ws_tool(
+        "apply_patch",
+        &serde_json::json!({"patch": patch}),
+        &kernel,
+        primary.path(),
+    )
+    .await;
+
+    assert!(result.is_error, "got: {}", result.content);
+    assert_eq!(
+        result.status,
+        ToolExecutionStatus::Denied,
+        "a whole-patch denial, not a partial apply: {}",
+        result.content
+    );
+    assert!(
+        !shared_canon.join("sib.md").exists(),
+        "the writable half must not be applied"
+    );
+    assert!(!locked_canon.join("x.md").exists());
+}
+
+#[tokio::test]
+async fn media_transcribe_out_path_through_a_workspace_symlink_into_a_read_only_mount_is_denied() {
+    use librefang_types::tool::ToolExecutionStatus;
+
+    // The destination is relative, so it resolves inside the agent workspace — and a
+    // symlink there can point into a read-only mount.
+    use librefang_types::agent::WorkspaceMode;
+
+    let primary = tempfile::tempdir().expect("primary");
+    let locked = tempfile::tempdir().expect("locked");
+    let locked_canon = locked.path().canonicalize().unwrap();
+    std::fs::write(locked_canon.join("notes.md"), "curated").unwrap();
+    std::os::unix::fs::symlink(
+        locked_canon.join("notes.md"),
+        primary.path().join("link.md"),
+    )
+    .unwrap();
+    let kernel = make_aliased_ws_kernel(vec![(
+        "vault".to_string(),
+        locked_canon.clone(),
+        WorkspaceMode::ReadOnly,
+    )]);
+
+    let result = run_named_ws_tool(
+        "media_transcribe",
+        &serde_json::json!({"path": "/tmp/rec.oga", "out_path": "link.md"}),
+        &kernel,
+        primary.path(),
+    )
+    .await;
+
+    assert!(result.is_error, "got: {}", result.content);
+    assert_eq!(
+        result.status,
+        ToolExecutionStatus::Denied,
+        "got: {}",
+        result.content
+    );
+    assert_eq!(
+        std::fs::read_to_string(locked_canon.join("notes.md")).unwrap(),
+        "curated"
+    );
+}
+
+#[tokio::test]
+async fn media_transcribe_out_path_through_a_mount_symlink_into_a_read_only_mount_is_denied() {
+    use librefang_types::agent::WorkspaceMode;
+    use librefang_types::tool::ToolExecutionStatus;
+
+    // Same shape, but reached through an `@name` destination whose mount contains a
+    // symlink into the read-only one: the check has to canonicalize to see it.
+    let primary = tempfile::tempdir().expect("primary");
+    let locked = tempfile::tempdir().expect("locked");
+    let shared = tempfile::tempdir().expect("shared");
+    let locked_canon = locked.path().canonicalize().unwrap();
+    let shared_canon = shared.path().canonicalize().unwrap();
+    std::fs::write(locked_canon.join("notes.md"), "curated").unwrap();
+    std::os::unix::fs::symlink(&locked_canon, shared_canon.join("lnk")).unwrap();
+    let kernel = make_aliased_ws_kernel(vec![
+        (
+            "locked".to_string(),
+            locked_canon.clone(),
+            WorkspaceMode::ReadOnly,
+        ),
+        ("shared".to_string(), shared_canon, WorkspaceMode::ReadWrite),
+    ]);
+
+    let result = run_named_ws_tool(
+        "media_transcribe",
+        &serde_json::json!({"path": "/tmp/rec.oga", "out_path": "@shared/lnk/notes.md"}),
+        &kernel,
+        primary.path(),
+    )
+    .await;
+
+    assert!(result.is_error, "got: {}", result.content);
+    assert_eq!(
+        result.status,
+        ToolExecutionStatus::Denied,
+        "got: {}",
+        result.content
+    );
+    assert_eq!(
+        std::fs::read_to_string(locked_canon.join("notes.md")).unwrap(),
+        "curated"
+    );
+}
+
+#[tokio::test]
+async fn a_dotdot_tail_is_rejected_by_the_alias_resolver() {
+    use librefang_types::agent::WorkspaceMode;
+
+    // The directory guard no longer lists `/..`: the alias resolver refuses a
+    // parent-dir remainder first, with its own diagnostic. Pin which message a
+    // caller actually gets, so the two cannot drift silently.
+    let primary = tempfile::tempdir().expect("primary");
+    let shared = tempfile::tempdir().expect("shared");
+    let shared_canon = shared.path().canonicalize().unwrap();
+    let kernel = make_aliased_ws_kernel(vec![(
+        "shared".to_string(),
+        shared_canon,
+        WorkspaceMode::ReadWrite,
+    )]);
+
+    let patch = "*** Begin Patch\n*** Add File: @shared/x/..\n+x\n*** End Patch\n";
+    let result = run_named_ws_tool(
+        "apply_patch",
+        &serde_json::json!({"patch": patch}),
+        &kernel,
+        primary.path(),
+    )
+    .await;
+
+    assert!(result.is_error, "got: {}", result.content);
+    assert!(
+        result.content.contains("'..' components are forbidden"),
+        "got: {}",
+        result.content
+    );
+}
+
+#[tokio::test]
+async fn an_existing_directory_without_a_trailing_slash_is_rejected_as_a_patch_target() {
+    use librefang_types::agent::WorkspaceMode;
+
+    // No directory-shaped spelling here, so this case is caught only by looking
+    // at where the path resolves to.
+    let primary = tempfile::tempdir().expect("primary");
+    let shared = tempfile::tempdir().expect("shared");
+    let shared_canon = shared.path().canonicalize().unwrap();
+    std::fs::create_dir(shared_canon.join("notes")).unwrap();
+    let kernel = make_aliased_ws_kernel(vec![(
+        "shared".to_string(),
+        shared_canon.clone(),
+        WorkspaceMode::ReadWrite,
+    )]);
+
+    let patch = "*** Begin Patch\n*** Add File: @shared/notes\n+x\n*** End Patch\n";
+    let result = run_named_ws_tool(
+        "apply_patch",
+        &serde_json::json!({"patch": patch}),
+        &kernel,
+        primary.path(),
+    )
+    .await;
+
+    assert!(result.is_error, "got: {}", result.content);
+    assert!(
+        result.content.contains("names a directory"),
+        "must get the directory diagnostic, got: {}",
+        result.content
+    );
+    assert!(
+        !result.content.contains("os error"),
+        "raw OS error leaked: {}",
+        result.content
+    );
+    assert!(
+        shared_canon.join("notes").is_dir(),
+        "directory must survive"
+    );
+}
+
+#[tokio::test]
+async fn a_relative_path_that_starts_with_at_but_names_no_alias_says_so_with_a_hint() {
+    use librefang_types::agent::WorkspaceMode;
+
+    // An agent that declares at least one mount can no longer create a file whose name merely starts with `@` through a relative path.
+    // That is the same rule `file_read`/`file_write` already apply, so the fix is the diagnostic, not the behaviour: say what happened and how to address the file instead.
+    let primary = tempfile::tempdir().expect("primary");
+    let shared = tempfile::tempdir().expect("shared");
+    let shared_canon = shared.path().canonicalize().unwrap();
+    let kernel = make_aliased_ws_kernel(vec![(
+        "vault".to_string(),
+        shared_canon,
+        WorkspaceMode::ReadWrite,
+    )]);
+
+    let patch = "*** Begin Patch\n*** Add File: @vault.md\n+x\n*** End Patch\n";
+    let result = run_named_ws_tool(
+        "apply_patch",
+        &serde_json::json!({"patch": patch}),
+        &kernel,
+        primary.path(),
+    )
+    .await;
+
+    assert!(result.is_error, "got: {}", result.content);
+    assert!(
+        result
+            .content
+            .contains("unknown named workspace '@vault.md'"),
+        "got: {}",
+        result.content
+    );
+    assert!(
+        result.content.contains("absolute path"),
+        "error must point at the absolute-path escape hatch, got: {}",
+        result.content
+    );
+    assert!(!primary.path().join("@vault.md").exists());
+}
+
+#[tokio::test]
+async fn a_bare_alias_is_not_a_valid_patch_target() {
+    use librefang_types::agent::WorkspaceMode;
+
+    // `@vault` names the mount directory, and TOOLS.md advertises that form for reads, so a model told to "add a file in @vault" can emit it as a patch target.
+    // Before this guard it reached the filesystem, surfaced an OS error (`File exists` / `Is a directory`) and, for Add File, staged a temp file in the directory *above* the mount.
+    let primary = tempfile::tempdir().expect("primary");
+    let shared = tempfile::tempdir().expect("shared");
+    let shared_canon = shared.path().canonicalize().unwrap();
+    std::fs::write(shared_canon.join("keep.txt"), "keep").unwrap();
+    let kernel = make_aliased_ws_kernel(vec![(
+        "shared".to_string(),
+        shared_canon.clone(),
+        WorkspaceMode::ReadWrite,
+    )]);
+
+    let cases = [
+        "*** Begin Patch\n*** Add File: @shared\n+x\n*** End Patch\n",
+        "*** Begin Patch\n*** Delete File: @shared\n*** End Patch\n",
+        // Same directory, different spelling: `@name/.` has no trailing slash, so a shape-only guard lets it through to the filesystem.
+        "*** Begin Patch\n*** Add File: @shared/.\n+x\n*** End Patch\n",
+        // A directory *inside* the mount: the diagnostic must not claim the header named the workspace itself.
+        "*** Begin Patch\n*** Add File: @shared/newdir/\n+x\n*** End Patch\n",
+    ];
+    for patch in cases {
+        let header = patch.lines().nth(1).unwrap_or_default();
+        let result = run_named_ws_tool(
+            "apply_patch",
+            &serde_json::json!({"patch": patch}),
+            &kernel,
+            primary.path(),
+        )
+        .await;
+
+        assert!(result.is_error, "[{header}] got: {}", result.content);
+        assert!(
+            result.content.contains("names a directory"),
+            "[{header}] error must say the target is a directory, got: {}",
+            result.content
+        );
+        assert!(
+            !result.content.contains("os error"),
+            "[{header}] raw OS error leaked: {}",
+            result.content
+        );
+        // The misdiagnosis this guard exists to avoid: `@shared/newdir/` is a directory *inside* the mount, not the mount itself.
+        assert!(
+            !result.content.contains("named workspace itself") || header == "*** Add File: @shared",
+            "[{header}] got the bare-alias wording for a subdirectory: {}",
+            result.content
+        );
+    }
+
+    assert!(shared_canon.is_dir(), "mount directory must survive");
+    assert!(shared_canon.join("keep.txt").exists());
+}
+
+#[tokio::test]
+async fn alias_path_inside_a_patch_deletes_a_file_in_the_named_workspace() {
+    use librefang_types::agent::WorkspaceMode;
+
+    let primary = tempfile::tempdir().expect("primary");
+    let shared = tempfile::tempdir().expect("shared");
+    let shared_canon = shared.path().canonicalize().unwrap();
+    std::fs::write(shared_canon.join("gone.md"), "bye").unwrap();
+    let kernel = make_aliased_ws_kernel(vec![(
+        "vault".to_string(),
+        shared_canon.clone(),
+        WorkspaceMode::ReadWrite,
+    )]);
+
+    let patch = "*** Begin Patch\n*** Delete File: @vault/gone.md\n*** End Patch\n";
+    let result = run_named_ws_tool(
+        "apply_patch",
+        &serde_json::json!({"patch": patch}),
+        &kernel,
+        primary.path(),
+    )
+    .await;
+
+    assert!(!result.is_error, "got error: {}", result.content);
+    assert!(!shared_canon.join("gone.md").exists(), "file must be gone");
+    assert!(
+        !primary.path().join("@vault").exists(),
+        "the alias must not leave a literal directory behind"
+    );
+}
+
+#[tokio::test]
+async fn a_patch_that_mentions_a_path_in_its_content_is_not_rewritten() {
+    use librefang_types::agent::WorkspaceMode;
+
+    let primary = tempfile::tempdir().expect("primary");
+    let shared = tempfile::tempdir().expect("shared");
+    let shared_canon = shared.path().canonicalize().unwrap();
+    let kernel = make_aliased_ws_kernel(vec![(
+        "vault".to_string(),
+        shared_canon.clone(),
+        WorkspaceMode::ReadWrite,
+    )]);
+
+    // The body *documents* the patch format; expanding the raw text instead of the parsed ops would rewrite these two lines.
+    let patch = "*** Begin Patch\n*** Add File: notes.md\n+*** Add File: @vault/evil.md\n+@vault/other.md\n*** End Patch\n";
+    let result = run_named_ws_tool(
+        "apply_patch",
+        &serde_json::json!({"patch": patch}),
+        &kernel,
+        primary.path(),
+    )
+    .await;
+
+    assert!(!result.is_error, "got error: {}", result.content);
+    assert_eq!(
+        std::fs::read_to_string(primary.path().join("notes.md")).unwrap(),
+        "*** Add File: @vault/evil.md\n@vault/other.md"
+    );
+    assert!(!shared_canon.join("evil.md").exists());
+    assert!(!shared_canon.join("other.md").exists());
+}
+
+#[tokio::test]
+async fn a_leading_at_sign_in_a_patch_is_left_alone_when_no_named_workspace_exists() {
+    // With nothing declared there is no alias the agent could have meant, so the name stays a plain relative path inside the agent's own workspace.
+    let primary = tempfile::tempdir().expect("primary");
+    let kernel = make_aliased_ws_kernel(vec![]);
+
+    let patch = "*** Begin Patch\n*** Add File: @literal.md\n+at-file\n*** End Patch\n";
+    let result = run_named_ws_tool(
+        "apply_patch",
+        &serde_json::json!({"patch": patch}),
+        &kernel,
+        primary.path(),
+    )
+    .await;
+
+    assert!(!result.is_error, "got error: {}", result.content);
+    assert_eq!(
+        std::fs::read_to_string(primary.path().join("@literal.md")).unwrap(),
+        "at-file"
+    );
+}
+
 #[tokio::test]
 async fn a_leading_at_sign_is_left_alone_when_no_named_workspace_exists() {
     // With nothing declared there is no alias the agent could have meant, so a
