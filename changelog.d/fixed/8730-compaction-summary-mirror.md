@@ -1,4 +1,0 @@
-Close the gaps left by the per-session compaction summary mirror from #8646.
-Switching an agent's model, or restoring a manifest that changes it, cleared only the agent's canonical session, so the prompt fell back to the per-session mirror and the old model's summary came straight back; the wipe now removes the mirrors in the same transaction.
-A conversation that compacted again after another one had taken the agent's single canonical summary slot restarted its summary from nothing and lost everything compacted before, which only postponed #8645 by one round; it now builds on its own earlier summary.
-The mirror is no longer rewritten on every turn when nothing changed, and the REST key/value list, export, import and single-key write no longer expose or accept the reserved `compaction_summary_` keys, so an import cannot plant a summary that a later turn trusts as its own history (#8730) (@houko)
