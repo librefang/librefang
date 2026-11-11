@@ -325,6 +325,15 @@ pub struct AgentLoopResult {
     /// an operator notification (`max_iterations`) so the truncation is
     /// observable. `false` on every ordinary end-turn exit.
     pub hit_iteration_cap: bool,
+    /// True when the loop stopped because a text-only reply kept hitting the
+    /// output token limit (`pure_text_overflow` or `MAX_CONTINUATIONS`) and the
+    /// partial text was delivered (#8754).
+    ///
+    /// Distinct from [`Self::hit_iteration_cap`]: that one means the *tool*
+    /// loop ran out of iterations, this one means the *text* ran out of room.
+    /// Both are `Ok` results and both are labelled in the cache metric, so the
+    /// two truncation classes stay separable in a trend.
+    pub truncated_by_continuation: bool,
 }
 
 #[derive(Debug, Clone)]

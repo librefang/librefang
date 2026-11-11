@@ -1266,6 +1266,7 @@ fn agent_loop_result_owner_notice_defaults_none() {
 fn agent_loop_result_owner_notice_can_be_set() {
     let r = AgentLoopResult {
         hit_iteration_cap: false,
+        truncated_by_continuation: false,
         owner_notice: Some("Sir, the appointment is at 3pm.".into()),
         ..AgentLoopResult::default()
     };
@@ -1291,6 +1292,7 @@ fn agent_loop_result_actual_provider_can_be_set() {
     // when this is None, and bills the named provider when set.
     let r = AgentLoopResult {
         hit_iteration_cap: false,
+        truncated_by_continuation: false,
         actual_provider: Some("anthropic-backup".into()),
         actual_model: None,
         ..AgentLoopResult::default()
@@ -2033,6 +2035,7 @@ fn test_classify_exit_reason_covers_every_branch() {
     assert_eq!(
         classify_exit_reason(&Ok(AgentLoopResult {
             hit_iteration_cap: true,
+            truncated_by_continuation: false,
             ..Default::default()
         })),
         "max_iterations"
@@ -2090,6 +2093,7 @@ fn test_record_agent_loop_exit_increments_once_with_labels() {
         (
             Ok(AgentLoopResult {
                 hit_iteration_cap: true,
+                truncated_by_continuation: false,
                 ..Default::default()
             }),
             "max_iterations",

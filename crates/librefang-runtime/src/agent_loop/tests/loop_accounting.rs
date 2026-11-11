@@ -4,7 +4,7 @@ use super::integration::test_manifest;
 use super::*;
 
 #[allow(clippy::too_many_arguments)]
-async fn run_loop_for_test(
+pub(super) async fn run_loop_for_test(
     manifest: &AgentManifest,
     user_message: &str,
     session: &mut librefang_memory::session::Session,
@@ -48,7 +48,7 @@ async fn run_loop_for_test(
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn run_streaming_loop_for_test(
+pub(super) async fn run_streaming_loop_for_test(
     manifest: &AgentManifest,
     user_message: &str,
     session: &mut librefang_memory::session::Session,
@@ -92,7 +92,7 @@ async fn run_streaming_loop_for_test(
     .await
 }
 
-fn empty_session() -> librefang_memory::session::Session {
+pub(super) fn empty_session() -> librefang_memory::session::Session {
     librefang_memory::session::Session {
         id: librefang_types::agent::SessionId::new(),
         agent_id: librefang_types::agent::AgentId::new(),
@@ -224,7 +224,7 @@ async fn interrupt_keeps_usage_of_calls_already_made_streaming() {
 }
 
 /// Regurgitates prompt scaffolding (two structural markers) on a billed call.
-struct BilledCascadeLeakDriver;
+pub(super) struct BilledCascadeLeakDriver;
 
 #[async_trait]
 impl LlmDriver for BilledCascadeLeakDriver {
