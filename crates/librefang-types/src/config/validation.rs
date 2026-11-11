@@ -452,7 +452,8 @@ impl KernelConfig {
                     );
                 }
             }
-            SearchProvider::DuckDuckGo | SearchProvider::Auto => {}
+            // Keenable works without a key (public endpoint), so nothing to warn about.
+            SearchProvider::DuckDuckGo | SearchProvider::Keenable | SearchProvider::Auto => {}
         }
 
         // --- Structural validation ---

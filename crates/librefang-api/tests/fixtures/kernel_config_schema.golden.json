@@ -1663,6 +1663,9 @@
           "use_eu_endpoint": false,
           "no_cache": false
         },
+        "keenable": {
+          "api_key_env": "KEENABLE_API_KEY"
+        },
         "searxng": {
           "url": ""
         },
@@ -4449,6 +4452,17 @@
         }
       }
     },
+    "KeenableSearchConfig": {
+      "description": "Keenable Search API configuration.\n\nKeenable works without an API key through its public endpoint; when the env var named by `api_key_env` is set, the keyed endpoint is used instead.",
+      "type": "object",
+      "properties": {
+        "api_key_env": {
+          "description": "Env var name holding the (optional) API key.",
+          "default": "KEENABLE_API_KEY",
+          "type": "string"
+        }
+      }
+    },
     "KernelMode": {
       "description": "Kernel operating mode.",
       "oneOf": [
@@ -6718,6 +6732,13 @@
           ]
         },
         {
+          "description": "Keenable web search (works without an API key; a key is optional).",
+          "type": "string",
+          "enum": [
+            "keenable"
+          ]
+        },
+        {
           "description": "DuckDuckGo HTML (no API key needed).",
           "type": "string",
           "enum": [
@@ -6732,7 +6753,7 @@
           ]
         },
         {
-          "description": "Auto-select based on available API keys (Tavily → Brave → Jina → Perplexity → Searxng → DuckDuckGo).",
+          "description": "Auto-select based on available API keys (Tavily → Brave → Jina → Keenable → Perplexity → Searxng → DuckDuckGo; Keenable only when its API key is set).",
           "type": "string",
           "enum": [
             "auto"
@@ -8464,6 +8485,17 @@
           "allOf": [
             {
               "$ref": "#/definitions/JinaSearchConfig"
+            }
+          ]
+        },
+        "keenable": {
+          "description": "Keenable Search configuration.",
+          "default": {
+            "api_key_env": "KEENABLE_API_KEY"
+          },
+          "allOf": [
+            {
+              "$ref": "#/definitions/KeenableSearchConfig"
             }
           ]
         },

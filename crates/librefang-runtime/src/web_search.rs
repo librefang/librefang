@@ -93,6 +93,7 @@ impl WebSearchEngine {
             SearchProvider::Brave => self.search_brave(query, max_results).await,
             SearchProvider::Tavily => self.search_tavily(query, max_results).await,
             SearchProvider::Jina => self.search_jina(query, max_results).await,
+            SearchProvider::Keenable => self.search_keenable(query, max_results).await,
             SearchProvider::Perplexity => self.search_perplexity(query).await,
             SearchProvider::DuckDuckGo => self.search_duckduckgo(query, max_results).await,
             SearchProvider::Searxng => self.search_searxng(query, max_results, None, 1).await,
@@ -108,7 +109,7 @@ impl WebSearchEngine {
     }
 
     /// Auto-select provider based on available API keys.
-    /// Priority: Tavily → Brave → Jina → Perplexity → Searxng → DuckDuckGo
+    /// Priority: Tavily → Brave → Jina → Keenable (keyed) → Perplexity → Searxng → DuckDuckGo
     async fn search_auto(&self, query: &str, max_results: usize) -> Result<String, ToolError> {
         // Tavily first (AI-agent-native)
         if resolve_api_key(&self.config.tavily.api_key_env).is_some() {
@@ -141,7 +142,16 @@ impl WebSearchEngine {
             }
         }
 
-        // Perplexity fourth
+        // Keenable next, only when its key is set (explicit `keenable` also works key-free)
+        if resolve_api_key(&self.config.keenable.api_key_env).is_some() {
+            debug!("Auto: trying Keenable");
+            match self.search_keenable(query, max_results).await {
+                Ok(result) => return Ok(result),
+                Err(e) => warn!("Keenable failed, falling back: {e}"),
+            }
+        }
+
+        // Perplexity next
         if resolve_api_key(&self.config.perplexity.api_key_env).is_some() {
             debug!("Auto: trying Perplexity");
             match self.search_perplexity(query).await {
@@ -165,8 +175,12 @@ impl WebSearchEngine {
         debug!("Auto: falling back to DuckDuckGo");
         match self.search_duckduckgo(query, max_results).await {
             Ok(result) if !result.trim().is_empty() => Ok(result),
-            Ok(_) => Err(ToolError::upstream_msg("All search providers failed; DuckDuckGo returned empty results (likely captcha-blocked). Configure a Brave, Tavily, Jina, Perplexity, or SearXNG provider for reliable search.")),
-            Err(e) => Err(ToolError::upstream_msg(format!("All search providers exhausted. Last error (DuckDuckGo): {e}"))),
+            Ok(_) => Err(ToolError::upstream_msg(
+                "All search providers failed; DuckDuckGo returned empty results (likely captcha-blocked). Configure a Brave, Tavily, Jina, Keenable, Perplexity, or SearXNG provider for reliable search.",
+            )),
+            Err(e) => Err(ToolError::upstream_msg(format!(
+                "All search providers exhausted. Last error (DuckDuckGo): {e}"
+            ))),
         }
     }
 
@@ -335,6 +349,34 @@ impl WebSearchEngine {
         }
 
         Ok(wrap_external_content("tavily-search", &output))
+    }
+
+    /// Search via Keenable. Uses the keyed endpoint when the API key env var is
+    /// set, otherwise Keenable's key-free public endpoint.
+    async fn search_keenable(&self, query: &str, max_results: usize) -> Result<String, ToolError> {
+        let api_key = resolve_api_key(&self.config.keenable.api_key_env);
+        let resp = keenable_request(
+            &self.client,
+            api_key.as_deref().map(String::as_str),
+            query,
+            max_results,
+        )
+        .send()
+        .await
+        .map_err(ToolError::upstream)?;
+
+        if !resp.status().is_success() {
+            return Err(ToolError::upstream_msg(format!(
+                "Keenable API returned {}",
+                resp.status()
+            )));
+        }
+
+        let data: serde_json::Value = resp.json().await.map_err(ToolError::upstream)?;
+        let output = format_keenable_results(query, &data, max_results).ok_or_else(|| {
+            ToolError::upstream_msg(format!("No results found for '{query}' (Keenable)."))
+        })?;
+        Ok(wrap_external_content("keenable-search", &output))
     }
 
     /// Search via Perplexity AI (chat completions endpoint).
@@ -857,6 +899,69 @@ fn resolve_api_key(env_var: &str) -> Option<Zeroizing<String>> {
         .map(Zeroizing::new)
 }
 
+/// App name sent to Keenable's key-free endpoint.
+const KEENABLE_APP_TITLE: &str = "LibreFang";
+
+/// Builds a Keenable search request: keyed `/v1/search` with `X-API-Key`, or
+/// the key-free `/v1/search/public` with `X-Keenable-Title`.
+fn keenable_request(
+    client: &reqwest::Client,
+    api_key: Option<&str>,
+    query: &str,
+    max_results: usize,
+) -> reqwest::RequestBuilder {
+    let body = serde_json::json!({ "query": query, "max_results": max_results.clamp(1, 20) });
+    let req = match api_key.map(str::trim).filter(|k| !k.is_empty()) {
+        Some(key) => client
+            .post("https://api.keenable.ai/v1/search")
+            .header("X-API-Key", key),
+        None => client
+            .post("https://api.keenable.ai/v1/search/public")
+            .header("X-Keenable-Title", KEENABLE_APP_TITLE),
+    };
+    req.json(&body)
+}
+
+/// Formats Keenable results; `None` when there are none. `description` is
+/// often empty, so the `snippet` excerpt is preferred.
+fn format_keenable_results(
+    query: &str,
+    data: &serde_json::Value,
+    max_results: usize,
+) -> Option<String> {
+    let results: Vec<&serde_json::Value> = data["results"]
+        .as_array()
+        .map(|items| {
+            items
+                .iter()
+                .filter(|r| r["url"].as_str().is_some_and(|u| !u.is_empty()))
+                .take(max_results)
+                .collect()
+        })
+        .unwrap_or_default();
+    if results.is_empty() {
+        return None;
+    }
+    let mut output = format!("Search results for '{query}' (Keenable):\n\n");
+    for (i, r) in results.iter().enumerate() {
+        let title = r["title"].as_str().unwrap_or("");
+        let url = r["url"].as_str().unwrap_or("");
+        let content = ["snippet", "description"]
+            .iter()
+            .filter_map(|k| r[*k].as_str())
+            .find(|s| !s.trim().is_empty())
+            .unwrap_or("");
+        output.push_str(&format!(
+            "{}. {}\n   URL: {}\n   {}\n\n",
+            i + 1,
+            title,
+            url,
+            content
+        ));
+    }
+    Some(output)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -908,6 +1013,48 @@ mod tests {
     }
 
     // ── Jina provider tests ──────────────────────────────────
+
+    #[test]
+    fn test_keenable_request_is_key_free_without_key() {
+        let client = reqwest::Client::new();
+        let req = keenable_request(&client, None, "q", 50).build().unwrap();
+        assert_eq!(
+            req.url().as_str(),
+            "https://api.keenable.ai/v1/search/public"
+        );
+        assert_eq!(req.headers()["X-Keenable-Title"], KEENABLE_APP_TITLE);
+        assert!(req.headers().get("X-API-Key").is_none());
+
+        let req = keenable_request(&client, Some("k"), "q", 5)
+            .build()
+            .unwrap();
+        assert_eq!(req.url().as_str(), "https://api.keenable.ai/v1/search");
+        assert_eq!(req.headers()["X-API-Key"], "k");
+    }
+
+    #[test]
+    fn test_format_keenable_results() {
+        let data = serde_json::json!({"results": [
+            {"title": "A", "url": "https://a.example", "description": "", "snippet": "excerpt"},
+            {"title": "B", "url": "https://b.example", "description": "summary", "snippet": ""},
+            {"title": "no url", "url": ""}
+        ]});
+        let out = format_keenable_results("q", &data, 5).unwrap();
+        assert!(out.contains("1. A\n   URL: https://a.example\n   excerpt"));
+        assert!(out.contains("2. B\n   URL: https://b.example\n   summary"));
+        assert!(!out.contains("no url"));
+        assert!(format_keenable_results("q", &serde_json::json!({"results": []}), 5).is_none());
+    }
+
+    #[test]
+    fn test_keenable_search_provider_serde() {
+        let provider = librefang_types::config::SearchProvider::Keenable;
+        assert_eq!(serde_json::to_string(&provider).unwrap(), "\"keenable\"");
+        assert_eq!(
+            librefang_types::config::KeenableSearchConfig::default().api_key_env,
+            "KEENABLE_API_KEY"
+        );
+    }
 
     #[test]
     fn test_jina_config_defaults() {
