@@ -698,6 +698,10 @@ impl ModelOverrides {
     pub fn sanitize_reasoning(&mut self) -> Vec<String> {
         let mut dropped = Vec::new();
         if let Some(efforts) = self.supported_efforts.as_mut() {
+            // An already-empty set is the operator's "budget-controlled"
+            // declaration and must survive sanitising; only a set that had
+            // tokens and lost all of them means "inherit".
+            let had_tokens = !efforts.is_empty();
             efforts.retain(|token| {
                 let valid = ReasoningMode::new(token.clone()).is_ok();
                 if !valid {
@@ -705,9 +709,7 @@ impl ModelOverrides {
                 }
                 valid
             });
-            // Every token was invalid: the operator declared a policy, not
-            // "explicitly no levels", so inherit instead of pinning empty.
-            if efforts.is_empty() {
+            if had_tokens && efforts.is_empty() {
                 self.supported_efforts = None;
             }
         }
@@ -2081,5 +2083,18 @@ aliases = []
         };
         overrides.sanitize_reasoning();
         assert_eq!(overrides.supported_efforts, Some(vec!["high".to_string()]));
+    }
+
+    /// An explicit empty set is the operator's "budget-controlled"
+    /// declaration, not a declaration that failed sanitising.
+    #[test]
+    fn sanitize_reasoning_preserves_an_explicit_empty_set() {
+        let mut overrides = ModelOverrides {
+            supported_efforts: Some(Vec::new()),
+            ..Default::default()
+        };
+        let dropped = overrides.sanitize_reasoning();
+        assert!(dropped.is_empty());
+        assert_eq!(overrides.supported_efforts, Some(Vec::new()));
     }
 }

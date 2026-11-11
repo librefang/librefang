@@ -48,14 +48,15 @@ impl LibreFangKernel {
         // catalog provider: blank it so a concrete model id still resolves its
         // declaration instead of falling into the undeclared path.
         let provider = if super::super::manifest_helpers::is_default_provider_sentinel(provider) {
-            ""
+            String::new()
         } else {
             // Operator declarations live on the canonical entry: an agent that
             // says `kimi` must see the policy declared for `moonshot`.
-            librefang_llm_drivers::drivers::canonical_provider_name(provider)
+            let lower = provider.to_ascii_lowercase();
+            librefang_llm_drivers::drivers::canonical_provider_name(&lower).to_string()
         };
         catalog
-            .find_model_for_failover(provider, model)
+            .find_model_for_failover(&provider, model)
             .map(|entry| catalog.effective_reasoning_policy(entry))
             .unwrap_or_default()
     }

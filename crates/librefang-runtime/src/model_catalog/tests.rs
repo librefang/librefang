@@ -289,6 +289,12 @@ fn test_failover_resolver_matches_an_alias_to_the_canonical_provider() {
     let resolver = ModelCatalog::failover_reasoning_resolver(std::sync::Arc::new(catalog));
     let (policy, _) = resolver("codex", "m");
     assert_eq!(policy.supported_efforts, vec!["max"]);
+    let (mixed_case, _) = resolver("Codex", "m");
+    assert_eq!(
+        mixed_case.supported_efforts,
+        vec!["max"],
+        "provider aliases are case-insensitive like the lookup itself"
+    );
 
     let (unknown, _) = resolver("customgw", "m");
     assert!(
