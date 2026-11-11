@@ -4851,5 +4851,89 @@
     "size_hint": "Hasta {{limit}} por documento",
     "too_large": "{{name}} ocupa {{size}}; un documento puede ocupar como máximo {{limit}}.",
     "no_agents": "Aún no hay agentes con quienes compartir."
+  },
+  "context_engine": {
+    "nav": "Motor de contexto",
+    "title": "Motor de contexto",
+    "subtitle": "Cadena de plugins, métricas de ganchos y actividad reciente de trazas",
+    "badge": "Observabilidad",
+    "load_error": "No se pudo cargar el estado del motor de contexto.",
+    "no_engine": "No hay motor de plugins activo",
+    "no_engine_desc": "Configura un plugin de motor de contexto para recoger métricas y trazas de los ganchos.",
+    "health": {
+      "title": "Salud del motor",
+      "healthy": "Sano",
+      "unhealthy": "Con problemas",
+      "active_plugins": "Plugins activos",
+      "issues": "Problemas",
+      "no_issues": "No se han notificado problemas"
+    },
+    "chain": {
+      "title": "Cadena de plugins",
+      "mode": "Modo",
+      "mode_default": "Por defecto",
+      "mode_single": "Plugin único",
+      "mode_stacked": "Apilada",
+      "length": "Longitud de la cadena",
+      "fallback": "Respaldo",
+      "plugin_error": "Plugin no disponible",
+      "disabled": "Desactivado",
+      "invalid": "Ganchos inválidos",
+      "cache_ttl": "Vigencia de caché"
+    },
+    "metrics": {
+      "title": "Métricas de ganchos",
+      "hook": "Gancho",
+      "calls": "Llamadas",
+      "successes": "Éxitos",
+      "failures": "Fallos",
+      "avg_latency": "Latencia media"
+    },
+    "traces": {
+      "title": "Trazas recientes",
+      "count": "{{total}} trazas",
+      "empty": "Aún no hay trazas",
+      "empty_desc": "Las llamadas a ganchos aparecerán aquí cuando el motor procese un turno.",
+      "success": "Éxito",
+      "failure": "Fallo",
+      "input": "Entrada",
+      "output": "Salida",
+      "annotations": "Anotaciones",
+      "error": "Error",
+      "trace_id": "Traza"
+    },
+    "config": {
+      "title": "Configuración del motor",
+      "engine": "Motor",
+      "plugin": "Plugin",
+      "timeout": "Tiempo límite de gancho",
+      "on_failure": "Si falla un gancho",
+      "max_retries": "Reintentos máximos",
+      "retry_delay": "Espera entre reintentos",
+      "hook_cache_ttl": "Vigencia de caché de ganchos",
+      "assemble_cache_ttl": "Vigencia de caché de ensamblado",
+      "compact_cache_ttl": "Vigencia de caché de compactación",
+      "allow_network": "Permitir red",
+      "allow_filesystem": "Permitir sistema de ficheros",
+      "max_memory": "Memoria máxima",
+      "circuit_breaker": "Cortacircuitos",
+      "registries": "Registradores"
+    },
+    "sandbox": {
+      "title": "Política de aislamiento",
+      "default_mode": "Política por defecto — sin motor de plugins",
+      "allowed": "Permitido",
+      "denied": "Denegado",
+      "filesystem": "Sistema de ficheros",
+      "network": "Red",
+      "memory": "Memoria",
+      "persistent": "Subproceso persistente",
+      "prewarm": "Precalentar subprocesos",
+      "queue_depth": "Profundidad de cola tras el turno",
+      "circuit_breaker": "Cortacircuitos",
+      "otel_endpoint": "Punto de OTel",
+      "unlimited": "Sin límite",
+      "plugin_error": "Política no disponible"
+    }
   }
 }
