@@ -48,11 +48,13 @@ export function autoDreamCacheStats(
   usage: AutoDreamUsage | undefined,
 ): AutoDreamCacheStats | null {
   if (!usage || usage.input_tokens <= 0) return null;
-  const totalInputTokens =
-    usage.input_tokens + usage.cache_read_input_tokens + usage.cache_creation_input_tokens;
-  const hitPct = totalInputTokens > 0
-    ? Math.round((usage.cache_read_input_tokens / totalInputTokens) * 100)
-    : 0;
+  // `input_tokens` is the TOTAL prompt, already including both cache buckets (see `TokenUsage` in librefang-types), so adding them again would count the cached portion twice and understate the ratio next to the `prompt cache metrics` log line.
+  const totalInputTokens = usage.input_tokens;
+  // Both buckets are subsets of the prompt, so a payload where they sum past it is malformed; the runtime reports no ratio for it, and this row must not invent a `> 100 %` one.
+  if (usage.cache_read_input_tokens + usage.cache_creation_input_tokens > totalInputTokens) {
+    return null;
+  }
+  const hitPct = Math.round((usage.cache_read_input_tokens / totalInputTokens) * 100);
   return { hitPct, totalInputTokens };
 }
 
