@@ -229,6 +229,16 @@ impl AuxClient {
         if let Some(store) = self.exhaustion_store.clone() {
             chain = chain.with_exhaustion_store(store);
         }
+        // A failover rewrites `req.model`, so each slot must re-resolve the
+        // reasoning policy and echo policy for the model it will actually call
+        // (#8616 review). The catalog snapshot is the one wired at
+        // construction; `POST /api/config/reload` rebuilds the client, which
+        // refreshes it.
+        if let Some(catalog) = self.model_catalog.clone() {
+            chain = chain.with_reasoning_resolver(
+                crate::model_catalog::ModelCatalog::failover_reasoning_resolver(catalog),
+            );
+        }
         let chain: Arc<dyn LlmDriver> = Arc::new(chain);
         AuxResolution {
             driver: chain,

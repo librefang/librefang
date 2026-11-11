@@ -201,12 +201,14 @@ pub(super) fn apply_resolved_inference_params(
 
 /// Apply a per-call reasoning override to a manifest clone.
 ///
-/// This is the top rung of the #7946 resolution order — per-call > per-agent >
-/// global > compiled default. The two rungs below it have already been applied
-/// by the caller: the manifest carries the per-agent `[thinking]` table, and
-/// the global `[thinking]` section was backfilled into it a few lines earlier
-/// when the agent declared none. So this function only has to overwrite, and
-/// whatever it leaves behind is the effective configuration for the turn.
+/// This is the top rung of the #7946 resolution order — per-call beats
+/// per-session, which beats per-agent, global, and compiled default. The rungs
+/// below it have already been applied by the caller: the session pin by
+/// [`apply_session_reasoning_effort`], the manifest's `[thinking]` table by the
+/// agent config, and the global `[thinking]` section was backfilled into it a
+/// few lines earlier when the agent declared none. So this function only has to
+/// overwrite, and whatever it leaves behind is the effective configuration for
+/// the turn.
 ///
 /// - [`ThinkingOverride::Enable`] (legacy `thinking: true`) — ensure the
 ///   manifest has a `ThinkingConfig`, inserting the default one if previously
@@ -218,7 +220,10 @@ pub(super) fn apply_resolved_inference_params(
 ///   make `thinking: true` a silent no-op.
 /// - [`ThinkingOverride::Disable`] (legacy `thinking: false`) — clear
 ///   `manifest.thinking` so the driver does not request thinking regardless of
-///   the manifest/global default.
+///   the manifest, global, or session default. The frame is the top rung, so an
+///   explicit per-call `false` wins over a session pin set earlier; a frame
+///   that carries no override at all resolves to `Inherit` and leaves the pin
+///   in place.
 /// - [`ThinkingOverride::Mode`] — stamp the mode onto the manifest's thinking
 ///   config, creating it if absent. Note that `Mode(ReasoningMode::none())` is
 ///   *not* the same as `Disable`: it keeps a thinking config so the driver can
@@ -245,9 +250,7 @@ pub(super) fn apply_thinking_override(
                 }
             }
         }
-        ThinkingOverride::Disable => {
-            manifest.thinking = None;
-        }
+        ThinkingOverride::Disable => manifest.thinking = None,
         ThinkingOverride::Mode(mode) => {
             manifest
                 .thinking
@@ -294,15 +297,17 @@ pub(super) fn apply_session_reasoning_effort(
 }
 
 /// Coerce the resolved effort to the effective model's declared policy
-/// (#8591).
+/// (#8591, #8616 review).
 ///
 /// The catalog's policy is authoritative, and a request outside it is mapped
 /// to the **nearest supported rung** — the pattern the comparative study
 /// settles on (OpenRouter / LiteLLM / Vercel) — not dropped and not 400-ed.
 /// `none` on a model with `off_allowed = false` or `mandatory = true` becomes
-/// the lowest graded rung. An undeclared policy (`supported_efforts` empty and
-/// no default) leaves the manifest untouched: the model published nothing, so
-/// the legacy wire spelling is the only honest behaviour.
+/// the lowest graded rung. An undeclared policy is not "supports everything":
+/// it constrains to the four pre-#8591 rungs (`none` / `low` / `high` / `max`),
+/// which every driver can carry, so a newer rung (`medium`, `xhigh`,
+/// `minimal`) only a declared entry offers cannot reach a model that never
+/// published it.
 ///
 /// Both kernel dispatch paths run this after every override has been applied (the per-message frame included) and after model selection and the session `/model` override, so the coercion sees the token that would actually go on the wire and the policy of the model that will actually receive it.
 /// Running it before routing would rewrite the token into the pre-routing model's set, which nothing downstream can undo.
@@ -311,9 +316,6 @@ pub(super) fn coerce_reasoning_effort_to_model(
     manifest: &mut librefang_types::agent::AgentManifest,
     policy: &librefang_types::config::ReasoningEffortPolicy,
 ) {
-    if !policy.is_declared() {
-        return;
-    }
     let Some(cfg) = manifest.thinking.as_mut() else {
         return;
     };
@@ -326,7 +328,7 @@ pub(super) fn coerce_reasoning_effort_to_model(
             from = %from,
             to = %coerced.effective.as_str(),
             model = %manifest.model.model,
-            "reasoning effort is outside the model's supported set; coerced to the nearest rung"
+            "reasoning effort is outside what the model declares; coerced to the nearest rung"
         );
         cfg.reasoning_effort = Some(coerced.effective);
     }

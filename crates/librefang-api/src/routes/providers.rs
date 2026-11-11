@@ -822,6 +822,14 @@ pub async fn set_model_overrides(
     Path(id): Path<String>,
     Json(body): Json<librefang_types::model_catalog::ModelOverrides>,
 ) -> impl IntoResponse {
+    // The four reasoning-policy overrides (#8591) are written to the provider
+    // wire verbatim, so a structurally invalid token must be refused at the
+    // boundary rather than persisted (#8616 review). This is the same gate the
+    // catalog entry applies to its own declaration.
+    if let Err(e) = body.validate_reasoning() {
+        return ApiErrorResponse::bad_request(format!("Invalid reasoning override: {e}"))
+            .into_json_tuple();
+    }
     let overrides_path = state
         .kernel
         .home_dir()
@@ -1539,6 +1547,47 @@ pub async fn add_custom_model(
         return ApiErrorResponse::bad_request("Missing required field: id").into_json_tuple();
     }
 
+    // #8616 review: the reasoning declaration is written to the provider wire
+    // verbatim, so a present key must be exactly what it claims. Previously
+    // `["high", 5]` silently became `["high"]` and
+    // `"supported_efforts": "extra high"` (wrong JSON type) silently became
+    // "no declaration" — a 200 for input the operator could only have sent by
+    // mistake.
+    let supported_efforts = match body.get("supported_efforts") {
+        None => Vec::new(),
+        Some(serde_json::Value::Array(items)) => {
+            let mut tokens = Vec::with_capacity(items.len());
+            for (idx, item) in items.iter().enumerate() {
+                match item.as_str() {
+                    Some(token) => tokens.push(token.to_string()),
+                    None => {
+                        return ApiErrorResponse::bad_request(format!(
+                            "supported_efforts[{idx}] must be a string, got {item}"
+                        ))
+                        .into_json_tuple()
+                    }
+                }
+            }
+            tokens
+        }
+        Some(other) => {
+            return ApiErrorResponse::bad_request(format!(
+                "supported_efforts must be an array of strings, got {other}"
+            ))
+            .into_json_tuple()
+        }
+    };
+    let default_effort = match body.get("default_effort") {
+        None => None,
+        Some(serde_json::Value::String(token)) => Some(token.clone()),
+        Some(other) => {
+            return ApiErrorResponse::bad_request(format!(
+                "default_effort must be a string, got {other}"
+            ))
+            .into_json_tuple()
+        }
+    };
+
     let display = body
         .get("display_name")
         .and_then(|v| v.as_str())
@@ -1603,20 +1652,9 @@ pub async fn add_custom_model(
         // Optional open-vocabulary declaration (#8591). Absent means "the
         // operator declared nothing": the canonical set is advertised, and
         // the drivers keep the legacy `max` spelling until a list says
-        // otherwise.
-        supported_efforts: body
-            .get("supported_efforts")
-            .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|v| v.as_str().map(str::to_string))
-                    .collect()
-            })
-            .unwrap_or_default(),
-        default_effort: body
-            .get("default_effort")
-            .and_then(|v| v.as_str())
-            .map(str::to_string),
+        // otherwise. Parsed strictly above (#8616 review).
+        supported_efforts,
+        default_effort,
         // `off_allowed` defaults to true; an explicitly sent value wins.
         off_allowed: body
             .get("off_allowed")

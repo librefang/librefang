@@ -492,7 +492,10 @@ pub struct MessageRequest {
     /// default.
     ///
     /// `reasoning_mode` is accepted as a deprecated alias on the wire
-    /// (#8591); responses and documentation use `reasoning_effort`.
+    /// (#8591); responses and documentation use `reasoning_effort`. A body
+    /// carrying both keys fails deserialization as a duplicate field (HTTP
+    /// 422) rather than silently picking one — the hand-parsed WS frame and
+    /// session PATCH route do accept both, with `reasoning_effort` winning.
     #[serde(default, alias = "reasoning_mode")]
     #[schema(value_type = Option<String>, example = "high")]
     pub reasoning_effort: Option<librefang_types::config::ReasoningMode>,

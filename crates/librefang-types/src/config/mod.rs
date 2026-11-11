@@ -1859,12 +1859,65 @@ admin_role = "admin"
         assert_eq!(ReasoningMode::new("banana").unwrap().as_str(), "banana");
     }
 
+    /// Provider effort vocabularies are lowercase (#8616 review): accepting
+    /// `"High"` verbatim made it a non-canonical token, so coercion ranked it
+    /// outside the rungs and dropped it to the floor instead of to `high`.
+    #[test]
+    fn test_reasoning_effort_normalizes_ascii_case() {
+        assert_eq!(ReasoningMode::new("High").unwrap().as_str(), "high");
+        assert_eq!(ReasoningMode::new("MAX").unwrap().as_str(), "max");
+        assert_eq!(ReasoningMode::new(" XHigh ").unwrap().as_str(), "xhigh");
+        assert!(ReasoningMode::new("HIGH").unwrap().is_canonical());
+        assert!(ReasoningMode::new("HIGH").unwrap() == ReasoningMode::high());
+        // The serde path runs the same constructor, so a manifest or REST body
+        // carrying the mixed-case spelling lands on the canonical rung.
+        let parsed: ReasoningMode = serde_json::from_str("\"High\"").unwrap();
+        assert_eq!(parsed, ReasoningMode::high());
+    }
+
+    /// Switching a request to another model must not carry a rung the target
+    /// never declared (#8616 review): a declared policy coerces, an undeclared
+    /// one keeps only the pre-#8591 spellings every driver can put on a wire.
+    #[test]
+    fn test_reasoning_policy_resolve_for_model_switch() {
+        use crate::config::ReasoningEffortPolicy;
+
+        let declared = ReasoningEffortPolicy {
+            supported_efforts: vec!["low".to_string(), "high".to_string()],
+            ..Default::default()
+        };
+        assert_eq!(
+            declared
+                .resolve_for_model_switch(&ReasoningMode::new("xhigh").unwrap())
+                .map(|m| m.as_str().to_string()),
+            Some("high".to_string())
+        );
+
+        let undeclared = ReasoningEffortPolicy::default();
+        for legacy in ["none", "low", "high", "max"] {
+            assert_eq!(
+                undeclared
+                    .resolve_for_model_switch(&ReasoningMode::new(legacy).unwrap())
+                    .map(|m| m.as_str().to_string()),
+                Some(legacy.to_string()),
+                "{legacy} is a pre-#8591 rung every driver knows"
+            );
+        }
+        for catalog_only in ["minimal", "medium", "xhigh"] {
+            assert_eq!(
+                undeclared.resolve_for_model_switch(&ReasoningMode::new(catalog_only).unwrap()),
+                None,
+                "{catalog_only} only exists because a model declared it"
+            );
+        }
+    }
+
     /// `ReasoningEffortPolicy::coerce` (#8591) implements the comparative-study
     /// rule: a value outside the model's supported set maps to the **nearest**
     /// supported rung (ties resolve downward, `xhigh` → `high`), never a silent
     /// drop and never a 400. `none` on a model that cannot be switched off maps
-    /// to the lowest graded rung; an undeclared policy passes everything
-    /// through.
+    /// to the lowest graded rung; an undeclared policy constrains to the four
+    /// legacy rungs (#8616 review).
     #[test]
     fn test_reasoning_policy_coerces_to_the_nearest_supported_effort() {
         use crate::config::ReasoningEffortPolicy;
@@ -1930,12 +1983,22 @@ admin_role = "admin"
         assert_eq!(c.effective.as_str(), "low");
         assert!(!always_on.none_allowed());
 
-        // Undeclared policy: nothing is coerced (legacy wire).
+        // Undeclared policy: constrained to the four legacy rungs, because
+        // those are the only ones every driver can carry (#8616 review).
         let undeclared = ReasoningEffortPolicy::default();
         assert!(!undeclared.is_declared());
         let c = undeclared.coerce(&ReasoningMode::new("xhigh").unwrap());
-        assert_eq!(c.effective.as_str(), "xhigh");
-        assert_eq!(c.coerced_from, None);
+        assert_eq!(c.effective.as_str(), "high", "xhigh → nearest legacy rung");
+        assert_eq!(c.coerced_from.as_deref(), Some("xhigh"));
+        let c = undeclared.coerce(&ReasoningMode::new("medium").unwrap());
+        assert_eq!(c.effective.as_str(), "low", "tie resolves downward");
+        let c = undeclared.coerce(&ReasoningMode::new("minimal").unwrap());
+        assert_eq!(c.effective.as_str(), "low");
+        for legacy in ["none", "low", "high", "max"] {
+            let c = undeclared.coerce(&ReasoningMode::new(legacy).unwrap());
+            assert_eq!(c.effective.as_str(), legacy, "{legacy} is a legacy rung");
+            assert_eq!(c.coerced_from, None);
+        }
         assert!(
             undeclared.offered().is_empty(),
             "an undeclared model must not be offered a guessed rung",
