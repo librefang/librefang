@@ -151,7 +151,7 @@ impl WebSearchEngine {
             }
         }
 
-        // Perplexity fourth
+        // Perplexity next
         if resolve_api_key(&self.config.perplexity.api_key_env).is_some() {
             debug!("Auto: trying Perplexity");
             match self.search_perplexity(query).await {
@@ -892,6 +892,13 @@ pub fn urldecode(s: &str) -> String {
 
 /// Resolve an API key from an environment variable name.
 /// Returns `Zeroizing<String>` that auto-wipes from memory on drop.
+fn resolve_api_key(env_var: &str) -> Option<Zeroizing<String>> {
+    std::env::var(env_var)
+        .ok()
+        .filter(|v| !v.is_empty())
+        .map(Zeroizing::new)
+}
+
 /// App name sent to Keenable's key-free endpoint.
 const KEENABLE_APP_TITLE: &str = "LibreFang";
 
@@ -953,13 +960,6 @@ fn format_keenable_results(
         ));
     }
     Some(output)
-}
-
-fn resolve_api_key(env_var: &str) -> Option<Zeroizing<String>> {
-    std::env::var(env_var)
-        .ok()
-        .filter(|v| !v.is_empty())
-        .map(Zeroizing::new)
 }
 
 #[cfg(test)]
