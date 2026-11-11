@@ -7,7 +7,7 @@
 //! * **In-process** (no daemon): boot a fresh kernel in this process,
 //!   serve ACP on stdio until stdin EOF.
 //! * **Daemon-attached** (UDS proxy): when the daemon is running and
-//!   has the ACP UDS listener up at `~/.librefang/acp.sock`, this
+//!   has the ACP UDS listener up at `<home>/acp.sock` (the daemon's home, which honours `LIBREFANG_HOME` and `--config`), this
 //!   binary becomes a thin bidirectional pipe — stdin → socket,
 //!   socket → stdout. The daemon-side ACP server uses its own
 //!   long-running kernel, so multiple editors can share state, agent
@@ -28,6 +28,25 @@ const DEFAULT_AGENT_NAME: &str = "assistant";
 /// stdin EOF. Or, if the daemon is up and the UDS listener is
 /// available, switch to proxy mode.
 pub fn run_acp_server(config: Option<PathBuf>, agent: Option<String>) {
+    // Resolve the daemon's home the same way `start` / `stop` do, so a relocated home finds the daemon's socket instead of booting a second kernel against the same database.
+    let home_dir = crate::commands::common::daemon_config_context(config.as_deref()).home_dir;
+    let daemon_up = crate::commands::common::find_daemon_in_home(&home_dir).is_some();
+
+    // The daemon-side listener resolves only the default agent; attaching would silently serve a different agent than the one asked for.
+    if daemon_up && !attached_mode_serves(agent.as_deref()) {
+        eprintln!(
+            "{}",
+            crate::i18n::t_args(
+                "acp-error-agent-attached",
+                &[
+                    ("name", agent.as_deref().unwrap_or(DEFAULT_AGENT_NAME)),
+                    ("default", DEFAULT_AGENT_NAME)
+                ]
+            )
+        );
+        std::process::exit(1);
+    }
+
     // Fast path: daemon already hosting an ACP listener — just be a
     // transparent stdio↔socket proxy. The daemon-side kernel is shared
     // across every concurrent `librefang acp` client, so editor tabs
@@ -42,7 +61,7 @@ pub fn run_acp_server(config: Option<PathBuf>, agent: Option<String>) {
     // this hint, "why did my agent forget I approved this tool?" is an
     // unfindable bug. (#3313 review, M2)
     #[cfg(unix)]
-    if let Some(sock) = locate_acp_socket() {
+    if let Some(sock) = daemon_up.then(|| acp_socket_in_home(&home_dir)).flatten() {
         eprintln!(
             "{}",
             crate::i18n::t_args("acp-attached-uds", &[("path", &sock.to_string_lossy())])
@@ -54,7 +73,7 @@ pub fn run_acp_server(config: Option<PathBuf>, agent: Option<String>) {
         return;
     }
     #[cfg(windows)]
-    if super::find_daemon().is_some() {
+    if daemon_up {
         eprintln!("{}", crate::i18n::t("acp-attached-pipe"));
         let exit_code = run_pipe_proxy();
         if exit_code != 0 {
@@ -119,25 +138,42 @@ pub fn run_acp_server(config: Option<PathBuf>, agent: Option<String>) {
     }
 }
 
-/// Look for a daemon-side ACP UDS at the canonical path. Returns the
-/// path only if the daemon is reachable AND the socket file exists —
-/// a stale socket from a crashed daemon falls back to in-process mode.
-/// Look for a daemon-side ACP UDS at the canonical path. Returns the
-/// path only if the daemon is reachable AND the socket file exists —
-/// a stale socket from a crashed daemon falls back to in-process mode.
+/// Whether the daemon-attached mode serves the requested agent: its listener always resolves [`DEFAULT_AGENT_NAME`].
+fn attached_mode_serves(agent: Option<&str>) -> bool {
+    agent.is_none_or(|name| name == DEFAULT_AGENT_NAME)
+}
+
+/// The daemon-side ACP UDS under `home_dir`, where the daemon binds it, if the socket file exists.
+/// The caller checks the daemon is reachable first, so a stale socket from a crashed daemon falls back to in-process mode.
 ///
 /// Unix-only because the daemon-side listener is itself Unix-only;
 /// the sole call site is the `#[cfg(unix)]` fast-path branch in
 /// `run_acp_server`. Windows / non-Unix targets skip straight to the
 /// in-process path, so no stub is needed.
 #[cfg(unix)]
-fn locate_acp_socket() -> Option<PathBuf> {
-    super::find_daemon()?;
-    let path = dirs::home_dir()?.join(".librefang").join("acp.sock");
-    if path.exists() {
-        Some(path)
-    } else {
-        None
+fn acp_socket_in_home(home_dir: &std::path::Path) -> Option<PathBuf> {
+    let path = home_dir.join("acp.sock");
+    path.exists().then_some(path)
+}
+
+/// How long the proxy keeps forwarding the daemon's output after stdin closes, so replies to the editor's last requests still reach it.
+const PROXY_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Drive both proxy directions until the session ends.
+///
+/// The socket closing ends it at once; stdin closing (the editor is done sending) lets the outbound side drain for up to `drain_timeout`, since the daemon may still be writing responses to the final requests.
+async fn proxy_until_drained(
+    inbound: impl std::future::Future<Output = ()>,
+    outbound: impl std::future::Future<Output = ()>,
+    drain_timeout: std::time::Duration,
+) {
+    let mut inbound = std::pin::pin!(inbound);
+    let mut outbound = std::pin::pin!(outbound);
+    tokio::select! {
+        _ = &mut inbound => {
+            let _ = tokio::time::timeout(drain_timeout, &mut outbound).await;
+        }
+        _ = &mut outbound => {}
     }
 }
 
@@ -204,12 +240,7 @@ fn run_uds_proxy(sock_path: &std::path::Path) -> i32 {
             }
         };
 
-        // Either direction closing ends the session. Use `tokio::join!`
-        // to allow the slower side to drain before we exit.
-        tokio::select! {
-            _ = inbound => {}
-            _ = outbound => {}
-        }
+        proxy_until_drained(inbound, outbound, PROXY_DRAIN_TIMEOUT).await;
         0
     })
 }
@@ -276,10 +307,57 @@ fn run_pipe_proxy() -> i32 {
             }
         };
 
-        tokio::select! {
-            _ = inbound => {}
-            _ = outbound => {}
-        }
+        proxy_until_drained(inbound, outbound, PROXY_DRAIN_TIMEOUT).await;
         0
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Attaching to the daemon with `--agent coder` used to chat with `assistant` silently.
+    #[test]
+    fn attached_mode_serves_only_the_default_agent() {
+        assert!(attached_mode_serves(None));
+        assert!(attached_mode_serves(Some(DEFAULT_AGENT_NAME)));
+        assert!(!attached_mode_serves(Some("coder")));
+    }
+
+    /// The socket was looked up under a hard-coded `~/.librefang`, missing a daemon whose home is relocated.
+    #[cfg(unix)]
+    #[test]
+    fn acp_socket_is_found_under_the_daemon_home() {
+        let home = tempfile::TempDir::new().unwrap();
+        assert_eq!(acp_socket_in_home(home.path()), None);
+        std::fs::write(home.path().join("acp.sock"), b"").unwrap();
+        assert_eq!(
+            acp_socket_in_home(home.path()),
+            Some(home.path().join("acp.sock"))
+        );
+    }
+
+    /// `select!` used to cancel the outbound copy the moment stdin hit EOF, dropping the daemon's final responses.
+    #[tokio::test]
+    async fn proxy_drains_outbound_after_stdin_eof() {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let outbound = async move {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            let _ = tx.send("final response");
+        };
+        proxy_until_drained(async {}, outbound, std::time::Duration::from_secs(5)).await;
+        assert_eq!(rx.await.ok(), Some("final response"));
+    }
+
+    #[tokio::test]
+    async fn proxy_stops_waiting_after_the_drain_timeout() {
+        let started = std::time::Instant::now();
+        proxy_until_drained(
+            async {},
+            std::future::pending::<()>(),
+            std::time::Duration::from_millis(20),
+        )
+        .await;
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+    }
 }

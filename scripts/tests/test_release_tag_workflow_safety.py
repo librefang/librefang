@@ -337,7 +337,7 @@ def check_repository_automation() -> None:
     title_step = title_steps[0]
     expected_title_action = (
         "amannn/action-semantic-pull-request@"
-        "48f256284bd46cdaab1048c3721360e808335d50"
+        "2252a14e810aa9b85c2d560bd7070c802206ecf6"
     )
     if title_step.get("uses") != expected_title_action:
         raise SystemExit("PR-title validation action pin drifted")
@@ -923,7 +923,7 @@ def check_repository_automation() -> None:
         "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
         "dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8",
         "Swatinem/rust-cache@c8037a86dde8214a8310e9f54a8fc61ab362aa31",
-        "peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1",
+        "peter-evans/create-pull-request@15733dbdfeedb4f7fdb73d13c6f5ac83b710fab8",
     }
     actual_contributor_actions = {
         step["uses"] for step in contributor_steps if isinstance(step.get("uses"), str)

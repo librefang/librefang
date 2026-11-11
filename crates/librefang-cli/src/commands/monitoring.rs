@@ -47,14 +47,22 @@ pub(crate) fn cmd_security_status(json: bool) {
     }
 }
 
+/// `/api/audit/recent` takes its row count as `n`; an unknown `limit` key is ignored and the handler falls back to its default of 50.
+fn security_audit_url(base: &str, limit: usize) -> String {
+    format!("{base}/api/audit/recent?n={limit}")
+}
+
+/// The audit rows of a `/api/audit/recent` response (`{items,total,tip_hash}`), or `None` for an unrecognised shape so the caller can dump it raw.
+fn security_audit_rows(body: &serde_json::Value) -> Option<&Vec<serde_json::Value>> {
+    body.get("items")
+        .and_then(|v| v.as_array())
+        .or_else(|| body.as_array())
+}
+
 pub(crate) fn cmd_security_audit(limit: usize, json: bool) {
     let base = require_daemon("security audit");
     let client = daemon_client();
-    let body = daemon_json(
-        client
-            .get(format!("{base}/api/audit/recent?limit={limit}"))
-            .send(),
-    );
+    let body = daemon_json(client.get(security_audit_url(&base, limit)).send());
     if json {
         println!(
             "{}",
@@ -62,11 +70,7 @@ pub(crate) fn cmd_security_audit(limit: usize, json: bool) {
         );
         return;
     }
-    if let Some(arr) = body
-        .get("entries")
-        .and_then(|v| v.as_array())
-        .or_else(|| body.as_array())
-    {
+    if let Some(arr) = security_audit_rows(&body) {
         if arr.is_empty() {
             println!("{}", i18n::t("monitoring-no-audit"));
             return;
@@ -770,6 +774,29 @@ pub(crate) fn cmd_webhooks_test(id: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The handler reads `n`; `?limit=` was ignored, so `--limit 500` still returned the default 50 rows.
+    #[test]
+    fn security_audit_url_sends_n() {
+        assert_eq!(
+            security_audit_url("http://h", 500),
+            "http://h/api/audit/recent?n=500"
+        );
+    }
+
+    /// Fixture copied from `routes/audit.rs::audit_recent`; the command looked for `entries` and dumped this raw.
+    #[test]
+    fn security_audit_rows_reads_items_envelope() {
+        let body = serde_json::json!({
+            "items": [{"seq": 1, "timestamp": "t", "agent_id": "a", "action": "ToolInvoke", "detail": "d", "outcome": "ok", "hash": "h"}],
+            "total": 1,
+            "offset": 0,
+            "limit": 50,
+            "tip_hash": "h",
+        });
+        assert_eq!(security_audit_rows(&body).map(Vec::len), Some(1));
+        assert!(security_audit_rows(&serde_json::json!({"error": "x"})).is_none());
+    }
 
     #[test]
     fn memory_kv_url_percent_encodes_key() {

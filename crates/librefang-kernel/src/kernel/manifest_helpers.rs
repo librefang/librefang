@@ -304,10 +304,9 @@ pub(super) fn apply_session_reasoning_effort(
 /// no default) leaves the manifest untouched: the model published nothing, so
 /// the legacy wire spelling is the only honest behaviour.
 ///
-/// The kernel runs this after every override has been applied — the per-message
-/// frame included — so the coercion sees the token that would actually go on
-/// the wire. Each driver re-applies the same policy as a wire-side backstop
-/// for callers that build a `CompletionRequest` directly.
+/// Both kernel dispatch paths run this after every override has been applied (the per-message frame included) and after model selection and the session `/model` override, so the coercion sees the token that would actually go on the wire and the policy of the model that will actually receive it.
+/// Running it before routing would rewrite the token into the pre-routing model's set, which nothing downstream can undo.
+/// Each driver re-applies the same policy as a wire-side backstop for callers that build a `CompletionRequest` directly.
 pub(super) fn coerce_reasoning_effort_to_model(
     manifest: &mut librefang_types::agent::AgentManifest,
     policy: &librefang_types::config::ReasoningEffortPolicy,

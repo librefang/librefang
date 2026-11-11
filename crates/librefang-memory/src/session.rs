@@ -1141,19 +1141,7 @@ impl SessionStore {
         let agent_id_str = agent_id.0.to_string();
         let tx = conn.transaction().map_err(LibreFangError::memory)?;
         execute_session_agent_deletes(&tx, &agent_id_str)?;
-        // A half-open range, not `LIKE '<prefix>%'`: in SQLite `_` matches any character and
-        // LIKE is ASCII-case-insensitive, so it would also sweep agent keys such as
-        // `compaction-summary-notes` or `COMPACTION_SUMMARY_x`, which the tool boundary (a
-        // case-sensitive `starts_with`) never reserved (#8645 review).
-        tx.execute(
-            "DELETE FROM kv_store WHERE agent_id = ?1 AND key >= ?2 AND key < ?3",
-            rusqlite::params![
-                agent_id_str,
-                COMPACTION_SUMMARY_KEY_PREFIX,
-                format!("{COMPACTION_SUMMARY_KEY_PREFIX}\u{10FFFF}")
-            ],
-        )
-        .map_err(LibreFangError::memory)?;
+        delete_compaction_mirrors_in_tx(&tx, &agent_id_str)?;
         // Every session of this agent is gone, so a canonical summary can no longer have a
         // live owner — and channel sids are deterministic, so the next inbound may reuse one.
         tx.execute(
@@ -1166,14 +1154,24 @@ impl SessionStore {
         Ok(())
     }
 
-    /// Delete the canonical (cross-channel) session for an agent.
+    /// Delete the canonical (cross-channel) session for an agent, together with the per-session
+    /// compaction mirrors.
+    ///
+    /// The kernel calls this to drop an old model's context on a model switch. Since #8645 the
+    /// prompt path falls back to a session's mirror whenever the canonical row has no summary for
+    /// it, so wiping only the row would hand the pre-switch summary straight back to the next
+    /// turn; both go in one transaction.
     pub fn delete_canonical_session(&self, agent_id: AgentId) -> LibreFangResult<()> {
-        let conn = self.pool.get().map_err(LibreFangError::memory)?;
-        conn.execute(
+        let mut conn = self.pool.get().map_err(LibreFangError::memory)?;
+        let agent_id_str = agent_id.0.to_string();
+        let tx = conn.transaction().map_err(LibreFangError::memory)?;
+        tx.execute(
             "DELETE FROM canonical_sessions WHERE agent_id = ?1",
-            rusqlite::params![agent_id.0.to_string()],
+            rusqlite::params![agent_id_str],
         )
         .map_err(LibreFangError::memory)?;
+        delete_compaction_mirrors_in_tx(&tx, &agent_id_str)?;
+        tx.commit().map_err(LibreFangError::memory)?;
         Ok(())
     }
 
@@ -2285,50 +2283,70 @@ impl SessionStore {
             let keep_count = DEFAULT_CANONICAL_WINDOW;
             let to_compact = canonical.messages.len().saturating_sub(keep_count);
             if to_compact > canonical.compaction_cursor {
-                // Build a summary from the messages being compacted, but fold
-                // in ONLY the triggering session's own entries (plus legacy
-                // untagged ones), mirroring the read-path session filter in
-                // `canonical_context`. The compacted_summary is agent-scoped
-                // (one row per agent) yet stamped with a single owning session,
-                // so if the fold included other sessions' content the read gate
-                // — which keys only on the owner stamp, not the content — would
-                // hand user A's private text to user B on a multi-user agent
-                // (#6493). Restricting the content to the owner keeps the stamp
-                // honest. Other sessions' trimmed messages still leave the recent
-                // window below; they simply don't enter this session's summary.
+                // Build a summary from the messages being compacted, but fold in ONLY the triggering session's own entries (plus legacy untagged ones), mirroring the read-path session filter in `canonical_context`.
+                // The compacted_summary is agent-scoped (one row per agent) yet stamped with a single owning session, so if the fold included other sessions' content the read gate — which keys only on the owner stamp, not the content — would hand user A's private text to user B on a multi-user agent (#6493).
+                // Restricting the content to the owner keeps the stamp honest.
+                // Other sessions' trimmed messages go into their own sessions' summaries instead, further down.
                 let compacting = &canonical.messages[canonical.compaction_cursor..to_compact];
-                let mut summary_parts: Vec<String> = Vec::new();
-                // Only carry forward an existing summary that this same session
-                // owns; another session's summary must not be prepended (it
-                // would re-introduce the cross-session content the fold filter
-                // above removes).
-                if let Some(ref existing) = canonical.compacted_summary {
-                    if canonical.compacted_summary_session_id == session_id {
-                        summary_parts.push(existing.clone());
+                // Carry forward this session's own earlier summary, never another
+                // session's (that would re-introduce the cross-session content the
+                // fold filter below removes). When another conversation compacted
+                // last and holds the canonical slot, this session's summary lives
+                // only in its mirror; starting from nothing there would overwrite
+                // the mirror with the new batch alone and lose everything compacted
+                // before (#8645 follow-up).
+                let existing = if canonical.compacted_summary_session_id == session_id {
+                    canonical.compacted_summary.clone()
+                } else {
+                    match session_id {
+                        Some(sid) => read_compaction_mirror_in_tx(
+                            &tx,
+                            &agent_id.0.to_string(),
+                            &sid.0.to_string(),
+                        )?,
+                        None => None,
+                    }
+                };
+                // Skip entries owned by a different session; an untagged (legacy) entry has no owner and folds into any session.
+                let own_summary = fold_compacted_messages(
+                    existing,
+                    compacting
+                        .iter()
+                        .filter(|entry| match (&entry.session_id, &session_id) {
+                            (Some(got), Some(want)) => got == want,
+                            _ => true,
+                        })
+                        .map(|entry| &entry.message),
+                );
+                // The entries of other sessions leave the shared window here too.
+                // Fold each session's share into that session's own summary, so a conversation does not lose compacted history because a different conversation crossed the threshold.
+                // Only tagged entries have another owner: untagged (legacy) ones already went into the caller's fold above, and a caller with no session (agent-wide compaction) folded everything into the agent-wide summary, so there is nothing left to route.
+                let mut others: Vec<(SessionId, Vec<&Message>)> = Vec::new();
+                if let Some(caller) = session_id {
+                    for entry in compacting {
+                        let Some(owner) = entry.session_id.filter(|owner| *owner != caller) else {
+                            continue;
+                        };
+                        match others.iter_mut().find(|(sid, _)| *sid == owner) {
+                            Some((_, messages)) => messages.push(&entry.message),
+                            None => others.push((owner, vec![&entry.message])),
+                        }
                     }
                 }
-                for entry in compacting {
-                    // Skip entries owned by a different session; an untagged
-                    // (legacy) entry has no owner and folds into any session.
-                    match (&entry.session_id, &session_id) {
-                        (Some(got), Some(want)) if got != want => continue,
-                        _ => {}
-                    }
-                    let msg = &entry.message;
-                    let role = match msg.role {
-                        librefang_types::message::Role::User => "User",
-                        librefang_types::message::Role::Assistant => "Assistant",
-                        librefang_types::message::Role::System => "System",
+                let mut other_summaries: Vec<(SessionId, String)> = Vec::new();
+                for (owner, messages) in others {
+                    // Same carry-forward rule as the caller's: the canonical summary while that session still holds the slot, otherwise its mirror.
+                    let existing = if canonical.compacted_summary_session_id == Some(owner) {
+                        canonical.compacted_summary.clone()
+                    } else {
+                        read_compaction_mirror_in_tx(
+                            &tx,
+                            &agent_id.0.to_string(),
+                            &owner.0.to_string(),
+                        )?
                     };
-                    let text = msg.content.text_content();
-                    if !text.is_empty() {
-                        // Truncate individual messages in summary to keep it compact (UTF-8 safe)
-                        let truncated = if text.len() > 200 {
-                            format!("{}...", librefang_types::truncate_str(&text, 200))
-                        } else {
-                            text
-                        };
-                        summary_parts.push(format!("{role}: {truncated}"));
+                    if let Some(summary) = fold_compacted_messages(existing, messages.into_iter()) {
+                        other_summaries.push((owner, summary));
                     }
                 }
                 // Only (re)write the summary when this session actually
@@ -2339,21 +2357,24 @@ impl SessionStore {
                 // untouched rather than stamping an empty summary onto this
                 // session. The message trim below still runs unconditionally so
                 // the canonical blob cannot grow without bound.
-                if !summary_parts.is_empty() {
-                    // Keep summary under ~4000 chars (UTF-8 safe)
-                    let mut full_summary = summary_parts.join("\n");
-                    if full_summary.len() > 4000 {
-                        let start = full_summary.len() - 4000;
-                        // Find the next char boundary at or after `start`
-                        let safe_start = (start..full_summary.len())
-                            .find(|&i| full_summary.is_char_boundary(i))
-                            .unwrap_or(full_summary.len());
-                        full_summary = full_summary[safe_start..].to_string();
-                    }
+                if let Some(full_summary) = own_summary {
                     canonical.compacted_summary = Some(full_summary);
                     // #6225: stamp the session that triggered this compaction so
                     // the read path only surfaces the banner on that session.
                     canonical.compacted_summary_session_id = session_id;
+                }
+                for (owner, summary) in other_summaries {
+                    // A session that still holds the canonical slot (the caller contributed nothing) gets its canonical summary updated in place, owner stamp unchanged.
+                    // The read path prefers that row and its next compaction carries it forward, so updating only the mirror would drop the folded content again.
+                    if canonical.compacted_summary_session_id == Some(owner) {
+                        canonical.compacted_summary = Some(summary.clone());
+                    }
+                    write_compaction_mirror_in_tx(
+                        &tx,
+                        &agent_id.0.to_string(),
+                        &owner.0.to_string(),
+                        Some(&summary),
+                    )?;
                 }
                 canonical.compaction_cursor = to_compact;
                 // Trim messages: keep only the recent window
@@ -2362,15 +2383,13 @@ impl SessionStore {
             }
         }
 
-        // The threshold path compacts without going through `store_llm_summary`, and it is the
-        // path production turns actually take, so the per-session copy belongs here too — in
-        // the same transaction that moves the canonical row (#8645). Only this session's own
-        // mirror is touched: another conversation's copy has to survive its neighbour's
-        // compaction, which is the point of the mirror.
+        // The threshold path compacts without going through `store_llm_summary`, and it is the path production turns actually take, so the per-session copy belongs here too — in the same transaction that moves the canonical row (#8645).
+        // Here only this session's own mirror is written from the canonical row; another conversation's mirror is never replaced by this session's summary, and only gains that conversation's own trimmed messages in the fold above.
         //
         // Unlike `store_llm_summary`'s best-effort mirror, a failure here aborts the append:
         // both writes share this transaction, and a turn that moved the summary without its
-        // copy is exactly the state this fixes.
+        // copy is exactly the state this fixes. Most turns compact nothing, so the helper
+        // compares before it writes and leaves an up-to-date mirror alone.
         if let Some(sid) = session_id {
             if canonical.compacted_summary_session_id == Some(sid) {
                 write_compaction_mirror_in_tx(
@@ -2423,6 +2442,51 @@ impl SessionStore {
     }
 }
 
+/// Fold compacted messages into a heuristic summary, after `existing`, in the threshold path's format: one `Role: text` line per message, each message cut at 200 bytes, the whole kept to its last ~4000 bytes.
+///
+/// Returns `None` when none of `messages` has text, so a caller can tell "nothing new to fold" from a summary that changed and leave the stored one, and its owner stamp, untouched.
+fn fold_compacted_messages<'a>(
+    existing: Option<String>,
+    messages: impl Iterator<Item = &'a Message>,
+) -> Option<String> {
+    let mut summary_parts: Vec<String> = Vec::new();
+    if let Some(existing) = existing.filter(|text| !text.trim().is_empty()) {
+        summary_parts.push(existing);
+    }
+    let carried = summary_parts.len();
+    for msg in messages {
+        let role = match msg.role {
+            Role::User => "User",
+            Role::Assistant => "Assistant",
+            Role::System => "System",
+        };
+        let text = msg.content.text_content();
+        if !text.is_empty() {
+            // Truncate individual messages in summary to keep it compact (UTF-8 safe)
+            let truncated = if text.len() > 200 {
+                format!("{}...", librefang_types::truncate_str(&text, 200))
+            } else {
+                text
+            };
+            summary_parts.push(format!("{role}: {truncated}"));
+        }
+    }
+    if summary_parts.len() == carried {
+        return None;
+    }
+    // Keep summary under ~4000 chars (UTF-8 safe)
+    let mut full_summary = summary_parts.join("\n");
+    if full_summary.len() > 4000 {
+        let start = full_summary.len() - 4000;
+        // Find the next char boundary at or after `start`
+        let safe_start = (start..full_summary.len())
+            .find(|&i| full_summary.is_char_boundary(i))
+            .unwrap_or(full_summary.len());
+        full_summary = full_summary[safe_start..].to_string();
+    }
+    Some(full_summary)
+}
+
 /// Remove `session_id`'s row from `sessions_fts`.
 ///
 /// `session_id` is `UNINDEXED` in the FTS5 table and FTS5 has no secondary index, so `WHERE session_id = ?` scans the whole index.
@@ -2459,12 +2523,54 @@ fn delete_session_fts_row(
     Ok(())
 }
 
-/// Remove the rows that describe one session outside the session tables (#8645 review).
+/// Delete every compaction mirror of one agent inside a write transaction (#8645).
 ///
-/// `kv_store` holds the per-session compaction mirror and `canonical_sessions` may hold an
-/// agent-scoped summary owned by this session. Both outlive the `sessions` row and are read by
-/// the next turn that lands on the same deterministic sid, so every deletion primitive — reset,
-/// delete, retention prune — has to drop them in the same transaction as the row.
+/// A half-open range, not `LIKE '<prefix>%'`: in SQLite `_` matches any character and LIKE is
+/// ASCII-case-insensitive, so it would also sweep agent keys such as `compaction-summary-notes`
+/// or `COMPACTION_SUMMARY_x`, which the tool boundary (a case-sensitive `starts_with`) never
+/// reserved (#8645 review).
+fn delete_compaction_mirrors_in_tx(conn: &Connection, agent_id: &str) -> LibreFangResult<()> {
+    conn.execute(
+        "DELETE FROM kv_store WHERE agent_id = ?1 AND key >= ?2 AND key < ?3",
+        rusqlite::params![
+            agent_id,
+            COMPACTION_SUMMARY_KEY_PREFIX,
+            format!("{COMPACTION_SUMMARY_KEY_PREFIX}\u{10FFFF}")
+        ],
+    )
+    .map_err(LibreFangError::memory)?;
+    Ok(())
+}
+
+/// Read the compaction mirror of one session inside a transaction (#8645).
+///
+/// The value is JSON, as `StructuredStore::set` writes it; anything but a string is treated as
+/// no mirror, matching `MemorySubstrate::per_session_summary` on the read path.
+fn read_compaction_mirror_in_tx(
+    conn: &Connection,
+    agent_id: &str,
+    session_id: &str,
+) -> LibreFangResult<Option<String>> {
+    use rusqlite::OptionalExtension;
+    let blob: Option<Vec<u8>> = conn
+        .query_row(
+            "SELECT value FROM kv_store WHERE agent_id = ?1 AND key = ?2",
+            rusqlite::params![
+                agent_id,
+                format!("{COMPACTION_SUMMARY_KEY_PREFIX}{session_id}")
+            ],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(LibreFangError::memory)?;
+    let Some(blob) = blob else {
+        return Ok(None);
+    };
+    let value: serde_json::Value =
+        serde_json::from_slice(&blob).map_err(LibreFangError::serialization)?;
+    Ok(value.as_str().map(str::to_string))
+}
+
 /// Upsert — or clear — the compaction mirror of one session inside a write transaction (#8645).
 ///
 /// `append_canonical` writes the canonical summary on the threshold path, which never reaches
@@ -2490,6 +2596,22 @@ fn write_compaction_mirror_in_tx(
     let (mirror, _) = truncate_summary_mirror(summary, MAX_SUMMARY_MIRROR_BYTES);
     let blob = serde_json::to_vec(&serde_json::Value::String(mirror))
         .map_err(LibreFangError::serialization)?;
+    // An unchanged mirror is left alone, so a turn that compacted nothing costs one point read
+    // rather than a rewrite that bumps `version` and `updated_at`. Comparing against the stored
+    // row rather than against "did this turn compact" also backfills a mirror that is missing or
+    // stale, e.g. a summary written before mirrors existed.
+    use rusqlite::OptionalExtension;
+    let stored: Option<Vec<u8>> = conn
+        .query_row(
+            "SELECT value FROM kv_store WHERE agent_id = ?1 AND key = ?2",
+            rusqlite::params![agent_id, key],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(LibreFangError::memory)?;
+    if stored.as_deref() == Some(blob.as_slice()) {
+        return Ok(());
+    }
     conn.execute(
         "INSERT INTO kv_store (agent_id, key, value, version, updated_at) VALUES (?1, ?2, ?3, 1, ?4)
          ON CONFLICT(agent_id, key) DO UPDATE SET value = ?3, version = version + 1, updated_at = ?4",
@@ -2499,6 +2621,12 @@ fn write_compaction_mirror_in_tx(
     Ok(())
 }
 
+/// Remove the rows that describe one session outside the session tables (#8645 review).
+///
+/// `kv_store` holds the per-session compaction mirror and `canonical_sessions` may hold an
+/// agent-scoped summary owned by this session. Both outlive the `sessions` row and are read by
+/// the next turn that lands on the same deterministic sid, so every deletion primitive — reset,
+/// delete, retention prune — has to drop them in the same transaction as the row.
 fn forget_session_summaries_in_tx(
     conn: &Connection,
     agent_id: &str,

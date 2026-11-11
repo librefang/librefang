@@ -15,6 +15,7 @@
 
 use librefang_types::config::ProxyConfig;
 use reqwest::Proxy;
+use std::collections::HashMap;
 use std::sync::{OnceLock, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 const USER_AGENT: &str = concat!("librefang/", env!("CARGO_PKG_VERSION"));
@@ -59,6 +60,43 @@ pub fn tls_config() -> rustls::ClientConfig {
 
 /// Global proxy configuration, updated on boot and hot-reload.
 static GLOBAL_PROXY: RwLock<Option<ProxyConfig>> = RwLock::new(None);
+
+/// Every environment variable proxy resolution reads, in the spelling reqwest's system detection uses.
+const PROXY_ENV_KEYS: &[&str] = &[
+    "HTTP_PROXY",
+    "http_proxy",
+    "HTTPS_PROXY",
+    "https_proxy",
+    "ALL_PROXY",
+    "all_proxy",
+    "NO_PROXY",
+    "no_proxy",
+    "REQUEST_METHOD",
+];
+
+/// The proxy environment as it was before the boot-time [`init_proxy`] export overwrote it.
+///
+/// Set only when that export actually wrote a variable.
+/// Once set, every later resolution reads this snapshot instead of the live environment, because the live values are the boot config's and would otherwise survive a hot-reload that removes or narrows the `[proxy]` section.
+static ORIGINAL_PROXY_ENV: OnceLock<HashMap<&'static str, String>> = OnceLock::new();
+
+/// Read a proxy environment variable as the operator set it, ignoring what [`init_proxy`] exported.
+fn original_proxy_env(key: &str) -> Option<String> {
+    match ORIGINAL_PROXY_ENV.get() {
+        Some(snapshot) => snapshot.get(key).cloned(),
+        None => std::env::var(key).ok(),
+    }
+}
+
+/// Snapshot the proxy environment once, before the first export mutates it.
+fn snapshot_original_proxy_env() {
+    ORIGINAL_PROXY_ENV.get_or_init(|| {
+        PROXY_ENV_KEYS
+            .iter()
+            .filter_map(|key| std::env::var(key).ok().map(|value| (*key, value)))
+            .collect()
+    });
+}
 
 fn read_proxy_recover(
     proxy: &RwLock<Option<ProxyConfig>>,
@@ -112,6 +150,9 @@ fn update_proxy(
 /// runtime spawns worker threads. Subsequent calls (hot-reload) update
 /// `GLOBAL_PROXY` only, avoiding the unsound `set_var` in a
 /// multi-threaded context.
+///
+/// Because the exported variables outlive the config that produced them, the original environment is snapshotted before the first export and every later resolution reads that snapshot (see [`build_http_client`]).
+/// That is what lets a hot-reload that removes or narrows `[proxy]` actually stop using the boot-time proxy for clients built through this crate.
 pub fn init_proxy(cfg: ProxyConfig) {
     update_proxy(&GLOBAL_PROXY, cfg, |cfg| {
         // SAFETY: `is_initial` is only `true` during the synchronous bootstrap
@@ -123,6 +164,7 @@ pub fn init_proxy(cfg: ProxyConfig) {
         if let Some(ref url) = cfg.http_proxy {
             if !url.is_empty() {
                 if is_valid_proxy_url(url) {
+                    snapshot_original_proxy_env();
                     unsafe {
                         std::env::set_var("HTTP_PROXY", url);
                         std::env::set_var("http_proxy", url);
@@ -138,6 +180,7 @@ pub fn init_proxy(cfg: ProxyConfig) {
         if let Some(ref url) = cfg.https_proxy {
             if !url.is_empty() {
                 if is_valid_proxy_url(url) {
+                    snapshot_original_proxy_env();
                     unsafe {
                         std::env::set_var("HTTPS_PROXY", url);
                         std::env::set_var("https_proxy", url);
@@ -152,6 +195,7 @@ pub fn init_proxy(cfg: ProxyConfig) {
         }
         if let Some(ref no) = cfg.no_proxy {
             if !no.is_empty() {
+                snapshot_original_proxy_env();
                 unsafe {
                     std::env::set_var("NO_PROXY", no);
                     std::env::set_var("no_proxy", no);
@@ -182,8 +226,8 @@ fn active_proxy() -> ProxyConfig {
 /// and TLS that works even when system CA certificates are missing.
 ///
 /// Proxy resolution:
-/// - When no `ProxyConfig` field is set, reqwest's built-in system proxy detection (`HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` / `NO_PROXY`, plus the platform proxy settings on macOS and Windows) applies unchanged.
-/// - When any field is set, each field is resolved on its own: the config value wins, otherwise the matching environment variable is used. See [`build_http_client`].
+/// - When no `ProxyConfig` field is set and `init_proxy()` has exported nothing, reqwest's built-in system proxy detection (`HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` / `NO_PROXY`, plus the platform proxy settings on macOS and Windows) applies unchanged.
+/// - When any field is set, each field is resolved on its own: the config value wins, otherwise the matching environment variable (as it was before the boot export) is used. See [`build_http_client`].
 /// - `init_proxy()` also exports config values as env vars, ensuring consistency
 ///   for crates that don't use this builder (e.g. `librefang-channels`).
 pub fn proxied_client_builder() -> reqwest::ClientBuilder {
@@ -267,7 +311,7 @@ pub fn new_client() -> reqwest::Client {
 /// Build a [`reqwest::ClientBuilder`] with the given proxy settings applied
 /// and TLS fallback to bundled Mozilla CA roots.
 ///
-/// When every `ProxyConfig` field is unset, the builder keeps reqwest's automatic system proxy detection.
+/// When every `ProxyConfig` field is unset, the builder keeps reqwest's automatic system proxy detection, unless [`init_proxy`] has already exported config values into the environment; from then on the operator's pre-export environment is applied explicitly (or a direct connection is used) so the stale export cannot outlive a hot-reload.
 /// When any field is set, each one is resolved separately (config value first, then the matching environment variable) and applied explicitly.
 /// That per-field fallback has to be done here because adding any explicit proxy to a reqwest builder disables its automatic environment detection entirely, which would otherwise drop the user's `NO_PROXY` and `HTTPS_PROXY` as soon as config sets only `http_proxy`.
 ///
@@ -290,10 +334,20 @@ pub fn build_http_client(proxy: &ProxyConfig) -> reqwest::ClientBuilder {
         .connect_timeout(std::time::Duration::from_secs(30))
         .read_timeout(std::time::Duration::from_secs(300));
 
-    let Some(resolved) = resolve_proxy(proxy, |key| std::env::var(key).ok()) else {
-        // Nothing configured: keep reqwest's automatic system proxy detection.
-        return builder;
+    let env_exported = ORIGINAL_PROXY_ENV.get().is_some();
+    let resolved = match effective_proxy(proxy, original_proxy_env, env_exported) {
+        // Nothing configured and the environment is untouched: keep reqwest's automatic system proxy detection.
+        EffectiveProxy::System => return builder,
+        // Nothing configured, the boot export polluted the environment, and the operator's own environment has no proxy: connect directly instead of letting reqwest pick up the stale export.
+        EffectiveProxy::Direct => return builder.no_proxy(),
+        EffectiveProxy::Explicit(resolved) => resolved,
     };
+
+    // After the boot export, reqwest's automatic detection reads the stale exported values.
+    // Turn it off up front so a resolution that ends up adding no proxy (a config with only `no_proxy`, or an invalid proxy URL that is skipped below) connects directly instead of falling back to the boot-time proxy.
+    if env_exported {
+        builder = builder.no_proxy();
+    }
 
     let no_proxy_filter = resolved
         .no_proxy
@@ -333,6 +387,40 @@ struct ResolvedProxy {
     no_proxy: Option<String>,
 }
 
+/// How [`build_http_client`] should route a client.
+#[derive(Debug, PartialEq, Eq)]
+enum EffectiveProxy {
+    /// Leave reqwest's own system proxy detection in charge.
+    System,
+    /// Use no proxy at all.
+    Direct,
+    /// Apply exactly these proxies.
+    Explicit(ResolvedProxy),
+}
+
+/// Decide the routing for `proxy` given the operator's original environment.
+///
+/// `env_exported` is true once [`init_proxy`] has written config values into the process environment.
+/// From then on reqwest's system detection would read those stale values, so an empty config is resolved explicitly from `env` (the pre-export snapshot) instead of being handed back to reqwest.
+/// The cost is that platform proxy settings (macOS / Windows system configuration) are not consulted in that one case; an explicit environment proxy still is.
+fn effective_proxy(
+    proxy: &ProxyConfig,
+    env: impl Fn(&str) -> Option<String>,
+    env_exported: bool,
+) -> EffectiveProxy {
+    let resolved = match resolve_proxy(proxy, &env) {
+        Some(resolved) => resolved,
+        None if !env_exported => return EffectiveProxy::System,
+        None => merge_with_env(ResolvedProxy::default(), &env),
+    };
+    // A resolution with no proxy URL (for example a config that sets only `no_proxy`) adds nothing to the builder; after the export that must mean a direct connection, not reqwest's detection of the stale exported values.
+    if env_exported && resolved.http.is_none() && resolved.https.is_none() {
+        EffectiveProxy::Direct
+    } else {
+        EffectiveProxy::Explicit(resolved)
+    }
+}
+
 /// Merge the `[proxy]` config with the environment, field by field.
 ///
 /// Returns `None` when no config field is set, so the caller can leave reqwest's own system proxy detection in charge.
@@ -354,7 +442,11 @@ fn resolve_proxy(
     if config == ResolvedProxy::default() {
         return None;
     }
+    Some(merge_with_env(config, env))
+}
 
+/// Fill every unset field of `config` from the environment, with reqwest's precedence and CGI rule.
+fn merge_with_env(config: ResolvedProxy, env: impl Fn(&str) -> Option<String>) -> ResolvedProxy {
     let is_cgi = env("REQUEST_METHOD").is_some();
     let first_env = |keys: &[&str]| -> Option<String> {
         if is_cgi {
@@ -365,7 +457,7 @@ fn resolve_proxy(
     };
     let all = || first_env(&["ALL_PROXY", "all_proxy"]);
 
-    Some(ResolvedProxy {
+    ResolvedProxy {
         http: config
             .http
             .or_else(|| first_env(&["HTTP_PROXY", "http_proxy"]))
@@ -377,7 +469,7 @@ fn resolve_proxy(
         no_proxy: config
             .no_proxy
             .or_else(|| first_env(&["NO_PROXY", "no_proxy"])),
-    })
+    }
 }
 
 #[cfg(test)]
@@ -473,6 +565,62 @@ mod tests {
                 https: Some("http://config:3128".to_string()),
                 no_proxy: None,
             })
+        );
+    }
+
+    /// Hot-reload removing `[proxy]` after the boot export: the stale exported `HTTPS_PROXY` must not keep routing traffic.
+    /// The resolver reads the pre-export snapshot, so an operator environment with no proxy means a direct connection, not reqwest's polluted system detection.
+    #[test]
+    fn effective_proxy_ignores_boot_export_after_proxy_removed() {
+        let empty_snapshot = env_of(&[]);
+        assert_eq!(
+            effective_proxy(&ProxyConfig::default(), &empty_snapshot, true),
+            EffectiveProxy::Direct
+        );
+        // Before any export, an empty config still defers to reqwest's system detection.
+        assert_eq!(
+            effective_proxy(&ProxyConfig::default(), &empty_snapshot, false),
+            EffectiveProxy::System
+        );
+        // The operator's own environment proxy survives the removal.
+        let operator_env = env_of(&[("HTTPS_PROXY", "http://operator:3128")]);
+        assert_eq!(
+            effective_proxy(&ProxyConfig::default(), &operator_env, true),
+            EffectiveProxy::Explicit(ResolvedProxy {
+                http: None,
+                https: Some("http://operator:3128".to_string()),
+                no_proxy: None,
+            })
+        );
+    }
+
+    /// Narrowing `[proxy]` from `https_proxy = old` to `http_proxy = new` must not keep sending HTTPS through `old`.
+    #[test]
+    fn effective_proxy_narrowed_config_does_not_inherit_boot_export() {
+        let narrowed = ProxyConfig {
+            http_proxy: Some("http://new:8080".to_string()),
+            ..ProxyConfig::default()
+        };
+        assert_eq!(
+            effective_proxy(&narrowed, env_of(&[]), true),
+            EffectiveProxy::Explicit(ResolvedProxy {
+                http: Some("http://new:8080".to_string()),
+                https: None,
+                no_proxy: None,
+            })
+        );
+    }
+
+    /// Narrowing `[proxy]` to only `no_proxy` after the boot export adds no proxy URL, which must route directly rather than through the stale exported `HTTPS_PROXY`.
+    #[test]
+    fn effective_proxy_no_proxy_only_config_after_export_is_direct() {
+        let no_proxy_only = ProxyConfig {
+            no_proxy: Some("internal.example".to_string()),
+            ..ProxyConfig::default()
+        };
+        assert_eq!(
+            effective_proxy(&no_proxy_only, env_of(&[]), true),
+            EffectiveProxy::Direct
         );
     }
 

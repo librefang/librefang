@@ -729,9 +729,8 @@ impl StandaloneChat {
                                 .send()
                             {
                                 if let Ok(body) = resp.json::<serde_json::Value>() {
-                                    let provider = body["model_provider"].as_str().unwrap_or("?");
-                                    let model = body["model_name"].as_str().unwrap_or("?");
-                                    self.chat.model_label = format!("{provider}/{model}");
+                                    self.chat.model_label =
+                                        crate::api_json::agent_model_label(&body);
                                 }
                             }
                             self.chat.push_message(
@@ -824,9 +823,7 @@ impl StandaloneChat {
             let client = crate::daemon_client();
             if let Ok(resp) = client.get(format!("{base_url}/api/agents/{id}")).send() {
                 if let Ok(body) = resp.json::<serde_json::Value>() {
-                    let provider = body["model_provider"].as_str().unwrap_or("?");
-                    let model = body["model_name"].as_str().unwrap_or("?");
-                    self.chat.model_label = format!("{provider}/{model}");
+                    self.chat.model_label = crate::api_json::agent_model_label(&body);
                 }
             }
         }

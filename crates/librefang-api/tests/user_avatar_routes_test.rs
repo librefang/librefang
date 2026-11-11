@@ -317,11 +317,8 @@ async fn avatar_upload_round_trips_and_shows_on_the_user_view() {
     assert_eq!(bytes, TINY_PNG, "the served bytes must be the stored bytes");
     assert_eq!(headers["content-type"], "image/png");
     assert_eq!(headers["x-content-type-options"], "nosniff");
-    // `cache-control` is deliberately not asserted: the production stack adds a
-    // global `no-store, no-cache, must-revalidate` to every API response, which
-    // is stricter than the route's own `no-cache`, so the value that arrives is
-    // the layer's and not this handler's. The revalidation contract is covered
-    // by the ETag/304 test rather than by a header string.
+    // `cache-control` is deliberately not asserted here: the revalidation contract is covered by the ETag/304 test rather than by a header string.
+    // The production `security_headers` layer only fills in its `no-store` default when a handler set no policy, so the route's own `no-cache` is what reaches the browser (`middleware::tests::security_headers_keeps_handler_cache_control_and_defaults_to_no_store`).
     assert!(headers.contains_key("etag"));
 
     // Without this the test would pass against a handler that wrote the file

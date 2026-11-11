@@ -502,7 +502,7 @@ fn without_turn_injections_strips_head_and_time_messages() {
         tool_result_message("tu1"),
     ];
 
-    let persisted = without_turn_injections(&working, &injections);
+    let persisted = without_turn_injections(&working, &injections, &[]);
 
     let texts: Vec<_> = persisted.iter().map(|m| m.content.text_content()).collect();
     assert_eq!(persisted.len(), 4, "{texts:?}");
@@ -510,8 +510,194 @@ fn without_turn_injections_strips_head_and_time_messages() {
     assert_eq!(texts[1], "q");
     assert_eq!(count_tool_blocks(&persisted, "tu1"), (1, 1));
     assert_eq!(
-        without_turn_injections(&working, &TurnInjections::default()).len(),
+        without_turn_injections(&working, &TurnInjections::default(), &[]).len(),
         working.len()
+    );
+}
+
+/// Session repair merges the time message into the prompt and the head injections into each other and into the first history message, so by the time the inline compressor path persists the working copy they are no longer separate messages.
+/// They must still be cut out, the messages they were merged into must come back exactly as the session stored them, and genuine content that repair merged (the compression summary, two real user messages) must survive.
+#[test]
+fn without_turn_injections_strips_injections_merged_by_repair() {
+    let memory_msg = Message::user(
+        "[System context — what you know about this person]\nlikes tea\n\nlives in Kyoto",
+    );
+    let canonical_msg = Message::user("[Canonical context] other channel");
+    let time_msg = Message::user("[Current date/time: Friday 12:00]");
+    let injections = TurnInjections {
+        head: vec![memory_msg.clone(), canonical_msg.clone()],
+        time_msg: Some(time_msg.clone()),
+    };
+    let mut first = Message::user("first question");
+    first.pinned = true;
+    let summary = Message::user("[CONTEXT COMPRESSION SUMMARY] earlier turns");
+    let tail_question = Message::user("tail question");
+    let prompt = Message::user("q");
+    let session_before = vec![
+        first.clone(),
+        Message::assistant("first answer"),
+        tail_question.clone(),
+        Message::assistant("tail answer"),
+        prompt.clone(),
+        tool_use_message("tu1", serde_json::json!({})),
+        tool_result_message("tu1"),
+    ];
+    let working = vec![
+        memory_msg.clone(),
+        canonical_msg.clone(),
+        first.clone(),
+        Message::assistant("first answer"),
+        summary,
+        tail_question,
+        Message::assistant("tail answer"),
+        prompt.clone(),
+        time_msg.clone(),
+        tool_use_message("tu1", serde_json::json!({})),
+        tool_result_message("tu1"),
+    ];
+    let repaired = crate::session_repair::validate_and_repair(&working);
+    assert!(
+        repaired.len() < working.len(),
+        "repair must have merged the injections for this test to mean anything"
+    );
+
+    let persisted = without_turn_injections(&repaired, &injections, &session_before);
+
+    let texts: Vec<_> = persisted.iter().map(|m| m.content.text_content()).collect();
+    for injected in [&memory_msg, &canonical_msg, &time_msg] {
+        let marker = injected.content.text_content();
+        assert!(
+            texts
+                .iter()
+                .all(|text| !text.contains(marker.lines().next().unwrap())),
+            "{marker:?} persisted: {texts:#?}"
+        );
+    }
+    let as_json = |m: &Message| serde_json::to_value(m).unwrap();
+    assert_eq!(
+        as_json(&persisted[0]),
+        as_json(&first),
+        "the first history message must come back as the session stored it, pin flag included: {texts:#?}"
+    );
+    assert_eq!(
+        texts[2], "[CONTEXT COMPRESSION SUMMARY] earlier turns\n\ntail question",
+        "a merge of two genuine messages is kept as repair left it"
+    );
+    let prompt_at = persisted
+        .iter()
+        .position(|m| as_json(m) == as_json(&prompt))
+        .unwrap_or_else(|| panic!("the prompt must come back unmerged: {texts:#?}"));
+    assert_eq!(persisted.len(), prompt_at + 3, "{texts:#?}");
+    assert_eq!(count_tool_blocks(&persisted, "tu1"), (1, 1));
+
+    // A merged message that held nothing but injections is dropped.
+    let only_injections = crate::session_repair::validate_and_repair(&[
+        memory_msg,
+        canonical_msg,
+        Message::assistant("a"),
+    ]);
+    assert_eq!(only_injections.len(), 2);
+    let persisted = without_turn_injections(&only_injections, &injections, &[]);
+    assert_eq!(persisted.len(), 1);
+    assert_eq!(persisted[0].role, Role::Assistant);
+}
+
+fn turn_json(turn: &[Message]) -> Vec<serde_json::Value> {
+    turn.iter()
+        .map(|m| serde_json::to_value(m).unwrap())
+        .collect()
+}
+
+/// The single message session repair leaves when it merges two adjacent user messages.
+fn merged_by_repair(first: Message, second: Message) -> Message {
+    let mut repaired = crate::session_repair::validate_and_repair(&[first, second]);
+    assert_eq!(repaired.len(), 1, "repair merges adjacent user messages");
+    repaired.remove(0)
+}
+
+/// Repair merges the turn's prompt with the time message that follows it in the working copy, so the prompt is no longer in the rewritten session verbatim; the turn must still start at the merged message, not one past it.
+#[test]
+fn current_turn_start_after_rewrite_finds_prompt_merged_by_repair() {
+    let turn = turn_json(&[
+        Message::user("q"),
+        tool_use_message("tu1", serde_json::json!({})),
+        tool_result_message("tu1"),
+    ]);
+    let merged = merged_by_repair(
+        Message::user("q"),
+        Message::user("[Current date/time: Friday 12:00]"),
+    );
+    let rewritten = vec![
+        Message::user("[Context compaction summary] s"),
+        Message::assistant("kept answer"),
+        merged,
+        tool_use_message("tu1", serde_json::json!({})),
+        tool_result_message("tu1"),
+    ];
+    assert_eq!(
+        current_turn_start_after_rewrite(Some(&turn), &rewritten, 40),
+        2
+    );
+
+    // A prompt-only turn merged the same way (compression on the turn's first iteration).
+    assert_eq!(
+        current_turn_start_after_rewrite(
+            Some(&turn_json(&[Message::user("q")])),
+            &rewritten[..3],
+            40
+        ),
+        2
+    );
+
+    // The prompt folded into the user message before it (the previous turn ended on an unanswered user message).
+    let rewritten = vec![
+        Message::assistant("older answer"),
+        merged_by_repair(Message::user("earlier"), Message::user("q")),
+        tool_use_message("tu1", serde_json::json!({})),
+        tool_result_message("tu1"),
+    ];
+    assert_eq!(
+        current_turn_start_after_rewrite(Some(&turn), &rewritten, 40),
+        1
+    );
+
+    // A summary that merely mentions the prompt's text is not the prompt.
+    let rewritten = vec![
+        Message::user("[Context compaction summary] the user asked q"),
+        tool_use_message("tu1", serde_json::json!({})),
+        tool_result_message("tu1"),
+    ];
+    assert_eq!(
+        current_turn_start_after_rewrite(Some(&turn), &rewritten, 40),
+        1
+    );
+}
+
+/// When a long turn's opening messages are summarised along with older history, the turn starts at its first surviving message; nothing from the summary or earlier is counted as this turn's, even an earlier turn that sent the same prompt.
+#[test]
+fn current_turn_start_after_rewrite_starts_at_first_survivor_when_turn_head_was_summarised() {
+    let turn = turn_json(&[
+        Message::user("q"),
+        tool_use_message("tu1", serde_json::json!({})),
+        tool_result_message("tu1"),
+        tool_use_message("tu2", serde_json::json!({})),
+        tool_result_message("tu2"),
+    ]);
+    let rewritten = vec![
+        Message::user("q"),
+        Message::assistant("an earlier turn with the same prompt"),
+        Message::user("[Context compaction summary] s"),
+        tool_use_message("tu2", serde_json::json!({})),
+        tool_result_message("tu2"),
+        Message::user("Please provide your response."),
+    ];
+    assert_eq!(
+        current_turn_start_after_rewrite(Some(&turn), &rewritten, 40),
+        3
+    );
+    assert_eq!(
+        current_turn_start_after_rewrite(Some(&[]), &rewritten, 40),
+        rewritten.len()
     );
 }
 
@@ -1374,6 +1560,7 @@ fn silent_response_single_source_of_truth() {
 
 mod hook_payload;
 mod integration;
+mod loop_accounting;
 mod recovery;
 mod sampling_params;
 mod sender;

@@ -256,6 +256,13 @@ async fn oc5_temperature_strip() {
     );
 }
 
+fn has_tools(body: &serde_json::Value) -> bool {
+    body.get("tools")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|tools| !tools.is_empty())
+}
+
+/// A repeated 500 while tools are present (GLM-5 on DashScope) strips the tools on the next retry.
 #[tokio::test]
 #[serial_test::serial]
 async fn oc6_toolless_retry_on_500() {
@@ -266,7 +273,7 @@ async fn oc6_toolless_retry_on_500() {
     Mock::given(method("POST"))
         .and(path("/chat/completions"))
         .respond_with(openai_500_tool_error())
-        .up_to_n_times(1)
+        .up_to_n_times(2)
         .with_priority(1)
         .mount(&server)
         .await;
@@ -286,15 +293,13 @@ async fn oc6_toolless_retry_on_500() {
     );
 
     let requests = server.received_requests().await.unwrap();
-    assert_eq!(requests.len(), 2, "expected 2 requests");
+    assert_eq!(requests.len(), 3, "expected 3 requests");
 
     let first = request_json(&requests[0]);
     let second = request_json(&requests[1]);
+    let third = request_json(&requests[2]);
     assert!(
-        first
-            .get("tools")
-            .and_then(serde_json::Value::as_array)
-            .is_some_and(|tools| !tools.is_empty()),
+        has_tools(&first),
         "first request should include tools: {first}"
     );
     assert!(
@@ -302,16 +307,54 @@ async fn oc6_toolless_retry_on_500() {
         "first request should include tool_choice: {first}"
     );
     assert!(
-        second
-            .get("tools")
-            .and_then(serde_json::Value::as_array)
-            .is_none_or(Vec::is_empty),
-        "retry request should omit tools or send empty tools: {second}"
+        has_tools(&second),
+        "the first 500 must be retried with tools unchanged: {second}"
     );
     assert!(
-        second.get("tool_choice").is_none(),
-        "retry request should omit tool_choice: {second}"
+        !has_tools(&third),
+        "retry after a repeated 500 should omit tools or send empty tools: {third}"
     );
+    assert!(
+        third.get("tool_choice").is_none(),
+        "retry after a repeated 500 should omit tool_choice: {third}"
+    );
+}
+
+/// A single transient 500 must not downgrade the turn to a tool-less completion: the retry carries the tools unchanged.
+#[tokio::test]
+#[serial_test::serial]
+async fn oc6b_transient_500_retries_with_tools() {
+    let _env = isolated_env();
+    let server = MockServer::start().await;
+    let driver = mock_openai_driver(&server);
+
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(openai_500_tool_error())
+        .up_to_n_times(1)
+        .with_priority(1)
+        .mount(&server)
+        .await;
+
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(openai_200_body("with-tools")))
+        .with_priority(2)
+        .mount(&server)
+        .await;
+
+    let result = driver.complete(request_with_tools("gpt-test")).await;
+    assert!(result.is_ok(), "expected Ok after retry, got {:?}", result);
+
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(requests.len(), 2, "expected 2 requests");
+    for (i, req) in requests.iter().enumerate() {
+        let body = request_json(req);
+        assert!(
+            has_tools(&body),
+            "request {i} must still carry tools after one transient 500: {body}"
+        );
+    }
 }
 
 #[tokio::test]

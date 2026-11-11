@@ -11,7 +11,6 @@
 use crate::backoff::standard_retry_delay;
 use crate::llm_driver::{CompletionRequest, CompletionResponse, LlmDriver, LlmError, StreamEvent};
 use async_trait::async_trait;
-use futures::StreamExt;
 use librefang_types::config::ResponseFormat;
 use librefang_types::message::{
     ContentBlock, Message, MessageContent, Role, StopReason, TokenUsage,
@@ -126,6 +125,8 @@ pub(crate) struct GeminiRequest {
 pub(crate) struct GeminiContent {
     #[serde(skip_serializing_if = "Option::is_none")]
     role: Option<String>,
+    /// Gemini omits `parts` on a candidate that finished with nothing to say (`"content": {"role": "model"}`); without the default the whole chunk, finishReason and usage included, fails to parse and is dropped.
+    #[serde(default)]
     parts: Vec<GeminiPart>,
 }
 
@@ -245,6 +246,19 @@ struct GeminiResponse {
     candidates: Vec<GeminiCandidate>,
     #[serde(default)]
     usage_metadata: Option<GeminiUsageMetadata>,
+    /// Error frame emitted inside an already-accepted (HTTP 200) SSE stream, e.g. `{"error":{"code":503,"status":"UNAVAILABLE",...}}`.
+    #[serde(default)]
+    error: Option<GeminiErrorDetail>,
+    /// Prompt-level feedback; carries `blockReason` when the prompt itself was blocked and no candidate is produced.
+    #[serde(default)]
+    prompt_feedback: Option<GeminiPromptFeedback>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GeminiPromptFeedback {
+    #[serde(default)]
+    block_reason: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -281,7 +295,6 @@ struct GeminiErrorResponse {
 }
 
 #[derive(Debug, Deserialize)]
-#[allow(dead_code)]
 struct GeminiErrorDetail {
     message: String,
     #[serde(default)]
@@ -590,24 +603,8 @@ fn convert_response(resp: GeminiResponse) -> Result<CompletionResponse, LlmError
         }
     }
 
-    // Gemini uses "STOP" for both end-of-turn and function calls,
-    // so check tool_calls to determine the actual stop reason.
-    let stop_reason = if !tool_calls.is_empty() {
-        StopReason::ToolUse
-    } else {
-        match candidate.finish_reason.as_deref() {
-            Some("MAX_TOKENS") => StopReason::MaxTokens,
-            // Safety / policy refusals — surface so caller can react (#3450).
-            Some("SAFETY")
-            | Some("RECITATION")
-            | Some("BLOCKLIST")
-            | Some("PROHIBITED_CONTENT")
-            | Some("SPII")
-            | Some("IMAGE_SAFETY")
-            | Some("LANGUAGE") => StopReason::ContentFiltered,
-            _ => StopReason::EndTurn,
-        }
-    };
+    let stop_reason =
+        map_gemini_finish_reason(candidate.finish_reason.as_deref(), !tool_calls.is_empty());
 
     let usage = resp
         .usage_metadata
@@ -635,6 +632,52 @@ fn convert_response(resp: GeminiResponse) -> Result<CompletionResponse, LlmError
 }
 
 // ── Shared helpers (used by both Gemini and Vertex AI drivers) ────────
+
+/// Map a Gemini `finishReason` to a [`StopReason`].
+///
+/// Gemini reports "STOP" both for a plain end of turn and for a function-call turn, so a turn that produced tool calls is `ToolUse` regardless of the reported reason.
+/// Shared by the non-streaming and streaming paths so they cannot disagree.
+fn map_gemini_finish_reason(finish_reason: Option<&str>, has_tool_calls: bool) -> StopReason {
+    if has_tool_calls {
+        return StopReason::ToolUse;
+    }
+    match finish_reason {
+        Some("MAX_TOKENS") => StopReason::MaxTokens,
+        // Safety / policy refusals — surface so caller can react (#3450).
+        Some("SAFETY")
+        | Some("RECITATION")
+        | Some("BLOCKLIST")
+        | Some("PROHIBITED_CONTENT")
+        | Some("SPII")
+        | Some("IMAGE_SAFETY")
+        | Some("LANGUAGE") => StopReason::ContentFiltered,
+        _ => StopReason::EndTurn,
+    }
+}
+
+/// Convert an error frame received inside a 200 SSE stream into a typed [`LlmError`], so overload and quota errors reach the retry / fallback logic instead of being skipped.
+fn gemini_stream_error(detail: &GeminiErrorDetail) -> LlmError {
+    let status = detail.status.as_deref().unwrap_or("");
+    let message = if status.is_empty() {
+        detail.message.clone()
+    } else {
+        format!("{status}: {}", detail.message)
+    };
+    match (detail.code, status) {
+        (Some(429), _) | (_, "RESOURCE_EXHAUSTED") => LlmError::RateLimited {
+            retry_after_ms: 5000,
+            message: Some(message),
+        },
+        (Some(503), _) | (_, "UNAVAILABLE") => LlmError::Overloaded {
+            retry_after_ms: 5000,
+        },
+        (code, _) => LlmError::Api {
+            status: code.unwrap_or(500),
+            message,
+            code: None,
+        },
+    }
+}
 
 /// Map a [`ResponseFormat`] to Gemini's `(responseMimeType, responseSchema)` pair.
 /// Gemini honors structured output through `generationConfig`, unlike OpenAI/Anthropic; `None` / `Text` leaves both unset (free-form text).
@@ -746,6 +789,8 @@ pub(crate) async fn stream_gemini_sse(
     let mut thinking_thought_sig: Option<String> = None;
     let mut fn_calls: Vec<(String, serde_json::Value, Option<String>, String)> = Vec::new();
     let mut finish_reason: Option<String> = None;
+    // `promptFeedback.blockReason` from a chunk with no candidates: the prompt itself was refused.
+    let mut prompt_block_reason: Option<String> = None;
     let mut usage = TokenUsage::default();
     // Buffers partial UTF-8 codepoints across chunk boundaries (#3448).
     let mut utf8 = crate::utf8_stream::Utf8StreamDecoder::new();
@@ -789,6 +834,27 @@ pub(crate) async fn stream_gemini_sse(
                 Ok(v) => v,
                 Err(_) => continue,
             };
+
+            if let Some(ref detail) = json.error {
+                warn!(
+                    code = ?detail.code,
+                    status = ?detail.status,
+                    message = %detail.message,
+                    "Gemini stream returned an error frame"
+                );
+                return Err(gemini_stream_error(detail));
+            }
+
+            if json.candidates.is_empty() {
+                if let Some(reason) = json
+                    .prompt_feedback
+                    .as_ref()
+                    .and_then(|f| f.block_reason.as_deref())
+                {
+                    warn!(block_reason = %reason, "Gemini blocked the prompt");
+                    prompt_block_reason = Some(reason.to_string());
+                }
+            }
 
             if let Some(ref u) = json.usage_metadata {
                 usage.input_tokens = u.prompt_token_count;
@@ -897,6 +963,21 @@ pub(crate) async fn stream_gemini_sse(
     // rather than silently disappearing (#3448).
     buffer.push_str(&utf8.finish());
 
+    let produced_nothing =
+        text_content.is_empty() && thinking_content.is_empty() && fn_calls.is_empty();
+    // A stream that produced no content and never reported a finishReason never delivered a candidate at all (truncated or garbage stream), mirroring the non-streaming path's "empty response" error.
+    // A candidate that finished with no parts (Gemini commonly answers a tool result with an empty `STOP`) stays an Ok turn: the agent loop owns empty-reply handling (accumulated-text fallback, in-loop retry), and a safety / length stop must reach the caller as `ContentFiltered` / `MaxTokens` (#3450).
+    if produced_nothing
+        && finish_reason.is_none()
+        && !receiver_dropped
+        && prompt_block_reason.is_none()
+    {
+        warn!("Gemini stream ended without any candidate");
+        return Err(LlmError::Parse(
+            "Gemini stream returned empty response (finish_reason: none)".to_string(),
+        ));
+    }
+
     // Build final response
     let mut content = Vec::new();
     let mut tool_calls = Vec::new();
@@ -937,24 +1018,10 @@ pub(crate) async fn stream_gemini_sse(
         });
     }
 
-    let stop_reason = match finish_reason.as_deref() {
-        Some("STOP") => StopReason::EndTurn,
-        Some("MAX_TOKENS") => StopReason::MaxTokens,
-        // Safety / policy refusals — surface so caller can react (#3450).
-        Some("SAFETY")
-        | Some("RECITATION")
-        | Some("BLOCKLIST")
-        | Some("PROHIBITED_CONTENT")
-        | Some("SPII")
-        | Some("IMAGE_SAFETY")
-        | Some("LANGUAGE") => StopReason::ContentFiltered,
-        _ => {
-            if !tool_calls.is_empty() {
-                StopReason::ToolUse
-            } else {
-                StopReason::EndTurn
-            }
-        }
+    let stop_reason = if prompt_block_reason.is_some() && tool_calls.is_empty() {
+        StopReason::ContentFiltered
+    } else {
+        map_gemini_finish_reason(finish_reason.as_deref(), !tool_calls.is_empty())
     };
 
     // Best-effort final send — byte loop is done, nothing to abort even if
@@ -1257,257 +1324,8 @@ impl LlmDriver for GeminiDriver {
                 });
             }
 
-            // Parse SSE stream
-            let mut buffer = String::new();
-            let mut text_content = String::new();
-            let mut thinking_content = String::new();
-            // Thought signature for accumulated text content (last one wins)
-            let mut text_thought_sig: Option<String> = None;
-            // Thought signature for accumulated thinking content (last one wins)
-            let mut thinking_thought_sig: Option<String> = None;
-            // Track function calls: (name, args_json, thought_signature)
-            let mut fn_calls: Vec<(String, serde_json::Value, Option<String>, String)> = Vec::new();
-            let mut finish_reason: Option<String> = None;
-            let mut usage = TokenUsage::default();
-            let mut receiver_dropped = false;
-            // Buffers partial UTF-8 codepoints across chunk boundaries (#3448).
-            let mut utf8 = crate::utf8_stream::Utf8StreamDecoder::new();
-
-            let mut byte_stream = resp.bytes_stream();
-            while let Some(chunk_result) = byte_stream.next().await {
-                if receiver_dropped {
-                    tracing::debug!("streaming receiver dropped; cancelling Gemini LLM stream");
-                    break;
-                }
-                let chunk = chunk_result.map_err(|e| LlmError::Http(e.to_string()))?;
-                buffer.push_str(&utf8.decode(&chunk));
-
-                // Process complete SSE events (delimited by \n\n or \r\n\r\n)
-                while let Some((pos, delim_len)) = buffer
-                    .find("\r\n\r\n")
-                    .map(|p| (p, 4usize))
-                    .into_iter()
-                    .chain(buffer.find("\n\n").map(|p| (p, 2usize)))
-                    .min_by_key(|&(p, _)| p)
-                {
-                    let event_text = buffer[..pos].to_string();
-                    buffer = buffer[pos + delim_len..].to_string();
-
-                    // Extract the data line (handle both "data: " and "data:" formats)
-                    let data = event_text
-                        .lines()
-                        .find_map(|line| {
-                            line.trim_end_matches('\r')
-                                .strip_prefix("data:")
-                                .map(|d| d.trim_start())
-                        })
-                        .unwrap_or("");
-
-                    if data.is_empty() {
-                        continue;
-                    }
-
-                    let json: GeminiResponse = match serde_json::from_str(data) {
-                        Ok(v) => v,
-                        Err(_) => continue,
-                    };
-
-                    // Extract usage from each chunk (last one wins)
-                    if let Some(ref u) = json.usage_metadata {
-                        usage.input_tokens = u.prompt_token_count;
-                        // #3479: thinking tokens are billed as output.
-                        usage.output_tokens = u.candidates_token_count + u.thoughts_token_count;
-                        // Cached prompt tokens (subset of input_tokens) for
-                        // cache-read pricing.
-                        usage.cache_read_input_tokens = u.cached_content_token_count;
-                    }
-
-                    for candidate in &json.candidates {
-                        if let Some(fr) = &candidate.finish_reason {
-                            finish_reason = Some(fr.clone());
-                        }
-
-                        if let Some(ref content) = candidate.content {
-                            for part in &content.parts {
-                                match part {
-                                    GeminiPart::Text {
-                                        text,
-                                        thought,
-                                        thought_signature,
-                                    } => {
-                                        if !text.is_empty() {
-                                            if *thought {
-                                                // Internal reasoning from a thinking
-                                                // model — emit as ThinkingDelta.
-                                                thinking_content.push_str(text);
-                                                if tx
-                                                    .send(StreamEvent::ThinkingDelta {
-                                                        text: text.clone(),
-                                                    })
-                                                    .await
-                                                    .is_err()
-                                                {
-                                                    receiver_dropped = true;
-                                                }
-                                                // Capture thought_signature for the
-                                                // thinking block separately from text.
-                                                if thought_signature.is_some() {
-                                                    thinking_thought_sig =
-                                                        thought_signature.clone();
-                                                }
-                                            } else {
-                                                text_content.push_str(text);
-                                                if tx
-                                                    .send(StreamEvent::TextDelta {
-                                                        text: text.clone(),
-                                                    })
-                                                    .await
-                                                    .is_err()
-                                                {
-                                                    receiver_dropped = true;
-                                                }
-                                                // Capture thought_signature for text
-                                                // parts (last one wins across chunks).
-                                                if thought_signature.is_some() {
-                                                    text_thought_sig = thought_signature.clone();
-                                                }
-                                            }
-                                        }
-                                    }
-                                    GeminiPart::FunctionCall {
-                                        function_call,
-                                        thought_signature,
-                                    } => {
-                                        let id = format!("call_{}", uuid::Uuid::new_v4().simple());
-                                        if tx
-                                            .send(StreamEvent::ToolUseStart {
-                                                id: id.clone(),
-                                                name: function_call.name.clone(),
-                                            })
-                                            .await
-                                            .is_err()
-                                        {
-                                            receiver_dropped = true;
-                                        }
-                                        let args_str = serde_json::to_string(&function_call.args)
-                                            .unwrap_or_default();
-                                        if tx
-                                            .send(StreamEvent::ToolInputDelta { text: args_str })
-                                            .await
-                                            .is_err()
-                                        {
-                                            receiver_dropped = true;
-                                        }
-                                        if tx
-                                            .send(StreamEvent::ToolUseEnd {
-                                                id: id.clone(),
-                                                name: function_call.name.clone(),
-                                                input: function_call.args.clone(),
-                                            })
-                                            .await
-                                            .is_err()
-                                        {
-                                            receiver_dropped = true;
-                                        }
-                                        // Carry the streamed id into the final
-                                        // response so the ToolUse block / ToolCall
-                                        // match the emitted events (#5870-cluster).
-                                        fn_calls.push((
-                                            function_call.name.clone(),
-                                            function_call.args.clone(),
-                                            thought_signature.clone(),
-                                            id,
-                                        ));
-                                    }
-                                    GeminiPart::InlineData { .. }
-                                    | GeminiPart::FunctionResponse { .. } => {}
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            // Drain any partial codepoint left in the decoder so a CJK
-            // character truncated by the final chunk surfaces explicitly
-            // rather than silently disappearing (#3448).
-            buffer.push_str(&utf8.finish());
-
-            // Build final response
-            let mut content = Vec::new();
-            let mut tool_calls = Vec::new();
-
-            // Thinking blocks come first (matches Anthropic convention).
-            if !thinking_content.is_empty() {
-                let provider_metadata =
-                    thinking_thought_sig.map(|sig| serde_json::json!({ "thought_signature": sig }));
-                content.push(ContentBlock::Thinking {
-                    thinking: thinking_content,
-                    provider_metadata,
-                });
-            }
-
-            if !text_content.is_empty() {
-                let provider_metadata =
-                    text_thought_sig.map(|sig| serde_json::json!({ "thought_signature": sig }));
-                content.push(ContentBlock::Text {
-                    text: text_content,
-                    provider_metadata,
-                });
-            }
-
-            for (name, args, thought_sig, id) in fn_calls {
-                let provider_metadata = thought_sig
-                    .as_ref()
-                    .map(|sig| serde_json::json!({ "thought_signature": sig }));
-                content.push(ContentBlock::ToolUse {
-                    id: id.clone(),
-                    name: name.clone(),
-                    input: args.clone(),
-                    provider_metadata,
-                });
-                tool_calls.push(ToolCall {
-                    id,
-                    name,
-                    input: args,
-                });
-            }
-
-            let stop_reason = match finish_reason.as_deref() {
-                Some("STOP") => StopReason::EndTurn,
-                Some("MAX_TOKENS") => StopReason::MaxTokens,
-                // Safety / policy refusals — surface so caller can react (#3450).
-                Some("SAFETY")
-                | Some("RECITATION")
-                | Some("BLOCKLIST")
-                | Some("PROHIBITED_CONTENT")
-                | Some("SPII")
-                | Some("IMAGE_SAFETY")
-                | Some("LANGUAGE") => StopReason::ContentFiltered,
-                _ => {
-                    if !tool_calls.is_empty() {
-                        StopReason::ToolUse
-                    } else {
-                        StopReason::EndTurn
-                    }
-                }
-            };
-
-            // Best-effort final send — byte loop is done, nothing to abort
-            // even if the receiver has dropped (#3769).
-            let _ = tx
-                .send(StreamEvent::ContentComplete { stop_reason, usage })
-                .await;
-
-            return Ok(CompletionResponse {
-                text_synthesized_from_thinking: false,
-                content,
-                stop_reason,
-                tool_calls,
-                usage,
-                actual_provider: None,
-                actual_model: None,
-            });
+            // Share the SSE parser with Vertex AI so stop-reason mapping, error-frame handling and empty-stream detection cannot drift between the two copies.
+            return stream_gemini_sse(resp, tx).await;
         }
 
         Err(LlmError::Api {
@@ -1757,6 +1575,8 @@ mod tests {
     #[test]
     fn test_convert_response_text_only() {
         let resp = GeminiResponse {
+            error: None,
+            prompt_feedback: None,
             candidates: vec![GeminiCandidate {
                 content: Some(GeminiContent {
                     role: Some("model".to_string()),
@@ -1790,6 +1610,8 @@ mod tests {
         // cachedContentTokenCount is a subset of promptTokenCount, surfaced as
         // cache_read_input_tokens so metering can apply the cache-read rate.
         let resp = GeminiResponse {
+            error: None,
+            prompt_feedback: None,
             candidates: vec![GeminiCandidate {
                 content: Some(GeminiContent {
                     role: Some("model".to_string()),
@@ -1818,6 +1640,8 @@ mod tests {
     #[test]
     fn test_convert_response_no_candidates() {
         let resp = GeminiResponse {
+            error: None,
+            prompt_feedback: None,
             candidates: vec![],
             usage_metadata: None,
         };
@@ -1829,6 +1653,8 @@ mod tests {
     #[test]
     fn test_convert_response_max_tokens() {
         let resp = GeminiResponse {
+            error: None,
+            prompt_feedback: None,
             candidates: vec![GeminiCandidate {
                 content: Some(GeminiContent {
                     role: Some("model".to_string()),
@@ -2541,6 +2367,8 @@ mod tests {
     fn test_thought_true_produces_thinking_block() {
         // A GeminiResponse with thought: true should produce ContentBlock::Thinking
         let resp = GeminiResponse {
+            error: None,
+            prompt_feedback: None,
             candidates: vec![GeminiCandidate {
                 content: Some(GeminiContent {
                     role: Some("model".to_string()),
@@ -2575,6 +2403,8 @@ mod tests {
         // thought=true + thought_signature should store the signature
         // in the Thinking block's provider_metadata
         let resp = GeminiResponse {
+            error: None,
+            prompt_feedback: None,
             candidates: vec![GeminiCandidate {
                 content: Some(GeminiContent {
                     role: Some("model".to_string()),

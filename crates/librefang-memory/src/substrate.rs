@@ -2471,6 +2471,299 @@ mod tests {
         );
     }
 
+    /// A conversation that compacts again after another one took the canonical slot must keep the
+    /// history its earlier compactions summarised (#8645 follow-up).
+    ///
+    /// The threshold path only carried a summary forward when the canonical row named the caller
+    /// as its owner. Once a second conversation had compacted, the first one's next compaction
+    /// started from nothing and overwrote its own mirror with a summary of the new batch alone, so
+    /// the loss #8645 reported was only postponed by one round.
+    #[test]
+    fn recompacting_after_another_session_keeps_the_earlier_summary() {
+        let substrate = MemorySubstrate::open_in_memory(0.1).unwrap();
+        let agent = AgentId::new();
+        let session_a = SessionId::new();
+        let session_b = SessionId::new();
+
+        let feed = |session: SessionId, word: &str| {
+            for i in 0..60 {
+                let message =
+                    librefang_types::message::Message::user(format!("{word} message {i}"));
+                substrate
+                    .append_canonical(
+                        agent,
+                        std::slice::from_ref(&message),
+                        Some(10),
+                        Some(session),
+                    )
+                    .unwrap();
+            }
+        };
+
+        feed(session_a, "alpha");
+        feed(session_b, "bravo");
+        feed(session_a, "charlie");
+
+        let (summary_a, _) = substrate
+            .canonical_context(agent, Some(session_a), None)
+            .unwrap();
+        let summary_a = summary_a.unwrap_or_default();
+        assert!(
+            summary_a.contains("alpha message 0"),
+            "A's second compaction must build on its first one, got {summary_a:?}"
+        );
+        assert!(
+            summary_a.contains("charlie message 0"),
+            "A's second compaction must add the newly compacted messages, got {summary_a:?}"
+        );
+        assert!(
+            !summary_a.contains("bravo"),
+            "carrying A's summary forward must not pull in B's content, got {summary_a:?}"
+        );
+
+        let (summary_b, _) = substrate
+            .canonical_context(agent, Some(session_b), None)
+            .unwrap();
+        let summary_b = summary_b.unwrap_or_default();
+        assert!(
+            summary_b.contains("bravo") && !summary_b.contains("alpha"),
+            "B keeps its own summary after A recompacts, got {summary_b:?}"
+        );
+    }
+
+    /// Append `count` messages `"<word> message <i>"` one turn at a time, as production does.
+    fn feed_one_by_one(
+        substrate: &MemorySubstrate,
+        agent: AgentId,
+        session: SessionId,
+        word: &str,
+        count: usize,
+    ) {
+        for i in 0..count {
+            let message = librefang_types::message::Message::user(format!("{word} message {i}"));
+            substrate
+                .append_canonical(
+                    agent,
+                    std::slice::from_ref(&message),
+                    Some(10),
+                    Some(session),
+                )
+                .unwrap();
+        }
+    }
+
+    /// Messages of one session that another session's compaction trims out of the shared window are folded into the first session's own summary, not dropped.
+    ///
+    /// A writes 50 messages without compacting; B's first 50 turns each trim one of A's messages out of the window, and its last 10 trim its own.
+    /// Before this, A's 50 messages left the window without reaching any summary.
+    #[test]
+    fn another_sessions_compaction_folds_trimmed_messages_into_their_owner_summary() {
+        let substrate = MemorySubstrate::open_in_memory(0.1).unwrap();
+        let agent = AgentId::new();
+        let session_a = SessionId::new();
+        let session_b = SessionId::new();
+
+        feed_one_by_one(&substrate, agent, session_a, "alpha", 50);
+        feed_one_by_one(&substrate, agent, session_b, "bravo", 60);
+
+        let mirror_a = substrate
+            .structured_get(agent, &compaction_summary_key(&session_a))
+            .unwrap()
+            .and_then(|value| value.as_str().map(str::to_string))
+            .unwrap_or_default();
+        assert!(
+            mirror_a.contains("User: alpha message 0")
+                && mirror_a.contains("User: alpha message 49"),
+            "A's mirror must hold the messages B's compaction trimmed, got {mirror_a:?}"
+        );
+        assert!(
+            !mirror_a.contains("bravo"),
+            "A's mirror must not pick up B's content, got {mirror_a:?}"
+        );
+
+        let (summary_a, _) = substrate
+            .canonical_context(agent, Some(session_a), None)
+            .unwrap();
+        assert_eq!(summary_a.as_deref(), Some(mirror_a.as_str()));
+
+        let (summary_b, _) = substrate
+            .canonical_context(agent, Some(session_b), None)
+            .unwrap();
+        let summary_b = summary_b.unwrap_or_default();
+        assert!(
+            summary_b.contains("bravo message 0") && !summary_b.contains("alpha"),
+            "B's summary holds only B's content, got {summary_b:?}"
+        );
+        let canonical = substrate.sessions.load_canonical(agent).unwrap();
+        assert_eq!(
+            canonical.compacted_summary_session_id,
+            Some(session_b),
+            "the canonical slot stays with the session that compacted its own content"
+        );
+    }
+
+    /// Content folded into a session's summary by another session's compaction survives that session's own next compaction.
+    #[test]
+    fn recompacting_keeps_messages_folded_in_by_another_session() {
+        let substrate = MemorySubstrate::open_in_memory(0.1).unwrap();
+        let agent = AgentId::new();
+        let session_a = SessionId::new();
+        let session_b = SessionId::new();
+
+        feed_one_by_one(&substrate, agent, session_a, "alpha", 50);
+        feed_one_by_one(&substrate, agent, session_b, "bravo", 60);
+        feed_one_by_one(&substrate, agent, session_a, "charlie", 60);
+
+        let (summary_a, _) = substrate
+            .canonical_context(agent, Some(session_a), None)
+            .unwrap();
+        let summary_a = summary_a.unwrap_or_default();
+        assert!(
+            summary_a.contains("alpha message 0") && summary_a.contains("alpha message 49"),
+            "A's own compaction must keep what B's compaction folded in, got {summary_a:?}"
+        );
+        assert!(
+            summary_a.contains("charlie message 0"),
+            "A's own compaction adds its newly compacted messages, got {summary_a:?}"
+        );
+        assert!(
+            !summary_a.contains("bravo"),
+            "A's summary must not pick up B's content, got {summary_a:?}"
+        );
+    }
+
+    /// When the session whose messages are trimmed holds the canonical slot and the compacting session contributes nothing, the fold updates the canonical summary in place and leaves the owner stamp alone.
+    ///
+    /// Updating only the mirror would leave the canonical row — which the read path prefers — stale, and A's next compaction, which carries the canonical summary forward, would drop the folded content again.
+    #[test]
+    fn folding_into_the_slot_owner_updates_the_canonical_summary_in_place() {
+        let substrate = MemorySubstrate::open_in_memory(0.1).unwrap();
+        let agent = AgentId::new();
+        let session_a = SessionId::new();
+        let session_b = SessionId::new();
+
+        // A compacts alpha 0..9 itself and owns the slot; B's 40 turns then trim alpha 10..49 without compacting anything of B's.
+        feed_one_by_one(&substrate, agent, session_a, "alpha", 60);
+        feed_one_by_one(&substrate, agent, session_b, "bravo", 40);
+
+        let canonical = substrate.sessions.load_canonical(agent).unwrap();
+        assert_eq!(canonical.compacted_summary_session_id, Some(session_a));
+        let summary = canonical.compacted_summary.unwrap_or_default();
+        assert!(
+            summary.contains("alpha message 9") && summary.contains("alpha message 49"),
+            "the canonical summary owned by A must include what B's compaction trimmed, got {summary:?}"
+        );
+        assert!(!summary.contains("bravo"), "got {summary:?}");
+        let mirror_a = substrate
+            .structured_get(agent, &compaction_summary_key(&session_a))
+            .unwrap()
+            .and_then(|value| value.as_str().map(str::to_string));
+        assert_eq!(mirror_a.as_deref(), Some(summary.as_str()));
+        assert!(
+            substrate
+                .structured_get(agent, &compaction_summary_key(&session_b))
+                .unwrap()
+                .is_none(),
+            "B compacted nothing of its own, so it has no mirror"
+        );
+    }
+
+    /// An append that compacts nothing must not rewrite the mirror (#8645 follow-up).
+    ///
+    /// The mirror upsert ran on every turn of the session that owned the canonical summary, so a
+    /// turn that changed nothing still bumped the row's version and timestamp.
+    #[test]
+    fn an_append_without_compaction_leaves_the_mirror_untouched() {
+        let substrate = MemorySubstrate::open_in_memory(0.1).unwrap();
+        let agent = AgentId::new();
+        let session_a = SessionId::new();
+
+        for i in 0..60 {
+            let message = librefang_types::message::Message::user(format!("alpha message {i}"));
+            substrate
+                .append_canonical(
+                    agent,
+                    std::slice::from_ref(&message),
+                    Some(10),
+                    Some(session_a),
+                )
+                .unwrap();
+        }
+        let mirror_row = || -> (i64, String) {
+            let conn = substrate.pool.get().unwrap();
+            conn.query_row(
+                "SELECT version, updated_at FROM kv_store WHERE agent_id = ?1 AND key = ?2",
+                rusqlite::params![agent.0.to_string(), compaction_summary_key(&session_a)],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap()
+        };
+        let before = mirror_row();
+
+        // The default threshold (100) is well above the 51 messages now held, so nothing compacts.
+        let message = librefang_types::message::Message::user("one more turn");
+        substrate
+            .append_canonical(agent, std::slice::from_ref(&message), None, Some(session_a))
+            .unwrap();
+
+        assert_eq!(
+            mirror_row(),
+            before,
+            "a turn that compacted nothing must not rewrite the compaction mirror"
+        );
+    }
+
+    /// Wiping the canonical session — what the kernel does on a model switch to keep the old
+    /// model's context out of the new one's prompt — must also remove the per-session mirrors,
+    /// which the prompt path otherwise falls back to (#8645 follow-up).
+    #[test]
+    fn deleting_the_canonical_session_removes_the_compaction_mirrors() {
+        let substrate = MemorySubstrate::open_in_memory(0.1).unwrap();
+        let agent = AgentId::new();
+        let session_a = SessionId::new();
+        let session_b = SessionId::new();
+        let kept = |text: &str| vec![librefang_types::message::Message::user(text)];
+
+        substrate
+            .store_llm_summary(agent, "summary of A", kept("a"), Some(session_a))
+            .unwrap();
+        substrate
+            .store_llm_summary(agent, "summary of B", kept("b"), Some(session_b))
+            .unwrap();
+        // Agent keys that merely resemble the reserved prefix belong to the agent, not to the
+        // platform, and must survive the wipe.
+        substrate
+            .structured_set(agent, "compaction-summary-notes", serde_json::json!("keep"))
+            .unwrap();
+        substrate
+            .structured_set(agent, "COMPACTION_SUMMARY_x", serde_json::json!("keep"))
+            .unwrap();
+
+        substrate.delete_canonical_session(agent).unwrap();
+
+        for session in [session_a, session_b] {
+            let (summary, _) = substrate
+                .canonical_context(agent, Some(session), None)
+                .unwrap();
+            assert_eq!(
+                summary, None,
+                "a wiped canonical session must not resurface a summary through the mirror"
+            );
+            assert_eq!(
+                substrate
+                    .compacted_summary_for_session(agent, session)
+                    .unwrap(),
+                None
+            );
+        }
+        for key in ["compaction-summary-notes", "COMPACTION_SUMMARY_x"] {
+            assert!(
+                substrate.structured_get(agent, key).unwrap().is_some(),
+                "{key} is not a compaction mirror and must survive"
+            );
+        }
+    }
+
     /// The #6493 guarantee has to survive: a session that owns no summary reads
     /// nothing, never the agent-scoped summary belonging to another conversation.
     #[test]

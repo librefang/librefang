@@ -35,6 +35,14 @@ struct PromptOverviewItem {
     /// Creation timestamp (RFC 3339) of the most recent version, if any.
     latest_version_at: Option<String>,
 }
+
+/// The 404 the agent-scoped routes return for an agent the caller may not access (#6753), so a prompt route cannot tell "exists but not yours" from "does not exist".
+fn agent_not_found() -> axum::response::Response {
+    ApiErrorResponse::not_found("Agent not found")
+        .into_json_tuple()
+        .into_response()
+}
+
 pub fn router() -> Router<Arc<AppState>> {
     Router::new()
         // Cross-agent repository overview: one summary row per non-hand
@@ -89,10 +97,16 @@ pub fn router() -> Router<Arc<AppState>> {
 /// new storage and no new kernel trait method. A store error for any
 /// single agent degrades that agent's row to a zero-version summary
 /// rather than failing the whole response.
-async fn list_prompts_overview(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+async fn list_prompts_overview(
+    State(state): State<Arc<AppState>>,
+    api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
+) -> impl IntoResponse {
     let agents = state.kernel.agent_registry().list_arcs();
     let mut items: Vec<PromptOverviewItem> = Vec::with_capacity(agents.len());
-    for entry in agents.iter().filter(|e| !e.is_hand) {
+    // Owner-scoping (#6753): `live_system_prompt` is the most sensitive part of a manifest, and `GET /api/agents/{id}` already hides it from a caller below Admin who did not author the agent.
+    for entry in agents.iter().filter(|e| {
+        !e.is_hand && super::caller_may_access_agent_data(&state, e.id, api_user.as_ref())
+    }) {
         // Store errors are non-fatal: surface the agent with zero versions
         // rather than 500-ing the whole repository view on one bad row.
         let versions = state
@@ -129,6 +143,7 @@ async fn list_prompts_overview(State(state): State<Arc<AppState>>) -> impl IntoR
 async fn list_prompt_versions(
     State(state): State<Arc<AppState>>,
     Path(agent_id): Path<String>,
+    api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
 ) -> impl IntoResponse {
     let agent_id: librefang_types::agent::AgentId = match agent_id.parse() {
         Ok(id) => id,
@@ -138,6 +153,9 @@ async fn list_prompt_versions(
                 .into_response()
         }
     };
+    if !super::caller_may_access_agent_data(&state, agent_id, api_user.as_ref()) {
+        return agent_not_found();
+    }
     let body = match state.kernel.list_prompt_versions(agent_id) {
         Ok(versions) => {
             let total = versions.len();
@@ -209,8 +227,19 @@ async fn create_prompt_version(
 async fn get_prompt_version(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
 ) -> impl IntoResponse {
     match state.kernel.get_prompt_version(&id) {
+        // A version of an agent the caller cannot access answers exactly like a missing one, so ids cannot be probed across owners (#6753).
+        Ok(Some(version))
+            if !super::caller_may_access_agent_data(
+                &state,
+                version.agent_id,
+                api_user.as_ref(),
+            ) =>
+        {
+            Json(serde_json::Value::Null).into_response()
+        }
         Ok(version) => Json(version).into_response(),
         // #3541: PromptStore returns typed `KernelOpError`; route through
         // the central status-code map so a `NotFound { kind: "prompt_version" }`
@@ -245,7 +274,31 @@ async fn activate_prompt_version(
                 .into_response()
         }
     };
-    if let Err(e) = state.kernel.set_active_prompt_version(&id, agent_id) {
+    // The store's activate is two unconditional UPDATEs (clear the agent's active flag, then set it on the version id), so an unknown version, or one belonging to another agent, would leave `agent_id` with no active version and the owner with two.
+    // Resolve the version first and require it to belong to the body's agent.
+    let version_agent = match state.kernel.get_prompt_version(&id) {
+        Ok(Some(version))
+            if agent_id
+                .trim()
+                .parse::<librefang_types::agent::AgentId>()
+                .ok()
+                == Some(version.agent_id) =>
+        {
+            version.agent_id.to_string()
+        }
+        Ok(Some(_)) => {
+            return ApiErrorResponse::bad_request("prompt version does not belong to agent_id")
+                .into_json_tuple()
+                .into_response()
+        }
+        Ok(None) => {
+            return ApiErrorResponse::not_found("prompt version not found")
+                .into_json_tuple()
+                .into_response()
+        }
+        Err(e) => return ApiErrorResponse::from(e).into_response(),
+    };
+    if let Err(e) = state.kernel.set_active_prompt_version(&id, &version_agent) {
         // #3541: typed KernelOpError → status-code via From impl.
         return ApiErrorResponse::from(e).into_response();
     }
@@ -264,6 +317,7 @@ async fn activate_prompt_version(
 async fn list_experiments(
     State(state): State<Arc<AppState>>,
     Path(agent_id): Path<String>,
+    api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
 ) -> impl IntoResponse {
     let agent_id: librefang_types::agent::AgentId = match agent_id.parse() {
         Ok(id) => id,
@@ -273,6 +327,9 @@ async fn list_experiments(
                 .into_response()
         }
     };
+    if !super::caller_may_access_agent_data(&state, agent_id, api_user.as_ref()) {
+        return agent_not_found();
+    }
     let body = match state.kernel.list_experiments(agent_id) {
         Ok(experiments) => {
             let total = experiments.len();
@@ -318,6 +375,29 @@ async fn create_experiment(
     experiment.status = librefang_types::agent::ExperimentStatus::default();
     experiment.started_at = None;
     experiment.ended_at = None;
+    // Completing an experiment activates the winning variant's `prompt_version_id` for this agent through the same unconditional store UPDATEs as `/activate`, so every variant must name an existing version of this agent: a defaulted nil id (or another agent's version) would deactivate the agent's prompt and activate nothing, or cross-wire two agents.
+    if experiment.variants.is_empty() {
+        return ApiErrorResponse::bad_request("experiment requires at least one variant")
+            .into_json_tuple()
+            .into_response();
+    }
+    for variant in &experiment.variants {
+        match state
+            .kernel
+            .get_prompt_version(&variant.prompt_version_id.to_string())
+        {
+            Ok(Some(version)) if version.agent_id == agent_id => {}
+            Ok(_) => {
+                return ApiErrorResponse::bad_request(format!(
+                    "variant '{}' must reference an existing prompt version of this agent",
+                    variant.name
+                ))
+                .into_json_tuple()
+                .into_response()
+            }
+            Err(e) => return ApiErrorResponse::from(e).into_response(),
+        }
+    }
     // Assign IDs to variants
     for variant in &mut experiment.variants {
         variant.id = uuid::Uuid::new_v4();
@@ -337,8 +417,19 @@ async fn create_experiment(
 async fn get_experiment(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
 ) -> impl IntoResponse {
     match state.kernel.get_experiment(&id) {
+        // Same not-found shape as a missing experiment for an agent the caller cannot access (#6753).
+        Ok(Some(experiment))
+            if !super::caller_may_access_agent_data(
+                &state,
+                experiment.agent_id,
+                api_user.as_ref(),
+            ) =>
+        {
+            Json(serde_json::Value::Null).into_response()
+        }
         Ok(experiment) => Json(experiment).into_response(),
         // #3541: PromptStore returns typed `KernelOpError`; route through
         // the central status-code map so a `NotFound { kind: "prompt_version" }`
@@ -411,7 +502,24 @@ async fn complete_experiment(
 async fn get_experiment_metrics(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
 ) -> impl IntoResponse {
+    // Metrics carry no agent id of their own, so authorize through the owning experiment; an inaccessible one answers like an unknown id (empty list).
+    if api_user.is_some() {
+        match state.kernel.get_experiment(&id) {
+            Ok(Some(experiment))
+                if !super::caller_may_access_agent_data(
+                    &state,
+                    experiment.agent_id,
+                    api_user.as_ref(),
+                ) =>
+            {
+                return Json(serde_json::json!([])).into_response();
+            }
+            Ok(_) => {}
+            Err(e) => return ApiErrorResponse::from(e).into_response(),
+        }
+    }
     match state.kernel.get_experiment_metrics(&id) {
         Ok(metrics) => Json(metrics).into_response(),
         // #3541: PromptStore returns typed `KernelOpError`; route through

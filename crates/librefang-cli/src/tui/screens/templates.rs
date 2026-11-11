@@ -668,7 +668,7 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut TemplatesState) {
 /// `pre-registry-restore` is the record-only snapshot `restore_from_registry` takes of the local file just before the registry copy overwrites it.
 /// `agent-tool` is the snapshot the kernel records when the agent-facing `agent_type_create` tool authors a type (`kernel/handles/agent_control.rs`).
 /// `unknown` is the SQLite column default (`crates/librefang-memory/src/migration.rs`), which no producer writes but an older row can carry.
-/// Every token here has a `tui-templates-source-<token>` key in all four locale packs.
+/// Every token here has a `tui-templates-source-<token>` key in all five locale packs.
 const TEMPLATE_CHANGE_SOURCES: &[&str] = &[
     "toml",
     "create",

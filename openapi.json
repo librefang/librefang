@@ -7,7 +7,7 @@
       "name": "MIT",
       "url": "https://opensource.org/licenses/MIT"
     },
-    "version": "2026.10.16"
+    "version": "2026.11.11"
   },
   "paths": {
     "/.well-known/agent.json": {
@@ -142,6 +142,12 @@
                 }
               }
             }
+          },
+          "404": {
+            "description": "No task with this id"
+          },
+          "409": {
+            "description": "Task already completed, failed or cancelled (A2A TaskNotCancelable)"
           }
         }
       }
@@ -3205,6 +3211,12 @@
                 }
               }
             }
+          },
+          "400": {
+            "description": "Malformed export, unsupported export version, export from another agent, or no messages"
+          },
+          "404": {
+            "description": "Agent not found"
           }
         }
       }
@@ -13035,7 +13047,10 @@
             }
           },
           "400": {
-            "description": "Missing query parameter"
+            "description": "Missing query parameter or malformed agent_id"
+          },
+          "404": {
+            "description": "agent_id filter names an agent the caller may not access"
           }
         }
       }

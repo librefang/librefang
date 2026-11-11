@@ -498,6 +498,33 @@ pub(super) async fn finalize_successful_end_turn(
     })
 }
 
+/// Tool-call ids already present in the LLM working copy before the running turn has made a call of its own.
+///
+/// Captured once, right after the working copy is prepared, and handed to [`running_turn_start`] on every iteration.
+/// The fold must never touch the running turn (#8653), and an index into `session.messages` cannot bound it: the working copy drops `Role::System` messages, gains head injections, and is rewritten by session repair, engine compaction and inline compression, none of which keep the two lists aligned.
+/// Tool ids survive every one of those, so they locate the turn in whatever the working copy has become.
+pub(super) fn prior_tool_ids(messages: &[Message]) -> std::collections::BTreeSet<String> {
+    messages
+        .iter()
+        .flat_map(super::tool_ids_of)
+        .map(str::to_owned)
+        .collect()
+}
+
+/// Index in the working copy `messages` of the running turn's first tool call, or `messages.len()` while the turn has made none.
+///
+/// Everything at or after it belongs to the running turn: a turn's tool results always follow the assistant message that issued them, and only the turn's own prompt and per-turn injections, which hold no foldable results, precede that message.
+/// A provider that reuses a tool id from an earlier turn on the turn's first call would hide the turn from this scan; every driver in this repo mints unique ids, and the durable replay in [`crate::history_fold::apply_fold_rewrites`] already relies on that uniqueness.
+pub(super) fn running_turn_start(
+    messages: &[Message],
+    prior_tool_ids: &std::collections::BTreeSet<String>,
+) -> usize {
+    messages
+        .iter()
+        .position(|m| super::tool_ids_of(m).any(|id| !prior_tool_ids.contains(id)))
+        .unwrap_or(messages.len())
+}
+
 /// Shared fold pass for the streaming and non-streaming agent loops
 /// (#3347 3/N + #4 review-followup DRY).  Both loops previously inlined
 /// the same fast-path / call / debug-log block; collapsing them into one
@@ -513,15 +540,10 @@ pub(super) async fn finalize_successful_end_turn(
 /// runs from scratch every turn — see `history_fold.rs` module doc.
 /// `streaming` flips the log target so operators can grep `"streaming"`
 /// vs `"non-streaming"` in production.
+/// `current_turn_start` is an index into the working copy `messages`, never into `session.messages`; the loops compute it with [`running_turn_start`].
 ///
-/// **Ordering note** — when soft-compression later in this same loop
-/// iteration fires `session.set_messages(messages.clone())`, it writes
-/// the (already-folded) working copy back over `session.messages`, so
-/// the explicit replay above is redundant on that path.  The replay is
-/// load-bearing only on the no-compression path; keeping it on both
-/// paths keeps session-mutation semantics uniform and removes a foot-gun
-/// for future refactors that move the fold call out from under the
-/// compression step.
+/// **Ordering note** — when soft-compression later in this same loop iteration persists its working copy, it writes the (already-folded) working copy back over `session.messages`, so the explicit replay above is redundant on that path.
+/// The replay is load-bearing only on the no-compression path; keeping it on both paths keeps session-mutation semantics uniform and removes a foot-gun for future refactors that move the fold call out from under the compression step.
 // Eight args because every parameter is genuinely distinct (working
 // messages, durable session, knobs, model, aux+primary driver chain,
 // streaming flag, reasoning policy) and bundling them into a context
