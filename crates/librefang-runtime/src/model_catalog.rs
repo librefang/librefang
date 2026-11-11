@@ -986,6 +986,9 @@ impl ModelCatalog {
         catalog: std::sync::Arc<Self>,
     ) -> librefang_llm_drivers::drivers::fallback_reasoning::ReasoningResolver {
         std::sync::Arc::new(move |provider: &str, model: &str| {
+            // Operator declarations live on the canonical entry: an agent that
+            // says `kimi` must see the policy declared for `moonshot`.
+            let provider = librefang_llm_drivers::drivers::canonical_provider_name(provider);
             match catalog.find_model_for_failover(provider, model) {
                 Some(entry) => (
                     catalog.effective_reasoning_policy(entry),

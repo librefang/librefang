@@ -50,7 +50,9 @@ impl LibreFangKernel {
         let provider = if super::super::manifest_helpers::is_default_provider_sentinel(provider) {
             ""
         } else {
-            provider
+            // Operator declarations live on the canonical entry: an agent that
+            // says `kimi` must see the policy declared for `moonshot`.
+            librefang_llm_drivers::drivers::canonical_provider_name(provider)
         };
         catalog
             .find_model_for_failover(provider, model)

@@ -705,6 +705,11 @@ impl ModelOverrides {
                 }
                 valid
             });
+            // Every token was invalid: the operator declared a policy, not
+            // "explicitly no levels", so inherit instead of pinning empty.
+            if efforts.is_empty() {
+                self.supported_efforts = None;
+            }
         }
         if let Some(token) = self.default_effort.as_ref() {
             if ReasoningMode::new(token.clone()).is_err() {
@@ -2051,5 +2056,30 @@ aliases = []
         assert_eq!(a.temperature, Some(0.3), "sibling fields still parse");
         assert_eq!(lenient["vllm:b"].top_k, Some(40));
         assert_eq!(lenient["vllm:c"].top_k, None);
+    }
+
+    /// #8616 review: a declaration whose tokens are all invalid inherits
+    /// instead of pinning an explicit empty set ("budget-controlled").
+    #[test]
+    fn sanitize_reasoning_inherits_when_every_token_is_invalid() {
+        let mut overrides = ModelOverrides {
+            supported_efforts: Some(vec!["high effort".to_string(), "very high".to_string()]),
+            default_effort: Some("extra high".to_string()),
+            ..Default::default()
+        };
+        let dropped = overrides.sanitize_reasoning();
+        assert_eq!(dropped, vec!["high effort", "very high", "extra high"]);
+        assert_eq!(overrides.supported_efforts, None);
+        assert_eq!(overrides.default_effort, None);
+    }
+
+    #[test]
+    fn sanitize_reasoning_keeps_the_valid_survivors() {
+        let mut overrides = ModelOverrides {
+            supported_efforts: Some(vec!["high".to_string(), "extra high".to_string()]),
+            ..Default::default()
+        };
+        overrides.sanitize_reasoning();
+        assert_eq!(overrides.supported_efforts, Some(vec!["high".to_string()]));
     }
 }

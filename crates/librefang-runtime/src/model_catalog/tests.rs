@@ -262,6 +262,41 @@ fn test_find_model_for_failover_is_strictly_provider_scoped() {
     assert!(catalog.find_model_for_failover("", "m").is_some());
 }
 
+/// #8616 review: the failover resolver canonicalises a provider alias before
+/// the lookup, so an agent configured as `codex` sees the policy declared on
+/// the `openai` entry instead of silently coercing as undeclared.
+#[test]
+fn test_failover_resolver_matches_an_alias_to_the_canonical_provider() {
+    let mut catalog = ModelCatalog::from_entries(
+        vec![ModelCatalogEntry {
+            id: "m".to_string(),
+            display_name: "M".to_string(),
+            provider: "openai".to_string(),
+            tier: ModelTier::Smart,
+            context_window: 128_000,
+            max_output_tokens: 8_192,
+            ..Default::default()
+        }],
+        vec![],
+    );
+    catalog.set_overrides(
+        "openai:m".to_string(),
+        ModelOverrides {
+            supported_efforts: Some(vec!["max".to_string()]),
+            ..Default::default()
+        },
+    );
+    let resolver = ModelCatalog::failover_reasoning_resolver(std::sync::Arc::new(catalog));
+    let (policy, _) = resolver("codex", "m");
+    assert_eq!(policy.supported_efforts, vec!["max"]);
+
+    let (unknown, _) = resolver("customgw", "m");
+    assert!(
+        unknown.supported_efforts.is_empty(),
+        "a provider miss is still undeclared"
+    );
+}
+
 /// The `{provider}/{model}` id form is still reconciled, so catalogs that key
 /// prefixed ids (OpenRouter) resolve under the strict lookup too.
 #[test]
