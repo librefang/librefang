@@ -3893,6 +3893,7 @@
     "select_option": "请选择...",
     "comma_separated": "逗号分隔",
     "add_item": "添加",
+    "json_invalid": "JSON 无效，请检查语法。",
     "load_error": "加载表单定义失败",
     "required_missing": "请填写所有必填字段"
   },

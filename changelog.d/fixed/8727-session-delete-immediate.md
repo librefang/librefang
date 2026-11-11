@@ -1,2 +1,0 @@
-`/new`, deleting a session from the dashboard, the memory decay sweep and consolidation could fail with "database is locked" whenever any other write was in flight, instead of waiting their turn.
-Each of them read before its first write inside a deferred SQLite transaction, and SQLite refuses that read-to-write upgrade immediately rather than honouring the busy timeout; they now take the write lock up front with `BEGIN IMMEDIATE`. (#8727) (@houko)

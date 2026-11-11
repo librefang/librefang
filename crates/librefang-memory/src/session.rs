@@ -2283,19 +2283,11 @@ impl SessionStore {
             let keep_count = DEFAULT_CANONICAL_WINDOW;
             let to_compact = canonical.messages.len().saturating_sub(keep_count);
             if to_compact > canonical.compaction_cursor {
-                // Build a summary from the messages being compacted, but fold
-                // in ONLY the triggering session's own entries (plus legacy
-                // untagged ones), mirroring the read-path session filter in
-                // `canonical_context`. The compacted_summary is agent-scoped
-                // (one row per agent) yet stamped with a single owning session,
-                // so if the fold included other sessions' content the read gate
-                // — which keys only on the owner stamp, not the content — would
-                // hand user A's private text to user B on a multi-user agent
-                // (#6493). Restricting the content to the owner keeps the stamp
-                // honest. Other sessions' trimmed messages still leave the recent
-                // window below; they simply don't enter this session's summary.
+                // Build a summary from the messages being compacted, but fold in ONLY the triggering session's own entries (plus legacy untagged ones), mirroring the read-path session filter in `canonical_context`.
+                // The compacted_summary is agent-scoped (one row per agent) yet stamped with a single owning session, so if the fold included other sessions' content the read gate — which keys only on the owner stamp, not the content — would hand user A's private text to user B on a multi-user agent (#6493).
+                // Restricting the content to the owner keeps the stamp honest.
+                // Other sessions' trimmed messages go into their own sessions' summaries instead, further down.
                 let compacting = &canonical.messages[canonical.compaction_cursor..to_compact];
-                let mut summary_parts: Vec<String> = Vec::new();
                 // Carry forward this session's own earlier summary, never another
                 // session's (that would re-introduce the cross-session content the
                 // fold filter below removes). When another conversation compacted
@@ -2315,32 +2307,46 @@ impl SessionStore {
                         None => None,
                     }
                 };
-                if let Some(existing) = existing.filter(|text| !text.trim().is_empty()) {
-                    summary_parts.push(existing);
-                }
-                let carried = summary_parts.len();
-                for entry in compacting {
-                    // Skip entries owned by a different session; an untagged
-                    // (legacy) entry has no owner and folds into any session.
-                    match (&entry.session_id, &session_id) {
-                        (Some(got), Some(want)) if got != want => continue,
-                        _ => {}
-                    }
-                    let msg = &entry.message;
-                    let role = match msg.role {
-                        librefang_types::message::Role::User => "User",
-                        librefang_types::message::Role::Assistant => "Assistant",
-                        librefang_types::message::Role::System => "System",
-                    };
-                    let text = msg.content.text_content();
-                    if !text.is_empty() {
-                        // Truncate individual messages in summary to keep it compact (UTF-8 safe)
-                        let truncated = if text.len() > 200 {
-                            format!("{}...", librefang_types::truncate_str(&text, 200))
-                        } else {
-                            text
+                // Skip entries owned by a different session; an untagged (legacy) entry has no owner and folds into any session.
+                let own_summary = fold_compacted_messages(
+                    existing,
+                    compacting
+                        .iter()
+                        .filter(|entry| match (&entry.session_id, &session_id) {
+                            (Some(got), Some(want)) => got == want,
+                            _ => true,
+                        })
+                        .map(|entry| &entry.message),
+                );
+                // The entries of other sessions leave the shared window here too.
+                // Fold each session's share into that session's own summary, so a conversation does not lose compacted history because a different conversation crossed the threshold.
+                // Only tagged entries have another owner: untagged (legacy) ones already went into the caller's fold above, and a caller with no session (agent-wide compaction) folded everything into the agent-wide summary, so there is nothing left to route.
+                let mut others: Vec<(SessionId, Vec<&Message>)> = Vec::new();
+                if let Some(caller) = session_id {
+                    for entry in compacting {
+                        let Some(owner) = entry.session_id.filter(|owner| *owner != caller) else {
+                            continue;
                         };
-                        summary_parts.push(format!("{role}: {truncated}"));
+                        match others.iter_mut().find(|(sid, _)| *sid == owner) {
+                            Some((_, messages)) => messages.push(&entry.message),
+                            None => others.push((owner, vec![&entry.message])),
+                        }
+                    }
+                }
+                let mut other_summaries: Vec<(SessionId, String)> = Vec::new();
+                for (owner, messages) in others {
+                    // Same carry-forward rule as the caller's: the canonical summary while that session still holds the slot, otherwise its mirror.
+                    let existing = if canonical.compacted_summary_session_id == Some(owner) {
+                        canonical.compacted_summary.clone()
+                    } else {
+                        read_compaction_mirror_in_tx(
+                            &tx,
+                            &agent_id.0.to_string(),
+                            &owner.0.to_string(),
+                        )?
+                    };
+                    if let Some(summary) = fold_compacted_messages(existing, messages.into_iter()) {
+                        other_summaries.push((owner, summary));
                     }
                 }
                 // Only (re)write the summary when this session actually
@@ -2351,21 +2357,24 @@ impl SessionStore {
                 // untouched rather than stamping an empty summary onto this
                 // session. The message trim below still runs unconditionally so
                 // the canonical blob cannot grow without bound.
-                if summary_parts.len() > carried {
-                    // Keep summary under ~4000 chars (UTF-8 safe)
-                    let mut full_summary = summary_parts.join("\n");
-                    if full_summary.len() > 4000 {
-                        let start = full_summary.len() - 4000;
-                        // Find the next char boundary at or after `start`
-                        let safe_start = (start..full_summary.len())
-                            .find(|&i| full_summary.is_char_boundary(i))
-                            .unwrap_or(full_summary.len());
-                        full_summary = full_summary[safe_start..].to_string();
-                    }
+                if let Some(full_summary) = own_summary {
                     canonical.compacted_summary = Some(full_summary);
                     // #6225: stamp the session that triggered this compaction so
                     // the read path only surfaces the banner on that session.
                     canonical.compacted_summary_session_id = session_id;
+                }
+                for (owner, summary) in other_summaries {
+                    // A session that still holds the canonical slot (the caller contributed nothing) gets its canonical summary updated in place, owner stamp unchanged.
+                    // The read path prefers that row and its next compaction carries it forward, so updating only the mirror would drop the folded content again.
+                    if canonical.compacted_summary_session_id == Some(owner) {
+                        canonical.compacted_summary = Some(summary.clone());
+                    }
+                    write_compaction_mirror_in_tx(
+                        &tx,
+                        &agent_id.0.to_string(),
+                        &owner.0.to_string(),
+                        Some(&summary),
+                    )?;
                 }
                 canonical.compaction_cursor = to_compact;
                 // Trim messages: keep only the recent window
@@ -2374,11 +2383,8 @@ impl SessionStore {
             }
         }
 
-        // The threshold path compacts without going through `store_llm_summary`, and it is the
-        // path production turns actually take, so the per-session copy belongs here too — in
-        // the same transaction that moves the canonical row (#8645). Only this session's own
-        // mirror is touched: another conversation's copy has to survive its neighbour's
-        // compaction, which is the point of the mirror.
+        // The threshold path compacts without going through `store_llm_summary`, and it is the path production turns actually take, so the per-session copy belongs here too — in the same transaction that moves the canonical row (#8645).
+        // Here only this session's own mirror is written from the canonical row; another conversation's mirror is never replaced by this session's summary, and only gains that conversation's own trimmed messages in the fold above.
         //
         // Unlike `store_llm_summary`'s best-effort mirror, a failure here aborts the append:
         // both writes share this transaction, and a turn that moved the summary without its
@@ -2434,6 +2440,51 @@ impl SessionStore {
         };
         Ok((summary, recent))
     }
+}
+
+/// Fold compacted messages into a heuristic summary, after `existing`, in the threshold path's format: one `Role: text` line per message, each message cut at 200 bytes, the whole kept to its last ~4000 bytes.
+///
+/// Returns `None` when none of `messages` has text, so a caller can tell "nothing new to fold" from a summary that changed and leave the stored one, and its owner stamp, untouched.
+fn fold_compacted_messages<'a>(
+    existing: Option<String>,
+    messages: impl Iterator<Item = &'a Message>,
+) -> Option<String> {
+    let mut summary_parts: Vec<String> = Vec::new();
+    if let Some(existing) = existing.filter(|text| !text.trim().is_empty()) {
+        summary_parts.push(existing);
+    }
+    let carried = summary_parts.len();
+    for msg in messages {
+        let role = match msg.role {
+            Role::User => "User",
+            Role::Assistant => "Assistant",
+            Role::System => "System",
+        };
+        let text = msg.content.text_content();
+        if !text.is_empty() {
+            // Truncate individual messages in summary to keep it compact (UTF-8 safe)
+            let truncated = if text.len() > 200 {
+                format!("{}...", librefang_types::truncate_str(&text, 200))
+            } else {
+                text
+            };
+            summary_parts.push(format!("{role}: {truncated}"));
+        }
+    }
+    if summary_parts.len() == carried {
+        return None;
+    }
+    // Keep summary under ~4000 chars (UTF-8 safe)
+    let mut full_summary = summary_parts.join("\n");
+    if full_summary.len() > 4000 {
+        let start = full_summary.len() - 4000;
+        // Find the next char boundary at or after `start`
+        let safe_start = (start..full_summary.len())
+            .find(|&i| full_summary.is_char_boundary(i))
+            .unwrap_or(full_summary.len());
+        full_summary = full_summary[safe_start..].to_string();
+    }
+    Some(full_summary)
 }
 
 /// Remove `session_id`'s row from `sessions_fts`.

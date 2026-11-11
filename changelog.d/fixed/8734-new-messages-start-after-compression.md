@@ -1,3 +1,0 @@
-Proactive memory and the canonical cross-channel session no longer miss part of a turn that hit its iteration cap.
-The repair that runs before a capped turn is saved can drop an orphaned tool result and merge the neighbours it leaves adjacent, which shortens the session, but the index marking where the turn began kept its pre-repair value, so end-of-turn recording started two messages late and lost the turn's prompt.
-Both loops now move the index to where the turn sits in the repaired history, with the same turn-boundary lookup inline compression already uses, and that lookup now also recognises a prompt that repair merged into an adjacent user message instead of skipping past it (#8734) (@houko)

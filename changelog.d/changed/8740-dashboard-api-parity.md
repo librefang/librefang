@@ -1,0 +1,1 @@
+A checked inventory (`scripts/dashboard-api-parity.mjs` plus `docs/architecture/dashboard-api-parity.md`) records which API routes the dashboard references and which surfaces are still missing. (#8740) (@DaBlitzStein)

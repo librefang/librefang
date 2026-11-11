@@ -759,7 +759,11 @@ async fn run_agent_loop_streaming_inner(
             if had_soft_compression {
                 // Persist the compressed history without the per-turn injections, which belong to this request only.
                 let current_turn = current_turn_snapshot(session, new_messages_start);
-                session.set_messages(without_turn_injections(&messages, &injections));
+                session.set_messages(without_turn_injections(
+                    &messages,
+                    &injections,
+                    &session.messages,
+                ));
                 new_messages_start = current_turn_start_after_rewrite(
                     current_turn.as_deref(),
                     &session.messages,

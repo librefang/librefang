@@ -865,7 +865,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
       - uses: Swatinem/rust-cache@c8037a86dde8214a8310e9f54a8fc61ab362aa31 # v2
-      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+      - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
         with:
           version: 12
       # No `cache: pnpm`: this job only runs `pnpm audit`, which never populates the store, so there is nothing to cache. pnpm 12 does not even create the store directory, and setup-node's post-job save then fails the job with "Path Validation Error".
@@ -1282,7 +1282,9 @@ jobs:
     # 90 minutes, matching `test-windows`. The lane runs 43-57 minutes in practice, so a 60-minute cap left 3-17 minutes of headroom and a slow runner spends it outright.
     # `f7130c1` stopped at 60:28, `efa84ea` at 60:41 and `2b871dd` at 60:23 — three of the last ten pushes to main, every other lane green in each.
     # GitHub reports a timeout as `cancelled`, and `CI Gate` fails on `cancelled` without re-evaluating, so each one files a `[main red]` issue against a tree that is fine and no re-run of the merged commit can clear it.
-    timeout-minutes: 90
+    # 120 minutes covers a cold cache. When the repo's Actions cache is over its 10 GB limit the `test-macos` cache gets evicted, and a cold run compiles from scratch for about 35 minutes and then needs 84-91 minutes in all (`15e8708ae` was cancelled twice, both times with all 14645 tests passed).
+    # A cold run that times out cannot recover on its own: rust-cache saves only in its post step, which a cancelled job skips, so every later run starts cold too.
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
