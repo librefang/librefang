@@ -75,7 +75,7 @@ pub struct SkillVersionRow {
 /// Persistent skill-version store backed by SQLite.
 ///
 /// Shares the connection pool every other store in `MemorySubstrate` uses.
-/// The `skill_versions` table is created by `migration::migrate_v65`.
+/// The `skill_versions` table is created by `migration::migrate_v66`.
 #[derive(Clone)]
 pub struct SkillVersionStore {
     pool: Pool<SqliteConnectionManager>,

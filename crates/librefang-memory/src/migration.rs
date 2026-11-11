@@ -1665,7 +1665,7 @@ fn migrate_v63(conn: &Connection) -> Result<(), rusqlite::Error> {
     Ok(())
 }
 
-/// v65 (#8021): skill version history.
+/// v66 (#8021): skill version history.
 ///
 /// Records full `skill.toml` + `prompt_context.md` snapshots per skill so the
 /// dashboard can show how an installed skill changed over time and restore a
@@ -5424,7 +5424,7 @@ mod tests {
     }
 
     // ---------------------------------------------------------------------
-    // v65: skill version history (#8021)
+    // v66: skill version history (#8021)
     // ---------------------------------------------------------------------
 
     /// The table has to arrive with the columns the store reads, on a database
@@ -5438,7 +5438,7 @@ mod tests {
 
         assert!(
             try_table_exists(&conn, "skill_versions").unwrap(),
-            "v65 must create skill_versions"
+            "v66 must create skill_versions"
         );
         for column in [
             "id",

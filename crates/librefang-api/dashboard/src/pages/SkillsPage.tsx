@@ -1689,7 +1689,7 @@ function SkillDetailModal({
               />
             ) : useLegacyHistory ? (
               <div className="space-y-2 max-h-72 overflow-y-auto">
-                {legacyVersions.map((v) => (
+                {[...legacyVersions].reverse().map((v) => (
                   <div
                     key={`${v.version}-${v.timestamp}`}
                     className="rounded-lg border border-border-subtle bg-surface-2 px-3 py-2 text-xs"
