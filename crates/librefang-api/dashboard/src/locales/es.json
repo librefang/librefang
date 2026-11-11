@@ -3897,6 +3897,7 @@
     "select_option": "Selecciona…",
     "comma_separated": "Valores separados por comas",
     "add_item": "Añadir",
+    "json_invalid": "JSON no válido. Revisa la sintaxis.",
     "load_error": "No se pudo cargar el esquema del formulario",
     "required_missing": "Rellena todos los campos obligatorios"
   },
