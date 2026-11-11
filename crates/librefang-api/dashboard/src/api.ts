@@ -6048,6 +6048,17 @@ export interface NamedTaintRuleSet {
   rules?: TaintRuleId[];
 }
 
+/** Manual OAuth fallback for servers whose metadata cannot be discovered (issue #8670). */
+export interface McpServerOAuth {
+  auth_url?: string | null;
+  token_url?: string | null;
+  client_id?: string | null;
+  /** Name of the env var holding the client secret; never the secret itself. */
+  client_secret_env?: string | null;
+  scopes?: string[];
+  user_scopes?: string[];
+}
+
 export interface McpServerConfigured {
   /** Stable identifier; falls back to `name` when the backend omits it. */
   id?: string;
@@ -6056,6 +6067,11 @@ export interface McpServerConfigured {
   timeout_secs?: number;
   env?: string[];
   headers?: string[];
+  /**
+   * Manual OAuth fallback. On update, an absent key leaves the stored block
+   * unchanged and an explicit `null` clears it.
+   */
+  oauth?: McpServerOAuth | null;
   /** Catalog template this server was installed from, when applicable. */
   template_id?: string;
   auth_state?: { state: string; auth_url?: string; message?: string };
