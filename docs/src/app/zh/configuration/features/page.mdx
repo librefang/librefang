@@ -1077,13 +1077,13 @@ prometheus_enabled = true   # 同时暴露 /api/metrics
 
 **Trace 搜索：** 在 `http://localhost:3000` 打开 Grafana，把 Explore tab 切到 Tempo 数据源，按 trace ID、span 名、或属性搜。业务级 span 包括 `agent.turn`、`tool.call`、`channel.send`、`cron.fire`、`provider.request`，每个带 agent id、channel 名、model、结果作为可搜索属性。
 
-**`cache_hit_ratio` 指标：** runtime 给每个 `agent.turn` span 计算
+**`cache_hit_ratio` 指标：** runtime 对每个走到 end-turn 路径的 turn 计算
 
 ```
-cache_hit_ratio = cache_read / (cache_read + cache_creation)   # 取值 [0.0, 1.0]
+cache_hit_ratio = cache_read / input_tokens   # 取值 [0.0, 1.0]
 ```
 
-`Some(1.0)` 是完美前缀缓存命中；`Some(0.0)` 是 cold start，缓存激活但没命中；`None` 是 run 完全没启用缓存。出现在 trajectory 导出（`metadata.cache_hit_ratio`）和 Grafana per-agent 面板。
+`Some(1.0)` 是完美前缀缓存命中；`Some(0.0)` 是 cold start，缓存激活但没命中；`None` 表示没有可报告的比例——run 完全没启用缓存、prompt 大小未知，或 provider 的缓存桶（读取 + 写入）之和超过了它们本应作为子集的 prompt。该值输出在 `prompt cache metrics` 日志行——停在迭代上限、停在 max-token 续写上限或以错误结束的 turn 根本走不到这条路径，也就完全不输出该行；`TrajectoryMetadata::cache_hit_ratio` 字段存在但尚未填充。
 
 ---
 

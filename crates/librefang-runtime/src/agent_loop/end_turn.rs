@@ -406,15 +406,14 @@ pub(super) async fn finalize_successful_end_turn(
         }
     );
 
-    // Prompt-cache observability (M2): emit a single-line metric so log
-    // pipelines can compute hit-rate trends per agent without parsing the
-    // surrounding loop summary. `None` (no caching activity) is folded to
-    // 0.0 for the log field; readers wanting to distinguish "no caching"
-    // from "0% hit" should look at the `creation` + `read` totals.
+    // Prompt-cache observability (M2): emit a single-line metric so log pipelines can compute hit-rate trends per agent without parsing the surrounding loop summary.
+    // `None` is folded to 0.0 for the log field, so four different facts share that value: no caching activity, an unknown prompt size, a provider whose cache buckets sum past the prompt, and a genuine 0% hit.
+    // The `input` / `creation` / `read` totals printed alongside are what tells them apart.
     tracing::info!(
         target: "librefang::cache",
         agent = ctx.agent_id_str,
         hit_ratio = end_turn.total_usage.cache_hit_ratio().unwrap_or(0.0),
+        input = end_turn.total_usage.input_tokens,
         creation = end_turn.total_usage.cache_creation_input_tokens,
         read = end_turn.total_usage.cache_read_input_tokens,
         "prompt cache metrics for turn"

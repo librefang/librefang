@@ -2338,8 +2338,9 @@ mod tests {
         assert_eq!(usage.cache_read_input_tokens, 28000);
         assert_eq!(usage.burst_tokens(), 1504);
         let ratio = usage.cache_hit_ratio().expect("cache activity reported");
+        // The denominator is the whole prompt (29204), not the cache buckets: the 1200 cache writes are inside `read + creation`, but the 4 plain new-input tokens are not, and `read / (read + creation)` silently drops exactly those.
         assert!(
-            (ratio - 28000.0 / 29200.0).abs() < 1e-4,
+            (ratio - 28000.0 / usage.input_tokens as f32).abs() < 1e-6,
             "unexpected cache hit ratio: {ratio}"
         );
 
