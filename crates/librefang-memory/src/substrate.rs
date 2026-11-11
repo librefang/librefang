@@ -2971,38 +2971,52 @@ mod tests {
         assert_eq!(substrate.max_episodic_chars(), 0);
     }
 
-    #[tokio::test]
-    async fn test_write_jsonl_mirror_async_runs_off_the_worker() {
+    #[test]
+    fn test_write_jsonl_mirror_async_runs_off_the_worker() {
         // A current-thread runtime has a single worker: a task spawned before the mirror write can only run while that write yields, which the old synchronous call never did.
-        let substrate = MemorySubstrate::open_in_memory(0.1).unwrap();
-        let mut session = substrate.create_session(AgentId::new()).unwrap();
-        for i in 0..200 {
-            session.push_message(librefang_types::message::Message::user(format!(
-                "message {i}"
-            )));
-        }
-        let dir = tempfile::tempdir().unwrap();
-        let ran = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let observer = {
-            let ran = Arc::clone(&ran);
-            tokio::spawn(async move { ran.store(true, std::sync::atomic::Ordering::SeqCst) })
-        };
-        substrate
-            .write_jsonl_mirror_async(session.clone(), dir.path().join("sessions"))
-            .await
+        // The runtime's only blocking thread is held by a gate that the observer releases, so the mirror write cannot finish before the worker has yielded to the observer.
+        // Without the gate the result depended on timing: a runner that preempted the test thread between `spawn_blocking` and the first poll let the write finish before it ever yielded, and the assertion failed with the code correct.
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .max_blocking_threads(1)
+            .build()
             .unwrap();
-        assert!(
-            ran.load(std::sync::atomic::Ordering::SeqCst),
-            "the mirror write must yield the worker while the file is written"
-        );
-        observer.await.unwrap();
-        let written = std::fs::read_to_string(
-            dir.path()
-                .join("sessions")
-                .join(format!("{}.jsonl", session.id.0)),
-        )
-        .unwrap();
-        assert_eq!(written.lines().count(), 200);
+        runtime.block_on(async {
+            let substrate = MemorySubstrate::open_in_memory(0.1).unwrap();
+            let mut session = substrate.create_session(AgentId::new()).unwrap();
+            for i in 0..200 {
+                session.push_message(librefang_types::message::Message::user(format!(
+                    "message {i}"
+                )));
+            }
+            let dir = tempfile::tempdir().unwrap();
+            let (release_gate, gate) = std::sync::mpsc::channel::<()>();
+            let gate = tokio::task::spawn_blocking(move || gate.recv().unwrap());
+            let ran = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let observer = {
+                let ran = Arc::clone(&ran);
+                tokio::spawn(async move {
+                    ran.store(true, std::sync::atomic::Ordering::SeqCst);
+                    release_gate.send(()).unwrap();
+                })
+            };
+            substrate
+                .write_jsonl_mirror_async(session.clone(), dir.path().join("sessions"))
+                .await
+                .unwrap();
+            assert!(
+                ran.load(std::sync::atomic::Ordering::SeqCst),
+                "the mirror write must yield the worker while the file is written"
+            );
+            observer.await.unwrap();
+            gate.await.unwrap();
+            let written = std::fs::read_to_string(
+                dir.path()
+                    .join("sessions")
+                    .join(format!("{}.jsonl", session.id.0)),
+            )
+            .unwrap();
+            assert_eq!(written.lines().count(), 200);
+        });
     }
 
     #[tokio::test]
