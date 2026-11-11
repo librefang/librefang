@@ -155,6 +155,9 @@ use crate::types;
         routes::evolve_patch_skill,
         routes::evolve_delete_skill,
         routes::evolve_rollback_skill,
+        // Skill version history + restore (#8021)
+        routes::list_skill_history,
+        routes::restore_skill_version,
         // Propose an evolved skill back to the public registry as a PR (#5842)
         routes::propose_skill_to_registry,
         // Skill workshop pending review (#3328)

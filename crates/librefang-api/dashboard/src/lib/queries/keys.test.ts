@@ -491,6 +491,13 @@ describe("query key factories", () => {
         ),
       ).toEqual(skillKeys.supportingFiles("demo"));
     });
+
+    it("history is nested under detail so every snapshot-recording write refreshes it", () => {
+      expect(skillKeys.history("demo")).toEqual(["skills", "detail", "demo", "history"]);
+      expect(skillKeys.history("demo").slice(0, skillKeys.detail("demo").length)).toEqual(
+        skillKeys.detail("demo"),
+      );
+    });
   });
 
   describe("runtimeKeys anchoring", () => {

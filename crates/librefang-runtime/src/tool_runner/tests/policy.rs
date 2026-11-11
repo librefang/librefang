@@ -3041,6 +3041,7 @@ impl ApprovalGate for SpawnCheckKernel {}
 impl A2ARegistry for SpawnCheckKernel {}
 impl ChannelSender for SpawnCheckKernel {}
 impl PromptStore for SpawnCheckKernel {}
+impl SkillHistory for SpawnCheckKernel {}
 impl WorkflowRunner for SpawnCheckKernel {}
 impl GoalControl for SpawnCheckKernel {}
 impl ToolPolicy for SpawnCheckKernel {}

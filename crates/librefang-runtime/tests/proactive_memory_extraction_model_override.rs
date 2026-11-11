@@ -204,6 +204,7 @@ impl HandsControl for OverrideKernel {}
 impl A2ARegistry for OverrideKernel {}
 impl ChannelSender for OverrideKernel {}
 impl PromptStore for OverrideKernel {}
+impl SkillHistory for OverrideKernel {}
 impl WorkflowRunner for OverrideKernel {}
 impl GoalControl for OverrideKernel {}
 impl ToolPolicy for OverrideKernel {}

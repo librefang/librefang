@@ -486,6 +486,7 @@ fn make_dedup_kernel(enabled: bool) -> Arc<dyn KernelHandle> {
         download_dir: None,
         dedup_enabled: enabled,
         acp_client: None,
+        skill_history: None,
     })
 }
 
@@ -661,7 +662,7 @@ async fn test_evolve_tools_rejected_when_registry_frozen() {
         "prompt_context": "# x",
         "tags": [],
     });
-    let err = tool_skill_evolve_create(&input, Some(&registry), None)
+    let err = tool_skill_evolve_create(&input, Some(&registry), None, None)
         .await
         .expect_err("must reject under freeze")
         .to_string();
@@ -670,10 +671,15 @@ async fn test_evolve_tools_rejected_when_registry_frozen() {
         "error must mention Stable/frozen, got: {err}"
     );
 
-    let err = tool_skill_evolve_delete(&serde_json::json!({ "name": "gated" }), Some(&registry))
-        .await
-        .expect_err("delete must reject under freeze")
-        .to_string();
+    let err = tool_skill_evolve_delete(
+        &serde_json::json!({ "name": "gated" }),
+        Some(&registry),
+        None,
+        None,
+    )
+    .await
+    .expect_err("delete must reject under freeze")
+    .to_string();
     assert!(err.contains("frozen") || err.contains("Stable"));
 
     let err = tool_skill_evolve_write_file(
@@ -683,11 +689,87 @@ async fn test_evolve_tools_rejected_when_registry_frozen() {
             "content": "hi",
         }),
         Some(&registry),
+        None,
+        None,
     )
     .await
     .expect_err("write_file must reject under freeze")
     .to_string();
     assert!(err.contains("frozen") || err.contains("Stable"));
+}
+
+// ── skill history for a global root reached through a symlink ───────────
+
+/// `is_global_skill_dir` canonicalizes the skill directory. After a delete the
+/// path is gone, so the fallback (the uncanonicalized path) no longer matches
+/// a symlinked skills root's canonical form — the history row for a global
+/// skill would be silently dropped. The scope decision has to be taken while
+/// the directory still exists.
+#[cfg(unix)]
+#[tokio::test]
+async fn skill_evolve_delete_records_a_global_skill_behind_a_symlinked_root() {
+    let tmp = tempfile::tempdir().unwrap();
+    let real_root = tmp.path().join("real-skills");
+    let skill_dir = real_root.join("linked_skill");
+    std::fs::create_dir_all(&skill_dir).unwrap();
+    std::fs::write(
+        skill_dir.join("skill.toml"),
+        r#"[skill]
+name = "linked_skill"
+version = "0.1.0"
+description = "symlinked root"
+author = "tester"
+
+[runtime]
+type = "promptonly"
+
+[source]
+type = "local"
+"#,
+    )
+    .unwrap();
+    std::fs::write(skill_dir.join("prompt_context.md"), "linked prompt").unwrap();
+
+    let link = tmp.path().join("skills-link");
+    std::os::unix::fs::symlink(&real_root, &link).unwrap();
+
+    // Deliberately not loaded into the registry: this is the same-turn /
+    // stale-cache branch of `tool_skill_evolve_delete`, where the tool falls
+    // back to `registry.skills_dir().join(name)` — a symlink-prefixed path,
+    // unlike the canonical path `load_skill` stores. That is exactly the
+    // shape whose post-delete canonicalize fails.
+    let registry = SkillRegistry::new(link.clone());
+    assert!(registry.get("linked_skill").is_none());
+
+    let capture = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let kernel: Arc<dyn KernelHandle> = Arc::new(NamedWsKernel {
+        named: vec![],
+        download_dir: None,
+        dedup_enabled: false,
+        acp_client: None,
+        skill_history: Some(Arc::clone(&capture)),
+    });
+
+    tool_skill_evolve_delete(
+        &serde_json::json!({ "name": "linked_skill" }),
+        Some(&registry),
+        Some("agent-symlink"),
+        Some(&kernel),
+    )
+    .await
+    .expect("delete must succeed");
+
+    let records = capture.lock().expect("history capture");
+    assert_eq!(
+        records.len(),
+        1,
+        "a global skill behind a symlinked root must still be recorded: {records:?}"
+    );
+    assert_eq!(records[0].skill_name, "linked_skill");
+    assert_eq!(records[0].source, "delete");
+    assert_eq!(records[0].prompt_context, "linked prompt");
+    assert_eq!(records[0].author, "agent:agent-symlink");
+    assert!(!skill_dir.exists(), "the delete must remove the skill");
 }
 
 // ── read_artifact tool (#3347) ─────────────────────────────────────────────

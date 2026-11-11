@@ -1233,6 +1233,7 @@ impl HandsControl for DispatchCapture {}
 impl A2ARegistry for DispatchCapture {}
 impl ChannelSender for DispatchCapture {}
 impl PromptStore for DispatchCapture {}
+impl SkillHistory for DispatchCapture {}
 #[async_trait::async_trait]
 impl WorkflowRunner for DispatchCapture {
     async fn run_workflow(
@@ -1893,6 +1894,7 @@ impl CronControl for MirrorKernel {}
 impl HandsControl for MirrorKernel {}
 impl A2ARegistry for MirrorKernel {}
 impl PromptStore for MirrorKernel {}
+impl SkillHistory for MirrorKernel {}
 impl WorkflowRunner for MirrorKernel {}
 impl GoalControl for MirrorKernel {}
 impl ToolPolicy for MirrorKernel {}
@@ -2628,6 +2630,7 @@ impl HandsControl for ApprovalKernel {}
 impl A2ARegistry for ApprovalKernel {}
 impl ChannelSender for ApprovalKernel {}
 impl PromptStore for ApprovalKernel {}
+impl SkillHistory for ApprovalKernel {}
 impl WorkflowRunner for ApprovalKernel {}
 impl GoalControl for ApprovalKernel {}
 impl ToolPolicy for ApprovalKernel {}
@@ -2863,6 +2866,7 @@ impl HandsControl for ForceHumanCapturingKernel {}
 impl A2ARegistry for ForceHumanCapturingKernel {}
 impl ChannelSender for ForceHumanCapturingKernel {}
 impl PromptStore for ForceHumanCapturingKernel {}
+impl SkillHistory for ForceHumanCapturingKernel {}
 impl WorkflowRunner for ForceHumanCapturingKernel {}
 impl GoalControl for ForceHumanCapturingKernel {}
 impl ToolPolicy for ForceHumanCapturingKernel {}

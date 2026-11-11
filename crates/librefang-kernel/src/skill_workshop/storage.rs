@@ -557,6 +557,17 @@ pub fn approve_candidate(
     active_skills_dir: &Path,
     id: &str,
 ) -> Result<EvolutionResult, WorkshopError> {
+    approve_candidate_with_snapshot(skills_root, active_skills_dir, id).map(|(result, _)| result)
+}
+
+/// [`approve_candidate`], additionally returning the `(skill.toml,
+/// prompt_context.md)` snapshot the promoted writer captured under its
+/// per-skill lock.
+pub fn approve_candidate_with_snapshot(
+    skills_root: &Path,
+    active_skills_dir: &Path,
+    id: &str,
+) -> Result<(EvolutionResult, evolution::SkillWriteSnapshot), WorkshopError> {
     let path = locate_candidate_path(skills_root, id)?;
     let body = fs::read_to_string(&path)?;
     let candidate: CandidateSkill = toml::from_str(&body)?;
@@ -572,8 +583,8 @@ pub fn approve_candidate(
     // scan ran at `save_candidate` time and runs again inside both
     // `create_skill` and `update_skill` (`validate_prompt_content`), preserving
     // defence in depth on the approve path.
-    let result = match candidate.kind {
-        CandidateKind::Create => evolution::create_skill(
+    let (result, snapshot) = match candidate.kind {
+        CandidateKind::Create => evolution::create_skill_with_snapshot(
             active_skills_dir,
             &candidate.name,
             &candidate.description,
@@ -589,7 +600,7 @@ pub fn approve_candidate(
             let skill = evolution::load_installed_skill_from_disk(active_skills_dir, target)?;
             // The candidate's one-line description doubles as the
             // version-history changelog note for the approved update.
-            evolution::update_skill(
+            evolution::update_skill_with_snapshot(
                 &skill,
                 &candidate.prompt_context,
                 &candidate.description,
@@ -613,7 +624,74 @@ pub fn approve_candidate(
              list_pending will keep showing it until manually rejected"
         );
     }
+    Ok((result, snapshot))
+}
+
+/// Promote a pending candidate and snapshot the result into the skill version
+/// history (#8021).
+///
+/// The version-history half of [`approve_candidate`]: the raw promotion is
+/// filesystem-only (it reaches `librefang_skills::evolution`, which has no
+/// store handle), so the kernel-side callers that *do* hold the substrate —
+/// `LibreFangKernel::approve_pending_skill` and the workshop's auto-promote
+/// loop — go through this wrapper. The CLI keeps calling the raw function: it
+/// runs without a daemon and has no pool to write to, which is the same v1
+/// limitation the store documents. Tests that exercise promotion without a
+/// substrate call the raw function too.
+///
+/// Records after promotion, like every post-write snapshot: a failure costs one
+/// history row, never the promotion. The `change_source` names the kind of
+/// promotion (`create` / `update`), read before the call because
+/// `approve_candidate` deletes the pending TOML on success.
+pub fn approve_candidate_versioned(
+    store: &librefang_memory::SkillVersionStore,
+    skills_root: &Path,
+    active_skills_dir: &Path,
+    id: &str,
+) -> Result<EvolutionResult, WorkshopError> {
+    let candidate = load_candidate(skills_root, id)?;
+    let source = match candidate.kind {
+        CandidateKind::Create => librefang_types::skill_history::SkillWrite::Create.as_str(),
+        CandidateKind::Update => librefang_types::skill_history::SkillWrite::Update.as_str(),
+    };
+    let (result, snapshot) = approve_candidate_with_snapshot(skills_root, active_skills_dir, id)?;
+    // Attribute the row to the agent whose draft was approved — the same
+    // `agent:<id>` shape the runtime tools record under.
+    let author = format!("agent:{}", candidate.agent_id);
+    record_skill_version_snapshot(store, &result.skill_name, snapshot, &author, source);
     Ok(result)
+}
+
+/// Best-effort record of a snapshot captured by a `*_with_snapshot` writer
+/// (#8021). Shared by the workshop promote wrapper and the kernel reviewer
+/// path.
+///
+/// The snapshot is the one the writer captured under its per-skill lock; the
+/// helper never re-reads disk, because another writer may already have moved
+/// the directory on.
+pub(crate) fn record_skill_version_snapshot(
+    store: &librefang_memory::SkillVersionStore,
+    skill_name: &str,
+    snapshot: evolution::SkillWriteSnapshot,
+    author: &str,
+    source: &str,
+) {
+    let Some((manifest_toml, prompt_context)) = snapshot else {
+        tracing::warn!(
+            skill = skill_name,
+            "skill history: writer could not capture skill.toml; snapshot skipped"
+        );
+        return;
+    };
+    if let Err(e) =
+        store.record_version(skill_name, &manifest_toml, &prompt_context, author, source)
+    {
+        tracing::warn!(
+            skill = skill_name,
+            error = %e,
+            "Failed to record skill version snapshot"
+        );
+    }
 }
 
 /// Best-effort cleanup of orphan `.toml.tmp` files left over from a
@@ -650,6 +728,136 @@ pub fn prune_orphan_temp_files(skills_root: &Path) -> io::Result<u32> {
         }
     }
     Ok(count)
+}
+
+#[cfg(test)]
+mod versioned_writer_drift_guard {
+    //! Promotion and the kernel reviewer must record the snapshot their
+    //! `*_with_snapshot` writer captured under the per-skill lock. These
+    //! source scans fail when a raw writer call or a post-unlock disk re-read
+    //! sneaks back in.
+    //!
+    //! Only the production half of each file is scanned: the test fixtures
+    //! below legitimately call the raw writers to seed a skill.
+
+    const STORAGE_SOURCE: &str = include_str!("storage.rs");
+    const KERNEL_TOOLS_SOURCE: &str = include_str!("../kernel/tools_and_skills.rs");
+
+    fn production(source: &str) -> &str {
+        source.split("#[cfg(test)]").next().unwrap_or(source)
+    }
+
+    /// 0-based line range of `signature`'s body in `source`, closing brace
+    /// included.
+    fn body_lines(source: &str, signature: &str) -> std::ops::Range<usize> {
+        let lines: Vec<&str> = source.lines().collect();
+        let start = lines
+            .iter()
+            .position(|line| line.contains(signature) && !line.contains('"'))
+            .unwrap_or_else(|| panic!("`{signature}` not found"));
+        let end = lines[start + 1..]
+            .iter()
+            .position(|line| line.trim_end() == "}")
+            .map(|offset| start + 1 + offset + 1)
+            .unwrap_or_else(|| panic!("closing brace of `{signature}` not found"));
+        start..end
+    }
+
+    fn call_lines(source: &str, writer: &str) -> Vec<usize> {
+        let needle = format!("{writer}(");
+        source
+            .lines()
+            .enumerate()
+            .filter(|(_, line)| line.contains(&needle))
+            .map(|(index, _)| index)
+            .collect()
+    }
+
+    #[test]
+    fn approve_writers_are_called_only_inside_the_snapshot_helper() {
+        let source = production(STORAGE_SOURCE);
+        let helper = body_lines(source, "fn approve_candidate_with_snapshot(");
+        for writer in [
+            "evolution::create_skill_with_snapshot",
+            "evolution::update_skill_with_snapshot",
+        ] {
+            let calls = call_lines(source, writer);
+            assert!(
+                !calls.is_empty(),
+                "`{writer}(` is called nowhere in storage.rs — update the guard so it keeps \
+                 testing something"
+            );
+            for index in calls {
+                assert!(
+                    helper.contains(&index),
+                    "`{writer}` is called at storage.rs:{} outside \
+                     `approve_candidate_with_snapshot`; the promotion's history row needs the \
+                     snapshot that call produced.",
+                    index + 1
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn raw_evolution_writers_have_no_call_sites_in_storage() {
+        let source = production(STORAGE_SOURCE);
+        for writer in [
+            "evolution::create_skill",
+            "evolution::update_skill",
+            "evolution::patch_skill",
+        ] {
+            let calls = call_lines(source, writer);
+            assert!(
+                calls.is_empty(),
+                "`{writer}` is called at storage.rs:{}; use the `_with_snapshot` variant.",
+                calls.first().map(|index| index + 1).unwrap_or(0)
+            );
+        }
+    }
+
+    #[test]
+    fn kernel_reviewer_uses_snapshot_writers() {
+        let source = production(KERNEL_TOOLS_SOURCE);
+        for writer in [
+            "evolution::update_skill_with_snapshot",
+            "evolution::patch_skill_with_snapshot",
+        ] {
+            assert!(
+                !call_lines(source, writer).is_empty(),
+                "`{writer}(` is called nowhere in tools_and_skills.rs — update the guard"
+            );
+        }
+        for writer in ["evolution::update_skill", "evolution::patch_skill"] {
+            let calls = call_lines(source, writer);
+            assert!(
+                calls.is_empty(),
+                "`{writer}` is called at tools_and_skills.rs:{}; use the `_with_snapshot` \
+                 variant so the reviewer's row holds the bytes it wrote.",
+                calls.first().map(|index| index + 1).unwrap_or(0)
+            );
+        }
+    }
+
+    #[test]
+    fn record_helper_never_rereads_disk() {
+        let source = production(STORAGE_SOURCE);
+        let lines: Vec<&str> = source.lines().collect();
+        let body = body_lines(source, "fn record_skill_version_snapshot(");
+        let start = body.start;
+        for (index, line) in lines[body].iter().enumerate() {
+            let code = line.trim_start();
+            if code.starts_with("//") {
+                continue;
+            }
+            assert!(
+                !code.contains("fs::read") && !code.contains("read_to_string"),
+                "record_skill_version_snapshot reads the filesystem at storage.rs:{}; record \
+                 the snapshot captured under the writer's lock instead.",
+                start + index + 1
+            );
+        }
+    }
 }
 
 #[cfg(test)]

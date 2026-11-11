@@ -1716,6 +1716,7 @@ impl LibreFangKernel {
 //   - `kernel::handles::tool_policy`      — `kernel_handle::ToolPolicy`
 //   - `kernel::handles::api_auth`         — `kernel_handle::ApiAuth`
 //   - `kernel::handles::session_writer`   — `kernel_handle::SessionWriter`
+//   - `kernel::handles::skill_history`    — `kernel_handle::SkillHistory` (#8021)
 //
 // ---- END role-trait impls (#3746) ----
 

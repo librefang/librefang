@@ -1329,20 +1329,26 @@ async fn dispatch_tool_call(
 
         // Skill evolution tools
         "skill_evolve_create" => {
-            tool_skill_evolve_create(input, *skill_registry, *caller_agent_id).await
+            tool_skill_evolve_create(input, *skill_registry, *caller_agent_id, *kernel).await
         }
         "skill_evolve_update" => {
-            tool_skill_evolve_update(input, *skill_registry, *caller_agent_id).await
+            tool_skill_evolve_update(input, *skill_registry, *caller_agent_id, *kernel).await
         }
         "skill_evolve_patch" => {
-            tool_skill_evolve_patch(input, *skill_registry, *caller_agent_id).await
+            tool_skill_evolve_patch(input, *skill_registry, *caller_agent_id, *kernel).await
         }
-        "skill_evolve_delete" => tool_skill_evolve_delete(input, *skill_registry).await,
+        "skill_evolve_delete" => {
+            tool_skill_evolve_delete(input, *skill_registry, *caller_agent_id, *kernel).await
+        }
         "skill_evolve_rollback" => {
-            tool_skill_evolve_rollback(input, *skill_registry, *caller_agent_id).await
+            tool_skill_evolve_rollback(input, *skill_registry, *caller_agent_id, *kernel).await
         }
-        "skill_evolve_write_file" => tool_skill_evolve_write_file(input, *skill_registry).await,
-        "skill_evolve_remove_file" => tool_skill_evolve_remove_file(input, *skill_registry).await,
+        "skill_evolve_write_file" => {
+            tool_skill_evolve_write_file(input, *skill_registry, *caller_agent_id, *kernel).await
+        }
+        "skill_evolve_remove_file" => {
+            tool_skill_evolve_remove_file(input, *skill_registry, *caller_agent_id, *kernel).await
+        }
 
         // Cron scheduling tools.
         "cron_create" => {

@@ -121,6 +121,8 @@ export {
   listSkills,
   getSkillDetail,
   getSupportingFile,
+  // skill version history (#8021)
+  getSkillHistory,
   // skill workshop pending review (#3328)
   listPendingCandidates,
   getPendingCandidate,
@@ -376,6 +378,8 @@ export {
   evolveDeleteSkill,
   evolveWriteFile,
   evolveRemoveFile,
+  // skill version history (#8021)
+  restoreSkillVersion,
   proposeSkillToRegistry,
   installSkill,
   uninstallSkill,
