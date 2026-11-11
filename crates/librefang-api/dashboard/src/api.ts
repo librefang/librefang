@@ -5812,6 +5812,185 @@ export async function listPluginRegistries(): Promise<{ registries: RegistryEntr
   return get<{ registries: RegistryEntry[] }>("/api/plugins/registries");
 }
 
+// ── Context engine ───────────────────────────────────
+
+export interface ContextEngineHealthIssue {
+  plugin: string;
+  errors: string[];
+}
+
+export interface ContextEngineHealth {
+  healthy: boolean;
+  active_plugins: string[];
+  issues: ContextEngineHealthIssue[];
+}
+
+export type ContextEngineMode = "default" | "single" | "stacked";
+
+export interface ContextEngineHookCoverage {
+  ingest: boolean;
+  after_turn: boolean;
+  assemble: boolean;
+  compact: boolean;
+  bootstrap: boolean;
+  prepare_subagent: boolean;
+  merge_subagent: boolean;
+  // Runtime launcher tag (`python`, `native`, …); null when the manifest omits it.
+  runtime: string | null;
+  enabled: boolean;
+  hooks_valid: boolean;
+  cache_ttl_secs: number | null;
+}
+
+export interface ContextEngineChainEntry {
+  plugin: string;
+  hooks: ContextEngineHookCoverage | { error: string };
+}
+
+export interface ContextEngineChain {
+  mode: ContextEngineMode;
+  chain: ContextEngineChainEntry[];
+  chain_length: number;
+  fallback: string;
+}
+
+export interface ContextEngineHookStats {
+  calls: number;
+  successes: number;
+  failures: number;
+  total_ms: number;
+}
+
+export type ContextEngineHookName =
+  | "ingest"
+  | "after_turn"
+  | "bootstrap"
+  | "assemble"
+  | "compact"
+  | "transform_tool_result"
+  | "prepare_subagent"
+  | "merge_subagent";
+
+export type ContextEngineMetrics = Record<ContextEngineHookName, ContextEngineHookStats>;
+
+export interface ContextEngineTrace {
+  trace_id: string;
+  correlation_id: string;
+  hook: string;
+  started_at: string;
+  elapsed_ms: number;
+  success: boolean;
+  error?: string | null;
+  input_preview: unknown;
+  output_preview?: unknown;
+  annotations?: unknown;
+}
+
+export interface ContextEngineTraces {
+  traces: ContextEngineTrace[];
+  count: number;
+}
+
+export interface ContextEngineCircuitBreaker {
+  max_failures: number;
+  reset_secs: number;
+}
+
+export interface ContextEngineRegistry {
+  name: string;
+  github_repo: string;
+}
+
+export interface ContextEngineConfigSnapshot {
+  engine: string;
+  plugin: string | null;
+  plugin_stack: string[] | null;
+  // `Option<u64>` in the config: absent resolves to null, not the runtime default.
+  hook_timeout_secs: number | null;
+  on_hook_failure: string;
+  max_retries: number;
+  retry_delay_ms: number;
+  hook_cache_ttl_secs: number | null;
+  assemble_cache_ttl_secs: number | null;
+  compact_cache_ttl_secs: number | null;
+  persistent_subprocess: boolean;
+  prewarm_subprocesses: boolean;
+  allow_network: boolean;
+  allow_filesystem: boolean;
+  max_memory_mb: number | null;
+  after_turn_queue_depth: number;
+  circuit_breaker: ContextEngineCircuitBreaker | null;
+  otel_endpoint: string | null;
+  registries: ContextEngineRegistry[];
+}
+
+export interface ContextEngineSandboxPlugin {
+  name: string;
+  allow_filesystem?: boolean;
+  allow_network?: boolean;
+  max_memory_mb?: number | null;
+  otel_endpoint?: string | null;
+  persistent_subprocess?: boolean;
+  prewarm_subprocesses?: boolean;
+  after_turn_queue_depth?: number;
+  circuit_breaker?: ContextEngineCircuitBreaker | null;
+  error?: string;
+}
+
+export interface ContextEngineSandboxPolicy {
+  mode: ContextEngineMode;
+  plugins: ContextEngineSandboxPlugin[];
+  global_defaults?: {
+    allow_filesystem: boolean;
+    allow_network: boolean;
+    max_memory_mb: number | null;
+    otel_endpoint: string | null;
+  };
+}
+
+// The shared `get<T>` helper always parses JSON, so the 204 branches these
+// three routes use for "no plugin engine" are handled explicitly.
+async function getAllowNoContent<T>(path: string): Promise<T | null> {
+  const response = await fetchWithTimeout(path, { headers: buildHeaders() });
+  if (response.status === 204) return null;
+  if (!response.ok) {
+    throw await parseError(response);
+  }
+  return (await response.json()) as T;
+}
+
+/** 204 when no plugin engine is configured; 503 still carries the report. */
+export async function getContextEngineHealth(): Promise<ContextEngineHealth | null> {
+  const response = await fetchWithTimeout("/api/context-engine/health", {
+    headers: buildHeaders(),
+  });
+  if (response.status === 204) return null;
+  if (!response.ok && response.status !== 503) {
+    throw await parseError(response);
+  }
+  return (await response.json()) as ContextEngineHealth;
+}
+
+export async function getContextEngineChain(): Promise<ContextEngineChain> {
+  return get<ContextEngineChain>("/api/context-engine/chain");
+}
+
+export async function getContextEngineMetrics(): Promise<ContextEngineMetrics | null> {
+  return getAllowNoContent<ContextEngineMetrics>("/api/context-engine/metrics");
+}
+
+export async function getContextEngineTraces(): Promise<ContextEngineTraces | null> {
+  return getAllowNoContent<ContextEngineTraces>("/api/context-engine/traces");
+}
+
+export async function getContextEngineConfig(): Promise<ContextEngineConfigSnapshot> {
+  return get<ContextEngineConfigSnapshot>("/api/context-engine/config");
+}
+
+export async function getContextEngineSandboxPolicy(): Promise<ContextEngineSandboxPolicy | null> {
+  return getAllowNoContent<ContextEngineSandboxPolicy>("/api/context-engine/sandbox-policy");
+}
+
 export interface PromptVersion {
   id: string;
   agent_id: string;

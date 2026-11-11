@@ -4865,5 +4865,89 @@
     "size_hint": "Do {{limit}} na dokument",
     "too_large": "{{name}} ma {{size}} — dokument może mieć najwyżej {{limit}}.",
     "no_agents": "Nie ma jeszcze agentów do udostępnienia."
+  },
+  "context_engine": {
+    "nav": "Silnik kontekstu",
+    "title": "Silnik kontekstu",
+    "subtitle": "Łańcuch wtyczek, metryki hooków i ostatnie ślady",
+    "badge": "Obserwowalność",
+    "load_error": "Nie udało się wczytać stanu silnika kontekstu.",
+    "no_engine": "Brak aktywnego silnika wtyczek",
+    "no_engine_desc": "Skonfiguruj wtyczkę silnika kontekstu, aby zbierać metryki hooków i ślady.",
+    "health": {
+      "title": "Kondycja silnika",
+      "healthy": "Sprawny",
+      "unhealthy": "Niesprawny",
+      "active_plugins": "Aktywne wtyczki",
+      "issues": "Problemy",
+      "no_issues": "Brak zgłoszonych problemów"
+    },
+    "chain": {
+      "title": "Łańcuch wtyczek",
+      "mode": "Tryb",
+      "mode_default": "Domyślny",
+      "mode_single": "Pojedyncza wtyczka",
+      "mode_stacked": "Warstwowy",
+      "length": "Długość łańcucha",
+      "fallback": "Zastępczy",
+      "plugin_error": "Wtyczka niedostępna",
+      "disabled": "Wyłączona",
+      "invalid": "Niepoprawne hooki",
+      "cache_ttl": "TTL pamięci podręcznej"
+    },
+    "metrics": {
+      "title": "Metryki hooków",
+      "hook": "Hook",
+      "calls": "Wywołania",
+      "successes": "Sukcesy",
+      "failures": "Błędy",
+      "avg_latency": "Śr. opóźnienie"
+    },
+    "traces": {
+      "title": "Ostatnie ślady",
+      "count": "Ślady: {{total}}",
+      "empty": "Brak śladów",
+      "empty_desc": "Wywołania hooków pojawią się tutaj, gdy silnik obsłuży turę.",
+      "success": "Sukces",
+      "failure": "Błąd",
+      "input": "Wejście",
+      "output": "Wyjście",
+      "annotations": "Adnotacje",
+      "error": "Błąd",
+      "trace_id": "Ślad"
+    },
+    "config": {
+      "title": "Konfiguracja silnika",
+      "engine": "Silnik",
+      "plugin": "Wtyczka",
+      "timeout": "Limit czasu hooka",
+      "on_failure": "Przy błędzie hooka",
+      "max_retries": "Maks. ponowień",
+      "retry_delay": "Opóźnienie ponowienia",
+      "hook_cache_ttl": "TTL pamięci hooka",
+      "assemble_cache_ttl": "TTL pamięci składania",
+      "compact_cache_ttl": "TTL pamięci kompaktowania",
+      "allow_network": "Zezwalaj na sieć",
+      "allow_filesystem": "Zezwalaj na system plików",
+      "max_memory": "Maks. pamięć",
+      "circuit_breaker": "Bezpiecznik",
+      "registries": "Rejestry"
+    },
+    "sandbox": {
+      "title": "Polityka piaskownicy",
+      "default_mode": "Polityka domyślna — brak silnika wtyczek",
+      "allowed": "Dozwolone",
+      "denied": "Zablokowane",
+      "filesystem": "System plików",
+      "network": "Sieć",
+      "memory": "Pamięć",
+      "persistent": "Trwały podproces",
+      "prewarm": "Wstępne uruchamianie podprocesów",
+      "queue_depth": "Głębokość kolejki po turze",
+      "circuit_breaker": "Bezpiecznik",
+      "otel_endpoint": "Punkt końcowy OTel",
+      "unlimited": "Bez limitu",
+      "plugin_error": "Polityka niedostępna"
+    }
   }
 }

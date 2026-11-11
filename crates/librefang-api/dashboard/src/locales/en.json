@@ -4845,5 +4845,89 @@
     "size_hint": "Up to {{limit}} per document",
     "too_large": "{{name}} is {{size}} — a document may be at most {{limit}}.",
     "no_agents": "No agents to share with yet."
+  },
+  "context_engine": {
+    "nav": "Context Engine",
+    "title": "Context Engine",
+    "subtitle": "Plugin chain, hook metrics and recent trace activity",
+    "badge": "Observability",
+    "load_error": "Could not load the context engine state.",
+    "no_engine": "No plugin engine active",
+    "no_engine_desc": "Configure a context engine plugin to collect hook metrics and traces.",
+    "health": {
+      "title": "Engine Health",
+      "healthy": "Healthy",
+      "unhealthy": "Unhealthy",
+      "active_plugins": "Active plugins",
+      "issues": "Issues",
+      "no_issues": "No issues reported"
+    },
+    "chain": {
+      "title": "Plugin Chain",
+      "mode": "Mode",
+      "mode_default": "Default",
+      "mode_single": "Single plugin",
+      "mode_stacked": "Stacked",
+      "length": "Chain length",
+      "fallback": "Fallback",
+      "plugin_error": "Plugin unavailable",
+      "disabled": "Disabled",
+      "invalid": "Invalid hooks",
+      "cache_ttl": "Cache TTL"
+    },
+    "metrics": {
+      "title": "Hook Metrics",
+      "hook": "Hook",
+      "calls": "Calls",
+      "successes": "Successes",
+      "failures": "Failures",
+      "avg_latency": "Avg latency"
+    },
+    "traces": {
+      "title": "Recent Traces",
+      "count": "{{total}} traces",
+      "empty": "No traces yet",
+      "empty_desc": "Hook invocations will appear here once the engine handles a turn.",
+      "success": "Success",
+      "failure": "Failure",
+      "input": "Input",
+      "output": "Output",
+      "annotations": "Annotations",
+      "error": "Error",
+      "trace_id": "Trace"
+    },
+    "config": {
+      "title": "Engine Configuration",
+      "engine": "Engine",
+      "plugin": "Plugin",
+      "timeout": "Hook timeout",
+      "on_failure": "On hook failure",
+      "max_retries": "Max retries",
+      "retry_delay": "Retry delay",
+      "hook_cache_ttl": "Hook cache TTL",
+      "assemble_cache_ttl": "Assemble cache TTL",
+      "compact_cache_ttl": "Compact cache TTL",
+      "allow_network": "Allow network",
+      "allow_filesystem": "Allow filesystem",
+      "max_memory": "Max memory",
+      "circuit_breaker": "Circuit breaker",
+      "registries": "Registries"
+    },
+    "sandbox": {
+      "title": "Sandbox Policy",
+      "default_mode": "Default policy — no plugin engine",
+      "allowed": "Allowed",
+      "denied": "Denied",
+      "filesystem": "Filesystem",
+      "network": "Network",
+      "memory": "Memory",
+      "persistent": "Persistent subprocess",
+      "prewarm": "Prewarm subprocesses",
+      "queue_depth": "After-turn queue depth",
+      "circuit_breaker": "Circuit breaker",
+      "otel_endpoint": "OTel endpoint",
+      "unlimited": "Unlimited",
+      "plugin_error": "Policy unavailable"
+    }
   }
 }
