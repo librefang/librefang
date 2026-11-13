@@ -432,8 +432,9 @@ SurrealDB-native memory substrate with semantic search, knowledge graphs, and ta
 3. The `embedded` feature on surreal-memory must remain — no external SurrealDB service needed
 4. surreal-memory is pinned by `rev`, not a branch, so a bump is a deliberate edit of the workspace `Cargo.toml` followed by `cargo update -p surreal-memory`.
    Its `surrealdb` pin is exact, so a new rev usually moves our `surrealdb` / `surrealdb-core` / `surrealdb-types` pins with it (see Shared SurrealDB Version Pin).
-   Since rev `b7e2093` it retries SurrealDB 3.3 `TransactionConflict` errors on every write and shares one `Surreal<Any>` session rather than cloning per call (in SDK 3.x a clone is a new server-side session).
-   Two operational env vars surface from its internals: `SURREAL_QUERY_TIMEOUT_MS` (per-query deadline, default 10000 ms) and `SURREAL_EMBEDDED_MAX_INFLIGHT` (concurrent embedded ops, default 16 = RocksDB default stripe count).
+   The current rev `c220263` (surreal-memory-server 1.11.0, `surrealdb = "=4.0.0"`) retries `TransactionConflict` errors on every write (up to 16 attempts, backoff 1 ms doubling to a 100 ms cap) and shares one `Arc<Surreal<Any>>` session rather than cloning per call (a `Surreal::clone()` opens a new server-side session).
+   One operational env var surfaces from its internals: `SURREAL_EMBEDDED_MAX_INFLIGHT` (concurrent embedded ops, default 16 — sized for RocksDB's lock stripes and carried over unchanged to the SurrealKV engine).
+   The per-query timeout is a fixed 10000 ms default in `RetryConfig`; its doc comment names `SURREAL_QUERY_TIMEOUT_MS`, but rev `c220263` never reads that variable, so setting it has no effect.
 
 ### 3. Universal Agent Runtime (UAR) as a Runtime Provider
 
