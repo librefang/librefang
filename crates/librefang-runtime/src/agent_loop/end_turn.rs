@@ -107,6 +107,7 @@ pub(super) fn build_silent_agent_loop_result(
 ) -> AgentLoopResult {
     AgentLoopResult {
         hit_iteration_cap: false,
+        truncated_by_continuation: false,
         response: String::new(),
         total_usage,
         iterations,
@@ -320,6 +321,51 @@ pub(super) async fn remember_turn_exchange(
     .await;
 }
 
+/// Emit the per-turn prompt-cache metric.
+///
+/// One helper rather than a copy per exit path, so the field set cannot drift between a turn that ended normally and one that did not.
+/// The loops call it directly before returning `Err` (an `Err` carries no usage, so the wrapper cannot log it), and `log_cache_metrics_on_exit` covers every `Ok` path: a capped, truncated, interrupted, silent or failed turn still paid for its prompt, and it is exactly the turn someone opens the log to diagnose (#8754).
+///
+/// `None` is folded to 0.0 for the log field, so "nothing was cached" and a genuine 0 % hit share that value; the `input` / `creation` / `read` totals printed alongside are what tells them apart.
+/// `outcome` says how the turn ended, because this line now covers capped, interrupted, silent and failed turns as well as completed ones, and a trend that mixes them without a label cannot be filtered back.
+pub(super) fn log_cache_metrics(agent: &str, usage: &TokenUsage, outcome: &str) {
+    // A turn that never reached the model has nothing to report: logging zeros would add a row per config or validation error and dilute the trend this exists for.
+    if usage.input_tokens == 0
+        && usage.output_tokens == 0
+        && usage.cache_read_input_tokens == 0
+        && usage.cache_creation_input_tokens == 0
+    {
+        return;
+    }
+    tracing::info!(
+        target: "librefang::cache",
+        agent,
+        hit_ratio = usage.cache_hit_ratio().unwrap_or(0.0),
+        outcome,
+        input = usage.input_tokens,
+        creation = usage.cache_creation_input_tokens,
+        read = usage.cache_read_input_tokens,
+        "prompt cache metrics for turn"
+    );
+}
+
+/// Emit the cache metric for a finished turn, from the same place that counts the exit.
+///
+/// Every `Ok` path funnels through the instrumented wrapper, so this one call covers the ordinary end-turn, the iteration cap, the interrupt and the silent exits (no-reply, cascade-leak, progress-leak) alike.
+/// The label comes from the same `classify_exit_reason` the exit counter uses, so the two series cannot drift apart.
+///
+/// Two known gaps, both documented rather than silently claimed away: an `Err` that escapes through `?` before the loop reaches one of its logging returns carries usage but no line, and a turn truncated by the max-token continuation limit is labelled `completed` because `AgentLoopResult` has no flag of its own for it.
+pub(super) fn log_cache_metrics_on_exit(agent: &str, result: &LibreFangResult<AgentLoopResult>) {
+    let Ok(result) = result else {
+        return;
+    };
+    log_cache_metrics(
+        agent,
+        &result.total_usage,
+        super::classify_ok_outcome(result),
+    );
+}
+
 pub(super) async fn finalize_successful_end_turn(
     ctx: FinalizeEndTurnContext<'_>,
     mut end_turn: FinalizeEndTurnResultData,
@@ -406,20 +452,6 @@ pub(super) async fn finalize_successful_end_turn(
         }
     );
 
-    // Prompt-cache observability (M2): emit a single-line metric so log
-    // pipelines can compute hit-rate trends per agent without parsing the
-    // surrounding loop summary. `None` (no caching activity) is folded to
-    // 0.0 for the log field; readers wanting to distinguish "no caching"
-    // from "0% hit" should look at the `creation` + `read` totals.
-    tracing::info!(
-        target: "librefang::cache",
-        agent = ctx.agent_id_str,
-        hit_ratio = end_turn.total_usage.cache_hit_ratio().unwrap_or(0.0),
-        creation = end_turn.total_usage.cache_creation_input_tokens,
-        read = end_turn.total_usage.cache_read_input_tokens,
-        "prompt cache metrics for turn"
-    );
-
     if !ctx.opts.is_fork && !ctx.opts.incognito {
         if let Some(pm_store) = ctx.proactive_memory {
             let user_id = ctx.session.agent_id.0.to_string();
@@ -477,6 +509,7 @@ pub(super) async fn finalize_successful_end_turn(
     let tool_call_count = end_turn.decision_traces.len();
     Ok(AgentLoopResult {
         hit_iteration_cap: false,
+        truncated_by_continuation: false,
         response: end_turn.final_response,
         total_usage: end_turn.total_usage,
         iterations: end_turn.iteration + 1,

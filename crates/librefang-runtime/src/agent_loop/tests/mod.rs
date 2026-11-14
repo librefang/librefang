@@ -1,3 +1,5 @@
+mod cache_metrics;
+
 use super::history::MIN_HISTORY_MESSAGES;
 use super::message::{
     budget_interaction_halves, sanitize_for_memory, ACCUMULATED_TEXT_MAX_BYTES,

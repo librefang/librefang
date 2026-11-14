@@ -1363,6 +1363,7 @@ mod agent_turn_outcome_tests {
         let id = recurring_job(&sched);
         let capped = AgentLoopResult {
             hit_iteration_cap: true,
+            truncated_by_continuation: false,
             iterations: 50,
             response: "partial".into(),
             ..Default::default()
@@ -1394,6 +1395,7 @@ mod agent_turn_outcome_tests {
         let id = recurring_job(&sched);
         let capped = AgentLoopResult {
             hit_iteration_cap: true,
+            truncated_by_continuation: false,
             ..Default::default()
         };
         record_agent_turn_outcome(&sched, id, &capped);
