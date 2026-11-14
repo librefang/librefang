@@ -1,0 +1,1 @@
+A tool approval resolved after a REST-started turn now wakes the agent in the originating session and persists the continuation, instead of leaving the result as a stalled `waiting_approval` with no follow-up (#8709) (@DaBlitzStein).
