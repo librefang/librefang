@@ -250,6 +250,32 @@ pub async fn execute_tool_raw(
     result
 }
 
+/// Canonicalize as much of `path` as exists on disk and re-append the part that does not.
+///
+/// The read-only pre-check runs before the sandbox resolver and has to compare what the resolver will compare, but the target of an `*** Add File:` does not exist yet, so `canonicalize` on the whole path would fail.
+/// Resolving the deepest existing ancestor covers the symlinks and case-folding that live in the path's *directories*, but not a leaf that is itself a dangling symlink: `canonicalize` fails for it and this function hands the unresolved path back, so a caller that writes to the result still needs the sandbox resolver, which rejects a leaf symlink on its own.
+fn canonicalize_existing_prefix(path: &Path) -> std::path::PathBuf {
+    if let Ok(resolved) = path.canonicalize() {
+        return resolved;
+    }
+    let mut trailing = Vec::new();
+    let mut current = path;
+    while let Some(parent) = current.parent() {
+        if let Some(name) = current.file_name() {
+            trailing.push(name.to_os_string());
+        }
+        if let Ok(resolved_parent) = parent.canonicalize() {
+            let mut out = resolved_parent;
+            for part in trailing.iter().rev() {
+                out.push(part);
+            }
+            return out;
+        }
+        current = parent;
+    }
+    path.to_path_buf()
+}
+
 /// Dispatch a tool without running the approval / capability / taint gate or the network byte quota.
 ///
 /// This is the pure dispatch layer: it pattern-matches on `tool_name` and calls the right implementation.
@@ -594,58 +620,58 @@ async fn dispatch_tool_call(
             tool_code_search(input, *workspace_root, &extra_refs).await
         }
         "apply_patch" => {
-            // SECURITY #3662: Enforce named workspace read-only restrictions
-            // before applying the patch.  Mirrors the upfront check in the
-            // `file_write` arm: any absolute target path that falls inside a
-            // read-only named workspace is rejected here, before the sandbox
-            // resolver even runs.  The sandbox itself would also block such
-            // writes (readonly workspaces are excluded from `additional_roots`),
-            // but the explicit pre-check catches the violation earlier and
-            // returns a clearer error message.
+            // The alias rewrite at the top of this function is keyed on `ALIAS_PATH_KEYS`, and `apply_patch` has no path argument to rewrite — its paths are in the patch body.
+            // Expand the parsed operations here, once, so the read-only pre-check below and the write itself both see the absolute path that will be opened.
+            // Expanding later, inside the tool, left this pre-check reading raw header text: `@vault/x` matched no read-only prefix, so the denial fell through to the per-operation check in `apply_patch_ext`, which skips one operation and lets the rest of the patch through (#8744 review).
+            let aliases = named_ws_aliases(*kernel, *caller_agent_id);
+            let ops = match parse_and_expand_patch(input, &aliases) {
+                Ok(ops) => ops,
+                Err(e) => return tool_result_from_typed(tool_use_id, Err(e)),
+            };
+            // SECURITY #3662: enforce named workspace read-only restrictions before applying the patch.
+            // This mirrors the upfront check in the `file_write` arm, and it rejects the whole patch rather than only the offending operation: the sandbox would block the individual write anyway (read-only workspaces are excluded from `additional_roots`), but a partial apply with a hard error is a different outcome from a refusal, and the model cannot predict which one it will get.
             if let (Some(k), Some(agent_id)) = (kernel, caller_agent_id) {
-                let ro = k.readonly_workspace_prefixes(agent_id);
+                // Canonicalize both sides: the resolver canonicalizes the target before matching it against these prefixes, so a symlink inside a writable mount that points into a read-only one must be resolved here too, or this check misses a target the resolver will refuse (and then the patch applies partially, which is exactly what this pre-check exists to prevent).
+                let ro: Vec<std::path::PathBuf> = k
+                    .readonly_workspace_prefixes(agent_id)
+                    .into_iter()
+                    .map(|prefix| canonicalize_existing_prefix(&prefix))
+                    .collect();
                 if !ro.is_empty() {
-                    // Parse the patch to inspect target paths before executing.
-                    if let Some(patch_str) = input["patch"].as_str() {
-                        if let Ok(ops) = crate::apply_patch::parse_patch(patch_str) {
-                            for op in &ops {
-                                let raw_paths: Vec<&str> = match op {
-                                    crate::apply_patch::PatchOp::AddFile { path, .. } => {
-                                        vec![path.as_str()]
-                                    }
-                                    crate::apply_patch::PatchOp::UpdateFile {
-                                        path,
-                                        move_to,
-                                        ..
-                                    } => {
-                                        let mut v = vec![path.as_str()];
-                                        if let Some(dest) = move_to {
-                                            v.push(dest.as_str());
-                                        }
-                                        v
-                                    }
-                                    crate::apply_patch::PatchOp::DeleteFile { path } => {
-                                        vec![path.as_str()]
-                                    }
-                                };
-                                for raw in raw_paths {
-                                    if Path::new(raw).is_absolute()
-                                        && ro
-                                            .iter()
-                                            .any(|prefix| Path::new(raw).starts_with(prefix))
-                                    {
-                                        return ToolResult {
-                                            tool_use_id: tool_use_id.to_string(),
-                                            content: format!(
-                                                "Write denied: '{}' is in a read-only named workspace",
-                                                raw
-                                            ),
-                                            status: ToolExecutionStatus::Denied,
-                                            is_error: true,
-                                            ..Default::default()
-                                        };
-                                    }
+                    for op in &ops {
+                        let raw_paths: Vec<&str> = match op {
+                            crate::apply_patch::PatchOp::AddFile { path, .. } => {
+                                vec![path.as_str()]
+                            }
+                            crate::apply_patch::PatchOp::UpdateFile { path, move_to, .. } => {
+                                let mut v = vec![path.as_str()];
+                                if let Some(dest) = move_to {
+                                    v.push(dest.as_str());
                                 }
+                                v
+                            }
+                            crate::apply_patch::PatchOp::DeleteFile { path } => vec![path.as_str()],
+                        };
+                        for raw in raw_paths {
+                            // A relative target resolves against the workspace, which can itself
+                            // contain a symlink into a read-only mount — checking only absolute
+                            // paths left that shape applying the rest of the patch.
+                            let target = match *workspace_root {
+                                Some(root) if !Path::new(raw).is_absolute() => root.join(raw),
+                                _ => Path::new(raw).to_path_buf(),
+                            };
+                            let candidate = canonicalize_existing_prefix(&target);
+                            if ro.iter().any(|prefix| candidate.starts_with(prefix)) {
+                                return ToolResult {
+                                    tool_use_id: tool_use_id.to_string(),
+                                    content: format!(
+                                        "Write denied: '{}' is in a read-only named workspace",
+                                        raw
+                                    ),
+                                    status: ToolExecutionStatus::Denied,
+                                    is_error: true,
+                                    ..Default::default()
+                                };
                             }
                         }
                     }
@@ -662,7 +688,7 @@ async fn dispatch_tool_call(
             // set.
             let ro_prefixes = named_ws_prefixes_readonly(*kernel, *caller_agent_id);
             let ro_refs: Vec<&Path> = ro_prefixes.iter().map(|p| p.as_path()).collect();
-            tool_apply_patch(input, *workspace_root, &extra_refs, &ro_refs).await
+            apply_patch_ops(&ops, *workspace_root, &extra_refs, &ro_refs).await
         }
 
         // Web tools (upgraded: multi-provider search, SSRF-protected fetch)
@@ -1255,6 +1281,36 @@ async fn dispatch_tool_call(
         }
         #[cfg(feature = "media")]
         "media_transcribe" => {
+            // `out_path` is a write destination, so it carries the same read-only rule as `file_write`.
+            // The roots handed to the tool below are every mount, because the file being transcribed is a *read* — which is exactly why the write half cannot rely on them, and why the check is here instead.
+            // Without it, expanding `@name` into a read-only mount would turn a refused write into a truncated file: the transcript is opened with `truncate`, not `create_new`.
+            if let (Some(k), Some(agent_id)) = (kernel, caller_agent_id) {
+                let raw = input["out_path"].as_str().unwrap_or("");
+                // A relative destination resolves against the workspace, which can still reach a
+                // read-only mount through a symlink there, so join it rather than skipping it.
+                let target = match *workspace_root {
+                    Some(root) if !Path::new(raw).is_absolute() => root.join(raw),
+                    _ => Path::new(raw).to_path_buf(),
+                };
+                let candidate = canonicalize_existing_prefix(&target);
+                let read_only = k
+                    .readonly_workspace_prefixes(agent_id)
+                    .into_iter()
+                    .map(|prefix| canonicalize_existing_prefix(&prefix))
+                    .any(|prefix| candidate.starts_with(prefix));
+                if read_only {
+                    return ToolResult {
+                        tool_use_id: tool_use_id.to_string(),
+                        content: format!(
+                            "Write denied: '{}' is in a read-only named workspace",
+                            raw
+                        ),
+                        status: ToolExecutionStatus::Denied,
+                        is_error: true,
+                        ..Default::default()
+                    };
+                }
+            }
             // #4981: see image_analyze above — staging dir is read-side allowlisted.
             // This is the primary path: Telegram voice messages land at
             // `<staging>/<uuid>.oga` and the agent calls media_transcribe on
