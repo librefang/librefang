@@ -2312,6 +2312,14 @@ impl LibreFangKernel {
             }
         };
 
+        if session.agent_id != *agent_id {
+            warn!(
+                agent_id = %agent_id,
+                "replace_tool_result_in_session: resolved session belongs to another agent — refusing to patch"
+            );
+            return;
+        }
+
         fn reconcile_tool_result(
             session: &mut librefang_memory::session::Session,
             tool_use_id: &str,
