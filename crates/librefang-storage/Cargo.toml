@@ -1,0 +1,38 @@
+[package]
+name = "librefang-storage"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Opt-in SurrealDB 4.0 storage foundation for LibreFang (config, connection pool, migrations)."
+
+[features]
+default = ["surreal-backend"]
+
+# Embedded (SurrealKV) or remote SurrealDB 4.0 backend.
+surreal-backend = ["dep:surrealdb", "dep:surrealdb-core", "dep:surrealdb-types"]
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+schemars = { version = "0.8", features = ["chrono", "uuid1"] }
+thiserror = { workspace = true }
+async-trait = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+dashmap = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+
+surrealdb = { workspace = true, optional = true }
+# surrealdb = "=x.y.z" does not constrain surrealdb-core / surrealdb-types, so list them
+# as direct optional deps; the workspace pins then keep all three on one version.
+surrealdb-core = { workspace = true, optional = true }
+surrealdb-types = { workspace = true, optional = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+toml = { workspace = true }

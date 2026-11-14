@@ -99,7 +99,38 @@ allow = [
 ]
 # Per-crate license clarifications go here. Add only when SPDX detection is
 # ambiguous AND the upstream LICENSE file has been read manually.
-exceptions = []
+exceptions = [
+    # The SurrealDB 4 packages are BUSL-1.1 (Business Source License 1.1, which converts to Apache-2.0 four years after each release).
+    # They are reached only through the opt-in `librefang-storage` crate; the default SQLite storage does not link them.
+    # Scoped per crate rather than allowing BUSL-1.1 globally; review at the next SurrealDB major version.
+    { allow = ["BUSL-1.1"], name = "surrealdb" },
+    { allow = ["BUSL-1.1"], name = "surrealdb-catalog" },
+    { allow = ["BUSL-1.1"], name = "surrealdb-cnf" },
+    { allow = ["BUSL-1.1"], name = "surrealdb-collections" },
+    { allow = ["BUSL-1.1"], name = "surrealdb-common" },
+    { allow = ["BUSL-1.1"], name = "surrealdb-core" },
+    { allow = ["BUSL-1.1"], name = "surrealdb-datastore" },
+    { allow = ["BUSL-1.1"], name = "surrealdb-engine-api" },
+    { allow = ["BUSL-1.1"], name = "surrealdb-engine-local" },
+    { allow = ["BUSL-1.1"], name = "surrealdb-expr" },
+    { allow = ["BUSL-1.1"], name = "surrealdb-iam" },
+    { allow = ["BUSL-1.1"], name = "surrealdb-idx" },
+    { allow = ["BUSL-1.1"], name = "surrealdb-keyspace-macro" },
+    { allow = ["BUSL-1.1"], name = "surrealdb-kvs" },
+    { allow = ["BUSL-1.1"], name = "surrealdb-kvs-any" },
+    { allow = ["BUSL-1.1"], name = "surrealdb-kvs-surrealkv" },
+    { allow = ["BUSL-1.1"], name = "surrealdb-observe" },
+    { allow = ["BUSL-1.1"], name = "surrealdb-parse-common" },
+    { allow = ["BUSL-1.1"], name = "surrealdb-parser-next" },
+    { allow = ["BUSL-1.1"], name = "surrealdb-rpc" },
+    { allow = ["BUSL-1.1"], name = "surrealdb-runtime" },
+    { allow = ["BUSL-1.1"], name = "surrealdb-stored-derive" },
+    { allow = ["BUSL-1.1"], name = "surrealdb-strand" },
+    { allow = ["BUSL-1.1"], name = "surrealdb-types" },
+    { allow = ["BUSL-1.1"], name = "surrealdb-types-derive" },
+    # Boost Software License 1.0 (permissive, OSI-approved); xxhash-rust is pulled in by surrealkv, the embedded SurrealDB engine.
+    { allow = ["BSL-1.0"], name = "xxhash-rust" },
+]
 
 # `ring` ships a hand-rolled license file rather than a single SPDX ID;
 # this clarification matches the upstream reality (MIT + ISC + OpenSSL).
