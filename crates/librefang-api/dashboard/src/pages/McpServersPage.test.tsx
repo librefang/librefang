@@ -9,6 +9,8 @@ import {
   McpServersPage,
   authPollTermination,
   computeAuthLabel,
+  configuredToForm,
+  formToPayload,
   resolveLucideIcon,
   serverIdOf,
   serverIdentityOf,
@@ -77,6 +79,62 @@ vi.mock("react-i18next", async () => {
 });
 
 describe("McpServersPage helpers", () => {
+  describe("manual OAuth fields (#8670)", () => {
+    const base = makeServer({ name: "plane", transport: { type: "http", url: "https://example.invalid/mcp" } });
+    const oauth = {
+      auth_url: "https://example.invalid/authorize",
+      token_url: "https://example.invalid/token",
+      client_id: "client-from-dcr",
+      client_secret_env: "PLANE_CLIENT_SECRET",
+      scopes: ["read", "write"],
+      user_scopes: ["identity"],
+    };
+
+    it("omits the oauth key when none was configured and none was entered", () => {
+      const payload = formToPayload(configuredToForm(base));
+      expect("oauth" in payload).toBe(false);
+    });
+
+    it("hydrates the form from a stored oauth block and round-trips it unchanged", () => {
+      const form = configuredToForm({ ...base, oauth });
+      expect(form.oauthAuthUrl).toBe(oauth.auth_url);
+      expect(form.oauthScopes).toBe("read write");
+      expect(form.hadOauth).toBe(true);
+      expect(formToPayload(form).oauth).toEqual(oauth);
+    });
+
+    it("keeps user_scopes, which have no form control, when other fields are edited", () => {
+      const form = { ...configuredToForm({ ...base, oauth }), oauthClientId: "other-client" };
+      expect(formToPayload(form).oauth).toMatchObject({ client_id: "other-client", user_scopes: ["identity"] });
+    });
+
+    it("builds an oauth block from typed fields and splits scopes on spaces and commas", () => {
+      const form = {
+        ...configuredToForm(base),
+        oauthAuthUrl: " https://example.invalid/authorize ",
+        oauthTokenUrl: "https://example.invalid/token",
+        oauthScopes: "read, write  admin",
+      };
+      expect(formToPayload(form).oauth).toEqual({
+        auth_url: "https://example.invalid/authorize",
+        token_url: "https://example.invalid/token",
+        scopes: ["read", "write", "admin"],
+      });
+    });
+
+    it("sends an explicit null when every field of an existing block is emptied", () => {
+      const form = {
+        ...configuredToForm({ ...base, oauth }),
+        oauthAuthUrl: "",
+        oauthTokenUrl: "",
+        oauthClientId: "",
+        oauthClientSecretEnv: "",
+        oauthScopes: "",
+      };
+      expect(formToPayload(form).oauth).toBeNull();
+    });
+  });
+
   it("uses one server identity contract for empty ids", () => {
     const server = makeServer({ id: "", name: "fallback-name" });
     expect(serverIdOf(server)).toBe("fallback-name");

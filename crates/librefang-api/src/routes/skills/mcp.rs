@@ -293,6 +293,8 @@ pub async fn list_mcp_servers(State(state): State<Arc<AppState>>) -> impl IntoRe
                 // Names only — an inline `KEY=VALUE` must never reach a caller (#6630).
                 // This route is in PUBLIC_ROUTES_DASHBOARD_READS, so in open mode that caller can be unauthenticated.
                 "env": mcp_env_names(&s.env),
+                // Manual OAuth fallback (#8670). `client_secret_env` is an env var *name*, never the secret.
+                "oauth": s.oauth,
                 "auth_state": auth_state,
                 // Issue #3050: surface taint config so the dashboard tree
                 // editor can hydrate without a separate fetch.
@@ -393,6 +395,8 @@ pub async fn get_mcp_server(
         "timeout_secs": entry.timeout_secs,
         // Names only, same contract as the list route (#6630).
         "env": mcp_env_names(&entry.env),
+        // Manual OAuth fallback (#8670), same contract as the list route.
+        "oauth": entry.oauth,
         "connected": false,
         // Issue #3050: surface taint config so the dashboard tree editor
         // can hydrate without a separate fetch.
@@ -626,6 +630,9 @@ pub async fn update_mcp_server(
     // Without this, editing any field of a catalog-installed HTTP server silently dropped its `Authorization: Bearer ${KEY}` binding and the next connect went out unauthenticated.
     // An explicit `"headers": []` still clears them.
     let headers_submitted = body.get("headers").is_some();
+    // The same rule for the manual OAuth block (#8670): an absent `oauth` key means "unchanged", so editing any other field no longer drops a configured `[mcp_servers.oauth]` block.
+    // An explicit `"oauth": null` clears it.
+    let oauth_submitted = body.get("oauth").is_some();
 
     if body.get("transport").is_none() {
         return ApiErrorResponse::bad_request(t.t("api-error-mcp-missing-transport"))
@@ -654,6 +661,9 @@ pub async fn update_mcp_server(
         entry.env = merge_env_preserving_inline_values(&entry.env, &existing.env);
         if !headers_submitted {
             entry.headers = existing.headers.clone();
+        }
+        if !oauth_submitted {
+            entry.oauth = existing.oauth.clone();
         }
         if let (Some(incoming_transport), Some(existing_transport)) =
             (entry.transport.as_mut(), existing.transport.as_ref())
