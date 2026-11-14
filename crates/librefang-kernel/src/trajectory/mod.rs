@@ -168,10 +168,9 @@ pub struct TrajectoryMetadata {
     pub redaction_credentials: bool,
     /// Whether workspace path collapsing was applied (root was set).
     pub redaction_workspace_paths: bool,
-    /// Cache hit ratio for this trajectory's turns: `cache_read / (cache_read + cache_creation)`.
-    /// `None` when the trajectory predates this field or the model didn't
-    /// support prompt caching. `Some(0.0)` means caching was active but
-    /// nothing hit (cold start / first turn).
+    /// Cache hit ratio for this trajectory's turns: `cache_read / input_tokens`, where `input_tokens` is the whole prompt including the cached portion.
+    /// `None` when the trajectory predates this field, the model didn't support prompt caching, there is no ratio to report (unknown prompt size, or cache buckets summing past the prompt), or nothing has stamped it yet — the exporter does not populate it today.
+    /// `Some(0.0)` means caching was active but nothing hit (cold start / first turn).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_hit_ratio: Option<f32>,
 }

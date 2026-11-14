@@ -1106,13 +1106,13 @@ prometheus_enabled = true   # also expose /api/metrics
 
 **Trace search**: open Grafana at `http://localhost:3000`, switch Explore to the Tempo data source, and search by trace ID, span name, or attribute. Business-level spans include `agent.turn`, `tool.call`, `channel.send`, `cron.fire`, and `provider.request` — each carrying agent id, channel name, model, and outcome as searchable attributes.
 
-**`cache_hit_ratio` metric:** for every `agent.turn` span the runtime computes
+**`cache_hit_ratio` metric:** for every turn that reaches the end-turn path the runtime computes
 
 ```
-cache_hit_ratio = cache_read / (cache_read + cache_creation)   # in [0.0, 1.0]
+cache_hit_ratio = cache_read / input_tokens   # in [0.0, 1.0]
 ```
 
-`Some(1.0)` is a perfect prefix-cache hit; `Some(0.0)` is a cold start where caching was active but nothing was hit; `None` means caching wasn't active at all for the run. Surfaces in trajectory exports (`metadata.cache_hit_ratio`) and on the Grafana per-agent panel.
+`Some(1.0)` is a perfect prefix-cache hit; `Some(0.0)` is a cold start where caching was active but nothing was hit; `None` means there is no ratio to report — caching wasn't active at all for the run, the prompt size is unknown, or the provider's cache buckets (reads plus writes) sum past the prompt they are documented to be subsets of. The value is emitted in the `prompt cache metrics` log line — a turn that stops on the iteration cap, on the max-token continuation limit, or with an error never reaches that path and emits no line at all; the `TrajectoryMetadata::cache_hit_ratio` field exists but is not populated yet.
 
 ---
 

@@ -410,20 +410,31 @@ impl TokenUsage {
             + self.output_tokens
     }
 
-    /// Prompt-cache hit ratio: `cache_read / (cache_read + cache_creation)`.
+    /// Prompt-cache hit ratio: `cache_read / input_tokens`.
     ///
-    /// Returns `None` when neither value was reported (provider doesn't
-    /// support prompt caching, or no caching activity this turn). Returns
-    /// `Some(ratio)` in `[0.0, 1.0]` otherwise — `Some(0.0)` for a cold
-    /// start where caching was active but produced no hits, `Some(1.0)`
-    /// for a fully-cached turn.
+    /// The denominator is the whole prompt, not the cache buckets: per the convention documented on [`TokenUsage`], `input_tokens` is the total prompt token count *including* the cached portion, while the two cache fields are subsets of it.
+    /// Dividing by `cache_read + cache_creation` therefore drops the uncached remainder, and on the drivers that never report cache writes it reduces to `read / read` — a metric that reads `1.0` no matter how little was cached.
+    /// Those drivers are the OpenAI-compatible ones, which cache automatically and neither bill nor report the write.
+    ///
+    /// Returns `None` when there is no ratio to report, which keeps "no data" distinct from a genuine miss.
+    /// Three cases qualify: neither cache field was reported at all, the prompt size is unknown, and a provider whose cache buckets sum past the prompt it was given.
+    /// The last one is not clamped to `1.0` — clamping would emit the value reserved for a fully-cached turn and hide a broken invariant behind the very symptom this metric exists to expose.
+    ///
+    /// Otherwise returns `Some(ratio)` in `[0.0, 1.0]`: `Some(0.0)` for a cold start where caching was active but produced no hits, `Some(1.0)` for a fully-cached turn.
     pub fn cache_hit_ratio(&self) -> Option<f32> {
-        let denom = self.cache_read_input_tokens + self.cache_creation_input_tokens;
-        if denom == 0 {
-            None
-        } else {
-            Some(self.cache_read_input_tokens as f32 / denom as f32)
+        if self.cache_read_input_tokens == 0 && self.cache_creation_input_tokens == 0 {
+            return None;
         }
+        // Both buckets are documented subsets of the prompt, so together they cannot exceed it.
+        // A provider that says otherwise — or that reports cache activity with no prompt size at all — has broken the convention the denominator is defined by, and there is no honest ratio to report.
+        if self
+            .cache_read_input_tokens
+            .saturating_add(self.cache_creation_input_tokens)
+            > self.input_tokens
+        {
+            return None;
+        }
+        Some(self.cache_read_input_tokens as f32 / self.input_tokens as f32)
     }
 }
 
@@ -528,6 +539,78 @@ mod tests {
             cache_read_input_tokens: 0,
         };
         assert_eq!(usage.cache_hit_ratio(), Some(0.0));
+    }
+
+    /// OpenAI-compatible wire shape: `input_tokens` is the whole prompt and
+    /// `cache_creation_input_tokens` is never reported (the driver hardcodes
+    /// 0, because these providers cache automatically and do not bill the
+    /// write). The ratio must still count the uncached remainder instead of
+    /// collapsing to `read / read == 1.0`.
+    #[test]
+    fn token_usage_cache_hit_ratio_openai_shape_counts_uncached_input() {
+        let usage = TokenUsage {
+            input_tokens: 1000,
+            output_tokens: 0,
+            cache_creation_input_tokens: 0,
+            cache_read_input_tokens: 300,
+        };
+        let ratio = usage.cache_hit_ratio().expect("ratio set");
+        assert!((ratio - 0.3).abs() < 1e-6, "got {ratio}");
+    }
+
+    /// Normalized Anthropic shape: the driver folds `cache_read` and
+    /// `cache_creation` into `input_tokens`, so plain uncached input exists
+    /// too and belongs in the denominator.
+    #[test]
+    fn token_usage_cache_hit_ratio_counts_uncached_input_on_normalized_shape() {
+        let usage = TokenUsage {
+            input_tokens: 1000,
+            output_tokens: 0,
+            cache_creation_input_tokens: 100,
+            cache_read_input_tokens: 700,
+        };
+        let ratio = usage.cache_hit_ratio().expect("ratio set");
+        assert!((ratio - 0.7).abs() < 1e-6, "got {ratio}");
+    }
+
+    /// Malformed payloads report more cache reads than the prompt contained.
+    /// There is no honest ratio to report, and clamping would dress the
+    /// regression up as a perfect hit — so `None`, like the unknown-size case.
+    #[test]
+    fn token_usage_cache_hit_ratio_none_when_cache_read_exceeds_input() {
+        let usage = TokenUsage {
+            input_tokens: 800,
+            output_tokens: 0,
+            cache_creation_input_tokens: 0,
+            cache_read_input_tokens: 8000,
+        };
+        assert_eq!(usage.cache_hit_ratio(), None);
+    }
+
+    /// Cache activity reported with no prompt size at all.
+    /// A naive `read / input` would answer `NaN` here (`0.0 / 0.0`), which `unwrap_or(0.0)` does not absorb and which would poison log and trajectory aggregates.
+    #[test]
+    fn token_usage_cache_hit_ratio_none_when_prompt_size_unknown() {
+        let usage = TokenUsage {
+            input_tokens: 0,
+            output_tokens: 0,
+            cache_creation_input_tokens: 5,
+            cache_read_input_tokens: 0,
+        };
+        assert_eq!(usage.cache_hit_ratio(), None);
+    }
+
+    /// The two buckets are subsets of the prompt, so together they cannot exceed it.
+    /// Checking only `read <= input` lets a payload whose writes push the sum past the prompt through, and it lands on `Some(1.0)` — the value reserved for a perfect hit.
+    #[test]
+    fn token_usage_cache_hit_ratio_none_when_buckets_sum_past_prompt() {
+        let usage = TokenUsage {
+            input_tokens: 1000,
+            output_tokens: 0,
+            cache_creation_input_tokens: 500,
+            cache_read_input_tokens: 1000,
+        };
+        assert_eq!(usage.cache_hit_ratio(), None);
     }
 
     #[test]
