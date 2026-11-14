@@ -1903,8 +1903,13 @@ impl LibreFangKernel {
         // the resolution signal. Fall back to direct session mutation only when the
         // agent is not currently reachable.
         if !self.notify_agent_of_resolution(&agent_id, &deferred, &decision, &result) {
-            self.replace_tool_result_in_session(&agent_id, &deferred.tool_use_id, &result)
-                .await;
+            self.replace_tool_result_in_session(
+                &agent_id,
+                deferred.session_id,
+                &deferred.tool_use_id,
+                &result,
+            )
+            .await;
             // Patching the session updates the on-disk tool_result but
             // does NOT fire a new agent turn. After a channel-originated
             // tool call, the LLM responded to the original `WaitingApproval`
@@ -2267,19 +2272,25 @@ impl LibreFangKernel {
     async fn replace_tool_result_in_session(
         &self,
         agent_id: &AgentId,
+        preferred_session: Option<librefang_types::agent::SessionId>,
         tool_use_id: &str,
         result: &librefang_types::tool::ToolResult,
     ) {
-        // Resolve the agent's session_id from the registry.
-        let session_id = match self.agents.registry.get(*agent_id) {
-            Some(entry) => entry.session_id,
-            None => {
-                warn!(
-                    agent_id = %agent_id,
-                    "replace_tool_result_in_session: agent not found in registry"
-                );
-                return;
-            }
+        // The deferred execution names the session the turn actually ran in.
+        // Falling back to the registry's canonical session would patch a
+        // different row whenever the REST body pinned a session id (#8709).
+        let session_id = match preferred_session {
+            Some(session_id) => session_id,
+            None => match self.agents.registry.get(*agent_id) {
+                Some(entry) => entry.session_id,
+                None => {
+                    warn!(
+                        agent_id = %agent_id,
+                        "replace_tool_result_in_session: agent not found in registry"
+                    );
+                    return;
+                }
+            },
         };
 
         let mut session = match self.memory.substrate.get_session_async(session_id).await {
