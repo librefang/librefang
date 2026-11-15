@@ -2,7 +2,7 @@
 
 Deterministic, no network: urllib is monkeypatched. Asserts the
 sidecar Nextcloud Talk adapter preserves the behaviour of the removed
-in-process Rust ``librefang-channels::nextcloud`` adapter, plus three
+in-process Rust ``librefang-channels::nextcloud`` adapter, plus four
 explicitly-acknowledged improvements:
 
 * **P1**: ``thread_id`` is the inbound ``id`` (or inbound
@@ -14,6 +14,12 @@ explicitly-acknowledged improvements:
   own_user_id)`` rather than ``actorId`` alone — a Talk guest /
   federated_users actor whose id happens to equal the bot's user id
   no longer spoofs self-skip.
+* **P4**: user-oriented identity — ``user_id`` is the sender's
+  ``actorId`` (not the room token), ``is_group`` comes from the
+  room's Talk type (1 = 1-to-1 → DM), and a startup actor→DM-room
+  map (built from the participants endpoint) lets ``channel_dm``
+  resolve members who have never DMed the bot, while group messages
+  carry a ``group_members`` roster for ``channel_members``.
 * **P3**: dedupe set on ``id`` (matches reddit / rocketchat), so
   boundary repeats of the same id on retry / re-poll no longer
   re-emit messages.
@@ -242,8 +248,9 @@ def test_list_joined_rooms_parses_tokens(monkeypatch):
         {"name": "no-token"},  # skipped
     ]}})])
     monkeypatch.setattr(nc.urllib.request, "urlopen", fake)
-    ids = a._list_joined_rooms()
-    assert ids == ["room1", "room2"]
+    rooms = a._list_joined_rooms()
+    assert [r["token"] for r in rooms] == ["room1", "room2"]
+    assert rooms[0]["name"] == "general"
     assert "/ocs/v2.php/apps/spreed/api/v4/room" in fake.calls[0]["url"]
     # Required OCS header present on discovery too.
     assert fake.calls[0]["headers"]["ocs-apirequest"] == "true"
@@ -306,7 +313,11 @@ def test_producer_uses_recovering_discovery_before_polling(monkeypatch):
 
     monkeypatch.setattr(a, "_verify_credentials", lambda: "bot")
     monkeypatch.setattr(
-        a, "_discover_rooms_until_available", lambda: ["room1"],
+        a, "_discover_rooms_until_available",
+        lambda: [{"token": "room1", "type": 2}],
+    )
+    monkeypatch.setattr(
+        a, "_fetch_participants", lambda _token: [],
     )
     monkeypatch.setattr(
         a, "_poll_once", lambda _emit, rooms: polled.append(list(rooms)),
@@ -326,15 +337,15 @@ def test_producer_uses_recovering_discovery_before_polling(monkeypatch):
 def test_parse_basic_text():
     a = _adapter()
     a.own_user_id = "librefang-bot"
-    ev = a._parse_message(_msg(), "ROOM1")
+    ev = a._parse_message(_msg(), "ROOM1", room_type=2)
     assert ev is not None
     p = ev["params"]
     assert p["content"] == {"Text": "hello nextcloud"}
     assert p["message_id"] == "1"
     assert p["channel_id"] == "ROOM1"
-    assert p["user_id"] == "ROOM1"  # platform routing key
+    assert p["user_id"] == "alice"  # user-oriented identity (actorId)
     assert p["user_name"] == "Alice"
-    assert p["is_group"] is True
+    assert p["is_group"] is True  # room_type=2 → group
     # P1: thread_id is the inbound id (top-level), not the room id.
     assert p["thread_id"] == "1"
     md = p["metadata"]
@@ -342,6 +353,7 @@ def test_parse_basic_text():
     assert md["actor_type"] == "users"
     assert md["actor_display_name"] == "Alice"
     assert md["room_token"] == "ROOM1"
+    assert md["room_type"] == 2
     assert "parent_message_id" not in md
 
 
@@ -985,3 +997,350 @@ def test_on_send_non_text_content_falls_back_to_placeholder(monkeypatch):
     )))
     parsed = dict(urllib.parse.parse_qsl(fake.calls[0]["body_raw"]))
     assert "Unsupported content type" in parsed["message"]
+
+
+def test_parse_dm_room_is_not_group():
+    """Type 1 (1-to-1) rooms must surface as DMs, not group traffic —
+    the daemon routes is_group=False into the user's DM session."""
+    a = _adapter()
+    a.own_user_id = "librefang-bot"
+    ev = a._parse_message(_msg(), "DM1", room_type=1)
+    p = ev["params"]
+    assert p["user_id"] == "alice"
+    assert p["channel_id"] == "DM1"  # reply target stays the room token
+    # protocol.message omits is_group when False (absent = DM).
+    assert "is_group" not in p
+    assert p["metadata"]["room_type"] == 1
+
+
+def test_parse_group_room_is_group():
+    a = _adapter()
+    a.own_user_id = "librefang-bot"
+    ev = a._parse_message(_msg(), "GRP1", room_type=2)
+    assert ev["params"]["is_group"] is True
+
+
+def test_parse_public_room_is_group():
+    """Type 3 (public) is group traffic too — classifying only
+    `type == 2` as group would push public rooms into the DM path."""
+    a = _adapter()
+    a.own_user_id = "librefang-bot"
+    ev = a._parse_message(_msg(), "PUB1", room_type=3)
+    assert ev["params"]["is_group"] is True
+
+
+def test_parse_unknown_room_type_defaults_group():
+    """Conservative default when the room type is unknown (pre-fix
+    behaviour)."""
+    a = _adapter()
+    a.own_user_id = "librefang-bot"
+    ev = a._parse_message(_msg(), "ROOM1")
+    assert ev["params"]["is_group"] is True
+
+
+def _rooms_payload():
+    return [
+        {"token": "dm-token-abc123", "type": 1,
+         "displayName": "Alice Anderson"},
+        {"token": "room-token-def456", "type": 2,
+         "displayName": "Group Team Chat"},
+        {"token": "room-token-ghi789", "type": 3, "displayName": "Public"},
+    ]
+
+
+def _participants_payload():
+    return [
+        {"actorId": "alice", "actorType": "users",
+         "displayName": "Alice Anderson"},
+        {"actorId": "librefang-bot", "actorType": "users",
+         "displayName": "librefang"},
+    ]
+
+
+def test_build_room_maps_dm_and_roster(monkeypatch):
+    a = _adapter()
+    a.own_user_id = "librefang-bot"
+    fake = _FakeUrlopen([
+        (200, {"ocs": {"data": _participants_payload()}}),  # DM room
+        (200, {"ocs": {"data": _participants_payload()}}),  # group room
+    ])
+    monkeypatch.setattr(nc.urllib.request, "urlopen", fake)
+    a._build_room_maps(_rooms_payload())
+    assert a._room_types == {"dm-token-abc123": 1, "room-token-def456": 2, "room-token-ghi789": 3}
+    # Only the non-self user of the 1-to-1 room maps to a DM target.
+    assert a._dm_room_by_actor == {"alice": "dm-token-abc123"}
+    # Group roster cached for group_members stamping.
+    entries = a._room_participants["room-token-def456"]
+    assert [e["user_id"] for e in entries] == ["alice", "librefang-bot"]
+    assert entries[0]["display_name"] == "Alice Anderson"
+    # DM roster entries carry the DM room token as the reply target.
+    assert a._room_participants["dm-token-abc123"][0]["platform_id"] == "dm-token-abc123"
+    # Participants endpoint hit once per type-1/2 room, with OCS header.
+    assert len(fake.calls) == 2
+    assert "/room/dm-token-abc123/participants" in fake.calls[0]["url"]
+    assert fake.calls[0]["headers"]["ocs-apirequest"] == "true"
+
+
+def test_build_room_maps_participants_failure_is_nonfatal(monkeypatch):
+    """Roster / DM-map construction is best-effort: a participants
+    fetch failure must never block polling."""
+    a = _adapter()
+    a.own_user_id = "librefang-bot"
+    fake = _FakeUrlopen([
+        (500, {"error": "boom"}),  # DM room participants
+        (500, {"error": "boom"}),  # group room participants
+    ])
+    monkeypatch.setattr(nc.urllib.request, "urlopen", fake)
+    a._build_room_maps(_rooms_payload())
+    # Types still indexed; maps just stay empty.
+    assert a._room_types["dm-token-abc123"] == 1
+    assert a._dm_room_by_actor == {}
+    # Failed fetches cache an empty roster (never blocks polling).
+    assert a._room_participants == {"dm-token-abc123": [], "room-token-def456": []}
+
+
+def test_poll_once_stamps_group_members(monkeypatch):
+    """channel_members: group messages carry the room's cached
+    participant roster as group_members metadata (slack #7086 shape)."""
+    a = _adapter()
+    a.own_user_id = "librefang-bot"
+    a._room_watermarks["R1"] = 0
+    a._room_types["R1"] = 2
+    a._room_participants["R1"] = [
+        {"user_id": "alice", "display_name": "Alice Anderson"},
+        {"user_id": "librefang-bot", "display_name": "librefang"},
+    ]
+    fake = _FakeUrlopen([(200, {"ocs": {"data": [_msg(mid=10)]}})])
+    monkeypatch.setattr(nc.urllib.request, "urlopen", fake)
+    emitted = []
+    a._poll_once(emitted.append, ["R1"])
+    meta = emitted[0]["params"]["metadata"]
+    assert meta["group_members"][0]["user_id"] == "alice"
+
+
+def test_poll_once_dm_not_stamped_with_roster(monkeypatch):
+    """DMs must not carry a group_members roster."""
+    a = _adapter()
+    a.own_user_id = "librefang-bot"
+    a._room_watermarks["R1"] = 0
+    a._room_types["R1"] = 1
+    a._room_participants["R1"] = [{"user_id": "alice", "display_name": "S"}]
+    fake = _FakeUrlopen([(200, {"ocs": {"data": [_msg(mid=10)]}})])
+    monkeypatch.setattr(nc.urllib.request, "urlopen", fake)
+    emitted = []
+    a._poll_once(emitted.append, ["R1"])
+    assert "group_members" not in emitted[0]["params"]["metadata"]
+
+
+def test_on_send_resolves_member_user_id_to_dm_room(monkeypatch):
+    """channel_dm: the daemon may pass the member's user id as the
+    reply target; it must resolve to their 1-to-1 room token."""
+    a = _adapter()
+    a._room_types = {"room-token-def456": 2}
+    a._dm_room_by_actor = {"alice": "dm-token-abc123"}
+    fake = _FakeUrlopen([(201, {"ocs": {"meta": {"status": "ok"},
+                                       "data": {}}})])
+    monkeypatch.setattr(nc.urllib.request, "urlopen", fake)
+    import asyncio as _asyncio
+    _asyncio.run(a.on_send(_StubCmd(
+        text="psst",
+        user={"user_id": "alice", "platform_id": "alice"},
+    )))
+    assert "/chat/dm-token-abc123" in fake.calls[0]["url"]
+
+
+def test_on_send_known_room_token_not_rewritten(monkeypatch):
+    """A group reply whose platform_id is a known room token must
+    never be rewritten through the DM map."""
+    a = _adapter()
+    a._room_types = {"room-token-def456": 2}
+    a._dm_room_by_actor = {"alice": "dm-token-abc123"}
+    fake = _FakeUrlopen([(201, {"ocs": {"meta": {"status": "ok"},
+                                       "data": {}}})])
+    monkeypatch.setattr(nc.urllib.request, "urlopen", fake)
+    import asyncio as _asyncio
+    _asyncio.run(a.on_send(_StubCmd(
+        text="hi group",
+        user={"user_id": "alice", "platform_id": "room-token-def456"},
+    )))
+    assert "/chat/room-token-def456" in fake.calls[0]["url"]
+
+
+# ---- watermark persistence (Matrix since-cursor pattern) ----------
+
+
+def test_watermark_state_path_uses_librefang_home_and_safe_user(monkeypatch, tmp_path):
+    """Path is $LIBREFANG_HOME/sidecar-state/nextcloud-{safe_user}-
+    watermarks.json, with the same sanitisation as Matrix."""
+    monkeypatch.setenv("LIBREFANG_HOME", str(tmp_path))
+    a = _adapter(NEXTCLOUD_ACCOUNT_ID="bot@cloud.example.com")
+    assert a._watermark_state_path == str(
+        tmp_path / "sidecar-state"
+        / "nextcloud-bot@cloud.example.com-watermarks.json"
+    )
+
+
+def test_watermark_state_path_sanitises_unsafe_account_id(monkeypatch, tmp_path):
+    monkeypatch.setenv("LIBREFANG_HOME", str(tmp_path))
+    a = _adapter(NEXTCLOUD_ACCOUNT_ID="weird/id spaces!")
+    assert a._watermark_state_path == str(
+        tmp_path / "sidecar-state"
+        / "nextcloud-weird_id_spaces_-watermarks.json"
+    )
+
+
+def test_watermark_state_path_defaults_when_no_account_id(monkeypatch, tmp_path):
+    monkeypatch.setenv("LIBREFANG_HOME", str(tmp_path))
+    a = _adapter(NEXTCLOUD_ACCOUNT_ID="")
+    assert a._watermark_state_path == str(
+        tmp_path / "sidecar-state" / "nextcloud-default-watermarks.json"
+    )
+
+
+def test_load_watermarks_no_file_gives_empty_dict(monkeypatch, tmp_path):
+    """First run: no state file → empty dict, no error."""
+    monkeypatch.setenv("LIBREFANG_HOME", str(tmp_path))
+    a = _adapter()
+    assert a._room_watermarks == {}
+    assert not (tmp_path / "sidecar-state").exists()
+
+
+def test_load_watermarks_reads_saved_file(monkeypatch, tmp_path):
+    monkeypatch.setenv("LIBREFANG_HOME", str(tmp_path))
+    state = tmp_path / "sidecar-state"
+    state.mkdir()
+    (state / "nextcloud-default-watermarks.json").write_text(
+        json.dumps({"R1": 42, "R2": 7}), encoding="utf-8",
+    )
+    a = _adapter()
+    assert a._room_watermarks == {"R1": 42, "R2": 7}
+
+
+def test_watermark_round_trip_persist_then_load(monkeypatch, tmp_path):
+    monkeypatch.setenv("LIBREFANG_HOME", str(tmp_path))
+    a = _adapter()
+    a._room_watermarks = {"R1": 100, "R2": 5}
+    a._persist_watermarks()
+    # Fresh adapter instance = simulated restart.
+    b = _adapter()
+    assert b._room_watermarks == {"R1": 100, "R2": 5}
+    # File is valid JSON with exactly the dict.
+    on_disk = json.loads(
+        (tmp_path / "sidecar-state" / "nextcloud-default-watermarks.json")
+        .read_text(encoding="utf-8"),
+    )
+    assert on_disk == {"R1": 100, "R2": 5}
+
+
+def test_persist_watermarks_is_atomic_no_tmp_left_behind(monkeypatch, tmp_path):
+    """Atomic write: tmp file is replaced, not left dangling."""
+    monkeypatch.setenv("LIBREFANG_HOME", str(tmp_path))
+    a = _adapter()
+    a._room_watermarks = {"R1": 3}
+    a._persist_watermarks()
+    state_dir = tmp_path / "sidecar-state"
+    assert not (state_dir / "nextcloud-default-watermarks.json.tmp").exists()
+    assert (state_dir / "nextcloud-default-watermarks.json").exists()
+
+
+def test_persist_watermarks_creates_state_dir(monkeypatch, tmp_path):
+    monkeypatch.setenv("LIBREFANG_HOME", str(tmp_path))
+    a = _adapter()
+    a._room_watermarks = {"R1": 3}
+    a._persist_watermarks()
+    assert (tmp_path / "sidecar-state").is_dir()
+
+
+def test_poll_once_persists_watermark_bump(monkeypatch, tmp_path):
+    """The poll loop persists after each watermark advance, so a
+    crash between polls replays at most one pass."""
+    monkeypatch.setenv("LIBREFANG_HOME", str(tmp_path))
+    a = _adapter()
+    a.own_user_id = "librefang-bot"
+    a._room_watermarks["R1"] = 0
+    fake = _FakeUrlopen([
+        (200, {"ocs": {"data": [_msg(mid=10), _msg(mid=11)]}}),
+    ])
+    monkeypatch.setattr(nc.urllib.request, "urlopen", fake)
+    a._poll_once(lambda ev: None, ["R1"])
+    on_disk = json.loads(
+        (tmp_path / "sidecar-state" / "nextcloud-default-watermarks.json")
+        .read_text(encoding="utf-8"),
+    )
+    assert on_disk == {"R1": 11}
+
+
+def test_restart_survival_no_replay(monkeypatch, tmp_path):
+    """End-to-end: adapter A polls and bumps; adapter B (restart)
+    starts from the persisted watermark and asks Talk for messages
+    strictly newer than it."""
+    monkeypatch.setenv("LIBREFANG_HOME", str(tmp_path))
+    a = _adapter()
+    a.own_user_id = "librefang-bot"
+    a._room_watermarks["R1"] = 0
+    fake = _FakeUrlopen([
+        (200, {"ocs": {"data": [_msg(mid=10)]}}),
+    ])
+    monkeypatch.setattr(nc.urllib.request, "urlopen", fake)
+    a._poll_once(lambda ev: None, ["R1"])
+
+    b = _adapter()
+    b.own_user_id = "librefang-bot"
+    assert b._room_watermarks == {"R1": 10}
+    fake2 = _FakeUrlopen([(200, {"ocs": {"data": []}})])
+    monkeypatch.setattr(nc.urllib.request, "urlopen", fake2)
+    b._poll_once(lambda ev: None, ["R1"])
+    # lastKnownMessageId in the resumed query is the persisted 10.
+    assert "lastKnownMessageId=10" in fake2.calls[0]["url"]
+
+
+def test_load_watermarks_corrupt_json_degrades_gracefully(monkeypatch, tmp_path):
+    """Corrupt JSON must not crash the adapter — warn and start
+    fresh."""
+    monkeypatch.setenv("LIBREFANG_HOME", str(tmp_path))
+    state = tmp_path / "sidecar-state"
+    state.mkdir()
+    (state / "nextcloud-default-watermarks.json").write_text(
+        "{not json at all", encoding="utf-8",
+    )
+    a = _adapter()
+    assert a._room_watermarks == {}
+
+
+def test_load_watermarks_non_dict_json_degrades_gracefully(monkeypatch, tmp_path):
+    monkeypatch.setenv("LIBREFANG_HOME", str(tmp_path))
+    state = tmp_path / "sidecar-state"
+    state.mkdir()
+    (state / "nextcloud-default-watermarks.json").write_text(
+        "[1, 2, 3]", encoding="utf-8",
+    )
+    a = _adapter()
+    assert a._room_watermarks == {}
+
+
+def test_load_watermarks_skips_non_integer_values(monkeypatch, tmp_path):
+    """Junk values are dropped, valid ones kept."""
+    monkeypatch.setenv("LIBREFANG_HOME", str(tmp_path))
+    state = tmp_path / "sidecar-state"
+    state.mkdir()
+    (state / "nextcloud-default-watermarks.json").write_text(
+        json.dumps({"R1": 5, "R2": "abc", "R3": None, "R4": "9"}),
+        encoding="utf-8",
+    )
+    a = _adapter()
+    assert a._room_watermarks == {"R1": 5, "R4": 9}
+
+
+def test_persist_watermarks_unwritable_path_warns_not_crashes(monkeypatch, tmp_path):
+    """OSError on persist must degrade to a warn, never kill the
+    poll loop."""
+    monkeypatch.setenv("LIBREFANG_HOME", str(tmp_path))
+    a = _adapter()
+    a._room_watermarks = {"R1": 1}
+    a._watermark_state_path = str(
+        tmp_path / "no-such-parent" / "x" / "watermarks.json",
+    )
+    # os.makedirs fails: parent 'x' sits under a file, not a dir.
+    blocker = tmp_path / "no-such-parent"
+    blocker.write_text("i am a file", encoding="utf-8")
+    a._persist_watermarks()  # must not raise
