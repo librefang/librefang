@@ -243,11 +243,103 @@ class NextcloudAdapter(SidecarAdapter):
         # to 0 the first time we see a room; bumped to the newest seen
         # `id` after each successful poll.
         self._room_watermarks: dict[str, int] = {}
+        # Watermark persistence — same pattern as the Matrix adapter's
+        # since-cursor: state under ``$LIBREFANG_HOME/sidecar-state/``
+        # keyed by account so multi-bot setups don't collide. JSON
+        # rather than a bare token because this is a dict of
+        # room_token → last_message_id. Without this a supervisor
+        # respawn replays each room's recent history as fresh
+        # inbound (the in-memory ``_seen`` dedupe set is also lost
+        # on restart, so it can't catch the replay).
+        self._watermark_state_path: str | None = (
+            self._compute_watermark_state_path()
+        )
+        self._room_watermarks = self._load_watermarks()
         # Dedupe set on Talk message `id` (cheap, bounded). Same
         # cap / eviction policy as reddit / rocketchat.
         self._seen = _SeenSet(
             max_size=SEEN_MESSAGES_MAX, evict=SEEN_MESSAGES_EVICT,
         )
+        # Room maps, built once at startup by `_build_room_maps()`:
+        # token → Talk room type (1 = 1-to-1, 2 = group, 3 = public),
+        # actorId → 1-to-1 room token (the DM reply target), and the
+        # per-room participant roster stamped on inbound group
+        # messages as `group_members` metadata.
+        self._room_types: dict[str, int] = {}
+        self._room_display_names: dict[str, str] = {}
+        self._dm_room_by_actor: dict[str, str] = {}
+        self._room_participants: dict[str, list[dict]] = {}
+
+    # ---- watermark persistence (Matrix since-cursor pattern) ----
+
+    def _compute_watermark_state_path(self) -> str | None:
+        """``$LIBREFANG_HOME/sidecar-state/nextcloud-{safe_user}-
+        watermarks.json`` — same safe_user sanitisation as the Matrix
+        adapter's ``_compute_since_state_path``."""
+        home = os.environ.get("LIBREFANG_HOME") or os.path.expanduser("~")
+        if not home:
+            return None
+        safe_user = "".join(
+            c if c.isalnum() or c in "-_.@" else "_"
+            for c in (self.account_id or "default")
+        )
+        return os.path.join(
+            home, "sidecar-state",
+            f"nextcloud-{safe_user}-watermarks.json",
+        )
+
+    def _load_watermarks(self) -> dict[str, int]:
+        """Read the persisted room_token → last_message_id dict.
+        Missing file → empty dict (first run). Any other error —
+        unreadable path, corrupt JSON, wrong shape — degrades to a
+        warn + empty dict rather than crashing the adapter."""
+        if not self._watermark_state_path:
+            return {}
+        try:
+            with open(self._watermark_state_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except FileNotFoundError:
+            return {}
+        except (OSError, ValueError) as exc:
+            log.warn(
+                "nextcloud watermark load failed; starting fresh",
+                path=self._watermark_state_path, error=str(exc),
+            )
+            return {}
+        if not isinstance(data, dict):
+            log.warn(
+                "nextcloud watermark state not a dict; starting fresh",
+                path=self._watermark_state_path,
+            )
+            return {}
+        out: dict[str, int] = {}
+        for key, value in data.items():
+            if not isinstance(key, str):
+                continue
+            try:
+                out[key] = int(value)
+            except (TypeError, ValueError):
+                continue
+        return out
+
+    def _persist_watermarks(self) -> None:
+        """Atomic write (tmp + ``os.replace``) of the full dict, so a
+        crash mid-write can never leave a truncated JSON file behind."""
+        if not self._watermark_state_path:
+            return
+        try:
+            os.makedirs(
+                os.path.dirname(self._watermark_state_path), exist_ok=True,
+            )
+            tmp = self._watermark_state_path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(self._room_watermarks, f)
+            os.replace(tmp, self._watermark_state_path)
+        except OSError as exc:
+            log.warn(
+                "nextcloud watermark persist failed; will retry next bump",
+                path=self._watermark_state_path, error=str(exc),
+            )
 
     # ---- HTTP helpers ------------------------------------------------
 
@@ -378,8 +470,9 @@ class NextcloudAdapter(SidecarAdapter):
 
     # ---- room discovery ----------------------------------------------
 
-    def _list_joined_rooms(self) -> list[str]:
-        """Discover joined room tokens via
+    def _list_joined_rooms(self) -> list[dict]:
+        """Discover joined rooms (full room objects, so callers can
+        read ``type`` / ``displayName``) via
         ``GET /ocs/v2.php/apps/spreed/api/v4/room?format=json``.
         Returns an empty list only when discovery succeeds and the bot has
         joined no rooms. Transient and protocol failures are distinct so the
@@ -410,15 +503,15 @@ class NextcloudAdapter(SidecarAdapter):
             raise _RoomDiscoveryError(
                 "nextcloud room list response missing ocs.data array"
             )
-        out: list[str] = []
+        out: list[dict] = []
         for room in data:
             if isinstance(room, dict):
                 tok = room.get("token")
                 if isinstance(tok, str) and tok:
-                    out.append(tok)
+                    out.append(room)
         return out
 
-    def _discover_rooms_until_available(self) -> list[str]:
+    def _discover_rooms_until_available(self) -> list[dict]:
         """Retry transient discovery failures and genuine empty results."""
         backoff = 1.0
         while True:
@@ -441,6 +534,100 @@ class NextcloudAdapter(SidecarAdapter):
                 delay=MAX_BACKOFF_SECS,
             )
             time.sleep(MAX_BACKOFF_SECS)
+
+    def _fetch_participants(self, room_token: str) -> list[dict]:
+        """Fetch a room's participant list via
+        ``GET /ocs/v2.php/apps/spreed/api/v4/room/{token}/participants``.
+        Returns [] on any failure — roster / DM-map construction is
+        best-effort and must never block polling."""
+        url = (
+            f"{self.server_url}"
+            f"/ocs/v2.php/apps/spreed/api/v4/room/{room_token}"
+            f"/participants?format=json"
+        )
+        try:
+            status, body, _raw, _hdrs = self._http(
+                url, headers=self._auth_headers(),
+            )
+        except urllib.error.URLError as e:
+            log.warn(
+                "nextcloud participants fetch transport error",
+                room_token=room_token, error=str(e),
+            )
+            return []
+        if status != 200 or not isinstance(body, dict):
+            log.warn(
+                "nextcloud participants fetch failed",
+                room_token=room_token, status=status,
+            )
+            return []
+        data = body.get("ocs", {}).get("data")
+        if not isinstance(data, list):
+            return []
+        return [p for p in data if isinstance(p, dict)]
+
+    def _build_room_maps(self, rooms: list[dict]) -> None:
+        """Index discovered rooms and build the user→DM-room map.
+
+        For every 1-to-1 room (type 1) the participants endpoint is
+        fetched once; the non-self user's ``actorId`` maps to that
+        room's token, giving ``channel_dm`` a resolvable reply target
+        for members who have never DMed the bot. Group rooms (type 2)
+        keep a cached participant roster so inbound group messages can
+        carry ``group_members`` metadata (the daemon's
+        ``channel_members`` 'enumerated' source, mirroring slack's
+        #7086 shape)."""
+        self._room_types = {}
+        self._room_display_names = {}
+        self._dm_room_by_actor = {}
+        self._room_participants = {}
+        for room in rooms:
+            token = room.get("token") if isinstance(room, dict) else None
+            if not isinstance(token, str) or not token:
+                continue
+            rtype = room.get("type")
+            rtype = rtype if isinstance(rtype, int) else -1
+            self._room_types[token] = rtype
+            display = room.get("displayName")
+            if isinstance(display, str) and display:
+                self._room_display_names[token] = display
+            if rtype not in (1, 2):
+                continue
+            participants = self._fetch_participants(token)
+            entries: list[dict] = []
+            for p in participants:
+                actor_id = p.get("actorId")
+                if not isinstance(actor_id, str) or not actor_id:
+                    continue
+                actor_type = (
+                    p.get("actorType")
+                    if isinstance(p.get("actorType"), str)
+                    else "users"
+                )
+                display_name = p.get("displayName")
+                entry: dict[str, Any] = {
+                    "user_id": actor_id,
+                    "display_name": (
+                        display_name
+                        if isinstance(display_name, str) and display_name
+                        else actor_id
+                    ),
+                }
+                if (rtype == 1 and actor_type == "users"
+                        and actor_id != self.own_user_id):
+                    self._dm_room_by_actor[actor_id] = token
+                    # The 1-to-1 room token is the platform's reply
+                    # target for this member — surface it so the
+                    # daemon can resolve `channel_dm` without a
+                    # prior inbound DM.
+                    entry["platform_id"] = token
+                entries.append(entry)
+            self._room_participants[token] = entries
+        log.info(
+            "nextcloud room maps built",
+            rooms=len(self._room_types),
+            dm_targets=len(self._dm_room_by_actor),
+        )
 
     # ---- dedupe ------------------------------------------------------
 
@@ -470,10 +657,18 @@ class NextcloudAdapter(SidecarAdapter):
             return False
         return actor_type == "users" and actor_id == self.own_user_id
 
-    def _parse_message(self, msg: dict, room_token: str) -> dict | None:
+    def _parse_message(
+        self, msg: dict, room_token: str, room_type: int | None = None,
+    ) -> dict | None:
         """Parse a Talk chat element into a ``message`` event. Returns
         ``None`` if the message should be skipped (system message,
-        self, empty body, malformed)."""
+        self, empty body, malformed).
+
+        Identity is user-oriented: ``user_id`` is the sender's
+        ``actorId`` (not the room token), while ``channel_id`` /
+        the reply target stay the room token. ``is_group`` comes from
+        the room's Talk type so 1-to-1 rooms are DMs, not group
+        traffic."""
         if not isinstance(msg, dict):
             return None
         # Talk emits `messageType="system"` for join/leave/etc. — the
@@ -530,6 +725,7 @@ class NextcloudAdapter(SidecarAdapter):
             "actor_type": actor_type,
             "actor_display_name": actor_display,
             "room_token": room_token,
+            "room_type": room_type,
         }
         if reference_id is not None:
             metadata["reference_id"] = reference_id
@@ -546,7 +742,10 @@ class NextcloudAdapter(SidecarAdapter):
         thread_id = parent_msg_id or (str(msg_id) if msg_id else None)
 
         return protocol.message(
-            user_id=room_token,
+            # User-oriented identity: the sender's actorId, not the
+            # room token — `channel_dm` / `channel_members` key on
+            # this. Guests with no actorId fall back to "unknown".
+            user_id=actor_id or "unknown",
             user_name=actor_display or "unknown",
             content=content,
             # Carry the room token as the canonical reply target —
@@ -555,7 +754,12 @@ class NextcloudAdapter(SidecarAdapter):
             # room_token}` shape (nextcloud.rs:374-378).
             channel_id=room_token,
             message_id=str(msg_id) if msg_id else None,
-            is_group=True,
+            # Talk room type 1 = 1-to-1 (DM); everything else
+            # (2 = group, 3 = public) is group traffic. Equivalent to
+            # `room_type == 2` for the common types and keeps public
+            # rooms out of the DM path. Unknown type → conservative
+            # group classification (previous behaviour).
+            is_group=(room_type != 1) if room_type is not None else True,
             # `librefang_user` is the always-round-tripped carrier for
             # the per-message reply correlation (Talk's `replyTo` form
             # param). `thread_id` is kept for forward-compat with a
@@ -648,7 +852,9 @@ class NextcloudAdapter(SidecarAdapter):
                         newest_id = msg_id
                     continue
 
-                ev = self._parse_message(msg, room_token)
+                ev = self._parse_message(
+                    msg, room_token, self._room_types.get(room_token),
+                )
                 if msg_id:
                     self._mark_seen(msg_id)
                 if msg_id > newest_id:
@@ -658,10 +864,24 @@ class NextcloudAdapter(SidecarAdapter):
                 if self.account_id is not None:
                     meta = ev["params"].setdefault("metadata", {})
                     meta["account_id"] = self.account_id
+                # Roster: stamp the room's cached participant list so
+                # `channel_members` reports real members (not just
+                # people who have spoken). Mirrors slack's
+                # `_apply_enumerated_members` (#7086) — the daemon
+                # stores these as `source = 'enumerated'` rows,
+                # deliberately apart from the observational ones.
+                if ev["params"].get("is_group"):
+                    members = self._room_participants.get(room_token)
+                    if members:
+                        meta = ev["params"].setdefault("metadata", {})
+                        meta["group_members"] = members
                 emit(ev)
 
             if newest_id > last_id:
                 self._room_watermarks[room_token] = newest_id
+                # Persist immediately so a crash between polls can
+                # replay at most the messages from this one pass.
+                self._persist_watermarks()
 
     def _producer_blocking(self, emit) -> None:
         """Verify credentials, resolve the room list, then poll forever
@@ -685,11 +905,22 @@ class NextcloudAdapter(SidecarAdapter):
                 time.sleep(verify_backoff)
                 verify_backoff = min(verify_backoff * 2, MAX_BACKOFF_SECS)
 
-        # Resolve rooms to poll. Empty allowed_rooms → discover.
+        # Discover rooms (full objects) first — the type / DM maps
+        # must exist even when NEXTCLOUD_ROOMS narrows the polled set,
+        # or `channel_dm` could never resolve a member who hasn't
+        # DMed yet. Empty allowed_rooms → poll everything discovered.
+        discovered = self._discover_rooms_until_available()
+        self._build_room_maps(discovered)
         if self.allowed_rooms:
-            rooms = list(self.allowed_rooms)
+            rooms = [
+                t for t in self.allowed_rooms
+                if isinstance(t, str) and t
+            ]
         else:
-            rooms = self._discover_rooms_until_available()
+            rooms = [
+                r.get("token") for r in discovered
+                if isinstance(r.get("token"), str) and r.get("token")
+            ]
 
         # Initialise watermarks to 0 so the first poll uses
         # `lastKnownMessageId=0` (matching the Rust adapter's
@@ -798,6 +1029,20 @@ class NextcloudAdapter(SidecarAdapter):
         )
         if not room_token:
             room_token = str(getattr(cmd, "channel_id", "") or "")
+
+        # DM resolution: `channel_dm` targets a member by user_id, and
+        # the daemon may pass that user id (not a room token) as the
+        # reply target. Resolve it to the member's 1-to-1 room via the
+        # actor→DM-room map built at discovery; a known room token
+        # (group reply, or in-conversation DM reply) wins unchanged.
+        uid = str(user.get("user_id") or "") if isinstance(user, dict) else ""
+        if room_token not in self._room_types:
+            resolved = (
+                self._dm_room_by_actor.get(uid)
+                or self._dm_room_by_actor.get(room_token)
+            )
+            if resolved:
+                room_token = resolved
 
         # Primary recovery: cmd.user["librefang_user"] (always
         # round-tripped). Fallback: cmd.thread_id (forward-compat
