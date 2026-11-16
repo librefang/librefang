@@ -390,7 +390,8 @@ impl LibreFangKernel {
     ///   `sender_account_id`, and a non-empty stamp *enables* the #6443
     ///   cross-account guard for agents that talk to several bots — a behaviour
     ///   change none of these callers ask for. Callers that need to *send* from
-    ///   a specific instance take it from [`Self::resolve_agent_home_instance`].
+    ///   a specific instance go through [`Self::forward_to_home_channel`], which
+    ///   resolves the instance and sends in one step.
     /// - `use_canonical_session = true` — preserves the trigger's existing
     ///   `session_mode` semantics; without this the kernel would switch to a
     ///   channel-scoped `SessionId::for_channel(agent, channel)` which would
@@ -418,8 +419,10 @@ impl LibreFangKernel {
     /// that arrived from nowhere and switch the #6443 cross-account guard on for
     /// them (see [`Self::resolve_agent_home_channel`]).
     ///
-    /// Returns `Ok(())` when the agent has no home sidecar: there is nowhere to
-    /// forward to, which is not an error for the best-effort callers.
+    /// Returns `Ok(String::new())` when the agent has no home sidecar: there is
+    /// nowhere to forward to, which is not an error for the best-effort callers.
+    /// A real send always carries the adapter's own confirmation text, so the empty
+    /// string unambiguously means "nothing was sent".
     pub(crate) async fn forward_to_home_channel(
         &self,
         agent_id: AgentId,
@@ -469,8 +472,10 @@ impl LibreFangKernel {
 
 /// An agent's home sidecar channel: the turn context plus the instance identity.
 ///
-/// Deliberately private, and its halves are handed out only together — see
-/// [`LibreFangKernel::forward_to_home_channel`], the one caller that needs them.
+/// Deliberately private: the pair is assembled inside
+/// [`LibreFangKernel::forward_to_home_channel`], and `ctx` alone leaves this module
+/// only as the turn context of [`LibreFangKernel::resolve_agent_home_channel`], which
+/// never sends.
 struct HomeSidecar {
     /// Turn context. `account_id` stays `None` so the #6443 cross-account guard
     /// keeps no-opping for turns that arrived from nowhere.
@@ -525,8 +530,8 @@ fn sidecar_default_conversation(
     sidecar_channels: &[librefang_types::config::SidecarChannelConfig],
     agent_name: &str,
 ) -> Option<String> {
-    // Resolve the SAME channel `resolve_agent_home_channel` picks — the first
-    // entry whose agent matches — and read only THAT channel's
+    // Resolve the SAME entry `sidecar_home_channel` picks — the first one whose
+    // agent matches — and read only THAT channel's
     // `default_conversation`. Using `find().and_then()` (not `find_map`) is
     // load-bearing: if the home channel has no default we must return `None`,
     // never skip ahead to a *different* channel's default. Otherwise a forward
@@ -3963,6 +3968,38 @@ mod tests {
         );
         // An agent with no channel keeps returning None instead of guessing.
         assert!(sidecar_home_channel(&chans, "researcher").is_none());
+    }
+
+    /// Two `[[sidecar_channels]]` entries may name the same agent; both the
+    /// destination (`sidecar_default_conversation`) and the send address
+    /// (`sidecar_home_channel`) must then pick the **same** entry — the first —
+    /// or a forward pairs one entry's chat with another entry's adapter, which is
+    /// exactly the "delivering to the wrong place" the destination resolver warns
+    /// about. The destination resolver pins this; the address resolver must too.
+    #[test]
+    fn home_channel_and_destination_agree_on_the_first_matching_entry() {
+        let chans = vec![
+            sc(serde_json::json!({
+                "name": "tg-first",
+                "command": "python3",
+                "channel_type": "telegram",
+                "default_agent": "assistant",
+            })),
+            sc(serde_json::json!({
+                "name": "tg-second",
+                "command": "python3",
+                "channel_type": "telegram",
+                "default_agent": "assistant",
+                "default_conversation": "chat-from-second",
+            })),
+        ];
+        let home = sidecar_home_channel(&chans, "assistant").expect("home channel");
+        assert_eq!(
+            home.instance, "tg-first",
+            "the send address must come from the same (first) entry"
+        );
+        // The second entry's `default_conversation` must not leak into the pair.
+        assert_eq!(sidecar_default_conversation(&chans, "assistant"), None);
     }
 
     /// The property the delegation forwards depend on, exercised through the

@@ -23304,7 +23304,9 @@ fn shutdown_publishes_kernel_stopping() {
 /// structural assertion on the resolver's output cannot do.
 #[tokio::test(flavor = "multi_thread")]
 async fn delegation_forward_addresses_the_agents_own_adapter() {
+    use crate::kernel::subsystems::events::EventSubsystemApi;
     use librefang_types::config::SidecarChannelConfig;
+    use librefang_types::task::{TaskKind, TaskStatus};
 
     fn sidecar(name: &str, agent: &str) -> SidecarChannelConfig {
         serde_json::from_value(serde_json::json!({
@@ -23319,29 +23321,45 @@ async fn delegation_forward_addresses_the_agents_own_adapter() {
     let tmp = tempfile::tempdir().unwrap();
     let home_dir = tmp.path().join("librefang-forward-instance-test");
     std::fs::create_dir_all(&home_dir).unwrap();
-    let config = KernelConfig {
+    let base_config = KernelConfig {
         home_dir: home_dir.clone(),
         data_dir: home_dir.join("data"),
-        // Two adapters of one channel type, each naming a different agent —
-        // the deployment shape that made the type-only lookup ambiguous.
+        ..KernelConfig::default()
+    };
+    // The channel records are installed *after* boot on purpose: booting with
+    // `[[sidecar_channels]]` present starts sidecar machinery that outlives the
+    // test and slows the rest of the suite, while resolution only reads the
+    // config snapshot.
+    let config = KernelConfig {
         sidecar_channels: vec![
+            // Two adapters of one channel type, each naming a different agent —
+            // the deployment shape that made the type-only lookup ambiguous.
             sidecar("tg-primary", "fw-assistant"),
             sidecar("tg-sales", "fw-sales"),
         ],
-        ..KernelConfig::default()
+        ..base_config
     };
-    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+    // `boot_with_config` does not populate `self_handle`; the completion
+    // forward in `complete_async_task` is gated on it, so the steady-state
+    // wiring has to be reproduced or the forward silently does nothing.
+    let kernel = Arc::new(LibreFangKernel::boot_with_config(config).expect("Kernel should boot"));
+    kernel.set_self_handle();
 
     let primary = Arc::new(RecordingChannelAdapter::named_instance(
         "tg-primary",
         "telegram",
     ));
-    let sales = Arc::new(RecordingChannelAdapter::named_instance("tg-sales", "telegram"));
+    let sales = Arc::new(RecordingChannelAdapter::named_instance(
+        "tg-sales", "telegram",
+    ));
     let primary_sent = primary.sent.clone();
     let sales_sent = sales.sent.clone();
     // Same seeding as `channel_bridge.rs`: the plain key, plus the qualified one.
     for (name, adapter) in [
-        ("tg-primary", primary.clone() as Arc<RecordingChannelAdapter>),
+        (
+            "tg-primary",
+            primary.clone() as Arc<RecordingChannelAdapter>,
+        ),
         ("tg-sales", sales.clone() as Arc<RecordingChannelAdapter>),
     ] {
         kernel
@@ -23393,6 +23411,46 @@ async fn delegation_forward_addresses_the_agents_own_adapter() {
     assert_eq!(sales_got.len(), 1, "each agent forwards to its own bot");
     assert!(sales_got[0].starts_with("chat-2:"));
 
+    // The real path: an async delegation completes and the *forward itself* must
+    // land on the agent's own adapter. Asserting only on the helper above would
+    // leave the two call sites in `task_registry.rs` free to go back to the
+    // channel-typed send with the whole suite still green — which is exactly how
+    // the first revision of this fix regressed.
+    // A live receiver on the registered session makes the tracker take the
+    // mid-turn path, which is the one that forwards to the channel.
+    let session = SessionId::new();
+    let (tx, _rx) = tokio::sync::mpsc::channel(8);
+    kernel
+        .injection_senders_ref()
+        .insert((assistant, session), tx);
+    let handle = kernel.register_async_task(
+        assistant,
+        session,
+        TaskKind::Delegation {
+            agent_id: sales_agent,
+            prompt_hash: "hash".to_string(),
+        },
+        Some("chat-4".to_string()),
+    );
+    let delivered = kernel
+        .complete_async_task(
+            handle.id,
+            TaskStatus::Completed(serde_json::json!({"result": "delegated answer"})),
+        )
+        .await
+        .expect("complete async task");
+    assert!(delivered, "the delegation completion must be delivered");
+    let after = primary_sent.lock().unwrap().clone();
+    assert_eq!(
+        after.len(),
+        2,
+        "the completion forward must reach the home adapter, got {after:?}"
+    );
+    assert!(
+        after[1].contains("delegated answer"),
+        "unexpected forward body: {after:?}"
+    );
+
     // An agent with no home sidecar has nowhere to forward to, and that is not
     // an error for the best-effort callers.
     let loner = kernel
@@ -23406,7 +23464,11 @@ async fn delegation_forward_addresses_the_agents_own_adapter() {
         .forward_to_home_channel(loner, "chat-3", "nowhere")
         .await
         .expect("a missing home channel is not an error");
-    assert!(primary_sent.lock().unwrap().len() == 1);
-    assert!(sales_sent.lock().unwrap().len() == 1);
+    assert_eq!(
+        primary_sent.lock().unwrap().len(),
+        2,
+        "the loner must not add a send to another agent's adapter"
+    );
+    assert_eq!(sales_sent.lock().unwrap().len(), 1);
     kernel.shutdown();
 }
