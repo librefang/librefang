@@ -23321,23 +23321,19 @@ async fn delegation_forward_addresses_the_agents_own_adapter() {
     let tmp = tempfile::tempdir().unwrap();
     let home_dir = tmp.path().join("librefang-forward-instance-test");
     std::fs::create_dir_all(&home_dir).unwrap();
-    let base_config = KernelConfig {
+    // Booted *with* the records, like production: `boot_with_config` seeds the
+    // per-instance channel defaults from `[[sidecar_channels]]`, and resolution
+    // must work on that shape. Two adapters of one channel type, each naming a
+    // different agent, is the deployment shape that made the type-only lookup
+    // ambiguous.
+    let config = KernelConfig {
         home_dir: home_dir.clone(),
         data_dir: home_dir.join("data"),
-        ..KernelConfig::default()
-    };
-    // The channel records are installed *after* boot on purpose: booting with
-    // `[[sidecar_channels]]` present starts sidecar machinery that outlives the
-    // test and slows the rest of the suite, while resolution only reads the
-    // config snapshot.
-    let config = KernelConfig {
         sidecar_channels: vec![
-            // Two adapters of one channel type, each naming a different agent —
-            // the deployment shape that made the type-only lookup ambiguous.
             sidecar("tg-primary", "fw-assistant"),
             sidecar("tg-sales", "fw-sales"),
         ],
-        ..base_config
+        ..KernelConfig::default()
     };
     // `boot_with_config` does not populate `self_handle`; the completion
     // forward in `complete_async_task` is gated on it, so the steady-state
@@ -23413,9 +23409,13 @@ async fn delegation_forward_addresses_the_agents_own_adapter() {
 
     // The real path: an async delegation completes and the *forward itself* must
     // land on the agent's own adapter. Asserting only on the helper above would
-    // leave the two call sites in `task_registry.rs` free to go back to the
+    // leave the call site in `task_registry.rs` free to go back to the
     // channel-typed send with the whole suite still green — which is exactly how
     // the first revision of this fix regressed.
+    //
+    // Scope: this covers the **mid-turn** site only. The wake-idle site runs a
+    // full agent turn (it needs a model) and is not exercised here; it calls the
+    // same helper, but nothing catches a revert of that one call.
     // A live receiver on the registered session makes the tracker take the
     // mid-turn path, which is the one that forwards to the channel.
     let session = SessionId::new();
@@ -23445,6 +23445,10 @@ async fn delegation_forward_addresses_the_agents_own_adapter() {
         after.len(),
         2,
         "the completion forward must reach the home adapter, got {after:?}"
+    );
+    assert!(
+        after[1].starts_with("chat-4:"),
+        "the forward must go to the inbound conversation, got {after:?}"
     );
     assert!(
         after[1].contains("delegated answer"),
