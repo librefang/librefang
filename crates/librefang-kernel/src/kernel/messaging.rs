@@ -385,7 +385,7 @@ impl LibreFangKernel {
     /// Returns a synthetic `SenderContext` populated with:
     /// - `channel` — the channel type (e.g. `"telegram"`, `"discord"`)
     /// - `account_id` — deliberately left `None`: this context describes a turn
-    ///   that arrived from nowhere (trigger, wake-idle, cron), so it must not
+    ///   that arrived from nowhere (trigger dispatches, wake-idle turns), so it must not
     ///   claim an originating account. `send_message_full` stamps it into
     ///   `sender_account_id`, and a non-empty stamp *enables* the #6443
     ///   cross-account guard for agents that talk to several bots — a behaviour
@@ -406,19 +406,43 @@ impl LibreFangKernel {
         sidecar_home_channel(&cfg.sidecar_channels, &agent_name).map(|home| home.ctx)
     }
 
-    /// Resolve the **sidecar instance name** of an agent's home channel.
+    /// Deliver `body` to `chat_id` through the agent's **home sidecar instance**.
     ///
-    /// This is the identity `resolve_channel_adapter` matches against
-    /// `adapter.name()`, so it is what a caller passes as the `account_id` of an
-    /// outbound send. Kept separate from [`Self::resolve_agent_home_channel`] on
-    /// purpose: putting it into the *turn* context would fabricate a
-    /// `sender_account_id` for turns that arrived from nowhere (see the note on
-    /// that method), which turns the #6443 cross-account guard on for them.
-    pub(crate) fn resolve_agent_home_instance(&self, agent_id: AgentId) -> Option<String> {
-        let entry = self.agents.registry.get(agent_id)?;
+    /// Both halves of the address are resolved here, in one place, because they
+    /// are useless apart: `channel` is the channel *type*, which does not
+    /// address an instance on a daemon running several adapters of one type,
+    /// while `instance` is the identity `resolve_channel_adapter` matches
+    /// against `adapter.name()`. Keeping the pair behind one method is also what
+    /// keeps the identity out of the turn context — putting it in
+    /// `SenderContext.account_id` would stamp `sender_account_id` onto turns
+    /// that arrived from nowhere and switch the #6443 cross-account guard on for
+    /// them (see [`Self::resolve_agent_home_channel`]).
+    ///
+    /// Returns `Ok(())` when the agent has no home sidecar: there is nowhere to
+    /// forward to, which is not an error for the best-effort callers.
+    pub(crate) async fn forward_to_home_channel(
+        &self,
+        agent_id: AgentId,
+        chat_id: &str,
+        body: &str,
+    ) -> KernelResult<String> {
+        let Some(entry) = self.agents.registry.get(agent_id) else {
+            return Ok(String::new());
+        };
         let agent_name = entry.name.clone();
         let cfg = self.config.load_full();
-        sidecar_home_channel(&cfg.sidecar_channels, &agent_name).map(|home| home.instance)
+        let Some(home) = sidecar_home_channel(&cfg.sidecar_channels, &agent_name) else {
+            return Ok(String::new());
+        };
+        self.send_channel_message(
+            &home.ctx.channel,
+            chat_id,
+            body,
+            None,
+            Some(home.instance.as_str()),
+        )
+        .await
+        .map_err(KernelError::from)
     }
 
     /// Resolve the **default outbound conversation id** for an agent's home
@@ -444,13 +468,16 @@ impl LibreFangKernel {
 }
 
 /// An agent's home sidecar channel: the turn context plus the instance identity.
-pub(in crate::kernel) struct HomeSidecar {
+///
+/// Deliberately private, and its halves are handed out only together — see
+/// [`LibreFangKernel::forward_to_home_channel`], the one caller that needs them.
+struct HomeSidecar {
     /// Turn context. `account_id` stays `None` so the #6443 cross-account guard
     /// keeps no-opping for turns that arrived from nowhere.
-    pub ctx: SenderContext,
+    ctx: SenderContext,
     /// The sidecar's `name`, which is the identity `resolve_channel_adapter`
     /// matches against `adapter.name()`.
-    pub instance: String,
+    instance: String,
 }
 
 /// Resolve an agent's home sidecar channel by scanning `sidecar_channels` for
@@ -458,11 +485,16 @@ pub(in crate::kernel) struct HomeSidecar {
 ///
 /// The channel key is `channel_type` when set, else the entry `name` — the same
 /// mapping `sidecar_default_agent` in `channel_sender.rs` uses for the inverted
-/// lookup. This key is a *channel type*, so it does not address one instance on
-/// its own: `resolve_channel_adapter` finds no adapter under the bare type and
-/// falls back to a by-type scan, which is where a multi-instance daemon needs
-/// `instance` to disambiguate. The two fields therefore travel together, and
-/// callers that send must pass `instance` as the send's `account_id`.
+/// lookup. When `channel_type` differs from `name`, that key is a channel *type*
+/// and addresses no instance on its own: the bridge seeds the registry by
+/// adapter `name` (`channel_bridge.rs`), so the lookup falls through to a
+/// by-type scan, where a daemon running several adapters of one type needs
+/// `instance` to disambiguate. When `channel_type` is absent the plain key *is*
+/// the instance and the by-type scan is never reached.
+///
+/// The two halves therefore travel together, and
+/// [`LibreFangKernel::forward_to_home_channel`] is the only place that pairs
+/// them with an outbound send.
 fn sidecar_home_channel(
     sidecar_channels: &[librefang_types::config::SidecarChannelConfig],
     agent_name: &str,
