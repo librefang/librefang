@@ -8,4 +8,4 @@ Async delegation results now reach the operator on a daemon that runs more than 
   The context now carries the sidecar's instance name as `account_id`, which is what
   `resolve_channel_adapter` matches against `adapter.name()`, pinning the send to the
   agent's own bot.
-  (#TBD) (@smanic)
+  (#8772) (@nevgenov)
