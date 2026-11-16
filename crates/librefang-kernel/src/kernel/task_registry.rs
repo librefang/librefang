@@ -378,27 +378,20 @@ impl LibreFangKernel {
                     .or_else(|| kernel_arc.resolve_agent_default_conversation(entry.agent_id));
                 if let Some(chat_id) = destination {
                     let body = format_task_completion_text(&event);
-                    if let Some(ctx) = kernel_arc.resolve_agent_home_channel(entry.agent_id) {
-                        use librefang_runtime::kernel_handle::ChannelSender;
-                        let _ = kernel_arc
-                            .send_channel_message(
-                                &ctx.channel,
-                                &chat_id,
-                                &body,
-                                None,
-                                ctx.account_id.as_deref(),
-                            )
-                            .await
-                            .map_err(|e| {
-                                tracing::warn!(
-                                    task_id = %task_id,
-                                    channel = %ctx.channel,
-                                    chat_id = %chat_id,
-                                    error = %e,
-                                    "Async task: failed to forward completion to home channel (mid-turn path)"
-                                );
-                            });
-                    }
+                    // `channel` alone cannot address the agent's own bot when the
+                    // daemon runs several adapters of one type, so the address is
+                    // resolved inside this one call.
+                    let _ = kernel_arc
+                        .forward_to_home_channel(entry.agent_id, &chat_id, &body)
+                        .await
+                        .map_err(|e| {
+                            tracing::warn!(
+                                task_id = %task_id,
+                                chat_id = %chat_id,
+                                error = %e,
+                                "Async task: failed to forward completion to home channel (mid-turn path)"
+                            );
+                        });
                 }
             }
             return Ok(true);
@@ -549,29 +542,32 @@ impl LibreFangKernel {
                     // Without this the response is produced inside the
                     // loop but discarded by the spawn — the bridge is
                     // not in the call path.
-                    if let Some(ref ctx) = sender_ctx {
-                        if !result.response.is_empty() {
-                            if let Some(ref peer_id) = chat_id {
-                                use librefang_runtime::kernel_handle::ChannelSender;
-                                let _ = kernel_arc
-                                    .send_channel_message(
-                                        &ctx.channel,
-                                        peer_id,
-                                        &result.response,
-                                        None,
-                                        ctx.account_id.as_deref(),
-                                    )
-                                    .await
-                                    .map_err(|e| {
+                    if !result.response.is_empty() {
+                        if let Some(ref peer_id) = chat_id {
+                            // Same helper as the mid-turn path: the address is
+                            // resolved once, including the adapter identity.
+                            //
+                            // Known limitation: `chat_id` is the *inbound*
+                            // conversation, which may have arrived on a sibling
+                            // adapter of the same channel type (a binding can
+                            // route any bot to this agent). Before the adapter
+                            // identity existed this pairing failed loudly
+                            // ("ambiguous"); it now delivers through the home
+                            // bot — a different bot in the same group, or a
+                            // "chat not found" warning when that bot is not a
+                            // member. Fixing it needs the inbound account
+                            // plumbed through the async-task entry.
+                            let _ = kernel_arc
+                                .forward_to_home_channel(agent_id, peer_id, &result.response)
+                                .await
+                                .map_err(|e| {
                                     tracing::warn!(
                                         agent_id = %agent_id,
-                                        channel = %ctx.channel,
                                         peer = %peer_id,
                                         error = %e,
                                         "Async task wake-idle: failed to forward response to channel"
                                     );
                                 });
-                            }
                         }
                     }
                 }
