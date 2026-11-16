@@ -397,24 +397,7 @@ impl LibreFangKernel {
         let entry = self.agents.registry.get(agent_id)?;
         let agent_name = entry.name.clone();
         let cfg = self.config.load_full();
-
-        // Every channel is a sidecar; scan `cfg.sidecar_channels` for the
-        // first entry whose `default_agent` names this agent. The effective
-        // channel key is `channel_type` when set, else the entry `name` —
-        // same mapping `sidecar_default_agent` in channel_sender.rs uses
-        // for the inverted lookup.
-        cfg.sidecar_channels.iter().find_map(|sc| {
-            if sc.agent.as_deref() != Some(agent_name.as_str()) {
-                return None;
-            }
-            let channel = sc.channel_type.clone().unwrap_or_else(|| sc.name.clone());
-            Some(SenderContext {
-                channel,
-                account_id: None,
-                use_canonical_session: true,
-                ..Default::default()
-            })
-        })
+        sidecar_home_channel(&cfg.sidecar_channels, &agent_name)
     }
 
     /// Resolve the **default outbound conversation id** for an agent's home
@@ -447,6 +430,36 @@ impl LibreFangKernel {
 /// `Vec` — same ordering contract `sidecar_default_agent` in
 /// `handles/channel_sender.rs` relies on. Factored out as a free function so
 /// it is unit-testable without standing up a kernel.
+/// Build the sender context for an agent's home sidecar channel.
+///
+/// Every channel is a sidecar; this scans `sidecar_channels` for the first entry
+/// whose `agent` names this agent. The effective channel key is `channel_type`
+/// when set, else the entry `name` — the same mapping `sidecar_default_agent` in
+/// `channel_sender.rs` uses for the inverted lookup.
+///
+/// `account_id` carries the sidecar's **instance name**. It is not decoration:
+/// on a daemon with several adapters of one type (ours has eight Telegram bots),
+/// `send_channel_message("telegram", …)` with no account is rejected as ambiguous
+/// — "8 registered adapters share that channel type" — and the callers that drop
+/// that error (the async-delegation forwards in `task_registry.rs`) lose the
+/// operator-facing message entirely. `resolve_channel_adapter` matches the
+/// instance name against `adapter.name()`, so passing it pins the send to this
+/// agent's own bot.
+fn sidecar_home_channel(
+    sidecar_channels: &[librefang_types::config::SidecarChannelConfig],
+    agent_name: &str,
+) -> Option<SenderContext> {
+    sidecar_channels
+        .iter()
+        .find(|sc| sc.agent.as_deref() == Some(agent_name))
+        .map(|sc| SenderContext {
+            channel: sc.channel_type.clone().unwrap_or_else(|| sc.name.clone()),
+            account_id: Some(sc.name.clone()),
+            use_canonical_session: true,
+            ..Default::default()
+        })
+}
+
 fn sidecar_default_conversation(
     sidecar_channels: &[librefang_types::config::SidecarChannelConfig],
     agent_name: &str,
@@ -3796,7 +3809,7 @@ pub(crate) fn experiment_turn_meets_criteria(
 
 #[cfg(test)]
 mod tests {
-    use super::sidecar_default_conversation;
+    use super::{sidecar_default_conversation, sidecar_home_channel};
     use librefang_types::config::SidecarChannelConfig;
 
     fn sc(json: serde_json::Value) -> SidecarChannelConfig {
@@ -3861,6 +3874,38 @@ mod tests {
             "default_conversation": "999",
         }))];
         assert_eq!(sidecar_default_conversation(&chans, "coder"), None);
+    }
+
+    /// Regression: the home-channel context must name the sidecar instance, so
+    /// follow-up sends are addressable on a multi-adapter daemon. With an empty
+    /// `account_id` the async-delegation forwards log
+    /// "Channel 'telegram' is ambiguous: 8 registered adapters share that channel
+    /// type" and the operator never sees the result.
+    #[test]
+    fn home_channel_names_the_instance_so_forwards_are_addressable() {
+        let chans = vec![
+            sc(serde_json::json!({
+                "name": "NA_bot",
+                "command": "python3",
+                "channel_type": "telegram",
+                "default_agent": "nick-assistant",
+            })),
+            sc(serde_json::json!({
+                "name": "roox_sales_bot",
+                "command": "python3",
+                "channel_type": "telegram",
+                "default_agent": "sales-crm-roox",
+            })),
+        ];
+        let ctx = sidecar_home_channel(&chans, "nick-assistant").expect("home channel");
+        assert_eq!(ctx.channel, "telegram");
+        assert_eq!(
+            ctx.account_id.as_deref(),
+            Some("NA_bot"),
+            "the instance name is what disambiguates an outbound send"
+        );
+        // An agent with no channel keeps returning None instead of guessing.
+        assert!(sidecar_home_channel(&chans, "researcher").is_none());
     }
 
     /// First-match wins, deterministic over the ordered `Vec`: when two
