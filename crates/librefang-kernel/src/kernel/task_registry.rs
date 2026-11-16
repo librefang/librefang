@@ -380,13 +380,18 @@ impl LibreFangKernel {
                     let body = format_task_completion_text(&event);
                     if let Some(ctx) = kernel_arc.resolve_agent_home_channel(entry.agent_id) {
                         use librefang_runtime::kernel_handle::ChannelSender;
+                        // Address the agent's own adapter, not the bare channel
+                        // type: on a daemon with several adapters of one type the
+                        // by-type lookup is refused as ambiguous and this
+                        // best-effort forward is dropped with only a warning.
+                        let instance = kernel_arc.resolve_agent_home_instance(entry.agent_id);
                         let _ = kernel_arc
                             .send_channel_message(
                                 &ctx.channel,
                                 &chat_id,
                                 &body,
                                 None,
-                                ctx.account_id.as_deref(),
+                                instance.as_deref(),
                             )
                             .await
                             .map_err(|e| {
@@ -521,6 +526,10 @@ impl LibreFangKernel {
             // Resolve the agent's home channel so the wake-idle turn
             // has sender context and can forward the response.
             let mut sender_ctx = kernel_arc.resolve_agent_home_channel(agent_id);
+            // Resolved here, on the caller's task: the forward below runs inside
+            // the spawned turn, and it needs the adapter identity to address the
+            // agent's own bot rather than the bare channel type.
+            let home_instance = kernel_arc.resolve_agent_home_instance(agent_id);
             if let (Some(ref mut ctx), Some(cid)) = (sender_ctx.as_mut(), chat_id.as_ref()) {
                 ctx.chat_id = Some(cid.clone());
             }
@@ -559,7 +568,7 @@ impl LibreFangKernel {
                                         peer_id,
                                         &result.response,
                                         None,
-                                        ctx.account_id.as_deref(),
+                                        home_instance.as_deref(),
                                     )
                                     .await
                                     .map_err(|e| {
