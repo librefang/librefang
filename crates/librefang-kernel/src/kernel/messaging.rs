@@ -3885,23 +3885,23 @@ mod tests {
     fn home_channel_names_the_instance_so_forwards_are_addressable() {
         let chans = vec![
             sc(serde_json::json!({
-                "name": "NA_bot",
+                "name": "tg-primary",
                 "command": "python3",
                 "channel_type": "telegram",
-                "default_agent": "nick-assistant",
+                "default_agent": "assistant",
             })),
             sc(serde_json::json!({
-                "name": "roox_sales_bot",
+                "name": "tg-sales",
                 "command": "python3",
                 "channel_type": "telegram",
-                "default_agent": "sales-crm-roox",
+                "default_agent": "sales-agent",
             })),
         ];
-        let ctx = sidecar_home_channel(&chans, "nick-assistant").expect("home channel");
+        let ctx = sidecar_home_channel(&chans, "assistant").expect("home channel");
         assert_eq!(ctx.channel, "telegram");
         assert_eq!(
             ctx.account_id.as_deref(),
-            Some("NA_bot"),
+            Some("tg-primary"),
             "the instance name is what disambiguates an outbound send"
         );
         // An agent with no channel keeps returning None instead of guessing.
