@@ -54,7 +54,7 @@ url = { workspace = true }
 regex-lite = { workspace = true }
 regex = { workspace = true }
 cron = "0.17"
-parking_lot = "0.12"
+parking_lot = "0.13"
 # Tera — workflow `Transform` operator (#4980 step 3). Sandboxed
 # Jinja2-style templating; no I/O, no shell escape. Used to render
 # previous-step output into a formatted string without an LLM call.
