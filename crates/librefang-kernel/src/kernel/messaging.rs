@@ -521,7 +521,6 @@ fn sidecar_home_channel(
 /// `Vec` — same ordering contract `sidecar_default_agent` in
 /// `handles/channel_sender.rs` relies on. Factored out as a free function so
 /// it is unit-testable without standing up a kernel.
-
 fn sidecar_default_conversation(
     sidecar_channels: &[librefang_types::config::SidecarChannelConfig],
     agent_name: &str,
