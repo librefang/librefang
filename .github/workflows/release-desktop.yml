@@ -107,7 +107,7 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v6
         with:
           node-version: 24
-      - uses: Swatinem/rust-cache@c8037a86dde8214a8310e9f54a8fc61ab362aa31 # v2
+      - uses: Swatinem/rust-cache@eedcf2fb1c22f010a0eb66b92f378c110977f266 # v2
         with:
           key: desktop-${{ matrix.platform.rust_target }}-${{ inputs.tag }}
       - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
