@@ -2174,10 +2174,12 @@ async fn run_agent_loop_inner(
                 // false on this arm — promoting a call switches
                 // `response.stop_reason` to `ToolUse`, which this match arm
                 // never sees — so the guard always runs.
-                let text = match replace_unrecoverable_tool_call_reply(&text) {
-                    std::borrow::Cow::Borrowed(_) => text,
-                    std::borrow::Cow::Owned(replacement) => replacement,
-                };
+                let text =
+                    match replace_unrecoverable_tool_call_reply(&text, !available_tools.is_empty())
+                    {
+                        std::borrow::Cow::Borrowed(_) => text,
+                        std::borrow::Cow::Owned(replacement) => replacement,
+                    };
 
                 let text = finalize_end_turn_text(
                     text,
@@ -2683,7 +2685,10 @@ async fn run_agent_loop_inner(
                     // the raw `<function=...>` syntax reaches the channel
                     // verbatim on every pure-text overflow that happened to
                     // start with one.
-                    let text = match replace_unrecoverable_tool_call_reply(&text) {
+                    let text = match replace_unrecoverable_tool_call_reply(
+                        &text,
+                        !available_tools.is_empty(),
+                    ) {
                         std::borrow::Cow::Borrowed(_) => text,
                         std::borrow::Cow::Owned(replacement) => replacement,
                     };

@@ -1,0 +1,2 @@
+The leak guard's replacement sentence said "please send the request again, or start a fresh session with /reset" even on turns that ran with no tool channel at all — the ephemeral `/btw` path and `"ephemeral": true` API callers. Re-sending lands on the same tool-less path and there is no session to reset. The guard now takes whether the turn had a usable tool list and answers such a turn with "this mode has no tools, so no action was performed. Ask again in the main chat." (#8781)
+(@nevgenov)

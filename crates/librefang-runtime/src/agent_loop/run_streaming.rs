@@ -1272,10 +1272,12 @@ async fn run_agent_loop_streaming_inner(
                 // before delivery — rather than right after directive
                 // parsing. `tools_recovered_from_text` is always false on
                 // this arm for the same reason as the non-streaming loop.
-                let text = match replace_unrecoverable_tool_call_reply(&text) {
-                    std::borrow::Cow::Borrowed(_) => text,
-                    std::borrow::Cow::Owned(replacement) => replacement,
-                };
+                let text =
+                    match replace_unrecoverable_tool_call_reply(&text, !available_tools.is_empty())
+                    {
+                        std::borrow::Cow::Borrowed(_) => text,
+                        std::borrow::Cow::Owned(replacement) => replacement,
+                    };
 
                 // #8236: the incremental guard in `stream_with_retry`
                 // withholds a delta while it might still resolve to pure
@@ -1799,7 +1801,10 @@ async fn run_agent_loop_streaming_inner(
                     // #8236: same guard as the non-streaming mirror in
                     // `mod.rs` — the token cap can cut a tool-call markup
                     // span off mid-call, leaving it permanently unterminated.
-                    let text = match replace_unrecoverable_tool_call_reply(&text) {
+                    let text = match replace_unrecoverable_tool_call_reply(
+                        &text,
+                        !available_tools.is_empty(),
+                    ) {
                         std::borrow::Cow::Borrowed(_) => text,
                         std::borrow::Cow::Owned(replacement) => replacement,
                     };

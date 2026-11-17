@@ -3279,7 +3279,7 @@ fn test_pure_tool_call_markup_is_replaced_with_honest_reply() {
     // A model that answered with nothing but an unparseable tool call would
     // otherwise deliver the raw syntax to the channel (#8235).
     let text = "<function=shell_exec>\n<parameter=command>ls</parameter>\n<parameter=timeout_seconds>5</parameter>\n</function>";
-    let out = replace_unrecoverable_tool_call_reply(text);
+    let out = replace_unrecoverable_tool_call_reply(text, true);
     assert!(
         !out.contains("<function=") && !out.contains("<parameter="),
         "raw tool-call syntax must never reach the user, got: {out:?}"
@@ -3294,14 +3294,14 @@ fn test_pure_tool_call_markup_is_replaced_with_honest_reply() {
 fn test_markup_mixed_with_prose_is_delivered_unchanged() {
     let text =
         "I could not run that. <function=shell_exec><parameter=command>ls</parameter></function>";
-    let out = replace_unrecoverable_tool_call_reply(text);
+    let out = replace_unrecoverable_tool_call_reply(text, true);
     assert_eq!(out, text, "a reply that starts with prose passes through");
 }
 
 #[test]
 fn test_normal_text_untouched_by_reply_guard() {
     let text = "Here are the prices I found: piña 1,20 €.";
-    assert_eq!(replace_unrecoverable_tool_call_reply(text), text);
+    assert_eq!(replace_unrecoverable_tool_call_reply(text, true), text);
 }
 
 #[test]
@@ -3309,7 +3309,7 @@ fn test_deepseek_dsml_markup_is_replaced_with_honest_reply() {
     // DeepSeek writes its native call syntax when the tool channel is gone
     // (#8652). Doubled fullwidth bars, as observed in production.
     let text = "<｜｜DSML｜｜ calls>\n<｜｜DSML｜｜ invoke name=\"memory_recall\">\n<｜｜DSML｜｜ parameter name=\"key\" string=\"true\">deal-42</｜｜DSML｜｜ parameter>\n</｜｜DSML｜｜ invoke>\n</｜｜DSML｜｜ calls>";
-    let out = replace_unrecoverable_tool_call_reply(text);
+    let out = replace_unrecoverable_tool_call_reply(text, true);
     assert!(
         !out.contains("DSML") && !out.contains('｜'),
         "the markup must never reach the user, got: {out:?}"
@@ -3321,13 +3321,48 @@ fn test_deepseek_dsml_markup_is_replaced_with_honest_reply() {
 }
 
 #[test]
+fn test_dsml_markup_on_a_tool_less_turn_does_not_advise_a_retry() {
+    // #8781: on a turn that ran with no tool channel at all — the ephemeral
+    // `/btw` path and every caller that posts `"ephemeral": true` — the
+    // generic sentence tells the user to send the request again, which lands
+    // on the same tool-less path, and to `/reset` a session that does not
+    // exist. The tool-less variant must say what is actually true.
+    let text = "<｜｜DSML｜｜ calls>\n<｜｜DSML｜｜ invoke name=\"tool_load\">\n<｜｜DSML｜｜ parameter name=\"name\" string=\"true\">task_post</｜｜DSML｜｜ parameter>\n</｜｜DSML｜｜ invoke>\n</｜｜DSML｜｜ calls>";
+    let out = replace_unrecoverable_tool_call_reply(text, false);
+    assert!(
+        !out.contains("DSML") && !out.contains('｜'),
+        "the markup must never reach the user, got: {out:?}"
+    );
+    assert!(
+        !out.contains("send the request again") && !out.contains("/reset"),
+        "a tool-less turn must not advise a retry that cannot work, got: {out:?}"
+    );
+    assert!(
+        out.contains("has no tools"),
+        "the replacement must name the real cause, got: {out:?}"
+    );
+}
+
+#[test]
+fn test_dsml_markup_with_tools_available_keeps_the_parse_sentence() {
+    // Control: when the turn did have a tool channel, a retry is
+    // legitimate advice and the original sentence stays.
+    let text = "<｜｜DSML｜｜ calls>\n<｜｜DSML｜｜ invoke name=\"tool_load\">\n</｜｜DSML｜｜ invoke>\n</｜｜DSML｜｜ calls>";
+    let out = replace_unrecoverable_tool_call_reply(text, true);
+    assert!(
+        out.contains("could not be parsed"),
+        "with tools available the parse sentence stays, got: {out:?}"
+    );
+}
+
+#[test]
 fn test_deepseek_dsml_single_bar_and_ascii_variants_are_guarded() {
     for text in [
         "<｜DSML｜ invoke name=\"x\"></｜DSML｜ invoke>",
         "<||DSML|| invoke name=\"x\"></||DSML|| invoke>",
         "<|DSML| invoke name=\"x\"></|DSML| invoke>",
     ] {
-        let out = replace_unrecoverable_tool_call_reply(text);
+        let out = replace_unrecoverable_tool_call_reply(text, true);
         assert!(
             out.contains("could not be parsed") && !out.contains("DSML"),
             "variant must be replaced, got: {out:?}"
@@ -3377,7 +3412,7 @@ fn test_unrecoverable_reply_guard_actually_substitutes_at_call_site() {
     // because that test only inspects the *returned value*, never the
     // discriminated variant.
     let text = "<function=shell_exec>\n<parameter=command>ls</parameter>\n</function>";
-    let delivered = match replace_unrecoverable_tool_call_reply(text) {
+    let delivered = match replace_unrecoverable_tool_call_reply(text, true) {
         std::borrow::Cow::Borrowed(_) => text.to_string(),
         std::borrow::Cow::Owned(replacement) => replacement,
     };
@@ -3395,7 +3430,7 @@ fn test_strip_tool_call_spans_preserves_trailing_prose_after_last_span() {
     // call and closes with a real answer got judged "100% unparseable" and
     // had the user's actual answer replaced by the apology sentence.
     let text = "<function=shell_exec><parameter=command>ls</parameter></function>\nLos precios son: piña 1,20 €.";
-    let out = replace_unrecoverable_tool_call_reply(text);
+    let out = replace_unrecoverable_tool_call_reply(text, true);
     assert_eq!(
         out, text,
         "trailing prose after the last markup span must survive, not be swallowed"
@@ -3417,7 +3452,7 @@ fn test_tool_call_tag_uses_correct_closer() {
         "middle prose",
         "<tool_call>{\"name\":\"b\",\"arguments\":{}}</tool_call>",
     );
-    let out = replace_unrecoverable_tool_call_reply(text);
+    let out = replace_unrecoverable_tool_call_reply(text, true);
     assert_eq!(
         out, text,
         "the middle prose between two properly closed <tool_call> spans must survive"
