@@ -469,6 +469,22 @@ fn sidecar_default_conversation(
         })
 }
 
+/// Suffix of the note prepended to every ephemeral turn (#8781).
+const EPHEMERAL_NO_TOOLS_NOTE: &str = "this turn has no tools — the tool channel is off. \
+     Answer in text only. If the request needs a tool, say so and point the user to the main chat.";
+
+/// Build the message an ephemeral turn actually receives (#8781).
+///
+/// The tool list on this path is empty on purpose (see `let tools` below): a
+/// side question must not be able to write to memory or disk. The model,
+/// however, still reads the agent's system prompt and tool catalogue as usual,
+/// so without being told it answers a work request by *writing* a tool call as
+/// text — which the reply guard can only turn into an apology. Naming the
+/// restriction in the turn is what lets it answer "this needs the main chat".
+fn ephemeral_turn_message(message: &str) -> String {
+    format!("[System: {EPHEMERAL_NO_TOOLS_NOTE}]\n\n{message}")
+}
+
 impl LibreFangKernel {
     /// Send an ephemeral "side question" to an agent (`/btw` command).
     ///
@@ -736,9 +752,10 @@ impl LibreFangKernel {
         );
 
         let start_time = std::time::Instant::now();
+        let ephemeral_message = ephemeral_turn_message(message);
         let result = run_agent_loop(
             &manifest,
-            message,
+            &ephemeral_message,
             &mut ephemeral_session,
             &self.memory.substrate,
             driver,
@@ -3796,6 +3813,25 @@ pub(crate) fn experiment_turn_meets_criteria(
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    #[test]
+    fn ephemeral_turn_message_names_the_missing_tool_channel() {
+        // #8781: the turn runs with an empty tool list, and the model has no
+        // other way to learn that. Without the note it writes a tool call as
+        // text; the guard can only apologise for it.
+        let user = "hand this to a researcher agent: check tomorrow's train schedule";
+        let built = ephemeral_turn_message(user);
+        assert!(
+            built.starts_with("[System:") && built.contains("no tools"),
+            "the turn must open with the restriction, got: {built:?}"
+        );
+        assert!(
+            built.ends_with(user),
+            "the user's request must survive verbatim at the end, got: {built:?}"
+        );
+    }
+
     use super::sidecar_default_conversation;
     use librefang_types::config::SidecarChannelConfig;
 
