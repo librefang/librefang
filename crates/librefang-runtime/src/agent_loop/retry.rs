@@ -506,9 +506,13 @@ pub(super) async fn stream_with_retry(
                                     && text_recovery::TOOL_CALL_OPENERS
                                         .iter()
                                         .any(|o| trimmed.starts_with(o))
+                                    // Only the returned variant matters here,
+                                    // not which sentence it carries — both
+                                    // branches answer `Owned`. The withholder
+                                    // has no view of the turn's tool list.
                                     && matches!(
                                         text_recovery::replace_unrecoverable_tool_call_reply(
-                                            trimmed
+                                            trimmed, true
                                         ),
                                         std::borrow::Cow::Borrowed(_)
                                     );

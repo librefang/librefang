@@ -687,6 +687,12 @@ pub(super) fn recover_text_tool_calls(
 /// unreadable to the user.
 const HONEST_UNRECOVERABLE_REPLY: &str = "I tried to call a tool, but the call could not be parsed, so no action was performed. Please send the request again, or start a fresh session with /reset.";
 
+/// Same guard, for a turn that ran with no tool channel at all (#8781):
+/// "send the request again" would put the user back on the identical
+/// tool-less path, and `/reset` means nothing on an ephemeral turn, so the
+/// honest sentence for that case must not offer either.
+const NO_TOOLS_UNRECOVERABLE_REPLY: &str = "I tried to call a tool, but this mode has no tools, so no action was performed. Ask again in the main chat.";
+
 /// Guard the delivered reply against raw tool-call syntax (#8235).
 ///
 /// When a model answers with nothing but a tool call written as text that
@@ -695,19 +701,27 @@ const HONEST_UNRECOVERABLE_REPLY: &str = "I tried to call a tool, but the call c
 /// tool-call opener and leaves nothing once the markup spans are stripped is
 /// replaced by one honest sentence. Anything that starts with prose passes
 /// through untouched, even when it contains markup further in.
-pub(super) fn replace_unrecoverable_tool_call_reply(text: &str) -> std::borrow::Cow<'_, str> {
+pub(super) fn replace_unrecoverable_tool_call_reply(
+    text: &str,
+    tools_available: bool,
+) -> std::borrow::Cow<'_, str> {
+    let honest = if tools_available {
+        HONEST_UNRECOVERABLE_REPLY
+    } else {
+        NO_TOOLS_UNRECOVERABLE_REPLY
+    };
     let trimmed = text.trim_start();
     if DSML_OPENERS.iter().any(|o| trimmed.starts_with(o)) {
         // A DSML block carries its arguments inside tags, so stripping it
         // leaves fragments that would read as prose. No legitimate reply
         // starts with this marker: replace it whole (#8652).
-        return std::borrow::Cow::Owned(HONEST_UNRECOVERABLE_REPLY.to_string());
+        return std::borrow::Cow::Owned(honest.to_string());
     }
     if !TOOL_CALL_OPENERS.iter().any(|o| trimmed.starts_with(o)) {
         return std::borrow::Cow::Borrowed(text);
     }
     if strip_tool_call_spans(trimmed).trim().is_empty() {
-        std::borrow::Cow::Owned(HONEST_UNRECOVERABLE_REPLY.to_string())
+        std::borrow::Cow::Owned(honest.to_string())
     } else {
         std::borrow::Cow::Borrowed(text)
     }
