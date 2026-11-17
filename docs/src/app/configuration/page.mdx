@@ -212,7 +212,7 @@ shared_secret = ""                    # Required when network_enabled = true
 
 # --- Web Tools ---
 [web]
-search_provider = "auto"              # auto | brave | jina | tavily | perplexity | duckduckgo
+search_provider = "auto"              # auto | brave | jina | keenable | tavily | perplexity | duckduckgo
 cache_ttl_minutes = 15
 timeout_secs = 15
 
@@ -677,9 +677,10 @@ timeout_secs = 15
 
 | Value | Description |
 |-------|-------------|
-| `auto` | Cascading fallback: tries Tavily, then Brave, then Jina, then Perplexity, then DuckDuckGo, based on which API keys are available. |
+| `auto` | Cascading fallback: tries Tavily, then Brave, then Jina, then Keenable, then Perplexity, then DuckDuckGo, based on which API keys are available. |
 | `brave` | Brave Search API. Requires `BRAVE_API_KEY`. |
 | `jina` | Jina AI search and grounding. Requires `JINA_API_KEY`. |
+| `keenable` | Keenable web search. Works without a key (public endpoint); uses `KEENABLE_API_KEY` when set. |
 | `tavily` | Tavily AI-native search. Requires `TAVILY_API_KEY`. |
 | `perplexity` | Perplexity AI search. Requires `PERPLEXITY_API_KEY`. |
 | `duckduckgo` | DuckDuckGo HTML scraping. No API key needed. |

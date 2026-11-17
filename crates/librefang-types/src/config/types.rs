@@ -763,12 +763,15 @@ pub enum SearchProvider {
     Perplexity,
     /// Jina AI search.
     Jina,
+    /// Keenable web search (works without an API key; a key is optional).
+    Keenable,
     /// DuckDuckGo HTML (no API key needed).
     DuckDuckGo,
     /// SearXNG self-hosted search (no API key needed).
     Searxng,
     /// Auto-select based on available API keys
-    /// (Tavily → Brave → Jina → Perplexity → Searxng → DuckDuckGo).
+    /// (Tavily → Brave → Jina → Keenable → Perplexity → Searxng → DuckDuckGo;
+    /// Keenable only when its API key is set).
     #[default]
     Auto,
 }
@@ -793,6 +796,8 @@ pub struct WebConfig {
     pub perplexity: PerplexitySearchConfig,
     /// Jina Search configuration.
     pub jina: JinaSearchConfig,
+    /// Keenable Search configuration.
+    pub keenable: KeenableSearchConfig,
     /// SearXNG self-hosted search configuration.
     pub searxng: SearxngSearchConfig,
     /// Web fetch configuration.
@@ -813,6 +818,7 @@ impl Default for WebConfig {
             tavily: TavilySearchConfig::default(),
             perplexity: PerplexitySearchConfig::default(),
             jina: JinaSearchConfig::default(),
+            keenable: KeenableSearchConfig::default(),
             searxng: SearxngSearchConfig::default(),
             fetch: WebFetchConfig::default(),
         }
@@ -887,6 +893,25 @@ impl Default for PerplexitySearchConfig {
         Self {
             api_key_env: "PERPLEXITY_API_KEY".to_string(),
             model: "sonar".to_string(),
+        }
+    }
+}
+
+/// Keenable Search API configuration.
+///
+/// Keenable works without an API key through its public endpoint; when the
+/// env var named by `api_key_env` is set, the keyed endpoint is used instead.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(default)]
+pub struct KeenableSearchConfig {
+    /// Env var name holding the (optional) API key.
+    pub api_key_env: String,
+}
+
+impl Default for KeenableSearchConfig {
+    fn default() -> Self {
+        Self {
+            api_key_env: "KEENABLE_API_KEY".to_string(),
         }
     }
 }

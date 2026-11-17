@@ -325,7 +325,7 @@ use instead of web_fetch + file_write (which round-trips the entire body through
         },
             ToolDefinition {
                 name: tool_name::WEB_SEARCH.to_string(),
-                description: "Search the web using multiple providers (Tavily, Brave, Perplexity, DuckDuckGo) with automatic fallback. Returns structured results with titles, URLs, and snippets.".to_string(),
+                description: "Search the web using multiple providers (Tavily, Brave, Keenable, Perplexity, DuckDuckGo) with automatic fallback. Returns structured results with titles, URLs, and snippets.".to_string(),
                 input_schema: serde_json::json!({
                     "type": "object",
                     "properties": {

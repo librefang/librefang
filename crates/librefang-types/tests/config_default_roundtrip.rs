@@ -34,13 +34,13 @@ use librefang_types::config::{
     AuditConfig, AutoDreamConfig, AutoReplyConfig, BraveSearchConfig, BroadcastConfig,
     BrowserConfig, BudgetConfig, CanvasConfig, ChannelsConfig, ChunkConfig, CompactionTomlConfig,
     ContextEngineTomlConfig, DockerSandboxConfig, ExtensionsConfig, ExternalAuthConfig,
-    HealthCheckConfig, HeartbeatTomlConfig, InboxConfig, JinaSearchConfig, KernelConfig,
-    MemoryConfig, MemoryDecayConfig, NetworkConfig, PairingConfig, ParallelToolsConfig,
-    PerplexitySearchConfig, PrivacyConfig, PromptIntelligenceConfig, QueueConcurrencyConfig,
-    QueueConfig, RateLimitConfig, RegistryConfig, ReloadConfig, SanitizeConfig, SessionConfig,
-    SkillsConfig, TaskBoardConfig, TavilySearchConfig, TelemetryConfig, TerminalConfig,
-    ThinkingConfig, TriggersConfig, TtsConfig, VaultConfig, WebConfig, WebFetchConfig,
-    WebhookTriggerConfig,
+    HealthCheckConfig, HeartbeatTomlConfig, InboxConfig, JinaSearchConfig, KeenableSearchConfig,
+    KernelConfig, MemoryConfig, MemoryDecayConfig, NetworkConfig, PairingConfig,
+    ParallelToolsConfig, PerplexitySearchConfig, PrivacyConfig, PromptIntelligenceConfig,
+    QueueConcurrencyConfig, QueueConfig, RateLimitConfig, RegistryConfig, ReloadConfig,
+    SanitizeConfig, SessionConfig, SkillsConfig, TaskBoardConfig, TavilySearchConfig,
+    TelemetryConfig, TerminalConfig, ThinkingConfig, TriggersConfig, TtsConfig, VaultConfig,
+    WebConfig, WebFetchConfig, WebhookTriggerConfig,
 };
 use serde::Serialize;
 
@@ -206,6 +206,7 @@ fn perplexity_search_config_default_roundtrips_through_toml() {
 #[test]
 fn jina_search_config_default_roundtrips_through_toml() {
     assert_default_roundtrip::<JinaSearchConfig>("JinaSearchConfig");
+    assert_default_roundtrip::<KeenableSearchConfig>("KeenableSearchConfig");
 }
 
 #[test]
