@@ -22,9 +22,11 @@
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
 use axum::Router;
+use librefang_api::middleware::AuthenticatedApiUser;
 use librefang_api::routes::{self, AppState};
+use librefang_kernel::auth::UserRole;
 use librefang_testing::{MockKernelBuilder, TestAppState};
-use librefang_types::agent::AgentId;
+use librefang_types::agent::{AgentId, AgentManifest, UserId};
 use librefang_types::config::McpServerConfigEntry;
 use librefang_types::tool::ToolDefinition;
 use std::sync::Arc;
@@ -400,15 +402,146 @@ async fn search_sessions_returns_scrubbed_500_on_database_failure() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn search_sessions_malformed_agent_id_is_silently_ignored() {
-    // The handler parses `agent_id` with `Uuid::parse_str(...).ok()`, so a
-    // garbage value falls through to `None` rather than 400. Pin the
-    // behaviour so a future refactor that suddenly starts rejecting it
-    // doesn't break dashboard callers that rely on the lenient shape.
+async fn search_sessions_malformed_agent_id_is_rejected() {
+    // A garbage `agent_id` used to fall through to `None`, silently widening a search the caller meant to narrow to one agent into a search over every session.
     let h = boot().await;
     let (status, body) = get_json(&h, "/api/sessions/search?q=anything&agent_id=not-a-uuid").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body:?}");
+    assert!(body.get("error").is_some(), "{body:?}");
+
+    // An empty value is "no filter", not a malformed one.
+    let (status, body) = get_json(&h, "/api/sessions/search?q=anything&agent_id=").await;
     assert_eq!(status, StatusCode::OK, "{body:?}");
     assert!(body["items"].is_array(), "{body:?}");
+}
+
+// ---------------------------------------------------------------------------
+// Owner-scoping on the flat /api/sessions* routes (#6753)
+// ---------------------------------------------------------------------------
+
+fn api_user(name: &str, role: UserRole) -> AuthenticatedApiUser {
+    AuthenticatedApiUser {
+        name: name.to_string(),
+        role,
+        user_id: UserId::from_name(name),
+    }
+}
+
+async fn get_json_as(
+    h: &Harness,
+    path: &str,
+    user: AuthenticatedApiUser,
+) -> (StatusCode, serde_json::Value) {
+    let mut req = Request::builder()
+        .method(Method::GET)
+        .uri(path)
+        .body(Body::empty())
+        .unwrap();
+    req.extensions_mut().insert(user);
+    let resp = h.app.clone().oneshot(req).await.unwrap();
+    let status = resp.status();
+    let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20)
+        .await
+        .unwrap();
+    let value = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+    (status, value)
+}
+
+/// Spawn an agent authored by `author` and seed one labelled session for it whose transcript contains `marker`.
+fn seed_authored_session(h: &Harness, name: &str, author: &str, marker: &str) -> (AgentId, String) {
+    let manifest = AgentManifest {
+        name: name.to_string(),
+        author: author.to_string(),
+        ..AgentManifest::default()
+    };
+    let agent_id = h.state.kernel.spawn_agent_typed(manifest).expect("spawn");
+    let substrate = h.state.kernel.memory_substrate();
+    let mut session = substrate
+        .create_session_with_label(agent_id, Some(&format!("{name}-label")))
+        .expect("seed session");
+    session
+        .messages
+        .push(librefang_types::message::Message::user(format!(
+            "secret {marker} text"
+        )));
+    substrate.save_session(&session).expect("save session");
+    (agent_id, session.id.0.to_string())
+}
+
+fn ids_in(body: &serde_json::Value) -> Vec<String> {
+    body["items"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|r| r["session_id"].as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn sessions_routes_hide_other_authors_sessions_from_non_admin() {
+    let h = boot().await;
+    let (alice_agent, alice_sid) = seed_authored_session(&h, "scope-alice", "alice", "alicemarker");
+    let (bob_agent, bob_sid) = seed_authored_session(&h, "scope-bob", "bob", "bobmarker");
+    let bob = || api_user("bob", UserRole::User);
+
+    // Detail: another author's transcript is a 404, own session is served.
+    let (status, body) = get_json_as(&h, &format!("/api/sessions/{alice_sid}"), bob()).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body:?}");
+    assert!(!body.to_string().contains("alicemarker"), "{body:?}");
+    let (status, body) = get_json_as(&h, &format!("/api/sessions/{bob_sid}"), bob()).await;
+    assert_eq!(status, StatusCode::OK, "{body:?}");
+
+    // List: only rows of bob's own agent (spawning also creates its default session), and `total` counts only what bob may see.
+    let (status, body) = get_json_as(&h, "/api/sessions", bob()).await;
+    assert_eq!(status, StatusCode::OK, "{body:?}");
+    let rows = body["items"].as_array().expect("items");
+    assert!(ids_in(&body).contains(&bob_sid), "{body:?}");
+    assert!(
+        rows.iter()
+            .all(|r| r["agent_id"].as_str() == Some(bob_agent.to_string().as_str())),
+        "{body:?}"
+    );
+    assert_eq!(body["total"].as_u64(), Some(rows.len() as u64), "{body:?}");
+
+    // Search: unfiltered search does not surface alice's content, an explicit filter on her agent is a 404.
+    let (status, body) = get_json_as(&h, "/api/sessions/search?q=alicemarker", bob()).await;
+    assert_eq!(status, StatusCode::OK, "{body:?}");
+    assert!(ids_in(&body).is_empty(), "{body:?}");
+    let (status, body) = get_json_as(&h, "/api/sessions/search?q=bobmarker", bob()).await;
+    assert_eq!(status, StatusCode::OK, "{body:?}");
+    assert_eq!(ids_in(&body), vec![bob_sid.clone()], "{body:?}");
+    let (status, _) = get_json_as(
+        &h,
+        &format!("/api/sessions/search?q=alicemarker&agent_id={alice_agent}"),
+        bob(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    // Label lookup on another author's agent is a 404.
+    let (status, _) = get_json_as(
+        &h,
+        &format!("/api/agents/{alice_agent}/sessions/by-label/scope-alice-label"),
+        bob(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    // Admin still sees everything.
+    let admin = || api_user("ops", UserRole::Admin);
+    let (status, _) = get_json_as(&h, &format!("/api/sessions/{alice_sid}"), admin()).await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, body) = get_json_as(&h, "/api/sessions", admin()).await;
+    let ids = ids_in(&body);
+    assert!(
+        ids.contains(&alice_sid) && ids.contains(&bob_sid),
+        "{body:?}"
+    );
+    let (status, body) = get_json_as(&h, "/api/sessions/search?q=alicemarker", admin()).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(ids_in(&body), vec![alice_sid], "{body:?}");
 }
 
 // ---------------------------------------------------------------------------
@@ -507,6 +640,188 @@ async fn patch_session_model_clears_override_with_null() {
         stored.model_override.is_none(),
         "stored override must be None after clear"
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn patch_session_reasoning_sets_open_token_and_reads_back() {
+    let h = boot().await;
+    let agent_id = AgentId(uuid::Uuid::new_v4());
+    let substrate = h.state.kernel.memory_substrate();
+    let session = substrate.create_session(agent_id).expect("seed session");
+    let sid = session.id.0.to_string();
+
+    // `xhigh` is the point of #8591: an open-vocabulary token that must be
+    // stored verbatim, not folded into the four legacy rungs.
+    let (status, body) = patch_json(
+        &h,
+        &format!("/api/sessions/{sid}/reasoning"),
+        serde_json::json!({"reasoning_effort": "xhigh"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "set override: {body:?}");
+    assert_eq!(body["status"].as_str(), Some("updated"), "{body:?}");
+    assert_eq!(body["reasoning_effort"].as_str(), Some("xhigh"), "{body:?}");
+
+    let stored = substrate
+        .get_session(session.id)
+        .expect("get_session ok")
+        .expect("session must exist");
+    assert_eq!(
+        stored.reasoning_effort.as_deref(),
+        Some("xhigh"),
+        "reasoning_effort not persisted: {stored:?}"
+    );
+
+    // The session JSON exposes the field next to `model_override`.
+    let req = Request::builder()
+        .method(Method::GET)
+        .uri(format!("/api/sessions/{sid}"))
+        .body(Body::empty())
+        .unwrap();
+    let resp = h.app.clone().oneshot(req).await.unwrap();
+    let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20)
+        .await
+        .unwrap();
+    let detail: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(
+        detail["reasoning_effort"].as_str(),
+        Some("xhigh"),
+        "session detail must expose reasoning_effort: {detail:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn patch_session_reasoning_clears_override_with_null() {
+    let h = boot().await;
+    let agent_id = AgentId(uuid::Uuid::new_v4());
+    let substrate = h.state.kernel.memory_substrate();
+    let session = substrate.create_session(agent_id).expect("seed session");
+    let sid = session.id.0.to_string();
+
+    substrate
+        .set_session_reasoning_effort(session.id, Some("minimal"))
+        .expect("pre-seed override");
+
+    let (status, body) = patch_json(
+        &h,
+        &format!("/api/sessions/{sid}/reasoning"),
+        serde_json::json!({"reasoning_effort": null}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "clear override: {body:?}");
+    assert!(
+        body["reasoning_effort"].is_null(),
+        "reasoning_effort must be null after clear: {body:?}"
+    );
+
+    let stored = substrate
+        .get_session(session.id)
+        .expect("get_session ok")
+        .expect("session must exist");
+    assert!(
+        stored.reasoning_effort.is_none(),
+        "stored override must be None after clear"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn patch_session_reasoning_rejects_malformed_or_missing_mode() {
+    let h = boot().await;
+    let agent_id = AgentId(uuid::Uuid::new_v4());
+    let session = h
+        .state
+        .kernel
+        .memory_substrate()
+        .create_session(agent_id)
+        .expect("seed session");
+    let sid = session.id.0.to_string();
+
+    // Empty / whitespace-bearing tokens cannot be provider rungs.
+    for body in [
+        serde_json::json!({"reasoning_effort": ""}),
+        serde_json::json!({"reasoning_effort": "high low"}),
+        serde_json::json!({"reasoning_effort": 42}),
+    ] {
+        let (status, resp) =
+            patch_json(&h, &format!("/api/sessions/{sid}/reasoning"), body.clone()).await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "expected 400 for {body:?}: {resp:?}"
+        );
+    }
+
+    // The key itself is required, same contract as /model.
+    let (status, resp) = patch_json(
+        &h,
+        &format!("/api/sessions/{sid}/reasoning"),
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{resp:?}");
+
+    // Unknown-but-well-formed tokens are accepted: the vocabulary is
+    // per-model catalog data, and `banana` is a provider-side typo.
+    let (status, resp) = patch_json(
+        &h,
+        &format!("/api/sessions/{sid}/reasoning"),
+        serde_json::json!({"reasoning_effort": "banana"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{resp:?}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn patch_session_reasoning_unknown_session_is_404() {
+    let h = boot().await;
+    let sid = uuid::Uuid::new_v4().to_string();
+    let (status, body) = patch_json(
+        &h,
+        &format!("/api/sessions/{sid}/reasoning"),
+        serde_json::json!({"reasoning_effort": "low"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body:?}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn patch_session_reasoning_accepts_deprecated_alias_key() {
+    let h = boot().await;
+    let agent_id = AgentId(uuid::Uuid::new_v4());
+    let substrate = h.state.kernel.memory_substrate();
+    let session = substrate.create_session(agent_id).expect("seed session");
+    let sid = session.id.0.to_string();
+
+    // The pre-#8591 key name must keep working, and the response uses the
+    // canonical one.
+    let (status, body) = patch_json(
+        &h,
+        &format!("/api/sessions/{sid}/reasoning"),
+        serde_json::json!({"reasoning_mode": "medium"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "alias set: {body:?}");
+    assert_eq!(
+        body["reasoning_effort"].as_str(),
+        Some("medium"),
+        "{body:?}"
+    );
+
+    let stored = substrate
+        .get_session(session.id)
+        .expect("get_session ok")
+        .expect("session must exist");
+    assert_eq!(stored.reasoning_effort.as_deref(), Some("medium"));
+
+    // Canonical wins when both keys are present.
+    let (status, body) = patch_json(
+        &h,
+        &format!("/api/sessions/{sid}/reasoning"),
+        serde_json::json!({"reasoning_mode": "low", "reasoning_effort": "xhigh"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body:?}");
+    assert_eq!(body["reasoning_effort"].as_str(), Some("xhigh"), "{body:?}");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -947,6 +1262,7 @@ async fn delete_session_cascades_to_children_and_reports_them() {
         context_window_tokens: 0,
         label: None,
         model_override: None,
+        reasoning_effort: None,
         messages_generation: 0,
         last_repaired_generation: None,
         peer_id: None,

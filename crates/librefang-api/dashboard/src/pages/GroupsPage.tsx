@@ -15,7 +15,7 @@
 // All API access lives in `lib/queries/groups.ts` and
 // `lib/mutations/groups.ts`. This file only renders.
 
-import { useMemo, useState } from "react";
+import { useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import {
@@ -24,7 +24,6 @@ import {
   Plus,
   Search,
   X,
-  Shield,
   Tag,
   Trash2,
   AlertTriangle,
@@ -47,6 +46,7 @@ import { Card } from "../components/ui/Card";
 import { Badge } from "../components/ui/Badge";
 import { Button } from "../components/ui/Button";
 import { Input } from "../components/ui/Input";
+import { ListField } from "../components/ui/ListField";
 import { Select } from "../components/ui/Select";
 import { Modal } from "../components/ui/Modal";
 import { ConfirmDialog } from "../components/ui/ConfirmDialog";
@@ -446,18 +446,9 @@ function GroupEditorForm({
   const { t } = useTranslation();
   const [name, setName] = useState(group?.name ?? "");
   const [description, setDescription] = useState(group?.description ?? "");
-  // Roles are edited as comma-separated text. The daemon trims, drops empties,
-  // sorts and de-duplicates, so the client does not have to police the string.
-  const [rolesText, setRolesText] = useState((group?.roles ?? []).join(", "));
-
-  const roles = useMemo(
-    () =>
-      rolesText
-        .split(",")
-        .map(r => r.trim())
-        .filter(Boolean),
-    [rolesText],
-  );
+  // Roles are edited as chips. The daemon trims, drops empties, sorts and
+  // de-duplicates, so the client does not have to police the array.
+  const [roles, setRoles] = useState<string[]>(group?.roles ?? []);
 
   const nameError = name.trim() ? undefined : t("groups.name_required", "Name is required");
 
@@ -491,13 +482,20 @@ function GroupEditorForm({
         placeholder={t("groups.description_placeholder", "Support rota")}
       />
       <div>
-        <Input
-          label={t("groups.roles_label", "Roles (comma-separated)")}
-          value={rolesText}
-          onChange={e => setRolesText(e.target.value)}
-          leftIcon={<Shield className="h-3.5 w-3.5" />}
-          placeholder="approver, auditor"
-        />
+        <div className="flex flex-col gap-1.5">
+          <label
+            htmlFor="group-roles"
+            className="text-[10px] font-black uppercase tracking-widest text-text-dim"
+          >
+            {t("groups.roles_label", "Roles (comma-separated)")}
+          </label>
+          <ListField
+            id="group-roles"
+            value={roles}
+            onChange={setRoles}
+            placeholder="approver, auditor"
+          />
+        </div>
         <p className="mt-1 text-[11px] text-text-dim">
           {t(
             "groups.roles_help",

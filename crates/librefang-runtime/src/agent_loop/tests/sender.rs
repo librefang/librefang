@@ -226,7 +226,7 @@ fn test_push_filtered_user_message_applies_prefix_after_pii() {
         context_window_tokens: 0,
         label: None,
         model_override: None,
-
+        reasoning_effort: None,
         messages_generation: 0,
         last_repaired_generation: None,
         peer_id: None,
@@ -275,7 +275,7 @@ fn test_push_filtered_user_message_no_prefix_non_group() {
         context_window_tokens: 0,
         label: None,
         model_override: None,
-
+        reasoning_effort: None,
         messages_generation: 0,
         last_repaired_generation: None,
         peer_id: None,
@@ -354,7 +354,7 @@ fn test_finalize_tool_use_results_skips_empty_message() {
         context_window_tokens: 0,
         label: None,
         model_override: None,
-
+        reasoning_effort: None,
         messages_generation: 0,
         last_repaired_generation: None,
         peer_id: None,
@@ -392,7 +392,7 @@ fn test_handle_mid_turn_signal_injects_without_tool_results() {
         context_window_tokens: 0,
         label: None,
         model_override: None,
-
+        reasoning_effort: None,
         messages_generation: 0,
         last_repaired_generation: None,
         peer_id: None,
@@ -457,7 +457,7 @@ fn test_handle_mid_turn_signal_mixed_flush_resets_consecutive_all_failed() {
         context_window_tokens: 0,
         label: None,
         model_override: None,
-
+        reasoning_effort: None,
         messages_generation: 0,
         last_repaired_generation: None,
         peer_id: None,
@@ -605,7 +605,7 @@ fn test_handle_mid_turn_signal_approval_resolved_updates_waiting_result_and_rese
         context_window_tokens: 0,
         label: None,
         model_override: None,
-
+        reasoning_effort: None,
         messages_generation: 0,
         last_repaired_generation: None,
         peer_id: None,
@@ -819,7 +819,7 @@ fn injection_resolution_does_not_pollute_other_sessions() {
         context_window_tokens: 0,
         label: None,
         model_override: None,
-
+        reasoning_effort: None,
         messages_generation: 0,
         last_repaired_generation: None,
         peer_id: None,
@@ -932,7 +932,7 @@ fn injection_resolution_still_applies_when_session_owns_pending_approval() {
         context_window_tokens: 0,
         label: None,
         model_override: None,
-
+        reasoning_effort: None,
         messages_generation: 0,
         last_repaired_generation: None,
         peer_id: None,
@@ -1136,7 +1136,7 @@ fn test_prepare_llm_messages_new_messages_start_keeps_full_turn_after_trim() {
         context_window_tokens: 0,
         label: None,
         model_override: None,
-
+        reasoning_effort: None,
         messages_generation: 0,
         last_repaired_generation: None,
         peer_id: None,
@@ -1214,7 +1214,7 @@ fn test_prepare_llm_messages_context_injections_survive_trim() {
         context_window_tokens: 0,
         label: None,
         model_override: None,
-
+        reasoning_effort: None,
         messages_generation: 0,
         last_repaired_generation: None,
         peer_id: None,
@@ -1317,7 +1317,7 @@ fn test_prepare_llm_messages_current_time_msg_survives_trim_in_long_session() {
         label: None,
         parent_session_id: None,
         model_override: None,
-
+        reasoning_effort: None,
         messages_generation: 0,
         last_repaired_generation: None,
         peer_id: None,
@@ -1390,7 +1390,7 @@ fn test_prepare_llm_messages_current_time_msg_never_splits_tool_use_result_pair(
         label: None,
         parent_session_id: None,
         model_override: None,
-
+        reasoning_effort: None,
         messages_generation: 0,
         last_repaired_generation: None,
         peer_id: None,
@@ -1505,7 +1505,7 @@ fn test_prepare_llm_messages_cold_load_triggers_repair() {
             context_window_tokens: 0,
             label: None,
             model_override: None,
-
+            reasoning_effort: None,
             messages_generation: 0,
             last_repaired_generation: None,
             peer_id: None,
@@ -1546,7 +1546,7 @@ fn test_prepare_llm_messages_generation_skip_equivalence() {
         context_window_tokens: 0,
         label: None,
         model_override: None,
-
+        reasoning_effort: None,
         messages_generation: 0,
         last_repaired_generation: None,
         peer_id: None,
@@ -1666,7 +1666,7 @@ async fn test_mid_turn_signal_preserves_partial_hard_failure_results_for_classif
         context_window_tokens: 0,
         label: None,
         model_override: None,
-
+        reasoning_effort: None,
         messages_generation: 0,
         last_repaired_generation: None,
         peer_id: None,

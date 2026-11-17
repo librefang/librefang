@@ -39,7 +39,7 @@ tauri = { version = "2", features = ["tray-icon", "image-png"] }
 tauri-plugin-single-instance = "2"
 tauri-plugin-autostart = "2"
 tauri-plugin-global-shortcut = "2"
-tauri-plugin-updater = "2"
+tauri-plugin-updater = "2.14.1"
 tauri-plugin-shell = "2"
 
 # Linux desktop: same plugin set as macOS/Windows.
@@ -50,7 +50,7 @@ tauri = { version = "2", features = ["image-png"] }
 tauri-plugin-single-instance = "2"
 tauri-plugin-autostart = "2"
 tauri-plugin-global-shortcut = "2"
-tauri-plugin-updater = "2"
+tauri-plugin-updater = "2.14.1"
 tauri-plugin-shell = "2"
 # We force the `async-io` backend for `ksni` (instead of `tokio` / default features) because the `tokio` backend pulls in `zbus/tokio`, which triggers a nested runtime panic ("Cannot start a runtime from within a runtime") when Tauri/notify-rust invokes blocking session bus connection calls inside a Tokio worker thread.
 ksni = { version = "0.3.6", default-features = false, features = ["async-io"] }

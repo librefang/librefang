@@ -50,6 +50,62 @@ fn select_everyapi_default_model(
     })
 }
 
+/// Endpoint settings resolved for the provider the primary driver is built for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DefaultProviderEndpoint {
+    base_url: Option<String>,
+    api_key_env: String,
+}
+
+/// Look up a provider's `base_url` in the model catalog, ignoring empty values.
+///
+/// `ModelCatalog::new` loads `~/.librefang/providers/*.toml`, the same source the per-turn path (`llm_drivers::lookup_provider_url`) consults.
+/// Boot has to read it too, or a provider that works after a dashboard edit fails on the next restart (#8663).
+fn provider_base_url_from_catalog(
+    catalog: &librefang_runtime::model_catalog::ModelCatalog,
+    provider: &str,
+) -> Option<String> {
+    catalog
+        .get_provider(provider)
+        .map(|entry| entry.base_url.clone())
+        .filter(|url| !url.is_empty())
+}
+
+/// Resolve `base_url` and `api_key_env` for `config.default_model.provider`.
+///
+/// Precedence intentionally mirrors the per-turn driver path:
+/// - base URL: explicit `[default_model].base_url` → `[provider_urls]` → provider catalog file.
+/// - env var: explicit `[default_model].api_key_env` → operator-explicit `[provider_api_keys]` / `[auth_profiles]` → provider catalog file → convention via [`KernelConfig::resolve_api_key_env`].
+///
+/// The env-var half is `llm_drivers::resolve_default_provider_api_key_env`, shared with the per-turn path so the two cannot drift.
+/// Operator-explicit config wins over the provider file's `api_key_env` (#5807), the same rule as `llm_drivers::resolve_non_default_api_key_env`.
+///
+/// Pure so the precedence can be pinned in unit tests without booting a kernel.
+fn resolve_default_provider_endpoint(
+    config: &librefang_types::config::KernelConfig,
+    catalog: &librefang_runtime::model_catalog::ModelCatalog,
+) -> DefaultProviderEndpoint {
+    let provider = config.default_model.provider.as_str();
+
+    let base_url = config
+        .default_model
+        .base_url
+        .clone()
+        .or_else(|| config.provider_urls.get(provider).cloned())
+        .or_else(|| provider_base_url_from_catalog(catalog, provider));
+
+    let api_key_env = super::llm_drivers::resolve_default_provider_api_key_env(
+        config,
+        &config.default_model,
+        catalog,
+    );
+
+    DefaultProviderEndpoint {
+        base_url,
+        api_key_env,
+    }
+}
+
 impl LibreFangKernel {
     /// Per-session stream-event hub (multi-client SSE attach).
     ///
@@ -712,25 +768,21 @@ impl LibreFangKernel {
         }
 
         // Create LLM driver.
-        // For the API key, try: 1) explicit api_key_env from config, 2) provider_api_keys
-        // mapping, 3) auth profiles, 4) convention {PROVIDER}_API_KEY. This ensures
-        // custom providers (e.g. nvidia, azure) work without hardcoded env var names.
+        // Load the provider catalog once: `~/.librefang/providers/<id>.toml` is an endpoint source for boot just like it is for the per-turn path, so a provider that only exists as a file (no [provider_urls] entry) still resolves its base_url.
+        let boot_provider_catalog =
+            librefang_runtime::model_catalog::ModelCatalog::new(&config.home_dir);
+        // For the API key, try, in order: 1) explicit api_key_env from config, 2) provider_api_keys mapping, 3) auth profiles, 4) the provider file's api_key_env, 5) convention {PROVIDER}_API_KEY.
+        // This ensures custom providers (e.g. nvidia, azure) work without hardcoded env var names.
+        let default_endpoint = resolve_default_provider_endpoint(&config, &boot_provider_catalog);
         let default_api_key = if driverless {
             // #7743: no driver means no credential — and no reason to read one out of the environment.
             None
-        } else if !config.default_model.api_key_env.is_empty() {
-            std::env::var(&config.default_model.api_key_env).ok()
+        } else if default_endpoint.api_key_env.is_empty() {
+            None
         } else {
-            // api_key_env not set — resolve using provider_api_keys / convention
-            let env_var = config.resolve_api_key_env(&config.default_model.provider);
-            std::env::var(&env_var).ok()
+            std::env::var(&default_endpoint.api_key_env).ok()
         };
-        let default_base_url = config.default_model.base_url.clone().or_else(|| {
-            config
-                .provider_urls
-                .get(&config.default_model.provider)
-                .cloned()
-        });
+        let default_base_url = default_endpoint.base_url.clone();
         let mcp_bridge_cfg = build_mcp_bridge_cfg(&config);
         let default_proxy_url = config
             .provider_proxy_urls
@@ -925,7 +977,9 @@ impl LibreFangKernel {
                         let auto_config = DriverConfig {
                             provider: provider.to_string(),
                             api_key: std::env::var(env_var).ok(),
-                            base_url: config.provider_urls.get(provider).cloned(),
+                            base_url: config.provider_urls.get(provider).cloned().or_else(|| {
+                                provider_base_url_from_catalog(&boot_provider_catalog, provider)
+                            }),
                             vertex_ai: config.vertex_ai.clone(),
                             azure_openai: config.azure_openai.clone(),
                             skip_permissions: true,
@@ -3892,6 +3946,170 @@ mod everyapi_default_model_selection {
         assert_eq!(
             select_everyapi_default_model(&catalog, &available).as_deref(),
             Some("future-chat-model")
+        );
+    }
+}
+
+#[cfg(test)]
+mod default_provider_file_resolution {
+    //! Regression guards for boot-time endpoint resolution from provider files.
+    //!
+    //! A provider declared only in `$HOME/providers/<id>.toml` (as written by the
+    //! dashboard / hand-authored) used to be ignored at boot: `base_url` came
+    //! solely from `[default_model]` / `[provider_urls]`, so the driver init
+    //! logged "has API key but no base_url configured" and fell back to
+    //! auto-detect. The per-turn path already read the catalog; these tests pin
+    //! the boot helper to the same precedence.
+    use super::{provider_base_url_from_catalog, resolve_default_provider_endpoint};
+    use librefang_runtime::model_catalog::ModelCatalog;
+    use librefang_types::config::{AuthProfile, KernelConfig};
+    use tempfile::TempDir;
+
+    const FILE_BASE_URL: &str = "http://192.168.1.220:8080/v1";
+    // Deliberately NOT `STRATA1_API_KEY`: the file's name must win over the `{PROVIDER}_API_KEY` convention, or these tests pass without reading the file.
+    const FILE_API_KEY_ENV: &str = "STRATA1_LAN_KEY";
+
+    /// Build a throwaway `$HOME` with `providers/strata1.toml`, mirroring the
+    /// real report. `tempfile` honours `TMPDIR`, so the test never touches `/tmp`.
+    fn fake_home_with_strata1() -> TempDir {
+        let home = tempfile::tempdir().expect("create temp home");
+        let providers = home.path().join("providers");
+        std::fs::create_dir_all(&providers).expect("create providers dir");
+        std::fs::write(
+            providers.join("strata1.toml"),
+            format!(
+                r#"
+[provider]
+id = "strata1"
+display_name = "Strata1"
+api_key_env = "{FILE_API_KEY_ENV}"
+base_url = "{FILE_BASE_URL}"
+key_required = true
+"#
+            ),
+        )
+        .expect("write provider file");
+        home
+    }
+
+    fn strata1_config(home: &std::path::Path) -> KernelConfig {
+        let mut config = KernelConfig {
+            home_dir: home.to_path_buf(),
+            ..KernelConfig::default()
+        };
+        config.default_model.provider = "strata1".to_string();
+        config.default_model.base_url = None;
+        config.default_model.api_key_env = String::new();
+        config.provider_urls.clear();
+        config
+    }
+
+    #[test]
+    fn resolves_base_url_and_api_key_env_from_provider_file() {
+        let home = fake_home_with_strata1();
+        let catalog = ModelCatalog::new(home.path());
+        let config = strata1_config(home.path());
+
+        let resolved = resolve_default_provider_endpoint(&config, &catalog);
+
+        assert_eq!(resolved.base_url.as_deref(), Some(FILE_BASE_URL));
+        assert_eq!(resolved.api_key_env, FILE_API_KEY_ENV);
+    }
+
+    #[test]
+    fn explicit_default_model_base_url_wins_over_provider_file() {
+        let home = fake_home_with_strata1();
+        let catalog = ModelCatalog::new(home.path());
+        let mut config = strata1_config(home.path());
+        config.default_model.base_url = Some("http://explicit.invalid/v1".to_string());
+
+        let resolved = resolve_default_provider_endpoint(&config, &catalog);
+
+        assert_eq!(
+            resolved.base_url.as_deref(),
+            Some("http://explicit.invalid/v1")
+        );
+        // The env var still comes from the file — only the URL was overridden.
+        assert_eq!(resolved.api_key_env, FILE_API_KEY_ENV);
+    }
+
+    #[test]
+    fn provider_urls_entry_wins_over_provider_file() {
+        let home = fake_home_with_strata1();
+        let catalog = ModelCatalog::new(home.path());
+        let mut config = strata1_config(home.path());
+        config.provider_urls.insert(
+            "strata1".to_string(),
+            "http://provider-urls.invalid/v1".to_string(),
+        );
+
+        let resolved = resolve_default_provider_endpoint(&config, &catalog);
+
+        assert_eq!(
+            resolved.base_url.as_deref(),
+            Some("http://provider-urls.invalid/v1")
+        );
+    }
+
+    #[test]
+    fn explicit_api_key_env_wins_over_provider_file() {
+        let home = fake_home_with_strata1();
+        let catalog = ModelCatalog::new(home.path());
+        let mut config = strata1_config(home.path());
+        config.default_model.api_key_env = "EXPLICIT_KEY".to_string();
+
+        let resolved = resolve_default_provider_endpoint(&config, &catalog);
+
+        assert_eq!(resolved.api_key_env, "EXPLICIT_KEY");
+    }
+
+    #[test]
+    fn operator_provider_api_keys_mapping_wins_over_provider_file() {
+        let home = fake_home_with_strata1();
+        let catalog = ModelCatalog::new(home.path());
+        let mut config = strata1_config(home.path());
+        config
+            .provider_api_keys
+            .insert("strata1".to_string(), "OPERATOR_KEY_ENV".to_string());
+
+        let resolved = resolve_default_provider_endpoint(&config, &catalog);
+
+        assert_eq!(resolved.api_key_env, "OPERATOR_KEY_ENV");
+    }
+
+    #[test]
+    fn operator_auth_profile_wins_over_provider_file() {
+        let home = fake_home_with_strata1();
+        let catalog = ModelCatalog::new(home.path());
+        let mut config = strata1_config(home.path());
+        config.auth_profiles.insert(
+            "strata1".to_string(),
+            vec![AuthProfile {
+                name: "primary".to_string(),
+                api_key_env: "OPERATOR_AUTH_PROFILE_ENV".to_string(),
+                priority: 0,
+            }],
+        );
+
+        let resolved = resolve_default_provider_endpoint(&config, &catalog);
+
+        assert_eq!(resolved.api_key_env, "OPERATOR_AUTH_PROFILE_ENV");
+    }
+
+    #[test]
+    fn unknown_provider_without_file_resolves_to_none() {
+        let home = fake_home_with_strata1();
+        let catalog = ModelCatalog::new(home.path());
+        let mut config = strata1_config(home.path());
+        config.default_model.provider = "not-in-any-file".to_string();
+
+        let resolved = resolve_default_provider_endpoint(&config, &catalog);
+
+        assert_eq!(resolved.base_url, None);
+        assert_eq!(resolved.api_key_env, "NOT_IN_ANY_FILE_API_KEY");
+        assert_eq!(
+            provider_base_url_from_catalog(&catalog, "not-in-any-file"),
+            None
         );
     }
 }

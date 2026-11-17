@@ -1306,6 +1306,6 @@ hand 组已经有上面文档里的 `list / install / activate / info / check-de
 |---|---|
 | `/reboot` | 重启 agent 进程(重置进程内状态,但保留 session 历史)。 |
 | `/compact` | 在当前 session 上触发一轮 LLM 摘要。 |
-| `/think` | 切换下一回复时的 chain-of-thought / 推理过程是否可见。 |
+| `/think <level\|off>` | 把当前 session 的推理强度固定到指定档位（`none` / `minimal` / `low` / `medium` / `high` / `xhigh` / `max`）；裸 `/think` 清除固定；`off` 固定为 `none`。旧的 `on` 写法会被拒绝并显示用法。网关声明的其他档位可以在界面或 session API 中设置，聊天命令不接收。 |
 
 channel adapter 暴露的命令（`/agents`、`/new`、`/usage`、`/triggers`、`/budget` 等）见 [Provider 管理 — Channel 命令](/zh/configuration/providers/management)。注意 **`/new` 是分叉出新会话，不是清空当前会话** — 旧会话保留在通道里仍可恢复。未知命令名只会得到一个 "unknown command" 错误，不会被传给模型。

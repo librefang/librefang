@@ -187,9 +187,13 @@ impl WebFetchEngine {
         // Async resolution keeps the blocking lookup off the tokio worker.
         let resolution = check_ssrf_async(url, &self.config.ssrf_allowed_hosts).await?;
 
-        // Step 2: Cache lookup (only for GET)
+        // Step 2: Cache lookup — only for plain GETs.
+        // The cache is kernel-wide and keyed by URL alone, so a request carrying caller-supplied headers (Authorization, Cookie, API keys, Accept) or a body must neither read nor populate it: otherwise one agent's authenticated response is replayed to every other agent fetching the same URL.
+        let cacheable = method_upper == "GET"
+            && headers.is_none_or(|h| h.is_empty())
+            && body.is_none_or(str::is_empty);
         let cache_key = format!("fetch:{}:{}", method_upper, url);
-        if method_upper == "GET" {
+        if cacheable {
             if let Some(cached) = self.cache.get(&cache_key) {
                 debug!(url, "Fetch cache hit");
                 return Ok(cached);
@@ -291,8 +295,9 @@ impl WebFetchEngine {
             wrap_external_content(url, &truncated)
         );
 
-        // Step 7: Cache (only GET responses)
-        if method_upper == "GET" {
+        // Step 7: Cache successful plain-GET responses only.
+        // A transient 429/5xx (or a 401 before a token is set) must not be replayed for the whole TTL and defeat the caller's retry.
+        if cacheable && status.is_success() {
             self.cache.put(cache_key, result.clone());
         }
 
@@ -824,6 +829,103 @@ mod tests {
             out.contains("FINAL-OK"),
             "expected final body after redirect, got: {out}"
         );
+    }
+
+    fn loopback_engine() -> WebFetchEngine {
+        WebFetchEngine::new(
+            WebFetchConfig {
+                ssrf_allowed_hosts: vec!["127.0.0.0/8".to_string()],
+                ..Default::default()
+            },
+            std::sync::Arc::new(WebCache::new(std::time::Duration::from_secs(60))),
+        )
+    }
+
+    /// A GET carrying caller-supplied headers must not be served from, or stored into, the shared URL-keyed cache.
+    #[tokio::test]
+    async fn test_fetch_with_headers_bypasses_shared_cache() {
+        use wiremock::matchers::{header, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/me"))
+            .and(header("authorization", "Bearer token-a"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("PROFILE-A"))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/me"))
+            .and(header("authorization", "Bearer token-b"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("PROFILE-B"))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/me"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("ANON"))
+            .mount(&server)
+            .await;
+
+        let engine = loopback_engine();
+        let url = format!("{}/me", server.uri());
+        let mut a = serde_json::Map::new();
+        a.insert("Authorization".into(), "Bearer token-a".into());
+        let mut b = serde_json::Map::new();
+        b.insert("Authorization".into(), "Bearer token-b".into());
+
+        let out_a = engine
+            .fetch_with_options(&url, "GET", Some(&a), None)
+            .await
+            .unwrap();
+        assert!(out_a.contains("PROFILE-A"), "{out_a}");
+        let out_b = engine
+            .fetch_with_options(&url, "GET", Some(&b), None)
+            .await
+            .unwrap();
+        assert!(
+            out_b.contains("PROFILE-B"),
+            "B must not see A's cached response: {out_b}"
+        );
+        let anon = engine.fetch(&url).await.unwrap();
+        assert!(
+            anon.contains("ANON"),
+            "an anonymous GET must not see a credentialed response: {anon}"
+        );
+    }
+
+    /// A non-2xx response must not be cached, so a retry after a transient 503 reaches the server again.
+    #[tokio::test]
+    async fn test_fetch_does_not_cache_error_status() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/flaky"))
+            .respond_with(ResponseTemplate::new(503).set_body_string("DOWN"))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/flaky"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("UP"))
+            .mount(&server)
+            .await;
+
+        let engine = loopback_engine();
+        let url = format!("{}/flaky", server.uri());
+        let first = engine.fetch(&url).await.unwrap();
+        assert!(first.starts_with("HTTP 503"), "{first}");
+        let second = engine.fetch(&url).await.unwrap();
+        assert!(
+            second.starts_with("HTTP 200") && second.contains("UP"),
+            "a cached 503 must not be replayed: {second}"
+        );
+        // The 200 is cached: a third fetch is served without changing the answer.
+        let third = engine.fetch(&url).await.unwrap();
+        assert_eq!(second, third);
     }
 
     #[tokio::test]

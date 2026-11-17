@@ -2057,6 +2057,26 @@ fn assert_kv_owner_or_admin(
     }
 }
 
+/// Whether `key` is in the platform's reserved compaction-mirror namespace (#8645).
+///
+/// `compaction_summary_<sid>` rows are per-conversation summaries the prompt path trusts as the
+/// conversation's own history, and the memory tools already refuse the prefix. The REST KV
+/// surface is the other way in: listing or exporting them hands one conversation's summary to
+/// whoever reads the agent's KV, and writing or importing one plants a summary that a later turn
+/// on that sid injects into its prompt. The rows are platform state rather than agent memory, so
+/// they are hidden from listings and exports and refused on writes.
+fn is_reserved_kv_key(key: &str) -> bool {
+    key.starts_with(librefang_memory::COMPACTION_SUMMARY_KEY_PREFIX)
+}
+
+fn reserved_kv_key_error(key: &str) -> (StatusCode, Json<serde_json::Value>) {
+    ApiErrorResponse::bad_request(format!(
+        "key '{key}' uses the reserved '{}' prefix",
+        librefang_memory::COMPACTION_SUMMARY_KEY_PREFIX
+    ))
+    .into_json_tuple()
+}
+
 /// GET /api/memory/agents/:id/kv — List KV pairs for an agent.
 #[utoipa::path(get, path = "/api/memory/agents/{id}/kv", tag = "memory", params(("id" = String, Path, description = "Agent ID")), responses((status = 200, description = "Agent KV store", body = crate::types::JsonObject)))]
 pub async fn get_agent_kv(
@@ -2074,6 +2094,7 @@ pub async fn get_agent_kv(
         Ok(pairs) => {
             let kv: Vec<serde_json::Value> = pairs
                 .into_iter()
+                .filter(|(k, _)| !is_reserved_kv_key(k))
                 .map(|(k, v)| serde_json::json!({"key": k, "value": v}))
                 .collect();
             (StatusCode::OK, Json(serde_json::json!({"kv_pairs": kv}))).into_response()
@@ -2153,6 +2174,12 @@ pub async fn set_agent_kv_key(
     };
     if let Err(resp) = assert_kv_owner_or_admin(&state, agent_id, api_user.as_ref(), &t) {
         return crate::extensions::with_agent_id(agent_id, resp);
+    }
+    if is_reserved_kv_key(&key) {
+        return crate::extensions::with_agent_id(
+            agent_id,
+            reserved_kv_key_error(&key).into_response(),
+        );
     }
     let value = body.get("value").cloned().unwrap_or(body);
 
@@ -2241,7 +2268,10 @@ pub async fn export_agent_memory(
 
     let body = match state.kernel.memory_substrate().list_kv(agent_id) {
         Ok(pairs) => {
-            let kv_map: serde_json::Map<String, serde_json::Value> = pairs.into_iter().collect();
+            let kv_map: serde_json::Map<String, serde_json::Value> = pairs
+                .into_iter()
+                .filter(|(k, _)| !is_reserved_kv_key(k))
+                .collect();
             (
                 StatusCode::OK,
                 Json(serde_json::json!({
@@ -2324,6 +2354,12 @@ pub async fn import_agent_memory(
         }
     };
 
+    // Refuse the whole import before anything is cleared or written, so a rejected body leaves
+    // the agent's memory exactly as it was.
+    if let Some(key) = kv.keys().find(|k| is_reserved_kv_key(k)) {
+        return crate::extensions::with_agent_id(agent_id, reserved_kv_key_error(key));
+    }
+
     let clear_existing = body
         .get("clear_existing")
         .and_then(|v| v.as_bool())
@@ -2333,7 +2369,9 @@ pub async fn import_agent_memory(
     if clear_existing {
         match state.kernel.memory_substrate().list_kv(agent_id) {
             Ok(existing) => {
-                for (key, _) in existing {
+                // The compaction mirrors are not part of the KV surface this endpoint exposes,
+                // so clearing it leaves them to the session lifecycle that owns them.
+                for (key, _) in existing.into_iter().filter(|(k, _)| !is_reserved_kv_key(k)) {
                     if let Err(e) = state
                         .kernel
                         .memory_substrate()

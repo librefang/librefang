@@ -179,6 +179,11 @@ fn get_status_text(app: &tauri::AppHandle) -> String {
     }
 }
 
+/// Label of the "Agents: N running" tray item, shared by both tray implementations.
+fn agents_info_text(agent_count: usize) -> String {
+    format!("Agents: {agent_count} running")
+}
+
 fn get_agent_count(app: &tauri::AppHandle) -> usize {
     if let Some(ks) = app.try_state::<crate::KernelState>() {
         let guard = ks.0.read().unwrap_or_else(|p| p.into_inner());
@@ -204,6 +209,9 @@ mod platform_tray {
     };
     use tauri_plugin_autostart::ManagerExt;
 
+    /// How often the informational tray items are re-labelled while the menu is closed.
+    const TRAY_INFO_REFRESH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
+
     pub fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         // Action items
         let show = MenuItem::with_id(app, "show", "Show Window", true, None::<&str>)?;
@@ -219,7 +227,7 @@ mod platform_tray {
         let agents_info = MenuItem::with_id(
             app,
             "agents_info",
-            format!("Agents: {agent_count} running"),
+            super::agents_info_text(agent_count),
             false,
             None::<&str>,
         )?;
@@ -272,6 +280,28 @@ mod platform_tray {
             ],
         )?;
 
+        // The informational items are built once, so they must be re-labelled as state changes: in connection-screen mode no kernel exists yet when this runs, and agents, uptime and the remote URL all move afterwards.
+        // Unlike the Linux tray, which rebuilds its menu on every open, a Tauri menu keeps whatever text it was given.
+        let refresh_info = {
+            let agents_info = agents_info.clone();
+            let status_info = status_info.clone();
+            move |app: &tauri::AppHandle| {
+                let _ = status_info.set_text(super::get_status_text(app));
+                let _ = agents_info.set_text(super::agents_info_text(super::get_agent_count(app)));
+            }
+        };
+        {
+            let refresh_info = refresh_info.clone();
+            let app_handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                let mut tick = tokio::time::interval(TRAY_INFO_REFRESH_INTERVAL);
+                loop {
+                    tick.tick().await;
+                    refresh_info(&app_handle);
+                }
+            });
+        }
+
         // Load the tray icon from embedded PNG bytes
         let tray_icon = tauri::image::Image::from_bytes(include_bytes!("../icons/32x32.png"))
             .expect("Failed to decode tray icon PNG");
@@ -308,7 +338,11 @@ mod platform_tray {
                 }
                 _ => {}
             })
-            .on_tray_icon_event(|tray, event| {
+            .on_tray_icon_event(move |tray, event| {
+                // Any click may open the menu, so bring its informational items up to date first.
+                if matches!(event, TrayIconEvent::Click { .. }) {
+                    refresh_info(tray.app_handle());
+                }
                 if let TrayIconEvent::Click {
                     button: MouseButton::Left,
                     button_state: MouseButtonState::Up,
@@ -433,7 +467,7 @@ mod platform_tray {
             let agent_count = super::get_agent_count(&self.app_handle);
 
             let agents_info = StandardItem {
-                label: format!("Agents: {agent_count} running"),
+                label: super::agents_info_text(agent_count),
                 enabled: false,
                 ..Default::default()
             };
@@ -556,6 +590,15 @@ mod platform_tray {
 }
 
 pub use platform_tray::setup_tray;
+
+#[cfg(test)]
+mod info_text_tests {
+    #[test]
+    fn agents_info_text_names_the_count() {
+        assert_eq!(super::agents_info_text(0), "Agents: 0 running");
+        assert_eq!(super::agents_info_text(3), "Agents: 3 running");
+    }
+}
 
 #[cfg(all(test, target_os = "linux"))]
 mod tests {

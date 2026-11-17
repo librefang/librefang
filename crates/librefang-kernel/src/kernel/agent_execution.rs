@@ -946,6 +946,7 @@ impl LibreFangKernel {
                 context_window_tokens: 0,
                 label: None,
                 model_override: None,
+                reasoning_effort: None,
                 messages_generation: 0,
                 last_repaired_generation: None,
                 peer_id: peer_id_for_new_session.clone(),
@@ -1048,7 +1049,7 @@ impl LibreFangKernel {
         // The registry and persisted manifest retain the sentinel so later global model changes take effect without rewriting the agent.
         {
             let is_default_provider =
-                manifest.model.provider.is_empty() || manifest.model.provider == "default";
+                super::manifest_helpers::is_default_provider_sentinel(&manifest.model.provider);
             let is_default_model =
                 manifest.model.model.is_empty() || manifest.model.model == "default";
             if is_default_provider && is_default_model {
@@ -1057,17 +1058,16 @@ impl LibreFangKernel {
                     "default_model_override",
                 );
                 let dm = override_guard.as_ref().unwrap_or(&cfg.default_model);
-                if !dm.provider.is_empty() {
-                    manifest.model.provider = dm.provider.clone();
-                }
+                // Provider, credential pin and endpoint pin all come from the
+                // effective default. The pins are REPLACED, not preserved: a
+                // stale `api_key_env` from the previous default provider would
+                // otherwise be sent to the new one (401; see
+                // `inherit_default_provider`). Mirrors the sentinel guard in
+                // `resolve_driver_for_owner`, which applies to its own manifest
+                // copy.
+                super::manifest_helpers::inherit_default_provider(&mut manifest.model, dm);
                 if !dm.model.is_empty() {
                     manifest.model.model = dm.model.clone();
-                }
-                if !dm.api_key_env.is_empty() && manifest.model.api_key_env.is_none() {
-                    manifest.model.api_key_env = Some(dm.api_key_env.clone());
-                }
-                if dm.base_url.is_some() && manifest.model.base_url.is_none() {
-                    manifest.model.base_url.clone_from(&dm.base_url);
                 }
                 for (key, value) in &dm.extra_params {
                     manifest
@@ -1104,7 +1104,16 @@ impl LibreFangKernel {
             manifest.thinking = cfg.thinking.clone();
         }
 
+        // Apply the per-session reasoning override (#8591): the rung between
+        // agent/global and per-call. After the backfill so it beats the agent
+        // or global level, before `apply_thinking_override` so a per-message
+        // token still wins — frame > session > agent > global > compiled.
+        if let Some(token) = session.reasoning_effort.as_deref() {
+            super::manifest_helpers::apply_session_reasoning_effort(&mut manifest, token);
+        }
+
         // Apply per-call thinking override (from API request).
+        // The resulting token stays uncoerced until model selection below has settled the model this turn will call.
         apply_thinking_override(&mut manifest, thinking_override);
 
         // Lazy backfill: create workspace for existing agents spawned before workspaces
@@ -1350,6 +1359,12 @@ impl LibreFangKernel {
             )
             .map_err(KernelError::LibreFang)?;
         }
+
+        // Coercion (#8591): the catalog's declared policy is authoritative, so the effective token (after every override, the per-call frame included) is coerced against the model this turn will actually call.
+        // It must run after model selection and the session `/model` re-application above, as on the streaming path: coercing against the pre-routing model rewrote the token into that model's set, and neither the agent loop's per-model policy nor the driver backstop can recover the original once routing picked a model with a different declared set.
+        // A token outside the set is mapped to the nearest supported rung with a warning, never forwarded and never 400-ed.
+        let reasoning_policy = self.lookup_reasoning_policy(&manifest.model.model);
+        super::manifest_helpers::coerce_reasoning_effort_to_model(&mut manifest, &reasoning_policy);
 
         // Resolve this turn's inference parameters from the agent manifest and
         // the per-model override that matches the final model.

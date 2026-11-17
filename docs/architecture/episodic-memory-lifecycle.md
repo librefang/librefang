@@ -5,7 +5,8 @@ This document states what that layer is for and what removes rows from it, becau
 
 ## What writes it
 
-`crates/librefang-runtime/src/agent_loop/end_turn.rs` composes `[Past exchange]\nThem: …\nYou: …` from the finished turn and hands it to `remember_interaction_best_effort` (`agent_loop/prompt.rs`), which writes straight to `MemorySubstrate`.
+`crates/librefang-runtime/src/agent_loop/end_turn.rs` composes `[Past exchange]\nThem: …\nYou: …` from the turn — finished, or ended at the iteration cap — and hands it to `remember_interaction_best_effort` (`agent_loop/prompt.rs`), which writes straight to `MemorySubstrate`.
+A capped turn's row carries an extra `[Unfinished — this turn reached the iteration limit (N) before finishing.]` line in its header, outside the halves the size budget cuts, so a long cut-off answer stays distinguishable from a long finished one (#8625).
 Two gates: `!is_fork && !incognito`, and `capabilities.memory_write` — an agent whose manifest declares a `memory_write` list covering nothing stops accumulating these rows, the same way it already stopped accumulating extracted facts (#7605).
 There is no relevance test, no extraction threshold and no category — the row is the raw exchange.
 The row does carry the `chat_scope` and `session_scope` stamps the recall filters read, spelled exactly as `auto_memorize` spells them, so an exchange written in one chat or session no longer surfaces in a recall running under a different one (#5227, #7605).

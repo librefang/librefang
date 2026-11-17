@@ -311,6 +311,7 @@ use crate::types;
         routes::delete_session,
         routes::set_session_label,
         routes::patch_session_model,
+        routes::patch_session_reasoning,
         routes::find_session_by_label,
         routes::search_sessions,
         routes::session_cleanup,

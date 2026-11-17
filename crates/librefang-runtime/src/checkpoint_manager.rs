@@ -45,6 +45,11 @@ const GIT_TIMEOUT_SECS: u64 = 30;
 /// deployments (e.g. fly.io 256 MB machines).
 const MAX_CONCURRENT_SNAPSHOTS: usize = 1;
 
+/// Default number of snapshots kept per working directory.
+///
+/// History is rewritten down to this many commits once it grows past twice the limit, so the rewrite (one `git commit-tree` per kept snapshot plus a `git gc`) runs at most once every `DEFAULT_SNAPSHOT_RETENTION` snapshots.
+pub const DEFAULT_SNAPSHOT_RETENTION: usize = 100;
+
 /// Default exclude patterns written into each shadow repo's `info/exclude`.
 const DEFAULT_EXCLUDES: &[&str] = &[
     "node_modules/",
@@ -147,6 +152,8 @@ pub struct CheckpointManager {
     /// rather than queued — preventing memory pressure from accumulated
     /// waiting tasks.
     semaphore: Arc<Mutex<usize>>,
+    /// Number of snapshots kept per working directory (see [`DEFAULT_SNAPSHOT_RETENTION`]).
+    retention: usize,
 }
 
 fn lock_snapshot_counter(counter: &Mutex<usize>) -> MutexGuard<'_, usize> {
@@ -178,7 +185,14 @@ impl CheckpointManager {
         Self {
             base_dir,
             semaphore: Arc::new(Mutex::new(0)),
+            retention: DEFAULT_SNAPSHOT_RETENTION,
         }
+    }
+
+    /// Keep at most `keep` snapshots per working directory (minimum 1) instead of [`DEFAULT_SNAPSHOT_RETENTION`].
+    pub fn with_snapshot_retention(mut self, keep: usize) -> Self {
+        self.retention = keep.max(1);
+        self
     }
 
     // -----------------------------------------------------------------------
@@ -195,7 +209,18 @@ impl CheckpointManager {
     /// Fails with [`CheckpointError::TooManyFiles`] when the directory
     /// contains more than [`MAX_FILES`] files, to avoid freezing the daemon
     /// on huge work trees.
+    ///
+    /// Older snapshots beyond the retention limit are dropped and their objects garbage-collected, so the shadow repo does not grow without bound.
     pub fn snapshot(&self, work_dir: &Path, reason: &str) -> Result<String, CheckpointError> {
+        self.snapshot_inner(work_dir, reason, true)
+    }
+
+    fn snapshot_inner(
+        &self,
+        work_dir: &Path,
+        reason: &str,
+        prune: bool,
+    ) -> Result<String, CheckpointError> {
         // Concurrency guard: skip snapshot if another one is already running.
         // This prevents multiple concurrent `git add -A` processes from
         // exhausting RAM on memory-constrained hosts (each git process can
@@ -289,10 +314,113 @@ impl CheckpointManager {
         );
         if ok_hash && !hash.is_empty() {
             debug!(hash, reason, "checkpoint taken for {}", work_dir.display());
+            if prune {
+                // Rewriting history changes every kept commit's hash, so report the rewritten tip.
+                if let Some(new_tip) = self.prune_history(&shadow, &work_dir) {
+                    return Ok(new_tip);
+                }
+            }
             Ok(hash)
         } else {
             Ok("unknown".to_string())
         }
+    }
+
+    /// Drop snapshots older than the newest `self.retention` once history exceeds twice that, then garbage-collect their objects.
+    ///
+    /// The kept commits are re-created on a new root with `git commit-tree`, preserving tree, subject and timestamps, so every blob only reachable from dropped snapshots becomes unreferenced and `git gc --prune=now` deletes it.
+    /// Best-effort: any failing step leaves the existing history untouched.
+    /// Returns the new tip hash when history was rewritten.
+    fn prune_history(&self, shadow: &Path, work_dir: &Path) -> Option<String> {
+        let keep = self.retention;
+        let (ok, count, _) = run_git(
+            &["rev-list", "--count", "HEAD"],
+            shadow,
+            work_dir,
+            GIT_TIMEOUT_SECS,
+            &[],
+        );
+        let count: usize = if ok { count.parse().ok()? } else { return None };
+        if count <= keep.saturating_mul(2) {
+            return None;
+        }
+
+        let keep_arg = keep.to_string();
+        // `-n` limits to the newest commits and `--reverse` then orders them oldest first, which is the order they must be re-created in.
+        let (ok, log, _) = run_git(
+            &[
+                "log",
+                "-n",
+                &keep_arg,
+                "--reverse",
+                "--format=%T%x1f%at%x1f%ct%x1f%s",
+            ],
+            shadow,
+            work_dir,
+            GIT_TIMEOUT_SECS,
+            &[],
+        );
+        if !ok {
+            return None;
+        }
+
+        let mut parent: Option<String> = None;
+        for line in log.lines() {
+            let mut parts = line.splitn(4, '\x1f');
+            let (tree, author_ts, committer_ts) = (parts.next()?, parts.next()?, parts.next()?);
+            let subject = parts.next().unwrap_or("");
+            let mut args = vec!["commit-tree", tree, "-m", subject];
+            if let Some(ref p) = parent {
+                args.extend(["-p", p.as_str()]);
+            }
+            let dates = [
+                ("GIT_AUTHOR_DATE", format!("@{author_ts} +0000")),
+                ("GIT_COMMITTER_DATE", format!("@{committer_ts} +0000")),
+            ];
+            let (ok, new_hash, stderr) =
+                run_git_env(&args, shadow, work_dir, GIT_TIMEOUT_SECS, &[], &dates);
+            if !ok || new_hash.is_empty() {
+                warn!(%stderr, "checkpoint history pruning aborted: commit-tree failed");
+                return None;
+            }
+            parent = Some(new_hash);
+        }
+        let new_tip = parent?;
+
+        // `update-ref HEAD` follows the symbolic ref, so the current branch moves to the new root chain.
+        let (ok, _, stderr) = run_git(
+            &["update-ref", "HEAD", &new_tip],
+            shadow,
+            work_dir,
+            GIT_TIMEOUT_SECS,
+            &[],
+        );
+        if !ok {
+            warn!(%stderr, "checkpoint history pruning aborted: update-ref failed");
+            return None;
+        }
+        // Reflogs still reference the dropped commits; expire them so gc can delete their objects.
+        run_git(
+            &["reflog", "expire", "--expire=now", "--all"],
+            shadow,
+            work_dir,
+            GIT_TIMEOUT_SECS,
+            &[],
+        );
+        run_git(
+            &["gc", "--prune=now", "--quiet"],
+            shadow,
+            work_dir,
+            GIT_TIMEOUT_SECS * 4,
+            &[],
+        );
+        debug!(
+            dropped = count - keep,
+            kept = keep,
+            "pruned checkpoint history for {}",
+            work_dir.display()
+        );
+        Some(new_tip)
     }
 
     /// Restore working directory to a previous snapshot.
@@ -326,7 +454,8 @@ impl CheckpointManager {
         // Take a pre-rollback snapshot so the user can undo the undo.
         let display_hash = commit_hash.get(..8).unwrap_or(commit_hash);
         let pre_reason = format!("pre-rollback snapshot (restoring to {display_hash})");
-        if let Err(e) = self.snapshot(&work_dir, &pre_reason) {
+        // No pruning here: it rewrites every commit hash, which would make `commit_hash` unreachable before it is checked out.
+        if let Err(e) = self.snapshot_inner(&work_dir, &pre_reason, false) {
             // Non-fatal: warn but continue with the restore.
             warn!("pre-rollback snapshot failed (continuing): {e}");
         }
@@ -544,6 +673,18 @@ fn run_git(
     timeout_secs: u64,
     allowed_non_zero: &[i32],
 ) -> (bool, String, String) {
+    run_git_env(args, shadow, work_dir, timeout_secs, allowed_non_zero, &[])
+}
+
+/// [`run_git`] with extra environment variables layered on top of [`git_env`].
+fn run_git_env(
+    args: &[&str],
+    shadow: &Path,
+    work_dir: &Path,
+    timeout_secs: u64,
+    allowed_non_zero: &[i32],
+    extra_env: &[(&str, String)],
+) -> (bool, String, String) {
     use std::io::ErrorKind;
     use std::process::Stdio;
 
@@ -559,7 +700,8 @@ fn run_git(
         );
     }
 
-    let env = git_env(shadow, work_dir);
+    let mut env = git_env(shadow, work_dir);
+    env.extend(extra_env.iter().map(|(k, v)| (k.to_string(), v.clone())));
     let allowed_owned: Vec<i32> = allowed_non_zero.to_vec();
 
     // Spawn the child process with captured stdout/stderr.
@@ -819,6 +961,67 @@ mod tests {
             std::fs::read_to_string(tracked_file).unwrap(),
             "third version"
         );
+    }
+
+    #[test]
+    fn snapshot_history_is_pruned_to_the_retention_limit() {
+        let checkpoint_root = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let manager =
+            CheckpointManager::new(checkpoint_root.path().to_path_buf()).with_snapshot_retention(2);
+        let tracked_file = workspace.path().join("data.csv");
+        let shadow = manager.shadow_repo_dir(&workspace.path().canonicalize().unwrap());
+
+        let mut first_hash = String::new();
+        let mut last_hash = String::new();
+        // Four snapshots stay within twice the limit; the fifth triggers the rewrite down to two.
+        for i in 1..=5 {
+            std::fs::write(&tracked_file, format!("version {i}")).unwrap();
+            last_hash = manager
+                .snapshot(workspace.path(), &format!("snap-{i}"))
+                .unwrap();
+            if i == 1 {
+                first_hash = last_hash.clone();
+            }
+            let (_, count, _) = run_git(
+                &["rev-list", "--count", "HEAD"],
+                &shadow,
+                workspace.path(),
+                GIT_TIMEOUT_SECS,
+                &[],
+            );
+            assert!(
+                count.parse::<usize>().unwrap() <= 4,
+                "after snap-{i}: {count}"
+            );
+        }
+
+        let snapshots = manager.list_snapshots(workspace.path()).unwrap();
+        let messages: Vec<&str> = snapshots.iter().map(|s| s.message.as_str()).collect();
+        assert_eq!(messages, vec!["snap-5", "snap-4"]);
+        assert_eq!(
+            snapshots[0].hash, last_hash,
+            "snapshot() returns the rewritten tip"
+        );
+
+        // The dropped snapshot's objects were garbage-collected, not just unreferenced.
+        let (exists, _, _) = run_git(
+            &["cat-file", "-e", &first_hash],
+            &shadow,
+            workspace.path(),
+            GIT_TIMEOUT_SECS,
+            &[1, 128],
+        );
+        assert!(
+            !exists,
+            "pruned commit {first_hash} is still in the object store"
+        );
+
+        // The kept snapshots are still restorable.
+        manager
+            .restore(workspace.path(), &snapshots[1].hash)
+            .unwrap();
+        assert_eq!(std::fs::read_to_string(&tracked_file).unwrap(), "version 4");
     }
 
     #[test]

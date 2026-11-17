@@ -224,6 +224,22 @@ pub(crate) fn can_access_agent(
     entry.manifest.author.eq_ignore_ascii_case(&user.0.name)
 }
 
+/// Owner-scoping for routes that address an agent's data by an id the registry may no longer know (sessions, prompt versions, experiments).
+///
+/// Same rule as [`can_access_agent`] for a caller below Admin: only agents whose manifest author matches their authenticated name.
+/// It differs only for the unrestricted principals — trusted no-auth (`None`) and Admin+ — which are admitted even when the agent is not in the registry, so their existing view of records left behind by a removed agent is unchanged.
+pub(crate) fn caller_may_access_agent_data(
+    state: &AppState,
+    agent_id: librefang_types::agent::AgentId,
+    api_user: Option<&axum::Extension<crate::middleware::AuthenticatedApiUser>>,
+) -> bool {
+    match api_user {
+        None => true,
+        Some(user) if user.0.role >= crate::middleware::UserRole::Admin => true,
+        Some(_) => can_access_agent(state, agent_id, api_user),
+    }
+}
+
 /// Shared application state.
 ///
 /// `kernel` is `Arc<dyn KernelApi>` (#3566) — method calls into the kernel

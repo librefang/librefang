@@ -275,15 +275,17 @@ impl LibreFangKernel {
         {
             let mut missing: Vec<String> = Vec::new();
 
-            // Default LLM provider — prefer explicit api_key_env, then resolve.
+            // Default LLM provider — the same precedence the boot driver and
+            // every turn use, so a provider file's api_key_env counts here too.
             // Skip providers that run locally (ollama, vllm, lmstudio, …) —
             // they don't need a key and flagging them confuses operators.
             if !librefang_runtime::provider_health::is_local_provider(&cfg.default_model.provider) {
-                let llm_env = if !cfg.default_model.api_key_env.is_empty() {
-                    cfg.default_model.api_key_env.clone()
-                } else {
-                    cfg.resolve_api_key_env(&cfg.default_model.provider)
-                };
+                let catalog = librefang_runtime::model_catalog::ModelCatalog::new(&cfg.home_dir);
+                let llm_env = super::llm_drivers::resolve_default_provider_api_key_env(
+                    &cfg,
+                    &cfg.default_model,
+                    &catalog,
+                );
                 if std::env::var(&llm_env).unwrap_or_default().is_empty() {
                     missing.push(format!(
                         "LLM ({}): ${}",

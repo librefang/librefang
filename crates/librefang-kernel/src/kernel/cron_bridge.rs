@@ -33,7 +33,7 @@ impl LibreFangKernel {
 
         cron_deliver_response(self, agent_id, output, delivery).await;
         if !delivery_targets.is_empty() {
-            cron_fan_out_targets(self, job_name, output, delivery_targets).await;
+            cron_fan_out_targets(self, agent_id, job_name, output, delivery_targets).await;
         }
     }
 }
@@ -130,8 +130,11 @@ const CRON_EMPTY_OUTPUT_HEARTBEAT: &str = "(cron heartbeat: empty output)";
 /// broke liveness-style cron jobs (e.g. "ping #ops every hour even when I
 /// have nothing to say"). Cron jobs that genuinely want to skip empty-
 /// output runs should not configure fan-out targets at all.
+///
+/// `LocalFile` targets resolve inside `agent_id`'s workspace; an agent with no workspace gets those targets refused rather than written relative to the daemon's current directory.
 pub(super) async fn cron_fan_out_targets(
     kernel: &Arc<LibreFangKernel>,
+    agent_id: AgentId,
     job_name: &str,
     output: &str,
     targets: &[librefang_types::scheduler::CronDeliveryTarget],
@@ -149,10 +152,16 @@ pub(super) async fn cron_fan_out_targets(
     });
     // Reuse one process-wide `reqwest::Client` across every fire instead of
     // rebuilding it (TLS, DNS, HTTP/2 pool) per cron tick (#5127).
+    let workspace = kernel
+        .agents
+        .registry
+        .get(agent_id)
+        .and_then(|entry| entry.manifest.workspace.clone());
     let engine = crate::cron_delivery::CronDeliveryEngine::with_http_client_result(
         sender,
         shared_fan_out_http_client(),
-    );
+    )
+    .with_local_file_root(workspace);
     let results = engine.deliver(targets, job_name, payload).await;
     let total = results.len();
     let failures = results.iter().filter(|r| !r.success).count();

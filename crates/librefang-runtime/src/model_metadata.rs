@@ -300,6 +300,13 @@ fn synthesize_entry(
         supports_streaming: false,
         supports_thinking: false,
         reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy::default(),
+        // A synthesized capacity entry declares no reasoning vocabulary; the
+        // canonical set is what selection UI falls back to, and drivers keep
+        // their legacy `max` spelling when this list is empty (#8591).
+        supported_efforts: Vec::new(),
+        default_effort: None,
+        off_allowed: true,
+        mandatory: false,
         aliases: Vec::new(),
     }
 }
@@ -862,6 +869,10 @@ mod tests {
             supports_streaming: false,
             supports_thinking: false,
             reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy::default(),
+            supported_efforts: vec![],
+            default_effort: None,
+            off_allowed: true,
+            mandatory: false,
             aliases: vec![],
         }
     }

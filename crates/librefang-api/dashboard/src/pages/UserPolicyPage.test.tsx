@@ -38,6 +38,15 @@ vi.mock("react-i18next", async () => {
           }
           return fallbackOrOpts;
         }
+        if (fallbackOrOpts && typeof fallbackOrOpts === "object") {
+          const { defaultValue, ...vars } = fallbackOrOpts as Record<string, unknown>;
+          if (typeof defaultValue === "string") {
+            return Object.entries(vars).reduce<string>(
+              (acc, [k, v]) => acc.replace(`{{${k}}}`, String(v)),
+              defaultValue,
+            );
+          }
+        }
         return key;
       },
     }),

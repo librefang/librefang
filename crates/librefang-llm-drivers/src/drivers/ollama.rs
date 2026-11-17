@@ -416,16 +416,19 @@ impl OllamaDriver {
             // and adding latency. Keeping the explicit `false` preserves
             // the pre-#4810 user-visible behaviour exactly.
             //
-            // `reasoning_mode = "none"` (#7946) is an explicit request NOT to
+            // `reasoning_effort = "none"` (#7946) is an explicit request NOT to
             // reason, so it reads as `think: false` even though a
             // `ThinkingConfig` is present. The kernel has to materialise one to
             // carry the mode (so the OpenAI-compatible drivers can send their
             // explicit non-think toggle), and without this check that config
             // would flip `think` to `true` for an agent that asked for the
             // opposite.
-            think: Some(request.thinking.as_ref().is_some_and(|tc| {
-                tc.reasoning_mode != Some(librefang_types::config::ReasoningMode::None)
-            })),
+            think: Some(
+                request
+                    .thinking
+                    .as_ref()
+                    .is_some_and(|tc| !tc.reasoning_effort.as_ref().is_some_and(|m| m.is_none())),
+            ),
             format,
             options,
             extra_body: request.extra_body.clone(),
@@ -853,15 +856,27 @@ impl LlmDriver for OllamaDriver {
         let mut receiver_dropped = false;
         let mut utf8 = crate::utf8_stream::Utf8StreamDecoder::new();
 
+        let mut saw_done = false;
         let mut byte_stream = resp.bytes_stream();
-        while let Some(chunk_result) = byte_stream.next().await {
+        let mut stream_ended = false;
+        while !stream_ended {
             if receiver_dropped {
                 debug!("streaming receiver dropped; cancelling Ollama stream");
                 break;
             }
-            let chunk = chunk_result.map_err(|e| LlmError::Http(e.to_string()))?;
-            chunk_count += 1;
-            buffer.push_str(&utf8.decode(&chunk));
+            match byte_stream.next().await {
+                Some(chunk_result) => {
+                    let chunk = chunk_result.map_err(|e| LlmError::Http(e.to_string()))?;
+                    chunk_count += 1;
+                    buffer.push_str(&utf8.decode(&chunk));
+                }
+                None => {
+                    // Flush a final object that arrived without its trailing newline, so the `done` chunk is never lost to framing.
+                    stream_ended = true;
+                    buffer.push_str(&utf8.finish());
+                    buffer.push('\n');
+                }
+            }
 
             // NDJSON: one complete JSON object per line.
             while let Some(pos) = buffer.find('\n') {
@@ -877,6 +892,16 @@ impl LlmDriver for OllamaDriver {
                         continue;
                     }
                 };
+
+                // A runner failure after streaming started (OOM, crash, context overflow) arrives as an `{"error": "..."}` line inside the 200 body.
+                // Surface it so retry / fallback engage instead of returning the partial text as a finished answer.
+                if json.get("error").is_some_and(|e| !e.is_null()) {
+                    warn!(
+                        line_len = line.len(),
+                        "Ollama stream returned an error line"
+                    );
+                    return Err(map_http_error(500, &line));
+                }
 
                 if let Some(msg) = json.get("message") {
                     if let Some(content) = msg.get("content").and_then(|v| v.as_str()) {
@@ -928,6 +953,7 @@ impl LlmDriver for OllamaDriver {
                 }
 
                 if json.get("done").and_then(|v| v.as_bool()) == Some(true) {
+                    saw_done = true;
                     if let Some(reason) = json.get("done_reason").and_then(|v| v.as_str()) {
                         done_reason = Some(reason.to_string());
                     }
@@ -941,11 +967,16 @@ impl LlmDriver for OllamaDriver {
             }
         }
 
-        // Drain any half-codepoint left in the decoder. We don't append it
-        // to `buffer` because there are no further line-aligned reads to
-        // do — calling `finish()` exists only so the decoder explicitly
-        // releases that state on a stream-truncated path (#3448 parity).
-        let _ = utf8.finish();
+        // A generation that finished sends a final `done: true` chunk; a stream that closed without one (proxy idle timeout, runner killed, receiver dropped) carries a partial answer, and returning it as Ok would hide the failure from retry and failover (mirrors the Anthropic driver).
+        if !saw_done {
+            warn!(
+                chunks = chunk_count,
+                receiver_dropped, "Ollama stream ended before a done chunk"
+            );
+            return Err(LlmError::Http(
+                "Ollama stream ended before a done: true chunk".to_string(),
+            ));
+        }
 
         // ── Emit aggregated tool calls ───────────────────────────
         let mut content_blocks: Vec<ContentBlock> = Vec::new();
@@ -1264,7 +1295,7 @@ mod tests {
         assert_eq!(wire.think, Some(false));
     }
 
-    /// `reasoning_mode = "none"` (#7946) must read as `think: false`.
+    /// `reasoning_effort = "none"` (#7946) must read as `think: false`.
     ///
     /// The kernel materialises a `ThinkingConfig` to carry that mode — it has
     /// to, so the OpenAI-compatible drivers can send their explicit non-think
@@ -1272,11 +1303,11 @@ mod tests {
     /// `think: true`, flipping chain-of-thought *on* for an agent that asked
     /// for the opposite.
     #[test]
-    fn build_request_think_field_false_for_reasoning_mode_none() {
+    fn build_request_think_field_false_for_reasoning_effort_none() {
         let driver = OllamaDriver::new(String::new(), "http://x".to_string());
         let mut r = req("qwen3:8b");
         r.thinking = Some(ThinkingConfig {
-            reasoning_mode: Some(librefang_types::config::ReasoningMode::None),
+            reasoning_effort: Some(librefang_types::config::ReasoningMode::none()),
             ..Default::default()
         });
         let wire = driver.build_request(&r).expect("build");
@@ -1285,16 +1316,16 @@ mod tests {
 
     /// Positive control: a graded mode leaves the pre-#7946 `think: true`.
     #[test]
-    fn build_request_think_field_true_for_a_graded_reasoning_mode() {
+    fn build_request_think_field_true_for_a_graded_reasoning_effort() {
         let driver = OllamaDriver::new(String::new(), "http://x".to_string());
         for mode in [
-            librefang_types::config::ReasoningMode::Low,
-            librefang_types::config::ReasoningMode::High,
-            librefang_types::config::ReasoningMode::Max,
+            librefang_types::config::ReasoningMode::low(),
+            librefang_types::config::ReasoningMode::high(),
+            librefang_types::config::ReasoningMode::max(),
         ] {
             let mut r = req("qwen3:8b");
             r.thinking = Some(ThinkingConfig {
-                reasoning_mode: Some(mode),
+                reasoning_effort: Some(mode.clone()),
                 ..Default::default()
             });
             let wire = driver.build_request(&r).expect("build");

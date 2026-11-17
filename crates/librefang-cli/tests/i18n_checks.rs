@@ -982,9 +982,10 @@ fn is_likely_i18n_key_literal(
 ) -> bool {
     // Not i18n keys: literals whose leading segment collides with a real key prefix.
     // `agent-types` is the operator agent-type directory name (`~/.librefang/agent-types`), not a message id.
-    // `mcp-servers` is a `manifest_versions.change_source` token in `MANIFEST_CHANGE_SOURCES`
-    // (`screens/agents.rs`, #8604); its label lives at `tui-agents-manifest-source-mcp-servers`.
-    const TECHNICAL_FALSE_POSITIVES: &[&str] = &["daemon-reload", "agent-types", "mcp-servers"];
+    // `mcp-servers` is a `manifest_versions.change_source` token in `MANIFEST_CHANGE_SOURCES` (`screens/agents.rs`, #8604); its label lives at `tui-agents-manifest-source-mcp-servers`.
+    // `agent-tool` is the same kind of token in `TEMPLATE_CHANGE_SOURCES` (`screens/templates.rs`, #8609); its label lives at `tui-templates-source-agent-tool`.
+    const TECHNICAL_FALSE_POSITIVES: &[&str] =
+        &["daemon-reload", "agent-types", "mcp-servers", "agent-tool"];
 
     let Some((prefix, _)) = literal.split_once('-') else {
         return false;
@@ -1010,10 +1011,11 @@ fn is_dynamic_i18n_key(key: &str) -> bool {
         || (key.starts_with("tui-triggers-type-")
             && (key.ends_with("-name") || key.ends_with("-desc")))
         || key.starts_with("tui-skills-sort-")
-        // The manifest-source labels are one key per token in the store's closed inventory, built
-        // from `MANIFEST_CHANGE_SOURCES` in `screens/agents.rs` (#8604) rather than spelled out in
-        // callers, so no single literal carries these names. `collect_dynamic_required_locale_keys`
-        // derives the exact 16 from that const and requires them in every locale.
+        // The template-source labels are one key per token in the template store's closed inventory, built from `TEMPLATE_CHANGE_SOURCES` in `screens/templates.rs` (#8609) rather than spelled out in callers, so no single literal carries these names.
+        // `collect_dynamic_required_locale_keys` derives the exact keys from that const and requires them in every locale.
+        || key.starts_with("tui-templates-source-")
+        // The manifest-source labels are one key per token in the store's closed inventory, built from `MANIFEST_CHANGE_SOURCES` in `screens/agents.rs` (#8604) rather than spelled out in callers, so no single literal carries these names.
+        // `collect_dynamic_required_locale_keys` derives the exact 16 from that const and requires them in every locale.
         || key.starts_with("tui-agents-manifest-source-")
 }
 
@@ -1047,6 +1049,12 @@ fn collect_dynamic_required_locale_keys(manifest_dir: &Path) -> std::collections
         let slug = template_slug(name);
         keys.insert(format!("tui-templates-name-{slug}"));
         keys.insert(format!("tui-templates-desc-{slug}"));
+    }
+
+    // The template-source labels (#8609) are built as `tui-templates-source-<token>` from this const, so the exact key set follows the token inventory.
+    // Adding a token without adding its key in a locale fails `test_locales_cover_used_i18n_keys` instead of rendering `[key]`.
+    for token in extract_const_array_string_literals(&templates_rs, "TEMPLATE_CHANGE_SOURCES") {
+        keys.insert(format!("tui-templates-source-{token}"));
     }
 
     let triggers_rs = fs::read_to_string(manifest_dir.join("src/tui/screens/triggers.rs")).unwrap();
@@ -1423,15 +1431,15 @@ const IDENTICAL_VALUE_EXEMPTIONS: &[IdenticalValueExemption] = &[
         ],
     },
     IdenticalValueExemption {
-        reason: "Trigger-type names as they appear on the wire and in `agent.toml`. An operator matching a screen against a config file needs the same spelling in both.",
-        locales: &["uk", "zh-CN"],
+        reason: "Trigger-type names as they appear on the wire and in `agent.toml`. An operator matching a screen against a config file needs the same spelling in both, and Ukrainian, Chinese and Spanish keep the wire name.",
+        locales: &["uk", "zh-CN", "es"],
         keys: &[
             "tui-triggers-type-lifecycle-name",
         ],
     },
     IdenticalValueExemption {
-        reason: "Only the punctuation differs from English, and Korean and Ukrainian use the same ASCII colon, parentheses and brackets that English does. zh-CN differs solely because it uses the fullwidth forms.",
-        locales: &["ko", "uk"],
+        reason: "Only the punctuation differs from English, and Korean, Ukrainian and Spanish use the same ASCII colon, parentheses and brackets that English does. zh-CN differs solely because it uses the fullwidth forms.",
+        locales: &["ko", "uk", "es"],
         keys: &[
             "agent-spawn-id-label",
             "automation-workflow-created-id",
@@ -1444,8 +1452,8 @@ const IDENTICAL_VALUE_EXEMPTIONS: &[IdenticalValueExemption] = &[
         ],
     },
     IdenticalValueExemption {
-        reason: "Binary and decimal unit abbreviations. Korean and Chinese write these in Latin script; only Ukrainian transliterates them into Cyrillic.",
-        locales: &["ko", "zh-CN"],
+        reason: "Binary and decimal unit abbreviations. Korean, Chinese and Spanish write these in Latin script; only Ukrainian transliterates them into Cyrillic.",
+        locales: &["ko", "zh-CN", "es"],
         keys: &[
             "format-bytes-b",
             "format-bytes-gib",
@@ -1456,8 +1464,8 @@ const IDENTICAL_VALUE_EXEMPTIONS: &[IdenticalValueExemption] = &[
         ],
     },
     IdenticalValueExemption {
-        reason: "A language runtime's own name followed by its version. Korean and Ukrainian keep the upstream spelling.",
-        locales: &["ko", "uk"],
+        reason: "A language runtime's own name followed by its version. Korean, Ukrainian and Spanish keep the upstream spelling.",
+        locales: &["ko", "uk", "es"],
         keys: &[
             "doctor-check-node-version",
             "doctor-check-python-version",
@@ -1474,8 +1482,8 @@ const IDENTICAL_VALUE_EXEMPTIONS: &[IdenticalValueExemption] = &[
         ],
     },
     IdenticalValueExemption {
-        reason: "`Hand` is a LibreFang product concept. Ukrainian and Chinese keep the English term; Korean transliterates it. This is a terminology decision that has not been made explicitly — it is recorded here rather than settled, so that flipping it is one edit in one place.",
-        locales: &["uk", "zh-CN"],
+        reason: "`Hand` is a LibreFang product concept. Ukrainian, Chinese and Spanish keep the English term; Korean transliterates it. This is a terminology decision that has not been made explicitly — it is recorded here rather than settled, so that flipping it is one edit in one place.",
+        locales: &["uk", "zh-CN", "es"],
         keys: &[
             "label-hands",
             "label-header-hand",
@@ -1485,10 +1493,73 @@ const IDENTICAL_VALUE_EXEMPTIONS: &[IdenticalValueExemption] = &[
         ],
     },
     IdenticalValueExemption {
-        reason: "`Hand` is a LibreFang product concept. Ukrainian and Chinese keep the English term; Korean transliterates it. This is a terminology decision that has not been made explicitly — it is recorded here rather than settled, so that flipping it is one edit in one place.",
-        locales: &["zh-CN"],
+        reason: "`Hand` is a LibreFang product concept. Ukrainian, Chinese and Spanish keep the English term; Korean transliterates it. This is a terminology decision that has not been made explicitly — it is recorded here rather than settled, so that flipping it is one edit in one place.",
+        locales: &["zh-CN", "es"],
         keys: &[
             "label-hand",
+        ],
+    },
+    IdenticalValueExemption {
+        reason: "Spain Spanish keeps these identical on purpose: identical cognates (`Local`, `General`, `Tutor`, `Configurable`, `Roles`, `No`, `auto`, `Chat`), technical loans and labels the product does not translate (`daemon`, `runtime`, `prompt`, `token`, `ALIAS`, `Hash`, `Caps`, `Config`, `Ext`, `LibreFang Doctor`), fixed status codes, and values made only of placeables, units or padding with no prose.",
+        locales: &["es"],
+        keys: &[
+            "automation-trigger-info-prompt",
+            "chat-runner-error-prefix",
+            "cmd-goal-error",
+            "config-test-ok",
+            "doctor-title",
+            "format-uptime-dh",
+            "format-uptime-dhm",
+            "format-uptime-hm",
+            "format-uptime-hms",
+            "format-uptime-ms",
+            "format-uptime-s",
+            "group-header-roles",
+            "group-label-roles",
+            "hand-error-prefix",
+            "hand-install-deps-dep-failed",
+            "label-daemon",
+            "label-header-alias",
+            "label-header-prompt",
+            "label-header-token",
+            "label-no",
+            "mcp-header-template-id",
+            "skill-dry-run-repo",
+            "skill-prompt-runtime",
+            "skill-validated-runtime",
+            "status-uptime-format",
+            "tui-agents-detail-caps",
+            "tui-audit-header-hash",
+            "tui-chat-mode-daemon",
+            "tui-chat-tokens-estimated",
+            "tui-chat-tool-error",
+            "tui-extensions-status-error",
+            "tui-goals-phase-actv",
+            "tui-goals-phase-canc",
+            "tui-goals-phase-max-iterations",
+            "tui-goals-phase-paused",
+            "tui-goals-phase-pend",
+            "tui-goals-phase-rate-limited",
+            "tui-goals-tick-value",
+            "tui-groups-header-roles",
+            "tui-init-complete-label-daemon",
+            "tui-init-hint-local",
+            "tui-init-migrate-opt-no",
+            "tui-init-routing-opt-no",
+            "tui-logs-badge-auto",
+            "tui-logs-filter-error",
+            "tui-logs-filter-info",
+            "tui-security-section-configurable",
+            "tui-settings-providers-status-local",
+            "tui-skills-header-runtime",
+            "tui-tab-chat",
+            "tui-tab-extensions",
+            "tui-tab-settings",
+            "tui-templates-cat-general",
+            "tui-templates-name-tutor",
+            "tui-triggers-review-prompt",
+            "tui-workflows-badge-auto",
+            "tui-workflows-step-field-prompt",
         ],
     },
 ];

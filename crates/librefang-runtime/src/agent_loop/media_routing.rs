@@ -292,7 +292,7 @@ mod engine {
                 },
             };
             self.engine
-                .describe_image(&attachment)
+                .describe_image(&attachment, None)
                 .await
                 .map(|u| u.description)
         }

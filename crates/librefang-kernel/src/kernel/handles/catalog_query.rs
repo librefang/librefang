@@ -27,6 +27,25 @@ impl LibreFangKernel {
             .unwrap_or_default()
     }
 
+    /// Inherent mirror of [`kernel_handle::CatalogQuery::reasoning_policy_for`]
+    /// (#8591) so `LibreFangKernel`'s own `CompletionRequest`-construction
+    /// sites can resolve the model's declared reasoning policy without
+    /// bringing the `CatalogQuery` trait into scope.
+    ///
+    /// Reads the **effective** policy, so an operator's `model_overrides.json`
+    /// declaration participates in coercion and in the wire gate exactly like
+    /// a catalog declaration does.
+    pub(crate) fn lookup_reasoning_policy(
+        &self,
+        model: &str,
+    ) -> librefang_types::config::ReasoningEffortPolicy {
+        let catalog = self.model_catalog_ref().load();
+        catalog
+            .find_model(model)
+            .map(|entry| catalog.effective_reasoning_policy(entry))
+            .unwrap_or_default()
+    }
+
     /// Inherent mirror of [`kernel_handle::CatalogQuery::vision_support_for`] (#6010, refs #7957).
     ///
     /// Resolves what the catalog actually *knows* about the model's image-input support, honouring operator capability overrides (#4745).
@@ -40,6 +59,10 @@ impl LibreFangKernel {
 impl kernel_handle::CatalogQuery for LibreFangKernel {
     fn reasoning_echo_policy_for(&self, model: &str) -> ReasoningEchoPolicy {
         self.lookup_reasoning_echo_policy(model)
+    }
+
+    fn reasoning_policy_for(&self, model: &str) -> librefang_types::config::ReasoningEffortPolicy {
+        self.lookup_reasoning_policy(model)
     }
 
     fn vision_support_for(&self, model: &str) -> VisionSupport {

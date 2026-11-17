@@ -17,10 +17,11 @@
 //!
 //! The Python SDK (`librefang_sdk.py`) provides a helper to handle this protocol.
 
+use librefang_subprocess::{read_capped_line, Line};
 use std::path::Path;
 use std::process::Stdio;
 use std::time::Duration;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use tracing::{debug, error, warn};
 
@@ -31,6 +32,24 @@ use crate::stderr_log::trim_for_log;
 /// — changing this string breaks downstream log filters and is pinned by
 /// the `python_stderr_target_is_stable` unit test.
 pub const PYTHON_STDERR_TARGET: &str = "python_stderr";
+
+/// Cap on the stdout kept from one script run; past it the oldest lines are drained and discarded, so the final reply line survives.
+const MAX_STDOUT_BYTES: usize = 4 * 1024 * 1024;
+
+/// Cap on the stderr kept for error messages; only the most recent bytes are retained.
+const MAX_STDERR_TAIL_BYTES: usize = 64 * 1024;
+
+/// Trim `text` from the front so at most `max` bytes remain, cutting on a char boundary.
+fn keep_tail(text: &mut String, max: usize) {
+    if text.len() <= max {
+        return;
+    }
+    let mut cut = text.len() - max;
+    while !text.is_char_boundary(cut) {
+        cut += 1;
+    }
+    text.drain(..cut);
+}
 
 /// Error type for Python runtime operations.
 #[derive(Debug, thiserror::Error)]
@@ -351,33 +370,62 @@ async fn run_python_with_stdin(
             }
         };
 
+        // Drain both pipes concurrently with the write. Reading stdout to EOF before touching stderr deadlocks as soon as the script fills the stderr pipe buffer (~64 KiB) while stdout is still open: the script blocks on its stderr write and never closes stdout.
+        // Both readers go through `read_capped_line`, so a single line without a newline cannot grow host memory past its cap either.
         let read_stdout = async {
-            let mut stdout_reader = BufReader::new(stdout);
-            let mut stdout_lines = Vec::new();
-            let mut line = String::new();
+            let mut reader = BufReader::new(stdout);
+            let mut stdout_lines: std::collections::VecDeque<String> =
+                std::collections::VecDeque::new();
+            let mut stored_bytes = 0usize;
+            let mut truncated = false;
+            // Set while the remainder of an over-cap line is still arriving, so that remainder is not stored as a line of its own.
+            let mut in_overlong_line = false;
+            let mut buf = Vec::new();
             loop {
-                line.clear();
-                match stdout_reader.read_line(&mut line).await {
-                    Ok(0) => break,
-                    Ok(_) => stdout_lines.push(line.trim_end().to_string()),
+                match read_capped_line(&mut reader, &mut buf, MAX_STDOUT_BYTES).await {
+                    Ok(Line::Eof) => break,
+                    Ok(Line::TooLong) => {
+                        in_overlong_line = true;
+                        truncated = true;
+                    }
+                    Ok(Line::Data(line)) => {
+                        if std::mem::take(&mut in_overlong_line) {
+                            continue;
+                        }
+                        let line = line.trim_end().to_string();
+                        stored_bytes += line.len();
+                        stdout_lines.push_back(line);
+                        // Keep draining so the child never blocks, but retain only the most recent lines: `parse_python_output` takes the reply from the last JSON line, so the oldest output is what gets dropped.
+                        while stored_bytes > MAX_STDOUT_BYTES && stdout_lines.len() > 1 {
+                            if let Some(old) = stdout_lines.pop_front() {
+                                stored_bytes -= old.len();
+                            }
+                            truncated = true;
+                        }
+                    }
                     Err(e) => {
                         warn!("Python stdout read error: {e}");
                         break;
                     }
                 }
             }
-            stdout_lines
+            if truncated {
+                warn!(
+                    script = %script_path,
+                    "Python stdout exceeded {MAX_STDOUT_BYTES} bytes; earlier or over-long lines were discarded"
+                );
+            }
+            Vec::from(stdout_lines)
         };
 
         let read_stderr = async {
-            let mut stderr_reader = BufReader::new(stderr);
+            let mut reader = BufReader::new(stderr);
             let mut stderr_text = String::new();
-            let mut stderr_line = String::new();
+            let mut buf = Vec::new();
             loop {
-                stderr_line.clear();
-                match stderr_reader.read_line(&mut stderr_line).await {
-                    Ok(0) => break,
-                    Ok(_) => {
+                match read_capped_line(&mut reader, &mut buf, MAX_STDERR_TAIL_BYTES).await {
+                    Ok(Line::Eof) => break,
+                    Ok(Line::Data(stderr_line)) => {
                         // Stream each non-empty line to tracing as it arrives so operators can monitor long-running Python tools live (#3256).
                         // The full line stays in `stderr_text` either way — the post-exit `debug!` summary below is independent.
                         //
@@ -391,6 +439,13 @@ async fn run_python_with_stdin(
                             );
                         }
                         stderr_text.push_str(&stderr_line);
+                        stderr_text.push('\n');
+                        keep_tail(&mut stderr_text, MAX_STDERR_TAIL_BYTES);
+                    }
+                    // An over-cap slice of a line with no newline (a `\r` progress bar): keep it in the bounded tail, which is all the error message ever shows.
+                    Ok(Line::TooLong) => {
+                        stderr_text.push_str(&String::from_utf8_lossy(&buf));
+                        keep_tail(&mut stderr_text, MAX_STDERR_TAIL_BYTES);
                     }
                     Err(_) => break,
                 }
@@ -630,6 +685,107 @@ print(json.dumps({"type": payload.get("type"), "message": payload.get("message")
 
         assert_eq!(output["type"], "ingest");
         assert_eq!(output["message"], "hello");
+    }
+
+    #[test]
+    fn keep_tail_retains_the_last_bytes_on_a_char_boundary() {
+        let mut s = "abcdef".to_string();
+        keep_tail(&mut s, 3);
+        assert_eq!(s, "def");
+        let mut s = "aéb".to_string(); // 'é' is two bytes
+        keep_tail(&mut s, 2);
+        assert_eq!(s, "b");
+    }
+
+    #[tokio::test]
+    async fn chatty_stderr_does_not_deadlock_before_stdout_closes() {
+        let mut config = PythonConfig::default();
+        if std::process::Command::new(&config.interpreter)
+            .arg("--version")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_err()
+        {
+            eprintln!("Skipping: python interpreter unavailable");
+            return;
+        }
+        config.timeout_secs = 20;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let script_path = tmp.path().join("chatty.py");
+        // 1 MiB of stderr before the reply, far past any pipe buffer, plus a non-UTF-8 byte.
+        std::fs::write(
+            &script_path,
+            r#"import json
+import sys
+
+sys.stdin.read()
+sys.stderr.buffer.write(b"\xff progress\n")
+for _ in range(16 * 1024):
+    sys.stderr.write("x" * 63 + "\n")
+sys.stderr.flush()
+print(json.dumps({"type": "response", "text": "done"}))
+"#,
+        )
+        .unwrap();
+
+        let started = std::time::Instant::now();
+        let result = run_python_agent(
+            script_path.to_str().unwrap(),
+            "agent-1",
+            "hello",
+            &serde_json::json!({}),
+            &config,
+        )
+        .await
+        .expect("script should finish instead of timing out");
+        assert_eq!(result.response, "done");
+        assert!(started.elapsed() < Duration::from_secs(15));
+    }
+
+    /// Output past the stdout cap drops the oldest lines, never the final reply line.
+    #[tokio::test]
+    async fn stdout_past_the_cap_keeps_the_final_reply() {
+        let mut config = PythonConfig::default();
+        if std::process::Command::new(&config.interpreter)
+            .arg("--version")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_err()
+        {
+            eprintln!("Skipping: python interpreter unavailable");
+            return;
+        }
+        config.timeout_secs = 20;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let script_path = tmp.path().join("noisy.py");
+        // 6 MiB of debug output on stdout, then the JSON reply.
+        std::fs::write(
+            &script_path,
+            r#"import json
+import sys
+
+sys.stdin.read()
+for _ in range(96 * 1024):
+    sys.stdout.write("d" * 63 + "\n")
+print(json.dumps({"type": "response", "text": "final"}))
+"#,
+        )
+        .unwrap();
+
+        let result = run_python_agent(
+            script_path.to_str().unwrap(),
+            "agent-1",
+            "hello",
+            &serde_json::json!({}),
+            &config,
+        )
+        .await
+        .expect("script should succeed");
+        assert_eq!(result.response, "final");
     }
 
     /// A script that never reads stdin used to block the input write forever once the input outgrew the pipe buffer, because the write ran before the deadline started.

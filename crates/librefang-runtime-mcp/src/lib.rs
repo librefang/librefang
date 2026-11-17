@@ -1376,6 +1376,12 @@ fn parse_sse_read_resource(resp: Option<serde_json::Value>) -> String {
 // McpConnection implementation
 // ---------------------------------------------------------------------------
 
+/// Upper bound on the MCP `initialize` round-trip.
+///
+/// Without it a server that accepts the connection (or a child that starts) but never answers `initialize` hangs the connect forever, and with it every server connected after it in the same sequential loop.
+/// It is twice the 60 s bound on the `tools/list` that follows because a stdio launcher such as `npx -y` or `uvx` fetches the package on a cold cache before the server can answer, and that download happens inside this window.
+const MCP_INITIALIZE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
 impl McpConnection {
     /// Connect to an MCP server, perform handshake, and discover tools.
     pub async fn connect(config: McpServerConfig) -> Result<Self, String> {
@@ -1384,7 +1390,8 @@ impl McpConnection {
         let roots = config.roots.clone();
         let (inner, discovered_tools) = match &config.transport {
             McpTransport::Stdio { command, args } => {
-                Self::connect_stdio(command, args, &config.env, roots).await?
+                Self::connect_stdio(command, args, &config.env, roots, MCP_INITIALIZE_TIMEOUT)
+                    .await?
             }
             McpTransport::Sse { url } => {
                 let headers = Self::resolve_header_templates(&config.headers, &config.env)?;
@@ -1487,6 +1494,7 @@ impl McpConnection {
         args: &[String],
         extra_env: &[String],
         roots: Vec<String>,
+        init_timeout: std::time::Duration,
     ) -> Result<(McpInner, Option<Vec<rmcp::model::Tool>>), String> {
         use rmcp::transport::{ConfigureCommandExt, TokioChildProcess};
         use rmcp::ServiceExt;
@@ -1623,18 +1631,26 @@ impl McpConnection {
             tokio::spawn(drain_child_stderr(stderr, server_name_for_log));
         }
 
-        let client = if roots.is_empty() {
-            ().into_dyn()
-                .serve(transport)
-                .await
-                .map_err(|e| format!("MCP handshake failed for '{resolved_command}': {e}"))?
-        } else {
-            RootsClientHandler::new(roots)
-                .into_dyn()
-                .serve(transport)
-                .await
-                .map_err(|e| format!("MCP handshake failed for '{resolved_command}': {e}"))?
+        let serve = async {
+            if roots.is_empty() {
+                ().into_dyn().serve(transport).await
+            } else {
+                RootsClientHandler::new(roots)
+                    .into_dyn()
+                    .serve(transport)
+                    .await
+            }
         };
+        // Dropping the timed-out future drops the transport, and `kill_on_drop` reaps the child.
+        let client = tokio::time::timeout(init_timeout, serve)
+            .await
+            .map_err(|_| {
+                format!(
+                    "MCP initialize timed out after {}s for '{resolved_command}'",
+                    init_timeout.as_secs_f32()
+                )
+            })?
+            .map_err(|e| format!("MCP handshake failed for '{resolved_command}': {e}"))?;
 
         // Discover tools via rmcp (with timeout)
         let timeout = std::time::Duration::from_secs(60);
@@ -1877,14 +1893,24 @@ impl McpConnection {
 
         let transport = StreamableHttpClientTransport::from_config(config);
 
-        let serve_result = if roots.is_empty() {
-            ().into_dyn().serve(transport).await
-        } else {
-            RootsClientHandler::new(roots)
-                .into_dyn()
-                .serve(transport)
-                .await
+        let serve = async {
+            if roots.is_empty() {
+                ().into_dyn().serve(transport).await
+            } else {
+                RootsClientHandler::new(roots)
+                    .into_dyn()
+                    .serve(transport)
+                    .await
+            }
         };
+        let serve_result = tokio::time::timeout(MCP_INITIALIZE_TIMEOUT, serve)
+            .await
+            .map_err(|_| {
+                format!(
+                    "MCP initialize timed out after {}s for Streamable HTTP '{url}'",
+                    MCP_INITIALIZE_TIMEOUT.as_secs()
+                )
+            })?;
         match serve_result {
             Ok(client) => {
                 // Discover tools via rmcp (with timeout)
@@ -2342,14 +2368,28 @@ impl McpConnection {
         }
     }
 
+    /// Register one tool under its namespaced name.
+    ///
+    /// Returns `false` (and registers nothing) when the namespaced name is already taken, e.g. by `foo-bar` and `foo_bar`, which normalize to the same name.
+    /// Advertising two definitions with one name makes every provider reject the whole request ("tool names must be unique"), and the second insert would silently re-route calls for the first, so the first registration wins.
     fn register_tool(
         &mut self,
         raw_name: &str,
         description: &str,
         input_schema: serde_json::Value,
-    ) {
+    ) -> bool {
         let server_name = &self.config.name;
         let namespaced = format_mcp_tool_name(server_name, raw_name);
+        if let Some(existing) = self.original_names.get(&namespaced) {
+            warn!(
+                server = %server_name,
+                tool = %raw_name,
+                existing = %existing,
+                namespaced = %namespaced,
+                "MCP tool name collides with an already-registered tool after namespacing; skipping it"
+            );
+            return false;
+        }
         self.original_names
             .insert(namespaced.clone(), raw_name.to_string());
         self.tools.push(ToolDefinition {
@@ -2357,6 +2397,7 @@ impl McpConnection {
             description: format!("[MCP:{server_name}] {description}"),
             input_schema,
         });
+        true
     }
 
     /// Explicitly close the MCP connection and wait for the underlying
@@ -2876,8 +2917,10 @@ impl McpConnection {
         description: &str,
         input_schema: serde_json::Value,
     ) {
-        self.register_tool(raw_name, description, input_schema);
-        self.resource_ops.insert(raw_name.to_string());
+        // A real server tool with this name was registered first and wins: only mark the name for interception when the synthetic tool actually took it, so calls to the server's own tool keep going to `tools/call`.
+        if self.register_tool(raw_name, description, input_schema) {
+            self.resource_ops.insert(raw_name.to_string());
+        }
     }
 
     /// Route an intercepted synthetic resource tool to the matching
@@ -5417,6 +5460,88 @@ mod tests {
         assert!(entry.split_once('=').is_none());
     }
 
+    fn collision_test_conn() -> McpConnection {
+        McpConnection {
+            config: McpServerConfig {
+                name: "srv".to_string(),
+                transport: McpTransport::HttpCompat {
+                    base_url: "http://127.0.0.1:8080".to_string(),
+                    headers: vec![],
+                    tools: vec![],
+                },
+                timeout_secs: 30,
+                env: vec![],
+                headers: vec![],
+                oauth_provider: None,
+                oauth_config: None,
+                taint_scanning: true,
+                taint_policy: None,
+                taint_rule_sets: empty_taint_rule_sets_handle(),
+                roots: vec![],
+            },
+            tools: Vec::new(),
+            original_names: HashMap::new(),
+            inner: McpInner::HttpCompat {
+                client: librefang_http::proxied_client(),
+            },
+            auth_state: crate::mcp_oauth::McpAuthState::NotRequired,
+            resource_ops: std::collections::HashSet::new(),
+            server_advertises_resources: false,
+            health_reporter: None,
+        }
+    }
+
+    /// Two raw names that normalize to the same namespaced name must not both be advertised: providers reject duplicate tool names for the whole request.
+    #[test]
+    fn test_register_tool_skips_normalized_name_collision() {
+        let mut conn = collision_test_conn();
+        assert!(conn.register_tool("get-user", "first", serde_json::json!({"type": "object"})));
+        assert!(!conn.register_tool("get_user", "second", serde_json::json!({"type": "object"})));
+        let names: Vec<&str> = conn.tools.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(names, vec!["mcp_srv_get_user"]);
+        assert_eq!(
+            conn.original_names
+                .get("mcp_srv_get_user")
+                .map(String::as_str),
+            Some("get-user"),
+            "the first registration must keep its raw name for dispatch"
+        );
+    }
+
+    /// A server tool literally named `read_resource` wins over the synthetic resource tool and is not intercepted into `resources/read`.
+    #[test]
+    fn test_synthetic_resource_tool_does_not_shadow_real_tool() {
+        let mut conn = collision_test_conn();
+        conn.register_tool(
+            "read_resource",
+            "server's own",
+            serde_json::json!({"type": "object"}),
+        );
+        conn.register_resource_tools();
+
+        let names: Vec<&str> = conn.tools.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(
+            names
+                .iter()
+                .filter(|n| **n == "mcp_srv_read_resource")
+                .count(),
+            1,
+            "read_resource must be advertised once: {names:?}"
+        );
+        assert!(names.contains(&"mcp_srv_list_resources"));
+        assert!(
+            !conn.resource_ops.contains("read_resource"),
+            "the server's real read_resource tool must not be intercepted"
+        );
+        assert!(conn.resource_ops.contains("list_resources"));
+        let real = conn
+            .tools
+            .iter()
+            .find(|t| t.name == "mcp_srv_read_resource")
+            .unwrap();
+        assert!(real.description.contains("server's own"));
+    }
+
     #[test]
     fn test_http_compat_tool_registration() {
         let mut conn = McpConnection {
@@ -6784,6 +6909,31 @@ mod tests {
         assert!(msg.contains("Ruby"), "ruby hint must point at Ruby: {msg}");
     }
 
+    /// A child that starts but never answers `initialize` must fail the connect within the initialize timeout instead of hanging it forever.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn connect_stdio_times_out_when_initialize_never_answers() {
+        let started = std::time::Instant::now();
+        let result = McpConnection::connect_stdio(
+            "sleep",
+            &["30".to_string()],
+            &[],
+            Vec::new(),
+            std::time::Duration::from_millis(300),
+        )
+        .await;
+        let err = match result {
+            Err(e) => e,
+            Ok(_) => panic!("a server that never answers initialize must not connect"),
+        };
+        assert!(err.contains("initialize timed out"), "{err}");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(10),
+            "connect must give up at the initialize timeout, took {:?}",
+            started.elapsed()
+        );
+    }
+
     /// End-to-end guard that the spawn site at `connect_stdio` actually
     /// routes through `format_spawn_error`. The unit tests above only
     /// exercise the helper in isolation; without this test, a regression
@@ -6794,7 +6944,8 @@ mod tests {
         // A command guaranteed not to exist on any reasonable host. The UUID
         // suffix prevents collision with an exotic developer setup.
         let bogus = "librefang-mcp-runtime-that-does-not-exist-1c9a186cf5d68d93";
-        let result = McpConnection::connect_stdio(bogus, &[], &[], Vec::new()).await;
+        let result =
+            McpConnection::connect_stdio(bogus, &[], &[], Vec::new(), MCP_INITIALIZE_TIMEOUT).await;
         // The Ok variant `(McpInner, Option<Vec<Tool>>)` doesn't implement
         // Debug, so unwrap via `match` rather than `.expect_err`.
         let err = match result {

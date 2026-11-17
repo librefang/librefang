@@ -73,6 +73,7 @@ fn blank_session() -> Session {
         label: None,
         parent_session_id: None,
         model_override: None,
+        reasoning_effort: None,
         messages_generation: 0,
         last_repaired_generation: None,
         peer_id: None,

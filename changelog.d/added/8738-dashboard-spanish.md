@@ -1,0 +1,1 @@
+The dashboard ships a complete Spanish (Spain) catalog and both language pickers expose it; key parity, plural forms and interpolation placeholders are covered by the existing i18n checks. (#8738) (@DaBlitzStein)

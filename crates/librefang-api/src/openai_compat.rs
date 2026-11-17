@@ -6,6 +6,8 @@
 //!
 //! Supports both streaming (SSE) and non-streaming responses.
 
+use crate::error::KernelError;
+use crate::middleware::{AuthenticatedApiUser, UserRole};
 use crate::routes::AppState;
 use axum::extract::State;
 use axum::http::StatusCode;
@@ -360,6 +362,7 @@ pub async fn chat_completions(
         }
 
         // Streaming response
+        let model = agent_name.clone();
         return match stream_response(
             state,
             agent_id,
@@ -371,7 +374,10 @@ pub async fn chat_completions(
         .await
         {
             Ok(sse) => sse.into_response(),
-            Err(e) => streaming_setup_error_response(&e),
+            Err(e) => {
+                warn!("OpenAI compat: streaming setup error: {e}");
+                agent_error_response(&e, &model)
+            }
         };
     }
 
@@ -415,37 +421,50 @@ pub async fn chat_completions(
         }
         Err(e) => {
             warn!("OpenAI compat: agent error: {e}");
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({
-                    "error": {
-                        "message": "Agent processing failed",
-                        "type": "server_error"
-                    }
-                })),
-            )
-                .into_response()
+            agent_error_response(&e, &agent_name)
         }
     }
 }
 
-/// Build the client-facing 500 response for a streaming-setup failure.
+/// Map a kernel error from a completion request to an OpenAI-shaped error response.
 ///
-/// The detailed error is logged server-side; the client only sees a generic
-/// message so internal kernel/provider detail is not leaked over the wire.
-/// This mirrors the non-streaming branch's error handling.
-fn streaming_setup_error_response(detail: &str) -> axum::response::Response {
-    warn!("OpenAI compat: streaming setup error: {detail}");
-    (
-        StatusCode::INTERNAL_SERVER_ERROR,
-        Json(serde_json::json!({
-            "error": {
-                "message": "Agent processing failed",
-                "type": "server_error"
-            }
-        })),
-    )
-        .into_response()
+/// The two deterministic client-side conditions get the status the REST twin (`POST /api/agents/{id}/message`) gives them: an exhausted budget is 429 and a vanished agent is 404.
+/// OpenAI SDKs retry every 5xx with backoff, so reporting either as 500 would make the client retry a request that cannot succeed and hide the reason from it.
+/// Everything else stays a scrubbed 500: the detailed error is logged by the caller, and the client only sees a generic message so internal kernel/provider detail is not leaked over the wire.
+fn agent_error_response(error: &KernelError, model: &str) -> axum::response::Response {
+    use librefang_types::error::LibreFangError;
+    let (status, body) = match error {
+        KernelError::LibreFang(LibreFangError::QuotaExceeded(reason)) => (
+            StatusCode::TOO_MANY_REQUESTS,
+            serde_json::json!({
+                "error": {
+                    "message": format!("Agent budget exceeded: {reason}"),
+                    "type": "rate_limit_error",
+                    "code": "budget_exceeded"
+                }
+            }),
+        ),
+        KernelError::LibreFang(LibreFangError::AgentNotFound(_)) => (
+            StatusCode::NOT_FOUND,
+            serde_json::json!({
+                "error": {
+                    "message": format!("No agent found for model '{model}'"),
+                    "type": "invalid_request_error",
+                    "code": "model_not_found"
+                }
+            }),
+        ),
+        _ => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            serde_json::json!({
+                "error": {
+                    "message": "Agent processing failed",
+                    "type": "server_error"
+                }
+            }),
+        ),
+    };
+    (status, Json(body)).into_response()
 }
 
 /// Build a chunk with a delta and optional finish_reason, serialized to JSON.
@@ -623,7 +642,7 @@ async fn stream_response(
     message: &str,
     request_id: String,
     created: u64,
-) -> Result<axum::response::Response, String> {
+) -> Result<axum::response::Response, KernelError> {
     let kernel_handle: Arc<dyn KernelHandle> = state.kernel.clone();
 
     // Keep the JoinHandle: it is the only carrier of a mid-stream failure. The
@@ -635,8 +654,7 @@ async fn stream_response(
         .kernel
         .clone()
         .send_message_streaming_with_routing(agent_id, message, Some(kernel_handle))
-        .await
-        .map_err(|e| format!("Streaming setup failed: {e}"))?;
+        .await?;
 
     let (tx, stream_rx) = tokio::sync::mpsc::channel::<Result<SseEvent, Infallible>>(64);
 
@@ -727,9 +745,18 @@ async fn stream_response(
 
 /// GET /v1/models — List available agents as OpenAI model objects.
 #[utoipa::path(get, path = "/v1/models", tag = "openai", operation_id = "list_openai_models", responses((status = 200, description = "OpenAI-compatible model list", body = crate::types::JsonObject)))]
-pub async fn list_models(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+pub async fn list_models(
+    State(state): State<Arc<AppState>>,
+    api_user: Option<axum::Extension<AuthenticatedApiUser>>,
+) -> impl IntoResponse {
     // Read-only iteration: prefer cheap Arc clones over full manifest deep-copy (#3569).
     let agents = state.kernel.agent_registry().list_arcs();
+    // Owner scoping (#6753), mirroring `GET /api/agents`: a caller below Admin sees only the agents it authored.
+    // Admin/Owner callers and the trusted no-auth path (`api_user` is `None`) keep the full list.
+    let visible_to_caller = |author: &str| match api_user.as_ref() {
+        Some(user) if user.0.role < UserRole::Admin => author.eq_ignore_ascii_case(&user.0.name),
+        _ => true,
+    };
     let created = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
@@ -737,6 +764,7 @@ pub async fn list_models(State(state): State<Arc<AppState>>) -> impl IntoRespons
 
     let models: Vec<ModelObject> = agents
         .iter()
+        .filter(|e| visible_to_caller(&e.manifest.author))
         .map(|e| ModelObject {
             id: format!("librefang:{}", e.name),
             object: "model",
@@ -760,8 +788,10 @@ mod tests {
 
     #[tokio::test]
     async fn streaming_setup_error_scrubs_internal_detail() {
-        let raw = "Streaming setup failed: provider connection refused at 10.0.0.5:8443";
-        let resp = streaming_setup_error_response(raw);
+        let raw = librefang_types::error::LibreFangError::Internal(
+            "provider connection refused at 10.0.0.5:8443".to_string(),
+        );
+        let resp = agent_error_response(&KernelError::LibreFang(raw), "librefang:assistant");
         assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
 
         let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
@@ -775,6 +805,41 @@ mod tests {
         // The generic client-facing message is returned instead.
         assert!(body.contains("Agent processing failed"));
         assert!(body.contains("server_error"));
+    }
+
+    async fn error_body(resp: axum::response::Response) -> serde_json::Value {
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    #[tokio::test]
+    async fn budget_exceeded_maps_to_429_not_a_retryable_500() {
+        let err = KernelError::LibreFang(librefang_types::error::LibreFangError::QuotaExceeded(
+            "hourly budget of $1.00 reached".to_string(),
+        ));
+        let resp = agent_error_response(&err, "librefang:assistant");
+        assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+        let body = error_body(resp).await;
+        assert_eq!(body["error"]["type"], "rate_limit_error");
+        assert_eq!(body["error"]["code"], "budget_exceeded");
+    }
+
+    #[tokio::test]
+    async fn vanished_agent_maps_to_404_model_not_found() {
+        let err = KernelError::LibreFang(librefang_types::error::LibreFangError::AgentNotFound(
+            "0000".to_string(),
+        ));
+        let resp = agent_error_response(&err, "librefang:assistant");
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        let body = error_body(resp).await;
+        assert_eq!(body["error"]["type"], "invalid_request_error");
+        assert_eq!(body["error"]["code"], "model_not_found");
+        assert!(body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("librefang:assistant"));
     }
 
     #[test]

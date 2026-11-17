@@ -24,7 +24,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
-      - uses: Swatinem/rust-cache@a45951ff880207c249adf57334cf2e9bd81d6e1e # v2
+      - uses: Swatinem/rust-cache@c8037a86dde8214a8310e9f54a8fc61ab362aa31 # v2
         with:
           shared-key: contributors
       - name: Generate contributors and star history SVGs
@@ -44,7 +44,7 @@ jobs:
       - name: Create PR with updated SVGs
         if: steps.diff.outputs.changed == 'true'
         id: cpr
-        uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8
+        uses: peter-evans/create-pull-request@15733dbdfeedb4f7fdb73d13c6f5ac83b710fab8 # v8
         with:
           # Create the PR with a PAT, not the default GITHUB_TOKEN. Branch
           # pushes made by GITHUB_TOKEN do not trigger `on: pull_request`

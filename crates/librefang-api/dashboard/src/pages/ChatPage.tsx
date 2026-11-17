@@ -15,7 +15,7 @@ import { useMediaProviders } from "../lib/queries/media";
 import { useModels } from "../lib/queries/models";
 import { usePendingApprovals } from "../lib/queries/approvals";
 import { agentQueries, useAgentAvatarUrl, useAgents, useAgentSessions } from "../lib/queries/agents";
-import { useSessionStream } from "../lib/queries/sessions";
+import { useSessionDetails, useSessionStream } from "../lib/queries/sessions";
 import { useActiveHandsWhen } from "../lib/queries/hands";
 import { useChatCommands, type ChatCommand } from "../lib/queries/commands";
 import { backendCommandNames, commandLabel, menuCommands, shouldHoldSlashSend } from "../lib/chatCommands";
@@ -39,6 +39,8 @@ import { useTtsManager } from "../lib/tts";
 import { MessageCircle, Send, Square, Bot, User, RefreshCw, AlertCircle, Wifi, Sparkles, X, ArrowRight, ArrowLeft, Zap, ShieldAlert, CheckCircle, XCircle, Clock, Plus, Trash2, ChevronDown, Loader2, Copy, Volume2, Pause, Download, Brain, Eye, EyeOff, Mic, MicOff, Globe, Paperclip, FileText, Menu, Minus, CheckSquare } from "lucide-react";
 import { Badge } from "../components/ui/Badge";
 import { MarkdownContent } from "../components/ui/MarkdownContent";
+import { ReasoningEffortMenu } from "../components/ReasoningEffortMenu";
+import { modelReasoningEfforts } from "../lib/reasoningEffort";
 import {
   useUIStore,
   MIN_CHAT_SCALE,
@@ -58,6 +60,7 @@ import { Avatar } from "../components/ui/Avatar";
 import { canListAllAgents, useWhoami, whoamiPersonName } from "../lib/queries/authz";
 import { useUserAvatarUrl } from "../lib/queries/users";
 import { useMathPlugins } from "../lib/hooks/useMathPlugins";
+import { useRovingTabs } from "../lib/useRovingTabs";
 import {
   useCreateAgentSession,
   useDeleteAgentSession,
@@ -67,9 +70,19 @@ import {
   useStopAgent,
   useUploadAgentFile,
 } from "../lib/mutations/agents";
+import { useSetSessionReasoning } from "../lib/mutations/sessions";
 
 const isAuthUnavailable = (status?: string) =>
   !!status && status !== "configured" && status !== "validated_key" && status !== "configured_cli" && status !== "not_required" && status !== "auto_detected";
+
+// Tab↔panel wiring for the session strip (#8597). The message area is a
+// single panel whose contents follow the active session — switching tabs
+// swaps the conversation inside it rather than mounting one panel per tab —
+// so every tab controls the same panel and the panel is labelled by whichever
+// tab is selected. Ids are derived from the session id to stay unique.
+const CHAT_SESSION_PANEL_ID = "chat-session-panel";
+const chatSessionTabId = (sessionId: string) => `chat-session-tab-${sessionId}`;
+const CHAT_COMPOSER_ID = "chat-composer";
 
 /**
  * Format a chat message's timestamp for the message footer.
@@ -537,6 +550,11 @@ export function useChatMessages(
   const addSkillOutput = useUIStore((s) => s.addSkillOutput);
   const deepThinking = useUIStore((s) => s.deepThinking);
   const showThinkingProcess = useUIStore((s) => s.showThinkingProcess);
+  // The one-shot reasoning effort armed on the composer control. Read here
+  // rather than passed down, because `sendMessage` is the single point every
+  // caller funnels through (the slash-command completion list included).
+  const nextReasoningEffort = useUIStore((s) => s.nextReasoningEffort);
+  const setNextReasoningEffort = useUIStore((s) => s.setNextReasoningEffort);
 
   // Track the currently-viewed agent in a ref so async handlers registered
   // during a previous render can tell whether their target is still on screen.
@@ -945,6 +963,14 @@ export function useChatMessages(
     // the agent the user is now looking at.
     const sendAgentId = agentId;
 
+    // The one-shot reasoning effort is armed on the composer and spent here:
+    // this turn's frame (WS or HTTP fallback) carries it once as
+    // `reasoning_effort`, then the store clears so the next message falls back
+    // to the session pin / manifest default. `null` is not written to the
+    // frame — an unset override is not a statement about the turn.
+    const turnReasoningEffort = nextReasoningEffort ?? null;
+    if (turnReasoningEffort !== null) setNextReasoningEffort(null);
+
     const userMsg: ChatMessage = {
       id: makeMessageId("user"),
       role: "user",
@@ -974,6 +1000,7 @@ export function useChatMessages(
           options: {
             thinking: deepThinking,
             show_thinking: showThinkingProcess,
+            reasoning_effort: turnReasoningEffort,
             session_id: sessionId,
             attachments: hasAttachments ? attachments : undefined,
           },
@@ -1346,6 +1373,9 @@ export function useChatMessages(
           content: trimmed,
           thinking: deepThinking,
           show_thinking: showThinkingProcess,
+          // Per-message reasoning effort, only when the operator armed one
+          // this turn (see `turnReasoningEffort` above).
+          ...(turnReasoningEffort !== null ? { reasoning_effort: turnReasoningEffort } : {}),
           // Turn correlation id (#6390): the daemon echoes it on every terminal frame so late frames bind to this bubble, not the newest one.
           // Reuses the bubble id — no extra mapping needed.
           message_id: botMsg.id,
@@ -1365,7 +1395,7 @@ export function useChatMessages(
 
     // HTTP fallback — direct, no fake streaming
     await sendViaHttp();
-  }, [addSkillOutput, agentId, agents, chatCommands, commandsPending, clearHistory, deepThinking, finishTurnIfCurrent, flushStreamingContent, flushThinkingContent, onAutoPinSession, onDropRef, onModelSwitch, onNewSession, pendingCommandsRef, queryClient, scheduleStreamingFlush, scheduleThinkingFlush, sendAgentMessageMutation, sessionId, setAgentLoading, showThinkingProcess, t, updateAgentMessages, ws, wsConnected]);
+  }, [addSkillOutput, agentId, agents, chatCommands, commandsPending, clearHistory, deepThinking, finishTurnIfCurrent, flushStreamingContent, flushThinkingContent, nextReasoningEffort, onAutoPinSession, onDropRef, onModelSwitch, onNewSession, pendingCommandsRef, queryClient, scheduleStreamingFlush, scheduleThinkingFlush, sendAgentMessageMutation, sessionId, setAgentLoading, setNextReasoningEffort, showThinkingProcess, t, updateAgentMessages, ws, wsConnected]);
 
   // Abort an in-flight agent run. Hits the backend stop endpoint (which aborts
   // the tokio task on the kernel side) and optimistically finalizes any
@@ -1402,6 +1432,60 @@ export function useChatMessages(
   }, [agentId, updateAgentMessages, finishTurnIfCurrent, stopAgentMutation]);
 
   return { messages, isLoading, sendMessage, stopMessage, clearHistory, wsConnected, ariaAnnouncement, ariaNonce, compactedSummary, isCompacting };
+}
+
+/**
+ * The session's pinned reasoning level, with a local override for the window
+ * between a PATCH and the server echoing it back.
+ *
+ * Two sources, one answer:
+ *
+ *   - `serverValue` is the session record's `reasoning_effort`. `undefined`
+ *     means the field is absent — an older daemon that has no such column —
+ *     and reading it as "nothing pinned" would make a successful PATCH look
+ *     like it silently failed.
+ *   - the optimistic value is what this window last PATCHed. It wins until the
+ *     server echo catches up to it, the same "clear when the real value
+ *     arrives" shape the header's model switcher uses. The comparison is
+ *     normalized (trim + case): the route validates and normalizes the token,
+ *     so a request for `" High "` can come back as `"high"`, and the pill must
+ *     not keep showing the spelling it sent. When the server value changes to
+ *     something else — another client pinned a different level — the server is
+ *     the authority and the override is dropped with it.
+ *
+ * `clearOptimistic` is the error path: a failed PATCH must not keep claiming
+ * the level it never wrote.
+ */
+export function useOptimisticPinnedReasoning(
+  activeSessionId: string | null,
+  serverValue: string | null | undefined,
+) {
+  const [optimistic, setOptimistic] = useState<string | null | undefined>(undefined);
+
+  // The override belongs to one session; carrying it across a switch would
+  // paint the previous conversation's pin onto the new one.
+  useEffect(() => {
+    setOptimistic(undefined);
+  }, [activeSessionId]);
+
+  useEffect(() => {
+    const same =
+      optimistic === null
+        ? serverValue === null
+        : typeof optimistic === "string" &&
+          typeof serverValue === "string" &&
+          serverValue.trim().toLowerCase() ===
+            optimistic.trim().toLowerCase();
+    if (same) setOptimistic(undefined);
+  }, [serverValue, optimistic]);
+
+  const clearOptimistic = useCallback(() => setOptimistic(undefined), []);
+
+  return {
+    pinned: optimistic !== undefined ? optimistic : serverValue ?? null,
+    setOptimistic,
+    clearOptimistic,
+  };
 }
 
 // Message bubble component — memoized to skip re-render during streaming of other messages
@@ -2032,7 +2116,7 @@ function LimitReachedBanner({ onNewSession, creating }: { onNewSession: () => vo
 }
 
 // Input box - with shortcut hints
-function ChatInput({ agentId, onSend, onStop, isStreaming, disabled, inputDisabled, placeholder, authMissing, authStatus, providerName, supportsThinking, sttAvailable }: { agentId: string; onSend: (msg: string, attachments?: ChatAttachment[]) => void; onStop?: () => void; isStreaming?: boolean; disabled: boolean; inputDisabled?: boolean; placeholder: string; authMissing?: boolean; authStatus?: string; providerName?: string; supportsThinking?: boolean; sttAvailable?: boolean }) {
+function ChatInput({ agentId, onSend, onStop, isStreaming, disabled, inputDisabled, placeholder, authMissing, authStatus, providerName, supportsThinking, sttAvailable, reasoningEfforts, modelName, sessionReasoningEffort, onPinReasoning, onUnpinReasoning, reasoningPinPending, reasoningPinError, canPinReasoning }: { agentId: string; onSend: (msg: string, attachments?: ChatAttachment[]) => void; onStop?: () => void; isStreaming?: boolean; disabled: boolean; inputDisabled?: boolean; placeholder: string; authMissing?: boolean; authStatus?: string; providerName?: string; supportsThinking?: boolean; sttAvailable?: boolean; reasoningEfforts?: string[]; modelName?: string; sessionReasoningEffort?: string | null; onPinReasoning?: (level: string) => void; onUnpinReasoning?: () => void; reasoningPinPending?: boolean; reasoningPinError?: string | null; canPinReasoning?: boolean }) {
   const { t } = useTranslation();
   const [message, setMessage] = useState("");
   const [activeIndex, setActiveIndex] = useState(-1);
@@ -2059,6 +2143,8 @@ function ChatInput({ agentId, onSend, onStop, isStreaming, disabled, inputDisabl
   const showThinkingProcess = useUIStore((s) => s.showThinkingProcess);
   const setDeepThinking = useUIStore((s) => s.setDeepThinking);
   const setShowThinkingProcess = useUIStore((s) => s.setShowThinkingProcess);
+  const nextReasoningEffort = useUIStore((s) => s.nextReasoningEffort);
+  const setNextReasoningEffort = useUIStore((s) => s.setNextReasoningEffort);
 
   const voiceInput = useVoiceInput(useCallback((text: string) => {
     setMessage((prev) => (prev ? prev + " " + text : text));
@@ -2432,12 +2518,27 @@ function ChatInput({ agentId, onSend, onStop, isStreaming, disabled, inputDisabl
           {showThinkingProcess ? <Eye className="h-3 w-3" /> : <EyeOff className="h-3 w-3" />}
           <span>{t("chat.show_thinking")}</span>
         </button>
+        {/* Reasoning effort — the level the next message uses (one-shot) and the
+            level pinned to the session. Sits with the thinking controls because
+            it is the same decision at a finer grain. */}
+        <ReasoningEffortMenu
+          efforts={reasoningEfforts}
+          modelName={modelName}
+          nextReasoningEffort={nextReasoningEffort}
+          sessionReasoningEffort={sessionReasoningEffort ?? null}
+          onUseOnce={setNextReasoningEffort}
+          onPin={canPinReasoning ? onPinReasoning : undefined}
+          onUnpin={canPinReasoning ? onUnpinReasoning : undefined}
+          pinPending={reasoningPinPending}
+          pinError={reasoningPinError}
+        />
       </div>
       )}
       <div className="flex gap-2 sm:gap-3 items-start">
         <div className="flex-1">
           <textarea
             ref={textareaRef}
+            id={CHAT_COMPOSER_ID}
             value={message}
             onChange={(e) => setMessage(e.target.value)}
             onPaste={handlePaste}
@@ -3569,6 +3670,117 @@ export function ChatPage() {
   // this becomes non-null and the highlight is correct.
   const activeSessionId = deriveDropdownActiveSessionId(urlSessionId);
 
+  // ── Reasoning effort ─────────────────────────────────────────────────────
+  // The pin control only exists for an explicit session on a thinking-capable
+  // model; that is exactly when the level list and the session record are
+  // worth reading.
+  const canPinReasoning = !!selectedAgentId && !!activeSessionId;
+  // The active model's levels. Same cache entry as the header's model popover
+  // (`available: true`), so opening either warms both.
+  const reasoningModelsQuery = useModels(
+    { available: true },
+    { enabled: !!selectedAgentId && !!selectedAgent?.supports_thinking },
+  );
+  // The session's pinned level — server state, read back from the session
+  // record (the same `GET /api/sessions/{id}` the Sessions page uses). Absent
+  // on a daemon that predates the field, which the merge below reads as "the
+  // echo is silent", not as "nothing is pinned". Requested only while the
+  // composer's control can be shown: the control is hidden otherwise, and this
+  // read duplicates the initial history fetch until #8616 can expose the
+  // scalar on the agent-session payload.
+  const sessionReasoningQuery = useSessionDetails(activeSessionId ?? "", {
+    enabled: canPinReasoning && !!selectedAgent?.supports_thinking,
+  });
+  // A session pinned to another model reasons on THAT model's terms, not the
+  // agent's: `model_override` is stored as `provider/model` (splitn(2, '/') —
+  // a qualified id may itself contain a slash), or as a bare model name when
+  // only the model was pinned.
+  const reasoningModel = useMemo(() => {
+    const override = sessionReasoningQuery.data?.model_override?.trim() ?? "";
+    if (override) {
+      const slash = override.indexOf("/");
+      if (slash > 0 && slash < override.length - 1) {
+        return {
+          provider: override.slice(0, slash),
+          model: override.slice(slash + 1),
+        };
+      }
+      // A bare model name says nothing about the provider, and the catalog
+      // can hold the same id under two of them. Stay on the provider the
+      // agent runs on rather than matching the first catalog entry by id.
+      return { provider: selectedAgent?.model_provider ?? "", model: override };
+    }
+    return {
+      provider: selectedAgent?.model_provider ?? "",
+      model: selectedAgent?.model_name ?? "",
+    };
+  }, [
+    sessionReasoningQuery.data?.model_override,
+    selectedAgent?.model_provider,
+    selectedAgent?.model_name,
+  ]);
+  const reasoningEfforts = useMemo(
+    () =>
+      modelReasoningEfforts(
+        reasoningModelsQuery.data?.models ?? [],
+        reasoningModel.model,
+        reasoningModel.provider,
+      ),
+    [reasoningModelsQuery.data?.models, reasoningModel],
+  );
+  const {
+    pinned: sessionReasoningEffort,
+    setOptimistic: setOptimisticReasoning,
+    clearOptimistic: clearOptimisticReasoning,
+  } = useOptimisticPinnedReasoning(
+    activeSessionId ?? null,
+    sessionReasoningQuery.data?.reasoning_effort,
+  );
+  const setSessionReasoning = useSetSessionReasoning();
+  const { mutate: mutateSessionReasoning, reset: resetSessionReasoning } = setSessionReasoning;
+  // A failed PATCH belongs to the session it was sent for. Reset on every
+  // session change so the error is gone for good — hiding it while another
+  // session is open would only make it reappear on the way back.
+  useEffect(() => {
+    resetSessionReasoning();
+  }, [activeSessionId, resetSessionReasoning]);
+  const handlePinReasoning = useCallback((level: string) => {
+    if (!activeSessionId) return;
+    // Optimistic: the pill and the menu mark the new level immediately, and the
+    // server echo either confirms it (and the override drops) or never speaks
+    // (older daemon — the override stays as the window's record).
+    setOptimisticReasoning(level);
+    mutateSessionReasoning(
+      {
+        sessionId: activeSessionId,
+        reasoningEffort: level,
+        agentId: selectedAgentId ?? null,
+      },
+      { onError: clearOptimisticReasoning },
+    );
+  }, [activeSessionId, selectedAgentId, mutateSessionReasoning, setOptimisticReasoning, clearOptimisticReasoning]);
+  const handleUnpinReasoning = useCallback(() => {
+    if (!activeSessionId) return;
+    setOptimisticReasoning(null);
+    mutateSessionReasoning(
+      {
+        sessionId: activeSessionId,
+        reasoningEffort: null,
+        agentId: selectedAgentId ?? null,
+      },
+      { onError: clearOptimisticReasoning },
+    );
+  }, [activeSessionId, selectedAgentId, mutateSessionReasoning, setOptimisticReasoning, clearOptimisticReasoning]);
+
+  // The pin mutation outlives the session it failed for. Scope the error to
+  // the session that saw the failure: switching away must not leave a red
+  // footer on an unrelated conversation.
+  const reasoningPinError =
+    setSessionReasoning.isError &&
+    setSessionReasoning.variables?.sessionId === activeSessionId
+      ? t("chat.reasoning_pin_failed")
+      : null;
+
   // Switching away abandons the export: the ids belong to the previous
   // agent/session, and keeping them would leave the bar saying "N selected"
   // with no boxes ticked while `runExport` filters against messages that are
@@ -3682,6 +3894,23 @@ export function ChatPage() {
     () => (selectedAgentId ? (openChatTabs[selectedAgentId] ?? []) : []),
     [openChatTabs, selectedAgentId],
   );
+  // The strip only exists once a second conversation is open; a single tab is
+  // a label pretending to be a control (see the render below). The panel
+  // semantics follow the same condition so the message area is only announced
+  // as a tabpanel while there are tabs to explain it.
+  const showSessionTabs = agentTabs.length > 1;
+  // Exactly one tab owns the tab stop. Normally that is the selected one; if
+  // the active session has no tab yet (a prune window), anchor on the first
+  // tab so the strip is never keyboard-unreachable.
+  const activeTabId =
+    activeSessionId && agentTabs.includes(activeSessionId)
+      ? activeSessionId
+      : (agentTabs[0] ?? "");
+  // The panel belongs to the selected tab. When the active session has no tab
+  // (a prune window), nothing in the strip is selected, so fall back to the
+  // roving tab: the label must always point at an element that exists.
+  const panelLabelledBySessionId =
+    activeTabId;
 
   // Session ids whose tab was opened while the loaded session list could not
   // have contained them (#8596): the list on screen was fetched before the
@@ -3692,7 +3921,26 @@ export function ChatPage() {
   // predate that list's own fetch, i.e. that the list had a chance to answer.
   const unconfirmedTabOpenedAt = useRef<Map<string, Map<string, number>>>(new Map());
 
+  // The session whose tab the user just closed, while its close is still
+  // navigating to the neighbour (#8326 review). Until that navigation lands,
+  // the URL still names the closed session, and the open effect below trusts
+  // the URL. Without this gate it reads the stale param as a visit, appends
+  // the closed tab back at the end of the strip, and the close silently
+  // becomes a move.
+  const closingTabRef = useRef<{ agentId: string; sessionId: string } | null>(null);
+
   useEffect(() => {
+    const closing = closingTabRef.current;
+    if (
+      closing &&
+      closing.agentId === selectedAgentId &&
+      closing.sessionId === activeSessionId
+    ) {
+      return;
+    }
+    // Any other active session (or none) means the close's navigation has
+    // landed, or the user moved on; the gate has served its purpose.
+    closingTabRef.current = null;
     if (!selectedAgentId || !activeSessionId) return;
     // `agentTabs` is in the dependencies on purpose, not only navigation: a
     // prune against a list that is stale (10 s `staleTime`), or another
@@ -3786,11 +4034,18 @@ export function ChatPage() {
       // Resolve the landing spot before the store drops the tab: the neighbour
       // at the closed tab's index, not the most recently visited tab.
       const nextSessionId = sessionAfterClose(agentTabs, sessionId);
+      const closingActiveTab = sessionId === activeSessionId;
+      // Park the id across the close's own render: the store drops it now,
+      // but the URL still names it until the navigation below lands. The open
+      // effect would otherwise re-add it at the end (#8326 review).
+      if (closingActiveTab && nextSessionId) {
+        closingTabRef.current = { agentId: selectedAgentId, sessionId };
+      }
       closeChatTab(selectedAgentId, sessionId);
       // Closing the one you are looking at has to land somewhere. The
       // neighbour, not "no session" — dropping the param would re-derive the
       // server-active session and could reopen the tab just closed.
-      if (sessionId === activeSessionId && nextSessionId) {
+      if (closingActiveTab && nextSessionId) {
         navigate({
           to: "/chat",
           search: { agentId: selectedAgentId, sessionId: nextSessionId },
@@ -3834,6 +4089,51 @@ export function ChatPage() {
       });
     }
   }, [deleteSessionMutation, selectedAgentId, urlSessionId, navigate]);
+
+  // Keyboard model of the strip (#8597): the shared `useRovingTabs` hook owns
+  // the roving tab stop and the arrow/Home/End keys with automatic activation,
+  // the same model the other dashboard strips use, so the two cannot drift.
+  const tabNav = useRovingTabs({
+    ids: agentTabs,
+    activeId: activeTabId,
+    onSelect: (sessionId: string) => {
+      if (sessionId !== activeSessionId) void handleSwitchSession(sessionId);
+      // Focus the target directly: focus must not wait on navigate() resolving.
+      document.getElementById(chatSessionTabId(sessionId))?.focus();
+    },
+  });
+
+  // Delete/Backspace close the focused tab and Enter/Space select it — a div
+  // with role="tab" gets no native activation, and the hook's doc leaves those
+  // three keys to the caller. The close button is out of the tab order
+  // (tabindex -1) so it cannot interleave with the roving tab stop.
+  const handleTabKeyDown = useCallback(
+    (event: React.KeyboardEvent<HTMLDivElement>, sessionId: string) => {
+      if (event.key === "Delete" || event.key === "Backspace") {
+        event.preventDefault();
+        const nextSessionId = sessionAfterClose(agentTabs, sessionId);
+        // With two tabs the strip unmounts after the close, so the neighbour
+        // focused now would be removed under the cursor. Move focus to the
+        // composer, which stays mounted, instead of dropping it to <body>
+        // (#8606 review).
+        const stripSurvives = agentTabs.length > 2;
+        handleCloseTab(sessionId);
+        const target = stripSurvives && nextSessionId
+          ? document.getElementById(chatSessionTabId(nextSessionId))
+          : document.getElementById(CHAT_COMPOSER_ID);
+        target?.focus();
+        return;
+      }
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        if (sessionId !== activeSessionId) void handleSwitchSession(sessionId);
+        document.getElementById(chatSessionTabId(sessionId))?.focus();
+        return;
+      }
+      tabNav.onKeyDown(event, sessionId);
+    },
+    [agentTabs, activeSessionId, handleCloseTab, handleSwitchSession, tabNav],
+  );
 
   // If the current selection is no longer visible (e.g. hand agents toggled
   // off while a hand-spawned agent was selected), clear it so the auto-select
@@ -4167,58 +4467,70 @@ export function ChatPage() {
           )}
 
           {/*
-            Session tabs. Only once there are two — a single tab is a label
-            pretending to be a control, and the header already names the
-            conversation you are in.
+            Session tabs, only once there are two: a single tab is a label pretending to be a control, and the header already names the conversation you are in.
           */}
-          {agentTabs.length > 1 && (
-            <div
-              role="tablist"
-              aria-label={t("chat.session_tabs", { defaultValue: "Open conversations" })}
-              className="flex items-center gap-1 overflow-x-auto border-b border-border-subtle/50 px-2 py-1 scrollbar-thin"
-            >
-              {agentTabs.map((sessionId) => {
-                const isActive = sessionId === activeSessionId;
-                return (
-                  <div
-                    key={sessionId}
-                    className={`group flex shrink-0 items-center gap-1 rounded-t-lg border-b-2 px-2 py-1 text-[11px] transition-colors ${
-                      isActive
-                        ? "border-brand bg-brand/5 text-brand font-bold"
-                        : "border-transparent text-text-dim hover:text-text-main hover:bg-surface-hover"
-                    }`}
-                  >
-                    <button
-                      type="button"
+          {showSessionTabs && (
+            <div className="flex items-center border-b border-border-subtle/50 pr-1">
+              <div
+                role="tablist"
+                aria-label={t("chat.session_tabs", { defaultValue: "Open conversations" })}
+                className="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto px-2 py-1 scrollbar-thin"
+              >
+                {agentTabs.map((sessionId) => {
+                  const isActive = sessionId === activeSessionId;
+                  const isRoving = tabNav.tabIndexFor(sessionId) === 0;
+                  return (
+                    <div
+                      key={sessionId}
+                      id={chatSessionTabId(sessionId)}
                       role="tab"
                       aria-selected={isActive}
+                      aria-controls={CHAT_SESSION_PANEL_ID}
+                      // The close button inside the tab is presentational to
+                      // AT, so Delete on the tab is the announced close path.
+                      aria-keyshortcuts="Delete"
+                      tabIndex={isRoving ? 0 : -1}
                       onClick={() => { if (!isActive) void handleSwitchSession(sessionId); }}
-                      className="max-w-[16ch] truncate"
+                      onKeyDown={(event) => handleTabKeyDown(event, sessionId)}
+                      className={`group flex shrink-0 cursor-pointer items-center gap-1 rounded-t-lg border-b-2 px-2 py-1 text-[11px] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand focus-visible:ring-inset ${
+                        isActive
+                          ? "border-brand bg-brand/5 text-brand font-bold"
+                          : "border-transparent text-text-dim hover:text-text-main hover:bg-surface-hover"
+                      }`}
                     >
-                      {pickSessionDropdownLabel(sessionId, sessionsQuery.data) ?? sessionId.slice(0, 8)}
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => handleCloseTab(sessionId)}
-                      aria-label={t("chat.session_tab_close", { defaultValue: "Close this tab" })}
-                      title={t("chat.session_tab_close_hint", {
-                        defaultValue: "Closes the tab. The conversation is kept.",
-                      })}
-                      // Hidden on hover-capable devices to keep the strip
-                      // quiet, always visible on touch screens where there is
-                      // no hover to reveal it.
-                      className="rounded p-0.5 opacity-0 transition-opacity hover:text-error focus-visible:opacity-100 group-hover:opacity-100 pointer-coarse:opacity-100"
-                    >
-                      <X className="h-2.5 w-2.5" />
-                    </button>
-                  </div>
-                );
-              })}
+                      <span className="max-w-[16ch] truncate">
+                        {pickSessionDropdownLabel(sessionId, sessionsQuery.data) ?? sessionId.slice(0, 8)}
+                      </span>
+                      <button
+                        type="button"
+                        // Out of the tab order on purpose (#8597): the tab is
+                        // the tab stop and the close button must not interleave
+                        // with the roving tabindex. Delete/Backspace on the tab
+                        // is the keyboard path.
+                        tabIndex={-1}
+                        onClick={(event) => { event.stopPropagation(); handleCloseTab(sessionId); }}
+                        aria-label={t("chat.session_tab_close", { defaultValue: "Close this tab" })}
+                        title={t("chat.session_tab_close_hint", {
+                          defaultValue: "Closes the tab. The conversation is kept.",
+                        })}
+                        // Hidden on hover-capable devices to keep the strip
+                        // quiet, always visible on touch screens where there is
+                        // no hover to reveal it. h-6/w-6 keep the hit target at
+                        // the 24 px WCAG 2.5.8 minimum while the icon stays 10 px.
+                        className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded opacity-0 transition-opacity hover:text-error group-hover:opacity-100 pointer-coarse:opacity-100"
+                      >
+                        <X className="h-2.5 w-2.5" />
+                      </button>
+                    </div>
+                  );
+                })}
+              </div>
+              {/* New tab lives beside the tablist, not inside it: a tablist's children are tabs, and a plain button there reads as one (#8597). */}
               <button
                 type="button"
                 onClick={() => { void handleNewSession(); }}
                 aria-label={t("chat.new_session", { defaultValue: "New session" })}
-                className="shrink-0 rounded-lg p-1 text-text-dim hover:text-brand hover:bg-surface-hover"
+                className="ml-1 shrink-0 rounded-lg p-1 text-text-dim hover:text-brand hover:bg-surface-hover"
               >
                 <Plus className="h-3 w-3" />
               </button>
@@ -4239,6 +4551,16 @@ export function ChatPage() {
             anything portalled to the body keep their own size.
           */}
           <div
+            // The message area is the panel the session tabs control. It is
+            // only a tabpanel while the strip is rendered — a lone
+            // conversation has no tabs to explain it (#8597).
+            id={showSessionTabs ? CHAT_SESSION_PANEL_ID : undefined}
+            role={showSessionTabs ? "tabpanel" : undefined}
+            aria-labelledby={
+              showSessionTabs && panelLabelledBySessionId
+                ? chatSessionTabId(panelLabelledBySessionId)
+                : undefined
+            }
             className="flex-1 min-h-0 overflow-y-auto p-2 sm:p-4 scrollbar-thin"
             style={{ zoom: chatScale }}
             data-testid="chat-message-area"
@@ -4393,6 +4715,14 @@ export function ChatPage() {
               providerName={selectedAgent?.model_provider}
               supportsThinking={selectedAgent?.supports_thinking}
               sttAvailable={sttAvailable}
+              reasoningEfforts={reasoningEfforts}
+              modelName={selectedAgent?.model_name}
+              sessionReasoningEffort={sessionReasoningEffort}
+              onPinReasoning={handlePinReasoning}
+              onUnpinReasoning={handleUnpinReasoning}
+              reasoningPinPending={setSessionReasoning.isPending}
+              reasoningPinError={reasoningPinError}
+              canPinReasoning={canPinReasoning}
             />
           </div>
         </main>

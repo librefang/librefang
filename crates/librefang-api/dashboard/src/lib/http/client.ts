@@ -266,6 +266,7 @@ export {
   deleteSession,
   setSessionLabel,
   setSessionModelOverride,
+  setSessionReasoningOverride,
   deletePromptVersion,
   activatePromptVersion,
   createPromptVersion,

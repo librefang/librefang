@@ -410,6 +410,10 @@ fn installed_sdk_version(command: &str) -> Option<String> {
         ])
         .stdin(Stdio::null())
         .stderr(Stdio::null());
+        // The probe runs the operator's interpreter (and any `sitecustomize` / `.pth` hooks it loads) just like the sidecar spawn does, so it must not inherit the daemon-only secrets either.
+        for k in crate::sidecar::DAEMON_ONLY_ENV {
+            cmd.env_remove(k);
+        }
         let (status, stdout) = match output_with_deadline(&mut cmd, SDK_PROBE_TIMEOUT) {
             Ok(Some(done)) => done,
             Ok(None) => {

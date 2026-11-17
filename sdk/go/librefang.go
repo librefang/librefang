@@ -1587,6 +1587,10 @@ func (r *SessionsResource) PatchSessionModel(id string, data map[string]interfac
 	return r.client.request("PATCH", fmt.Sprintf("/api/sessions/%s/model", url.PathEscape(id)), data, nil)
 }
 
+func (r *SessionsResource) PatchSessionReasoning(id string, data map[string]interface{}) (interface{}, error) {
+	return r.client.request("PATCH", fmt.Sprintf("/api/sessions/%s/reasoning", url.PathEscape(id)), data, nil)
+}
+
 // ── Skills Resource
 
 type SkillsResource struct{ client *Client }

@@ -1996,7 +1996,7 @@ pub struct ManifestCapabilities {
     /// Read it through [`ManifestCapabilities::allows_own_memory_read`] rather than matching on the `Option` at call sites.
     #[serde(
         default,
-        deserialize_with = "crate::serde_compat::option_vec_lenient",
+        deserialize_with = "crate::serde_compat::option_vec_lenient_deny",
         skip_serializing_if = "Option::is_none"
     )]
     pub memory_read: Option<Vec<String>>,
@@ -2004,7 +2004,7 @@ pub struct ManifestCapabilities {
     /// See [`Self::memory_read`] for why this is an `Option` and not a plain `Vec`.
     #[serde(
         default,
-        deserialize_with = "crate::serde_compat::option_vec_lenient",
+        deserialize_with = "crate::serde_compat::option_vec_lenient_deny",
         skip_serializing_if = "Option::is_none"
     )]
     pub memory_write: Option<Vec<String>>,
@@ -2937,6 +2937,26 @@ mod tests {
         );
     }
 
+    /// A wrong-shaped memory scope (`memory_read = false`) used to deserialize to `None`, the unrestricted default — the opposite of what the operator wrote.
+    /// It must deny instead, and a bare string must keep its single scope.
+    #[test]
+    fn wrong_shaped_memory_scopes_fail_closed() {
+        let caps: ManifestCapabilities = toml::from_str(
+            "memory_read = false
+memory_write = 0",
+        )
+        .expect("parse");
+        assert_eq!(caps.memory_read, Some(vec![]));
+        assert!(!caps.allows_own_memory_read());
+        assert!(!caps.allows_own_memory_write());
+
+        let single: ManifestCapabilities =
+            toml::from_str("memory_read = \"kv:*\"\ntools = \"web_fetch\"").expect("parse");
+        assert_eq!(single.memory_read, Some(vec!["kv:*".to_string()]));
+        assert!(!single.allows_own_memory_read());
+        assert_eq!(single.tools, vec!["web_fetch".to_string()]);
+    }
+
     #[test]
     fn declared_memory_scopes_are_matched_against_the_agents_own_store() {
         let wildcard: ManifestCapabilities =
@@ -3837,19 +3857,22 @@ model = "llama-3.3-70b-versatile"
     }
 
     /// Per-agent knobs live in `agent.toml`, not `config.toml` (CLAUDE.md #5476),
-    /// so `reasoning_mode` has to survive a manifest TOML round trip inside the
+    /// so `reasoning_effort` has to survive a manifest TOML round trip inside the
     /// existing `[thinking]` table (#7946).
     #[test]
-    fn test_manifest_thinking_reasoning_mode_round_trips_through_toml() {
+    fn test_manifest_thinking_reasoning_effort_round_trips_through_toml() {
         let toml_str = r#"
             name = "researcher"
             [thinking]
             budget_tokens = 4096
-            reasoning_mode = "max"
+            reasoning_effort = "max"
         "#;
         let manifest: AgentManifest = toml::from_str(toml_str).expect("parse agent.toml");
         let tc = manifest.thinking.as_ref().expect("thinking table parsed");
-        assert_eq!(tc.reasoning_mode, Some(crate::config::ReasoningMode::Max));
+        assert_eq!(
+            tc.reasoning_effort,
+            Some(crate::config::ReasoningMode::max())
+        );
         assert_eq!(tc.budget_tokens, 4096);
 
         // And back out again, so an API round trip (PATCH → agent.toml → boot
@@ -3857,22 +3880,22 @@ model = "llama-3.3-70b-versatile"
         let back: AgentManifest =
             serde_json::from_str(&serde_json::to_string(&manifest).unwrap()).unwrap();
         assert_eq!(
-            back.thinking.unwrap().reasoning_mode,
-            Some(crate::config::ReasoningMode::Max),
+            back.thinking.unwrap().reasoning_effort,
+            Some(crate::config::ReasoningMode::max()),
         );
     }
 
-    /// An agent that omits `reasoning_mode` keeps the pre-#7946 shape: absent,
+    /// An agent that omits `reasoning_effort` keeps the pre-#7946 shape: absent,
     /// not defaulted to a mode.
     #[test]
-    fn test_manifest_thinking_without_reasoning_mode_stays_absent() {
+    fn test_manifest_thinking_without_reasoning_effort_stays_absent() {
         let toml_str = r#"
             name = "plain"
             [thinking]
             budget_tokens = 4096
         "#;
         let manifest: AgentManifest = toml::from_str(toml_str).expect("parse agent.toml");
-        assert_eq!(manifest.thinking.unwrap().reasoning_mode, None);
+        assert_eq!(manifest.thinking.unwrap().reasoning_effort, None);
     }
 
     #[test]

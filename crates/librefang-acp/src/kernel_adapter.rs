@@ -9,6 +9,7 @@
 use std::sync::Arc;
 use std::sync::RwLock;
 
+use agent_client_protocol::schema::v1::SessionId as AcpSessionId;
 use async_trait::async_trait;
 use librefang_kernel::kernel_handle::{AcpFsBridge, AcpTerminalBridge, KernelHandle};
 use librefang_kernel::AgentSubsystemApi;
@@ -156,6 +157,18 @@ impl AcpKernel for KernelAdapter {
         Ok(rx)
     }
 
+    async fn cancel_prompt(&self, agent_id: AgentId, librefang_session_id: LfSessionId) {
+        // Fires the session interrupt and aborts the loop task, the same teardown the WebSocket `stop` command performs.
+        match self.kernel.stop_session_run(agent_id, librefang_session_id) {
+            Ok(stopped) => {
+                tracing::debug!(%agent_id, session_id = %librefang_session_id, stopped, "ACP session/cancel")
+            }
+            Err(e) => {
+                tracing::warn!(%agent_id, session_id = %librefang_session_id, error = %e, "ACP session/cancel could not stop the session run")
+            }
+        }
+    }
+
     fn subscribe_approvals(&self) -> broadcast::Receiver<ApprovalEvent> {
         self.kernel.approvals().subscribe()
     }
@@ -211,7 +224,7 @@ impl AcpKernel for KernelAdapter {
         write_client_handle(&self.fs_client, handle, "fs_client");
     }
 
-    fn register_session_fs(&self, lf_session_id: LfSessionId) {
+    fn register_session_fs(&self, lf_session_id: LfSessionId, acp_session_id: &AcpSessionId) {
         // No client handle yet (initialize hasn't run, or this server
         // is a stub-mock harness) → nothing to register; runtime tools
         // will see `Unavailable` and fall back to local fs.
@@ -219,8 +232,9 @@ impl AcpKernel for KernelAdapter {
             return;
         };
         // `FsClientHandle` impls `AcpFsClient`, so we coerce into the
-        // trait object the kernel registry expects.
-        let client: Arc<dyn librefang_kernel::kernel_handle::AcpFsClient> = Arc::new(handle);
+        // trait object the kernel registry expects. The handle is bound to the editor's session id, which every `fs/*` request must carry.
+        let client: Arc<dyn librefang_kernel::kernel_handle::AcpFsClient> =
+            Arc::new(handle.with_session(acp_session_id.clone()));
         self.kernel.register_acp_fs_client(lf_session_id, client);
     }
 
@@ -232,11 +246,12 @@ impl AcpKernel for KernelAdapter {
         write_client_handle(&self.terminal_client, handle, "terminal_client");
     }
 
-    fn register_session_terminal(&self, lf_session_id: LfSessionId) {
+    fn register_session_terminal(&self, lf_session_id: LfSessionId, acp_session_id: &AcpSessionId) {
         let Some(handle) = self.terminal_client() else {
             return;
         };
-        let client: Arc<dyn librefang_kernel::kernel_handle::AcpTerminalClient> = Arc::new(handle);
+        let client: Arc<dyn librefang_kernel::kernel_handle::AcpTerminalClient> =
+            Arc::new(handle.with_session(acp_session_id.clone()));
         self.kernel
             .register_acp_terminal_client(lf_session_id, client);
     }

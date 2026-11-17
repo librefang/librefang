@@ -17,7 +17,7 @@ use common::{
     collect_stream, gemini_sse_body, isolated_env, mock_gemini_driver, request_json,
     request_with_tools, simple_request,
 };
-use librefang_llm_driver::{LlmDriver, StreamEvent};
+use librefang_llm_driver::{LlmDriver, LlmError, StreamEvent};
 use librefang_types::message::StopReason;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -249,4 +249,131 @@ async fn streaming_usage_captures_cached_content_tokens() {
         "cachedContentTokenCount from the streamed chunk must populate \
          cache_read_input_tokens"
     );
+}
+
+/// Mount a single-chunk-per-`data:` SSE body on the Gemini streaming path.
+async fn mount_gemini_sse(server: &MockServer, chunks: &[serde_json::Value]) {
+    let body: String = chunks.iter().map(|c| format!("data: {c}\n\n")).collect();
+    Mock::given(method("POST"))
+        .and(path(
+            "/v1beta/models/gemini-2.0-flash:streamGenerateContent",
+        ))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(body),
+        )
+        .mount(server)
+        .await;
+}
+
+/// Gemini reports finishReason "STOP" on a function-call turn too; the streamed turn must still come back as `ToolUse` so the agent loop runs the tool.
+#[tokio::test]
+#[serial_test::serial]
+async fn streaming_function_call_with_stop_is_tool_use() {
+    let _env = isolated_env();
+    let server = MockServer::start().await;
+    mount_gemini_sse(
+        &server,
+        &[serde_json::json!({
+            "candidates": [{
+                "content": {"parts": [{"functionCall": {"name": "web_search", "args": {"q": "rust"}}}]},
+                "finishReason": "STOP"
+            }]
+        })],
+    )
+    .await;
+
+    let driver = mock_gemini_driver(&server);
+    let (result, _events) = collect_stream(&driver, request_with_tools("gemini-2.0-flash")).await;
+    let resp = result.expect("stream should succeed");
+    assert_eq!(resp.tool_calls.len(), 1);
+    assert_eq!(resp.tool_calls[0].name, "web_search");
+    assert_eq!(resp.stop_reason, StopReason::ToolUse);
+}
+
+/// An error frame inside an accepted (HTTP 200) stream must surface as a typed error so retry / fallback engage.
+#[tokio::test]
+#[serial_test::serial]
+async fn streaming_error_frame_surfaces_as_overloaded() {
+    let _env = isolated_env();
+    let server = MockServer::start().await;
+    mount_gemini_sse(
+        &server,
+        &[serde_json::json!({
+            "error": {"code": 503, "message": "The model is overloaded", "status": "UNAVAILABLE"}
+        })],
+    )
+    .await;
+
+    let driver = mock_gemini_driver(&server);
+    let (result, _events) = collect_stream(&driver, simple_request("gemini-2.0-flash")).await;
+    assert!(
+        matches!(result, Err(LlmError::Overloaded { .. })),
+        "a 503 error frame must map to Overloaded, got {result:?}"
+    );
+}
+
+/// A prompt-level block (no candidates, `promptFeedback.blockReason`) is reported as `ContentFiltered`, not an empty successful turn.
+#[tokio::test]
+#[serial_test::serial]
+async fn streaming_blocked_prompt_is_content_filtered() {
+    let _env = isolated_env();
+    let server = MockServer::start().await;
+    mount_gemini_sse(
+        &server,
+        &[serde_json::json!({
+            "promptFeedback": {"blockReason": "SAFETY"},
+            "usageMetadata": {"promptTokenCount": 7}
+        })],
+    )
+    .await;
+
+    let driver = mock_gemini_driver(&server);
+    let (result, _events) = collect_stream(&driver, simple_request("gemini-2.0-flash")).await;
+    let resp = result.expect("a blocked prompt is a filtered turn, not a transport failure");
+    assert_eq!(resp.stop_reason, StopReason::ContentFiltered);
+    assert!(resp.content.is_empty());
+}
+
+/// A stream that produces no content at all is an error, matching the non-streaming "empty response" error.
+#[tokio::test]
+#[serial_test::serial]
+async fn streaming_empty_response_is_error() {
+    let _env = isolated_env();
+    let server = MockServer::start().await;
+    mount_gemini_sse(
+        &server,
+        &[serde_json::json!({"usageMetadata": {"promptTokenCount": 7}})],
+    )
+    .await;
+
+    let driver = mock_gemini_driver(&server);
+    let (result, _events) = collect_stream(&driver, simple_request("gemini-2.0-flash")).await;
+    assert!(
+        matches!(result, Err(LlmError::Parse(ref m)) if m.contains("empty response")),
+        "an empty stream must not be returned as Ok, got {result:?}"
+    );
+}
+
+/// A candidate that finishes with `STOP` and no parts (Gemini's usual answer to a tool result it has nothing to add to) stays an Ok `EndTurn`, so the agent loop's empty-reply handling (accumulated-text fallback, in-loop retry) still runs instead of the turn failing.
+#[tokio::test]
+#[serial_test::serial]
+async fn streaming_stop_with_no_parts_is_ok_end_turn() {
+    let _env = isolated_env();
+    let server = MockServer::start().await;
+    mount_gemini_sse(
+        &server,
+        &[serde_json::json!({
+            "candidates": [{"content": {"role": "model"}, "finishReason": "STOP"}],
+            "usageMetadata": {"promptTokenCount": 7}
+        })],
+    )
+    .await;
+
+    let driver = mock_gemini_driver(&server);
+    let (result, _events) = collect_stream(&driver, simple_request("gemini-2.0-flash")).await;
+    let resp = result.expect("a finished candidate with no parts is not a transport failure");
+    assert_eq!(resp.stop_reason, StopReason::EndTurn);
+    assert!(resp.content.is_empty());
 }

@@ -27,13 +27,17 @@ use librefang_llm_driver::StreamEvent;
 use librefang_types::agent::AgentId;
 use librefang_types::message::StopReason as LfStopReason;
 
+use tokio_util::sync::CancellationToken;
+
 use crate::events::EventTranslator;
-use crate::session::SessionStore;
+use crate::session::{SessionState, SessionStore};
 use crate::AcpKernel;
 
-/// Handle a single ACP `session/prompt` request. Pumps streaming events
-/// to the client over the lifetime of the call, then returns a
-/// `PromptResponse`.
+/// Handle a single ACP `session/prompt` request: start the turn, then pump its streaming events to the client from a task spawned on the connection, which sends the `PromptResponse` when the turn ends.
+///
+/// Request callbacks run inside the connection's dispatch loop, which processes no other message until the callback returns.
+/// Pumping the turn inline therefore held back every message the editor sent during it: `session/cancel` was only seen after the turn had finished, and the responses to the agent's own `fs/*`, `terminal/*` and permission requests could not be routed until their reverse-RPC timed out.
+/// The session lookup and the per-turn cancel token stay on the dispatch loop, so a `session/cancel` the editor sends right after the prompt is always ordered after `begin_turn` and cancels this turn.
 pub(crate) async fn handle<K: AcpKernel>(
     kernel: Arc<K>,
     sessions: Arc<SessionStore>,
@@ -53,6 +57,27 @@ pub(crate) async fn handle<K: AcpKernel>(
     // A fresh per-turn token: a `session/cancel` aimed at an earlier turn (or sent while idle) must not cancel this one.
     let cancel = state.begin_turn();
 
+    cx.spawn(run_turn(
+        kernel,
+        state,
+        cancel,
+        agent_id,
+        req,
+        responder,
+        cx.clone(),
+    ))
+}
+
+/// Run one prompt turn to completion off the dispatch loop and answer the `session/prompt` request.
+async fn run_turn<K: AcpKernel>(
+    kernel: Arc<K>,
+    state: Arc<SessionState>,
+    cancel: CancellationToken,
+    agent_id: AgentId,
+    req: PromptRequest,
+    responder: Responder<PromptResponse>,
+    cx: ConnectionTo<Client>,
+) -> Result<(), agent_client_protocol::Error> {
     let (message, converted) = concat_text_blocks(&req.prompt);
     // Surface converted multimodal blocks so the user knows the
     // attachment landed but didn't reach the LLM verbatim — the
@@ -101,9 +126,11 @@ pub(crate) async fn handle<K: AcpKernel>(
             biased;
 
             _ = cancel.cancelled() => {
-                // Drop the receiver so the kernel-side sender notices
-                // and tears down the agent loop. The actual stop_reason
-                // we *return* is `Cancelled` — see the mapping below.
+                // The streaming loop treats a dropped receiver as a non-fatal disconnect and keeps running, so stop the kernel-side run explicitly before dropping it.
+                // The actual stop_reason we *return* is `Cancelled` — see the mapping below.
+                kernel
+                    .cancel_prompt(agent_id, state.librefang_session_id)
+                    .await;
                 drop(events);
                 break 'pump;
             }

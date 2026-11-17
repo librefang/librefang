@@ -324,41 +324,62 @@ impl StructuredStore {
         exclude_prefix: Option<&str>,
         limit: usize,
     ) -> LibreFangResult<Vec<String>> {
+        let exclude: Vec<&str> = exclude_prefix.into_iter().collect();
+        self.list_keys_with_prefix_excluding(agent_id, prefix, &exclude, limit)
+    }
+
+    /// [`Self::list_keys_with_prefix`] with more than one excluded range.
+    ///
+    /// The unscoped tool scope hides two disjoint regions — the `peer:` framing and the
+    /// platform's `compaction_summary_` mirrors (#8645) — and a single exclusion slot cannot
+    /// express both. Passing every hidden prefix here keeps `limit` counting only rows the caller can
+    /// actually address, exactly as the one-prefix form does for the peer framing.
+    pub fn list_keys_with_prefix_excluding(
+        &self,
+        agent_id: AgentId,
+        prefix: &str,
+        exclude_prefixes: &[&str],
+        limit: usize,
+    ) -> LibreFangResult<Vec<String>> {
         let conn = self.pool.get().map_err(LibreFangError::memory)?;
         let upper = format!("{prefix}\u{10FFFF}");
-        // `None` becomes an empty range (`lo == hi`) that no key satisfies, so the one statement below serves both cases.
-        let (exclude_lo, exclude_hi) = match exclude_prefix {
-            Some(p) => (p.to_string(), format!("{p}\u{10FFFF}")),
-            None => (String::new(), String::new()),
-        };
-        let mut stmt = conn
-            .prepare(
-                "SELECT key FROM kv_store \
-                 WHERE agent_id = ?1 AND key >= ?2 AND key < ?3 \
-                   AND NOT (key >= ?4 AND key < ?5) \
-                 ORDER BY key LIMIT ?6",
-            )
-            .map_err(LibreFangError::memory)?;
+        // Each exclusion removes its own half-open range, so the scan stays on the
+        // primary-key index regardless of how many ranges the caller hides.
+        let mut sql = String::from(
+            "SELECT key FROM kv_store \
+             WHERE agent_id = ?1 AND key >= ?2 AND key < ?3",
+        );
+        let mut values = vec![
+            rusqlite::types::Value::Text(agent_id.0.to_string()),
+            rusqlite::types::Value::Text(prefix.to_string()),
+            rusqlite::types::Value::Text(upper),
+        ];
+        for (i, excluded) in exclude_prefixes.iter().enumerate() {
+            let lo = 4 + i * 2;
+            sql.push_str(&format!(" AND NOT (key >= ?{lo} AND key < ?{})", lo + 1));
+            values.push(rusqlite::types::Value::Text((*excluded).to_string()));
+            values.push(rusqlite::types::Value::Text(format!(
+                "{excluded}\u{10FFFF}"
+            )));
+        }
+        sql.push_str(&format!(
+            " ORDER BY key LIMIT ?{}",
+            4 + exclude_prefixes.len() * 2
+        ));
+        values.push(rusqlite::types::Value::Integer(limit as i64));
+
+        let mut stmt = conn.prepare(&sql).map_err(LibreFangError::memory)?;
         let rows = stmt
-            .query_map(
-                rusqlite::params![
-                    agent_id.0.to_string(),
-                    prefix,
-                    upper,
-                    exclude_lo,
-                    exclude_hi,
-                    limit as i64
-                ],
-                |row| {
-                    let key: String = row.get(0)?;
-                    Ok(key)
-                },
-            )
+            .query_map(rusqlite::params_from_iter(values), |row| {
+                let key: String = row.get(0)?;
+                Ok(key)
+            })
             .map_err(LibreFangError::memory)?;
 
         let mut keys = Vec::new();
         for row in rows {
-            keys.push(row.map_err(LibreFangError::memory)?);
+            let key = row.map_err(LibreFangError::memory)?;
+            keys.push(key);
         }
         Ok(keys)
     }

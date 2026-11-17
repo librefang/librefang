@@ -1112,14 +1112,19 @@ impl AgentsResource {
         .await
     }
 
-    pub async fn get_agent_session(&self, id: &str, session_id: Option<&str>) -> Result<Value> {
+    pub async fn get_agent_session(
+        &self,
+        id: &str,
+        session_id: Option<&str>,
+        materialize: Option<&str>,
+    ) -> Result<Value> {
         do_req(
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
             &["api", "agents", id, "session"],
             None,
-            &[("session_id", session_id)],
+            &[("session_id", session_id), ("materialize", materialize)],
         )
         .await
     }
@@ -4486,6 +4491,18 @@ impl SessionsResource {
             &self.base_url,
             reqwest::Method::PATCH,
             &["api", "sessions", id, "model"],
+            Some(data),
+            &[],
+        )
+        .await
+    }
+
+    pub async fn patch_session_reasoning(&self, id: &str, data: Value) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::PATCH,
+            &["api", "sessions", id, "reasoning"],
             Some(data),
             &[],
         )

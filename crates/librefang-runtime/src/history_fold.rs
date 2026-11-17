@@ -59,13 +59,10 @@
 //!
 //! # Fallback
 //!
-//! When the aux-LLM call fails (no key configured, network error, empty
-//! response) the fold falls back to a static stub:
-//! `[history-fold: summarisation unavailable]`.  When the call succeeds but
-//! the response is not valid JSON the raw response text is applied to every
-//! stale block instead (degrading to Option-1 bulk-summary semantics rather
-//! than wasting the round-trip).  Either way the stale payload is removed
-//! from context.
+//! The fold never touches the running turn: only messages before `preserve_from` are candidates, because a turn's own tool results are the model's working set and folding them makes it re-fetch the same data until the iteration cap (#8653).
+//! `preserve_from` is an index into the `messages` this module is handed (the agent loop's LLM working copy), not into `session.messages`; the agent loop locates it by tool id, see `agent_loop::end_turn::running_turn_start`.
+//! When the aux-LLM call fails (no key configured, network error, empty response), when the response is not valid JSON, or when it omits an id, each affected block keeps a preview-truncated copy of its own result, never a content-free stub — a stub gives the model nothing to act on, and the raw non-JSON response is never applied as a bulk summary (#5978).
+//! Either way the bulk of the stale payload is removed from context.
 
 use crate::aux_client::AuxClient;
 use crate::llm_driver::{CompletionRequest, LlmDriver};
@@ -81,18 +78,6 @@ const FOLD_PREFIX: &str = "[history-fold]";
 
 /// Number of characters shown in the per-tool preview inside the fold prompt.
 const FOLD_PREVIEW_CHARS: usize = 500;
-
-/// Static-stub text used when the aux-LLM summarisation call fails outright.
-///
-/// Explicitly tells the model the call genuinely failed so it does NOT
-/// re-issue the identical tool call.  Only applied when the whole batched
-/// summariser call failed (network/empty) — see `bulk_fallback`.  For the
-/// narrower case where the model simply *omitted* one id from an otherwise
-/// successful batch, the original tool result is preserved instead (see the
-/// `[result preserved — summarisation omitted]` branch in the apply loop) so
-/// the model never reads a folded block as "result not available yet" and
-/// retries (issue #5978).
-const FALLBACK_SUMMARY: &str = "[summarisation unavailable — do not retry this tool call]";
 
 /// Marker prefixing a fold block whose id the summariser omitted from an
 /// otherwise-successful batch.  The original tool result is preserved
@@ -139,8 +124,9 @@ pub struct FoldResult {
     pub groups_folded: usize,
     /// Total tool-result messages that were replaced.
     pub messages_replaced: usize,
-    /// `1` when the aux-LLM batched call failed (network/empty) and the
-    /// pass fell back to [`FALLBACK_SUMMARY`]; `0` otherwise.  Kept as a
+    /// `1` when the aux-LLM batched call failed (network/empty) and every
+    /// block kept a preview-truncated copy of its own result instead of a
+    /// summary; `0` otherwise.  Kept as a
     /// counter (rather than a bool) so future per-chunk batching can
     /// surface partial failures.
     pub groups_used_fallback: usize,
@@ -189,12 +175,60 @@ pub struct FoldConfig {
 /// is performed again from scratch on the next turn.  See
 /// [`apply_fold_rewrites`] for the recommended replay helper.
 pub async fn fold_stale_tool_results(
+    messages: Vec<Message>,
+    cfg: FoldConfig,
+    model: &str,
+    aux_client: Option<&AuxClient>,
+    driver: Arc<dyn LlmDriver>,
+    reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy,
+) -> (Vec<Message>, FoldResult) {
+    fold_stale_tool_results_inner(
+        messages,
+        cfg,
+        model,
+        aux_client,
+        driver,
+        reasoning_echo_policy,
+        usize::MAX,
+    )
+    .await
+}
+
+/// Fold everything before the running turn.  `current_turn_start` is an
+/// index into `messages` itself, at or before the running turn's first tool
+/// call; nothing at or after it is eligible, so the model keeps the results
+/// it is still working over.
+#[allow(clippy::too_many_arguments)]
+pub async fn fold_stale_tool_results_preserving_turn(
+    messages: Vec<Message>,
+    cfg: FoldConfig,
+    model: &str,
+    aux_client: Option<&AuxClient>,
+    driver: Arc<dyn LlmDriver>,
+    reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy,
+    current_turn_start: usize,
+) -> (Vec<Message>, FoldResult) {
+    fold_stale_tool_results_inner(
+        messages,
+        cfg,
+        model,
+        aux_client,
+        driver,
+        reasoning_echo_policy,
+        current_turn_start,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn fold_stale_tool_results_inner(
     mut messages: Vec<Message>,
     cfg: FoldConfig,
     model: &str,
     aux_client: Option<&AuxClient>,
     driver: Arc<dyn LlmDriver>,
     reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy,
+    preserve_from: usize,
 ) -> (Vec<Message>, FoldResult) {
     let FoldConfig {
         fold_after_turns,
@@ -207,7 +241,8 @@ pub async fn fold_stale_tool_results(
     // Walk backwards to find the stale boundary.  Count assistant turns from
     // the end; tool-result messages whose assistant-turn distance exceeds
     // `fold_after_turns` are stale.
-    let stale_indices = collect_stale_indices(&messages, fold_after_turns as usize);
+    let stale_indices =
+        collect_stale_indices_from(&messages, fold_after_turns as usize, preserve_from);
 
     if stale_indices.is_empty() {
         return (messages, FoldResult::default());
@@ -239,7 +274,7 @@ pub async fn fold_stale_tool_results(
     // `summarise_batch` below is called with `model` — the *agent's* model — so the driver it is paired with must be the one that can serve it.
     // `AuxClient::primary` is the kernel's process-wide `default_driver`, not the triggering agent's chain, so for any agent that overrides `provider` / `model` in its manifest the two disagree: the request goes to the default provider carrying a model only the agent's provider has.
     // Reported as a LiteLLM `403 team_model_access_denied` — "Tried to access deepseek-v4-pro" — on an agent configured to reach DeepSeek directly.
-    // The fold then silently degrades to `FALLBACK_SUMMARY` on every turn.
+    // The fold then silently degrades to its call-failure path on every turn, and no block ever gets a real summary.
     //
     // `used_primary` is exactly this signal, and `ContextCompressor` already branches on it the same way (`context_compressor.rs`, the `AuxTask::Compression` resolution) — this brings the fold path in line.
     let summary_driver = match aux_client {
@@ -267,13 +302,12 @@ pub async fn fold_stale_tool_results(
 
     // One batched LLM call returns either:
     //   - `Ok(per-id map)` on a happy-path JSON response,
-    //   - `Err(Parse{raw,…})` when the model produced a non-JSON string —
-    //     we still apply `raw` as a bulk summary to every block (Option-1
-    //     fallback) rather than waste the round-trip,
+    //   - `Err(Parse{…})` when the model produced a non-JSON string,
     //   - `Err(Call|Empty)` when the aux-LLM is unreachable / returned
-    //     nothing — we apply [`FALLBACK_SUMMARY`] to every block.
+    //     nothing.
+    // Both error arms yield an empty map, so every block keeps a preview-truncated copy of its own result.
     let stale_count = stale_blocks.len();
-    let (summaries_by_id, bulk_fallback) = match summarise_batch(
+    let summaries_by_id = match summarise_batch(
         &stale_blocks,
         model,
         &*summary_driver,
@@ -291,9 +325,9 @@ pub async fn fold_stale_tool_results(
             // Common failure modes: trailing whitespace, double-quoting
             // (`"\"tid_3\""`), Unicode-normalised dash variants, model
             // under-delivery (returns summaries for K of N stale blocks).
-            // Without these warns the affected blocks silently fall back
-            // to `FALLBACK_SUMMARY` and operators have no way to spot
-            // the drift.
+            // Without these warns the affected blocks silently keep a
+            // preview instead of a summary and operators have no way to
+            // spot the drift.
             let stale_id_set: std::collections::BTreeSet<&str> = stale_blocks
                 .iter()
                 .map(|b| b.tool_use_id.as_str())
@@ -306,7 +340,7 @@ pub async fn fold_stale_tool_results(
             if !unmatched.is_empty() {
                 warn!(
                     unmatched_ids = ?unmatched,
-                    "history_fold: model returned ids that did not match any stale tool_use_id — those blocks fall back to the static stub"
+                    "history_fold: model returned ids that did not match any stale tool_use_id — those blocks preserve a preview-truncated copy of the original tool result"
                 );
             }
             let missing: Vec<&str> = stale_id_set
@@ -320,7 +354,7 @@ pub async fn fold_stale_tool_results(
                     "history_fold: model omitted summaries for some stale tool_use_ids — those blocks preserve a preview-truncated copy of the original tool result (issue #5978)"
                 );
             }
-            (map, None)
+            map
         }
         Err(BatchSummariseFailure::Parse { error }) => {
             // The aux model returned a body we could not parse as the
@@ -330,24 +364,27 @@ pub async fn fold_stale_tool_results(
             // overwritten with garbage, the model reads it as "no answer"
             // and re-issues the identical call forever (verified live,
             // session 81620c15).  Treat it like a fully-omitted batch:
-            // an empty map + `None` bulk fallback routes every stale block
-            // into the content-preserving branch below, so each keeps a
+            // an empty map routes every stale block into the
+            // content-preserving branch below, so each keeps a
             // preview-truncated copy of its own original result.
             warn!(
                 count = stale_count,
                 error = %error,
                 "history_fold: JSON parse failed — preserving preview-truncated original tool results (issue #5978)"
             );
-            (BTreeMap::new(), None)
+            BTreeMap::new()
         }
         Err(err) => {
             warn!(
                 count = stale_count,
                 error = %err,
-                "history_fold: aux-LLM batched call failed — using fallback stub"
+                "history_fold: aux-LLM batched call failed — preserving preview-truncated original tool results"
             );
+            // A content-free stub tells the model nothing, so it re-issues
+            // the call; the preview keeps enough of the payload to decide
+            // (#8653, same degradation as #5978).
             result.groups_used_fallback = 1;
-            (BTreeMap::new(), Some(FALLBACK_SUMMARY.to_string()))
+            BTreeMap::new()
         }
     };
 
@@ -367,13 +404,11 @@ pub async fn fold_stale_tool_results(
                 {
                     // Resolve the new folded content for this block:
                     //   1. model-returned per-id summary (happy path), OR
-                    //   2. bulk fallback — the static stub, used only when the
-                    //      aux call itself failed (network / empty body), OR
-                    //   3. neither: the batched call *succeeded* but the model
-                    //      silently omitted this id, OR the response could not
-                    //      be parsed as JSON at all (Parse failure → empty map
-                    //      + `None` fallback, so every block lands here).
-                    //      Previously both of those fell back to a stub that
+                    //   2. no summary: the model silently omitted this id, the
+                    //      response could not be parsed as JSON, or the aux
+                    //      call itself failed (the last two yield an empty
+                    //      map, so every block lands here).
+                    //      Previously these fell back to a stub that
                     //      discarded the real prior tool result — the model
                     //      then read the block as "result not available yet"
                     //      and re-issued the identical call, producing the
@@ -386,11 +421,9 @@ pub async fn fold_stale_tool_results(
                         summaries_by_id.get(tool_use_id).cloned()
                     {
                         format!("{FOLD_PREFIX} {summary}")
-                    } else if let Some(bulk) = bulk_fallback.clone() {
-                        format!("{FOLD_PREFIX} {bulk}")
                     } else {
-                        // Omitted id from an otherwise-successful batch:
-                        // preserve the original result, preview-truncated.
+                        // No summary for this id: preserve the original
+                        // result, preview-truncated.
                         let preview: String = content.chars().take(FOLD_PREVIEW_CHARS).collect();
                         let ellipsis = if content.chars().count() > FOLD_PREVIEW_CHARS {
                             "…"
@@ -498,7 +531,20 @@ fn collect_stale_blocks(messages: &[Message], stale_indices: &[usize]) -> Vec<St
 /// A message is a "tool-result message" when its content is a `Blocks` vec
 /// that contains at least one `ContentBlock::ToolResult` block AND it has the
 /// `User` role.  Pinned messages are never stale.
+#[cfg(test)]
 fn collect_stale_indices(messages: &[Message], fold_after_turns: usize) -> Vec<usize> {
+    collect_stale_indices_from(messages, fold_after_turns, usize::MAX)
+}
+
+/// Same as [`collect_stale_indices`], but never marks a message at or after
+/// `preserve_from`.  Production passes the start of the running turn: a
+/// turn's own tool results are the model's working set, and folding them
+/// makes it re-fetch the same data until the iteration cap (#8653).
+fn collect_stale_indices_from(
+    messages: &[Message],
+    fold_after_turns: usize,
+    preserve_from: usize,
+) -> Vec<usize> {
     // Walk backwards, count assistant messages, mark the boundary index.
     let mut assistant_turns_seen = 0usize;
     let mut boundary_idx = messages.len(); // exclusive upper bound for "recent" turns
@@ -527,6 +573,7 @@ fn collect_stale_indices(messages: &[Message], fold_after_turns: usize) -> Vec<u
         .enumerate()
         .filter(|(i, msg)| {
             *i < boundary_idx
+                && *i < preserve_from
                 && !msg.pinned
                 && msg.role == Role::User
                 && is_tool_result_message(msg)
@@ -568,9 +615,8 @@ fn is_already_folded(msg: &Message) -> bool {
 
 /// Failure modes for the batched summariser.  All three are handled by
 /// preserving the stale blocks' original content rather than substituting a
-/// summary: `Call` / `Empty` fall back to the static stub, while `Parse`
-/// (an unparseable response) keeps each block's own preview-truncated
-/// original — dumping the raw non-JSON text as a bulk summary is the #5978
+/// summary: each block keeps its own preview-truncated original, and for
+/// `Parse` (an unparseable response) dumping the raw non-JSON text as a bulk summary is the #5978
 /// memory_recall loop, so the raw body is intentionally not retained.
 enum BatchSummariseFailure {
     Call(String),
@@ -629,7 +675,7 @@ async fn summarise_batch(
     // single-line JSON — the previous 64 tok/block budget was routinely
     // overrun by verbose-output models such as ollama:gemma4, causing
     // serde_json to fail with "EOF while parsing a string" and every fold
-    // pass to degrade to the raw-text bulk fallback (#5203).  Floor
+    // pass to degrade to the parse-failure path (#5203).  Floor
     // (`FOLD_TOKENS_FLOOR`) sized at 4 × per-block so a size-1 pass
     // (#4866 steady state) is never less generous than a small batch.
     // Capped at `MAX_FOLD_OUTPUT_TOKENS` (provider 400 ceiling); when
@@ -684,7 +730,7 @@ async fn summarise_batch(
         // OpenAI-compat drivers). Without this, DeepSeek / OpenAI /
         // Mistral / Gemini are free to emit natural-language numbered
         // lists, `parse_labeled_summaries` fails, and the fold falls
-        // back to "applying raw response as bulk summary" — losing the
+        // back to its parse-failure path (previews, no summaries) — losing the
         // per-tool_use_id granularity (tool_use_id / tool_name /
         // is_error / status) we just spent the aux-LLM call building.
         // Providers that don't honour the flag ignore it without
@@ -730,7 +776,7 @@ fn parse_labeled_summaries(text: &str) -> Result<BTreeMap<String, String>, Strin
     // when only one stale block was supplied (after #4866 persistence
     // most fold passes are exactly that case).  Lifting the object into
     // a one-element vec preserves per-id granularity instead of
-    // degrading to bulk-summary on every size-1 pass.
+    // degrading to the parse-failure path on every size-1 pass.
     let entries: Vec<serde_json::Value> = match value {
         serde_json::Value::Array(arr) => arr,
         serde_json::Value::Object(_) => vec![value],
@@ -1069,7 +1115,7 @@ mod tests {
     ///
     /// `summarise_batch` is called with the *agent's* `model`, while `AuxClient::primary` is the kernel's process-wide `default_driver`.
     /// For any agent overriding `provider` / `model` those disagree, and the request goes to the default provider carrying a model only the agent's provider can serve.
-    /// Live symptom: LiteLLM `403 team_model_access_denied` naming the agent's model, after which every fold silently degrades to `FALLBACK_SUMMARY`.
+    /// Live symptom: LiteLLM `403 team_model_access_denied` naming the agent's model, after which every fold silently degrades to its call-failure path.
     #[tokio::test]
     async fn fold_without_aux_chain_uses_the_callers_driver_not_aux_primary() {
         let (agent_driver, agent_calls) =
@@ -1115,7 +1161,7 @@ mod tests {
         );
         assert_eq!(
             result.groups_used_fallback, 0,
-            "a working summariser must not degrade to FALLBACK_SUMMARY"
+            "a working summariser must not take the call-failure path"
         );
     }
 
@@ -1191,6 +1237,78 @@ mod tests {
         assert_eq!(out.len(), original_len, "history unchanged");
     }
 
+    /// #8653: a turn's own tool results are the model's working set.  They
+    /// must survive the fold even when the turn looks like many "turns" to
+    /// the assistant-message counter, or the agent re-fetches the same data
+    /// until the iteration cap.
+    #[tokio::test]
+    async fn running_turn_tool_results_are_never_folded() {
+        let messages = build_history(10); // tid_0 .. tid_9
+        let last_tool_result = messages.len() - 1; // tid_9
+        let stale = collect_stale_indices_from(&messages, 2, last_tool_result);
+        assert!(
+            !stale.contains(&last_tool_result),
+            "the running turn's result must not be stale: {stale:?}"
+        );
+        assert!(
+            stale.contains(&2),
+            "an earlier turn's result must still fold: {stale:?}"
+        );
+
+        let json = format!(
+            "[{}]",
+            (0..9)
+                .map(|i| format!(r#"{{"id":"tid_{i}","summary":"summary {i}"}}"#))
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+        let driver: Arc<dyn LlmDriver> = Arc::new(OkDriver(json));
+        let (out, result) = fold_stale_tool_results_preserving_turn(
+            messages,
+            FoldConfig {
+                fold_after_turns: 2,
+                min_batch_size: 1,
+            },
+            "test-model",
+            None,
+            driver,
+            librefang_types::model_catalog::ReasoningEchoPolicy::None,
+            last_tool_result,
+        )
+        .await;
+
+        assert_eq!(result.groups_folded, 1);
+        let by_id: BTreeMap<String, String> = out
+            .iter()
+            .flat_map(|m| match &m.content {
+                MessageContent::Blocks(blocks) => blocks
+                    .iter()
+                    .filter_map(|b| match b {
+                        ContentBlock::ToolResult {
+                            tool_use_id,
+                            content,
+                            ..
+                        } => Some((tool_use_id.clone(), content.clone())),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>(),
+                _ => Vec::new(),
+            })
+            .collect();
+        assert_eq!(
+            by_id.get("tid_9").map(String::as_str),
+            Some("output of turn 9"),
+            "the running turn's payload must be byte-identical after the fold"
+        );
+        assert!(
+            by_id
+                .get("tid_0")
+                .is_some_and(|c| c.starts_with(FOLD_PREFIX)),
+            "an earlier turn's result must be folded, got {:?}",
+            by_id.get("tid_0")
+        );
+    }
+
     #[tokio::test]
     async fn fallback_stub_when_llm_unavailable() {
         // 10 turns, fold_after=8, but the LLM driver always fails.
@@ -1210,7 +1328,7 @@ mod tests {
         )
         .await;
 
-        // Should still fold (with fallback stubs).
+        // Should still fold, keeping a preview of each payload (#8653).
         assert_eq!(
             result.groups_used_fallback, 1,
             "single batched call → exactly one fallback recorded"
@@ -1219,8 +1337,7 @@ mod tests {
         let fallback_present = out.iter().any(|m| match &m.content {
             MessageContent::Blocks(blocks) => blocks.iter().any(|b| match b {
                 ContentBlock::ToolResult { content, .. } => {
-                    content.starts_with(FOLD_PREFIX)
-                        && content.contains("summarisation unavailable")
+                    content.starts_with(FOLD_PREFIX) && content.contains(OMITTED_SUMMARY_PREFIX)
                 }
                 _ => false,
             }),
@@ -1228,7 +1345,7 @@ mod tests {
         });
         assert!(
             fallback_present,
-            "expected fallback summary in a folded ToolResult.content"
+            "expected a preview-preserving fold when the summariser is down"
         );
     }
 
@@ -1438,8 +1555,7 @@ mod tests {
     async fn json_response_assigns_per_tool_use_id_summary() {
         let messages = build_history(10); // tid_0..tid_9
                                           // Hand-craft a JSON response that names a subset of stale ids.
-                                          // Anything not named falls back to FALLBACK_SUMMARY because
-                                          // `bulk_fallback` is None on the happy path.
+                                          // Anything not named keeps a preview of its original result.
         let json = r#"[
             {"id":"tid_0","summary":"listed files"},
             {"id":"tid_1","summary":"read config"},
@@ -1560,7 +1676,7 @@ mod tests {
         .await;
         assert_eq!(
             result.groups_used_fallback, 0,
-            "single-object happy path must NOT fall back to the static stub"
+            "single-object happy path must NOT take the call-failure path"
         );
         let tid_0_content = out.iter().find_map(|m| match &m.content {
             MessageContent::Blocks(blocks) => blocks.iter().find_map(|b| match b {
@@ -1582,11 +1698,7 @@ mod tests {
         assert!(result.rewrites.contains_key("tid_0"));
     }
 
-    /// Non-JSON response should NOT crash the fold — degrade to Option-1
-    /// bulk summary applied to every block.  This keeps user-facing
-    /// behaviour identical to the pre-#4866 single-group fast-path so
-    /// existing call sites that rely on `messages_replaced > 0` still
-    /// signal correctly.
+    /// Non-JSON response should NOT crash the fold, and every stale block is still replaced so call sites that rely on `messages_replaced > 0` signal correctly.
     /// Companion to `parse_failure_preserves_original_per_block_content`,
     /// exercising the *pure-prose* Parse variant (`serde_json::from_str`
     /// fails outright, vs a valid array with no `{id,summary}` pairs).  Both
@@ -1662,10 +1774,9 @@ mod tests {
 
     /// JSON parse succeeds but every returned `id` is bogus (no overlap
     /// with stale `tool_use_id`s).  The Ok-path runs, the per-block apply
-    /// loop finds no matching summary AND there is no `bulk_fallback`
-    /// (the call succeeded), so every block lands on the omitted-id
-    /// preservation branch (issue #5978): the ORIGINAL tool result is
-    /// kept, preview-truncated, NOT the static stub.  This prevents the
+    /// loop finds no matching summary, so every block lands on the
+    /// omitted-id preservation branch (issue #5978): the ORIGINAL tool
+    /// result is kept, preview-truncated, NOT a content-free stub.  This prevents the
     /// model from reading the fold as "result not available yet" and
     /// re-issuing the identical call.  `groups_used_fallback` stays 0
     /// (the aux-LLM call itself succeeded — the operator-visible drift
@@ -1693,7 +1804,7 @@ mod tests {
         assert_eq!(result.groups_used_fallback, 0);
         // Every folded block must carry the omitted-id preservation marker
         // plus a copy of the ORIGINAL tool result — and must NOT carry the
-        // "summarisation unavailable" static stub.
+        // retired "summarisation unavailable" stub.
         let preserved_count = out
             .iter()
             .filter(|m| match &m.content {
@@ -1718,7 +1829,7 @@ mod tests {
 
     /// Issue #5978 regression: when the summariser returns a valid batch
     /// but OMITS one stale id, that block must preserve a preview-truncated
-    /// copy of its ORIGINAL tool result — never the static
+    /// copy of its ORIGINAL tool result — never the retired
     /// `[summarisation unavailable]` stub, which the model reads as "result
     /// not available yet" and re-issues the identical call (the endless
     /// memory_recall loop).
@@ -1771,7 +1882,7 @@ mod tests {
         );
         assert!(
             !content.contains("summarisation unavailable"),
-            "omitted id must NOT carry the static FALLBACK_SUMMARY stub, got: {content:?}"
+            "omitted id must NOT carry the retired summarisation-unavailable stub, got: {content:?}"
         );
         assert!(
             content.contains(OMITTED_SUMMARY_PREFIX),
@@ -1797,8 +1908,8 @@ mod tests {
         );
     }
 
-    /// Issue #5978 regression (negative assertion): the FALLBACK_SUMMARY
-    /// text must NOT appear in any block whose id was merely omitted from
+    /// Issue #5978 regression (negative assertion): the retired
+    /// summarisation-unavailable stub text must NOT appear in any block whose id was merely omitted from
     /// an otherwise-successful batch.  Belt-and-suspenders companion to
     /// `omitted_ids_preserve_original_content`.
     #[tokio::test]
@@ -1821,7 +1932,7 @@ mod tests {
         )
         .await;
 
-        // No folded block may carry the static "summarisation unavailable"
+        // No folded block may carry the retired "summarisation unavailable"
         // stub — every omitted id preserves its original content instead.
         let any_fallback = out.iter().any(|m| match &m.content {
             MessageContent::Blocks(blocks) => blocks.iter().any(|b| match b {
@@ -1834,7 +1945,7 @@ mod tests {
         });
         assert!(
             !any_fallback,
-            "no omitted-id block may carry the FALLBACK_SUMMARY stub (issue #5978)"
+            "no omitted-id block may carry the retired summarisation-unavailable stub (issue #5978)"
         );
 
         // And the omitted blocks must preserve their original results.
@@ -1928,10 +2039,10 @@ mod tests {
                 !content.contains("foo") && !content.contains("baz"),
                 "{id} must NOT carry the raw unparsed response as a bulk summary, got: {content:?}"
             );
-            // Must NOT carry the static call-failure stub either.
+            // Must NOT carry the retired call-failure stub either.
             assert!(
                 !content.contains("summarisation unavailable"),
-                "{id} must NOT carry the FALLBACK_SUMMARY stub on a parse failure, got: {content:?}"
+                "{id} must NOT carry the retired summarisation-unavailable stub on a parse failure, got: {content:?}"
             );
             // Must carry the preservation marker.
             assert!(
@@ -2128,7 +2239,7 @@ mod tests {
     }
 
     /// Regression for #6009: thinking-by-default fold models (deepseek-v4-flash) prepend a `<think>…</think>` block to the requested JSON.
-    /// The parser must strip it instead of degrading to the raw bulk-summary fallback.
+    /// The parser must strip it instead of degrading to the parse-failure path.
     #[test]
     fn parse_labeled_summaries_tolerates_think_preamble() {
         let input = "<think>\nThe tool listed files. I'll summarise each one.\n</think>\n\
@@ -2164,7 +2275,7 @@ mod tests {
     /// than `max_tokens * 4` bytes gets cut off.  With the pre-#5203 budget
     /// (64 tok/block, 256 floor) a realistic ~1680-byte verbose response is
     /// chopped mid-string and serde_json fails with "EOF while parsing a
-    /// string" — every fold pass falls back to bulk-summary semantics.
+    /// string" — every fold pass falls back to the parse-failure path.
     ///
     /// This test asserts both halves of the regression guard:
     /// 1. **Old budget would have failed** — when the response is
@@ -2435,7 +2546,7 @@ mod tests {
     /// request. Without it, DeepSeek / OpenAI / Mistral / Gemini are
     /// free to emit natural-language numbered lists,
     /// `parse_labeled_summaries` fails, and the fold silently
-    /// degrades to "applying raw response as bulk summary" — losing
+    /// degrades to the parse-failure path — losing
     /// per-tool_use_id granularity on every long session.
     #[tokio::test]
     async fn fold_request_pins_response_format_json_for_aux_llm() {

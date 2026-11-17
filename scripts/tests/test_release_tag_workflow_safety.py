@@ -115,7 +115,7 @@ def check_repository_automation() -> None:
     )
     expected_actions = {
         "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
-        "actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97",
+        "actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0",
     }
     jobs = supply_chain.get("jobs", {})
     for job_name in ("self-test", "audit"):
@@ -337,7 +337,7 @@ def check_repository_automation() -> None:
     title_step = title_steps[0]
     expected_title_action = (
         "amannn/action-semantic-pull-request@"
-        "48f256284bd46cdaab1048c3721360e808335d50"
+        "2252a14e810aa9b85c2d560bd7070c802206ecf6"
     )
     if title_step.get("uses") != expected_title_action:
         raise SystemExit("PR-title validation action pin drifted")
@@ -922,8 +922,8 @@ def check_repository_automation() -> None:
     expected_contributor_actions = {
         "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
         "dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8",
-        "Swatinem/rust-cache@a45951ff880207c249adf57334cf2e9bd81d6e1e",
-        "peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1",
+        "Swatinem/rust-cache@c8037a86dde8214a8310e9f54a8fc61ab362aa31",
+        "peter-evans/create-pull-request@15733dbdfeedb4f7fdb73d13c6f5ac83b710fab8",
     }
     actual_contributor_actions = {
         step["uses"] for step in contributor_steps if isinstance(step.get("uses"), str)

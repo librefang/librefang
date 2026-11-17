@@ -52,7 +52,10 @@ pub fn run_decay(
     let now = Utc::now();
     let now_unix = now.timestamp();
     let mut total_deleted: usize = 0;
-    let tx = db.transaction().map_err(LibreFangError::memory)?;
+    // BEGIN IMMEDIATE because each `decay_scope` counts before it updates: a deferred transaction starts as a reader and fails the upgrade with SQLITE_BUSY whenever another connection holds the write lock, and the busy timeout does not retry that upgrade.
+    let tx = db
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(LibreFangError::memory)?;
 
     // Decay SESSION scope memories — soft-delete only.
     total_deleted += decay_scope(
@@ -258,6 +261,36 @@ mod tests {
             })
             .unwrap();
         assert_eq!(remaining_id, "new-session");
+    }
+
+    /// The decay sweep counts expired rows before it soft-deletes them, inside one transaction; as a deferred transaction that read-then-write failed with "database is locked" whenever another connection held the write lock, instead of waiting under `busy_timeout`.
+    #[test]
+    fn run_decay_waits_for_a_concurrent_writer() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("decay.db");
+        let pool = crate::test_support::file_backed_pool(&path);
+        let old_time = (Utc::now() - chrono::Duration::days(10)).to_rfc3339();
+        insert_memory(
+            &pool.get().unwrap(),
+            "old-session",
+            "session_memory",
+            &old_time,
+        );
+        let config = MemoryDecayConfig {
+            enabled: true,
+            session_ttl_days: 7,
+            agent_ttl_days: 30,
+            episodic_ttl_days: 0,
+            decay_interval_hours: 1,
+        };
+
+        let holder =
+            crate::test_support::hold_write_lock(&path, std::time::Duration::from_millis(300));
+        let deleted = run_decay(&pool, &config)
+            .expect("run_decay must wait for the other writer, not fail with database is locked");
+        holder.join().unwrap();
+
+        assert_eq!(deleted, 1);
     }
 
     /// #7911: `episodic` is the scope the agent loop writes on every turn and the table default, and before this change `run_decay` did not name it — so the highest-volume scope in a real store was the one scope with no exit at all.

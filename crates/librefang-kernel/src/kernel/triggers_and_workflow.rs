@@ -621,46 +621,44 @@ impl LibreFangKernel {
                                         let wid_for_spawn = wid_str.clone();
                                         let source_for_spawn = source.clone();
                                         let timeout_for_spawn = fire_timeout;
-                                        tokio::spawn(async move {
-                                            match tokio::time::timeout(
-                                                timeout_for_spawn,
-                                                kernel_for_spawn.run_workflow(wf_id, msg),
-                                            )
-                                            .await
-                                            {
-                                                Ok(Ok((run_id, _output))) => {
-                                                    info!(
-                                                        source = %source_for_spawn,
-                                                        run_id = %run_id,
-                                                        workflow_id = %wid_for_spawn,
-                                                        "Trigger workflow run completed"
-                                                    );
+                                        // Task-locals do not cross `tokio::spawn`, so re-scope the trigger depth here exactly as the dispatch task above does.
+                                        // Otherwise every event the workflow's step turns publish starts a fresh depth-0 chain, and a trigger that re-fires its own workflow never reaches `triggers.max_depth`.
+                                        let depth_for_spawn =
+                                            PUBLISH_EVENT_DEPTH.try_with(|c| c.get()).unwrap_or(0);
+                                        tokio::spawn(PUBLISH_EVENT_DEPTH.scope(
+                                            std::cell::Cell::new(depth_for_spawn),
+                                            async move {
+                                                // The fire budget goes into the run rather than around it, so a run that outlives it is failed in place instead of being stranded in `Running`.
+                                                match kernel_for_spawn
+                                                    .run_workflow_with_timeout(
+                                                        wf_id,
+                                                        msg,
+                                                        timeout_for_spawn,
+                                                    )
+                                                    .await
+                                                {
+                                                    Ok((run_id, _output)) => {
+                                                        info!(
+                                                            source = %source_for_spawn,
+                                                            run_id = %run_id,
+                                                            workflow_id = %wid_for_spawn,
+                                                            "Trigger workflow run completed"
+                                                        );
+                                                    }
+                                                    Err(e) => {
+                                                        warn!(
+                                                            source = %source_for_spawn,
+                                                            workflow_id = %wid_for_spawn,
+                                                            timeout_secs = timeout_for_spawn.as_secs(),
+                                                            "Trigger workflow run failed: {e}"
+                                                        );
+                                                    }
                                                 }
-                                                Ok(Err(e)) => {
-                                                    warn!(
-                                                        source = %source_for_spawn,
-                                                        workflow_id = %wid_for_spawn,
-                                                        "Trigger workflow run failed: {e}"
-                                                    );
-                                                }
-                                                Err(_) => {
-                                                    warn!(
-                                                        source = %source_for_spawn,
-                                                        workflow_id = %wid_for_spawn,
-                                                        timeout_secs = timeout_for_spawn.as_secs(),
-                                                        "Trigger workflow run timed out"
-                                                    );
-                                                }
-                                            }
-                                            // Lane::Trigger permit is dropped here,
-                                            // when the spawned future ends — held for
-                                            // the full workflow run, not just for
-                                            // resolution. Explicit drop documents
-                                            // intent (the `_`-prefixed binding hint
-                                            // would otherwise allow Rust to drop it
-                                            // immediately).
-                                            drop(lane_permit_for_spawn);
-                                        });
+                                                // Lane::Trigger permit is dropped here, when the spawned future ends — held for the full workflow run, not just for resolution.
+                                                // Explicit drop documents intent (the `_`-prefixed binding hint would otherwise allow Rust to drop it immediately).
+                                                drop(lane_permit_for_spawn);
+                                            },
+                                        ));
                                     }
                                     None => {
                                         warn!(
@@ -1252,6 +1250,32 @@ impl LibreFangKernel {
         input: String,
         owner: Option<AgentId>,
     ) -> KernelResult<(WorkflowRunId, String)> {
+        self.run_workflow_bounded(workflow_id, input, owner, None)
+            .await
+    }
+
+    /// [`Self::run_workflow`] for an automated caller (cron, trigger) that has its own wall-clock budget.
+    ///
+    /// The budget is pushed into the run, which is bounded by `min(timeout, triggers.max_workflow_secs)`, instead of being wrapped around it.
+    /// Wrapping the call in an outer `tokio::time::timeout` would drop the run's own timeout branch along with `execute_run`, leaving the run stuck in `Running` with nothing driving it and no caller holding its id.
+    /// On expiry the run is failed in place and the error text contains "timed out".
+    pub async fn run_workflow_with_timeout(
+        &self,
+        workflow_id: WorkflowId,
+        input: String,
+        timeout: std::time::Duration,
+    ) -> KernelResult<(WorkflowRunId, String)> {
+        self.run_workflow_bounded(workflow_id, input, None, Some(timeout))
+            .await
+    }
+
+    async fn run_workflow_bounded(
+        &self,
+        workflow_id: WorkflowId,
+        input: String,
+        owner: Option<AgentId>,
+        caller_timeout: Option<std::time::Duration>,
+    ) -> KernelResult<(WorkflowRunId, String)> {
         let cfg = self.config.load_full();
 
         // Bound nested workflow runs (refs #6659).
@@ -1351,10 +1375,13 @@ impl LibreFangKernel {
             };
 
         // SECURITY: Global workflow timeout to prevent runaway execution.
-        let max_workflow_secs = cfg.triggers.max_workflow_secs;
+        // A caller budget can only tighten it.
+        let max_workflow = std::time::Duration::from_secs(cfg.triggers.max_workflow_secs);
+        let run_timeout = caller_timeout.map_or(max_workflow, |t| t.min(max_workflow));
+        let timeout_secs = run_timeout.as_secs();
 
         let outcome = match tokio::time::timeout(
-            std::time::Duration::from_secs(max_workflow_secs),
+            run_timeout,
             self.workflows
                 .engine
                 .execute_run(run_id, resolver, send_message),
@@ -1363,7 +1390,7 @@ impl LibreFangKernel {
         {
             Ok(outcome) => outcome,
             Err(_elapsed) => {
-                let error = format!("Workflow timed out after {max_workflow_secs}s");
+                let error = format!("Workflow timed out after {timeout_secs}s");
                 // Dropping `execute_run` mid-step leaves the run in `Running` with nothing driving it, so move it to the terminal `Failed` the caller is told about, as the async workflow runner does.
                 self.workflows.engine.fail_running_run(run_id, &error).await;
                 return Err(KernelError::LibreFang(LibreFangError::Internal(error)));
@@ -2342,5 +2369,179 @@ mod spawn_lifecycle_trigger_dispatch_tests {
             kernel.agents.agent_concurrency.contains_key(&watcher),
             "a charged agent_spawned match must be dispatched, not evaluated and discarded"
         );
+    }
+}
+
+#[cfg(test)]
+mod automated_workflow_fire_tests {
+    //! Automated workflow fires (cron, triggers) run under the caller's wall-clock budget.
+    //!
+    //! That budget used to be an outer `tokio::time::timeout` around `run_workflow`, which dropped the run's own timeout branch together with `execute_run`, so a run that outlived it stayed `Running` forever with no caller holding its id.
+
+    use super::*;
+    use crate::workflow::{
+        ErrorMode, StepAgent, StepMode, Workflow, WorkflowRunState, WorkflowStep,
+    };
+    use librefang_types::agent::{AgentManifest, ManifestCapabilities};
+
+    fn agent(name: &str) -> AgentManifest {
+        AgentManifest {
+            name: name.to_string(),
+            source_template: None,
+            description: "workflow step target".to_string(),
+            author: "test".to_string(),
+            module: "builtin:chat".to_string(),
+            capabilities: ManifestCapabilities::default(),
+            ..Default::default()
+        }
+    }
+
+    fn one_step_workflow(target: &str) -> Workflow {
+        Workflow {
+            id: WorkflowId::new(),
+            name: "caller-budget-probe".to_string(),
+            description: "one step whose agent is busy for longer than the caller budget"
+                .to_string(),
+            steps: vec![WorkflowStep {
+                name: "only-step".to_string(),
+                agent: StepAgent::ByName {
+                    name: target.to_string(),
+                },
+                prompt_template: "{{input}}".to_string(),
+                mode: StepMode::Sequential,
+                timeout_secs: 600,
+                error_mode: ErrorMode::Fail,
+                output_var: None,
+                inherit_context: None,
+                depends_on: vec![],
+                session_mode: None,
+                required_skills: Vec::new(),
+            }],
+            created_at: chrono::Utc::now(),
+            layout: None,
+            total_timeout_secs: None,
+            input_schema: None,
+            owner: None,
+        }
+    }
+
+    /// A run that outlives the caller's budget must end `Failed`, not stay `Running`.
+    /// The step blocks on its agent's concurrency permit (held by the test), which is a hang that needs no LLM behind it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn caller_budget_expiry_fails_the_run_instead_of_stranding_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home_dir = tmp.path().join("caller-budget");
+        std::fs::create_dir_all(home_dir.join("data")).unwrap();
+        let config = KernelConfig {
+            home_dir: home_dir.clone(),
+            data_dir: home_dir.join("data"),
+            network_enabled: false,
+            default_model: librefang_types::config::DefaultModelConfig::driverless(),
+            ..KernelConfig::default()
+        };
+        let kernel = Arc::new(LibreFangKernel::boot_with_config(config).expect("kernel boots"));
+        LibreFangKernel::set_self_handle(&kernel);
+        assert!(
+            kernel.config.load().triggers.max_workflow_secs > 1,
+            "precondition: the caller budget must be the tighter bound"
+        );
+
+        let busy = kernel
+            .spawn_agent_inner(agent("busy-worker"), None, None, None)
+            .expect("agent spawns");
+        let _held = kernel
+            .agent_concurrency_for(busy)
+            .acquire_owned()
+            .await
+            .expect("permit");
+        let wf_id = kernel
+            .register_workflow(one_step_workflow("busy-worker"))
+            .await;
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            kernel.run_workflow_with_timeout(
+                wf_id,
+                "hello".to_string(),
+                std::time::Duration::from_secs(1),
+            ),
+        )
+        .await
+        .expect("the caller budget must bound the run");
+        let err = result.expect_err("a run past its budget must report failure");
+        assert!(
+            err.to_string().contains("timed out after 1s"),
+            "the error must name the caller budget (and stay classified as a timeout), got: {err}"
+        );
+
+        let runs = kernel.workflows.engine.list_runs(None).await;
+        assert_eq!(runs.len(), 1);
+        assert!(
+            matches!(runs[0].state, WorkflowRunState::Failed),
+            "a timed-out run must be terminal, got {:?}",
+            runs[0].state
+        );
+        kernel.shutdown();
+    }
+
+    /// Production source only (everything before the first test module), with line comments removed, so neither a doc reference nor these tests' own string literals can satisfy an assertion.
+    fn strip_comments(src: &str) -> String {
+        let production = src.split("#[cfg(test)]").next().unwrap_or(src);
+        production
+            .lines()
+            .map(|line| match line.find("//") {
+                Some(i) => &line[..i],
+                None => line,
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// Neither automated caller may wrap the run in an outer timeout again, which is what stranded runs in `Running`.
+    #[test]
+    fn automated_workflow_callers_push_their_budget_into_the_run() {
+        for (file, src) in [
+            (
+                "triggers_and_workflow.rs",
+                include_str!("triggers_and_workflow.rs"),
+            ),
+            ("cron_tick.rs", include_str!("cron_tick.rs")),
+        ] {
+            let compact: String = strip_comments(src)
+                .chars()
+                .filter(|c| !c.is_whitespace())
+                .collect();
+            assert!(
+                compact.contains(".run_workflow_with_timeout("),
+                "{file} must hand its fire budget to run_workflow_with_timeout"
+            );
+            assert!(
+                !compact.contains(".run_workflow(wf_id"),
+                "{file} must not run an automated workflow fire through the unbounded run_workflow wrapped in an outer timeout"
+            );
+        }
+    }
+
+    /// Task-locals do not cross `tokio::spawn`, so the trigger-fired workflow spawn must re-establish `PUBLISH_EVENT_DEPTH`.
+    /// Without it, events published by the workflow's step turns restart at depth 0 and a trigger that re-fires its own workflow never reaches `triggers.max_depth`.
+    /// Observing the depth behaviourally needs a real LLM turn that publishes an event, so pin the wiring.
+    #[test]
+    fn trigger_workflow_spawn_carries_publish_event_depth() {
+        let compact: String = strip_comments(include_str!("triggers_and_workflow.rs"))
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect();
+        let spawn_at = compact
+            .find("tokio::spawn(PUBLISH_EVENT_DEPTH.scope(std::cell::Cell::new(depth_for_spawn)")
+            .expect("the trigger workflow spawn must be wrapped in a PUBLISH_EVENT_DEPTH scope");
+        let call_at = compact
+            .find("kernel_for_spawn.run_workflow_with_timeout(")
+            .expect("trigger workflow dispatch call");
+        assert!(
+            spawn_at < call_at,
+            "the scoped spawn must enclose the workflow run"
+        );
+        assert!(compact
+            .contains("letdepth_for_spawn=PUBLISH_EVENT_DEPTH.try_with(|c|c.get()).unwrap_or(0);"));
     }
 }

@@ -191,6 +191,7 @@ const AGENT_NODE_TYPES_SET = new Set(["agent", "channel", "respond", "condition"
 const TEMPLATE_LANG_SUFFIX: Readonly<Record<string, string>> = {
   zh: "\n\nIMPORTANT: You MUST respond entirely in Chinese (中文).",
   pl: "\n\nIMPORTANT: You MUST respond entirely in Polish (Polski).",
+  es: "\n\nIMPORTANT: You MUST respond entirely in Spanish (Español).",
 };
 const NODE_MODE_MAP: Readonly<Record<string, string>> = {
   condition: "conditional",

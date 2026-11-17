@@ -61,6 +61,40 @@ pub(super) async fn tool_code_search(
     let mut matches: Vec<(String, usize, String)> = Vec::new();
     let mut files_scanned: usize = 0;
     let mut truncated = false;
+
+    // Stat the root before walking: the walk swallows read_dir errors by design (an unreadable subdirectory must not fail the search), which would turn a file path or a nonexistent path into an authoritative-sounding "No matches".
+    let root_meta = tokio::fs::metadata(&root)
+        .await
+        .map_err(|e| ToolError::InvalidParameter {
+            name: "path",
+            reason: format!("cannot search '{raw_path}': {e}"),
+        })?;
+    if root_meta.is_file() {
+        // A single file (LLMs often pass `src/main.rs`): search just it, under the same size and binary rules as the walk.
+        // An oversized file is an error rather than a silent skip: the caller named it explicitly, so "No matches" would be the same false negative as before.
+        if root_meta.len() > MAX_FILE_BYTES {
+            return Err(ToolError::InvalidParameter {
+                name: "path",
+                reason: format!(
+                    "'{raw_path}' is {} bytes, over the {MAX_FILE_BYTES}-byte code_search limit",
+                    root_meta.len()
+                ),
+            });
+        }
+        let rel = root
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| raw_path.to_string());
+        truncated = search_file(&root, rel, &re, &mut matches, max_results).await;
+        return Ok(format_matches(query, raw_path, matches, truncated));
+    }
+    if !root_meta.is_dir() {
+        return Err(ToolError::InvalidParameter {
+            name: "path",
+            reason: format!("'{raw_path}' is neither a file nor a directory"),
+        });
+    }
+
     let mut stack: Vec<PathBuf> = vec![root.clone()];
 
     'walk: while let Some(dir) = stack.pop() {
@@ -104,27 +138,14 @@ pub(super) async fn tool_code_search(
                 break 'walk;
             }
 
-            let bytes = match tokio::fs::read(&path).await {
-                Ok(b) => b,
-                Err(_) => continue,
-            };
-            if bytes.contains(&0u8) {
-                continue; // binary
-            }
-            let text = String::from_utf8_lossy(&bytes);
             let rel = path
                 .strip_prefix(&root)
                 .unwrap_or(path.as_path())
                 .display()
                 .to_string();
-            for (idx, line) in text.lines().enumerate() {
-                if re.is_match(line) {
-                    matches.push((rel.clone(), idx + 1, clip_line(line)));
-                    if matches.len() >= max_results {
-                        truncated = true;
-                        break 'walk;
-                    }
-                }
+            if search_file(&path, rel, &re, &mut matches, max_results).await {
+                truncated = true;
+                break 'walk;
             }
         }
         // Push in reverse so the next pops visit subdirs in sorted order.
@@ -133,8 +154,47 @@ pub(super) async fn tool_code_search(
         }
     }
 
+    Ok(format_matches(query, raw_path, matches, truncated))
+}
+
+/// Append every line of `path` matching `re` to `matches`, labelled `rel`.
+///
+/// Unreadable and binary (NUL-containing) files are skipped.
+/// Returns `true` once `matches` reaches `max_results`.
+async fn search_file(
+    path: &Path,
+    rel: String,
+    re: &regex::Regex,
+    matches: &mut Vec<(String, usize, String)>,
+    max_results: usize,
+) -> bool {
+    let bytes = match tokio::fs::read(path).await {
+        Ok(b) => b,
+        Err(_) => return false,
+    };
+    if bytes.contains(&0u8) {
+        return false; // binary
+    }
+    let text = String::from_utf8_lossy(&bytes);
+    for (idx, line) in text.lines().enumerate() {
+        if re.is_match(line) {
+            matches.push((rel.clone(), idx + 1, clip_line(line)));
+            if matches.len() >= max_results {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn format_matches(
+    query: &str,
+    raw_path: &str,
+    mut matches: Vec<(String, usize, String)>,
+    truncated: bool,
+) -> String {
     if matches.is_empty() {
-        return Ok(format_empty_result(query, raw_path, truncated));
+        return format_empty_result(query, raw_path, truncated);
     }
     matches.sort();
     let mut out = String::with_capacity(matches.len() * 48);
@@ -147,7 +207,7 @@ pub(super) async fn tool_code_search(
             matches.len()
         ));
     }
-    Ok(out)
+    out
 }
 
 fn format_empty_result(query: &str, raw_path: &str, truncated: bool) -> String {
@@ -260,6 +320,57 @@ mod tests {
             .await
             .unwrap();
         assert!(out.contains("No matches"), "got: {out}");
+    }
+
+    /// A `path` naming a file searches that file instead of reporting a false "No matches".
+    #[tokio::test]
+    async fn path_to_a_file_searches_that_file() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::create_dir_all(tmp.path().join("src")).unwrap();
+        std::fs::write(tmp.path().join("src/main.rs"), "use x;\nfn main() {}\n").unwrap();
+        let out = tool_code_search(
+            &json!({"query": "fn main", "path": "src/main.rs"}),
+            Some(tmp.path()),
+            &[],
+        )
+        .await
+        .unwrap();
+        assert!(out.contains("main.rs:2: fn main() {}"), "got: {out}");
+    }
+
+    /// A `path` naming a file over the size cap is reported, not silently skipped into "No matches".
+    #[tokio::test]
+    async fn path_to_an_oversized_file_is_invalid_parameter() {
+        let tmp = TempDir::new().unwrap();
+        let mut big = "fn main() {}\n".to_string().into_bytes();
+        big.resize(MAX_FILE_BYTES as usize + 1, b'a');
+        std::fs::write(tmp.path().join("big.rs"), big).unwrap();
+        let r = tool_code_search(
+            &json!({"query": "fn main", "path": "big.rs"}),
+            Some(tmp.path()),
+            &[],
+        )
+        .await;
+        assert!(
+            matches!(r, Err(ToolError::InvalidParameter { name: "path", .. })),
+            "{r:?}"
+        );
+    }
+
+    /// A `path` that does not exist is an invalid parameter, not an empty search result.
+    #[tokio::test]
+    async fn nonexistent_path_is_invalid_parameter() {
+        let tmp = TempDir::new().unwrap();
+        let r = tool_code_search(
+            &json!({"query": "x", "path": "no/such/dir"}),
+            Some(tmp.path()),
+            &[],
+        )
+        .await;
+        assert!(
+            matches!(r, Err(ToolError::InvalidParameter { name: "path", .. })),
+            "{r:?}"
+        );
     }
 
     #[test]

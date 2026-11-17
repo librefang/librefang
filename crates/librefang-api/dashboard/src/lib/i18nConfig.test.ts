@@ -7,6 +7,7 @@ describe("dashboard i18n initialization", () => {
     ["zh-CN", "zh"],
     ["ko_KR", "ko"],
     ["UK-ua", "uk"],
+    ["ES-es", "es"],
   ])("normalizes detected locale %s to %s", (detected, expected) => {
     expect(normalizeDetectedLanguage(detected)).toBe(expected);
   });
@@ -15,7 +16,7 @@ describe("dashboard i18n initialization", () => {
     await expect(i18nReady).resolves.toBeDefined();
     expect(i18n.options.load).toBe("languageOnly");
     expect(i18n.options.supportedLngs).toEqual(
-      expect.arrayContaining(["en", "zh", "uk", "ko", "pl"]),
+      expect.arrayContaining(["en", "zh", "uk", "ko", "pl", "es"]),
     );
   });
 });

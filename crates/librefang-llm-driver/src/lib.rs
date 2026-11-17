@@ -422,6 +422,17 @@ pub struct CompletionRequest {
     /// Drivers that don't speak the OpenAI-compatible chat-completions wire
     /// format (Anthropic, Gemini, etc.) ignore this field.
     pub reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy,
+    /// The reasoning-effort tokens this request's model accepts, verbatim
+    /// (#8591), from the catalog entry plus any operator override via
+    /// [`crate::kernel_handle::CatalogQuery::reasoning_policy_for`].
+    ///
+    /// The OpenAI-compatible driver applies the policy's coercion here (a
+    /// token outside the set is mapped to the nearest supported rung so a
+    /// direct `CompletionRequest` builder cannot send one) and uses
+    /// `is_declared()` to decide between the pre-#8591 spelling and the
+    /// verbatim/enum path. Other families read the policy too — Anthropic's
+    /// adaptive wire refuses an undeclared rung it cannot vouch for.
+    pub reasoning_policy: librefang_types::config::ReasoningEffortPolicy,
 }
 
 /// A response from an LLM completion.

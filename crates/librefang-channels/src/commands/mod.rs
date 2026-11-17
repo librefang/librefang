@@ -272,9 +272,12 @@ pub const COMMAND_REGISTRY: &[CommandDef] = &[
         name: "think",
         aliases: &[],
         category: Category::Session,
-        scope: Scope::CHANNEL.union(Scope::DASHBOARD),
-        description: "Toggle extended thinking",
-        args_hint: "[on|off]",
+        // CLI joined in #8591: the TUI chat runner pins the same per-session
+        // effort the channel arm does, so `/think <level>` is no longer
+        // channel-only.
+        scope: Scope::CHANNEL.union(Scope::CLI).union(Scope::DASHBOARD),
+        description: "Set the reasoning effort for this session",
+        args_hint: "[none|minimal|low|medium|high|xhigh|max|off]",
         subcommands: &[],
         telegram_menu: true,
         // The dashboard has no "think" arm in `ws.rs::handle_command` — it
@@ -623,6 +626,46 @@ pub fn lookup(name_or_alias: &str) -> Option<&'static CommandDef> {
     COMMAND_REGISTRY
         .iter()
         .find(|c| c.name == bare || c.aliases.contains(&bare))
+}
+
+/// Parse the optional argument of `/think` into the session reasoning-effort
+/// pin.
+///
+/// One implementation for every surface that spells the command (channel
+/// bridge and TUI chat runner), so the accepted vocabulary cannot drift
+/// between them:
+/// - no argument → `Ok(None)` — clear the pin and let the agent / global /
+///   compiled default decide. A bare `/think` therefore inherits rather than
+///   forcing thinking on.
+/// - `on` / `true` / `enable` / `enabled` are rejected: before #8591 they
+///   forced thinking on, and there is no level they map to now, so the caller
+///   answers with the usage line instead of silently doing nothing.
+/// - `off` / `false` / `disable` / `disabled` → `Ok(Some("none"))` — the
+///   explicit non-think toggle.
+/// - a canonical rung (`none` / `minimal` / `low` / `medium` / `high` /
+///   `xhigh` / `max`, see [`librefang_types::config::CANONICAL_REASONING_EFFORTS`])
+///   → `Ok(Some(rung))`.
+/// - a gateway-declared rung outside that list is refused here on purpose: the
+///   command answers in one line and cannot read the catalog, so an unknown
+///   token would be a silent typo. Those levels are set from the dashboard or
+///   `PATCH /api/sessions/{id}/reasoning`, which the catalog coerces.
+/// - anything else → `Err(argument)` carrying the original spelling, so the
+///   caller can quote it. A typo must not silently pin a level nobody asked
+///   for — the same confirmation-without-action class #7140 fixed for
+///   `/think of`, which used to switch thinking off while acking success.
+pub fn parse_think_argument(arg: Option<&str>) -> Result<Option<&'static str>, String> {
+    let Some(raw) = arg.map(str::trim).filter(|a| !a.is_empty()) else {
+        return Ok(None);
+    };
+    let lower = raw.to_ascii_lowercase();
+    match lower.as_str() {
+        "off" | "false" | "disable" | "disabled" => Ok(Some("none")),
+        other => librefang_types::config::CANONICAL_REASONING_EFFORTS
+            .iter()
+            .find(|token| **token == other)
+            .map(|token| Ok(Some(*token)))
+            .unwrap_or_else(|| Err(raw.to_string())),
+    }
 }
 
 /// Iterate every command visible on at least one of the given surfaces.
@@ -995,6 +1038,79 @@ mod tests {
         assert_eq!(lookup("quit").map(|c| c.name), Some("exit"));
         assert_eq!(lookup("/quit").map(|c| c.name), Some("exit"));
         assert_eq!(lookup("exit").map(|c| c.name), Some("exit"));
+    }
+
+    /// `/think` must resolve on the TUI surface too: the chat runner's
+    /// pre-flight gate only accepts commands whose scope carries `Scope::CLI`
+    /// (#8591).
+    #[test]
+    fn think_command_is_reachable_from_cli_and_channel() {
+        let def = lookup("think").expect("/think must be registered");
+        assert!(
+            def.scope.contains(Scope::CLI),
+            "/think must work in the TUI"
+        );
+        assert!(
+            def.scope.contains(Scope::CHANNEL),
+            "/think must stay reachable from channels"
+        );
+        // The usage hint is what the unknown-argument reply renders, so it
+        // must name the vocabulary, not just on/off.
+        assert!(def.args_hint.contains("none"), "hint: {}", def.args_hint);
+        assert!(def.args_hint.contains("max"), "hint: {}", def.args_hint);
+    }
+
+    /// The shared `/think` parser behind both the channel arm and the TUI arm
+    /// must map the legacy on/off words onto the new pin semantics and pass
+    /// every canonical rung through verbatim; anything else is echoed back
+    /// rather than folded onto a level nobody asked for.
+    #[test]
+    fn parse_think_argument_maps_aliases_and_levels() {
+        // A bare `/think` clears the pin; absent, empty and whitespace-only
+        // arguments all behave the same.
+        for clear in [None, Some(""), Some("   ")] {
+            assert_eq!(parse_think_argument(clear), Ok(None), "arg {clear:?}");
+        }
+        // The legacy "enable" words are refused rather than silently clearing
+        // the pin: they used to force thinking on, and the caller answers with
+        // the level syntax (#8618 review).
+        for refused in ["on", "ON", " true ", "enable", "enabled"] {
+            assert_eq!(
+                parse_think_argument(Some(refused)),
+                Err(refused.trim().to_string()),
+                "arg {refused:?} must point at the level syntax"
+            );
+        }
+        for off in ["off", "false", "disable", "disabled"] {
+            assert_eq!(
+                parse_think_argument(Some(off)),
+                Ok(Some("none")),
+                "arg {off}"
+            );
+        }
+        for level in librefang_types::config::CANONICAL_REASONING_EFFORTS {
+            assert_eq!(
+                parse_think_argument(Some(level)),
+                Ok(Some(level)),
+                "level {level}"
+            );
+            let upper = level.to_ascii_uppercase();
+            assert_eq!(
+                parse_think_argument(Some(&upper)),
+                Ok(Some(level)),
+                "level {upper}"
+            );
+        }
+        // A typo keeps its original spelling for the caller to quote.
+        assert_eq!(
+            parse_think_argument(Some("banana")),
+            Err("banana".to_string())
+        );
+        assert_eq!(
+            parse_think_argument(Some("of")),
+            Err("of".to_string()),
+            "the historical /think of typo must stay a typo"
+        );
     }
 
     /// Adding `Scope::CLI` to existing channel commands must not change the

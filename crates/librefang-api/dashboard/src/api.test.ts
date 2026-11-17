@@ -16,7 +16,9 @@ import {
   resetAgentSession,
   restoreBackup,
   searchMemories,
+  sendAgentMessage,
   setApiKey,
+  setSessionReasoningOverride,
   updateAgentTools,
   verifyStoredAuth,
 } from "./api";
@@ -486,6 +488,60 @@ describe("dashboard auth helpers", () => {
     ]);
   });
 
+  // The session PATCH route targets #8616, which names the field
+  // `reasoning_effort` (and still accepts the old spelling as an alias). The
+  // HTTP message body is the exception — see the sendAgentMessage test below.
+  it("setSessionReasoningOverride patches the session with reasoning_effort", async () => {
+    setApiKey("secret-token");
+    const okResponse = () =>
+      new Response(JSON.stringify({ status: "ok" }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    fetchMock.mockResolvedValueOnce(okResponse()).mockResolvedValueOnce(okResponse());
+
+    await setSessionReasoningOverride("sess-1", "xhigh");
+    await setSessionReasoningOverride("sess-1", null);
+
+    expect(fetchMock.mock.calls[0][0]).toBe("/api/sessions/sess-1/reasoning");
+    const pinned = JSON.parse(fetchMock.mock.calls[0][1].body);
+    expect(pinned).toEqual({ reasoning_effort: "xhigh" });
+    expect(pinned).not.toHaveProperty("reasoning_mode");
+    // `null` has to survive stringify as an explicit null: it is the only way
+    // to say "remove the pin" — an omitted key means "leave it alone".
+    expect(JSON.parse(fetchMock.mock.calls[1][1].body)).toEqual({ reasoning_effort: null });
+  });
+
+  // The HTTP fallback must go out under `reasoning_mode`: main's
+  // `MessageRequest` (the only deployed backend when this dashboard ships) is
+  // `#[serde(deny_unknown_fields)]` and does not know `reasoning_effort`, so
+  // the canonical name would 400 every send that armed a level. #8616 accepts
+  // `reasoning_mode` as the deprecated alias, which is what makes the same
+  // body work on both.
+  it("sendAgentMessage carries the level as reasoning_mode, only when armed", async () => {
+    setApiKey("secret-token");
+    const okResponse = () =>
+      new Response(JSON.stringify({ response: "ok" }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    fetchMock.mockResolvedValueOnce(okResponse()).mockResolvedValueOnce(okResponse());
+
+    await sendAgentMessage("agent-1", "hi", { reasoning_effort: "minimal" });
+    await sendAgentMessage("agent-1", "hi");
+
+    const withEffort = JSON.parse(fetchMock.mock.calls[0][1].body);
+    expect(withEffort.reasoning_mode).toBe("minimal");
+    expect(withEffort).not.toHaveProperty("reasoning_effort");
+    // Unset is absent, not null: the session pin / manifest default applies.
+    const without = JSON.parse(fetchMock.mock.calls[1][1].body);
+    expect(without).not.toHaveProperty("reasoning_mode");
+    expect(without).not.toHaveProperty("reasoning_effort");
+  });
+
+  // `null` has to survive JSON.stringify as `null`, not vanish. It is the only
+  // way for a client to say "hand this field back to inherit" — an omitted key
+  // means "leave it alone", which is a different request.
   it("reads the manifest ETag as an unquoted expected_version token (#8424)", async () => {
     fetchMock.mockResolvedValueOnce(
       new Response('name = "a"\n', {

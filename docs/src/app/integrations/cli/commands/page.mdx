@@ -1324,6 +1324,6 @@ These slash commands exist in the registry alongside `/help` / `/clear` / etc. b
 |---|---|
 | `/reboot` | Restart the agent process (resets in-process state, but keeps session history). |
 | `/compact` | Trigger an LLM-based compaction round on the current session. |
-| `/think` | Toggle visible chain-of-thought / reasoning rendering for the next reply. |
+| `/think <level\|off>` | Pin the session's reasoning effort to a level (`none` / `minimal` / `low` / `medium` / `high` / `xhigh` / `max`); a bare `/think` clears the pin; `off` pins `none`. The old `on` spelling is refused with the usage line. A level a gateway declares outside that list can be pinned from the dashboard or the session API, not from chat. |
 
 Commands surfaced by channel adapters (`/agents`, `/new`, `/usage`, `/triggers`, `/budget`, …) are described under [Provider Management — Channel Commands](/configuration/providers/management). Note that **`/new` forks into a fresh session rather than wiping the current one** — the previous session stays accessible from the channel and can be resumed. Unknown command names fall through to a single "unknown command" error rather than being passed to the model.

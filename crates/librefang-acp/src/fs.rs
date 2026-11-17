@@ -83,6 +83,9 @@ impl FsCapabilities {
 #[derive(Clone)]
 pub struct FsClientHandle {
     inner: Arc<FsClientInner>,
+    /// The editor-facing ACP session this handle serves, set by [`Self::with_session`].
+    /// ACP requires every `fs/*` request to name the session it belongs to, and editors resolve that id to a thread or project before serving it, so the kernel-side trait impl refuses to send a request without one.
+    session_id: Option<agent_client_protocol::schema::v1::SessionId>,
 }
 
 struct FsClientInner {
@@ -94,7 +97,24 @@ impl FsClientHandle {
     pub(crate) fn new(cx: ConnectionTo<Client>, caps: FsCapabilities) -> Self {
         Self {
             inner: Arc::new(FsClientInner { cx, caps }),
+            session_id: None,
         }
+    }
+
+    /// A copy of this handle bound to `session_id`, the ACP session the editor minted.
+    /// The kernel registers one bound handle per session, and its `AcpFsClient` impl names that session on every request.
+    pub fn with_session(&self, session_id: agent_client_protocol::schema::v1::SessionId) -> Self {
+        Self {
+            inner: Arc::clone(&self.inner),
+            session_id: Some(session_id),
+        }
+    }
+
+    /// The ACP session this handle is bound to, or `Unavailable` when it is not bound, so the runtime falls back to local fs instead of sending a request the editor cannot attribute.
+    fn bound_session_id(&self) -> Result<agent_client_protocol::schema::v1::SessionId, AcpError> {
+        self.session_id
+            .clone()
+            .ok_or_else(|| AcpError::unavailable("fs client is not bound to an ACP session"))
     }
 
     /// Editor-declared capabilities. Returned by value — callers that
@@ -161,28 +181,13 @@ impl FsClientHandle {
             Err(_) => Err(AcpError::unavailable("fs/write_text_file timed out")),
         }
     }
-
-    /// ACP `SessionId` placeholder used when the caller's session id
-    /// has been folded into the `register_acp_fs_client` registration
-    /// key already (and so the ACP-side session id is no longer
-    /// available at the call site). Editors don't reuse the bytes for
-    /// anything in `fs/*` requests beyond echoing them back, so an
-    /// empty string is fine on the wire.
-    fn dummy_acp_session_id() -> agent_client_protocol::schema::v1::SessionId {
-        agent_client_protocol::schema::v1::SessionId::new(String::new())
-    }
 }
 
 /// Bridge into [`librefang_kernel_handle::AcpFsClient`] so the kernel
 /// can route runtime tool calls through the editor without depending
 /// on the ACP schema crate.
 ///
-/// The kernel keys its registry by LibreFang `SessionId`, not by the
-/// ACP `SessionId` the editor uses on the wire — so when the kernel
-/// asks us to read a file, we don't have the editor-facing id to put
-/// in the `ReadTextFileRequest`. The protocol allows an empty session
-/// id (the request is implicitly scoped by the connection); editors
-/// echo it back without inspecting the contents.
+/// The kernel keys its registry by LibreFang `SessionId`, so each registered handle carries the editor-facing ACP session id it was bound to with [`FsClientHandle::with_session`] and puts it on the wire.
 #[async_trait]
 impl AcpFsClient for FsClientHandle {
     async fn read_text_file(
@@ -191,19 +196,15 @@ impl AcpFsClient for FsClientHandle {
         line: Option<u32>,
         limit: Option<u32>,
     ) -> KernelResult<String> {
-        FsClientHandle::read_text_file(
-            self,
-            FsClientHandle::dummy_acp_session_id(),
-            path,
-            line,
-            limit,
-        )
-        .await
-        .map_err(acp_to_kernel_err)
+        let session_id = self.bound_session_id().map_err(acp_to_kernel_err)?;
+        FsClientHandle::read_text_file(self, session_id, path, line, limit)
+            .await
+            .map_err(acp_to_kernel_err)
     }
 
     async fn write_text_file(&self, path: PathBuf, content: String) -> KernelResult<()> {
-        FsClientHandle::write_text_file(self, FsClientHandle::dummy_acp_session_id(), path, content)
+        let session_id = self.bound_session_id().map_err(acp_to_kernel_err)?;
+        FsClientHandle::write_text_file(self, session_id, path, content)
             .await
             .map_err(acp_to_kernel_err)
     }

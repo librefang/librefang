@@ -7,6 +7,7 @@ import zh from "../locales/zh.json";
 import uk from "../locales/uk.json";
 import ko from "../locales/ko.json";
 import pl from "../locales/pl.json";
+import es from "../locales/es.json";
 
 export const normalizeDetectedLanguage = (language: string): string =>
   language.split(/[-_]/, 1)[0].toLowerCase();
@@ -21,9 +22,10 @@ export const i18nReady = i18n
       uk: { translation: uk },
       ko: { translation: ko },
       pl: { translation: pl },
+      es: { translation: es },
     },
     load: "languageOnly",
-    supportedLngs: ["en", "zh", "uk", "ko", "pl"],
+    supportedLngs: ["en", "zh", "uk", "ko", "pl", "es"],
     fallbackLng: "en",
     detection: {
       convertDetectedLanguage: normalizeDetectedLanguage,
