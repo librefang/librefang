@@ -117,6 +117,12 @@ MAX_MESSAGE_LEN = 32000
 DEFAULT_POLL_INTERVAL_SECS = 3
 MIN_POLL_INTERVAL_SECS = 1
 SEND_TIMEOUT_SECS = 30
+# Long-poll read timeout for `chat/<token>?lookIntoFuture=1`: Talk
+# holds the connection for its whole long-poll window (~30 s), so an
+# idle room's socket read times out on every poll. Raised above the
+# server hold so a slow server can't wedge the loop; `_poll_once`
+# treats the resulting TimeoutError as a normal empty poll.
+POLL_TIMEOUT_SECS = 45
 # How many messages per `chat/<token>?lookIntoFuture=1` poll. Matches
 # the Rust adapter's `limit=100` query param.
 CHAT_FETCH_LIMIT = 100
@@ -794,7 +800,17 @@ class NextcloudAdapter(SidecarAdapter):
             try:
                 status, body, _raw, resp_hdrs = self._http(
                     url, headers=self._auth_headers(),
+                    timeout=POLL_TIMEOUT_SECS,
                 )
+            except TimeoutError:
+                # Idle long-poll: Talk holds the connection open for
+                # its long-poll window and quiet rooms time out at the
+                # socket read on every pass. Expected steady-state —
+                # same as the 304 no-op below — not a transport error,
+                # so no warn and no producer backoff; just move on to
+                # the next room. (`socket.timeout` is an alias of the
+                # builtin TimeoutError since Python 3.10, our floor.)
+                continue
             except urllib.error.URLError as e:
                 log.warn(
                     "nextcloud chat poll transport error",
@@ -875,6 +891,11 @@ class NextcloudAdapter(SidecarAdapter):
                     if members:
                         meta = ev["params"].setdefault("metadata", {})
                         meta["group_members"] = members
+                log.info(
+                    "nextcloud message picked up",
+                    room_token=room_token, message_id=msg_id,
+                    sender=msg.get("actorId"),
+                )
                 emit(ev)
 
             if newest_id > last_id:

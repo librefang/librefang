@@ -790,6 +790,112 @@ def test_poll_once_request_shape(monkeypatch):
     assert call["headers"]["ocs-apirequest"] == "true"
 
 
+def test_poll_once_read_timeout_treated_as_empty_poll(monkeypatch, tmp_path):
+    """An idle long-poll read timeout is expected steady-state, not a
+    transport error: Talk holds `lookIntoFuture=1` connections for its
+    whole long-poll window, so quiet rooms time out at the socket
+    read on every pass (`socket.timeout` == builtin `TimeoutError`
+    since Python 3.10, and not a `URLError` subclass). Must be
+    treated like the 304 no-op: no warn, no raise, and the next room
+    still polls in the same pass."""
+    monkeypatch.setenv("LIBREFANG_HOME", str(tmp_path))
+    a = _adapter()
+    a.own_user_id = "librefang-bot"
+    a._room_watermarks["R1"] = 7
+    a._room_watermarks["R2"] = 0
+    warns = []
+    monkeypatch.setattr(
+        nc.log, "warn", lambda *args, **kw: warns.append((args, kw)),
+    )
+
+    def fake_urlopen(req, timeout=None):
+        if "/chat/R1" in req.full_url:
+            raise TimeoutError("The read operation timed out")
+        if "/chat/R2" in req.full_url:
+            return _FakeResp(
+                200,
+                json.dumps({"ocs": {"data": [_msg(mid=50)]}}).encode("utf-8"),
+            )
+        raise AssertionError(f"unexpected {req.full_url}")
+
+    monkeypatch.setattr(nc.urllib.request, "urlopen", fake_urlopen)
+    emitted = []
+    a._poll_once(emitted.append, ["R1", "R2"])  # must not raise
+    assert [e["params"]["channel_id"] for e in emitted] == ["R2"]
+    assert warns == []
+    # Timed-out room's watermark untouched.
+    assert a._room_watermarks["R1"] == 7
+
+
+def test_poll_once_transport_error_still_warns(monkeypatch):
+    """Real transport errors keep the warn + skip behaviour — the
+    read-timeout fix must not swallow them."""
+    a = _adapter()
+    a._room_watermarks["R1"] = 0
+    warns = []
+    monkeypatch.setattr(
+        nc.log, "warn", lambda *args, **kw: warns.append((args, kw)),
+    )
+
+    def fake_urlopen(req, timeout=None):
+        raise urllib.error.URLError("dns error")
+
+    monkeypatch.setattr(nc.urllib.request, "urlopen", fake_urlopen)
+    emitted = []
+    a._poll_once(emitted.append, ["R1"])  # must not raise
+    assert emitted == []
+    assert len(warns) == 1
+    assert warns[0][0][0] == "nextcloud chat poll transport error"
+    assert warns[0][1]["room_token"] == "R1"
+
+
+def test_poll_once_poll_call_uses_raised_timeout(monkeypatch):
+    """The long-poll call passes an explicit timeout above the server
+    hold (POLL_TIMEOUT_SECS) so a slow server can't wedge the loop;
+    every other _http call keeps the SEND_TIMEOUT_SECS default."""
+    a = _adapter()
+    a._room_watermarks["R1"] = 0
+    fake = _FakeUrlopen([(200, {"ocs": {"data": []}})])
+    monkeypatch.setattr(nc.urllib.request, "urlopen", fake)
+    a._poll_once(lambda _: None, ["R1"])
+    assert fake.calls[0]["timeout"] == nc.POLL_TIMEOUT_SECS
+    assert nc.POLL_TIMEOUT_SECS > nc.SEND_TIMEOUT_SECS
+
+
+def test_poll_once_logs_picked_up_message(monkeypatch):
+    """Every emitted message logs an info pickup line (room token,
+    message id, sender) — during debugging, silence was
+    indistinguishable from failure. Self-skipped, deduped and system
+    messages log nothing."""
+    a = _adapter()
+    a.own_user_id = "librefang-bot"
+    a._room_watermarks["R1"] = 0
+    infos = []
+    monkeypatch.setattr(
+        nc.log, "info", lambda *args, **kw: infos.append((args, kw)),
+    )
+    fake = _FakeUrlopen([
+        (200, {"ocs": {"data": [
+            _msg(mid=60, actor_id="alice"),
+            _msg(mid=61, actor_id="librefang-bot", actor_type="users"),
+            _msg(mid=62, text="hi", message_type="system"),
+        ]}}),
+        (200, {"ocs": {"data": [_msg(mid=60, actor_id="alice")]}}),
+    ])
+    monkeypatch.setattr(nc.urllib.request, "urlopen", fake)
+    emitted = []
+    a._poll_once(emitted.append, ["R1"])
+    a._poll_once(emitted.append, ["R1"])  # dedupe repeat: no log
+    pickups = [
+        i for i in infos if i[0][0] == "nextcloud message picked up"
+    ]
+    assert len(pickups) == 1
+    assert pickups[0][1] == {
+        "room_token": "R1", "message_id": 60, "sender": "alice",
+    }
+    assert [e["params"]["message_id"] for e in emitted] == ["60"]
+
+
 # ---- dedupe set capacity ------------------------------------------
 
 
