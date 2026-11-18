@@ -2056,24 +2056,91 @@ def test_on_send_file_data_above_cap_rejected_before_http(monkeypatch):
     )
 
 
-def test_on_send_file_data_missing_oc_fileid_no_share(monkeypatch):
-    """PUT succeeds but the OC-FileId response header is missing →
-    failure path: no share POST, loud notice instead."""
+def test_on_send_file_data_oc_fileid_padded_instance_suffix(monkeypatch):
+    """Real-world header shape (observed live on nextcloud.jsbart.com):
+    zero-padded numeric id + 'oc' + instance id, e.g.
+    '02861982octccaigsouv' → numeric 2861982. The share must be
+    posted with the unpadded numeric id and NO PROPFIND fallback."""
+    a = _adapter()
+    a.own_user_id = "librefang-bot"
+    fake = _FakeUrlopen([
+        (201, b"", {"OC-FileId": "02861982octccaigsouv"}),
+        (201, _media_ok_ocs()),
+    ])
+    monkeypatch.setattr(nc.urllib.request, "urlopen", fake)
+    import asyncio as _asyncio
+    _asyncio.run(a.on_send(_file_data_cmd(list(b"PNGDATA"))))
+    assert len(fake.calls) == 2  # PUT + share — no PROPFIND
+    share = fake.calls[1]
+    assert share["url"] == (
+        "https://cloud.example.com/ocs/v2.php/apps/spreed/api/v1/"
+        "chat/ROOM1/share"
+    )
+    assert share["body"]["metaData"]["id"] == 2861982
+
+
+def test_on_send_file_data_oc_fileid_unparseable_propfind_fallback(monkeypatch):
+    """Header present but unparseable → PROPFIND oc:fileid on the
+    uploaded path (Depth 0) resolves the numeric id → share still
+    posted."""
+    a = _adapter()
+    a.own_user_id = "librefang-bot"
+    propfind_xml = (
+        '<?xml version="1.0"?>'
+        '<d:multistatus xmlns:d="DAV:" '
+        'xmlns:s="http://sabredav.org/ns" '
+        'xmlns:oc="http://owncloud.org/ns">'
+        "<d:response>"
+        "<d:href>/remote.php/dav/files/librefang-bot/"
+        "LibreFang/photo.png</d:href>"
+        "<d:propstat><d:prop>"
+        "<oc:fileid>2861982</oc:fileid>"
+        "</d:prop><d:status>HTTP/1.1 200 OK</d:status>"
+        "</d:propstat></d:response></d:multistatus>"
+    ).encode("utf-8")
+    fake = _FakeUrlopen([
+        (201, b"", {"OC-FileId": "urn:uuid:not-a-file-id"}),
+        (207, propfind_xml, {}),
+        (201, _media_ok_ocs()),
+    ])
+    monkeypatch.setattr(nc.urllib.request, "urlopen", fake)
+    import asyncio as _asyncio
+    _asyncio.run(a.on_send(_file_data_cmd(list(b"PNGDATA"))))
+    assert len(fake.calls) == 3
+    propfind = fake.calls[1]
+    assert propfind["method"] == "PROPFIND"
+    assert propfind["url"] == (
+        "https://cloud.example.com/remote.php/dav/files/"
+        "librefang-bot/LibreFang/photo.png"
+    )
+    assert propfind["headers"]["depth"] == "0"
+    share = fake.calls[2]
+    assert share["url"].endswith("/chat/ROOM1/share")
+    assert share["body"]["metaData"]["id"] == 2861982
+
+
+def test_on_send_file_data_file_id_unresolvable_no_share(monkeypatch):
+    """PUT succeeds but the OC-FileId header is missing AND the
+    PROPFIND fallback fails (404 — no DAV entry) → failure path:
+    no share POST, loud notice instead."""
     a = _adapter()
     a.own_user_id = "librefang-bot"
     fake = _FakeUrlopen([
         (201, b"", {}),  # PUT ok but no OC-FileId header
+        (404, '<?xml version="1.0" encoding="utf-8"?><d:error xmlns:d="DAV:" xmlns:s="http://sabredav.org/ns"><s:exception>Sabre\\DAV\\Exception\\NotFound</s:exception></d:error>', {}),  # PROPFIND fallback fails
         (201, _media_ok_ocs()),  # the failure notice itself
     ])
     monkeypatch.setattr(nc.urllib.request, "urlopen", fake)
     import asyncio as _asyncio
     _asyncio.run(a.on_send(_file_data_cmd(list(b"PNGDATA"))))
-    assert len(fake.calls) == 2
-    assert "/share" not in fake.calls[1]["url"]
-    parsed = dict(urllib.parse.parse_qsl(fake.calls[1]["body_raw"]))
+    assert len(fake.calls) == 3
+    assert fake.calls[1]["method"] == "PROPFIND"
+    assert "/share" not in fake.calls[2]["url"]
+    parsed = dict(urllib.parse.parse_qsl(fake.calls[2]["body_raw"]))
     assert parsed["message"] == (
-        "[clawbster: outbound media failed — "
-        "OC-FileId missing from DAV PUT response]"
+        "[clawbster: outbound media failed — file id unresolvable: "
+        "OC-FileId header None, DAV PROPFIND oc:fileid fallback "
+        "failed]"
     )
 
 

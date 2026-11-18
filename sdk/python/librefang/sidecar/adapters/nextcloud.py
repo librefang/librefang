@@ -126,6 +126,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import xml.etree.ElementTree as ET
 from typing import Any
 
 from librefang.sidecar import Content, Field, Schema, SidecarAdapter, protocol, run_stdio_main
@@ -299,6 +300,26 @@ def _safe_filename(raw: Any) -> str:
     if name in ("", ".", ".."):
         return "file"
     return name[:255]
+
+
+_FILE_ID_RE = re.compile(r"^(\d+)oc")
+
+
+def _parse_file_id(raw: Any) -> int | None:
+    """Numeric file id from an ``OC-FileId``-shaped value: the
+    standard Nextcloud shape is a zero-padded id + instance
+    suffix (``"02861982octccaigsouv"`` → ``2861982``); some
+    servers return a bare numeric id. Returns ``None`` when
+    unparseable."""
+    if not isinstance(raw, str):
+        return None
+    m = _FILE_ID_RE.match(raw)
+    if m:
+        return int(m.group(1))
+    try:
+        return int(raw)
+    except ValueError:
+        return None
 
 
 def _coerce_file_data(raw: Any) -> bytes | None:
@@ -1397,6 +1418,46 @@ class NextcloudAdapter(SidecarAdapter):
             reply_to,
         )
 
+    def _resolve_file_id(
+        self, filename: str, header_value: Any,
+    ) -> int | None:
+        """Numeric file id for a freshly uploaded file. The
+        DAV PUT response's ``OC-FileId`` header is parsed
+        leniently (see ``_parse_file_id``); if it is missing
+        or unparseable, fall back to a ``PROPFIND``
+        ``oc:fileid`` on the uploaded path *before*
+        declaring failure — a header quirk must not silently
+        skip the share. Returns the int id, or ``None`` when
+        both lookups fail (the caller fails loudly)."""
+        file_id = _parse_file_id(header_value)
+        if file_id is not None:
+            return file_id
+        status, _parsed, raw, _hdrs = self._http(
+            self._dav_upload_url(filename),
+            method="PROPFIND",
+            body=(
+                '<d:propfind xmlns:d="DAV:" '
+                'xmlns:oc="http://owncloud.org/ns">'
+                "<d:prop><oc:fileid/></d:prop></d:propfind>"
+            ).encode("utf-8"),
+            headers={
+                "Authorization": f"Bearer {self.token}",
+                "Content-Type": "application/xml",
+                "Depth": "0",
+            },
+        )
+        if status != 207 or not raw:
+            return None
+        try:
+            root = ET.fromstring(raw)  # noqa: S314 — server XML
+        except ET.ParseError:
+            return None
+        for el in root.iter("{http://owncloud.org/ns}fileid"):
+            file_id = _parse_file_id((el.text or "").strip())
+            if file_id is not None:
+                return file_id
+        return None
+
     def _send_media(
         self, cmd, room_token: str, reply_to: "Optional[str]",
     ) -> None:
@@ -1477,19 +1538,15 @@ class NextcloudAdapter(SidecarAdapter):
                 f"{raw[:200].decode('utf-8', 'replace')}",
             )
             return
-        file_id = resp_headers.get("oc-fileid")
-        if not file_id:
+        numeric_file_id = self._resolve_file_id(
+            filename, resp_headers.get("oc-fileid"),
+        )
+        if numeric_file_id is None:
             self._media_failure(
                 room_token, reply_to,
-                "OC-FileId missing from DAV PUT response",
-            )
-            return
-        try:
-            numeric_file_id = int(file_id)
-        except (TypeError, ValueError):
-            self._media_failure(
-                room_token, reply_to,
-                f"OC-FileId not numeric: {file_id!r}",
+                f"file id unresolvable: OC-FileId header "
+                f"{resp_headers.get('oc-fileid')!r}, DAV PROPFIND "
+                f"oc:fileid fallback failed",
             )
             return
 
