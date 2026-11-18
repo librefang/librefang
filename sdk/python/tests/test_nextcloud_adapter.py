@@ -1095,7 +1095,10 @@ def test_on_send_falls_back_to_channel_id(monkeypatch):
     assert "/chat/ROOM2" in fake.calls[0]["url"]
 
 
-def test_on_send_non_text_content_falls_back_to_placeholder(monkeypatch):
+def test_on_send_non_text_content_fails_loudly(monkeypatch):
+    """Non-text content that is neither FileData nor File{url}
+    (e.g. a Reaction) → loud failure notice, never the old
+    "(Unsupported content type)" placeholder."""
     a = _adapter()
     fake = _FakeUrlopen([(201, {"ocs": {"meta": {"status": "ok"}, "data": {}}})])
     monkeypatch.setattr(nc.urllib.request, "urlopen", fake)
@@ -1105,7 +1108,10 @@ def test_on_send_non_text_content_falls_back_to_placeholder(monkeypatch):
         user={"platform_id": "ROOM1"},
     )))
     parsed = dict(urllib.parse.parse_qsl(fake.calls[0]["body_raw"]))
-    assert "Unsupported content type" in parsed["message"]
+    assert parsed["message"] == (
+        "[clawbster: outbound media failed — unsupported content shape]"
+    )
+    assert "(Unsupported content type)" not in parsed["message"]
 
 
 def test_parse_dm_room_is_not_group():
@@ -1886,3 +1892,324 @@ def test_poll_once_rejected_media_still_advances_watermark(monkeypatch):
     a._poll_once(emitted.append, ["R1"])
     assert emitted == []
     assert a._room_watermarks["R1"] == 41
+
+
+# ---- on_send: Phase 2 outbound media (upload + share) ------------
+
+
+def _media_ok_ocs():
+    return {"ocs": {"meta": {"status": "ok"}, "data": {}}}
+
+
+def _file_data_cmd(data, filename="photo.png", mime="image/png",
+                   text=None, room="ROOM1"):
+    content = {"FileData": {
+        "data": data, "filename": filename, "mime_type": mime,
+    }}
+    return _StubCmd(
+        text=text if text is not None else json.dumps(content),
+        content=content,
+        user={"platform_id": room},
+    )
+
+
+def test_on_send_file_data_uploads_then_shares(monkeypatch):
+    """Happy path: FileData → DAV PUT (Content-Type from mime_type,
+    filename in the URI, Bearer auth) → OC-FileId read from the PUT
+    response → OCS share POST with the exact metaData body (numeric
+    id, name, path relative to the bot's files root, no leading
+    slash). The daemon's JSON flattening of the content into `text`
+    must NOT be posted as a caption."""
+    a = _adapter()
+    a.own_user_id = "librefang-bot"
+    fake = _FakeUrlopen([
+        (201, b"", {"OC-FileId": "12345"}),
+        (201, _media_ok_ocs()),
+    ])
+    monkeypatch.setattr(nc.urllib.request, "urlopen", fake)
+    import asyncio as _asyncio
+    _asyncio.run(a.on_send(_file_data_cmd(list(b"PNGDATA"))))
+    assert len(fake.calls) == 2
+    put = fake.calls[0]
+    assert put["url"] == (
+        "https://cloud.example.com/remote.php/dav/files/"
+        "librefang-bot/LibreFang/photo.png"
+    )
+    assert put["method"] == "PUT"
+    assert put["headers"]["content-type"] == "image/png"
+    assert put["headers"]["authorization"] == "Bearer test-token"
+    assert put["body_raw"] == "PNGDATA"
+    share = fake.calls[1]
+    assert share["url"] == (
+        "https://cloud.example.com/ocs/v2.php/apps/spreed/api/v1/"
+        "chat/ROOM1/share"
+    )
+    assert share["method"] == "POST"
+    assert share["headers"]["content-type"] == "application/json"
+    assert share["headers"]["ocs-apirequest"] == "true"
+    assert share["body"] == {
+        "objectType": "file",
+        "metaData": {
+            "id": 12345, "name": "photo.png",
+            "path": "LibreFang/photo.png",
+        },
+    }
+
+
+def test_on_send_file_data_caption_after_share(monkeypatch):
+    """A caption riding with the media (text that is NOT the JSON
+    flattening of the content object) is delivered as a separate
+    text message AFTER the share — the share endpoint has no caption
+    parameter."""
+    a = _adapter()
+    a.own_user_id = "librefang-bot"
+    fake = _FakeUrlopen([
+        (201, b"", {"OC-FileId": "12345"}),
+        (201, _media_ok_ocs()),
+        (201, _media_ok_ocs()),
+    ])
+    monkeypatch.setattr(nc.urllib.request, "urlopen", fake)
+    import asyncio as _asyncio
+    _asyncio.run(a.on_send(_file_data_cmd(
+        list(b"PNGDATA"), text="look at this",
+    )))
+    assert len(fake.calls) == 3
+    assert "/chat/ROOM1/share" in fake.calls[1]["url"]
+    caption = fake.calls[2]
+    assert "/chat/ROOM1" in caption["url"]
+    assert "/share" not in caption["url"]
+    parsed = dict(urllib.parse.parse_qsl(caption["body_raw"]))
+    assert parsed == {"message": "look at this"}
+
+
+def test_on_send_file_data_malformed_rejected_loudly(monkeypatch):
+    """Malformed byte array → loud rejection (stderr + chat notice),
+    no DAV PUT, no share — and never the old placeholder string."""
+    a = _adapter()
+    fake = _FakeUrlopen([(201, _media_ok_ocs())])
+    monkeypatch.setattr(nc.urllib.request, "urlopen", fake)
+    import asyncio as _asyncio
+    _asyncio.run(a.on_send(_StubCmd(
+        text=None,
+        content={"FileData": {
+            "data": "not-a-list", "filename": "x.png",
+            "mime_type": "image/png",
+        }},
+        user={"platform_id": "ROOM1"},
+    )))
+    assert len(fake.calls) == 1
+    call = fake.calls[0]
+    assert "remote.php/dav" not in call["url"]
+    parsed = dict(urllib.parse.parse_qsl(call["body_raw"]))
+    assert parsed["message"] == (
+        "[clawbster: outbound media failed — malformed byte array]"
+    )
+    assert "(Unsupported content type)" not in parsed["message"]
+
+
+def test_on_send_file_data_bool_in_array_rejected(monkeypatch):
+    """`isinstance(True, int)` is True in Python — bools inside the
+    byte array are malformed (slack #7087 pattern) and must be
+    rejected, not silently coerced to 1/0."""
+    a = _adapter()
+    fake = _FakeUrlopen([(201, _media_ok_ocs())])
+    monkeypatch.setattr(nc.urllib.request, "urlopen", fake)
+    import asyncio as _asyncio
+    _asyncio.run(a.on_send(_StubCmd(
+        text=None,
+        content={"FileData": {
+            "data": [80, True, 78], "filename": "x.png",
+            "mime_type": "image/png",
+        }},
+        user={"platform_id": "ROOM1"},
+    )))
+    assert len(fake.calls) == 1
+    assert "remote.php/dav" not in fake.calls[0]["url"]
+    parsed = dict(urllib.parse.parse_qsl(fake.calls[0]["body_raw"]))
+    assert parsed["message"] == (
+        "[clawbster: outbound media failed — malformed byte array]"
+    )
+
+
+def test_on_send_file_data_above_cap_rejected_before_http(monkeypatch):
+    """>64 MiB → rejected before any upload HTTP traffic; only the
+    failure notice is posted."""
+    a = _adapter()
+    fake = _FakeUrlopen([(201, _media_ok_ocs())])
+    monkeypatch.setattr(nc.urllib.request, "urlopen", fake)
+    import asyncio as _asyncio
+    _asyncio.run(a.on_send(_StubCmd(
+        text=None,
+        content={"FileData": {
+            "data": bytes(nc.MAX_UPLOAD_BYTES + 1),
+            "filename": "big.bin",
+            "mime_type": "application/octet-stream",
+        }},
+        user={"platform_id": "ROOM1"},
+    )))
+    assert len(fake.calls) == 1
+    assert "remote.php/dav" not in fake.calls[0]["url"]
+    parsed = dict(urllib.parse.parse_qsl(fake.calls[0]["body_raw"]))
+    assert parsed["message"] == (
+        f"[clawbster: outbound media failed — payload above "
+        f"{nc.MAX_UPLOAD_BYTES}-byte upload limit]"
+    )
+
+
+def test_on_send_file_data_missing_oc_fileid_no_share(monkeypatch):
+    """PUT succeeds but the OC-FileId response header is missing →
+    failure path: no share POST, loud notice instead."""
+    a = _adapter()
+    a.own_user_id = "librefang-bot"
+    fake = _FakeUrlopen([
+        (201, b"", {}),  # PUT ok but no OC-FileId header
+        (201, _media_ok_ocs()),  # the failure notice itself
+    ])
+    monkeypatch.setattr(nc.urllib.request, "urlopen", fake)
+    import asyncio as _asyncio
+    _asyncio.run(a.on_send(_file_data_cmd(list(b"PNGDATA"))))
+    assert len(fake.calls) == 2
+    assert "/share" not in fake.calls[1]["url"]
+    parsed = dict(urllib.parse.parse_qsl(fake.calls[1]["body_raw"]))
+    assert parsed["message"] == (
+        "[clawbster: outbound media failed — "
+        "OC-FileId missing from DAV PUT response]"
+    )
+
+
+def test_on_send_file_data_dav_put_error_no_share(monkeypatch):
+    """DAV PUT fails (409) → failure path: no share POST, loud
+    notice carrying the status."""
+    a = _adapter()
+    a.own_user_id = "librefang-bot"
+    fake = _FakeUrlopen([
+        (409, "conflict"),
+        (201, _media_ok_ocs()),
+    ])
+    monkeypatch.setattr(nc.urllib.request, "urlopen", fake)
+    import asyncio as _asyncio
+    _asyncio.run(a.on_send(_file_data_cmd(list(b"PNGDATA"))))
+    assert len(fake.calls) == 2
+    assert "/share" not in fake.calls[1]["url"]
+    parsed = dict(urllib.parse.parse_qsl(fake.calls[1]["body_raw"]))
+    assert parsed["message"].startswith(
+        "[clawbster: outbound media failed — DAV PUT error 409"
+    )
+
+
+def test_on_send_file_url_not_implemented_notice(monkeypatch):
+    """File{url} variant → explicit not-implemented notice; no DAV
+    PUT, no share, no placeholder string."""
+    a = _adapter()
+    fake = _FakeUrlopen([(201, _media_ok_ocs())])
+    monkeypatch.setattr(nc.urllib.request, "urlopen", fake)
+    import asyncio as _asyncio
+    _asyncio.run(a.on_send(_StubCmd(
+        text=None,
+        content={"File": {
+            "url": "https://elsewhere.example/x.png",
+            "filename": "x.png",
+        }},
+        user={"platform_id": "ROOM1"},
+    )))
+    assert len(fake.calls) == 1
+    call = fake.calls[0]
+    assert "remote.php/dav" not in call["url"]
+    assert "/share" not in call["url"]
+    parsed = dict(urllib.parse.parse_qsl(call["body_raw"]))
+    assert parsed["message"] == (
+        "[clawbster: outbound media by URL is not implemented yet]"
+    )
+    assert "(Unsupported content type)" not in parsed["message"]
+
+
+def test_on_send_unknown_content_shape_fails_loudly(monkeypatch):
+    """Non-FileData / non-File structured content (e.g. an inbound
+    Image variant echoed back) → loud failure, never the old
+    placeholder."""
+    a = _adapter()
+    fake = _FakeUrlopen([(201, _media_ok_ocs())])
+    monkeypatch.setattr(nc.urllib.request, "urlopen", fake)
+    import asyncio as _asyncio
+    _asyncio.run(a.on_send(_StubCmd(
+        text=None,
+        content={"Image": {"url": "https://x.example/y.png"}},
+        user={"platform_id": "ROOM1"},
+    )))
+    assert len(fake.calls) == 1
+    parsed = dict(urllib.parse.parse_qsl(fake.calls[0]["body_raw"]))
+    assert parsed["message"] == (
+        "[clawbster: outbound media failed — unsupported content shape]"
+    )
+    assert "(Unsupported content type)" not in parsed["message"]
+
+
+def test_on_send_file_data_mime_fallback_octet_stream(monkeypatch):
+    """Missing / non-string mime_type → Content-Type falls back to
+    application/octet-stream on the DAV PUT."""
+    a = _adapter()
+    a.own_user_id = "librefang-bot"
+    fake = _FakeUrlopen([
+        (201, b"", {"OC-FileId": "7"}),
+        (201, _media_ok_ocs()),
+    ])
+    monkeypatch.setattr(nc.urllib.request, "urlopen", fake)
+    import asyncio as _asyncio
+    _asyncio.run(a.on_send(_StubCmd(
+        text=None,
+        content={"FileData": {
+            "data": list(b"BIN"), "filename": "blob.bin",
+            "mime_type": None,
+        }},
+        user={"platform_id": "ROOM1"},
+    )))
+    assert fake.calls[0]["headers"]["content-type"] == (
+        "application/octet-stream"
+    )
+
+
+def test_on_send_file_data_no_own_user_fails(monkeypatch):
+    """own_user_id unknown (credential discovery failed) → loud
+    failure, no DAV PUT (mirrors the Phase 1 inbound guard)."""
+    a = _adapter()  # own_user_id stays "" — discovery never ran
+    fake = _FakeUrlopen([(201, _media_ok_ocs())])
+    monkeypatch.setattr(nc.urllib.request, "urlopen", fake)
+    import asyncio as _asyncio
+    _asyncio.run(a.on_send(_file_data_cmd(list(b"PNGDATA"))))
+    assert len(fake.calls) == 1
+    assert "remote.php/dav" not in fake.calls[0]["url"]
+    parsed = dict(urllib.parse.parse_qsl(fake.calls[0]["body_raw"]))
+    assert parsed["message"] == (
+        "[clawbster: outbound media failed — "
+        "own user id unknown (credential discovery failed)]"
+    )
+
+
+def test_on_send_file_data_filename_sanitised(monkeypatch):
+    """A path-y / NUL-laden filename is sanitised to its basename
+    before it reaches the DAV URI (no smuggled URI segments)."""
+    a = _adapter()
+    a.own_user_id = "librefang-bot"
+    fake = _FakeUrlopen([
+        (201, b"", {"OC-FileId": "9"}),
+        (201, _media_ok_ocs()),
+    ])
+    monkeypatch.setattr(nc.urllib.request, "urlopen", fake)
+    import asyncio as _asyncio
+    _asyncio.run(a.on_send(_StubCmd(
+        text=None,
+        content={"FileData": {
+            "data": list(b"PNGDATA"),
+            "filename": "../../etc/passwd\x00.png",
+            "mime_type": "image/png",
+        }},
+        user={"platform_id": "ROOM1"},
+    )))
+    assert fake.calls[0]["url"] == (
+        "https://cloud.example.com/remote.php/dav/files/"
+        "librefang-bot/LibreFang/passwd.png"
+    )
+    assert fake.calls[1]["body"]["metaData"]["name"] == "passwd.png"
+    assert fake.calls[1]["body"]["metaData"]["path"] == (
+        "LibreFang/passwd.png"
+    )
