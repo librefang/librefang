@@ -69,6 +69,29 @@ bodies are chunked at 32000 chars (matching the Rust
 carries the same ``replyTo`` so the multi-part reply lives in the
 same thread.
 
+Inbound media (Phase 1, receive-only): files and voice messages
+shared into a room surface as a ``file`` rich object in
+``messageParameters`` (the chat API's ``messageType`` is not a
+reliable signal — plain shares parse as ``comment``, only voice
+messages get ``voice-message``). The adapter forwards them as
+``Image`` / ``Video`` / ``Audio`` / ``Voice`` / ``File`` content
+variants carrying a DAV URL in the bot's own namespace —
+``<server>/remote.php/dav/files/<user>/<path>`` — because Talk
+re-resolves the rich object per viewer at read time (spreed
+``SystemMessage.php::getFileFromShare`` resolves the node in the
+viewer's own user folder), so ``path`` is relative to the bot's
+files root. That is the same account-DAV download every official
+client uses (talk-android ``ApiUtils`` builds
+``baseUrl/remote.php/dav/files/<user>/<Uri.encode(path, "/")>``).
+The daemon fetches the URL itself using the ``header_rules``
+declared on ``ready`` (bearer token pinned to the configured server
+host — the URL is always built from ``server_url``, never
+member-chosen). Gated by ``NEXTCLOUD_MEDIA_MAX_BYTES`` (0 = off)
+and ``NEXTCLOUD_MEDIA_MIME_ALLOWLIST``; rejected files drop the
+message rather than emitting the bare ``{file}`` placeholder as
+text. ``NEXTCLOUD_MEDIA_UPLOAD_DIR`` is parsed + validated now for
+Phase 2 (outbound media) but unused yet.
+
 Stdlib-only (the SDK has zero runtime deps): HTTP via
 ``urllib.request``, polling on a worker thread.
 
@@ -84,6 +107,9 @@ Configure via ``[[sidecar_channels]]``:
     # NEXTCLOUD_ROOMS = "abc123,def456"           # optional; empty = all joined
     # NEXTCLOUD_ACCOUNT_ID = "prod"               # optional, multi-bot routing key
     # NEXTCLOUD_POLL_INTERVAL_SECS = "3"          # optional, default 3, floor 1
+    # NEXTCLOUD_MEDIA_MAX_BYTES = "10485760"      # optional, 0 = off
+    # NEXTCLOUD_MEDIA_MIME_ALLOWLIST = "image/*,audio/*,video/*,application/pdf"
+    # NEXTCLOUD_MEDIA_UPLOAD_DIR = "LibreFang"    # optional (Phase 2, unused)
 
 The Nextcloud app password / OAuth bearer belongs in
 ``~/.librefang/secrets.env`` as ``NEXTCLOUD_TOKEN`` (the dashboard's
@@ -92,8 +118,10 @@ Channels page writes it there when you fill the Nextcloud form).
 from __future__ import annotations
 
 import asyncio
+import fnmatch
 import json
 import os
+import re
 import time
 import urllib.error
 import urllib.parse
@@ -133,6 +161,18 @@ CHAT_FETCH_LIMIT = 100
 # polls.
 SEEN_MESSAGES_MAX = 10000
 SEEN_MESSAGES_EVICT = 5000
+# ---- inbound media (files / voice messages shared into a room) ----
+# Talk re-resolves the `file` rich object per viewer at read time
+# (spreed SystemMessage.php::getFileFromShare), so for the bot the
+# object's `path` is relative to the bot's own files root — the same
+# account-DAV namespace every official client downloads from
+# (`<server>/remote.php/dav/files/<user>/<path>`). Phase 1 is
+# receive-only; the upload dir is parsed + validated now so a bad
+# value fails at startup, but outbound media (Phase 2) is not
+# implemented yet.
+DEFAULT_MEDIA_MAX_BYTES = 10 * 1024 * 1024
+DEFAULT_MEDIA_MIME_ALLOWLIST = "image/*,audio/*,video/*,application/pdf"
+DEFAULT_MEDIA_UPLOAD_DIR = "LibreFang"
 
 
 class _RoomDiscoveryError(RuntimeError):
@@ -146,6 +186,109 @@ def _parse_rooms(raw: str) -> list[str]:
     entries; preserves order. Empty input → empty list (means 'discover
     joined rooms at startup')."""
     return [s.strip() for s in raw.split(",") if s.strip()]
+
+
+class NextcloudMediaPolicy:
+    """Inbound media gate — mirrors slack's SlackFilePolicy (#7087):
+    one object the parse path can ask 'may I forward this?' so the
+    config surface stays testable in isolation."""
+
+    def __init__(
+        self, *, max_bytes: int, mime_allowlist, upload_dir: str,
+    ) -> None:
+        self.max_bytes = max_bytes
+        self.mime_allowlist = tuple(mime_allowlist)
+        self.upload_dir = upload_dir
+
+    @property
+    def enabled(self) -> bool:
+        return self.max_bytes > 0
+
+    def mime_allowed(self, mimetype: str) -> bool:
+        """Comma-separated glob patterns (`image/*`, exact mimetypes).
+        An empty / missing mimetype is never allowed — we cannot
+        verify what the daemon would download."""
+        mimetype = (mimetype or "").strip().lower()
+        if not mimetype:
+            return False
+        return any(
+            fnmatch.fnmatchcase(mimetype, pat)
+            for pat in self.mime_allowlist
+        )
+
+    def rejection_reason(self, file_param: dict) -> str | None:
+        """Why this `file` rich object must not be forwarded, or
+        ``None`` when it may be. Talk sends `size` as a string; an
+        absent / unparseable size is not a rejection (the daemon's
+        fetch has its own limits) — same as slack."""
+        if not self.enabled:
+            return "media receive disabled (NEXTCLOUD_MEDIA_MAX_BYTES=0)"
+        path = file_param.get("path")
+        if not isinstance(path, str) or not path.strip():
+            return "file rich object has no path (cannot build DAV URL)"
+        size = file_param.get("size")
+        if isinstance(size, str):
+            size = size.strip() or None
+        if size is not None:
+            try:
+                size_int = int(size)
+            except (TypeError, ValueError):
+                size_int = None
+            if size_int is not None and size_int > self.max_bytes:
+                return (
+                    f"file is {size_int} bytes, over the "
+                    f"{self.max_bytes} byte cap"
+                )
+        mimetype = file_param.get("mimetype")
+        if not self.mime_allowed(
+            mimetype if isinstance(mimetype, str) else ""
+        ):
+            return f"mimetype {mimetype!r} not in allowlist"
+        return None
+
+
+def _parse_mime_allowlist(raw: str) -> tuple[str, ...]:
+    """Comma-separated glob patterns; blank entries dropped. The
+    caller pre-defaults the input — an explicitly empty allowlist
+    would silently drop every file."""
+    return tuple(
+        p.strip().lower() for p in raw.split(",") if p.strip()
+    )
+
+
+def _parse_upload_dir(raw: str) -> str | None:
+    """Bot's own folder for outbound media uploads (Phase 2).
+    Slashes trimmed; `.`/`..`/empty segments rejected — a nonsense
+    value should fail at startup, not on the first upload."""
+    out = raw.strip().strip("/")
+    if not out or any(
+        seg in ("", ".", "..") for seg in out.split("/")
+    ):
+        return None
+    return out
+
+
+def _find_file_parameter(params: Any) -> dict | None:
+    """First ``messageParameters`` entry describing a shared file
+    (``type == "file"``). Talk puts the shared file under the
+    ``file`` key for plain shares, voice messages and call
+    recordings alike, and the chat API's ``messageType`` is not a
+    reliable signal (plain shares surface as ``comment`` — only
+    voice messages get ``voice-message``), so match on the object's
+    ``type`` like the web client does."""
+    if not isinstance(params, dict):
+        return None
+    for value in params.values():
+        if isinstance(value, dict) and value.get("type") == "file":
+            return value
+    return None
+
+
+# A file share's `message` is the bare `{file}` placeholder; a
+# captioned share carries real text (Talk's `talkMetaData.caption`
+# becomes the message text). Only a lone placeholder means 'no
+# companion text'.
+_LONE_PLACEHOLDER_RE = re.compile(r"^\{[^{}]*\}$")
 
 
 class NextcloudAdapter(SidecarAdapter):
@@ -183,6 +326,22 @@ class NextcloudAdapter(SidecarAdapter):
                   f"floor {MIN_POLL_INTERVAL_SECS})",
                   "text",
                   placeholder=str(DEFAULT_POLL_INTERVAL_SECS),
+                  advanced=True),
+            Field("NEXTCLOUD_MEDIA_MAX_BYTES",
+                  f"Max inbound media bytes (0 = off, default "
+                  f"{DEFAULT_MEDIA_MAX_BYTES})",
+                  "text",
+                  placeholder=str(DEFAULT_MEDIA_MAX_BYTES),
+                  advanced=True),
+            Field("NEXTCLOUD_MEDIA_MIME_ALLOWLIST",
+                  "Inbound media mime allowlist (comma-separated globs)",
+                  "text",
+                  placeholder=DEFAULT_MEDIA_MIME_ALLOWLIST,
+                  advanced=True),
+            Field("NEXTCLOUD_MEDIA_UPLOAD_DIR",
+                  "Upload dir for outbound media (Phase 2, unused)",
+                  "text",
+                  placeholder=DEFAULT_MEDIA_UPLOAD_DIR,
                   advanced=True),
         ],
     )
@@ -222,6 +381,51 @@ class NextcloudAdapter(SidecarAdapter):
             interval = MIN_POLL_INTERVAL_SECS
         self.poll_interval = interval
 
+        # ---- inbound media config (Phase 1, receive-only) ----
+        media_max_raw = os.environ.get(
+            "NEXTCLOUD_MEDIA_MAX_BYTES", "",
+        ).strip()
+        try:
+            media_max = (
+                int(media_max_raw) if media_max_raw
+                else DEFAULT_MEDIA_MAX_BYTES
+            )
+        except ValueError:
+            log.error(
+                "NEXTCLOUD_MEDIA_MAX_BYTES invalid (must be integer)",
+                value=media_max_raw,
+            )
+            raise SystemExit(2) from None
+        if media_max < 0:
+            log.error(
+                "NEXTCLOUD_MEDIA_MAX_BYTES invalid (must be >= 0)",
+                value=media_max_raw,
+            )
+            raise SystemExit(2)
+        upload_raw = os.environ.get(
+            "NEXTCLOUD_MEDIA_UPLOAD_DIR", "",
+        ).strip()
+        upload_dir = (
+            _parse_upload_dir(upload_raw)
+            if upload_raw else DEFAULT_MEDIA_UPLOAD_DIR
+        )
+        if upload_dir is None:
+            log.error(
+                "NEXTCLOUD_MEDIA_UPLOAD_DIR invalid "
+                "(non-empty path, no '.'/'..' segments)",
+                value=upload_raw,
+            )
+            raise SystemExit(2)
+        self.media_policy = NextcloudMediaPolicy(
+            max_bytes=media_max,
+            mime_allowlist=_parse_mime_allowlist(
+                os.environ.get(
+                    "NEXTCLOUD_MEDIA_MIME_ALLOWLIST", "",
+                ).strip() or DEFAULT_MEDIA_MIME_ALLOWLIST,
+            ),
+            upload_dir=upload_dir,
+        )
+
         missing: list[str] = []
         if not self.server_url:
             missing.append("NEXTCLOUD_SERVER_URL")
@@ -237,6 +441,20 @@ class NextcloudAdapter(SidecarAdapter):
                 server_url=self.server_url,
             )
             raise SystemExit(2)
+
+        # Inbound media hands the daemon a DAV URL that is always
+        # built from `server_url`, so the bearer token only ever
+        # attaches to the configured Nextcloud host (the daemon
+        # exact-matches hosts — see `fetch_headers_for` in
+        # sidecar.rs). Declared only while media receive is on,
+        # matching slack (#7087): an operator who disables it does
+        # not ship the token to the daemon's fetcher at all.
+        host = urllib.parse.urlparse(self.server_url).hostname or ""
+        self.header_rules: list = []
+        if self.media_policy.enabled and host:
+            self.header_rules = [
+                (host, [["Authorization", "Bearer " + self.token]]),
+            ]
 
         # Discovered at startup via `_verify_credentials()` — the stable
         # user id Talk uses in `actorId` for messages the bot itself
@@ -663,12 +881,85 @@ class NextcloudAdapter(SidecarAdapter):
             return False
         return actor_type == "users" and actor_id == self.own_user_id
 
+    def _dav_file_url(self, file_param: dict) -> str:
+        """``<server>/remote.php/dav/files/<user>/<path>`` — the
+        account-DAV namespace every official client downloads
+        room-shared files from (talk-android builds
+        ``baseUrl/remote.php/dav/files/<user>/<Uri.encode(path,
+        "/")>``). Each path segment is percent-encoded with ``/``
+        kept as the separator; empty segments collapse."""
+        path = file_param.get("path") or ""
+        segments = [seg for seg in path.split("/") if seg]
+        encoded = "/".join(
+            urllib.parse.quote(seg, safe="") for seg in segments
+        )
+        user = urllib.parse.quote(self.own_user_id, safe="")
+        return (
+            f"{self.server_url}/remote.php/dav/files/{user}/{encoded}"
+        )
+
+    def _media_content(
+        self, msg: dict, file_param: dict, text: str, room_token: str,
+    ) -> dict | None:
+        """Map a `file` rich object onto a ChannelContent variant
+        (slack #7087 pattern). Returns ``None`` — with a warn — when
+        the file must not or cannot be forwarded; the caller drops
+        the message rather than emitting the bare ``{file}``
+        placeholder as text."""
+        reason = self.media_policy.rejection_reason(file_param)
+        if reason is not None:
+            log.warn(
+                "nextcloud inbound media rejected",
+                room_token=room_token, reason=reason,
+            )
+            return None
+        if not self.own_user_id:
+            log.warn(
+                "nextcloud inbound media skipped: own user id "
+                "unknown (credential discovery failed)",
+                room_token=room_token,
+            )
+            return None
+        url = self._dav_file_url(file_param)
+        filename = file_param.get("name")
+        if not isinstance(filename, str) or not filename.strip():
+            filename = "file"
+        mimetype = file_param.get("mimetype")
+        mimetype = (
+            mimetype.strip() if isinstance(mimetype, str) else ""
+        )
+        companion = text.strip() if isinstance(text, str) else ""
+        if _LONE_PLACEHOLDER_RE.match(companion):
+            companion = ""
+        caption = companion or None
+        if mimetype.startswith("image/"):
+            return Content.image(
+                url, caption=caption, mime_type=mimetype,
+            )
+        if mimetype.startswith("video/"):
+            return Content.video(
+                url, caption=caption, filename=filename,
+            )
+        if mimetype.startswith("audio/"):
+            if msg.get("messageType") == "voice-message":
+                return Content.voice(url, caption=caption)
+            return Content.audio(
+                url, caption=caption, title=filename,
+            )
+        if caption:
+            log.warn(
+                "nextcloud file share has companion text that "
+                "cannot be sent as a caption",
+                filename=filename,
+            )
+        return Content.file(url, filename)
+
     def _parse_message(
         self, msg: dict, room_token: str, room_type: int | None = None,
     ) -> dict | None:
         """Parse a Talk chat element into a ``message`` event. Returns
         ``None`` if the message should be skipped (system message,
-        self, empty body, malformed).
+        self, empty body, rejected media, malformed).
 
         Identity is user-oriented: ``user_id`` is the sender's
         ``actorId`` (not the room token), while ``channel_id`` /
@@ -685,8 +976,25 @@ class NextcloudAdapter(SidecarAdapter):
         if self._is_self(msg):
             return None
         text = msg.get("message")
-        if not isinstance(text, str) or not text:
+        if not isinstance(text, str):
+            text = ""
+
+        # Shared files / voice messages surface as a `file` rich
+        # object in `messageParameters` — see `_media_content`. Media
+        # rides the same watermark / dedupe path as text; nothing
+        # below touches the cursor.
+        file_param = _find_file_parameter(msg.get("messageParameters"))
+        if file_param is not None:
+            content = self._media_content(msg, file_param, text, room_token)
+            if content is None:
+                return None
+        elif not text:
             return None
+        elif text.startswith("/"):
+            head, _, tail = text[1:].partition(" ")
+            content = Content.command(head, tail.split() if tail else [])
+        else:
+            content = Content.text(text)
 
         # Talk's message id is a positive integer (i64 in the Rust
         # adapter at nextcloud.rs:347). Coerce defensively.
@@ -719,12 +1027,6 @@ class NextcloudAdapter(SidecarAdapter):
                 parent_msg_id = str(pv)
             elif isinstance(pv, str) and pv:
                 parent_msg_id = pv
-
-        if text.startswith("/"):
-            head, _, tail = text[1:].partition(" ")
-            content = Content.command(head, tail.split() if tail else [])
-        else:
-            content = Content.text(text)
 
         metadata: dict[str, Any] = {
             "actor_id": actor_id,

@@ -48,6 +48,9 @@ def _adapter(**env):
         "NEXTCLOUD_ROOMS": "",
         "NEXTCLOUD_ACCOUNT_ID": "",
         "NEXTCLOUD_POLL_INTERVAL_SECS": "",
+        "NEXTCLOUD_MEDIA_MAX_BYTES": "",
+        "NEXTCLOUD_MEDIA_MIME_ALLOWLIST": "",
+        "NEXTCLOUD_MEDIA_UPLOAD_DIR": "",
     }
     for k, v in defaults.items():
         os.environ[k] = env.get(k, v)
@@ -1450,3 +1453,436 @@ def test_persist_watermarks_unwritable_path_warns_not_crashes(monkeypatch, tmp_p
     blocker = tmp_path / "no-such-parent"
     blocker.write_text("i am a file", encoding="utf-8")
     a._persist_watermarks()  # must not raise
+
+
+# ---- inbound media (Phase 1) ---------------------------------------
+#
+# Ground truth for these fixtures: spreed's
+# SystemMessage.php::getFileFromShare resolves the shared node in
+# the *viewer's* own user folder and emits `path` relative to that
+# root (e.g. "Talk/photo.jpg"); talk-android downloads via
+# baseUrl/remote.php/dav/files/<user>/<Uri.encode(path, "/")>.
+
+
+def _file_param(**over):
+    out = {
+        "type": "file",
+        "id": "17",
+        "name": "photo.jpg",
+        "path": "Talk/photo.jpg",
+        "size": "2048",
+        "mimetype": "image/jpeg",
+        "link": "https://cloud.example.com/f/17",
+    }
+    out.update(over)
+    return out
+
+
+def _media_msg(**over):
+    """Chat message carrying a `file` rich object — the shape Talk's
+    OCS chat API delivers for shared files / voice messages."""
+    msg = _msg(
+        mid=over.pop("mid", 30),
+        text=over.pop("text", "{file}"),
+        actor_id=over.pop("actor_id", "alice"),
+        message_type=over.pop("message_type", None),
+    )
+    msg["messageParameters"] = {"file": _file_param(**over.pop("file", {}))}
+    msg.update(over)
+    return msg
+
+
+# -- config -----------------------------------------------------------
+
+
+def test_media_config_defaults():
+    a = _adapter()
+    p = a.media_policy
+    assert p.enabled is True
+    assert p.max_bytes == nc.DEFAULT_MEDIA_MAX_BYTES
+    assert p.mime_allowlist == (
+        "image/*", "audio/*", "video/*", "application/pdf",
+    )
+    assert p.upload_dir == "LibreFang"
+
+
+def test_media_header_rules_pinned_to_server_host():
+    """The DAV URL is always built from `server_url`, so the token
+    only ever attaches to the configured host (the daemon
+    exact-matches hosts). Declared only while media receive is on —
+    slack #7087."""
+    a = _adapter()
+    assert a.header_rules == [
+        ("cloud.example.com", [["Authorization", "Bearer test-token"]]),
+    ]
+    a = _adapter(NEXTCLOUD_MEDIA_MAX_BYTES="0")
+    assert a.header_rules == []
+
+
+def test_media_max_bytes_invalid_exits():
+    with pytest.raises(SystemExit) as exc:
+        _adapter(NEXTCLOUD_MEDIA_MAX_BYTES="abc")
+    assert exc.value.code == 2
+
+
+def test_media_max_bytes_negative_exits():
+    with pytest.raises(SystemExit) as exc:
+        _adapter(NEXTCLOUD_MEDIA_MAX_BYTES="-1")
+    assert exc.value.code == 2
+
+
+def test_media_max_bytes_zero_disables_receive():
+    a = _adapter(NEXTCLOUD_MEDIA_MAX_BYTES="0")
+    assert a.media_policy.enabled is False
+
+
+def test_media_mime_allowlist_custom():
+    a = _adapter(NEXTCLOUD_MEDIA_MIME_ALLOWLIST="image/png, text/plain")
+    assert a.media_policy.mime_allowlist == ("image/png", "text/plain")
+    assert a.media_policy.mime_allowed("image/png") is True
+    assert a.media_policy.mime_allowed("image/jpeg") is False
+
+
+def test_media_upload_dir_invalid_exits():
+    """A nonsense upload dir must fail at startup, not on the first
+    Phase 2 upload."""
+    for bad in ("..", "a//b", "a/../b", "/"):
+        with pytest.raises(SystemExit) as exc:
+            _adapter(NEXTCLOUD_MEDIA_UPLOAD_DIR=bad)
+        assert exc.value.code == 2, bad
+
+
+def test_media_upload_dir_slashes_trimmed():
+    a = _adapter(NEXTCLOUD_MEDIA_UPLOAD_DIR="/Talk/Media/")
+    assert a.media_policy.upload_dir == "Talk/Media"
+
+
+# -- policy -----------------------------------------------------------
+
+
+def test_media_mime_allowed_wildcard_exact_and_case():
+    p = _adapter().media_policy
+    assert p.mime_allowed("image/png") is True
+    assert p.mime_allowed("IMAGE/PNG") is True
+    assert p.mime_allowed("application/pdf") is True
+    assert p.mime_allowed("application/zip") is False
+    # An empty / missing mimetype is never allowed — we cannot
+    # verify what the daemon would download.
+    assert p.mime_allowed("") is False
+    assert p.mime_allowed(None) is False
+
+
+def test_media_rejection_reason_size_string_over_cap():
+    """Talk sends `size` as a string; over-cap files are rejected."""
+    a = _adapter(NEXTCLOUD_MEDIA_MAX_BYTES="1024")
+    reason = a.media_policy.rejection_reason(_file_param(size="2048"))
+    assert reason is not None and "over the" in reason
+
+
+def test_media_rejection_reason_size_absent_or_bad_not_rejected():
+    """Absent / unparseable sizes are not rejections — the daemon's
+    fetch has its own limits (same as slack)."""
+    p = _adapter().media_policy
+    assert p.rejection_reason(_file_param(size=None)) is None
+    assert p.rejection_reason(_file_param(size="huge")) is None
+
+
+def test_media_rejection_reason_no_path():
+    p = _adapter().media_policy
+    reason = p.rejection_reason(_file_param(path=""))
+    assert reason is not None and "no path" in reason
+
+
+def test_media_rejection_reason_mime_not_allowed():
+    p = _adapter().media_policy
+    reason = p.rejection_reason(
+        _file_param(mimetype="application/zip")
+    )
+    assert reason is not None and "not in allowlist" in reason
+
+
+def test_media_rejection_reason_disabled():
+    a = _adapter(NEXTCLOUD_MEDIA_MAX_BYTES="0")
+    reason = a.media_policy.rejection_reason(_file_param())
+    assert reason is not None and "disabled" in reason
+
+
+# -- DAV URL ----------------------------------------------------------
+
+
+def test_dav_file_url_matches_official_clients():
+    """talk-android: baseUrl/remote.php/dav/files/<user>/<Uri.encode(
+    path, "/")> — segments percent-encoded, `/` kept as separator."""
+    a = _adapter()
+    a.own_user_id = "librefang-bot"
+    url = a._dav_file_url(_file_param(path="Talk/room 1/photo final.jpg"))
+    assert url == ("https://cloud.example.com/remote.php/dav/files/"
+                   "librefang-bot/Talk/room%201/photo%20final.jpg")
+
+
+def test_dav_file_url_encodes_query_and_unicode():
+    """`?`/`&` must not leak into the URL's query; non-ASCII
+    percent-encodes as UTF-8."""
+    a = _adapter()
+    a.own_user_id = "librefang-bot"
+    url = a._dav_file_url(_file_param(path="Grüße/a&b=c?d.png"))
+    assert url == ("https://cloud.example.com/remote.php/dav/files/"
+                   "librefang-bot/Gr%C3%BC%C3%9Fe/a%26b%3Dc%3Fd.png")
+
+
+def test_dav_file_url_collapses_empty_segments():
+    a = _adapter()
+    a.own_user_id = "librefang-bot"
+    url = a._dav_file_url(_file_param(path="/Talk//photo.jpg/"))
+    assert url == ("https://cloud.example.com/remote.php/dav/files/"
+                   "librefang-bot/Talk/photo.jpg")
+
+
+def test_dav_file_url_quotes_user_id():
+    a = _adapter()
+    a.own_user_id = "bot user"
+    url = a._dav_file_url(_file_param(path="Talk/x.jpg"))
+    assert url == ("https://cloud.example.com/remote.php/dav/files/"
+                   "bot%20user/Talk/x.jpg")
+
+
+# -- mapping ----------------------------------------------------------
+
+
+def test_parse_image_share_maps_to_image_content():
+    a = _adapter()
+    a.own_user_id = "librefang-bot"
+    ev = a._parse_message(_media_msg(), "R1")
+    assert ev["params"]["content"] == {
+        "Image": {
+            "url": "https://cloud.example.com/remote.php/dav/files/"
+                   "librefang-bot/Talk/photo.jpg",
+            "caption": None,
+            "mime_type": "image/jpeg",
+        },
+    }
+
+
+def test_parse_voice_message_maps_to_voice_content():
+    """Voice messages are file shares with messageType
+    'voice-message' — the only messageType Talk sets reliably."""
+    a = _adapter()
+    a.own_user_id = "librefang-bot"
+    ev = a._parse_message(
+        _media_msg(
+            message_type="voice-message",
+            file={"mimetype": "audio/ogg", "name": "voice.ogg",
+                  "path": "Talk/voice.ogg"},
+        ),
+        "R1",
+    )
+    assert ev["params"]["content"] == {
+        "Voice": {
+            "url": "https://cloud.example.com/remote.php/dav/files/"
+                   "librefang-bot/Talk/voice.ogg",
+            "caption": None,
+            "duration_seconds": 0,
+        },
+    }
+
+
+def test_parse_audio_share_maps_to_audio_content():
+    """Plain audio shares parse as `comment` — messageType is not a
+    reliable signal, so mapping keys off the mimetype."""
+    a = _adapter()
+    a.own_user_id = "librefang-bot"
+    ev = a._parse_message(
+        _media_msg(
+            file={"mimetype": "audio/mpeg", "name": "song.mp3",
+                  "path": "Music/song.mp3"},
+        ),
+        "R1",
+    )
+    assert ev["params"]["content"] == {
+        "Audio": {
+            "url": "https://cloud.example.com/remote.php/dav/files/"
+                   "librefang-bot/Music/song.mp3",
+            "caption": None,
+            "duration_seconds": 0,
+            "title": "song.mp3",
+        },
+    }
+
+
+def test_parse_video_share_maps_to_video_content():
+    a = _adapter()
+    a.own_user_id = "librefang-bot"
+    ev = a._parse_message(
+        _media_msg(
+            file={"mimetype": "video/mp4", "name": "clip.mp4",
+                  "path": "Talk/clip.mp4"},
+        ),
+        "R1",
+    )
+    assert ev["params"]["content"] == {
+        "Video": {
+            "url": "https://cloud.example.com/remote.php/dav/files/"
+                   "librefang-bot/Talk/clip.mp4",
+            "caption": None,
+            "duration_seconds": 0,
+            "filename": "clip.mp4",
+        },
+    }
+
+
+def test_parse_document_share_maps_to_file_content():
+    a = _adapter()
+    a.own_user_id = "librefang-bot"
+    ev = a._parse_message(
+        _media_msg(
+            file={"mimetype": "application/pdf", "name": "report.pdf",
+                  "path": "Talk/report.pdf"},
+        ),
+        "R1",
+    )
+    assert ev["params"]["content"] == {
+        "File": {
+            "url": "https://cloud.example.com/remote.php/dav/files/"
+                   "librefang-bot/Talk/report.pdf",
+            "filename": "report.pdf",
+        },
+    }
+
+
+def test_parse_media_caption_becomes_caption():
+    """A captioned share carries real text (Talk's
+    talkMetaData.caption becomes the message text)."""
+    a = _adapter()
+    a.own_user_id = "librefang-bot"
+    ev = a._parse_message(_media_msg(text="look at this"), "R1")
+    assert ev["params"]["content"]["Image"]["caption"] == "look at this"
+
+
+def test_parse_document_share_drops_companion_text():
+    """The File variant has no caption field; companion text is
+    warned about and dropped rather than silently lost."""
+    a = _adapter()
+    a.own_user_id = "librefang-bot"
+    ev = a._parse_message(
+        _media_msg(
+            text="see attached",
+            file={"mimetype": "application/pdf", "name": "report.pdf",
+                  "path": "Talk/report.pdf"},
+        ),
+        "R1",
+    )
+    assert ev["params"]["content"] == {
+        "File": {
+            "url": "https://cloud.example.com/remote.php/dav/files/"
+                   "librefang-bot/Talk/report.pdf",
+            "filename": "report.pdf",
+        },
+    }
+
+
+def test_parse_media_rejected_returns_none():
+    """Rejected files drop the message rather than emitting the bare
+    `{file}` placeholder as text."""
+    a = _adapter(NEXTCLOUD_MEDIA_MAX_BYTES="1024")
+    a.own_user_id = "librefang-bot"
+    assert a._parse_message(
+        _media_msg(file={"size": "999999"}), "R1",
+    ) is None
+
+
+def test_parse_media_mime_rejected_returns_none():
+    a = _adapter()
+    a.own_user_id = "librefang-bot"
+    assert a._parse_message(
+        _media_msg(file={"mimetype": "application/zip"}), "R1",
+    ) is None
+
+
+def test_parse_media_disabled_returns_none():
+    a = _adapter(NEXTCLOUD_MEDIA_MAX_BYTES="0")
+    a.own_user_id = "librefang-bot"
+    assert a._parse_message(_media_msg(), "R1") is None
+
+
+def test_parse_media_without_own_user_id_returns_none():
+    """No user id → no DAV namespace to build a URL in; skip rather
+    than emit a broken URL."""
+    a = _adapter()
+    a.own_user_id = ""
+    assert a._parse_message(_media_msg(), "R1") is None
+
+
+def test_parse_message_with_non_file_params_stays_text():
+    """Mentions etc. are ordinary rich objects — only `type ==
+    "file"` switches to the media path."""
+    a = _adapter()
+    a.own_user_id = "librefang-bot"
+    msg = _msg(mid=31, text="hi {mention-user1}")
+    msg["messageParameters"] = {
+        "mention-user1": {"type": "user", "id": "alice",
+                          "name": "Alice"},
+    }
+    ev = a._parse_message(msg, "R1")
+    assert ev["params"]["content"] == {"Text": "hi {mention-user1}"}
+
+
+def test_parse_self_shared_file_skipped():
+    a = _adapter()
+    a.own_user_id = "librefang-bot"
+    assert a._parse_message(
+        _media_msg(actor_id="librefang-bot"), "R1",
+    ) is None
+
+
+def test_parse_system_message_with_file_param_skipped():
+    a = _adapter()
+    a.own_user_id = "librefang-bot"
+    assert a._parse_message(
+        _media_msg(message_type="system"), "R1",
+    ) is None
+
+
+# -- poll integration --------------------------------------------------
+
+
+def test_poll_once_emits_media_and_advances_watermark(monkeypatch):
+    a = _adapter()
+    a.own_user_id = "librefang-bot"
+    a._room_watermarks["R1"] = 0
+    fake = _FakeUrlopen([
+        (200, {"ocs": {"data": [_media_msg(mid=40)]}}),
+    ])
+    monkeypatch.setattr(nc.urllib.request, "urlopen", fake)
+    emitted = []
+    a._poll_once(emitted.append, ["R1"])
+    assert len(emitted) == 1
+    assert emitted[0]["params"]["content"]["Image"]["url"] == (
+        "https://cloud.example.com/remote.php/dav/files/"
+        "librefang-bot/Talk/photo.jpg"
+    )
+    assert a._room_watermarks["R1"] == 40
+    assert 40 in a._seen.ids
+
+
+def test_poll_once_rejected_media_still_advances_watermark(monkeypatch):
+    """A rejected file must not re-fetch forever: the watermark and
+    dedupe set advance on every fetched id, emitted or not."""
+    a = _adapter(NEXTCLOUD_MEDIA_MAX_BYTES="1024")
+    a.own_user_id = "librefang-bot"
+    a._room_watermarks["R1"] = 0
+    fake = _FakeUrlopen([
+        (200, {"ocs": {"data": [
+            _media_msg(mid=41, file={"size": "999999"}),
+        ]}}),
+        (200, {"ocs": {"data": [
+            _media_msg(mid=41, file={"size": "999999"}),
+        ]}}),
+    ])
+    monkeypatch.setattr(nc.urllib.request, "urlopen", fake)
+    emitted = []
+    a._poll_once(emitted.append, ["R1"])
+    assert emitted == []
+    assert a._room_watermarks["R1"] == 41
+    a._poll_once(emitted.append, ["R1"])
+    assert emitted == []
+    assert a._room_watermarks["R1"] == 41
