@@ -1463,8 +1463,8 @@ class NextcloudAdapter(SidecarAdapter):
     ) -> None:
         """Phase 2 outbound media (Segment 1): upload the wire bytes
         to the bot's DAV files namespace, then share the uploaded
-        file into the room via the OCS chat share endpoint. The
-        share endpoint has no caption parameter, so a caption rides
+        file into the room via the OCS chat share endpoint. A real
+        caption rides in the share's metaData and is also delivered
         as a separate text message AFTER the share. Every failure
         path is loud (stderr + chat notice) — the old
         "(Unsupported content type)" placeholder is gone for good."""
@@ -1550,25 +1550,50 @@ class NextcloudAdapter(SidecarAdapter):
             )
             return
 
-        # 2) Share the uploaded file into the room. Talk re-resolves
-        # the rich object per viewer, so `path` is relative to the
-        # bot's files root with no leading slash.
+        # 2) Caption resolution: the daemon flattens a non-Text
+        # send's `text` to the JSON serialization of the content
+        # object itself, so a text that does NOT round-trip to the
+        # content is a real caption. Resolved BEFORE the share so
+        # it can ride in the share's metaData.
+        caption = getattr(cmd, "text", None)
+        if caption:
+            try:
+                flattened = json.loads(caption) == content
+            except (ValueError, TypeError):
+                flattened = False
+            if flattened:
+                caption = None
+
+        # 3) Share the uploaded file into the room. The OCS layer
+        # binds only form-encoded params (a JSON body is silently
+        # unbound → an empty 400), and the rich-object validator
+        # requires every metaData value to be a string — so the
+        # body is application/x-www-form-urlencoded with
+        # objectType/objectId plus metaData as a JSON string whose
+        # values are all stringified (size int → str). Talk
+        # re-resolves the rich object per viewer, so `path` is
+        # relative to the bot's files root with no leading slash.
+        meta_data = {
+            "name": filename,
+            "path": "/".join(
+                (self.media_policy.upload_dir, filename),
+            ),
+            "size": str(len(data)),
+            "mimetype": mime,
+        }
+        if caption:
+            meta_data["caption"] = caption
         share_status, _parsed, raw, _hdrs = self._http(
             f"{self.server_url}/ocs/v2.php/apps/spreed/api/v1/"
             f"chat/{room_token}/share",
             method="POST",
-            body=json.dumps({
+            body=urllib.parse.urlencode({
                 "objectType": "file",
-                "metaData": {
-                    "id": numeric_file_id,
-                    "name": filename,
-                    "path": "/".join(
-                        (self.media_policy.upload_dir, filename),
-                    ),
-                },
+                "objectId": str(numeric_file_id),
+                "metaData": json.dumps(meta_data),
             }).encode("utf-8"),
             headers=self._auth_headers(
-                {"Content-Type": "application/json"},
+                {"Content-Type": "application/x-www-form-urlencoded"},
             ),
         )
         if share_status >= 300:
@@ -1579,19 +1604,11 @@ class NextcloudAdapter(SidecarAdapter):
             )
             return
 
-        # 3) Caption: the daemon flattens a non-Text send's `text`
-        # to the JSON serialization of the content object itself,
-        # so a text that does NOT round-trip to the content is a
-        # real caption — deliver it as a separate text message
-        # AFTER the share.
-        caption = getattr(cmd, "text", None)
+        # 4) Caption delivery: a real caption rides in the share's
+        # metaData (above) AND lands as its own text message AFTER
+        # the share so it is visible in the room timeline.
         if caption:
-            try:
-                flattened = json.loads(caption) == content
-            except (ValueError, TypeError):
-                flattened = False
-            if not flattened:
-                self._post_message(room_token, caption, reply_to)
+            self._post_message(room_token, caption, reply_to)
 
     async def on_send(self, cmd) -> None:
         # Phase 2: structured non-Text content is outbound media —

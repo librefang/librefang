@@ -1916,9 +1916,10 @@ def _file_data_cmd(data, filename="photo.png", mime="image/png",
 def test_on_send_file_data_uploads_then_shares(monkeypatch):
     """Happy path: FileData → DAV PUT (Content-Type from mime_type,
     filename in the URI, Bearer auth) → OC-FileId read from the PUT
-    response → OCS share POST with the exact metaData body (numeric
-    id, name, path relative to the bot's files root, no leading
-    slash). The daemon's JSON flattening of the content into `text`
+    response → OCS share POST, form-encoded per the OCS layer
+    (objectType + objectId + metaData as a JSON string whose values
+    are ALL strings — the rich-object validator rejects non-string
+    values). The daemon's JSON flattening of the content into `text`
     must NOT be posted as a caption."""
     a = _adapter()
     a.own_user_id = "librefang-bot"
@@ -1945,22 +1946,27 @@ def test_on_send_file_data_uploads_then_shares(monkeypatch):
         "chat/ROOM1/share"
     )
     assert share["method"] == "POST"
-    assert share["headers"]["content-type"] == "application/json"
+    assert share["headers"]["content-type"] == (
+        "application/x-www-form-urlencoded"
+    )
     assert share["headers"]["ocs-apirequest"] == "true"
-    assert share["body"] == {
-        "objectType": "file",
-        "metaData": {
-            "id": 12345, "name": "photo.png",
-            "path": "LibreFang/photo.png",
-        },
+    form = dict(urllib.parse.parse_qsl(share["body_raw"]))
+    assert form["objectType"] == "file"
+    assert form["objectId"] == "12345"
+    meta = json.loads(form["metaData"])
+    assert all(isinstance(v, str) for v in meta.values())
+    assert meta == {
+        "name": "photo.png",
+        "path": "LibreFang/photo.png",
+        "size": "7",
+        "mimetype": "image/png",
     }
 
 
 def test_on_send_file_data_caption_after_share(monkeypatch):
     """A caption riding with the media (text that is NOT the JSON
-    flattening of the content object) is delivered as a separate
-    text message AFTER the share — the share endpoint has no caption
-    parameter."""
+    flattening of the content object) rides in the share's metaData
+    AND is delivered as a separate text message AFTER the share."""
     a = _adapter()
     a.own_user_id = "librefang-bot"
     fake = _FakeUrlopen([
@@ -1975,6 +1981,8 @@ def test_on_send_file_data_caption_after_share(monkeypatch):
     )))
     assert len(fake.calls) == 3
     assert "/chat/ROOM1/share" in fake.calls[1]["url"]
+    share_form = dict(urllib.parse.parse_qsl(fake.calls[1]["body_raw"]))
+    assert json.loads(share_form["metaData"])["caption"] == "look at this"
     caption = fake.calls[2]
     assert "/chat/ROOM1" in caption["url"]
     assert "/share" not in caption["url"]
@@ -2076,7 +2084,12 @@ def test_on_send_file_data_oc_fileid_padded_instance_suffix(monkeypatch):
         "https://cloud.example.com/ocs/v2.php/apps/spreed/api/v1/"
         "chat/ROOM1/share"
     )
-    assert share["body"]["metaData"]["id"] == 2861982
+    form = dict(urllib.parse.parse_qsl(share["body_raw"]))
+    assert form["objectId"] == "2861982"
+    assert all(
+        isinstance(v, str)
+        for v in json.loads(form["metaData"]).values()
+    )
 
 
 def test_on_send_file_data_oc_fileid_unparseable_propfind_fallback(monkeypatch):
@@ -2116,7 +2129,8 @@ def test_on_send_file_data_oc_fileid_unparseable_propfind_fallback(monkeypatch):
     assert propfind["headers"]["depth"] == "0"
     share = fake.calls[2]
     assert share["url"].endswith("/chat/ROOM1/share")
-    assert share["body"]["metaData"]["id"] == 2861982
+    form = dict(urllib.parse.parse_qsl(share["body_raw"]))
+    assert form["objectId"] == "2861982"
 
 
 def test_on_send_file_data_file_id_unresolvable_no_share(monkeypatch):
@@ -2276,7 +2290,7 @@ def test_on_send_file_data_filename_sanitised(monkeypatch):
         "https://cloud.example.com/remote.php/dav/files/"
         "librefang-bot/LibreFang/passwd.png"
     )
-    assert fake.calls[1]["body"]["metaData"]["name"] == "passwd.png"
-    assert fake.calls[1]["body"]["metaData"]["path"] == (
-        "LibreFang/passwd.png"
-    )
+    form = dict(urllib.parse.parse_qsl(fake.calls[1]["body_raw"]))
+    meta = json.loads(form["metaData"])
+    assert meta["name"] == "passwd.png"
+    assert meta["path"] == "LibreFang/passwd.png"
