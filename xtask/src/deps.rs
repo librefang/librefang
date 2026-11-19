@@ -293,6 +293,12 @@ mod tests {
     }
 
     #[test]
+    fn an_advisory_report_fails_even_with_a_zero_exit() {
+        let advisory = r#"{"advisories":{"123":{"severity":"high"}},"metadata":{"vulnerabilities":{"info":0,"low":0,"moderate":0,"high":2,"critical":0}}}"#;
+        assert!(!pnpm_audit_passed(Some(0), advisory, ""));
+    }
+
+    #[test]
     fn actionable_advisories_still_fail() {
         let report = r#"{"advisories":{"123":{"severity":"high"}},"metadata":{"vulnerabilities":{"info":0,"low":0,"moderate":0,"high":2,"critical":0}}}"#;
         assert!(!pnpm_audit_passed(Some(1), report, ""));
