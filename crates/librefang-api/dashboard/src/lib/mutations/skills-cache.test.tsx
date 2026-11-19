@@ -16,6 +16,7 @@ import {
   useEvolveRollbackSkill,
   useEvolveUpdateSkill,
   useEvolveWriteFile,
+  useRestoreSkillVersion,
 } from "./skills";
 
 vi.mock("../http/client", () => ({
@@ -32,6 +33,7 @@ vi.mock("../http/client", () => ({
   evolveDeleteSkill: vi.fn(),
   evolveWriteFile: vi.fn(),
   evolveRemoveFile: vi.fn(),
+  restoreSkillVersion: vi.fn(),
   proposeSkillToRegistry: vi.fn(),
   approvePendingCandidate: vi.fn(),
   rejectPendingCandidate: vi.fn(),
@@ -117,5 +119,28 @@ describe("skill mutation caches", () => {
     expect(removeSpy).toHaveBeenCalledWith({
       queryKey: skillKeys.supportingFile("skill-a", "references/old.md"),
     });
+  });
+
+  it("restores a skill version and refreshes the detail, list and history caches (#8021)", async () => {
+    vi.mocked(http.restoreSkillVersion).mockResolvedValue({
+      status: "ok",
+      skill_name: "skill-a",
+      restored_version_id: 42,
+    });
+    const { queryClient, wrapper } = createQueryClientWrapper();
+    const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");
+    // Seed a history entry under the detail subtree so the invalidation has
+    // something real to mark stale: `history` is nested under `detail(name)`,
+    // which is what refreshes the list after a restore without a second
+    // explicit key.
+    queryClient.setQueryData(skillKeys.history("skill-a"), []);
+    const { result } = renderHook(() => useRestoreSkillVersion(), { wrapper });
+
+    await result.current.mutateAsync({ name: "skill-a", versionId: 42 });
+
+    expect(http.restoreSkillVersion).toHaveBeenCalledWith("skill-a", 42);
+    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: skillKeys.detail("skill-a") });
+    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: skillKeys.lists() });
+    expect(queryClient.getQueryState(skillKeys.history("skill-a"))?.isInvalidated).toBe(true);
   });
 });

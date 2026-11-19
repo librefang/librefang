@@ -67,6 +67,8 @@ ignore = [
     { id = "RUSTSEC-2026-0370", reason = "zvariant unmaintained, merged into zbus 6; transitive via zbus 5 (ksni, notify-rust, tauri-plugin-single-instance), none of which has moved to zbus 6. https://rustsec.org/advisories/RUSTSEC-2026-0370" },
     { id = "RUSTSEC-2026-0371", reason = "zbus_names unmaintained, merged into zbus 6; transitive via zbus 5 (ksni, notify-rust, tauri-plugin-single-instance), none of which has moved to zbus 6. https://rustsec.org/advisories/RUSTSEC-2026-0371" },
     { id = "RUSTSEC-2026-0372", reason = "zvariant_derive unmaintained, merged into zbus 6; transitive via zbus 5 (ksni, notify-rust, tauri-plugin-single-instance), none of which has moved to zbus 6. https://rustsec.org/advisories/RUSTSEC-2026-0372" },
+    { id = "RUSTSEC-2026-0543", reason = "chrono unmaintained (all versions); no drop-in successor, used directly and across the workspace. https://rustsec.org/advisories/RUSTSEC-2026-0543" },
+    { id = "RUSTSEC-2026-0555", reason = "chrono-tz unmaintained (all versions); no drop-in successor, used for timezone handling. https://rustsec.org/advisories/RUSTSEC-2026-0555" },
 ]
 
 # ─────────────────────────────────────────────────────────────────────────────

@@ -1250,6 +1250,7 @@ pub fn classified_reload_fields() -> std::collections::BTreeMap<&'static str, &'
         ("telemetry", "R"),
         ("context_engine", "R"),
         ("session", "R"),
+        ("artifacts", "R"),
         ("task_board", "N"),
         ("broadcast", "R"),
         ("auto_reply", "R"),

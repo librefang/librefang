@@ -273,7 +273,10 @@ impl SkillRegistry {
     /// (whitespace, brackets, invisible chars); it does not strip injection
     /// phrases, so an unscanned `description` would smuggle the exact content
     /// the `prompt_context` gate blocks.
-    fn scan_loaded_prompt_context(name: &str, manifest: &SkillManifest) -> Result<(), SkillError> {
+    pub(crate) fn scan_loaded_prompt_context(
+        name: &str,
+        manifest: &SkillManifest,
+    ) -> Result<(), SkillError> {
         // Every string that reaches the prompt, paired with a source label for
         // diagnostics.
         let mut sources: Vec<(String, &str)> = Vec::new();

@@ -77,6 +77,18 @@
         }
       ]
     },
+    "artifacts": {
+      "description": "Session artifact store (content-addressed blobs plus versioned rows).",
+      "default": {
+        "retention_days": 90,
+        "blob_dir": null
+      },
+      "allOf": [
+        {
+          "$ref": "#/definitions/ArtifactConfig"
+        }
+      ]
+    },
     "audit": {
       "description": "Audit log configuration.",
       "default": {
@@ -1933,6 +1945,27 @@
         "tool_pattern": {
           "description": "Tool name glob pattern (e.g. \"shell_*\", \"file_delete\").",
           "type": "string"
+        }
+      }
+    },
+    "ArtifactConfig": {
+      "description": "Artifact store configuration (exposed in the `[artifacts]` TOML section).\n\nSession artifacts are content-addressed blobs on disk plus a versioned SQLite row per `(session, path)`. Blobs shared by several sessions are stored once, so pruning is driven by rows and only removes blobs no row references any more.",
+      "type": "object",
+      "properties": {
+        "blob_dir": {
+          "description": "Blob storage directory. `None` means `<home_dir>/artifacts`.",
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "retention_days": {
+          "description": "Age in days after which artifacts are pruned (0 = keep everything).",
+          "default": 90,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
         }
       }
     },

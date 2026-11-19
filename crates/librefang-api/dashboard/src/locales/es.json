@@ -1604,7 +1604,30 @@
     "pending_title": "Taller de habilidades pendiente",
     "pending_load_failed": "No se pudieron cargar las candidatas pendientes:",
     "pending_unknown_error": "error desconocido",
-    "pending_desc": "Borradores capturados de conversaciones con agentes que esperan tu revisión (#3328)."
+    "pending_desc": "Borradores capturados de conversaciones con agentes que esperan tu revisión (#3328).",
+    "change_source": {
+      "create": "Creada",
+      "update": "Actualizada",
+      "evolve": "Evolucionada",
+      "patch": "Parcheada",
+      "rollback": "Revertida",
+      "install": "Instalada",
+      "uninstall": "Desinstalada",
+      "delete": "Eliminada",
+      "file-write": "Archivo escrito",
+      "file-remove": "Archivo eliminado",
+      "restore": "Restaurada",
+      "unknown": "Origen desconocido"
+    },
+    "evo_history_empty": "Aún no hay historial de versiones",
+    "evo_history_empty_desc": "Se guarda una instantánea cada vez que esta habilidad se crea, se importa o se edita.",
+    "evo_history_load_err": "No se pudo cargar el historial de versiones.",
+    "evo_manifest": "Manifiesto (skill.toml)",
+    "evo_restore_btn": "Restaurar",
+    "evo_restore_confirm": "¿Restaurar '{{name}}' a la versión guardada el {{timestamp}} ({{source}})? Esto sobrescribe el skill.toml y el prompt actuales de la habilidad.",
+    "evo_restore_failed": "No se pudo restaurar",
+    "evo_restore_title": "Restaurar esta versión",
+    "evo_version_restored": "Versión restaurada"
   },
   "hands": {
     "title": "Hands",

@@ -280,6 +280,7 @@ impl librefang_kernel_handle::HandsControl for VisionKernel {}
 impl librefang_kernel_handle::A2ARegistry for VisionKernel {}
 impl librefang_kernel_handle::ChannelSender for VisionKernel {}
 impl librefang_kernel_handle::PromptStore for VisionKernel {}
+impl librefang_kernel_handle::SkillHistory for VisionKernel {}
 impl librefang_kernel_handle::WorkflowRunner for VisionKernel {}
 impl librefang_kernel_handle::GoalControl for VisionKernel {}
 impl librefang_kernel_handle::ToolPolicy for VisionKernel {}
