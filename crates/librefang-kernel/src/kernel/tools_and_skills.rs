@@ -913,8 +913,12 @@ impl LibreFangKernel {
         let owner_agent_id = candidate.agent_id.clone();
         let is_create = candidate.kind == crate::skill_workshop::candidate::CandidateKind::Create;
 
-        let result =
-            crate::skill_workshop::storage::approve_candidate(&skills_root, &skills_root, id)?;
+        let result = crate::skill_workshop::storage::approve_candidate_versioned(
+            &librefang_memory::SkillVersionStore::new(self.memory.substrate.pool()),
+            &skills_root,
+            &skills_root,
+            id,
+        )?;
 
         // Refresh the in-memory registry so the next prompt build sees it.
         self.reload_skills();
@@ -1496,15 +1500,28 @@ impl LibreFangKernel {
                     );
                 }
 
-                match librefang_skills::evolution::update_skill(
+                match librefang_skills::evolution::update_skill_with_snapshot(
                     &skill,
                     prompt_context,
                     changelog,
                     Some(&review_author),
                 ) {
-                    Ok(result) => {
+                    Ok((result, snapshot)) => {
                         tracing::info!(skill = %result.skill_name, version = %result.version.as_deref().unwrap_or("?"), "💾 Background review: updated skill");
                         do_reload();
+                        // The reviewer is not an evolve-surface edit: its
+                        // full rewrites record as `update` (see the shared
+                        // `SkillWrite` vocabulary), with the
+                        // `reviewer:agent:<id>` author naming the surface.
+                        crate::skill_workshop::storage::record_skill_version_snapshot(
+                            &librefang_memory::SkillVersionStore::new(
+                                kernel.memory.substrate.pool(),
+                            ),
+                            &result.skill_name,
+                            snapshot,
+                            &review_author,
+                            librefang_types::skill_history::SkillWrite::Update.as_str(),
+                        );
                         Ok(())
                     }
                     Err(librefang_skills::SkillError::SecurityBlocked(msg)) => {
@@ -1632,7 +1649,7 @@ impl LibreFangKernel {
                     );
                 }
 
-                match librefang_skills::evolution::patch_skill(
+                match librefang_skills::evolution::patch_skill_with_snapshot(
                     &skill,
                     old_string,
                     new_string,
@@ -1640,9 +1657,18 @@ impl LibreFangKernel {
                     false, // never replace_all from the reviewer — too risky
                     Some(&review_author),
                 ) {
-                    Ok(result) => {
+                    Ok((result, snapshot)) => {
                         tracing::info!(skill = %result.skill_name, version = %result.version.as_deref().unwrap_or("?"), "💾 Background review: patched skill");
                         do_reload();
+                        crate::skill_workshop::storage::record_skill_version_snapshot(
+                            &librefang_memory::SkillVersionStore::new(
+                                kernel.memory.substrate.pool(),
+                            ),
+                            &result.skill_name,
+                            snapshot,
+                            &review_author,
+                            librefang_types::skill_history::SkillWrite::Patch.as_str(),
+                        );
                         Ok(())
                     }
                     Err(librefang_skills::SkillError::SecurityBlocked(msg)) => {
