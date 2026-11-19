@@ -124,10 +124,9 @@ fn pnpm_audit_passed(exit_code: Option<i32>, stdout: &str) -> bool {
     }
 
     // pnpm can print a human line ("Error: 1 dependency issue(s) found") and,
-    // when both streams carry the report, the same JSON object twice. Parse the
-    // first JSON value and ignore whatever follows, so a duplicated clean
-    // report is still recognised; a real advisory keeps its non-empty
-    // `advisories` map and still fails.
+    // when both streams carry the report, the same JSON object twice. Collect
+    // every report and require all of them to be clean, so a duplicated clean
+    // report is recognised while a differing second one still fails closed.
     if let Ok(report) = serde_json::from_str::<serde_json::Value>(stdout) {
         return pnpm_audit_report_is_ignored_only(&report);
     }
