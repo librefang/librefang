@@ -116,21 +116,18 @@ enum PnpmAuditOutcome {
 }
 
 fn pnpm_audit_passed(exit_code: Option<i32>, stdout: &str, stderr: &str) -> bool {
-    if exit_code == Some(0) {
-        return true;
-    }
-    if exit_code != Some(1) {
-        return false;
-    }
-    // Judge the reports, not the exit code: pnpm exits 1 on a clean report in
-    // CI and splits the JSON across streams. Each stream carries at most one
-    // report (after a human line); every report present must be clean, and at
-    // least one must exist.
+    // The report is authoritative: pnpm exits 1 (and, in CI, 2) on a clean
+    // run and splits the JSON across streams. Each stream carries at most one
+    // report (after a human line); every report present must be clean. With no
+    // report at all, only a zero exit counts as clean.
     let reports: Vec<serde_json::Value> = [stdout, stderr]
         .into_iter()
         .filter_map(audit_report_in)
         .collect();
-    !reports.is_empty() && reports.iter().all(pnpm_audit_report_is_ignored_only)
+    if reports.is_empty() {
+        return exit_code == Some(0);
+    }
+    reports.iter().all(pnpm_audit_report_is_ignored_only)
 }
 
 /// Parse the JSON report in one stream, ignoring a human line before it.
@@ -334,7 +331,8 @@ mod tests {
             assert!(!pnpm_audit_passed(Some(1), report, ""), "{report}");
         }
         assert!(!pnpm_audit_passed(None, "{}", ""));
-        assert!(!pnpm_audit_passed(
+        // A clean report is authoritative even when pnpm exits 2 (seen in CI).
+        assert!(pnpm_audit_passed(
             Some(2),
             r#"{"advisories":{},"metadata":{"vulnerabilities":{"info":0,"low":0,"moderate":0,"high":1,"critical":0}}}"#,
             ""
