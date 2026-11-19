@@ -116,30 +116,35 @@ enum PnpmAuditOutcome {
 }
 
 fn pnpm_audit_passed(exit_code: Option<i32>, stdout: &str, stderr: &str) -> bool {
-    // The report is authoritative: pnpm exits 1 (and, in CI, 2) on a clean
-    // run and splits the JSON across streams. Each stream carries at most one
-    // report (after a human line); every report present must be clean. With no
+    // The report is authoritative: pnpm exits non-zero on a clean run in CI and
+    // may split the JSON across streams. Scan the joined output for every JSON
+    // object; all of them must be clean, and at least one must exist. With no
     // report at all, only a zero exit counts as clean.
-    let reports: Vec<serde_json::Value> = [stdout, stderr]
-        .into_iter()
-        .filter_map(audit_report_in)
-        .collect();
+    let joined = format!("{stdout}{stderr}");
+    let reports = audit_reports(&joined);
     if reports.is_empty() {
         return exit_code == Some(0);
     }
     reports.iter().all(pnpm_audit_report_is_ignored_only)
 }
 
-/// Parse the JSON report in one stream, ignoring a human line before it.
-fn audit_report_in(stream: &str) -> Option<serde_json::Value> {
-    if let Ok(report) = serde_json::from_str::<serde_json::Value>(stream) {
-        return Some(report);
+/// Every JSON object in `stream`, skipping human lines and other noise.
+fn audit_reports(stream: &str) -> Vec<serde_json::Value> {
+    let mut reports = Vec::new();
+    let mut offset = 0;
+    while let Some(start) = stream[offset..].find('{') {
+        let at = offset + start;
+        let mut values =
+            serde_json::Deserializer::from_str(&stream[at..]).into_iter::<serde_json::Value>();
+        match values.next() {
+            Some(Ok(report)) => {
+                reports.push(report);
+                offset = at + values.byte_offset().max(1);
+            }
+            _ => offset = at + 1,
+        }
     }
-    let start = stream.find('{')?;
-    serde_json::Deserializer::from_str(&stream[start..])
-        .into_iter::<serde_json::Value>()
-        .next()?
-        .ok()
+    reports
 }
 
 /// True when pnpm reported no actionable advisory and every severity counter
@@ -310,6 +315,13 @@ mod tests {
         let advisory = r#"{"advisories":{"123":{"severity":"high"}},"metadata":{"vulnerabilities":{"info":0,"low":0,"moderate":0,"high":2,"critical":0}}}"#;
         assert!(!pnpm_audit_passed(Some(1), clean, advisory));
         assert!(!pnpm_audit_passed(Some(1), advisory, clean));
+    }
+
+    #[test]
+    fn a_report_split_across_streams_is_reassembled() {
+        let one = r#"{"advisories":{},"metadata":{"vulnerabilities":{"info":0,"low":0,"moderate":0,"high":1,"critical":0}}}"#;
+        let (a, b) = one.split_at(one.len() / 2);
+        assert!(pnpm_audit_passed(Some(1), a, b));
     }
 
     #[test]
