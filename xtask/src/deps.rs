@@ -189,10 +189,10 @@ fn run_pnpm_audit(dir: &Path, label: &str) -> PnpmAuditOutcome {
     print!("{combined}");
     println!();
 
-    if pnpm_audit_passed(
-        output.status.code(),
-        &String::from_utf8_lossy(&output.stdout),
-    ) {
+    // Parse both streams together: pnpm 12 in CI writes the JSON report to
+    // stderr and only the human "N dependency issue(s)" line to stdout, so
+    // inspecting stdout alone reads a clean report as a failure (#8768 CI).
+    if pnpm_audit_passed(output.status.code(), &combined) {
         PnpmAuditOutcome::Clean
     } else if is_audit_endpoint_retired(&combined) {
         println!(
@@ -293,6 +293,16 @@ mod tests {
     fn actionable_advisories_still_fail() {
         let report = r#"{"advisories":{"123":{"severity":"high"}},"metadata":{"vulnerabilities":{"info":0,"low":0,"moderate":0,"high":2,"critical":0}}}"#;
         assert!(!pnpm_audit_passed(Some(1), report));
+    }
+
+    #[test]
+    fn a_report_on_stderr_is_read_when_the_streams_are_combined() {
+        let human_only = "Error: 1 dependency issue(s) found\n";
+        assert!(!pnpm_audit_passed(Some(1), human_only));
+        let combined = format!(
+            "{human_only}{{\"advisories\":{{}},\"metadata\":{{\"vulnerabilities\":{{\"info\":0,\"low\":0,\"moderate\":0,\"high\":1,\"critical\":0}}}}}}"
+        );
+        assert!(pnpm_audit_passed(Some(1), &combined));
     }
 
     #[test]
