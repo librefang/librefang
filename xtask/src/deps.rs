@@ -115,31 +115,34 @@ enum PnpmAuditOutcome {
     Skipped,
 }
 
-fn pnpm_audit_passed(exit_code: Option<i32>, stdout: &str) -> bool {
+fn pnpm_audit_passed(exit_code: Option<i32>, stdout: &str, stderr: &str) -> bool {
     if exit_code == Some(0) {
         return true;
     }
     if exit_code != Some(1) {
         return false;
     }
-
-    // pnpm can print a human line ("Error: 1 dependency issue(s) found") and,
-    // when both streams carry the report, the same JSON object twice. Collect
-    // every report and require all of them to be clean, so a duplicated clean
-    // report is recognised while a differing second one still fails closed.
-    if let Ok(report) = serde_json::from_str::<serde_json::Value>(stdout) {
-        return pnpm_audit_report_is_ignored_only(&report);
-    }
-    let Some(start) = stdout.find('{') else {
-        return false;
-    };
-    // Every report in the stream must be clean: pnpm writes the same object to
-    // both streams, but a differing second object must not be discarded.
-    let reports: Vec<serde_json::Value> = serde_json::Deserializer::from_str(&stdout[start..])
-        .into_iter::<serde_json::Value>()
-        .collect::<Result<_, _>>()
-        .unwrap_or_default();
+    // Judge the reports, not the exit code: pnpm exits 1 on a clean report in
+    // CI and splits the JSON across streams. Each stream carries at most one
+    // report (after a human line); every report present must be clean, and at
+    // least one must exist.
+    let reports: Vec<serde_json::Value> = [stdout, stderr]
+        .into_iter()
+        .filter_map(audit_report_in)
+        .collect();
     !reports.is_empty() && reports.iter().all(pnpm_audit_report_is_ignored_only)
+}
+
+/// Parse the JSON report in one stream, ignoring a human line before it.
+fn audit_report_in(stream: &str) -> Option<serde_json::Value> {
+    if let Ok(report) = serde_json::from_str::<serde_json::Value>(stream) {
+        return Some(report);
+    }
+    let start = stream.find('{')?;
+    serde_json::Deserializer::from_str(&stream[start..])
+        .into_iter::<serde_json::Value>()
+        .next()?
+        .ok()
 }
 
 /// True when pnpm reported no actionable advisory and every severity counter
@@ -191,7 +194,11 @@ fn run_pnpm_audit(dir: &Path, label: &str) -> PnpmAuditOutcome {
     // Parse both streams together: pnpm 12 in CI writes the JSON report to
     // stderr and only the human "N dependency issue(s)" line to stdout, so
     // inspecting stdout alone reads a clean report as a failure (#8768 CI).
-    if pnpm_audit_passed(output.status.code(), &combined) {
+    if pnpm_audit_passed(
+        output.status.code(),
+        &String::from_utf8_lossy(&output.stdout),
+        &String::from_utf8_lossy(&output.stderr),
+    ) {
         PnpmAuditOutcome::Clean
     } else if is_audit_endpoint_retired(&combined) {
         println!(
@@ -273,50 +280,47 @@ mod tests {
     #[test]
     fn ignored_only_audit_with_nonzero_exit_passes() {
         let report = r#"{"advisories":{},"metadata":{"vulnerabilities":{"info":0,"low":0,"moderate":0,"high":1,"critical":0}}}"#;
-        assert!(pnpm_audit_passed(Some(1), report));
+        assert!(pnpm_audit_passed(Some(1), report, ""));
     }
 
     #[test]
     fn prefixed_error_line_still_recognises_an_ignored_only_report() {
         let report = "Error: 1 dependency issue(s) found\n{\"advisories\":{},\"metadata\":{\"vulnerabilities\":{\"info\":0,\"low\":0,\"moderate\":0,\"high\":1,\"critical\":0}}}";
-        assert!(pnpm_audit_passed(Some(1), report));
+        assert!(pnpm_audit_passed(Some(1), report, ""));
     }
 
     #[test]
     fn prefixed_error_line_does_not_hide_an_actionable_advisory() {
         let report = "Error: 1 dependency issue(s) found\n{\"advisories\":{\"123\":{\"severity\":\"high\"}},\"metadata\":{\"vulnerabilities\":{\"info\":0,\"low\":0,\"moderate\":0,\"high\":2,\"critical\":0}}}";
-        assert!(!pnpm_audit_passed(Some(1), report));
+        assert!(!pnpm_audit_passed(Some(1), report, ""));
     }
 
     #[test]
     fn actionable_advisories_still_fail() {
         let report = r#"{"advisories":{"123":{"severity":"high"}},"metadata":{"vulnerabilities":{"info":0,"low":0,"moderate":0,"high":2,"critical":0}}}"#;
-        assert!(!pnpm_audit_passed(Some(1), report));
+        assert!(!pnpm_audit_passed(Some(1), report, ""));
     }
 
     #[test]
-    fn a_clean_report_followed_by_an_advisory_fails() {
+    fn a_clean_stdout_with_an_advisory_on_stderr_fails() {
         let clean = r#"{"advisories":{},"metadata":{"vulnerabilities":{"info":0,"low":0,"moderate":0,"high":1,"critical":0}}}"#;
         let advisory = r#"{"advisories":{"123":{"severity":"high"}},"metadata":{"vulnerabilities":{"info":0,"low":0,"moderate":0,"high":2,"critical":0}}}"#;
-        let combined = format!("Error: 1 dependency issue(s) found\n{clean}\n{advisory}");
-        assert!(!pnpm_audit_passed(Some(1), &combined));
+        assert!(!pnpm_audit_passed(Some(1), clean, advisory));
+        assert!(!pnpm_audit_passed(Some(1), advisory, clean));
     }
 
     #[test]
-    fn a_report_duplicated_across_streams_is_still_clean() {
+    fn the_same_clean_report_on_both_streams_is_clean() {
         let one = r#"{"advisories":{},"metadata":{"vulnerabilities":{"info":0,"low":0,"moderate":0,"high":1,"critical":0}}}"#;
-        let combined = format!("Error: 1 dependency issue(s) found\n{one}\n{one}");
-        assert!(pnpm_audit_passed(Some(1), &combined));
+        assert!(pnpm_audit_passed(Some(1), one, one));
     }
 
     #[test]
-    fn a_report_on_stderr_is_read_when_the_streams_are_combined() {
+    fn a_report_on_stderr_with_a_human_line_on_stdout_is_clean() {
         let human_only = "Error: 1 dependency issue(s) found\n";
-        assert!(!pnpm_audit_passed(Some(1), human_only));
-        let combined = format!(
-            "{human_only}{{\"advisories\":{{}},\"metadata\":{{\"vulnerabilities\":{{\"info\":0,\"low\":0,\"moderate\":0,\"high\":1,\"critical\":0}}}}}}"
-        );
-        assert!(pnpm_audit_passed(Some(1), &combined));
+        let clean = r#"{"advisories":{},"metadata":{"vulnerabilities":{"info":0,"low":0,"moderate":0,"high":1,"critical":0}}}"#;
+        assert!(pnpm_audit_passed(Some(1), human_only, clean));
+        assert!(!pnpm_audit_passed(Some(1), human_only, human_only));
     }
 
     #[test]
@@ -327,12 +331,13 @@ mod tests {
             r#"{"advisories":{}}"#,
             r#"{"advisories":{},"metadata":{"vulnerabilities":{"info":0,"low":0,"moderate":0,"high":1,"critical":0}},"error":{"code":"ECONNRESET"}}"#,
         ] {
-            assert!(!pnpm_audit_passed(Some(1), report), "{report}");
+            assert!(!pnpm_audit_passed(Some(1), report, ""), "{report}");
         }
-        assert!(!pnpm_audit_passed(None, "{}"));
+        assert!(!pnpm_audit_passed(None, "{}", ""));
         assert!(!pnpm_audit_passed(
             Some(2),
-            r#"{"advisories":{},"metadata":{"vulnerabilities":{"info":0,"low":0,"moderate":0,"high":1,"critical":0}}}"#
+            r#"{"advisories":{},"metadata":{"vulnerabilities":{"info":0,"low":0,"moderate":0,"high":1,"critical":0}}}"#,
+            ""
         ));
     }
 
