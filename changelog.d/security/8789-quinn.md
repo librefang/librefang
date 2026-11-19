@@ -1,0 +1,1 @@
+Bump `quinn`/`quinn-proto`/`quinn-udp` to 0.11.12/0.11.19/0.5.16, closing RUSTSEC-2026-0524, RUSTSEC-2026-0523 and RUSTSEC-2026-0538 (stream-limit and receive-loop issues in QUIC) (#8789) (@DaBlitzStein).
