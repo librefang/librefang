@@ -1334,6 +1334,38 @@ fn resolve_notification_targets(
     }
 }
 
+/// Where an approval-resolved continuation turn goes.
+enum ApprovalResumeTarget<'a> {
+    /// A channel turn: resume and route the reply back to the chat.
+    Channel {
+        channel: &'a str,
+        sender_id: &'a str,
+        chat_id: Option<&'a str>,
+    },
+    /// A REST/API turn with a session: resume in that session, no outbound routing.
+    Session(librefang_types::agent::SessionId),
+    /// Nothing to resume into; leave the patched session for the next turn.
+    None,
+}
+
+fn approval_resume_target(
+    deferred: &librefang_types::tool::DeferredToolExecution,
+) -> ApprovalResumeTarget<'_> {
+    if let (Some(channel), Some(sender_id)) =
+        (deferred.channel.as_deref(), deferred.sender_id.as_deref())
+    {
+        return ApprovalResumeTarget::Channel {
+            channel,
+            sender_id,
+            chat_id: deferred.chat_id.as_deref(),
+        };
+    }
+    match deferred.session_id {
+        Some(session_id) => ApprovalResumeTarget::Session(session_id),
+        None => ApprovalResumeTarget::None,
+    }
+}
+
 impl LibreFangKernel {
     /// Mark all active Hands' cron jobs as due-now so the next scheduler tick fires them.
     /// Called after a provider is first configured so Hands resume immediately.
@@ -1871,8 +1903,13 @@ impl LibreFangKernel {
         // the resolution signal. Fall back to direct session mutation only when the
         // agent is not currently reachable.
         if !self.notify_agent_of_resolution(&agent_id, &deferred, &decision, &result) {
-            self.replace_tool_result_in_session(&agent_id, &deferred.tool_use_id, &result)
-                .await;
+            self.replace_tool_result_in_session(
+                &agent_id,
+                deferred.session_id,
+                &deferred.tool_use_id,
+                &result,
+            )
+            .await;
             // Patching the session updates the on-disk tool_result but
             // does NOT fire a new agent turn. After a channel-originated
             // tool call, the LLM responded to the original `WaitingApproval`
@@ -1897,11 +1934,16 @@ impl LibreFangKernel {
     /// just-patched tool_result, and generates a response that flows
     /// back to the originating channel.
     ///
+    /// A non-channel turn that carries a `session_id` (the REST
+    /// `POST /api/agents/{id}/message` path) is resumed in that session with
+    /// no outbound routing: the continuation turn is persisted, so the client
+    /// polling the session sees the resolved result instead of a stalled
+    /// `waiting_approval` (#8709).
+    ///
     /// No-op when:
-    /// - `(deferred.channel, deferred.sender_id)` is missing — non-channel
-    ///   sources (dashboard direct, cron, autonomous, inline-blocking
-    ///   `request_approval`) need their own resume path; we don't have
-    ///   a chat to route a response to.
+    /// - The deferred execution carries neither a channel/sender pair nor a
+    ///   session id (inline-blocking `request_approval` from a source that
+    ///   tracks neither) — there is nowhere to resume.
     /// - The kernel self-handle is unavailable (early boot / shutdown).
     /// - `send_message_full` fails — logged at WARN; the patched
     ///   session is still on disk so the next user-initiated turn will
@@ -1913,15 +1955,45 @@ impl LibreFangKernel {
         decision: &librefang_types::approval::ApprovalDecision,
         result: &librefang_types::tool::ToolResult,
     ) {
-        let (Some(channel), Some(sender_id)) =
-            (deferred.channel.as_deref(), deferred.sender_id.as_deref())
-        else {
-            debug!(
-                agent_id = %agent_id,
-                tool_use_id = %deferred.tool_use_id,
-                "Approval resolved with no channel/sender context — session patched but agent left idle (non-channel source; next user message will see the resolved result)"
-            );
-            return;
+        let target = approval_resume_target(deferred);
+        let (sender_ctx, session_override, channel_out, routing_chat_id) = match &target {
+            ApprovalResumeTarget::Channel {
+                channel,
+                sender_id,
+                chat_id,
+            } => {
+                // Prefer the originating chat_id over sender_id. In DMs they
+                // coincide and the previous synth-from-sender_id behaviour
+                // worked by accident; in groups `sender_id` is the human user
+                // and `chat_id` is the group conversation.
+                let routing = chat_id.filter(|c| !c.is_empty()).unwrap_or(sender_id);
+                let ctx = librefang_channels::types::SenderContext {
+                    // Audit: cron-channel-name-not-reserved. `deferred.channel`
+                    // was captured upstream from a `SenderContext` that may
+                    // predate the construction-site sanitizer. Re-sanitize on
+                    // replay so a stored unsanitized value cannot resurrect
+                    // the collision.
+                    channel: librefang_channels::types::sanitize_channel_name(channel),
+                    user_id: (*sender_id).to_string(),
+                    chat_id: Some((*routing).to_string()),
+                    ..Default::default()
+                };
+                (
+                    Some(ctx),
+                    None,
+                    Some(*channel),
+                    Some((*routing).to_string()),
+                )
+            }
+            ApprovalResumeTarget::Session(session_id) => (None, Some(*session_id), None, None),
+            ApprovalResumeTarget::None => {
+                debug!(
+                    agent_id = %agent_id,
+                    tool_use_id = %deferred.tool_use_id,
+                    "Approval resolved with no channel/sender or session context — session patched but agent left idle (next user message will see the resolved result)"
+                );
+                return;
+            }
         };
 
         let kernel_handle = match self.self_handle.get().and_then(|w| w.upgrade()) {
@@ -1933,29 +2005,6 @@ impl LibreFangKernel {
                 );
                 return;
             }
-        };
-
-        // Prefer the originating chat_id over sender_id. In DMs they
-        // coincide and the previous synth-from-sender_id behaviour
-        // worked by accident; in groups `sender_id` is the human user
-        // and `chat_id` is the group conversation. Routing the reply
-        // via the group's chat_id puts the agent's follow-up back in
-        // the original thread, matching #5489's intent end-to-end.
-        let routing_chat_id = deferred
-            .chat_id
-            .as_deref()
-            .filter(|c| !c.is_empty())
-            .unwrap_or(sender_id);
-        let sender_ctx = librefang_channels::types::SenderContext {
-            // Audit: cron-channel-name-not-reserved. `deferred.channel`
-            // was captured upstream from a `SenderContext` that may
-            // predate the construction-site sanitizer. Re-sanitize on
-            // replay so a stored unsanitized value cannot resurrect
-            // the collision.
-            channel: librefang_channels::types::sanitize_channel_name(channel),
-            user_id: sender_id.to_string(),
-            chat_id: Some(routing_chat_id.to_string()),
-            ..Default::default()
         };
 
         let result_preview = librefang_types::truncate_str(&result.content, 300);
@@ -1972,10 +2021,10 @@ impl LibreFangKernel {
                 &msg,
                 kernel_handle,
                 None,
-                Some(&sender_ctx),
+                sender_ctx.as_ref(),
                 None,
                 None,
-                None,
+                session_override,
             )
             .await
         {
@@ -1990,6 +2039,19 @@ impl LibreFangKernel {
                 return;
             }
         };
+
+        let Some(channel) = channel_out else {
+            info!(
+                agent_id = %agent_id,
+                tool_use_id = %deferred.tool_use_id,
+                session_id = ?session_override,
+                response_len = loop_result.response.len(),
+                silent = loop_result.silent,
+                "Woke idle agent after approval resolution — continuation turn persisted in the originating session (no channel to route a reply to)"
+            );
+            return;
+        };
+        let routing_chat_id = routing_chat_id.as_deref().unwrap_or_default();
 
         info!(
             agent_id = %agent_id,
@@ -2210,19 +2272,25 @@ impl LibreFangKernel {
     async fn replace_tool_result_in_session(
         &self,
         agent_id: &AgentId,
+        preferred_session: Option<librefang_types::agent::SessionId>,
         tool_use_id: &str,
         result: &librefang_types::tool::ToolResult,
     ) {
-        // Resolve the agent's session_id from the registry.
-        let session_id = match self.agents.registry.get(*agent_id) {
-            Some(entry) => entry.session_id,
-            None => {
-                warn!(
-                    agent_id = %agent_id,
-                    "replace_tool_result_in_session: agent not found in registry"
-                );
-                return;
-            }
+        // The deferred execution names the session the turn actually ran in.
+        // Falling back to the registry's canonical session would patch a
+        // different row whenever the REST body pinned a session id (#8709).
+        let session_id = match preferred_session {
+            Some(session_id) => session_id,
+            None => match self.agents.registry.get(*agent_id) {
+                Some(entry) => entry.session_id,
+                None => {
+                    warn!(
+                        agent_id = %agent_id,
+                        "replace_tool_result_in_session: agent not found in registry"
+                    );
+                    return;
+                }
+            },
         };
 
         let mut session = match self.memory.substrate.get_session_async(session_id).await {
@@ -2243,6 +2311,14 @@ impl LibreFangKernel {
                 return;
             }
         };
+
+        if session.agent_id != *agent_id {
+            warn!(
+                agent_id = %agent_id,
+                "replace_tool_result_in_session: resolved session belongs to another agent — refusing to patch"
+            );
+            return;
+        }
 
         fn reconcile_tool_result(
             session: &mut librefang_memory::session::Session,
@@ -2544,3 +2620,77 @@ impl librefang_wire::peer::PeerHandle for LibreFangKernel {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod approval_resume_target_tests {
+    use super::{approval_resume_target, ApprovalResumeTarget};
+    use librefang_types::agent::SessionId;
+    use librefang_types::tool::DeferredToolExecution;
+
+    fn deferred(
+        channel: Option<&str>,
+        sender: Option<&str>,
+        chat: Option<&str>,
+        session: Option<SessionId>,
+    ) -> DeferredToolExecution {
+        DeferredToolExecution {
+            agent_id: uuid::Uuid::new_v4().to_string(),
+            tool_use_id: "tool-1".to_string(),
+            tool_name: "web_search".to_string(),
+            input: serde_json::json!({}),
+            allowed_tools: None,
+            allowed_env_vars: None,
+            exec_policy: None,
+            sender_id: sender.map(str::to_string),
+            channel: channel.map(str::to_string),
+            chat_id: chat.map(str::to_string),
+            account_id: None,
+            workspace_root: None,
+            force_human: false,
+            session_id: session,
+        }
+    }
+
+    /// #8709: a REST turn has no channel/sender, but it does have a session;
+    /// it must resume instead of being left idle.
+    #[test]
+    fn a_session_only_turn_resumes_in_its_session() {
+        let session = SessionId::new();
+        let d = deferred(None, None, None, Some(session));
+        match approval_resume_target(&d) {
+            ApprovalResumeTarget::Session(actual) => assert_eq!(actual, session),
+            _ => panic!("a session-only deferred execution must resume in its session"),
+        }
+    }
+
+    #[test]
+    fn a_channel_turn_prefers_the_chat_id() {
+        let d = deferred(
+            Some("telegram"),
+            Some("user-1"),
+            Some("group-9"),
+            Some(SessionId::new()),
+        );
+        match approval_resume_target(&d) {
+            ApprovalResumeTarget::Channel {
+                channel,
+                sender_id,
+                chat_id,
+            } => {
+                assert_eq!(channel, "telegram");
+                assert_eq!(sender_id, "user-1");
+                assert_eq!(chat_id, Some("group-9"));
+            }
+            _ => panic!("a channel turn must route back to its chat"),
+        }
+    }
+
+    #[test]
+    fn nothing_to_resume_into_stays_idle() {
+        let d = deferred(None, None, None, None);
+        assert!(matches!(
+            approval_resume_target(&d),
+            ApprovalResumeTarget::None
+        ));
+    }
+}
