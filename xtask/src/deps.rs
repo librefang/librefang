@@ -128,19 +128,19 @@ fn pnpm_audit_passed(exit_code: Option<i32>, stdout: &str) -> bool {
     // first JSON value and ignore whatever follows, so a duplicated clean
     // report is still recognised; a real advisory keeps its non-empty
     // `advisories` map and still fails.
-    let parsed = serde_json::from_str::<serde_json::Value>(stdout)
-        .ok()
-        .or_else(|| {
-            let start = stdout.find('{')?;
-            serde_json::Deserializer::from_str(&stdout[start..])
-                .into_iter::<serde_json::Value>()
-                .next()?
-                .ok()
-        });
-    let Some(report) = parsed else {
+    if let Ok(report) = serde_json::from_str::<serde_json::Value>(stdout) {
+        return pnpm_audit_report_is_ignored_only(&report);
+    }
+    let Some(start) = stdout.find('{') else {
         return false;
     };
-    pnpm_audit_report_is_ignored_only(&report)
+    // Every report in the stream must be clean: pnpm writes the same object to
+    // both streams, but a differing second object must not be discarded.
+    let reports: Vec<serde_json::Value> = serde_json::Deserializer::from_str(&stdout[start..])
+        .into_iter::<serde_json::Value>()
+        .collect::<Result<_, _>>()
+        .unwrap_or_default();
+    !reports.is_empty() && reports.iter().all(pnpm_audit_report_is_ignored_only)
 }
 
 /// True when pnpm reported no actionable advisory and every severity counter
@@ -293,6 +293,14 @@ mod tests {
     fn actionable_advisories_still_fail() {
         let report = r#"{"advisories":{"123":{"severity":"high"}},"metadata":{"vulnerabilities":{"info":0,"low":0,"moderate":0,"high":2,"critical":0}}}"#;
         assert!(!pnpm_audit_passed(Some(1), report));
+    }
+
+    #[test]
+    fn a_clean_report_followed_by_an_advisory_fails() {
+        let clean = r#"{"advisories":{},"metadata":{"vulnerabilities":{"info":0,"low":0,"moderate":0,"high":1,"critical":0}}}"#;
+        let advisory = r#"{"advisories":{"123":{"severity":"high"}},"metadata":{"vulnerabilities":{"info":0,"low":0,"moderate":0,"high":2,"critical":0}}}"#;
+        let combined = format!("Error: 1 dependency issue(s) found\n{clean}\n{advisory}");
+        assert!(!pnpm_audit_passed(Some(1), &combined));
     }
 
     #[test]
