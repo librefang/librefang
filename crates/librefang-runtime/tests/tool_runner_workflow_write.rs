@@ -253,6 +253,7 @@ impl HandsControl for WorkflowWriteStubKernel {}
 impl A2ARegistry for WorkflowWriteStubKernel {}
 impl ChannelSender for WorkflowWriteStubKernel {}
 impl PromptStore for WorkflowWriteStubKernel {}
+impl SkillHistory for WorkflowWriteStubKernel {}
 impl GoalControl for WorkflowWriteStubKernel {}
 impl ToolPolicy for WorkflowWriteStubKernel {}
 impl librefang_kernel_handle::CatalogQuery for WorkflowWriteStubKernel {}

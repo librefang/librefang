@@ -206,6 +206,7 @@ pub async fn skillhub_skill_code(Path(_slug): Path<String>) -> impl IntoResponse
 /// POST /api/skillhub/install — Install a skill from Skillhub.
 pub async fn skillhub_install(
     State(state): State<Arc<AppState>>,
+    api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
     Json(req): Json<crate::types::ClawHubInstallRequest>,
 ) -> impl IntoResponse {
     if let Some(ref hand_id) = req.hand {
@@ -253,6 +254,16 @@ pub async fn skillhub_install(
 
     match client.install(&req.slug, &skills_dir).await {
         Ok(result) => {
+            // Record the first version of the skill the marketplace delivered
+            // (#8021), under the shared `install` source.
+            if req.hand.is_none() {
+                record_installed_skill_version(
+                    &state,
+                    &skills_dir,
+                    &result.skill_name,
+                    &dashboard_author(api_user.as_ref()),
+                );
+            }
             let warnings: Vec<serde_json::Value> = result
                 .warnings
                 .iter()
