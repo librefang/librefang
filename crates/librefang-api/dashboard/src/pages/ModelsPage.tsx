@@ -207,6 +207,15 @@ type SettingsState = {
   contextWindowEnabled: boolean;
   maxOutputTokens: number;
   maxOutputTokensEnabled: boolean;
+  // Refs #8591/#8616: reasoning-effort policy overrides. There is no control
+  // for them in this drawer yet, but the PUT body is a whole document, so the
+  // stored values are hydrated here and written back verbatim on save.
+  // `null` means "inherit the catalog entry"; `[]` is the explicit "no enum"
+  // declaration and must survive that distinction.
+  supportedEfforts: string[] | null;
+  defaultEffort: string;
+  offAllowed: boolean | null;
+  mandatory: boolean | null;
 };
 
 type SettingsAction =
@@ -243,6 +252,10 @@ const settingsInitial: SettingsState = {
   contextWindowEnabled: false,
   maxOutputTokens: 8192,
   maxOutputTokensEnabled: false,
+  supportedEfforts: null,
+  defaultEffort: "",
+  offAllowed: null,
+  mandatory: null,
 };
 
 function boolToOverride(v: boolean | undefined | null): CapOverride {
@@ -306,7 +319,21 @@ export function settingsStateFromOverrides(
           maxOutputTokensEnabled: true,
         }
       : {}),
+    // `?? null`, not a truthiness test: `[]` is a declaration ("no effort
+    // enum") and differs from "inherit the catalog entry".
+    supportedEfforts: overrides.supported_efforts ?? null,
+    defaultEffort: overrides.default_effort ?? "",
+    offAllowed: overrides.off_allowed ?? null,
+    mandatory: overrides.mandatory ?? null,
   };
+}
+
+/** Value equality for one settings field, treating arrays by content. */
+function settingsFieldEqual(a: unknown, b: unknown): boolean {
+  if (Array.isArray(a) && Array.isArray(b)) {
+    return a.length === b.length && a.every((v, i) => v === b[i]);
+  }
+  return a === b;
 }
 
 export function settingsStateEqual(
@@ -314,7 +341,7 @@ export function settingsStateEqual(
   right: SettingsState,
 ): boolean {
   return (Object.keys(settingsInitial) as (keyof SettingsState)[]).every(
-    (key) => left[key] === right[key],
+    (key) => settingsFieldEqual(left[key], right[key]),
   );
 }
 
@@ -1500,6 +1527,16 @@ function ModelSettingsModal({ model, onClose, onSaved, onReset, onError }: {
     if (streaming !== undefined) overrides.supports_streaming = streaming;
     const thinking = overrideToBool(s.thinkingOverride);
     if (thinking !== undefined) overrides.supports_thinking = thinking;
+    // Refs #8616: the PUT body replaces the whole override document, so every
+    // field this drawer does not edit must be written back or the save wipes
+    // it. That was the bug: saving `temperature` cleared the model's declared
+    // reasoning rungs.
+    if (s.supportedEfforts !== null) {
+      overrides.supported_efforts = [...s.supportedEfforts];
+    }
+    if (s.defaultEffort) overrides.default_effort = s.defaultEffort;
+    if (s.offAllowed !== null) overrides.off_allowed = s.offAllowed;
+    if (s.mandatory !== null) overrides.mandatory = s.mandatory;
     try {
       await updateMut.mutateAsync({ modelKey: overrideKey, overrides });
       if (!mountedRef.current) return;

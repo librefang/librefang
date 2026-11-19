@@ -1,6 +1,6 @@
 //! Model catalog types — shared data structures for the model registry.
 
-use crate::config::ReasoningEffortPolicy;
+use crate::config::{ReasoningEffortPolicy, ReasoningMode};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
@@ -418,6 +418,11 @@ impl ModelCatalogEntry {
     /// missing those fields would silently load with `0` and propagate that
     /// `0` into compaction thresholds and budget math downstream. Catalog
     /// loaders MUST call this and reject entries that fail.
+    ///
+    /// The reasoning-effort declaration is validated here too (#8616 review):
+    /// every `supported_efforts` entry and `default_effort` must be a
+    /// structurally valid [`ReasoningMode`] token, because both are written to
+    /// the provider wire verbatim.
     pub fn validate(&self) -> Result<(), String> {
         if self.modality == Modality::Text {
             if self.context_window == 0 {
@@ -432,6 +437,27 @@ impl ModelCatalogEntry {
                     self.provider, self.id
                 ));
             }
+        }
+        // The reasoning-effort declaration is operator/catalog data that ends
+        // up on the wire verbatim (#8591). A token that cannot be carried —
+        // `"high effort"`, `"high low"`, an empty string — must be rejected at
+        // ingress rather than surfacing later as a malformed provider request
+        // (#8616 review).
+        for token in &self.supported_efforts {
+            ReasoningMode::new(token.clone()).map_err(|e| {
+                format!(
+                    "model {}/{} declares an invalid supported_efforts entry {token:?}: {e}",
+                    self.provider, self.id
+                )
+            })?;
+        }
+        if let Some(token) = &self.default_effort {
+            ReasoningMode::new(token.clone()).map_err(|e| {
+                format!(
+                    "model {}/{} declares an invalid default_effort {token:?}: {e}",
+                    self.provider, self.id
+                )
+            })?;
         }
         Ok(())
     }
@@ -637,6 +663,63 @@ impl ModelOverrides {
             && self.default_effort.is_none()
             && self.off_allowed.is_none()
             && self.mandatory.is_none()
+    }
+
+    /// Validate the four reasoning-policy overrides (#8616 review).
+    ///
+    /// `supported_efforts` and `default_effort` travel to the provider wire
+    /// verbatim, so a structurally invalid token (`"high effort"`, an empty
+    /// string) has no possible wire spelling. Callers that own an HTTP request
+    /// turn this into a 400; the `model_overrides.json` loader sanitizes
+    /// instead of failing the whole file.
+    pub fn validate_reasoning(&self) -> Result<(), String> {
+        if let Some(efforts) = &self.supported_efforts {
+            for token in efforts {
+                ReasoningMode::new(token.clone()).map_err(|e| {
+                    format!("supported_efforts entry {token:?} is not a valid reasoning token: {e}")
+                })?;
+            }
+        }
+        if let Some(token) = &self.default_effort {
+            ReasoningMode::new(token.clone()).map_err(|e| {
+                format!("default_effort {token:?} is not a valid reasoning token: {e}")
+            })?;
+        }
+        Ok(())
+    }
+
+    /// Drop structurally invalid reasoning tokens in place, returning what was
+    /// dropped so the caller can warn (#8616 review).
+    ///
+    /// Used by the `model_overrides.json` loader: the file is hand-editable, so
+    /// one bad token must not discard the operator's unrelated tuning (and
+    /// must not fail the whole catalog load). An invalid `default_effort`
+    /// clears the field, deferring to the entry's own default.
+    pub fn sanitize_reasoning(&mut self) -> Vec<String> {
+        let mut dropped = Vec::new();
+        if let Some(efforts) = self.supported_efforts.as_mut() {
+            // An already-empty set is the operator's "budget-controlled"
+            // declaration and must survive sanitising; only a set that had
+            // tokens and lost all of them means "inherit".
+            let had_tokens = !efforts.is_empty();
+            efforts.retain(|token| {
+                let valid = ReasoningMode::new(token.clone()).is_ok();
+                if !valid {
+                    dropped.push(token.clone());
+                }
+                valid
+            });
+            if had_tokens && efforts.is_empty() {
+                self.supported_efforts = None;
+            }
+        }
+        if let Some(token) = self.default_effort.as_ref() {
+            if ReasoningMode::new(token.clone()).is_err() {
+                dropped.push(token.clone());
+                self.default_effort = None;
+            }
+        }
+        dropped
     }
 }
 
@@ -1975,5 +2058,43 @@ aliases = []
         assert_eq!(a.temperature, Some(0.3), "sibling fields still parse");
         assert_eq!(lenient["vllm:b"].top_k, Some(40));
         assert_eq!(lenient["vllm:c"].top_k, None);
+    }
+
+    /// #8616 review: a declaration whose tokens are all invalid inherits
+    /// instead of pinning an explicit empty set ("budget-controlled").
+    #[test]
+    fn sanitize_reasoning_inherits_when_every_token_is_invalid() {
+        let mut overrides = ModelOverrides {
+            supported_efforts: Some(vec!["high effort".to_string(), "very high".to_string()]),
+            default_effort: Some("extra high".to_string()),
+            ..Default::default()
+        };
+        let dropped = overrides.sanitize_reasoning();
+        assert_eq!(dropped, vec!["high effort", "very high", "extra high"]);
+        assert_eq!(overrides.supported_efforts, None);
+        assert_eq!(overrides.default_effort, None);
+    }
+
+    #[test]
+    fn sanitize_reasoning_keeps_the_valid_survivors() {
+        let mut overrides = ModelOverrides {
+            supported_efforts: Some(vec!["high".to_string(), "extra high".to_string()]),
+            ..Default::default()
+        };
+        overrides.sanitize_reasoning();
+        assert_eq!(overrides.supported_efforts, Some(vec!["high".to_string()]));
+    }
+
+    /// An explicit empty set is the operator's "budget-controlled"
+    /// declaration, not a declaration that failed sanitising.
+    #[test]
+    fn sanitize_reasoning_preserves_an_explicit_empty_set() {
+        let mut overrides = ModelOverrides {
+            supported_efforts: Some(Vec::new()),
+            ..Default::default()
+        };
+        let dropped = overrides.sanitize_reasoning();
+        assert!(dropped.is_empty());
+        assert_eq!(overrides.supported_efforts, Some(Vec::new()));
     }
 }

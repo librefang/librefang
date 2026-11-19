@@ -2733,7 +2733,9 @@ impl LibreFangKernel {
             super::manifest_helpers::apply_session_reasoning_effort(&mut manifest, token);
         }
 
-        // Apply per-call thinking override (from API request).
+        // Apply per-call thinking override (from API request). The frame is
+        // the top rung, so an explicit `thinking: false` clears a session pin
+        // set above; an untouched frame resolves to `Inherit` and keeps it.
         apply_thinking_override(&mut manifest, thinking_override);
 
         // Coercion (#8591): the catalog's declared policy is authoritative, and
@@ -2741,7 +2743,8 @@ impl LibreFangKernel {
         // effective token after every override. A token outside the set is
         // mapped to the nearest supported rung with a warning, never forwarded
         // and never 400-ed.
-        let reasoning_policy = self.lookup_reasoning_policy(&manifest.model.model);
+        let reasoning_policy =
+            self.lookup_reasoning_policy(&manifest.model.provider, &manifest.model.model);
         super::manifest_helpers::coerce_reasoning_effort_to_model(&mut manifest, &reasoning_policy);
 
         // Lazy backfill: create workspace for existing agents spawned before workspaces

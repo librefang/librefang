@@ -853,10 +853,10 @@ async fn run_agent_loop_streaming_inner(
             .map(|k| k.reasoning_echo_policy_for(&api_model))
             .unwrap_or_default();
         // Catalog-driven reasoning policy (#8591) — same as the
-        // non-streaming path above.
+        // non-streaming path above, provider-scoped.
         let reasoning_policy = kernel
             .as_ref()
-            .map(|k| k.reasoning_policy_for(&api_model))
+            .map(|k| k.reasoning_policy_for(&manifest.model.provider, &api_model))
             .unwrap_or_default();
 
         // Mirror the non-streaming vision gate (#6010, refs #7957): only a model the catalog

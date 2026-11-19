@@ -2703,6 +2703,15 @@ pub enum TypingMode {
 pub const CANONICAL_REASONING_EFFORTS: [&str; 7] =
     ["none", "minimal", "low", "medium", "high", "xhigh", "max"];
 
+/// The tokens every driver knew before #8591 introduced the open vocabulary.
+///
+/// A request may safely keep one of these when it is re-targeted at a model
+/// whose catalog entry declares nothing, because each driver already has a
+/// wire spelling for them. The newer rungs (`minimal`, `medium`, `xhigh`) are
+/// only meaningful against a model that *declared* them, so they must not leak
+/// across a failover onto an undeclared model (#8616 review).
+pub const LEGACY_REASONING_EFFORTS: [&str; 4] = ["none", "low", "high", "max"];
+
 /// How hard the model should reason on a turn (#7946, #8591).
 ///
 /// `budget_tokens` cannot express two things operators need.
@@ -2749,7 +2758,9 @@ impl ReasoningMode {
     /// catalog-declared, so this deliberately does not reject a token merely
     /// because LibreFang has never heard of it. What it does reject is input
     /// that cannot be a token: empty, over-long, or carrying whitespace /
-    /// control characters.
+    /// control characters. Accepted tokens are trimmed and ASCII-lowercased,
+    /// because every provider effort vocabulary this type spells on the wire
+    /// is lowercase.
     pub fn new(token: impl Into<String>) -> Result<Self, String> {
         let token = token.into();
         let trimmed = token.trim();
@@ -2770,7 +2781,10 @@ impl ReasoningMode {
                 "reasoning mode {trimmed:?} must be a single token (ASCII letters, digits, '-', '_', '.')"
             ));
         }
-        Ok(Self(trimmed.to_string()))
+        // Provider effort vocabularies are lowercase (#8616 review): `"High"`
+        // must land on the same rung as `"high"` rather than rank as a
+        // non-canonical token and fall to the floor during coercion.
+        Ok(Self(trimmed.to_ascii_lowercase()))
     }
 
     /// The mode's canonical string, identical to its serde representation.
@@ -2847,9 +2861,10 @@ pub fn canonical_reasoning_rank(token: &str) -> Option<usize> {
 /// and [`Self::mandatory`] says the model always reasons.
 ///
 /// An entry that declares nothing (`supported_efforts` empty) is **undeclared**
-/// — not "supports everything": drivers keep the pre-#8591 wire spellings for
-/// the legacy tokens and the open vocabulary stays unreachable, so existing
-/// configs cannot be retargeted onto rungs their model never had. Budget-based
+/// — not "supports everything": [`Self::coerce`] constrains a request to the
+/// four pre-#8591 rungs (`none` / `low` / `high` / `max`), which every driver
+/// can carry, so a rung only a declared entry offers (`minimal`, `medium`,
+/// `xhigh`) cannot be retargeted onto a model that never published it. Budget-based
 /// families (Gemini 2.5, legacy Anthropic, Qwen with a budget control) live in
 /// that state by design: their control is `budget_tokens`, never the enum, and
 /// the two are never emitted together.
@@ -2889,8 +2904,8 @@ impl Default for ReasoningEffortPolicy {
 /// token: the token that may go on the wire, plus the original when it changed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EffortCoercion {
-    /// The effective token — always inside the declared set, or the requested
-    /// token verbatim when the policy is undeclared.
+    /// The effective token — always inside the declared set, or inside the
+    /// four legacy rungs when the policy is undeclared.
     pub effective: ReasoningMode,
     /// `Some(original)` when the request was coerced, for the caller's warning.
     pub coerced_from: Option<String>,
@@ -2960,10 +2975,16 @@ impl ReasoningEffortPolicy {
         out
     }
 
-    /// Coerce a requested token to what this model accepts (#8591).
+    /// Coerce a requested token to what this model accepts (#8591, #8616
+    /// review).
     ///
     /// Rules, in order:
-    /// 1. Undeclared policy → the requested token, untouched (legacy wire).
+    /// 1. Undeclared policy → constrain to the four pre-#8591 rungs
+    ///    (`none`, `low`, `high`, `max`), which every driver can carry, using
+    ///    the same nearest-rung rule below. An undeclared model is not
+    ///    "supports everything": a rung only a declared entry offers
+    ///    (`minimal`, `medium`, `xhigh`) must not reach a wire that never
+    ///    published it.
     /// 2. `none` on a model that cannot be switched off → the lowest graded
     ///    rung (`none` is not offered at all on such a model).
     /// 3. A token inside the set → itself, verbatim.
@@ -2973,10 +2994,19 @@ impl ReasoningEffortPolicy {
     ///    falls back to `default_effort`, else the lowest rung.
     pub fn coerce(&self, requested: &ReasoningMode) -> EffortCoercion {
         if !self.is_declared() {
-            return EffortCoercion {
-                effective: requested.clone(),
-                coerced_from: None,
+            // The legacy rungs as a declared policy, so the rules below apply
+            // unchanged. The model's `off_allowed` / `mandatory` bits still
+            // shape the `none` case.
+            let legacy = ReasoningEffortPolicy {
+                supported_efforts: LEGACY_REASONING_EFFORTS
+                    .iter()
+                    .map(|t| (*t).to_string())
+                    .collect(),
+                default_effort: self.default_effort.clone(),
+                off_allowed: self.off_allowed,
+                mandatory: self.mandatory,
             };
+            return legacy.coerce(requested);
         }
 
         let verbatim = |r: &ReasoningMode| EffortCoercion {
@@ -3051,6 +3081,27 @@ impl ReasoningEffortPolicy {
             .min_by_key(|(_, r)| (r.abs_diff(rank), *r))
             .map(|(t, _)| t)
     }
+
+    /// Resolve the effort to send after a request is re-targeted at another
+    /// model — a failover slot, a session model switch (#8616 review).
+    ///
+    /// Reusing the primary model's token is wrong in both directions: the
+    /// fallback may declare a narrower set (so the token must be coerced), and
+    /// an undeclared fallback has no vocabulary at all, so a rung the primary
+    /// declared (`xhigh`, `medium`, `minimal`) must not leak onto its wire.
+    ///
+    /// * A declared policy behaves exactly like [`Self::coerce`].
+    /// * An undeclared policy keeps the four pre-#8591 spellings, which every
+    ///   driver can carry, and returns `None` for anything else — the caller
+    ///   clears the explicit mode, leaving "provider default".
+    pub fn resolve_for_model_switch(&self, requested: &ReasoningMode) -> Option<ReasoningMode> {
+        if self.is_declared() {
+            return Some(self.coerce(requested).effective);
+        }
+        LEGACY_REASONING_EFFORTS
+            .contains(&requested.as_str())
+            .then(|| requested.clone())
+    }
 }
 
 /// A per-call reasoning override, resolved from the request body before it
@@ -3116,7 +3167,9 @@ pub struct ThinkingConfig {
     ///
     /// The TOML key is `reasoning_effort`; `reasoning_mode` — the key this
     /// field shipped under during #7946 — is accepted as a deprecated alias so
-    /// existing manifests keep loading unchanged (#8591).
+    /// existing manifests keep loading unchanged (#8591). A table carrying
+    /// both keys fails to deserialize as a duplicate field rather than
+    /// silently choosing one.
     #[serde(default, alias = "reasoning_mode")]
     pub reasoning_effort: Option<ReasoningMode>,
 }

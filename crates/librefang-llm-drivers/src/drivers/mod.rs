@@ -14,6 +14,7 @@ pub mod codex_cli;
 pub mod copilot;
 pub mod fallback;
 pub mod fallback_chain;
+pub mod fallback_reasoning;
 pub mod gemini;
 pub mod gemini_cli;
 pub mod ollama;
