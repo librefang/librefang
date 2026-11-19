@@ -617,6 +617,16 @@ export const pluginKeys = {
   registries: () => [...pluginKeys.all, "registries"] as const,
 };
 
+export const contextEngineKeys = {
+  all: ["contextEngine"] as const,
+  health: () => [...contextEngineKeys.all, "health"] as const,
+  chain: () => [...contextEngineKeys.all, "chain"] as const,
+  metrics: () => [...contextEngineKeys.all, "metrics"] as const,
+  traces: () => [...contextEngineKeys.all, "traces"] as const,
+  config: () => [...contextEngineKeys.all, "config"] as const,
+  sandboxPolicy: () => [...contextEngineKeys.all, "sandbox-policy"] as const,
+};
+
 export const configKeys = {
   all: ["config"] as const,
   full: () => [...configKeys.all, "full"] as const,

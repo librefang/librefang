@@ -380,6 +380,7 @@ const SPA_ROUTES: &[&str] = &[
     "comms",
     "config",
     "connect",
+    "context-engine",
     "goals",
     "groups",
     "hands",

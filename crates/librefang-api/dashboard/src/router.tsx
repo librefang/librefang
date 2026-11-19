@@ -184,6 +184,7 @@ const UserPolicyPage = lazyWithReload(() => import("./pages/UserPolicyPage").the
 const ConnectWizardPage = lazyWithReload(() => import("./pages/ConnectWizardPage").then(m => ({ default: m.ConnectWizardPage })));
 const MobilePairingPage = lazyWithReload(() => import("./pages/MobilePairingPage").then(m => ({ default: m.MobilePairingPage })));
 const TasksPage = lazyWithReload(() => import("./pages/TasksPage").then(m => ({ default: m.TasksPage })));
+const ContextEnginePage = lazyWithReload(() => import("./pages/ContextEnginePage").then(m => ({ default: m.ContextEnginePage })));
 
 function LazyRouteBoundary({ children }: { children: React.ReactNode }) {
   return (
@@ -486,6 +487,12 @@ const tasksRoute = createRoute({
   component: () => <LazyRouteBoundary><TasksPage /></LazyRouteBoundary>
 });
 
+const contextEngineRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/context-engine",
+  component: () => <LazyRouteBoundary><ContextEnginePage /></LazyRouteBoundary>
+});
+
 const configIndexRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/config",
@@ -577,6 +584,7 @@ const routeTree = rootRoute.addChildren([
   connectRoute,
   mobilePairingRoute,
   tasksRoute,
+  contextEngineRoute,
 ]);
 
 function ChunkErrorBoundary({ error }: ErrorComponentProps) {
