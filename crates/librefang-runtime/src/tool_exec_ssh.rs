@@ -231,7 +231,7 @@ mod transport {
 
         async fn check_server_key(
             &mut self,
-            server_key: &ssh_key::PublicKey,
+            server_key: &russh::keys::PublicKeyOrCertificate,
         ) -> Result<bool, Self::Error> {
             // Hash the wire-form public-key bytes ourselves so we control
             // the pin format (hex SHA-256 of the SSH wire blob) — the same
@@ -239,8 +239,15 @@ mod transport {
             // binary key blob (not the OpenSSH text line), identical to the
             // blob russh-keys 0.45 `public_key_bytes()` returned, so existing
             // pins / known-hosts entries keep matching across the upgrade.
+            use russh::keys::PublicKeyOrCertificate;
             use sha2::{Digest, Sha256};
-            let blob = match server_key.to_bytes() {
+            let host_key = match server_key {
+                PublicKeyOrCertificate::PublicKey { key, .. } => key.clone(),
+                PublicKeyOrCertificate::Certificate(cert) => {
+                    ssh_key::PublicKey::from(cert.public_key().clone())
+                }
+            };
+            let blob = match host_key.to_bytes() {
                 Ok(b) => b,
                 Err(e) => {
                     // A host key we can't even encode is one we can't verify
