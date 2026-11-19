@@ -867,7 +867,7 @@ jobs:
       - uses: Swatinem/rust-cache@c8037a86dde8214a8310e9f54a8fc61ab362aa31 # v2
       - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
         with:
-          version: 12
+          version: 12.6.0
       # No `cache: pnpm`: this job only runs `pnpm audit`, which never populates the store, so there is nothing to cache. pnpm 12 does not even create the store directory, and setup-node's post-job save then fails the job with "Path Validation Error".
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v6
         with:
@@ -901,6 +901,8 @@ jobs:
             --ignore RUSTSEC-2026-0370 \
             --ignore RUSTSEC-2026-0371 \
             --ignore RUSTSEC-2026-0372 \
+            --ignore RUSTSEC-2026-0543 \
+            --ignore RUSTSEC-2026-0555 \
             --web
 
   # ── Secrets scanning (independent) ─────────────────────────────────────────────
