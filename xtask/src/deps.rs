@@ -123,22 +123,22 @@ fn pnpm_audit_passed(exit_code: Option<i32>, stdout: &str) -> bool {
         return false;
     }
 
-    let Ok(report) = serde_json::from_str::<serde_json::Value>(stdout) else {
-        // pnpm can print a human line ("Error: 1 dependency issue(s) found")
-        // to stdout ahead of the JSON report when it exits 1. Extract the
-        // object so an ignored-only finding is still recognised; a real
-        // advisory keeps its non-empty `advisories` map and still fails.
-        let trimmed = stdout.trim();
-        let (Some(start), Some(end)) = (trimmed.find('{'), trimmed.rfind('}')) else {
-            return false;
-        };
-        if end < start {
-            return false;
-        }
-        let Ok(report) = serde_json::from_str::<serde_json::Value>(&trimmed[start..=end]) else {
-            return false;
-        };
-        return pnpm_audit_report_is_ignored_only(&report);
+    // pnpm can print a human line ("Error: 1 dependency issue(s) found") and,
+    // when both streams carry the report, the same JSON object twice. Parse the
+    // first JSON value and ignore whatever follows, so a duplicated clean
+    // report is still recognised; a real advisory keeps its non-empty
+    // `advisories` map and still fails.
+    let parsed = serde_json::from_str::<serde_json::Value>(stdout)
+        .ok()
+        .or_else(|| {
+            let start = stdout.find('{')?;
+            serde_json::Deserializer::from_str(&stdout[start..])
+                .into_iter::<serde_json::Value>()
+                .next()?
+                .ok()
+        });
+    let Some(report) = parsed else {
+        return false;
     };
     pnpm_audit_report_is_ignored_only(&report)
 }
@@ -293,6 +293,13 @@ mod tests {
     fn actionable_advisories_still_fail() {
         let report = r#"{"advisories":{"123":{"severity":"high"}},"metadata":{"vulnerabilities":{"info":0,"low":0,"moderate":0,"high":2,"critical":0}}}"#;
         assert!(!pnpm_audit_passed(Some(1), report));
+    }
+
+    #[test]
+    fn a_report_duplicated_across_streams_is_still_clean() {
+        let one = r#"{"advisories":{},"metadata":{"vulnerabilities":{"info":0,"low":0,"moderate":0,"high":1,"critical":0}}}"#;
+        let combined = format!("Error: 1 dependency issue(s) found\n{one}\n{one}");
+        assert!(pnpm_audit_passed(Some(1), &combined));
     }
 
     #[test]
