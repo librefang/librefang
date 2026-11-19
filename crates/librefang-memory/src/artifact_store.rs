@@ -14,7 +14,7 @@ use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::fs;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 
 /// One recorded version of a session artifact.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -51,18 +51,18 @@ pub struct PruneReport {
 /// Persistent artifact store backed by SQLite plus a blob directory.
 ///
 /// Shares the connection pool every other store in `MemorySubstrate` uses.
-/// The `artifacts` table is created by `migration::migrate_v66`.
+/// The `artifacts` table is created by `migration::migrate_v67`.
 #[derive(Clone)]
 pub struct ArtifactStore {
     pool: Pool<SqliteConnectionManager>,
     blob_root: PathBuf,
-    /// Serialises `put` against `prune` for this store instance. Without it a blob
-    /// written by `put` can be swept between its write and its row insert; sharing
-    /// one instance (as the kernel does when it attaches the store) keeps the lock shared.
-    /// A second store over the same pool or blob root does not share it.
-    /// A second daemon pointed at the same blob directory is out of scope.
-    op_lock: Arc<Mutex<()>>,
 }
+
+/// Serialises `put` against `prune` across every store instance in this
+/// process, so one store cannot delete a blob another just wrote before its
+/// row was inserted. It is not cross-process: two daemons sharing a blob root
+/// still need external coordination.
+static OP_LOCK: Mutex<()> = Mutex::new(());
 
 const RECORD_COLUMNS: &str =
     "id, session_id, message_id, path, content_hash, size_bytes, mime_type, version, created_at";
@@ -90,11 +90,7 @@ impl ArtifactStore {
     ///
     /// The caller must ensure `migration::run_migrations` has already run.
     pub fn new(pool: Pool<SqliteConnectionManager>, blob_root: PathBuf) -> Self {
-        Self {
-            pool,
-            blob_root,
-            op_lock: Arc::new(Mutex::new(())),
-        }
+        Self { pool, blob_root }
     }
 
     /// Store `bytes` as the next version of `(session_id, path)`.
@@ -110,7 +106,7 @@ impl ArtifactStore {
         bytes: &[u8],
         mime_type: Option<&str>,
     ) -> LibreFangResult<ArtifactRecord> {
-        let _guard = self.op_lock.lock().expect("artifact op lock poisoned");
+        let _guard = OP_LOCK.lock().expect("artifact op lock poisoned");
         let hash = hex_sha256(bytes);
 
         if let Some(latest) = self.latest(session_id, path)? {
@@ -255,7 +251,7 @@ impl ArtifactStore {
             return Ok(PruneReport::default());
         }
 
-        let _guard = self.op_lock.lock().expect("artifact op lock poisoned");
+        let _guard = OP_LOCK.lock().expect("artifact op lock poisoned");
         let cutoff = (now - Duration::days(i64::from(retention_days)))
             .format("%Y-%m-%d %H:%M:%S")
             .to_string();
@@ -350,7 +346,7 @@ impl ArtifactStore {
     }
 
     fn delete_unreferenced_blobs(&self, referenced: &HashSet<String>) -> LibreFangResult<usize> {
-        // `put` and `prune` take `op_lock` in this process, so a fresh blob
+        // `put` and `prune` take the process-wide `OP_LOCK`, so a fresh blob
         // cannot be swept between its write and its row insert. A second
         // daemon sharing the same blob directory is not covered.
         let root = self.blob_root.join("blobs");
