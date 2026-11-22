@@ -422,17 +422,37 @@ impl LibreFangKernel {
         // A sidecar may stamp an id it reported on `ready` instead of its config
         // name; the channel resolver accepts that, so this lookup has to as well or
         // the forward silently falls back to the home adapter.
-        let resolved_name = self
+        // Collect, do not pick: an adapter is registered under two keys (bare and
+        // qualified), so one instance can appear twice, while two *different*
+        // instances answering to one account are two tenants and must not be
+        // resolved by `DashMap` iteration order — the same rule
+        // `resolve_channel_adapter` applies.
+        let mut names: Vec<String> = self
             .mesh
             .channel_adapters
             .iter()
-            .find(|e| {
+            .filter(|e| {
                 let adapter = e.value();
                 adapter.account_id() == Some(account)
                     || adapter.reported_account_id() == Some(account)
             })
-            .map(|e| e.value().name().to_string())?;
-        sidecar_by_name(&cfg.sidecar_channels, &resolved_name)
+            .map(|e| e.value().name().to_string())
+            .collect();
+        names.sort();
+        names.dedup();
+        match names.as_slice() {
+            [single] => sidecar_by_name(&cfg.sidecar_channels, single),
+            [] => None,
+            _ => {
+                tracing::warn!(
+                    account,
+                    candidates = ?names,
+                    "delegation forward: several adapters answer to the recorded account; \
+                     not guessing which one owns the conversation"
+                );
+                None
+            }
+        }
     }
 
     /// Deliver `body` to `chat_id` on `account_id`, falling back to the agent's
@@ -487,8 +507,8 @@ impl LibreFangKernel {
                     tracing::warn!(
                         agent = %agent_name,
                         account = a,
-                        "delegation forward: recorded account has no registered sidecar record; \
-                         falling back to the agent's home adapter"
+                        "delegation forward: recorded account has no unambiguous sidecar \
+                         record; trying the agent's home adapter"
                     );
                 }
                 sidecar_home_channel(&cfg.sidecar_channels, &agent_name)

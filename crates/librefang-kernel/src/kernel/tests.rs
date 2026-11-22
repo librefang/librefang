@@ -18,6 +18,9 @@ struct RecordingChannelAdapter {
     name: String,
     channel_type: ChannelType,
     account_id: Option<String>,
+    /// What the transport reported on `ready` — the alias a sidecar may stamp as
+    /// the inbound `account_id` instead of its config name.
+    reported: Option<String>,
     sent: Arc<std::sync::Mutex<Vec<String>>>,
     overrides: Option<librefang_types::config::ChannelOverrides>,
 }
@@ -28,6 +31,7 @@ impl RecordingChannelAdapter {
             name: channel_type.to_string(),
             channel_type: ChannelType::Custom(channel_type.to_string()),
             account_id: None,
+            reported: None,
             sent: Arc::new(std::sync::Mutex::new(Vec::new())),
             overrides: None,
         }
@@ -68,6 +72,10 @@ impl ChannelAdapter for RecordingChannelAdapter {
 
     fn account_id(&self) -> Option<&str> {
         self.account_id.as_deref()
+    }
+
+    fn reported_account_id(&self) -> Option<&str> {
+        self.reported.as_deref()
     }
 
     fn channel_overrides(&self) -> Option<librefang_types::config::ChannelOverrides> {
@@ -3828,6 +3836,114 @@ async fn test_send_message_ephemeral_does_not_modify_session() {
         msg_count_before, msg_count_after,
         "ephemeral /btw message should not modify the real session"
     );
+    kernel.shutdown();
+}
+
+/// A sidecar may stamp the id it reported on `ready` rather than its config
+/// name; the channel resolver accepts that alias, so the forward lookup has to as
+/// well — otherwise the result silently goes out through the home adapter.
+#[tokio::test(flavor = "multi_thread")]
+async fn forward_resolves_the_reported_account_alias() {
+    use crate::kernel::subsystems::events::EventSubsystemApi;
+    use librefang_types::config::SidecarChannelConfig;
+    use librefang_types::task::{TaskKind, TaskStatus};
+
+    fn sidecar(name: &str, agent: &str) -> SidecarChannelConfig {
+        serde_json::from_value(serde_json::json!({
+            "name": name,
+            "command": "python3",
+            "channel_type": "telegram",
+            "agent": agent,
+        }))
+        .expect("sidecar config")
+    }
+
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().join("librefang-alias-forward");
+    std::fs::create_dir_all(&home_dir).unwrap();
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        sidecar_channels: vec![
+            sidecar("tg-primary", "alias-agent"),
+            sidecar("tg-sales", "alias-other"),
+        ],
+        ..KernelConfig::default()
+    };
+    let kernel = Arc::new(LibreFangKernel::boot_with_config(config).expect("kernel boots"));
+    kernel.set_self_handle();
+
+    let primary = Arc::new(RecordingChannelAdapter::named_instance(
+        "tg-primary",
+        "telegram",
+    ));
+    // The transport reports `bot-42` for this instance; inbound turns from it
+    // carry that string as their account, not the config name.
+    let sales = Arc::new(RecordingChannelAdapter {
+        reported: Some("bot-42".to_string()),
+        ..RecordingChannelAdapter::named_instance("tg-sales", "telegram")
+    });
+    let primary_sent = primary.sent.clone();
+    let sales_sent = sales.sent.clone();
+    for (name, adapter) in [
+        (
+            "tg-primary",
+            primary.clone() as Arc<RecordingChannelAdapter>,
+        ),
+        ("tg-sales", sales.clone() as Arc<RecordingChannelAdapter>),
+    ] {
+        kernel
+            .mesh
+            .channel_adapters
+            .insert(name.to_string(), adapter.clone());
+        kernel
+            .mesh
+            .channel_adapters
+            .insert(format!("{name}:{name}"), adapter);
+    }
+
+    let agent = kernel
+        .spawn_agent(AgentManifest {
+            name: "alias-agent".to_string(),
+            source_template: None,
+            ..Default::default()
+        })
+        .expect("spawn agent");
+
+    let session = SessionId::new();
+    let (tx, _rx) = tokio::sync::mpsc::channel(8);
+    kernel.injection_senders_ref().insert((agent, session), tx);
+    let handle = kernel.register_async_task_on(
+        agent,
+        session,
+        TaskKind::Delegation {
+            agent_id: agent,
+            prompt_hash: "alias".to_string(),
+        },
+        Some("chat-42".to_string()),
+        Some("bot-42".to_string()),
+    );
+    kernel
+        .complete_async_task(
+            handle.id,
+            TaskStatus::Completed(serde_json::json!({"result": "alias answer"})),
+        )
+        .await
+        .expect("complete async task");
+
+    let sales_got = sales_sent.lock().unwrap().clone();
+    assert_eq!(
+        sales_got.len(),
+        1,
+        "the reported alias must resolve to the instance that reports it, got {sales_got:?}"
+    );
+    assert!(sales_got[0].starts_with("chat-42:"));
+    assert!(
+        primary_sent.lock().unwrap().is_empty(),
+        "the home adapter must not receive it: {:?}",
+        primary_sent.lock().unwrap()
+    );
+
     kernel.shutdown();
 }
 
