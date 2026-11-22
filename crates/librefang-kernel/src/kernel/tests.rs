@@ -18,6 +18,9 @@ struct RecordingChannelAdapter {
     name: String,
     channel_type: ChannelType,
     account_id: Option<String>,
+    /// What the transport reported on `ready` — the alias a sidecar may stamp as
+    /// the inbound `account_id` instead of its config name.
+    reported: Option<String>,
     sent: Arc<std::sync::Mutex<Vec<String>>>,
     overrides: Option<librefang_types::config::ChannelOverrides>,
 }
@@ -28,6 +31,7 @@ impl RecordingChannelAdapter {
             name: channel_type.to_string(),
             channel_type: ChannelType::Custom(channel_type.to_string()),
             account_id: None,
+            reported: None,
             sent: Arc::new(std::sync::Mutex::new(Vec::new())),
             overrides: None,
         }
@@ -68,6 +72,10 @@ impl ChannelAdapter for RecordingChannelAdapter {
 
     fn account_id(&self) -> Option<&str> {
         self.account_id.as_deref()
+    }
+
+    fn reported_account_id(&self) -> Option<&str> {
+        self.reported.as_deref()
     }
 
     fn channel_overrides(&self) -> Option<librefang_types::config::ChannelOverrides> {
@@ -3827,6 +3835,505 @@ async fn test_send_message_ephemeral_does_not_modify_session() {
     assert_eq!(
         msg_count_before, msg_count_after,
         "ephemeral /btw message should not modify the real session"
+    );
+    kernel.shutdown();
+}
+
+/// A sidecar may stamp the id it reported on `ready` rather than its config
+/// name; the channel resolver accepts that alias, so the forward lookup has to as
+/// well — otherwise the result silently goes out through the home adapter.
+#[tokio::test(flavor = "multi_thread")]
+async fn forward_resolves_the_reported_account_alias() {
+    use crate::kernel::subsystems::events::EventSubsystemApi;
+    use librefang_types::config::SidecarChannelConfig;
+    use librefang_types::task::{TaskKind, TaskStatus};
+
+    fn sidecar(name: &str, agent: &str) -> SidecarChannelConfig {
+        serde_json::from_value(serde_json::json!({
+            "name": name,
+            "command": "python3",
+            "channel_type": "telegram",
+            "agent": agent,
+        }))
+        .expect("sidecar config")
+    }
+
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().join("librefang-alias-forward");
+    std::fs::create_dir_all(&home_dir).unwrap();
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        sidecar_channels: vec![
+            sidecar("tg-primary", "alias-agent"),
+            sidecar("tg-sales", "alias-other"),
+        ],
+        ..KernelConfig::default()
+    };
+    let kernel = Arc::new(LibreFangKernel::boot_with_config(config).expect("kernel boots"));
+    kernel.set_self_handle();
+
+    let primary = Arc::new(RecordingChannelAdapter::named_instance(
+        "tg-primary",
+        "telegram",
+    ));
+    // The transport reports `bot-42` for this instance; inbound turns from it
+    // carry that string as their account, not the config name.
+    let sales = Arc::new(RecordingChannelAdapter {
+        reported: Some("bot-42".to_string()),
+        ..RecordingChannelAdapter::named_instance("tg-sales", "telegram")
+    });
+    let primary_sent = primary.sent.clone();
+    let sales_sent = sales.sent.clone();
+    for (name, adapter) in [
+        (
+            "tg-primary",
+            primary.clone() as Arc<RecordingChannelAdapter>,
+        ),
+        ("tg-sales", sales.clone() as Arc<RecordingChannelAdapter>),
+    ] {
+        kernel
+            .mesh
+            .channel_adapters
+            .insert(name.to_string(), adapter.clone());
+        kernel
+            .mesh
+            .channel_adapters
+            .insert(format!("{name}:{name}"), adapter);
+    }
+
+    let agent = kernel
+        .spawn_agent(AgentManifest {
+            name: "alias-agent".to_string(),
+            source_template: None,
+            ..Default::default()
+        })
+        .expect("spawn agent");
+
+    let session = SessionId::new();
+    let (tx, _rx) = tokio::sync::mpsc::channel(8);
+    kernel.injection_senders_ref().insert((agent, session), tx);
+    let handle = kernel.register_async_task_on(
+        agent,
+        session,
+        TaskKind::Delegation {
+            agent_id: agent,
+            prompt_hash: "alias".to_string(),
+        },
+        Some("chat-42".to_string()),
+        Some("bot-42".to_string()),
+    );
+    kernel
+        .complete_async_task(
+            handle.id,
+            TaskStatus::Completed(serde_json::json!({"result": "alias answer"})),
+        )
+        .await
+        .expect("complete async task");
+
+    let sales_got = sales_sent.lock().unwrap().clone();
+    assert_eq!(
+        sales_got.len(),
+        1,
+        "the reported alias must resolve to the instance that reports it, got {sales_got:?}"
+    );
+    assert!(sales_got[0].starts_with("chat-42:"));
+    assert!(
+        primary_sent.lock().unwrap().is_empty(),
+        "the home adapter must not receive it: {:?}",
+        primary_sent.lock().unwrap()
+    );
+
+    kernel.shutdown();
+}
+
+/// When two different adapters answer to one recorded account, the forward must
+/// not guess: `DashMap` iteration order is not stable across processes, so
+/// picking one would make delivery depend on the run. It falls back to the
+/// agent's home adapter instead — the same rule `resolve_channel_adapter`
+/// applies to an ambiguous channel type.
+#[tokio::test(flavor = "multi_thread")]
+async fn ambiguous_recorded_account_falls_back_instead_of_guessing() {
+    use crate::kernel::subsystems::events::EventSubsystemApi;
+    use librefang_types::config::SidecarChannelConfig;
+    use librefang_types::task::{TaskKind, TaskStatus};
+
+    fn sidecar(name: &str, agent: &str) -> SidecarChannelConfig {
+        serde_json::from_value(serde_json::json!({
+            "name": name,
+            "command": "python3",
+            "channel_type": "telegram",
+            "agent": agent,
+        }))
+        .expect("sidecar config")
+    }
+
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().join("librefang-ambiguous-account");
+    std::fs::create_dir_all(&home_dir).unwrap();
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        sidecar_channels: vec![
+            sidecar("tg-primary", "amb-agent"),
+            sidecar("tg-left", "amb-left"),
+            sidecar("tg-right", "amb-right"),
+        ],
+        ..KernelConfig::default()
+    };
+    let kernel = Arc::new(LibreFangKernel::boot_with_config(config).expect("kernel boots"));
+    kernel.set_self_handle();
+
+    let primary = Arc::new(RecordingChannelAdapter::named_instance(
+        "tg-primary",
+        "telegram",
+    ));
+    // Two distinct instances reporting the same alias — a collision between two
+    // tenants, which is exactly the case that must not be resolved by chance.
+    let left = Arc::new(RecordingChannelAdapter {
+        reported: Some("bot-42".to_string()),
+        ..RecordingChannelAdapter::named_instance("tg-left", "telegram")
+    });
+    let right = Arc::new(RecordingChannelAdapter {
+        reported: Some("bot-42".to_string()),
+        ..RecordingChannelAdapter::named_instance("tg-right", "telegram")
+    });
+    let primary_sent = primary.sent.clone();
+    let left_sent = left.sent.clone();
+    let right_sent = right.sent.clone();
+    for (name, adapter) in [
+        (
+            "tg-primary",
+            primary.clone() as Arc<RecordingChannelAdapter>,
+        ),
+        ("tg-left", left.clone() as Arc<RecordingChannelAdapter>),
+        ("tg-right", right.clone() as Arc<RecordingChannelAdapter>),
+    ] {
+        kernel
+            .mesh
+            .channel_adapters
+            .insert(name.to_string(), adapter.clone());
+        kernel
+            .mesh
+            .channel_adapters
+            .insert(format!("{name}:{name}"), adapter);
+    }
+
+    // No model on the manifest: the completion runs the mid-turn branch through
+    // the injection sender below, so no agent-loop turn (and no LLM) happens.
+    let agent = kernel
+        .spawn_agent(AgentManifest {
+            name: "amb-agent".to_string(),
+            source_template: None,
+            ..Default::default()
+        })
+        .expect("spawn agent");
+
+    let session = SessionId::new();
+    let (tx, _rx) = tokio::sync::mpsc::channel(8);
+    kernel.injection_senders_ref().insert((agent, session), tx);
+    let handle = kernel.register_async_task_on(
+        agent,
+        session,
+        TaskKind::Delegation {
+            agent_id: agent,
+            prompt_hash: "ambiguous".to_string(),
+        },
+        Some("chat-8".to_string()),
+        Some("bot-42".to_string()),
+    );
+    kernel
+        .complete_async_task(
+            handle.id,
+            TaskStatus::Completed(serde_json::json!({"result": "ambiguous answer"})),
+        )
+        .await
+        .expect("complete async task");
+
+    assert_eq!(
+        primary_sent.lock().unwrap().len(),
+        1,
+        "the home adapter is the documented fallback when the account is ambiguous"
+    );
+    assert!(
+        left_sent.lock().unwrap().is_empty() && right_sent.lock().unwrap().is_empty(),
+        "neither candidate may be picked by iteration order: left={:?} right={:?}",
+        left_sent.lock().unwrap(),
+        right_sent.lock().unwrap()
+    );
+
+    kernel.shutdown();
+}
+
+/// The kernel-side hop of the account plumbing: `AgentControl::send_to_agent_async_tracked`
+/// has to carry the account into the registered task. Registering through
+/// `register_async_task_on` directly (as the other tests do) skips this hop, so
+/// mutating it back to `None` used to leave every test green.
+#[tokio::test(flavor = "multi_thread")]
+async fn async_delegation_registers_the_inbound_account() {
+    use librefang_kernel_handle::AgentControl;
+    use librefang_types::config::SidecarChannelConfig;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn sidecar(name: &str, agent: &str) -> SidecarChannelConfig {
+        serde_json::from_value(serde_json::json!({
+            "name": name,
+            "command": "python3",
+            "channel_type": "telegram",
+            "agent": agent,
+        }))
+        .expect("sidecar config")
+    }
+
+    let backend = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/chat"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
+            format!(
+                "{}\n",
+                serde_json::json!({
+                    "message": {"content": "callee reply"},
+                    "done": true,
+                    "done_reason": "stop",
+                })
+            ),
+            "application/json",
+        ))
+        .mount(&backend)
+        .await;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().join("librefang-async-account-hop");
+    std::fs::create_dir_all(&home_dir).unwrap();
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        default_model: DefaultModelConfig::driverless(),
+        sidecar_channels: vec![
+            sidecar("tg-primary", "hop-caller"),
+            sidecar("tg-sales", "hop-other"),
+        ],
+        ..KernelConfig::default()
+    };
+    let kernel = Arc::new(LibreFangKernel::boot_with_config(config).expect("kernel boots"));
+    kernel.set_self_handle();
+
+    let primary = Arc::new(RecordingChannelAdapter::named_instance(
+        "tg-primary",
+        "telegram",
+    ));
+    let sales = Arc::new(RecordingChannelAdapter::named_instance(
+        "tg-sales", "telegram",
+    ));
+    let primary_sent = primary.sent.clone();
+    let sales_sent = sales.sent.clone();
+    for (name, adapter) in [
+        (
+            "tg-primary",
+            primary.clone() as Arc<RecordingChannelAdapter>,
+        ),
+        ("tg-sales", sales.clone() as Arc<RecordingChannelAdapter>),
+    ] {
+        kernel
+            .mesh
+            .channel_adapters
+            .insert(name.to_string(), adapter.clone());
+        kernel
+            .mesh
+            .channel_adapters
+            .insert(format!("{name}:{name}"), adapter);
+    }
+
+    let mut caller_manifest = test_manifest("hop-caller", "caller", vec![]);
+    caller_manifest.model.provider = "ollama".to_string();
+    caller_manifest.model.model = "llama3.2".to_string();
+    caller_manifest.model.base_url = Some(backend.uri());
+    let caller = kernel.spawn_agent(caller_manifest).expect("spawn caller");
+
+    let mut callee_manifest = test_manifest("hop-callee", "callee", vec![]);
+    callee_manifest.model.provider = "ollama".to_string();
+    callee_manifest.model.model = "llama3.2".to_string();
+    callee_manifest.model.base_url = Some(backend.uri());
+    kernel.spawn_agent(callee_manifest).expect("spawn callee");
+
+    let session = SessionId::new();
+    let outcome = AgentControl::send_to_agent_async_tracked(
+        &*kernel,
+        "hop-callee",
+        "do the thing",
+        &caller.to_string(),
+        Some(&session.to_string()),
+        None,
+        Some("chat-11"),
+        Some("tg-sales"),
+    )
+    .await
+    .expect("async delegation registers");
+
+    // Tracked, not inlined: the account could only be carried by the registry.
+    assert!(
+        matches!(
+            outcome,
+            librefang_kernel_handle::AsyncSendOutcome::Tracked(_)
+        ),
+        "expected a tracked delegation, got {outcome:?}"
+    );
+
+    let mut waited = 0;
+    while sales_sent.lock().unwrap().is_empty() && waited < 150 {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        waited += 1;
+    }
+    let sales_got = sales_sent.lock().unwrap().clone();
+    assert_eq!(
+        sales_got.len(),
+        1,
+        "the completion must be forwarded through the recorded account, got {sales_got:?}"
+    );
+    assert!(sales_got[0].starts_with("chat-11:"));
+    assert!(
+        primary_sent.lock().unwrap().is_empty(),
+        "the home adapter must not receive it: {:?}",
+        primary_sent.lock().unwrap()
+    );
+
+    kernel.shutdown();
+}
+
+/// The **wake-idle** forward: a delegation that completes while the agent is not
+/// in a turn still reaches the channel, and it goes out through the adapter the
+/// conversation arrived on rather than the agent's home one (#8774).
+///
+/// No injection receiver is attached, so `complete_async_task` takes the
+/// spawned-turn branch; the turn talks to a mocked backend and its reply is what
+/// gets forwarded.
+#[tokio::test(flavor = "multi_thread")]
+async fn wake_idle_forward_uses_the_account_the_task_came_from() {
+    use librefang_types::config::SidecarChannelConfig;
+    use librefang_types::task::{TaskKind, TaskStatus};
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn sidecar(name: &str, agent: &str) -> SidecarChannelConfig {
+        serde_json::from_value(serde_json::json!({
+            "name": name,
+            "command": "python3",
+            "channel_type": "telegram",
+            "agent": agent,
+        }))
+        .expect("sidecar config")
+    }
+
+    let backend = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/chat"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
+            format!(
+                "{}\n",
+                serde_json::json!({
+                    "message": {"content": "wake-idle answer"},
+                    "done": true,
+                    "done_reason": "stop",
+                })
+            ),
+            "application/json",
+        ))
+        .mount(&backend)
+        .await;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().join("librefang-wake-idle-forward");
+    std::fs::create_dir_all(&home_dir).unwrap();
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        default_model: DefaultModelConfig::driverless(),
+        sidecar_channels: vec![
+            sidecar("tg-primary", "wake-agent"),
+            sidecar("tg-sales", "wake-other"),
+        ],
+        ..KernelConfig::default()
+    };
+    let kernel = Arc::new(LibreFangKernel::boot_with_config(config).expect("kernel boots"));
+    kernel.set_self_handle();
+
+    let primary = Arc::new(RecordingChannelAdapter::named_instance(
+        "tg-primary",
+        "telegram",
+    ));
+    let sales = Arc::new(RecordingChannelAdapter::named_instance(
+        "tg-sales", "telegram",
+    ));
+    let primary_sent = primary.sent.clone();
+    let sales_sent = sales.sent.clone();
+    for (name, adapter) in [
+        (
+            "tg-primary",
+            primary.clone() as Arc<RecordingChannelAdapter>,
+        ),
+        ("tg-sales", sales.clone() as Arc<RecordingChannelAdapter>),
+    ] {
+        kernel
+            .mesh
+            .channel_adapters
+            .insert(name.to_string(), adapter.clone());
+        kernel
+            .mesh
+            .channel_adapters
+            .insert(format!("{name}:{name}"), adapter);
+    }
+
+    let mut manifest = test_manifest("wake-agent", "wake-idle forward", vec![]);
+    manifest.model.provider = "ollama".to_string();
+    manifest.model.model = "llama3.2".to_string();
+    manifest.model.base_url = Some(backend.uri());
+    let agent = kernel.spawn_agent(manifest).expect("spawn agent");
+
+    // The conversation belongs to the *sibling* bot, whose record is not the
+    // agent's home one: only the account carried by the task can address it.
+    let handle = kernel.register_async_task_on(
+        agent,
+        SessionId::new(),
+        TaskKind::Delegation {
+            agent_id: agent,
+            prompt_hash: "wake-idle".to_string(),
+        },
+        Some("chat-7".to_string()),
+        Some("tg-sales".to_string()),
+    );
+    kernel
+        .complete_async_task(
+            handle.id,
+            TaskStatus::Completed(serde_json::json!({"result": "delegated"})),
+        )
+        .await
+        .expect("complete async task");
+
+    // The spawned turn is detached; wait for the forward to land.
+    let mut waited = 0;
+    while sales_sent.lock().unwrap().is_empty() && waited < 100 {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        waited += 1;
+    }
+    let sales_got = sales_sent.lock().unwrap().clone();
+    let primary_got = primary_sent.lock().unwrap().clone();
+    assert_eq!(
+        sales_got.len(),
+        1,
+        "the wake-idle forward must reach the adapter the task came from, got {sales_got:?}"
+    );
+    assert!(
+        sales_got[0].starts_with("chat-7:"),
+        "unexpected recipient: {sales_got:?}"
+    );
+    assert!(
+        sales_got[0].contains("wake-idle answer"),
+        "the forwarded body must be the agent's answer, got {sales_got:?}"
+    );
+    assert!(
+        primary_got.is_empty(),
+        "the home adapter must not receive it: {primary_got:?}"
     );
 
     kernel.shutdown();
@@ -23292,4 +23799,229 @@ fn shutdown_publishes_kernel_stopping() {
         );
     }
     assert!(stopping, "shutdown must publish KernelStopping");
+}
+
+/// The delegation forward must address the agent's **own** adapter.
+///
+/// Before this, the forward passed the channel *type* and no account, so on a
+/// daemon running more than one adapter of that type the lookup was refused as
+/// ambiguous and the best-effort send was dropped with a warning — the operator
+/// never saw the result of a delegation. This test is the behavioural half of
+/// the fix: it observes which adapter actually received the message, which a
+/// structural assertion on the resolver's output cannot do.
+#[tokio::test(flavor = "multi_thread")]
+async fn delegation_forward_addresses_the_agents_own_adapter() {
+    use crate::kernel::subsystems::events::EventSubsystemApi;
+    use librefang_types::config::SidecarChannelConfig;
+    use librefang_types::task::{TaskKind, TaskStatus};
+
+    fn sidecar(name: &str, agent: &str) -> SidecarChannelConfig {
+        serde_json::from_value(serde_json::json!({
+            "name": name,
+            "command": "python3",
+            "channel_type": "telegram",
+            "agent": agent,
+        }))
+        .expect("sidecar config")
+    }
+
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().join("librefang-forward-instance-test");
+    std::fs::create_dir_all(&home_dir).unwrap();
+    // Booted *with* the records, like production: `boot_with_config` seeds the
+    // per-instance channel defaults from `[[sidecar_channels]]`, and resolution
+    // must work on that shape. Two adapters of one channel type, each naming a
+    // different agent, is the deployment shape that made the type-only lookup
+    // ambiguous.
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        sidecar_channels: vec![
+            sidecar("tg-primary", "fw-assistant"),
+            sidecar("tg-sales", "fw-sales"),
+        ],
+        ..KernelConfig::default()
+    };
+    // `boot_with_config` does not populate `self_handle`; the completion
+    // forward in `complete_async_task` is gated on it, so the steady-state
+    // wiring has to be reproduced or the forward silently does nothing.
+    let kernel = Arc::new(LibreFangKernel::boot_with_config(config).expect("Kernel should boot"));
+    kernel.set_self_handle();
+
+    let primary = Arc::new(RecordingChannelAdapter::named_instance(
+        "tg-primary",
+        "telegram",
+    ));
+    let sales = Arc::new(RecordingChannelAdapter::named_instance(
+        "tg-sales", "telegram",
+    ));
+    let primary_sent = primary.sent.clone();
+    let sales_sent = sales.sent.clone();
+    // Same seeding as `channel_bridge.rs`: the plain key, plus the qualified one.
+    for (name, adapter) in [
+        (
+            "tg-primary",
+            primary.clone() as Arc<RecordingChannelAdapter>,
+        ),
+        ("tg-sales", sales.clone() as Arc<RecordingChannelAdapter>),
+    ] {
+        kernel
+            .mesh
+            .channel_adapters
+            .insert(name.to_string(), adapter.clone());
+        kernel
+            .mesh
+            .channel_adapters
+            .insert(format!("{name}:{name}"), adapter);
+    }
+
+    let assistant = kernel
+        .spawn_agent(AgentManifest {
+            name: "fw-assistant".to_string(),
+            source_template: None,
+            ..Default::default()
+        })
+        .expect("spawn assistant");
+    let sales_agent = kernel
+        .spawn_agent(AgentManifest {
+            name: "fw-sales".to_string(),
+            source_template: None,
+            ..Default::default()
+        })
+        .expect("spawn sales agent");
+
+    kernel
+        .forward_to_channel(assistant, "chat-1", "result for the assistant", None)
+        .await
+        .expect("forward for assistant");
+    kernel
+        .forward_to_channel(sales_agent, "chat-2", "result for sales", None)
+        .await
+        .expect("forward for sales agent");
+
+    let primary_got = primary_sent.lock().unwrap().clone();
+    let sales_got = sales_sent.lock().unwrap().clone();
+    assert_eq!(
+        primary_got.len(),
+        1,
+        "the assistant's forward must land on its own adapter, got {primary_got:?}"
+    );
+    assert!(
+        primary_got[0].starts_with("chat-1:"),
+        "unexpected recipient on the home adapter: {primary_got:?}"
+    );
+    assert!(primary_got[0].contains("result for the assistant"));
+    assert_eq!(sales_got.len(), 1, "each agent forwards to its own bot");
+    assert!(sales_got[0].starts_with("chat-2:"));
+
+    // The real path: an async delegation completes and the *forward itself* must
+    // land on the agent's own adapter. Asserting only on the helper above would
+    // leave the call site in `task_registry.rs` free to go back to the
+    // channel-typed send with the whole suite still green — which is exactly how
+    // the first revision of this fix regressed.
+    //
+    // Scope: this covers the **mid-turn** site only. The wake-idle site runs a
+    // full agent turn (it needs a model) and is not exercised here; it calls the
+    // same helper, but nothing catches a revert of that one call.
+    // A live receiver on the registered session makes the tracker take the
+    // mid-turn path, which is the one that forwards to the channel.
+    let session = SessionId::new();
+    let (tx, _rx) = tokio::sync::mpsc::channel(8);
+    kernel
+        .injection_senders_ref()
+        .insert((assistant, session), tx);
+    let handle = kernel.register_async_task(
+        assistant,
+        session,
+        TaskKind::Delegation {
+            agent_id: sales_agent,
+            prompt_hash: "hash".to_string(),
+        },
+        Some("chat-4".to_string()),
+    );
+    let delivered = kernel
+        .complete_async_task(
+            handle.id,
+            TaskStatus::Completed(serde_json::json!({"result": "delegated answer"})),
+        )
+        .await
+        .expect("complete async task");
+    assert!(delivered, "the delegation completion must be delivered");
+    let after = primary_sent.lock().unwrap().clone();
+    assert_eq!(
+        after.len(),
+        2,
+        "the completion forward must reach the home adapter, got {after:?}"
+    );
+    assert!(
+        after[1].starts_with("chat-4:"),
+        "the forward must go to the inbound conversation, got {after:?}"
+    );
+    assert!(
+        after[1].contains("delegated answer"),
+        "unexpected forward body: {after:?}"
+    );
+
+    // An agent with no home sidecar has nowhere to forward to, and that is not
+    // an error for the best-effort callers.
+    let loner = kernel
+        .spawn_agent(AgentManifest {
+            name: "fw-loner".to_string(),
+            source_template: None,
+            ..Default::default()
+        })
+        .expect("spawn loner");
+    kernel
+        .forward_to_channel(loner, "chat-3", "nowhere", None)
+        .await
+        .expect("a missing home channel is not an error");
+    assert_eq!(
+        primary_sent.lock().unwrap().len(),
+        2,
+        "the loner must not add a send to another agent's adapter"
+    );
+    assert_eq!(sales_sent.lock().unwrap().len(), 1);
+    // A task registered from a conversation that arrived on a *sibling* bot
+    // must forward through that bot, not the agent's home adapter. The account
+    // travels with the async-task entry (#8774).
+    let session_b = SessionId::new();
+    let (tx_b, _rx_b) = tokio::sync::mpsc::channel(8);
+    kernel
+        .injection_senders_ref()
+        .insert((assistant, session_b), tx_b);
+    let handle_b = kernel.register_async_task_on(
+        assistant,
+        session_b,
+        TaskKind::Delegation {
+            agent_id: sales_agent,
+            prompt_hash: "from-bot-b".to_string(),
+        },
+        Some("chat-5".to_string()),
+        Some("tg-sales".to_string()),
+    );
+    kernel
+        .complete_async_task(
+            handle_b.id,
+            TaskStatus::Completed(serde_json::json!({"result": "answered on bot b"})),
+        )
+        .await
+        .expect("complete async task from bot b");
+    let primary_after_b = primary_sent.lock().unwrap().clone();
+    let sales_after_b = sales_sent.lock().unwrap().clone();
+    assert_eq!(
+        primary_after_b.len(),
+        2,
+        "the home adapter must not receive the sibling-bot forward: {primary_after_b:?}"
+    );
+    assert_eq!(
+        sales_after_b.len(),
+        2,
+        "the recorded account must win over the home adapter: {sales_after_b:?}"
+    );
+    assert!(
+        sales_after_b[1].starts_with("chat-5:"),
+        "unexpected recipient on the sibling adapter: {sales_after_b:?}"
+    );
+
+    kernel.shutdown();
 }

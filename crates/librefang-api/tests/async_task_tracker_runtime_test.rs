@@ -178,6 +178,7 @@ async fn register_and_complete_workflow_task_through_kernel_api() {
         session_id,
         TaskKind::Workflow { run_id },
         None,
+        None,
     );
 
     assert_eq!(h.state.kernel.pending_async_task_count(), 1);
@@ -224,6 +225,7 @@ async fn wake_idle_spawn_when_no_receiver_attached() {
         TaskKind::Workflow {
             run_id: WorkflowRunId(Uuid::new_v4()),
         },
+        None,
         None,
     );
 
@@ -308,6 +310,7 @@ async fn timeout_completion_text_format_is_stable() {
         agent_id,
         session_id,
         TaskKind::Workflow { run_id },
+        None,
         None,
     );
 
@@ -463,6 +466,7 @@ async fn double_completion_via_appstate_is_a_noop() {
         TaskKind::Workflow {
             run_id: WorkflowRunId(Uuid::new_v4()),
         },
+        None,
         None,
     );
 

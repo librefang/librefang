@@ -226,8 +226,11 @@ pub(super) async fn tool_process_start(
                 // is spawned, so there is no race between spawn and
                 // completion. `register_async_task` returns `None` for handles
                 // without a tracker (mocks) → no sink.
+                // Background processes have no inbound channel, so no adapter
+                // account to record; the completion forward falls back to the
+                // agent's home adapter.
                 let handle =
-                    kernel.register_async_task(aid, sid, TaskKind::Process { pid }, chat)?;
+                    kernel.register_async_task(aid, sid, TaskKind::Process { pid }, chat, None)?;
                 Some(Arc::new(KernelHandleProcessSink {
                     kernel,
                     task_id: handle.id,

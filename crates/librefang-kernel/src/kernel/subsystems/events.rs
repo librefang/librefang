@@ -44,6 +44,12 @@ pub(crate) struct PendingTask {
     /// wake-idle response back to the right conversation. Threaded
     /// from the caller's `SenderContext.chat_id` at registration time.
     pub chat_id: Option<String>,
+    /// The adapter instance the originating turn arrived on (e.g. the
+    /// sidecar's `name`). Threaded from the caller's
+    /// `SenderContext.account_id` at registration time so a completion
+    /// forward can address the same bot the conversation belongs to,
+    /// rather than guessing the agent's home adapter.
+    pub account_id: Option<String>,
 }
 
 /// Focused event-bus + injection-channel API.

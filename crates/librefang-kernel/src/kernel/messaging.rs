@@ -384,7 +384,14 @@ impl LibreFangKernel {
     ///
     /// Returns a synthetic `SenderContext` populated with:
     /// - `channel` — the channel type (e.g. `"telegram"`, `"discord"`)
-    /// - `account_id` — the specific bot instance's `account_id` (when set)
+    /// - `account_id` — deliberately left `None`: this context describes a turn
+    ///   that arrived from nowhere (trigger dispatches, wake-idle turns), so it must not
+    ///   claim an originating account. `send_message_full` stamps it into
+    ///   `sender_account_id`, and a non-empty stamp *enables* the #6443
+    ///   cross-account guard for agents that talk to several bots — a behaviour
+    ///   change none of these callers ask for. Callers that need to *send* from
+    ///   a specific instance go through [`Self::forward_to_channel`], which
+    ///   resolves the instance and sends in one step.
     /// - `use_canonical_session = true` — preserves the trigger's existing
     ///   `session_mode` semantics; without this the kernel would switch to a
     ///   channel-scoped `SessionId::for_channel(agent, channel)` which would
@@ -397,24 +404,127 @@ impl LibreFangKernel {
         let entry = self.agents.registry.get(agent_id)?;
         let agent_name = entry.name.clone();
         let cfg = self.config.load_full();
+        sidecar_home_channel(&cfg.sidecar_channels, &agent_name).map(|home| home.ctx)
+    }
 
-        // Every channel is a sidecar; scan `cfg.sidecar_channels` for the
-        // first entry whose `default_agent` names this agent. The effective
-        // channel key is `channel_type` when set, else the entry `name` —
-        // same mapping `sidecar_default_agent` in channel_sender.rs uses
-        // for the inverted lookup.
-        cfg.sidecar_channels.iter().find_map(|sc| {
-            if sc.agent.as_deref() != Some(agent_name.as_str()) {
-                return None;
-            }
-            let channel = sc.channel_type.clone().unwrap_or_else(|| sc.name.clone());
-            Some(SenderContext {
-                channel,
-                account_id: None,
-                use_canonical_session: true,
-                ..Default::default()
+    /// The sidecar record behind `account`, matched by the same identities
+    /// `resolve_channel_adapter` accepts: the config `name` first, then whatever the
+    /// adapter itself reports (`account_id()` / `reported_account_id()`), mapped back
+    /// through the adapter to its config record.
+    fn sidecar_record_for_account(
+        &self,
+        cfg: &librefang_types::config::KernelConfig,
+        account: &str,
+    ) -> Option<HomeSidecar> {
+        if let Some(record) = sidecar_by_name(&cfg.sidecar_channels, account) {
+            return Some(record);
+        }
+        // A sidecar may stamp an id it reported on `ready` instead of its config
+        // name; the channel resolver accepts that, so this lookup has to as well or
+        // the forward silently falls back to the home adapter.
+        // Collect, do not pick: an adapter is registered under two keys (bare and
+        // qualified), so one instance can appear twice, while two *different*
+        // instances answering to one account are two tenants and must not be
+        // resolved by `DashMap` iteration order — the same rule
+        // `resolve_channel_adapter` applies.
+        let mut names: Vec<String> = self
+            .mesh
+            .channel_adapters
+            .iter()
+            .filter(|e| {
+                let adapter = e.value();
+                adapter.account_id() == Some(account)
+                    || adapter.reported_account_id() == Some(account)
             })
-        })
+            .map(|e| e.value().name().to_string())
+            .collect();
+        names.sort();
+        names.dedup();
+        match names.as_slice() {
+            [single] => sidecar_by_name(&cfg.sidecar_channels, single),
+            [] => None,
+            _ => {
+                tracing::warn!(
+                    account,
+                    candidates = ?names,
+                    "delegation forward: several adapters answer to the recorded account; \
+                     not guessing which one owns the conversation"
+                );
+                None
+            }
+        }
+    }
+
+    /// Deliver `body` to `chat_id` on `account_id`, falling back to the agent's
+    /// **home sidecar instance** when the caller has no recorded account.
+    ///
+    /// Both halves of the address are resolved here, in one place, because they
+    /// are useless apart: `channel` is the channel *type*, which does not
+    /// address an instance on a daemon running several adapters of one type,
+    /// while the instance name is the identity `resolve_channel_adapter` matches
+    /// against `adapter.name()`. Keeping the pair behind one method is also what
+    /// keeps the identity out of the turn context — putting it in
+    /// `SenderContext.account_id` would stamp `sender_account_id` onto turns
+    /// that arrived from nowhere and switch the #6443 cross-account guard on for
+    /// them (see [`Self::resolve_agent_home_channel`]).
+    ///
+    /// `account_id` is the adapter the originating turn arrived on, recorded
+    /// with the async task. When it is present the forward goes out through that
+    /// bot: a conversation belongs to the adapter that received it, and a daemon
+    /// can bind several bots of one type to the same agent. The home instance
+    /// stays the fallback for tasks registered without an account — workflows,
+    /// background processes, and callerless sends.
+    ///
+    /// Returns `Ok(String::new())` when the agent has no home sidecar: there is
+    /// nowhere to forward to, which is not an error for the best-effort callers.
+    /// A real send always carries the adapter's own confirmation text, so the empty
+    /// string unambiguously means "nothing was sent".
+    pub(crate) async fn forward_to_channel(
+        &self,
+        agent_id: AgentId,
+        chat_id: &str,
+        body: &str,
+        account_id: Option<&str>,
+    ) -> KernelResult<String> {
+        let Some(entry) = self.agents.registry.get(agent_id) else {
+            return Ok(String::new());
+        };
+        let agent_name = entry.name.clone();
+        let cfg = self.config.load_full();
+        // The recorded account wins: the conversation belongs to the adapter
+        // that received it, and that record also carries the channel type, so a
+        // task posted from a bot the agent does not count as its "home" still
+        // forwards correctly.
+        let account_id = account_id.filter(|a| !a.is_empty());
+        let record = account_id
+            .and_then(|a| self.sidecar_record_for_account(&cfg, a))
+            .or_else(|| {
+                if let Some(a) = account_id {
+                    // Falling back to the home adapter delivers the result
+                    // through a bot the conversation may not belong to. Silent
+                    // by construction until now: the send still succeeds, so
+                    // nothing else would notice.
+                    tracing::warn!(
+                        agent = %agent_name,
+                        account = a,
+                        "delegation forward: recorded account has no unambiguous sidecar \
+                         record; trying the agent's home adapter"
+                    );
+                }
+                sidecar_home_channel(&cfg.sidecar_channels, &agent_name)
+            });
+        let Some(record) = record else {
+            return Ok(String::new());
+        };
+        self.send_channel_message(
+            &record.ctx.channel,
+            chat_id,
+            body,
+            None,
+            Some(record.instance.as_str()),
+        )
+        .await
+        .map_err(KernelError::from)
     }
 
     /// Resolve the **default outbound conversation id** for an agent's home
@@ -439,6 +549,71 @@ impl LibreFangKernel {
     }
 }
 
+/// An agent's home sidecar channel: the turn context plus the instance identity.
+///
+/// Deliberately private: the pair is assembled inside
+/// [`LibreFangKernel::forward_to_channel`], and `ctx` alone leaves this module
+/// only as the turn context of [`LibreFangKernel::resolve_agent_home_channel`], which
+/// never sends.
+struct HomeSidecar {
+    /// Turn context. `account_id` stays `None` so the #6443 cross-account guard
+    /// keeps no-opping for turns that arrived from nowhere.
+    ctx: SenderContext,
+    /// The sidecar's `name`, which is the identity `resolve_channel_adapter`
+    /// matches against `adapter.name()`.
+    instance: String,
+}
+
+/// The sidecar record that registers `name` as its instance, if one exists.
+fn sidecar_by_name(
+    sidecar_channels: &[librefang_types::config::SidecarChannelConfig],
+    name: &str,
+) -> Option<HomeSidecar> {
+    sidecar_channels
+        .iter()
+        .find(|sc| sc.name == name)
+        .map(home_from_config)
+}
+
+/// Build the turn context and instance identity from one `[[sidecar_channels]]`
+/// record.
+fn home_from_config(sc: &librefang_types::config::SidecarChannelConfig) -> HomeSidecar {
+    HomeSidecar {
+        ctx: SenderContext {
+            channel: sc.channel_type.clone().unwrap_or_else(|| sc.name.clone()),
+            account_id: None,
+            use_canonical_session: true,
+            ..Default::default()
+        },
+        instance: sc.name.clone(),
+    }
+}
+
+/// Resolve an agent's home sidecar channel by scanning `sidecar_channels` for
+/// the first entry whose `agent` names it.
+///
+/// The channel key is `channel_type` when set, else the entry `name` — the same
+/// mapping `sidecar_default_agent` in `channel_sender.rs` uses for the inverted
+/// lookup. When `channel_type` differs from `name`, that key is a channel *type*
+/// and addresses no instance on its own: the bridge seeds the registry by
+/// adapter `name` (`channel_bridge.rs`), so the lookup falls through to a
+/// by-type scan, where a daemon running several adapters of one type needs
+/// `instance` to disambiguate. When `channel_type` is absent the plain key *is*
+/// the instance and the by-type scan is never reached.
+///
+/// The two halves therefore travel together, and
+/// [`LibreFangKernel::forward_to_channel`] is the only place that pairs
+/// them with an outbound send.
+fn sidecar_home_channel(
+    sidecar_channels: &[librefang_types::config::SidecarChannelConfig],
+    agent_name: &str,
+) -> Option<HomeSidecar> {
+    sidecar_channels
+        .iter()
+        .find(|sc| sc.agent.as_deref() == Some(agent_name))
+        .map(home_from_config)
+}
+
 /// Pure resolver: the `default_conversation` of the first `sidecar_channels`
 /// entry whose `agent` (a.k.a. `default_agent`) names `agent_name`, filtered
 /// to non-empty values.
@@ -451,8 +626,8 @@ fn sidecar_default_conversation(
     sidecar_channels: &[librefang_types::config::SidecarChannelConfig],
     agent_name: &str,
 ) -> Option<String> {
-    // Resolve the SAME channel `resolve_agent_home_channel` picks — the first
-    // entry whose agent matches — and read only THAT channel's
+    // Resolve the SAME entry `sidecar_home_channel` picks — the first one whose
+    // agent matches — and read only THAT channel's
     // `default_conversation`. Using `find().and_then()` (not `find_map`) is
     // load-bearing: if the home channel has no default we must return `None`,
     // never skip ahead to a *different* channel's default. Otherwise a forward
@@ -3796,7 +3971,7 @@ pub(crate) fn experiment_turn_meets_criteria(
 
 #[cfg(test)]
 mod tests {
-    use super::sidecar_default_conversation;
+    use super::{sidecar_default_conversation, sidecar_home_channel};
     use librefang_types::config::SidecarChannelConfig;
 
     fn sc(json: serde_json::Value) -> SidecarChannelConfig {
@@ -3861,6 +4036,143 @@ mod tests {
             "default_conversation": "999",
         }))];
         assert_eq!(sidecar_default_conversation(&chans, "coder"), None);
+    }
+
+    /// Contract: the home-channel *turn* context must NOT claim an originating
+    /// account. `send_message_full` stamps `account_id` into
+    /// `SENDER_ACCOUNT_ID_METADATA_KEY`, and a non-empty stamp switches on the
+    /// #6443 cross-account guard for the agent's own `channel_send` calls —
+    /// including on trigger and wake-idle turns, which arrive from nowhere and
+    /// have never carried an account.
+    #[test]
+    fn home_channel_context_leaves_the_sender_account_unset() {
+        let chans = vec![sc(serde_json::json!({
+            "name": "tg-primary",
+            "command": "python3",
+            "channel_type": "telegram",
+            "default_agent": "assistant",
+        }))];
+        let home = sidecar_home_channel(&chans, "assistant").expect("home channel");
+        assert_eq!(home.ctx.channel, "telegram");
+        assert_eq!(
+            home.ctx.account_id, None,
+            "a turn that arrived from nowhere must not name an account"
+        );
+        assert_eq!(
+            home.instance, "tg-primary",
+            "the instance is what an outbound send is addressed to"
+        );
+        // An agent with no channel keeps returning None instead of guessing.
+        assert!(sidecar_home_channel(&chans, "researcher").is_none());
+    }
+
+    /// Two `[[sidecar_channels]]` entries may name the same agent; both the
+    /// destination (`sidecar_default_conversation`) and the send address
+    /// (`sidecar_home_channel`) must then pick the **same** entry — the first —
+    /// or a forward pairs one entry's chat with another entry's adapter, which is
+    /// exactly the "delivering to the wrong place" the destination resolver warns
+    /// about. The destination resolver pins this; the address resolver must too.
+    #[test]
+    fn home_channel_and_destination_agree_on_the_first_matching_entry() {
+        let chans = vec![
+            sc(serde_json::json!({
+                "name": "tg-first",
+                "command": "python3",
+                "channel_type": "telegram",
+                "default_agent": "assistant",
+            })),
+            sc(serde_json::json!({
+                "name": "tg-second",
+                "command": "python3",
+                "channel_type": "telegram",
+                "default_agent": "assistant",
+                "default_conversation": "chat-from-second",
+            })),
+        ];
+        let home = sidecar_home_channel(&chans, "assistant").expect("home channel");
+        assert_eq!(
+            home.instance, "tg-first",
+            "the send address must come from the same (first) entry"
+        );
+        // The second entry's `default_conversation` must not leak into the pair.
+        assert_eq!(sidecar_default_conversation(&chans, "assistant"), None);
+    }
+
+    /// The property the delegation forwards depend on, exercised through the
+    /// real registry and the real resolver: the instance name disambiguates a
+    /// by-type lookup that the bare channel type cannot.
+    ///
+    /// A literal assertion on the returned struct cannot see this — it passes
+    /// even if the send sites drop the identity, or if resolution is done with a
+    /// differently-shaped string (lowercased, trimmed, channel type).
+    #[test]
+    fn home_channel_instance_resolves_to_the_agents_own_adapter() {
+        use crate::kernel::handles::channel_sender::resolve_channel_adapter;
+        use librefang_channels::sidecar::SidecarAdapter;
+        use librefang_channels::types::ChannelAdapter;
+        use std::sync::Arc;
+
+        fn adapter(name: &str, channel_type: &str) -> Arc<SidecarAdapter> {
+            let cfg: librefang_types::config::SidecarChannelConfig =
+                serde_json::from_value(serde_json::json!({
+                    "name": name,
+                    "command": "python3",
+                    "channel_type": channel_type,
+                    "default_agent": "assistant",
+                }))
+                .expect("sidecar config");
+            Arc::new(SidecarAdapter::new(&cfg, std::path::PathBuf::from("/tmp")))
+        }
+
+        let adapters: ::dashmap::DashMap<String, Arc<dyn ChannelAdapter>> = Default::default();
+        for name in ["tg-primary", "tg-sales"] {
+            let a = adapter(name, "telegram");
+            // Same seeding `channel_bridge.rs` does: the plain key, plus the
+            // qualified `<name>:<account_id>` key.
+            adapters.insert(name.to_string(), a.clone());
+            adapters.insert(format!("{name}:{name}"), a);
+        }
+
+        // Without the instance the by-type scan sees two candidates and refuses.
+        let err = match resolve_channel_adapter(&adapters, "telegram", None) {
+            Ok(hit) => panic!("expected ambiguity, but resolved to {}", hit.name()),
+            Err(e) => e,
+        };
+        assert!(err.contains("ambiguous"), "unexpected error: {err}");
+
+        // With the identity the resolver itself produces, the lookup lands on
+        // the agent's own adapter. Feeding the literal here instead would let a
+        // mutation of the produced value (case, trimming, channel type) pass.
+        let chans = vec![
+            sc(serde_json::json!({
+                "name": "tg-primary",
+                "command": "python3",
+                "channel_type": "telegram",
+                "default_agent": "assistant",
+            })),
+            sc(serde_json::json!({
+                "name": "tg-sales",
+                "command": "python3",
+                "channel_type": "telegram",
+                "default_agent": "sales-agent",
+            })),
+        ];
+        let home = sidecar_home_channel(&chans, "assistant").expect("home channel");
+        let hit = resolve_channel_adapter(&adapters, &home.ctx.channel, Some(&home.instance))
+            .expect("the instance name must disambiguate");
+        assert_eq!(hit.name(), "tg-primary");
+
+        // And a single-adapter registry keeps resolving by type, as before.
+        let single: ::dashmap::DashMap<String, Arc<dyn ChannelAdapter>> = Default::default();
+        let only = adapter("tg-primary", "telegram");
+        single.insert("tg-primary".to_string(), only.clone());
+        single.insert("tg-primary:tg-primary".to_string(), only);
+        assert_eq!(
+            resolve_channel_adapter(&single, "telegram", None)
+                .expect("single adapter")
+                .name(),
+            "tg-primary"
+        );
     }
 
     /// First-match wins, deterministic over the ordered `Vec`: when two

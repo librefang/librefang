@@ -150,6 +150,11 @@ impl kernel_handle::AgentControl for LibreFangKernel {
     /// [`complete_async_task`](crate::kernel::LibreFangKernel::complete_async_task),
     /// which injects the reply back into the caller's session (mid-turn or
     /// wake-idle). Mirrors `start_workflow_async_tracked`.
+    // The parameter list is the delegation's routing identity: target, message,
+    // caller, caller session, conversation key, chat id and - since #8774 - the
+    // inbound adapter account. Bundling them into a struct would be a wider change
+    // for a single call site.
+    #[allow(clippy::too_many_arguments)]
     async fn send_to_agent_async_tracked(
         &self,
         agent_id: &str,
@@ -158,6 +163,7 @@ impl kernel_handle::AgentControl for LibreFangKernel {
         caller_session_id: Option<&str>,
         conversation_key: Option<&str>,
         chat_id: Option<&str>,
+        account_id: Option<&str>,
     ) -> Result<kernel_handle::AsyncSendOutcome, kernel_handle::KernelOpError> {
         use kernel_handle::{AsyncSendOutcome, KernelOpError};
         use librefang_types::task::{TaskKind, TaskStatus};
@@ -219,6 +225,7 @@ impl kernel_handle::AgentControl for LibreFangKernel {
                 prompt_hash,
             },
             chat_id.map(String::from),
+            account_id.map(String::from),
         );
         let task_id = handle.id;
 
@@ -446,9 +453,10 @@ impl kernel_handle::AgentControl for LibreFangKernel {
         session_id: SessionId,
         kind: librefang_types::task::TaskKind,
         chat_id: Option<String>,
+        account_id: Option<String>,
     ) -> Option<librefang_types::task::TaskHandle> {
-        Some(LibreFangKernel::register_async_task(
-            self, agent_id, session_id, kind, chat_id,
+        Some(LibreFangKernel::register_async_task_on(
+            self, agent_id, session_id, kind, chat_id, account_id,
         ))
     }
 
@@ -707,6 +715,7 @@ system_prompt = "test"
             "ping",
             &caller.to_string(),
             Some(&session.to_string()),
+            None,
             None,
             None,
         )

@@ -47,6 +47,7 @@ pub(super) async fn tool_agent_send(
     caller_agent_id: Option<&str>,
     caller_session_id: Option<librefang_types::agent::SessionId>,
     chat_id: Option<&str>,
+    sender_account_id: Option<&str>,
 ) -> ToolResult {
     let kh = require_kernel_typed(kernel)?;
     let agent_id = input["agent_id"]
@@ -133,6 +134,7 @@ pub(super) async fn tool_agent_send(
                 session_str.as_deref(),
                 conversation_key,
                 chat_id,
+                sender_account_id,
             )
             .await
             .map_err(ToolError::upstream)?;
