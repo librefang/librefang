@@ -492,8 +492,13 @@ impl LibreFangKernel {
         // so the session history reads consistently regardless of how
         // the agent surfaced the result.
         let body = format_task_completion_text(event);
-        // The adapter the conversation arrived on, threaded into the spawned
-        // turn: the forward must go out through that bot, not the home one.
+        // The adapter the conversation arrived on, used **for the forward only**.
+        // The spawned turn itself keeps the home channel's context, whose
+        // `account_id` is deliberately `None` (see `resolve_agent_home_channel`):
+        // stamping it would switch the #6443 cross-account guard on for a turn
+        // that arrived from nowhere. Consequence: a delegation issued *from* this
+        // wake-idle turn records no account and forwards through the home
+        // adapter — the limitation this PR removes one level up.
         let entry_account_id = account_id;
 
         // Resolve both semaphores synchronously on the caller's task so

@@ -1452,6 +1452,69 @@ async fn agent_send_async_routes_to_tracked_path_and_returns_task_id() {
     );
 }
 
+/// The dispatch arm is its own hop: the context's `sender_account_id` has to
+/// reach `agent_send` from `execute_tool_with_sender_account`, not just from a
+/// direct call to the tool. Mutating that arm back to `None` used to leave every
+/// test green.
+#[tokio::test]
+async fn dispatch_arm_threads_the_turn_account_into_agent_send() {
+    use librefang_types::agent::SessionId;
+
+    let cap = Arc::new(DispatchCapture::default());
+    let kernel: Arc<dyn KernelHandle> = cap.clone();
+    let input = serde_json::json!({
+        "agent_id": "target",
+        "message": "delegate",
+        "async": true,
+    });
+    let session = SessionId(uuid::Uuid::new_v4()).0.to_string();
+
+    let _ = crate::tool_runner::dispatch::execute_tool_with_sender_account(
+        "tu-1",
+        "agent_send",
+        &input,
+        Some(&kernel),
+        None,
+        Some("parent-agent"),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        Some("user-1"),
+        Some("telegram"),
+        Some("chat-9"),
+        None,
+        None,
+        Some(&session),
+        None,
+        None,
+        0,
+        0,
+        Some("bot-b"),
+        false,
+        None,
+    )
+    .await;
+
+    let calls = cap.calls.lock().unwrap();
+    assert_eq!(
+        &*calls,
+        &[format!("async_tracked:session={session} account=bot-b")],
+        "the dispatch arm must pass the turn's account to agent_send"
+    );
+}
+
 /// The turn's adapter account is threaded into the async tracker, so the
 /// completion forward can address the bot the conversation arrived on instead of
 /// the agent's home one (#8774).

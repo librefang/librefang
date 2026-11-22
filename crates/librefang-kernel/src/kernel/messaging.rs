@@ -390,7 +390,7 @@ impl LibreFangKernel {
     ///   `sender_account_id`, and a non-empty stamp *enables* the #6443
     ///   cross-account guard for agents that talk to several bots — a behaviour
     ///   change none of these callers ask for. Callers that need to *send* from
-    ///   a specific instance go through [`Self::forward_to_home_channel`], which
+    ///   a specific instance go through [`Self::forward_to_channel`], which
     ///   resolves the instance and sends in one step.
     /// - `use_canonical_session = true` — preserves the trigger's existing
     ///   `session_mode` semantics; without this the kernel would switch to a
@@ -405,6 +405,34 @@ impl LibreFangKernel {
         let agent_name = entry.name.clone();
         let cfg = self.config.load_full();
         sidecar_home_channel(&cfg.sidecar_channels, &agent_name).map(|home| home.ctx)
+    }
+
+    /// The sidecar record behind `account`, matched by the same identities
+    /// `resolve_channel_adapter` accepts: the config `name` first, then whatever the
+    /// adapter itself reports (`account_id()` / `reported_account_id()`), mapped back
+    /// through the adapter to its config record.
+    fn sidecar_record_for_account(
+        &self,
+        cfg: &librefang_types::config::KernelConfig,
+        account: &str,
+    ) -> Option<HomeSidecar> {
+        if let Some(record) = sidecar_by_name(&cfg.sidecar_channels, account) {
+            return Some(record);
+        }
+        // A sidecar may stamp an id it reported on `ready` instead of its config
+        // name; the channel resolver accepts that, so this lookup has to as well or
+        // the forward silently falls back to the home adapter.
+        let resolved_name = self
+            .mesh
+            .channel_adapters
+            .iter()
+            .find(|e| {
+                let adapter = e.value();
+                adapter.account_id() == Some(account)
+                    || adapter.reported_account_id() == Some(account)
+            })
+            .map(|e| e.value().name().to_string())?;
+        sidecar_by_name(&cfg.sidecar_channels, &resolved_name)
     }
 
     /// Deliver `body` to `chat_id` on `account_id`, falling back to the agent's
@@ -447,10 +475,24 @@ impl LibreFangKernel {
         // that received it, and that record also carries the channel type, so a
         // task posted from a bot the agent does not count as its "home" still
         // forwards correctly.
+        let account_id = account_id.filter(|a| !a.is_empty());
         let record = account_id
-            .filter(|a| !a.is_empty())
-            .and_then(|a| sidecar_by_name(&cfg.sidecar_channels, a))
-            .or_else(|| sidecar_home_channel(&cfg.sidecar_channels, &agent_name));
+            .and_then(|a| self.sidecar_record_for_account(&cfg, a))
+            .or_else(|| {
+                if let Some(a) = account_id {
+                    // Falling back to the home adapter delivers the result
+                    // through a bot the conversation may not belong to. Silent
+                    // by construction until now: the send still succeeds, so
+                    // nothing else would notice.
+                    tracing::warn!(
+                        agent = %agent_name,
+                        account = a,
+                        "delegation forward: recorded account has no registered sidecar record; \
+                         falling back to the agent's home adapter"
+                    );
+                }
+                sidecar_home_channel(&cfg.sidecar_channels, &agent_name)
+            });
         let Some(record) = record else {
             return Ok(String::new());
         };
@@ -490,7 +532,7 @@ impl LibreFangKernel {
 /// An agent's home sidecar channel: the turn context plus the instance identity.
 ///
 /// Deliberately private: the pair is assembled inside
-/// [`LibreFangKernel::forward_to_home_channel`], and `ctx` alone leaves this module
+/// [`LibreFangKernel::forward_to_channel`], and `ctx` alone leaves this module
 /// only as the turn context of [`LibreFangKernel::resolve_agent_home_channel`], which
 /// never sends.
 struct HomeSidecar {
@@ -540,7 +582,7 @@ fn home_from_config(sc: &librefang_types::config::SidecarChannelConfig) -> HomeS
 /// the instance and the by-type scan is never reached.
 ///
 /// The two halves therefore travel together, and
-/// [`LibreFangKernel::forward_to_home_channel`] is the only place that pairs
+/// [`LibreFangKernel::forward_to_channel`] is the only place that pairs
 /// them with an outbound send.
 fn sidecar_home_channel(
     sidecar_channels: &[librefang_types::config::SidecarChannelConfig],

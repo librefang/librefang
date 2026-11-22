@@ -3831,6 +3831,142 @@ async fn test_send_message_ephemeral_does_not_modify_session() {
     kernel.shutdown();
 }
 
+/// The kernel-side hop of the account plumbing: `AgentControl::send_to_agent_async_tracked`
+/// has to carry the account into the registered task. Registering through
+/// `register_async_task_on` directly (as the other tests do) skips this hop, so
+/// mutating it back to `None` used to leave every test green.
+#[tokio::test(flavor = "multi_thread")]
+async fn async_delegation_registers_the_inbound_account() {
+    use librefang_kernel_handle::AgentControl;
+    use librefang_types::config::SidecarChannelConfig;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn sidecar(name: &str, agent: &str) -> SidecarChannelConfig {
+        serde_json::from_value(serde_json::json!({
+            "name": name,
+            "command": "python3",
+            "channel_type": "telegram",
+            "agent": agent,
+        }))
+        .expect("sidecar config")
+    }
+
+    let backend = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/chat"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
+            format!(
+                "{}\n",
+                serde_json::json!({
+                    "message": {"content": "callee reply"},
+                    "done": true,
+                    "done_reason": "stop",
+                })
+            ),
+            "application/json",
+        ))
+        .mount(&backend)
+        .await;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().join("librefang-async-account-hop");
+    std::fs::create_dir_all(&home_dir).unwrap();
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        default_model: DefaultModelConfig::driverless(),
+        sidecar_channels: vec![
+            sidecar("tg-primary", "hop-caller"),
+            sidecar("tg-sales", "hop-other"),
+        ],
+        ..KernelConfig::default()
+    };
+    let kernel = Arc::new(LibreFangKernel::boot_with_config(config).expect("kernel boots"));
+    kernel.set_self_handle();
+
+    let primary = Arc::new(RecordingChannelAdapter::named_instance(
+        "tg-primary",
+        "telegram",
+    ));
+    let sales = Arc::new(RecordingChannelAdapter::named_instance(
+        "tg-sales", "telegram",
+    ));
+    let primary_sent = primary.sent.clone();
+    let sales_sent = sales.sent.clone();
+    for (name, adapter) in [
+        (
+            "tg-primary",
+            primary.clone() as Arc<RecordingChannelAdapter>,
+        ),
+        ("tg-sales", sales.clone() as Arc<RecordingChannelAdapter>),
+    ] {
+        kernel
+            .mesh
+            .channel_adapters
+            .insert(name.to_string(), adapter.clone());
+        kernel
+            .mesh
+            .channel_adapters
+            .insert(format!("{name}:{name}"), adapter);
+    }
+
+    let mut caller_manifest = test_manifest("hop-caller", "caller", vec![]);
+    caller_manifest.model.provider = "ollama".to_string();
+    caller_manifest.model.model = "llama3.2".to_string();
+    caller_manifest.model.base_url = Some(backend.uri());
+    let caller = kernel.spawn_agent(caller_manifest).expect("spawn caller");
+
+    let mut callee_manifest = test_manifest("hop-callee", "callee", vec![]);
+    callee_manifest.model.provider = "ollama".to_string();
+    callee_manifest.model.model = "llama3.2".to_string();
+    callee_manifest.model.base_url = Some(backend.uri());
+    kernel.spawn_agent(callee_manifest).expect("spawn callee");
+
+    let session = SessionId::new();
+    let outcome = AgentControl::send_to_agent_async_tracked(
+        &*kernel,
+        "hop-callee",
+        "do the thing",
+        &caller.to_string(),
+        Some(&session.to_string()),
+        None,
+        Some("chat-11"),
+        Some("tg-sales"),
+    )
+    .await
+    .expect("async delegation registers");
+
+    // Tracked, not inlined: the account could only be carried by the registry.
+    assert!(
+        matches!(
+            outcome,
+            librefang_kernel_handle::AsyncSendOutcome::Tracked(_)
+        ),
+        "expected a tracked delegation, got {outcome:?}"
+    );
+
+    let mut waited = 0;
+    while sales_sent.lock().unwrap().is_empty() && waited < 150 {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        waited += 1;
+    }
+    let sales_got = sales_sent.lock().unwrap().clone();
+    assert_eq!(
+        sales_got.len(),
+        1,
+        "the completion must be forwarded through the recorded account, got {sales_got:?}"
+    );
+    assert!(sales_got[0].starts_with("chat-11:"));
+    assert!(
+        primary_sent.lock().unwrap().is_empty(),
+        "the home adapter must not receive it: {:?}",
+        primary_sent.lock().unwrap()
+    );
+
+    kernel.shutdown();
+}
+
 /// The **wake-idle** forward: a delegation that completes while the agent is not
 /// in a turn still reaches the channel, and it goes out through the adapter the
 /// conversation arrived on rather than the agent's home one (#8774).
