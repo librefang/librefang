@@ -484,10 +484,13 @@ impl kernel_handle::WorkflowRunner for LibreFangKernel {
         let (task_id, async_cfg) = match (caller_agent_id, caller_session_id) {
             (Some(aid), Some(sid)) => match (aid.parse::<AgentId>(), sid.parse::<SessionId>()) {
                 (Ok(agent_id), Ok(session_id)) => {
-                    let handle = self.register_async_task(
+                    // Workflow runs carry no inbound channel, so no adapter
+                    // account: the completion forward falls back to home.
+                    let handle = self.register_async_task_on(
                         agent_id,
                         session_id,
                         TaskKind::Workflow { run_id },
+                        None,
                         None,
                     );
                     let cfg = self

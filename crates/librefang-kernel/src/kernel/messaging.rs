@@ -407,42 +407,59 @@ impl LibreFangKernel {
         sidecar_home_channel(&cfg.sidecar_channels, &agent_name).map(|home| home.ctx)
     }
 
-    /// Deliver `body` to `chat_id` through the agent's **home sidecar instance**.
+    /// Deliver `body` to `chat_id` on `account_id`, falling back to the agent's
+    /// **home sidecar instance** when the caller has no recorded account.
     ///
     /// Both halves of the address are resolved here, in one place, because they
     /// are useless apart: `channel` is the channel *type*, which does not
     /// address an instance on a daemon running several adapters of one type,
-    /// while `instance` is the identity `resolve_channel_adapter` matches
+    /// while the instance name is the identity `resolve_channel_adapter` matches
     /// against `adapter.name()`. Keeping the pair behind one method is also what
     /// keeps the identity out of the turn context — putting it in
     /// `SenderContext.account_id` would stamp `sender_account_id` onto turns
     /// that arrived from nowhere and switch the #6443 cross-account guard on for
     /// them (see [`Self::resolve_agent_home_channel`]).
     ///
+    /// `account_id` is the adapter the originating turn arrived on, recorded
+    /// with the async task. When it is present the forward goes out through that
+    /// bot: a conversation belongs to the adapter that received it, and a daemon
+    /// can bind several bots of one type to the same agent. The home instance
+    /// stays the fallback for tasks registered without an account — workflows,
+    /// background processes, and callerless sends.
+    ///
     /// Returns `Ok(String::new())` when the agent has no home sidecar: there is
     /// nowhere to forward to, which is not an error for the best-effort callers.
     /// A real send always carries the adapter's own confirmation text, so the empty
     /// string unambiguously means "nothing was sent".
-    pub(crate) async fn forward_to_home_channel(
+    pub(crate) async fn forward_to_channel(
         &self,
         agent_id: AgentId,
         chat_id: &str,
         body: &str,
+        account_id: Option<&str>,
     ) -> KernelResult<String> {
         let Some(entry) = self.agents.registry.get(agent_id) else {
             return Ok(String::new());
         };
         let agent_name = entry.name.clone();
         let cfg = self.config.load_full();
-        let Some(home) = sidecar_home_channel(&cfg.sidecar_channels, &agent_name) else {
+        // The recorded account wins: the conversation belongs to the adapter
+        // that received it, and that record also carries the channel type, so a
+        // task posted from a bot the agent does not count as its "home" still
+        // forwards correctly.
+        let record = account_id
+            .filter(|a| !a.is_empty())
+            .and_then(|a| sidecar_by_name(&cfg.sidecar_channels, a))
+            .or_else(|| sidecar_home_channel(&cfg.sidecar_channels, &agent_name));
+        let Some(record) = record else {
             return Ok(String::new());
         };
         self.send_channel_message(
-            &home.ctx.channel,
+            &record.ctx.channel,
             chat_id,
             body,
             None,
-            Some(home.instance.as_str()),
+            Some(record.instance.as_str()),
         )
         .await
         .map_err(KernelError::from)
@@ -485,6 +502,31 @@ struct HomeSidecar {
     instance: String,
 }
 
+/// The sidecar record that registers `name` as its instance, if one exists.
+fn sidecar_by_name(
+    sidecar_channels: &[librefang_types::config::SidecarChannelConfig],
+    name: &str,
+) -> Option<HomeSidecar> {
+    sidecar_channels
+        .iter()
+        .find(|sc| sc.name == name)
+        .map(home_from_config)
+}
+
+/// Build the turn context and instance identity from one `[[sidecar_channels]]`
+/// record.
+fn home_from_config(sc: &librefang_types::config::SidecarChannelConfig) -> HomeSidecar {
+    HomeSidecar {
+        ctx: SenderContext {
+            channel: sc.channel_type.clone().unwrap_or_else(|| sc.name.clone()),
+            account_id: None,
+            use_canonical_session: true,
+            ..Default::default()
+        },
+        instance: sc.name.clone(),
+    }
+}
+
 /// Resolve an agent's home sidecar channel by scanning `sidecar_channels` for
 /// the first entry whose `agent` names it.
 ///
@@ -507,15 +549,7 @@ fn sidecar_home_channel(
     sidecar_channels
         .iter()
         .find(|sc| sc.agent.as_deref() == Some(agent_name))
-        .map(|sc| HomeSidecar {
-            ctx: SenderContext {
-                channel: sc.channel_type.clone().unwrap_or_else(|| sc.name.clone()),
-                account_id: None,
-                use_canonical_session: true,
-                ..Default::default()
-            },
-            instance: sc.name.clone(),
-        })
+        .map(home_from_config)
 }
 
 /// Pure resolver: the `default_conversation` of the first `sidecar_channels`

@@ -154,6 +154,11 @@ pub trait AgentControl: Send + Sync {
     /// Callers must branch on the variant — never render the payload as a task id unconditionally.
     ///
     /// Defaults to the blocking [`send_to_agent_as`](Self::send_to_agent_as) for handles that don't support the tracker (mocks/tests), returning [`AsyncSendOutcome::Inline`] because there is no tracker to register against.
+    // The parameter list is the delegation's routing identity: target, message,
+    // caller, caller session, conversation key, chat id and - since #8774 - the
+    // inbound adapter account. Bundling them into a struct would be a wider change
+    // for a single call site.
+    #[allow(clippy::too_many_arguments)]
     async fn send_to_agent_async_tracked(
         &self,
         agent_id: &str,
@@ -162,8 +167,9 @@ pub trait AgentControl: Send + Sync {
         caller_session_id: Option<&str>,
         conversation_key: Option<&str>,
         chat_id: Option<&str>,
+        account_id: Option<&str>,
     ) -> Result<AsyncSendOutcome, KernelOpError> {
-        let _ = (caller_session_id, conversation_key, chat_id);
+        let _ = (caller_session_id, conversation_key, chat_id, account_id);
         tracing::trace!(
             agent = %agent_id,
             "send_to_agent_async_tracked: default impl — async tracking not supported by this handle; falling back to blocking send_to_agent_as"
@@ -190,8 +196,9 @@ pub trait AgentControl: Send + Sync {
         session_id: librefang_types::agent::SessionId,
         kind: librefang_types::task::TaskKind,
         chat_id: Option<String>,
+        account_id: Option<String>,
     ) -> Option<librefang_types::task::TaskHandle> {
-        let _ = (agent_id, session_id, kind, chat_id);
+        let _ = (agent_id, session_id, kind, chat_id, account_id);
         None
     }
 

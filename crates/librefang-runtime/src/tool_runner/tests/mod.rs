@@ -1030,6 +1030,11 @@ impl AgentControl for DispatchCapture {
         Ok(format!("as-keyed:{conversation_key}"))
     }
 
+    // The parameter list is the delegation's routing identity: target, message,
+    // caller, caller session, conversation key, chat id and - since #8774 - the
+    // inbound adapter account. Bundling them into a struct would be a wider change
+    // for a single call site.
+    #[allow(clippy::too_many_arguments)]
     async fn send_to_agent_async_tracked(
         &self,
         _agent_id: &str,
@@ -1038,13 +1043,15 @@ impl AgentControl for DispatchCapture {
         caller_session_id: Option<&str>,
         _conversation_key: Option<&str>,
         _chat_id: Option<&str>,
+        account_id: Option<&str>,
     ) -> Result<librefang_kernel_handle::AsyncSendOutcome, librefang_kernel_handle::KernelOpError>
     {
         // Record that the async path was taken and echo back whether a caller
         // session was threaded through (the tool must forward it).
         self.calls.lock().unwrap().push(format!(
-            "async_tracked:session={}",
-            caller_session_id.unwrap_or("none")
+            "async_tracked:session={} account={}",
+            caller_session_id.unwrap_or("none"),
+            account_id.unwrap_or("none")
         ));
         // Mirror the kernel's own discrimination (#6650): a caller session is what makes tracking possible, so its absence yields `Inline` here exactly as it does in the real impl.
         Ok(match caller_session_id {
@@ -1280,7 +1287,7 @@ async fn agent_send_no_key_no_caller_routes_to_send_to_agent() {
     let kernel: Arc<dyn KernelHandle> = cap.clone();
     let input = serde_json::json!({ "agent_id": "target", "message": "hi" });
 
-    let result = super::agent::tool_agent_send(&input, Some(&kernel), None, None, None).await;
+    let result = super::agent::tool_agent_send(&input, Some(&kernel), None, None, None, None).await;
 
     assert_eq!(result.unwrap(), "no-key-no-parent");
     let calls = cap.calls.lock().unwrap();
@@ -1297,9 +1304,15 @@ async fn agent_send_no_key_with_caller_routes_to_send_to_agent_as() {
     // This test covers the blocking path's caller-aware routing, which still exists and is still reachable — see `agent_send_defaults_to_async_when_caller_is_known` for the new default.
     let input = serde_json::json!({ "agent_id": "target", "message": "hi", "async": false });
 
-    let result =
-        super::agent::tool_agent_send(&input, Some(&kernel), Some("parent-agent"), None, None)
-            .await;
+    let result = super::agent::tool_agent_send(
+        &input,
+        Some(&kernel),
+        Some("parent-agent"),
+        None,
+        None,
+        None,
+    )
+    .await;
 
     assert_eq!(result.unwrap(), "no-key-with-parent");
     let calls = cap.calls.lock().unwrap();
@@ -1321,9 +1334,16 @@ async fn agent_send_same_key_routes_to_as_with_key_both_calls() {
         "async": false,
     });
 
-    super::agent::tool_agent_send(&input, Some(&kernel), Some("parent-agent"), None, None)
-        .await
-        .unwrap();
+    super::agent::tool_agent_send(
+        &input,
+        Some(&kernel),
+        Some("parent-agent"),
+        None,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
 
     let input2 = serde_json::json!({
         "agent_id": "target",
@@ -1331,9 +1351,16 @@ async fn agent_send_same_key_routes_to_as_with_key_both_calls() {
         "conversation_key": "thread-abc",
         "async": false,
     });
-    super::agent::tool_agent_send(&input2, Some(&kernel), Some("parent-agent"), None, None)
-        .await
-        .unwrap();
+    super::agent::tool_agent_send(
+        &input2,
+        Some(&kernel),
+        Some("parent-agent"),
+        None,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
 
     let calls = cap.calls.lock().unwrap();
     assert_eq!(
@@ -1360,9 +1387,16 @@ async fn agent_send_distinct_keys_produce_isolated_dispatch() {
                 "conversation_key": key,
                 "async": false,
             });
-            super::agent::tool_agent_send(&input, Some(&kernel), Some("parent-agent"), None, None)
-                .await
-                .unwrap()
+            super::agent::tool_agent_send(
+                &input,
+                Some(&kernel),
+                Some("parent-agent"),
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap()
         }
     };
 
@@ -1400,6 +1434,7 @@ async fn agent_send_async_routes_to_tracked_path_and_returns_task_id() {
         Some("parent-agent"),
         Some(session),
         None,
+        None,
     )
     .await
     .unwrap();
@@ -1411,9 +1446,45 @@ async fn agent_send_async_routes_to_tracked_path_and_returns_task_id() {
     let calls = cap.calls.lock().unwrap();
     assert_eq!(
         &*calls,
-        &[format!("async_tracked:session={}", session.0)],
+        &[format!("async_tracked:session={} account=none", session.0)],
         "async=true must hit the tracker path and forward the caller session, \
          not the blocking send_to_agent_as"
+    );
+}
+
+/// The turn's adapter account is threaded into the async tracker, so the
+/// completion forward can address the bot the conversation arrived on instead of
+/// the agent's home one (#8774).
+#[tokio::test]
+async fn agent_send_async_forwards_the_turn_account_to_the_tracker() {
+    use librefang_types::agent::SessionId;
+
+    let cap = Arc::new(DispatchCapture::default());
+    let kernel: Arc<dyn KernelHandle> = cap.clone();
+    let input = serde_json::json!({
+        "agent_id": "target",
+        "message": "delegate",
+        "async": true,
+    });
+    let session = SessionId(uuid::Uuid::new_v4());
+
+    super::agent::tool_agent_send(
+        &input,
+        Some(&kernel),
+        Some("parent-agent"),
+        Some(session),
+        Some("chat-9"),
+        Some("bot-b"),
+    )
+    .await
+    .unwrap();
+
+    let calls = cap.calls.lock().unwrap();
+    assert_eq!(
+        &*calls,
+        &[format!("async_tracked:session={} account=bot-b", session.0)],
+        "the adapter account must reach the tracker, or the forward falls back \
+         to the agent's home adapter"
     );
 }
 
@@ -1438,6 +1509,7 @@ async fn agent_send_defaults_to_async_when_caller_is_known() {
         Some("parent-agent"),
         Some(session),
         None,
+        None,
     )
     .await
     .unwrap();
@@ -1449,7 +1521,7 @@ async fn agent_send_defaults_to_async_when_caller_is_known() {
     let calls = cap.calls.lock().unwrap();
     assert_eq!(
         &*calls,
-        &[format!("async_tracked:session={}", session.0)],
+        &[format!("async_tracked:session={} account=none", session.0)],
         "an omitted async flag with a known caller must take the tracker path, \
          not the blocking send_to_agent_as"
     );
@@ -1467,7 +1539,7 @@ async fn agent_send_without_caller_still_defaults_to_blocking() {
     let input = serde_json::json!({ "agent_id": "target", "message": "system notice" });
 
     // caller_agent_id = None: a system-initiated send.
-    let out = super::agent::tool_agent_send(&input, Some(&kernel), None, None, None)
+    let out = super::agent::tool_agent_send(&input, Some(&kernel), None, None, None, None)
         .await
         .expect("a callerless send must not be rejected as an invalid async request");
 
@@ -1496,10 +1568,16 @@ async fn agent_send_async_without_session_returns_the_reply_not_a_fake_task_id_6
     });
 
     // Known caller, no session — the shape both HTTP bridges produce.
-    let out =
-        super::agent::tool_agent_send(&input, Some(&kernel), Some("parent-agent"), None, None)
-            .await
-            .unwrap();
+    let out = super::agent::tool_agent_send(
+        &input,
+        Some(&kernel),
+        Some("parent-agent"),
+        None,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
 
     assert_eq!(
         out, "inline-fallback-response",
@@ -1516,7 +1594,7 @@ async fn agent_send_async_without_session_returns_the_reply_not_a_fake_task_id_6
     let calls = cap.calls.lock().unwrap();
     assert_eq!(
         &*calls,
-        &["async_tracked:session=none".to_string()],
+        &["async_tracked:session=none account=none".to_string()],
         "the tool must still route through the tracked entry point — the kernel \
          owns the fallback decision, not the tool"
     );
@@ -1536,7 +1614,7 @@ async fn agent_send_async_without_caller_is_invalid_parameter() {
         "async": true,
     });
 
-    let err = super::agent::tool_agent_send(&input, Some(&kernel), None, None, None)
+    let err = super::agent::tool_agent_send(&input, Some(&kernel), None, None, None, None)
         .await
         .expect_err("async without a caller must be rejected");
     assert!(matches!(
@@ -1569,8 +1647,15 @@ async fn agent_send_depth_exceeded_is_permission_denied() {
     // task-local depth to 10 reaches the `>= max_depth` branch.
     let result = AGENT_CALL_DEPTH
         .scope(std::cell::Cell::new(10), async {
-            super::agent::tool_agent_send(&input, Some(&kernel), Some("parent-agent"), None, None)
-                .await
+            super::agent::tool_agent_send(
+                &input,
+                Some(&kernel),
+                Some("parent-agent"),
+                None,
+                None,
+                None,
+            )
+            .await
         })
         .await;
 
@@ -1654,6 +1739,7 @@ async fn agent_send_quota_sees_depth_established_by_with_agent_call_depth() {
                 &input,
                 Some(&kernel),
                 Some("parent-agent"),
+                None,
                 None,
                 None,
             )),
