@@ -3947,6 +3947,124 @@ async fn forward_resolves_the_reported_account_alias() {
     kernel.shutdown();
 }
 
+/// When two different adapters answer to one recorded account, the forward must
+/// not guess: `DashMap` iteration order is not stable across processes, so
+/// picking one would make delivery depend on the run. It falls back to the
+/// agent's home adapter instead — the same rule `resolve_channel_adapter`
+/// applies to an ambiguous channel type.
+#[tokio::test(flavor = "multi_thread")]
+async fn ambiguous_recorded_account_falls_back_instead_of_guessing() {
+    use crate::kernel::subsystems::events::EventSubsystemApi;
+    use librefang_types::config::SidecarChannelConfig;
+    use librefang_types::task::{TaskKind, TaskStatus};
+
+    fn sidecar(name: &str, agent: &str) -> SidecarChannelConfig {
+        serde_json::from_value(serde_json::json!({
+            "name": name,
+            "command": "python3",
+            "channel_type": "telegram",
+            "agent": agent,
+        }))
+        .expect("sidecar config")
+    }
+
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().join("librefang-ambiguous-account");
+    std::fs::create_dir_all(&home_dir).unwrap();
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        sidecar_channels: vec![
+            sidecar("tg-primary", "amb-agent"),
+            sidecar("tg-left", "amb-left"),
+            sidecar("tg-right", "amb-right"),
+        ],
+        ..KernelConfig::default()
+    };
+    let kernel = Arc::new(LibreFangKernel::boot_with_config(config).expect("kernel boots"));
+    kernel.set_self_handle();
+
+    let primary = Arc::new(RecordingChannelAdapter::named_instance(
+        "tg-primary",
+        "telegram",
+    ));
+    // Two distinct instances reporting the same alias — a collision between two
+    // tenants, which is exactly the case that must not be resolved by chance.
+    let left = Arc::new(RecordingChannelAdapter {
+        reported: Some("bot-42".to_string()),
+        ..RecordingChannelAdapter::named_instance("tg-left", "telegram")
+    });
+    let right = Arc::new(RecordingChannelAdapter {
+        reported: Some("bot-42".to_string()),
+        ..RecordingChannelAdapter::named_instance("tg-right", "telegram")
+    });
+    let primary_sent = primary.sent.clone();
+    let left_sent = left.sent.clone();
+    let right_sent = right.sent.clone();
+    for (name, adapter) in [
+        (
+            "tg-primary",
+            primary.clone() as Arc<RecordingChannelAdapter>,
+        ),
+        ("tg-left", left.clone() as Arc<RecordingChannelAdapter>),
+        ("tg-right", right.clone() as Arc<RecordingChannelAdapter>),
+    ] {
+        kernel
+            .mesh
+            .channel_adapters
+            .insert(name.to_string(), adapter.clone());
+        kernel
+            .mesh
+            .channel_adapters
+            .insert(format!("{name}:{name}"), adapter);
+    }
+
+    // No model on the manifest: the completion runs the mid-turn branch through
+    // the injection sender below, so no agent-loop turn (and no LLM) happens.
+    let agent = kernel
+        .spawn_agent(AgentManifest {
+            name: "amb-agent".to_string(),
+            source_template: None,
+            ..Default::default()
+        })
+        .expect("spawn agent");
+
+    let session = SessionId::new();
+    let (tx, _rx) = tokio::sync::mpsc::channel(8);
+    kernel.injection_senders_ref().insert((agent, session), tx);
+    let handle = kernel.register_async_task_on(
+        agent,
+        session,
+        TaskKind::Delegation {
+            agent_id: agent,
+            prompt_hash: "ambiguous".to_string(),
+        },
+        Some("chat-8".to_string()),
+        Some("bot-42".to_string()),
+    );
+    kernel
+        .complete_async_task(
+            handle.id,
+            TaskStatus::Completed(serde_json::json!({"result": "ambiguous answer"})),
+        )
+        .await
+        .expect("complete async task");
+
+    assert_eq!(
+        primary_sent.lock().unwrap().len(),
+        1,
+        "the home adapter is the documented fallback when the account is ambiguous"
+    );
+    assert!(
+        left_sent.lock().unwrap().is_empty() && right_sent.lock().unwrap().is_empty(),
+        "neither candidate may be picked by iteration order: left={:?} right={:?}",
+        left_sent.lock().unwrap(),
+        right_sent.lock().unwrap()
+    );
+
+    kernel.shutdown();
+}
+
 /// The kernel-side hop of the account plumbing: `AgentControl::send_to_agent_async_tracked`
 /// has to carry the account into the registered task. Registering through
 /// `register_async_task_on` directly (as the other tests do) skips this hop, so
